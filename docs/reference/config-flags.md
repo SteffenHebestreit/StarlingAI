@@ -98,7 +98,7 @@ Every public schema field, where it is declared, and how many production files r
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1518 | 1 |
 | `container` | packages/core/src/config/schema.ts:692 | 78 |
 | `contextWindow` | packages/core/src/config/schema.ts:122 | 14 |
-| `control` | packages/core/src/config/schema.ts:1666 | 56 |
+| `control` | packages/core/src/config/schema.ts:1666 | 57 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:893 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:319 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:812 | 11 |
@@ -334,7 +334,7 @@ Every public schema field, where it is declared, and how many production files r
 | `patterns` | packages/core/src/config/schema.ts:1291 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 25 |
 | `peers` | packages/core/src/config/schema.ts:585 | 15 |
-| `performance` | packages/core/src/config/schema.ts:1752 | 46 |
+| `performance` | packages/core/src/config/schema.ts:1752 | 47 |
 | `permitTtlMs` | packages/core/src/config/schema.ts:1676 | 2 |
 | `perSenderRateLimitCount` | packages/core/src/config/schemas/channels.ts:24 | 5 |
 | `perSenderRateLimitWindowMs` | packages/core/src/config/schemas/channels.ts:26 | 5 |

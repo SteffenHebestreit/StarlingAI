@@ -82,7 +82,7 @@ registerTool({
       : 5;
 
     try {
-      const { checkUrlSsrf, leaveRefusedPage, refusedBrowserPage, reportedPageUrls } = await import("./web.js");
+      const { checkUrlSsrf, FRAME_ADDRESSES, leaveRefusedPage, refusedBrowserPage, refusedFrameUrls, reportedPageUrls } = await import("./web.js");
       // A redirect or the page's own script can take the browser to a host the guard refuses
       // after the URL was checked, and the audit reported on that page (its URL and the
       // selectors of its elements). The page is checked on arrival and again in the audit result.
@@ -147,6 +147,7 @@ registerTool({
       nodeCount: v.nodes.length,
     })),
     incomplete: result.incomplete.map((v) => ({ id: v.id, description: v.description, nodeCount: v.nodes.length })),
+    frames: ${FRAME_ADDRESSES},
   };
 }`;
 
@@ -155,6 +156,11 @@ registerTool({
       const audited = typeof parsed?.["url"] === "string" ? [parsed["url"]] : [];
       const landing = await refusedBrowserPage([...reportedPageUrls(raw), ...audited]);
       if (landing) return await refuse(landing);
+      // axe audits the page's frames with it, so the frames the script listed are checked too.
+      if (parsed && "frames" in parsed) {
+        const framed = await refusedFrameUrls(parsed["frames"]);
+        if (framed) return await refuse(framed);
+      }
       if (!parsed) {
         return { success: false, output: raw || "", error: "axe audit returned non-JSON output" };
       }

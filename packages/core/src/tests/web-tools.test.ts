@@ -498,12 +498,16 @@ describe("web_fetch lists the page's links after its text", () => {
     querySelector: (selector: string) => (selector === "img" && extra.alt ? { alt: extra.alt } : null),
   });
 
-  /** Playwright MCP 1.61 running the exact `function` web_fetch sends against `document`; `evaluated` holds what it returned. */
-  function browserRendering(document: unknown) {
+  /**
+   * Playwright MCP 1.61 running the exact `function` web_fetch sends against `document` (a page
+   * without frames unless it says otherwise); `evaluated` holds what it returned.
+   */
+  function browserRendering(document: Record<string, unknown>) {
     const evaluated: unknown[] = [];
+    const page = { querySelectorAll: () => [], ...document };
     const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
       if (input.name !== "browser_evaluate") return { content: [{ type: "text", text: "" }] };
-      const value: unknown = runInNewContext(`(${String(input.arguments["function"])})()`, { document });
+      const value: unknown = runInNewContext(`(${String(input.arguments["function"])})()`, { document: page });
       evaluated.push(value);
       return {
         content: [{
@@ -685,6 +689,22 @@ describe("web_fetch lists the page's links after its text", () => {
     const r = await webFetch({ url: `${SITE}/konto` }, "s-fetch-links-spa");
     expect(r.metadata?.["fetchMethod"]).toBe("playwright");
     expect(r.output).toContain("Bestellübersicht: 3 offene Aufträge, 1 Rücksendung");
+  });
+
+  it("refuses a rendered page that frames a private host, from the frames its own function lists", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => html(JS_SHELL)));
+    const internalFrame = { contentWindow: { location: { href: "http://10.0.0.5/admin" } }, contentDocument: null, src: "http://10.0.0.5/admin" };
+    const { callTool } = browserRendering({
+      URL: `${SITE}/portal`,
+      body: { innerText: "Kundenportal Nordlicht" },
+      links: [],
+      querySelectorAll: () => [internalFrame],
+    });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const r = await webFetch({ url: `${SITE}/portal` }, "s-fetch-frame-real-function");
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/\(a frame on it: requesting private\/internal network addresses is not allowed\)/);
   });
 
   it("still fails an empty render that has links (emptiness reads the text, not the envelope)", async () => {
@@ -890,8 +910,8 @@ describe("web_fetch checks the page the browser landed on", () => {
   const calls = (callTool: ReturnType<typeof browser>) => callTool.mock.calls.map(([input]) =>
     input.name === "browser_navigate" ? `navigate ${String(input.arguments["url"])}` : input.name);
 
-  /** What PAGE_TEXT_AND_LINKS returns, as browser_evaluate's answer carries it. */
-  const evaluated = (t: string, u: string) => `### Result\n${JSON.stringify(JSON.stringify({ t, u, l: [] }))}`;
+  /** What PAGE_TEXT_AND_LINKS returns (frames `f`: none unless given), as browser_evaluate's answer carries it. */
+  const evaluated = (t: string, u: string, f: string[] | null = []) => `### Result\n${JSON.stringify(JSON.stringify({ t, u, l: [], f }))}`;
 
   it("fails when the page's script took the browser to a private host, and sends the tab to about:blank", async () => {
     scriptShell();
@@ -942,6 +962,51 @@ describe("web_fetch checks the page the browser landed on", () => {
     expect(r.metadata?.["fetchMethod"]).toBe("playwright");
     expect(r.output).toContain("Neue Preisliste: Basic 9 EUR, Pro 29 EUR");
     expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/preise`, "browser_evaluate"]);
+  });
+
+  // A public page can embed a private one in a frame: the page's own address passes, and what the
+  // browser reads of it can include the frame.
+  it("fails when the page frames a private host, from the frame list its own evaluate returns", async () => {
+    scriptShell();
+    const callTool = browser({ browser_evaluate: { text: evaluated("Portal", `${PUBLIC}/portal`, [`${PUBLIC}/widget`, "http://169.254.169.254/latest/meta-data/"]) } });
+
+    const r = await webFetch(`${PUBLIC}/portal`, "s-landing-frame");
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`${PUBLIC}/portal led the browser to a page the guard refuses (a frame on it: requesting private/internal network addresses is not allowed); nothing from that page is returned`);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/portal`, "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("fails when the page's frames could not be listed", async () => {
+    scriptShell();
+    const callTool = browser({ browser_evaluate: { text: evaluated("Portal", `${PUBLIC}/portal`, null) } });
+
+    const r = await webFetch(`${PUBLIC}/portal`, "s-landing-frames-unread");
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/\(the addresses of its frames could not be read\)/);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/portal`, "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("reads the frames of a snapshot fallback that shows one, and fails on a private one", async () => {
+    scriptShell();
+    const callTool = vi.fn(async (input: { name: string; arguments: Record<string, unknown> }) => {
+      if (input.name === "browser_evaluate") {
+        // The page function (the one reading innerText) fails, which sends web_fetch to the
+        // snapshot; the frame listing answers.
+        return String(input.arguments["function"]).includes("innerText")
+          ? { content: [{ type: "text", text: "evaluate unavailable" }], isError: true }
+          : { content: [{ type: "text", text: `### Result\n${JSON.stringify(JSON.stringify({ u: `${PUBLIC}/portal`, f: ["http://10.0.0.5/admin"] }))}` }], isError: false };
+      }
+      if (input.name === "browser_snapshot") {
+        return { content: [{ type: "text", text: `### Page\n- Page URL: ${PUBLIC}/portal\n### Snapshot\n\`\`\`yaml\n- iframe [ref=e2]:\n  - text: ${INTERNAL} [ref=f1e1]\n\`\`\`` }], isError: false };
+      }
+      return { content: [{ type: "text", text: "" }], isError: false };
+    });
+    mcpConnections.set("playwright", { client: { callTool } });
+
+    const r = await webFetch(`${PUBLIC}/portal`, "s-landing-snapshot-frame");
+    expect(r.success).toBe(false);
+    expect(r.output).not.toContain(INTERNAL);
+    expect(calls(callTool)).toEqual([`navigate ${PUBLIC}/portal`, "browser_evaluate", "browser_snapshot", "browser_evaluate", "navigate about:blank"]);
   });
 });
 
@@ -1040,5 +1105,58 @@ describe("web_fetch's redirect chain has a deadline", () => {
     expect(r.metadata?.["fetchMethod"]).toBe("playwright");
     expect(r.output).toContain(`**Content from:** ${PUBLIC}/langsam (browser-rendered; a direct request failed (This operation was aborted))`);
     expect(callTool.mock.calls.map(([input]) => input.name)).toEqual(["browser_navigate", "browser_evaluate"]);
+  });
+});
+
+/**
+ * FRAME_ADDRESSES, the expression the browser runs to list a page's frames, run here against
+ * stand-in documents: what each frame's address is read as, and when the list gives up.
+ */
+describe("the frame listing the browser runs in the page", () => {
+  async function list(document: unknown): Promise<unknown> {
+    const { FRAME_ADDRESSES } = await import("../tools/web.js");
+    return runInNewContext(FRAME_ADDRESSES, { document });
+  }
+
+  /** A document holding `frames`, whose resource timing recorded `entries`. */
+  const doc = (frames: unknown[], entries: unknown[] = []) => ({
+    querySelectorAll: () => frames,
+    defaultView: { performance: { getEntriesByType: (type: string) => (type === "resource" ? entries : []) } },
+  });
+  /** A frame of another origin: reading its address throws, as a browser's would. */
+  const crossOrigin = (src: string) => ({
+    contentWindow: { location: Object.defineProperty({}, "href", { get() { throw new Error("SecurityError: Blocked a frame"); } }) },
+    contentDocument: null,
+    src,
+  });
+
+  it("lists a same-origin frame's current address, and the frames inside it", async () => {
+    const inner = { contentWindow: { location: { href: "https://93.184.215.14/inner" } }, contentDocument: doc([]), src: "" };
+    const outer = { contentWindow: { location: { href: "https://93.184.215.14/outer-now" } }, contentDocument: doc([inner]), src: "https://93.184.215.14/outer" };
+
+    expect(await list(doc([outer]))).toEqual(["https://93.184.215.14/outer-now", "https://93.184.215.14/inner"]);
+  });
+
+  it("lists a frame still on about:blank by the src it is loading", async () => {
+    const loading = { contentWindow: { location: { href: "about:blank" } }, contentDocument: doc([]), src: "https://93.184.215.14/loading" };
+
+    expect(await list(doc([loading]))).toEqual(["https://93.184.215.14/loading"]);
+  });
+
+  it("lists a cross-origin frame by its src, and one with neither as unreadable", async () => {
+    expect(await list(doc([crossOrigin("https://ads.example/slot"), crossOrigin("")]))).toEqual(["https://ads.example/slot", ""]);
+  });
+
+  it("lists the frame loads the page's resource timing recorded, a frame that navigated since among them", async () => {
+    const entries = [
+      { initiatorType: "iframe", name: "http://10.0.0.5/was-here" },
+      { initiatorType: "img", name: "https://93.184.215.14/logo.png" },
+    ];
+
+    expect(await list(doc([], entries))).toEqual(["http://10.0.0.5/was-here"]);
+  });
+
+  it("is null when the frames cannot be listed", async () => {
+    expect(await list({ querySelectorAll: () => { throw new Error("detached"); } })).toBeNull();
   });
 });

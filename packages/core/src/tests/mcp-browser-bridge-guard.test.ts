@@ -113,6 +113,22 @@ describe("bridged Playwright MCP tools pass the same SSRF checks as the gateway'
     expect(calls()).toEqual(["read_page"]);
   });
 
+  /** browser_evaluate's answer listing the tab's address `u` and its frames' `f`. */
+  const addresses = (u: string, f: string[]) => `### Result\n${JSON.stringify(JSON.stringify({ u, f }))}`;
+
+  it("refuses a bridged snapshot that shows a frame on a private host", async () => {
+    answers["browser_snapshot"] = [
+      "### Page", `- Page URL: ${PUBLIC}/portal`, "### Snapshot", "```yaml",
+      "- iframe [ref=e2]:", `  - text: ${INTERNAL} [ref=f1e1]`, "```",
+    ].join("\n");
+    answers["browser_evaluate"] = addresses(`${PUBLIC}/portal`, ["http://10.0.0.5/admin"]);
+
+    const r = await getTool("mcp__playwright__browser_snapshot")!.execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).not.toContain(INTERNAL);
+    expect(calls()).toEqual(["browser_snapshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
   // A screenshot answer reports no Page URL unless the tab's header changed, so nothing was
   // checked and the image of the page the tab had drifted to went out.
   const IMAGE = "aW50ZXJuYWwgZGFzaGJvYXJk";
@@ -123,7 +139,7 @@ describe("bridged Playwright MCP tools pass the same SSRF checks as the gateway'
 
   it("reads the tab's address for a bridged screenshot that reports none, and refuses a private one", async () => {
     answers["browser_screenshot"] = screenshot;
-    answers["browser_evaluate"] = `### Result\n${JSON.stringify("http://169.254.169.254/latest/meta-data/")}`;
+    answers["browser_evaluate"] = addresses("http://169.254.169.254/latest/meta-data/", []);
 
     const r = await getTool("mcp__playwright__browser_screenshot")!.execute({}, ctx);
     expect(r.success).toBe(false);
@@ -134,7 +150,7 @@ describe("bridged Playwright MCP tools pass the same SSRF checks as the gateway'
 
   it("returns a bridged screenshot of a public tab as it was", async () => {
     answers["browser_screenshot"] = screenshot;
-    answers["browser_evaluate"] = `### Result\n${JSON.stringify(`${PUBLIC}/galerie`)}`;
+    answers["browser_evaluate"] = addresses(`${PUBLIC}/galerie`, []);
 
     const r = await getTool("mcp__playwright__browser_screenshot")!.execute({}, ctx);
     expect(r.success).toBe(true);

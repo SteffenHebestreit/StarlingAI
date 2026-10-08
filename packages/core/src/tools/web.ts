@@ -411,7 +411,7 @@ registerTool({
           // This keeps the page out of the answer; it cannot take back the request the browser sent.
           const arrival = await refusedBrowserPage(reportedPageUrls(await callPlaywrightTool("browser_navigate", { url })));
           if (arrival) return await refuseBrowserLanding(url, arrival);
-          let rendered: { text: string; pageUrl: string | null; links: PageLink[] };
+          let rendered: { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null };
           let pageReport: string;
           try {
             // browser_evaluate takes a FUNCTION. This sent `expression`, which Playwright MCP 1.61
@@ -427,6 +427,11 @@ registerTool({
           }
           const landing = await refusedBrowserPage([...reportedPageUrls(pageReport), ...(rendered.pageUrl ? [rendered.pageUrl] : [])]);
           if (landing) return await refuseBrowserLanding(url, landing);
+          // The page can frame a private host, and the snapshot carries the frame's content. The
+          // page function lists the frames it found; a snapshot that shows one has them read.
+          const frames = rendered.frames !== undefined ? rendered.frames : showsFrames(pageReport) ? (await readPageAddresses()).frames : [];
+          const framed = await refusedFrameUrls(frames);
+          if (framed) return await refuseBrowserLanding(url, framed);
           // Emptiness is the page's text, never the envelope or the links around it.
           if (!rendered.text.trim()) {
             // An empty render is not the page's content. It was returned as a successful fetch
@@ -774,17 +779,49 @@ function evaluateResultText(output: string): string {
 }
 
 /**
+ * A browser expression for the addresses of the page's frames: each iframe or frame element's
+ * current address where it can be read (same origin, whose own frames are listed too), else its
+ * src, and every frame load the page's resource timing recorded, which still names a frame that
+ * has navigated since. An element with neither lists as "", and the expression is null when the
+ * frames could not be listed at all. A public page can frame a private one, and what the browser
+ * shows of the page (a snapshot, a screenshot) shows the frame with it.
+ */
+export const FRAME_ADDRESSES = `(() => {
+  try {
+    const found = [];
+    const visit = (doc, depth) => {
+      for (const frame of Array.from(doc.querySelectorAll('iframe, frame'))) {
+        let href = '';
+        let inner = null;
+        try { href = String(frame.contentWindow.location.href); inner = frame.contentDocument; } catch (e) { href = ''; }
+        found.push(href && href !== 'about:blank' ? href : (frame.src || href));
+        if (inner && depth < 8) visit(inner, depth + 1);
+      }
+      const timing = doc.defaultView && doc.defaultView.performance;
+      if (timing) for (const entry of timing.getEntriesByType('resource')) {
+        if (entry.initiatorType === 'iframe' || entry.initiatorType === 'frame') found.push(entry.name);
+      }
+    };
+    visit(document, 0);
+    return found;
+  } catch (e) {
+    return null;
+  }
+})()`;
+
+/**
  * The browser_evaluate function web_fetch sends: the page's text (whitespace evened out as
- * before), the URL the browser ended on, and its first LINK_SCAN_MAX links as [href, label]
- * pairs, returned as ONE JSON string. Text and links come back in the same round trip, and a
- * string result is what evaluateResultText reads. innerText has no link targets, so a rendered
- * page used to reach the agent with its menu as bare words. A link longer than LINK_URL_MAX is
- * never listed, so it is not sent either: a data: URI download link can run to megabytes.
+ * before), the URL the browser ended on, its first LINK_SCAN_MAX links as [href, label]
+ * pairs and its frames' addresses (FRAME_ADDRESSES), returned as ONE JSON string. Text and links
+ * come back in the same round trip, and a string result is what evaluateResultText reads.
+ * innerText has no link targets, so a rendered page used to reach the agent with its menu as
+ * bare words. A link longer than LINK_URL_MAX is never listed, so it is not sent either: a data:
+ * URI download link can run to megabytes.
  */
 const PAGE_TEXT_AND_LINKS = `() => {
   const t = (document.body?.innerText ?? '').replace(/\\t/g, ' ').replace(/[ \\t]{3,}/g, '  ').replace(/\\n{4,}/g, '\\n\\n\\n').trim();
   const l = Array.from(document.links ?? []).filter((a) => typeof a.href === 'string' && a.href.length <= ${LINK_URL_MAX}).slice(0, ${LINK_SCAN_MAX}).map((a) => [a.href, (a.innerText || a.getAttribute('aria-label') || a.title || a.querySelector('img')?.alt || '').replace(/\\s+/g, ' ').trim().slice(0, 200)]);
-  return JSON.stringify({ t, u: document.URL, l });
+  return JSON.stringify({ t, u: document.URL, l, f: ${FRAME_ADDRESSES} });
 }`;
 
 /**
@@ -792,13 +829,13 @@ const PAGE_TEXT_AND_LINKS = `() => {
  * or an envelope a future Playwright MCP renders differently — is the page text, with no links.
  * A page URL that is not http(s) (a browser error page's) is dropped; the requested URL stands in.
  */
-function parseRenderedPage(answer: string): { text: string; pageUrl: string | null; links: PageLink[] } {
+function parseRenderedPage(answer: string): { text: string; pageUrl: string | null; links: PageLink[]; frames?: string[] | null } {
   try {
     const value: unknown = JSON.parse(answer);
     if (value && typeof value === "object" && typeof (value as { t?: unknown }).t === "string") {
-      const page = value as { t: string; u?: unknown; l?: unknown };
+      const page = value as { t: string; u?: unknown; l?: unknown; f?: unknown };
       const pageUrl = typeof page.u === "string" && /^https?:\/\//i.test(page.u) ? page.u : null;
-      return { text: page.t, pageUrl, links: renderedLinks(page.l) };
+      return { text: page.t, pageUrl, links: renderedLinks(page.l), ...("f" in page ? { frames: frameList(page.f) } : {}) };
     }
   } catch {
     // not JSON: the answer is the page text itself
@@ -1092,34 +1129,89 @@ let lastClearedPageUrl: string | undefined;
 export async function refusedBrowserPage(pageUrls: Iterable<string>): Promise<string | null> {
   for (const pageUrl of pageUrls) {
     if (pageUrl === lastClearedPageUrl) continue;
-    let target = pageUrl;
-    while (/^(?:blob|view-source|filesystem):/i.test(target)) target = target.slice(target.indexOf(":") + 1);
-    const refused = /^file:/i.test(target)
-      ? "a local file is not allowed"
-      : /^https?:\/\//i.test(target) ? await checkUrlSsrf(target) : null;
+    const refused = await pageAddressRefusal(pageUrl);
     if (refused) {
       lastClearedPageUrl = undefined;
       return refused;
     }
-    if (/^https?:\/\//i.test(target)) lastClearedPageUrl = pageUrl;
+    if (/^https?:\/\//i.test(innerPageUrl(pageUrl))) lastClearedPageUrl = pageUrl;
   }
   return null;
 }
 
-/** Whether a Playwright MCP answer carries something of the page: a snapshot, an image (a screenshot) or a result. */
-function carriesPageContent(output: string): boolean {
-  return /```ya?ml/.test(output) || /"type"\s*:\s*"image"/.test(output) || /^#{1,4}[ \t]*Result\b/m.test(output);
+/** The URL a blob:, view-source: or filesystem: page belongs to; any other page URL as it is. */
+function innerPageUrl(pageUrl: string): string {
+  let target = pageUrl;
+  while (/^(?:blob|view-source|filesystem):/i.test(target)) target = target.slice(target.indexOf(":") + 1);
+  return target;
 }
 
-/** The address of the page the shared browser tab is on, read now; null when it cannot be read. */
-async function currentTabUrl(): Promise<string | null> {
+/** Why a page or frame at `pageUrl` may not be shown, or null: refusedBrowserPage's decision, without its memory. */
+async function pageAddressRefusal(pageUrl: string): Promise<string | null> {
+  const target = innerPageUrl(pageUrl);
+  if (/^file:/i.test(target)) return "a local file is not allowed";
+  return /^https?:\/\//i.test(target) ? checkUrlSsrf(target) : null;
+}
+
+/** A frame list as the page reported it: its addresses, or null when it is not a list of them. */
+function frameList(value: unknown): string[] | null {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? (value as string[]) : null;
+}
+
+/**
+ * Why a page's frames may not be shown, or null: one on a host the guard refuses, one whose
+ * address could not be read, or a list that could not be read (null). This keeps a frame's
+ * content out of the answer; only egress control on the browser's network stops the request
+ * the frame made.
+ */
+export async function refusedFrameUrls(reported: unknown): Promise<string | null> {
+  const frames = frameList(reported);
+  if (frames === null) return "the addresses of its frames could not be read";
+  const checked = new Set<string>();
+  for (const frame of frames) {
+    if (!frame) return "the address of one of its frames could not be read";
+    let origin = frame;
+    try {
+      origin = new URL(innerPageUrl(frame)).origin;
+    } catch {
+      // checked as it is
+    }
+    if (checked.has(origin)) continue;
+    checked.add(origin);
+    const refused = await pageAddressRefusal(frame);
+    if (refused) return `a frame on it: ${refused}`;
+  }
+  return null;
+}
+
+/** Whether a Playwright MCP answer carries an image of the page (a screenshot), which shows its frames too. */
+function carriesImage(output: string): boolean {
+  return /"type"\s*:\s*"image"/.test(output);
+}
+
+/** Whether a Playwright MCP answer carries something of the page: a snapshot, an image or a result. */
+function carriesPageContent(output: string): boolean {
+  return /```ya?ml/.test(output) || carriesImage(output) || /^#{1,4}[ \t]*Result\b/m.test(output);
+}
+
+/** Whether a snapshot in the answer shows a frame's content: an iframe, or an element inside one (a ref such as f1e2). */
+function showsFrames(output: string): boolean {
+  return /^[ \t]*-[ \t]+'?iframe\b/m.test(output) || /\[ref=f\d+e\d+\]/.test(output);
+}
+
+/** browser_evaluate's function for the tab's address and its frames' (FRAME_ADDRESSES), as one JSON string. */
+const PAGE_ADDRESSES = `() => JSON.stringify({ u: location.href, f: ${FRAME_ADDRESSES} })`;
+
+/** The address of the page the shared browser tab is on and its frames', read now; null where they cannot be read. */
+async function readPageAddresses(): Promise<{ page: string | null; frames: string[] | null }> {
   try {
-    const output = await callPlaywrightTool("browser_evaluate", { function: "() => location.href" });
-    const value = evaluateResultText(output).trim();
-    if (/^[a-z][a-z0-9+.-]*:\S*$/i.test(value)) return value;
-    return reportedPageUrls(output)[0] ?? null;
+    const output = await callPlaywrightTool("browser_evaluate", { function: PAGE_ADDRESSES });
+    const value: unknown = JSON.parse(evaluateResultText(output));
+    const read = value !== null && typeof value === "object" ? (value as { u?: unknown; f?: unknown }) : {};
+    const page = typeof read.u === "string" && /^[a-z][a-z0-9+.-]*:\S*$/i.test(read.u) ? read.u : reportedPageUrls(output)[0] ?? null;
+    return { page, frames: frameList(read.f) };
   } catch {
-    return null;
+    return { page: null, frames: null };
   }
 }
 
@@ -1127,14 +1219,26 @@ async function currentTabUrl(): Promise<string | null> {
  * Why the browser answers in `outputs` may not be shown, or null. The page URLs they report are
  * checked. An answer that carries something of the page but reports no URL, such as a
  * screenshot taken while the tab's header had not changed, passed unchecked; the tab's address
- * is now read for it, and one that cannot be read refuses it.
+ * is now read for it, and one that cannot be read refuses it. An answer that shows frames (an
+ * iframe in its snapshot, or an image of the page) has its frames' addresses read and checked;
+ * a page without frames costs no extra call.
  */
 export async function refusedBrowserAnswer(outputs: readonly string[]): Promise<string | null> {
   const pageUrls = outputs.flatMap((output) => reportedPageUrls(output));
-  if (pageUrls.length > 0) return refusedBrowserPage(pageUrls);
-  if (!outputs.some((output) => carriesPageContent(output))) return null;
-  const tabUrl = await currentTabUrl();
-  return tabUrl === null ? "its address could not be read" : refusedBrowserPage([tabUrl]);
+  if (pageUrls.length > 0) {
+    const refused = await refusedBrowserPage(pageUrls);
+    if (refused) return refused;
+  }
+  const pageUnknown = pageUrls.length === 0 && outputs.some((output) => carriesPageContent(output));
+  const framesShown = outputs.some((output) => showsFrames(output) || carriesImage(output));
+  if (!pageUnknown && !framesShown) return null;
+  const read = await readPageAddresses();
+  if (pageUnknown) {
+    if (read.page === null) return "its address could not be read";
+    const refused = await refusedBrowserPage([read.page]);
+    if (refused) return refused;
+  }
+  return refusedFrameUrls(read.frames);
 }
 
 /** Sends the shared browser tab to about:blank after a refused page, so no later call starts on it. */

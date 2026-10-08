@@ -171,8 +171,8 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
     { type: "text", text: "### Result\nTook the viewport screenshot and saved it as page.png" },
     { type: "image", data: IMAGE, mimeType: "image/png" },
   ];
-  /** browser_evaluate's answer for location.href, the tab being at `url`. */
-  const tabAt = (url: string) => `### Result\n${JSON.stringify(url)}`;
+  /** browser_evaluate's answer listing the tab's address `u` and its frames' `f` (null: they could not be listed). */
+  const tabAt = (u: string, f: string[] | null = []) => `### Result\n${JSON.stringify(JSON.stringify({ u, f }))}`;
 
   it("reads the tab's address for a screenshot that reports none, and refuses a private one", async () => {
     const callTool = browser({ browser_screenshot: screenshot, browser_evaluate: tabAt("http://10.0.0.5/dashboard") });
@@ -220,8 +220,71 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
     expect(calls(callTool)).toEqual(["browser_click"]);
   });
 
-  /** browser_evaluate's answer for the axe audit, run on the page at `url`. */
-  const axeResult = (url: string) => `### Result\n${JSON.stringify({
+  // A public page can embed a private one in an iframe: the Page URL stays public, and the
+  // snapshot carries the frame's content as part of the page.
+  /** A snapshot of a public portal that embeds a frame showing `frameText`. */
+  const framed = (frameText: string) => [
+    "### Page", `- Page URL: ${PUBLIC}/portal`, "- Page Title: Portal", "### Snapshot", "```yaml",
+    "- heading \"Portal\" [level=1] [ref=e1]",
+    "- iframe [ref=e2]:",
+    `  - text: ${frameText} [ref=f1e1]`,
+    "```",
+  ].join("\n");
+
+  it("refuses a snapshot that shows a frame on a private host, and sends the tab to about:blank", async () => {
+    const callTool = browser({ browser_snapshot: framed(INTERNAL), browser_evaluate: tabAt(`${PUBLIC}/portal`, [`${PUBLIC}/widget`, "http://10.0.0.5/admin"]) });
+
+    const r = await (await tool("browser_snapshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to show the page the browser is on: a frame on it: requesting private/internal network addresses is not allowed. The browser was sent to about:blank.");
+    expect(JSON.stringify(r)).not.toContain(INTERNAL);
+    expect(calls(callTool)).toEqual(["browser_snapshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("refuses a snapshot when a frame's address cannot be read, or the frames cannot be listed", async () => {
+    for (const [frames, reason] of [
+      [[""], "the address of one of its frames could not be read"],
+      [null, "the addresses of its frames could not be read"],
+    ] as const) {
+      const callTool = browser({ browser_snapshot: framed(INTERNAL), browser_evaluate: tabAt(`${PUBLIC}/portal`, frames === null ? null : [...frames]) });
+
+      const r = await (await tool("browser_snapshot")).execute({}, ctx);
+      expect(r.error).toBe(`Refusing to show the page the browser is on: ${reason}. The browser was sent to about:blank.`);
+      expect(calls(callTool)).toEqual(["browser_snapshot", "browser_evaluate", "navigate about:blank"]);
+    }
+  });
+
+  it("shows a snapshot whose frames are all public, after one read of them", async () => {
+    const answer = framed("Video: Akkuschrauber im Test");
+    const callTool = browser({ browser_snapshot: answer, browser_evaluate: tabAt(`${PUBLIC}/portal`, ["https://93.184.215.15/embed/akku", "about:blank"]) });
+
+    const r = await (await tool("browser_snapshot")).execute({}, ctx);
+    expect(r.success).toBe(true);
+    expect(r.output).toBe(answer);
+    expect(calls(callTool)).toEqual(["browser_snapshot", "browser_evaluate"]);
+  });
+
+  it("checks the frames of a screenshot that reports its page, since the image shows them", async () => {
+    const reporting: ContentPart[] = [{ type: "text", text: `### Page\n- Page URL: ${PUBLIC}/portal\n### Result\nTook the viewport screenshot` }, screenshot[1]!];
+    const callTool = browser({ browser_screenshot: reporting, browser_evaluate: tabAt(`${PUBLIC}/portal`, ["http://10.0.0.5/admin"]) });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).not.toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  it("checks the frames of a screenshot too, since the image shows them", async () => {
+    const callTool = browser({ browser_screenshot: screenshot, browser_evaluate: tabAt(`${PUBLIC}/portal`, ["http://192.168.1.1/status"]) });
+
+    const r = await (await tool("browser_screenshot")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).not.toContain(IMAGE);
+    expect(calls(callTool)).toEqual(["browser_screenshot", "browser_evaluate", "navigate about:blank"]);
+  });
+
+  /** browser_evaluate's answer for the axe audit, run on the page at `url` (with the frames it lists, when given). */
+  const axeResult = (url: string, frames?: string[]) => `### Result\n${JSON.stringify({
     url,
     testEngine: { name: "axe-core", version: "4.10.2" },
     violations: [{
@@ -229,7 +292,18 @@ describe("browser tools refuse to show a page on a host the SSRF guard refuses",
       tags: ["wcag2a"], nodes: [{ target: ["#deploy-key-field"] }], nodeCount: 1,
     }],
     incomplete: [],
+    ...(frames ? { frames } : {}),
   })}`;
+
+  it("browser_axe_audit refuses to report on a page that frames a private host", async () => {
+    const callTool = browser({ browser_evaluate: axeResult(`${PUBLIC}/formular`, ["http://10.0.0.5/admin"]) });
+
+    const r = await (await tool("browser_axe_audit")).execute({}, ctx);
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to audit the page the browser is on: a frame on it: requesting private/internal network addresses is not allowed. The browser was sent to about:blank.");
+    expect(JSON.stringify(r)).not.toContain("#deploy-key-field");
+    expect(calls(callTool)).toEqual(["browser_evaluate", "navigate about:blank"]);
+  });
 
   it("browser_axe_audit refuses a navigation that ended on a private host, before auditing it", async () => {
     const callTool = browser({ browser_navigate: page("http://10.0.0.5/") });
