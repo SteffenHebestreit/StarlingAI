@@ -492,6 +492,39 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
     expect(third).toMatch(CUT_LINE);
     expect(third).toMatch(/not shown\.\]\n\n\[System notice: search_knowledge_base has returned identical output 3 times in a row\. You are stuck in a loop\. [^\n]*\]$/);
   }, 60_000);
+
+  it("a repeated search served from the cache keeps the cached-result note after the cut line", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Six long excerpts of a crawled site, as the default top-k returns them: past the budget.
+    const chunks = Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `c${i}`,
+      text: `Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks, retrievalFailed: false, lowConfidence: false });
+    callsThenAnswer([
+      [["kb1", "search_knowledge_base", SEARCH_ARGS]],
+      [["kb2", "search_knowledge_base", SEARCH_ARGS]],
+    ], "Die Auszüge nennen keine Ladezeit.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    // The repeat was served from the cache, not searched again.
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
+    const repeat = storedResult(session, "kb2");
+    expect(repeat, "the repeated search left no result").toBeDefined();
+    expect(repeat).toMatch(CUT_LINE);
+    const cachedNote = /not shown\.\]\n\n\[Note: This is a cached result — you already called 'search_knowledge_base' with identical arguments earlier in this turn\. Do NOT call it again\. [^\n]*\]/;
+    expect(repeat).toMatch(new RegExp(`${cachedNote.source}$`));
+    // And the call after the repeat reads it.
+    expect(streamMock.mock.calls.length, "the turn made no call after the repeat").toBeGreaterThanOrEqual(3);
+    const nextCall = (streamMock.mock.calls[2]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toMatch(cachedNote);
+  }, 60_000);
 });
 
 describe("citations in an answer from this turn's knowledge-base read are its sources", () => {

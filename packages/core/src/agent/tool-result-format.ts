@@ -65,10 +65,10 @@ export function escapeRegExp(value: string): string {
 export interface ToolResultFrameContext {
   /**
    * The text the turn loop appended to the result itself (agent/runtime.ts: its identical-output
-   * notice), exactly as appended. A retrieval result cut to its budget keeps it after the cut line.
-   * Only this is kept there. A closing "[System notice: …]" paragraph the TOOL returned is retrieved
-   * content, which a crawled page or a stored memory can carry, and goes with the cut: lifted past
-   * the harness's own cut line it would read as the runtime speaking.
+   * notice, its cached-result note), exactly as appended. A retrieval result cut to its budget keeps
+   * it after the cut line, and only it. A closing "[System notice: …]" paragraph the TOOL returned
+   * is retrieved content, which a crawled page or a stored memory can carry, and goes with the cut:
+   * lifted past the harness's own cut line it would read as the runtime speaking.
    */
   readonly runtimeNote?: string;
 }

@@ -4542,7 +4542,10 @@ async function _runTurn(
         && cachedToolCall.args === argsSig
         && cachedToolCall.success !== false
       ) {
-        const cachedResultText = `${cachedToolCall.result}\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        // The note goes to the frame beside the text as well, so a retrieval result cut to its
+        // budget keeps it (tool-result-format.ts ToolResultFrameContext).
+        const cachedNote = `\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        const cachedResultText = `${cachedToolCall.result}${cachedNote}`;
         _lastToolResultByName.set(tc.name, cachedToolCall.result);
 
         logAudit("tool_call_completed", {
@@ -4562,7 +4565,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
