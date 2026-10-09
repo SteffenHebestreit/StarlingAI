@@ -6,10 +6,12 @@
  * deliverable-emitting tool. On the embedding path the confidence part filters nothing: the
  * prefetch admits an agent only at a semantic score of 0.72 or more, and 0.72 is also where "high"
  * begins, so every agent the capsule lists is high. The condition there is the top agent's tools
- * alone, whether or not the request asks for a deliverable. These cases run the real routing, the
- * real prefetch and the real predicate with only the embedding search stubbed, so a change that
- * narrows or widens the condition on this path shows up here, and the comments that describe it
- * have to change with it.
+ * alone, whether or not the request asks for a deliverable, which is why passing it only asks the
+ * intent readout whether the request is work, and that reading arms the forced call
+ * (runtime-auto-artifact-prefetch-routing.test.ts). These cases run the real routing, the real
+ * prefetch and the real predicate with only the embedding search stubbed, so a change that narrows
+ * or widens the condition on this path shows up here, and the comments that describe it have to
+ * change with it.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -104,7 +106,7 @@ describe("the prefetch's --auto arm when routing runs on embeddings", () => {
     ]);
   });
 
-  it("so a question that routes to an agent holding a generator arms the forced call, and one routed elsewhere does not", async () => {
+  it("so a question that routes to an agent holding a generator passes the routing check, and one routed elsewhere does not", async () => {
     const { turnSetup, deliverableIntent } = await load({ diagram_designer: 0.73 });
     expect(deliverableIntent.classifyDeliverableIntent(QUESTION).wantsArtifact).toBe(false);
     expect(turnSetup.prefetchRoutedToDeliverableEmitter((await capsuleAgents(turnSetup, QUESTION)) ?? [])).toBe(true);
