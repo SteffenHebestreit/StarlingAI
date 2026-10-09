@@ -332,7 +332,7 @@ Every public schema field, where it is declared, and how many production files r
 | `path` | packages/core/src/config/schemas/decisions.ts:111 | 306 |
 | `pattern` | packages/core/src/config/schema.ts:1378 | 60 |
 | `patterns` | packages/core/src/config/schema.ts:1315 | 27 |
-| `pdf` | packages/core/src/config/schemas/render.ts:18 | 27 |
+| `pdf` | packages/core/src/config/schemas/render.ts:18 | 28 |
 | `peers` | packages/core/src/config/schema.ts:609 | 15 |
 | `performance` | packages/core/src/config/schema.ts:1776 | 48 |
 | `permitTtlMs` | packages/core/src/config/schema.ts:1700 | 2 |

@@ -2531,6 +2531,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // can adjust its next move.
         const narrativeOnly = isNarrativeOnlyDeliverableFailure(
           classification, output, request.task, stats, agentCfg, request.deliverable,
+          { artifacts, ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) },
         );
         if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>

@@ -959,3 +959,64 @@ describe("classifyDelegationResult — a file is missed only when the delegation
     }
   });
 });
+
+// A run that wrote nothing is not judged by what it was not asked for — but it IS judged by what it
+// SAYS it did. An undeclared or "answer" delegation whose output claims, as a completed fact, a file
+// it never wrote ("I wrote research/notes.md …", "… als plan.md gespeichert") is a failure: relayed,
+// that claim tells the orchestrator a file exists. Read with the completion-claim grammar the turn's
+// false-completion guard uses (claimsArtifactWrittenButUnproduced), and from leaked tool-call markup
+// for a file tool (31612733: the model emitted its write_file call as text and never made it).
+describe("a run that wrote nothing but claims a file is a failure, declared or not", () => {
+  const read = (names: string[] = []) => ({ toolCount: names.length, toolNames: names, terminalState: "completed", outcome: "success" as const });
+  const researcher = { tools: ["web_search", "web_fetch", "read_shared_facts", "write_file", "edit_file"] } as never;
+  const planner = { tools: ["read_file", "write_file", "edit_file", "generate_document", "read_shared_facts"] } as never;
+  const analyst = { tools: ["read_file", "grep_files", "write_file", "edit_file"] } as never;
+
+  it("fails a claimed write, undeclared or declared an answer, and names it narrative-only", () => {
+    const cases: Array<[string, never, string, string]> = [
+      ["researcher", researcher, "Write the findings to research/notes.md.", "I wrote research/notes.md with the findings: the ESP32-S3 has two I2S controllers."],
+      ["project_planner", planner, "Erstelle einen Projektplan als Dokument und speichere ihn.", "Der Projektplan wurde als plan.md gespeichert. Er hat vier Phasen."],
+      ["data_analyst", analyst, "Clean the data.", "I created out/clean.csv with 412 rows."],
+    ];
+    for (const [name, cfg, task, output] of cases) {
+      for (const run of [{}, { deliverable: "answer" as const }]) {
+        expect(classifyDelegationResult(output, "success", read(["web_search"]), cfg, name, task, [], run), `${name} ${JSON.stringify(run)}`)
+          .toBe<DelegationClassification>("failure");
+      }
+      expect(isNarrativeOnlyDeliverableFailure("failure", output, task, read(["web_search"]), cfg, undefined), name).toBe(true);
+    }
+  });
+
+  it("fails a write_file call the model emitted as text instead of making it (31612733)", () => {
+    const leaked = "Die Lernwebsite wird jetzt geschrieben.\n<tool_call>\n<function=write_file>\n<parameter=path>\ncpsaf.html\n</parameter>\n"
+      + "<parameter=content>\n<!DOCTYPE html><html><head><title>CPSA-F</title>";
+    expect(classifyDelegationResult(leaked, "success", read(), researcher, "researcher", "Baue die Lernwebsite."))
+      .toBe<DelegationClassification>("failure");
+  });
+
+  it("does not fail an honest answer: the 7c4cbb28 diagnoses, an inline translation, a cited datasheet", () => {
+    for (const output of [
+      "int(subtotal + tax) truncates instead of rounding; the same line is in receipt_total.",
+      "Das fehlerhafte Konstrukt ist int(subtotal + tax) in invoice_total (invoices.py).",
+      "We look forward to working together.",
+      // A file the answer NAMES is as often what it read as what it wrote: a pure pointer is not
+      // counted here (the turn-level guard still checks pointers against the workspace).
+      "Laut dem Datenblatt esp32-s3_datasheet.pdf hat der Chip 512 KB SRAM.",
+    ]) {
+      expect(classifyDelegationResult(output, "success", read(["read_file"]), analyst, "code_analyst", "Analysiere, ändere nichts."), output)
+        .toBe<DelegationClassification>("success");
+    }
+  });
+
+  it("does not judge a claim the run's own writes back", () => {
+    const claim = "I wrote research/notes.md with the findings.";
+    // A recorded artifact, or a file tool that ran (shell_exec may write without recording one).
+    expect(classifyDelegationResult(claim, "success", read(["write_file"]), researcher, "researcher", "Notes, please.", [{ outputPath: "research/notes.md" }]))
+      .toBe<DelegationClassification>("success");
+    expect(classifyDelegationResult(claim, "success", read(["shell_exec"]), { tools: ["shell_exec"] } as never, "coder", "Notes, please."))
+      .toBe<DelegationClassification>("success");
+    // A file tool that was called and failed wrote nothing.
+    expect(classifyDelegationResult(claim, "success", read(["write_file"]), researcher, "researcher", "Notes, please.", [], { failedToolNames: ["write_file"] }))
+      .toBe<DelegationClassification>("failure");
+  });
+});

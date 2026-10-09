@@ -1388,6 +1388,55 @@ describe("swarm orchestration tools", () => {
     expect(String(missed.error)).toContain("write_file");
   }, 30_000);
 
+  // Undeclared, a run that wrote nothing is not a miss — unless its own output claims the file. The
+  // claim must not reach the orchestrator as the error text either: it would read as "the file exists".
+  // Its one write_file call failed, so the run's failed calls must reach the check as well.
+  it("fails an undeclared run that claims a file it never wrote, with the narrative-only reason", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-swarm-claimed-write-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        researcher: { description: "Research.", tools: ["web_search", "web_fetch", "write_file", "edit_file"], maxIterations: 4 },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const claim = "I wrote research/notes.md with the findings.";
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: claim,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 2,
+        toolNames: ["web_search", "write_file"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4,
+        model: "mock",
+        capabilities: [],
+        outcome: "success",
+        terminalState: "completed",
+      },
+      toolFailures: [{ agent: args.agentName, tool: "write_file", error: "EACCES: research/notes.md" }],
+    }));
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const result = await getTool("delegate_to_agent")!.execute({ agentName: "researcher", task: "Collect the I2S facts." }, {
+      sessionId: "claimed-write-undeclared",
+      workspacePath: tempDir,
+      swarmState: { objective: "notes", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain("narrative-only");
+    expect(String(result.error)).not.toContain(claim);
+  }, 30_000);
+
   it("offers the deliverable declaration on every tool that dispatches a delegation", async () => {
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),

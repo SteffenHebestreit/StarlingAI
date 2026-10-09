@@ -9,6 +9,8 @@
  */
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
+import { claimsArtifactWrittenButUnproduced } from "../agent/deliverable-intent.js";
+import { NARRATED_TOOL_TEXT_RE } from "../agent/sanitize-response.js";
 
 // ── Concrete evidence in a result's OWN text (2026-10-05) ──────────────────────────────────
 // Units of measure and currencies: symbols, not words of any language. Durations are left out
@@ -295,6 +297,49 @@ export function looksLikeArtifactDeliverableMiss(
   }
 
   return true;
+}
+
+/**
+ * The run wrote nothing: no artifact was recorded, and no file-writing tool call it made went
+ * through (`failedToolNames`, when known, takes out the ones that failed).
+ */
+function runWroteNothing(
+  stats: { toolNames: string[] } | undefined,
+  artifacts: readonly unknown[],
+  failedToolNames: readonly string[] | undefined,
+): boolean {
+  if (artifacts.length > 0) return false;
+  const fileCalls = (stats?.toolNames ?? []).filter((name) => ARTIFACT_PRODUCING_TOOLS.has(name)).length;
+  const failedFileCalls = (failedToolNames ?? []).filter((name) => ARTIFACT_PRODUCING_TOOLS.has(name)).length;
+  return fileCalls <= failedFileCalls;
+}
+
+/** The output carries a file tool's call as text — the model wrote the call instead of making it. */
+function narratesFileToolCall(output: string): boolean {
+  const head = output.slice(0, 4_000);
+  return NARRATED_TOOL_TEXT_RE.test(head) && [...ARTIFACT_PRODUCING_TOOLS].some((name) => head.includes(name));
+}
+
+/**
+ * A run that wrote nothing whose own output says it did: a completed-write claim about a file or
+ * an artifact ("I wrote research/notes.md …", "Der Projektplan wurde als plan.md gespeichert"), or
+ * a file tool's call emitted as text (31612733). Judged whatever the delegation declared, because
+ * the claim is false either way, and relayed it tells the orchestrator a file exists.
+ *
+ * The claim is read with the completion grammar of the turn's false-completion guard
+ * (claimsArtifactWrittenButUnproduced) with one difference: a file the output only NAMES is not
+ * counted ("laut esp32-s3_datasheet.pdf …"). A specialist names the files it read as often as the
+ * ones it would have written; the turn-level guard still checks such pointers against the
+ * workspace. An honest prose answer — 7c4cbb28's diagnosis — claims nothing and passes.
+ */
+export function looksLikeClaimedWriteMiss(
+  output: string,
+  stats: { toolNames: string[] } | undefined,
+  artifacts: readonly unknown[] = [],
+  failedToolNames?: readonly string[],
+): boolean {
+  if (!output.trim() || !runWroteNothing(stats, artifacts, failedToolNames)) return false;
+  return narratesFileToolCall(output) || claimsArtifactWrittenButUnproduced(output, { fileExists: () => true });
 }
 
 // Routing-time gate. If the delegation asks for a file (delegationAsksForFile:
@@ -715,6 +760,12 @@ export function classifyDelegationResult(
     return "failure";
   }
 
+  // Not asked for a file (or asked and the check above could not judge it), wrote none, and says
+  // it did.
+  if (looksLikeClaimedWriteMiss(output, stats, artifacts, run.failedToolNames)) {
+    return "failure";
+  }
+
   // Every WORK call the run made failed: a failure when the answer reports one (or is empty) —
   // figures in it do not rescue it, they may be echoed or remembered — else a partial: the answer
   // is kept and delivered, flagged as unbacked by any working tool. Only the run's own explicit
@@ -789,10 +840,14 @@ export function isNarrativeOnlyDeliverableFailure(
   stats: { toolCount: number; toolNames: string[] } | undefined,
   agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
   deliverable: DelegationDeliverable | undefined,
+  run: { artifacts?: readonly unknown[]; failedToolNames?: readonly string[] } = {},
 ): boolean {
   if (classification !== "failure") return false;
   if (looksLikeContainerLevelFailure(output)) return false;
-  return looksLikePlanningOnlyResult(output) || looksLikeArtifactDeliverableMiss(task, stats, agentCfg, deliverable);
+  return looksLikePlanningOnlyResult(output)
+    || looksLikeArtifactDeliverableMiss(task, stats, agentCfg, deliverable)
+    // Pasted back as the error, the claim would tell the orchestrator the file exists.
+    || looksLikeClaimedWriteMiss(output, stats, run.artifacts ?? [], run.failedToolNames);
 }
 
 export function formatArtifactReferencesForSharedContext(
