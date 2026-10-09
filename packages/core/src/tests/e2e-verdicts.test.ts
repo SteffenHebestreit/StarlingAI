@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 import * as buildProvenanceModule from "../../../../scripts/build-provenance.mjs";
 // @ts-expect-error — plain .mjs, no types
 import * as configDigestModule from "../../../../scripts/gateway-config-digest.mjs";
+// @ts-expect-error — plain .mjs, no types
+import * as serviceContainerModule from "../../../../scripts/service-container.mjs";
 import { E2EInfraError, type HttpResult } from "../e2e/gateway-client.js";
 import { buildReport, compareWithBaseline, describeBuildChanges, exitCodeFor, renderMarkdown, type E2EReport, type E2ERunMeta } from "../e2e/report.js";
 import type { AttemptResult, ScenarioResult } from "../e2e/runner.js";
@@ -298,6 +300,26 @@ describe("e2e verdicts — environment-suspect runs", () => {
     // Interrupted before they started: the user's doing, not the environment's.
     const interrupted = buildReport([...passing, skipped("i", []), skipped("j", [])], META);
     expect(interrupted.environment.suspect).toBe(false);
+  });
+
+  it("marks a run suspect for what the CLI saw around its scenarios, whatever the scenarios did", () => {
+    // core-build-artifact-mermaid on 2026-10-08: one failure, every scenario run, and a reranker that
+    // answered every /rerank with a 500. Graded on the scenarios alone, that run exited 1.
+    const results = [ran("core-build-artifact-mermaid", "F"), ...["b", "c", "d"].map((id) => ran(id, "P"))];
+    const reranker = "the stack's reranker was not ready when the run began (starlingai-reranker-1: running, unhealthy): every turn's routing reranks through it, so a scenario may have failed on that alone";
+    const report = buildReport(results, META, [reranker]);
+    expect(report.environment).toEqual({ suspect: true, reasons: [reranker] });
+    expect(exitCodeFor(report)).toBe(3);
+    expect(renderMarkdown(report)).toContain(`> **Environment suspect** — ${reranker}`);
+    // After the reasons the scenarios give.
+    const skippedToo = buildReport([...results, skipped("e", [up("gateway"), down("model")])], META, [reranker]);
+    expect(skippedToo.environment.reasons).toEqual([
+      "1 of 5 selected scenarios were skipped because model was down (model: unreachable); it was up when d started, so it went down during the run",
+      reranker,
+    ]);
+    // Nothing seen around them: the report is the one the scenarios alone give.
+    expect(buildReport(results, META, [])).toEqual(buildReport(results, META));
+    expect(exitCodeFor(buildReport(results, META, []))).toBe(1);
   });
 });
 
@@ -867,5 +889,48 @@ describe("e2e provenance — the gateway image's build labels, from git to the r
     const environment = readFileSync(join(root, "scripts", "e2e-env.mjs"), "utf8");
     expect(environment).toMatch(/^import \{ imageOfContainer \} from "\.\/build-provenance\.mjs";$/m);
     expect(functionSource(environment, "async function collectStatus(")).toMatch(/\bgateway: \{[^}]*\bimage: imageOfContainer\(docker, gatewayRunning\),/);
+  });
+});
+
+// ── the stack's reranker, as `pnpm e2e:env status` reports it (scripts/service-container.mjs) ──
+
+type DockerWithErrors = (args: string[]) => { ok: boolean; out: string; err: string };
+
+/** scripts/service-container.mjs, which `pnpm e2e:env status` reads each container through. */
+const serviceContainers = serviceContainerModule as {
+  serviceContainer: (docker: DockerWithErrors, project: string, service: string) => unknown;
+};
+
+describe("e2e environment — the stack's reranker, as e2e:env status reports it", () => {
+  const root = findRepoRoot();
+  const NAME = "starlingai-reranker-1";
+  const answering = (result: { ok: boolean; out: string; err: string }, calls: string[][] = []): DockerWithErrors => (args) => {
+    calls.push(args);
+    return result;
+  };
+  const read = (out: string, calls?: string[][]) => serviceContainers.serviceContainer(answering({ ok: true, out, err: "" }, calls), "starlingai", "reranker");
+
+  it("reads the container's state and Docker's health of it, and tells a docker that could not be asked from no container", () => {
+    const calls: string[][] = [];
+    expect(read(`${NAME}\trunning\tUp 3 hours (healthy)`, calls)).toEqual({ name: NAME, state: "running", health: "healthy" });
+    expect(calls).toEqual([["ps", "-a", "--filter", "label=com.docker.compose.project=starlingai", "--filter", "label=com.docker.compose.service=reranker", "--format", "{{.Names}}\t{{.State}}\t{{.Status}}"]]);
+    expect(read(`${NAME}\trunning\tUp 2 minutes (unhealthy)`)).toEqual({ name: NAME, state: "running", health: "unhealthy" });
+    expect(read(`${NAME}\trunning\tUp 20 seconds (health: starting)`)).toEqual({ name: NAME, state: "running", health: "health: starting" });
+    expect(read(`${NAME}\trunning\tUp 3 hours`)).toEqual({ name: NAME, state: "running", health: "no healthcheck" });
+    expect(read(`${NAME}\texited\tExited (0) 2 hours ago`)).toEqual({ name: NAME, state: "exited", health: "-" });
+    // No such container: the rag profile is off.
+    expect(read("")).toBeNull();
+    // A docker that failed is not "no container", which the harness reads as a stack without a reranker.
+    const daemonDown = answering({ ok: false, out: "", err: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\nIs the docker daemon running?" });
+    expect(serviceContainers.serviceContainer(daemonDown, "starlingai", "reranker")).toEqual({ error: "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." });
+    expect(serviceContainers.serviceContainer(answering({ ok: false, out: "", err: "" }), "starlingai", "reranker")).toEqual({ error: "docker ps failed" });
+  });
+
+  it("is what e2e:env status reports as its reranker, a docker that could not be asked included", () => {
+    const environment = readFileSync(join(root, "scripts", "e2e-env.mjs"), "utf8");
+    expect(environment).toMatch(/^import \{ serviceContainer \} from "\.\/service-container\.mjs";$/m);
+    const collect = functionSource(environment, "async function collectStatus(");
+    expect(collect).toContain('const reranker = serviceContainer(docker, stack.project, "reranker");');
+    expect(collect).toContain('reranker: reranker && !("error" in reranker) ? { container: reranker.name, state: reranker.state, health: reranker.health } : reranker,');
   });
 });

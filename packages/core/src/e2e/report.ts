@@ -150,7 +150,11 @@ export function summarize(results: readonly ScenarioResult[]): E2EReportSummary 
   };
 }
 
-export function buildReport(results: readonly ScenarioResult[], meta: E2ERunMeta): E2EReport {
+/**
+ * The report of a run. `environmentReasons` are what the CLI saw of the environment around the
+ * scenarios (the stack's reranker before and after the run); each makes the run suspect.
+ */
+export function buildReport(results: readonly ScenarioResult[], meta: E2ERunMeta, environmentReasons: readonly string[] = []): E2EReport {
   const summary = summarize(results);
   const reasons: string[] = [];
   if (summary.scenarios > 0 && summary.run === 0) {
@@ -165,6 +169,7 @@ export function buildReport(results: readonly ScenarioResult[], meta: E2ERunMeta
   if (summary.attempts > 0 && summary.attemptsErrored / summary.attempts >= ERROR_SHARE_SUSPECT) {
     reasons.push(`${summary.attemptsErrored} of ${summary.attempts} attempts ended on a harness/environment error, not on an expectation`);
   }
+  reasons.push(...environmentReasons);
   return {
     kind: "e2e-evaluation",
     version: 1,

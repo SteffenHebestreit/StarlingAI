@@ -70,6 +70,28 @@ describe("e2e-env status child", () => {
     expect(result).toEqual({ error: "pnpm e2e:env status --json gave no status (no output; exit code 0)" });
   });
 
+  it("serves one answer to every reader, and reads again when asked for a fresh one", async () => {
+    // The CLI reads the reranker's health again after the run, which may be within the five
+    // minutes one answer serves.
+    const source = environmentStatusSource(repo);
+    if (!source) throw new Error("expected a status source for a repo with scripts/e2e-env.mjs");
+    const first = source();
+    expect(calls).toHaveLength(1);
+    calls[0]!.done(null, '{"ready":{},"reranker":null}', "");
+    expect(await first).toEqual({ json: { ready: {}, reranker: null } });
+    expect(await source()).toEqual({ json: { ready: {}, reranker: null } });
+    expect(calls).toHaveLength(1);
+
+    const fresh = source({ fresh: true });
+    expect(calls).toHaveLength(2);
+    calls[1]!.done(null, '{"ready":{},"reranker":{"container":"r","state":"running","health":"unhealthy"}}', "");
+    const after = { json: { ready: {}, reranker: { container: "r", state: "running", health: "unhealthy" } } };
+    expect(await fresh).toEqual(after);
+    // The fresh answer is the one later readers share.
+    expect(await source()).toEqual(after);
+    expect(calls).toHaveLength(2);
+  });
+
   it("still reads the status a failing exit prints", async () => {
     const missingSomething = Object.assign(new Error("Command failed"), { code: 1, signal: null });
     const { result } = await statusWith((done) => done(missingSomething, '{"ready":{"mail":false}}', ""));

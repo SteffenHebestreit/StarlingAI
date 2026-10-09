@@ -37,6 +37,8 @@ import {
   interpretEnvironmentStatus,
   mailIsolationCheck,
   mailIsolationVerdict,
+  rerankerNotReady,
+  rerankerReason,
   ServiceProber,
   type ServiceProbeContext,
 } from "../e2e/services.js";
@@ -1668,7 +1670,8 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
   const credsFile = join(cliDir, "creds.local.json");
   // The run locks of these runs: never the machine's own temp directory.
   const lockDir = join(cliDir, "locks");
-  const notRunning = async () => ({ json: { mailService: { running: false } } });
+  // A stack without a mail-service or a reranker container: neither stops nor taints a run.
+  const notRunning = async () => ({ json: { mailService: { running: false }, reranker: null } });
 
   beforeAll(() => {
     mkdirSync(join(cliDir, "scenarios"), { recursive: true });
@@ -1734,6 +1737,32 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
       .toBe("cannot verify mail isolation: the mail-service runs, but the accounts it shows eval could not be read");
     expect(mailIsolationVerdict({}).safe).toBe(false);
     expect(await mailIsolationCheck(null)()).toEqual({ safe: false, detail: "cannot verify mail isolation: scripts/e2e-env.mjs not found" });
+  });
+
+  it("reads the stack's reranker from the environment status: healthy or not running is fine, anything else is not", () => {
+    const reading = (reranker: unknown) => rerankerNotReady({ json: { mailService: { running: false }, reranker } });
+    const container = (state: string, health: string) => ({ container: "starlingai-reranker-1", state, health });
+    expect(reading(container("running", "healthy"))).toBeNull();
+    // The rag profile is off: no container, or one that does not run.
+    expect(reading(null)).toBeNull();
+    for (const state of ["created", "exited", "dead"]) expect(reading(container(state, "-")), state).toBeNull();
+    // It runs, but Docker's healthcheck, which loads and runs the model, has not passed.
+    expect(reading(container("running", "unhealthy"))).toBe("starlingai-reranker-1: running, unhealthy");
+    expect(reading(container("running", "health: starting"))).toBe("starlingai-reranker-1: running, health: starting");
+    expect(reading(container("running", "no healthcheck"))).toBe("starlingai-reranker-1: running, no healthcheck");
+    expect(reading(container("restarting", "-"))).toBe("starlingai-reranker-1: restarting, -");
+    // A status that cannot tell is not a healthy reranker (fail closed).
+    expect(reading({ error: "Cannot connect to the Docker daemon" })).toBe("docker could not be asked: Cannot connect to the Docker daemon");
+    expect(reading("running")).toBe("the e2e environment status does not report it");
+    expect(rerankerNotReady({ json: { mailService: { running: false } } })).toBe("the e2e environment status does not report it");
+    expect(rerankerNotReady({ error: "pnpm e2e:env status --json gave no status (no output; exit code 1)" }))
+      .toBe("its status could not be read: pnpm e2e:env status --json gave no status (no output; exit code 1)");
+
+    const why = ": every turn's routing reranks through it, so a scenario may have failed on that alone";
+    expect(rerankerReason(null, null)).toBeNull();
+    expect(rerankerReason("a: running, unhealthy", null)).toBe(`the stack's reranker was not ready when the run began (a: running, unhealthy)${why}`);
+    expect(rerankerReason(null, "b: restarting, -")).toBe(`the stack's reranker was not ready when it ended (b: restarting, -)${why}`);
+    expect(rerankerReason("a", "b")).toBe(`the stack's reranker was not ready when the run began (a) and when it ended (b)${why}`);
   });
 
   it("runs, reports and exits by the result; --id narrows; a baseline flags a decisive regression only", async () => {
@@ -1834,6 +1863,67 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     expect(markdown).toContain(`> **Provenance** — ${provenance.warnings[0]}`);
   });
 
+  it("exits 3 when the stack's reranker runs but Docker does not call it healthy when the run begins or when it ends", async () => {
+    // 2026-10-08: a reranker whose model could not load failed every /rerank of a run, the discovery
+    // prefetch overran its budget waiting on it, and core-build-artifact-mermaid was graded a swarm
+    // failure (exit 1) while Docker called the reranker healthy.
+    mkdirSync(join(cliDir, "reranker"), { recursive: true });
+    writeFileSync(join(cliDir, "reranker", "r.jsonc"), JSON.stringify({ id: "reranker-r", title: "Reranker R", group: "core", steps: [{ kind: "turn", message: "hello reranker", expect: { reply: { includes: ["42"] } } }] }));
+    const container = (state: string, health: string) => ({ container: "starlingai-reranker-1", state, health });
+    // The status as the preflight reads it, and as a fresh read after the run sees it.
+    const statuses = (before: unknown, after: unknown) => {
+      const fresh: boolean[] = [];
+      const source = async (options?: { fresh?: boolean }) => {
+        fresh.push(options?.fresh === true);
+        return { json: { mailService: { running: false }, reranker: options?.fresh ? after : before } };
+      };
+      return { source, fresh };
+    };
+    const run = (out: string, environment: CliIo["environment"]) => cli(["evaluate", "--scenarios", "reranker", "--out", out], { environment });
+    const environmentOf = (out: string) => {
+      const file = readdirSync(join(cliDir, out)).find((name) => name.endsWith(".json"))!;
+      return (JSON.parse(readFileSync(join(cliDir, out, file), "utf8")) as { environment: { suspect: boolean; reasons: string[] } }).environment;
+    };
+    const why = ": every turn's routing reranks through it, so a scenario may have failed on that alone";
+
+    const healthy = statuses(container("running", "healthy"), container("running", "healthy"));
+    const fine = await run("reranker-healthy", healthy.source);
+    expect(fine.err).toBe("");
+    expect(fine.code).toBe(0);
+    expect(fine.out).not.toContain("RERANKER");
+    // Read again after the run, past the cached answer.
+    expect(healthy.fresh.at(-1)).toBe(true);
+    expect(environmentOf("reranker-healthy")).toEqual({ suspect: false, reasons: [] });
+
+    const broken = await run("reranker-broken", statuses(container("running", "unhealthy"), container("running", "unhealthy")).source);
+    expect(broken.err).toBe("");
+    expect(broken.code).toBe(3);
+    expect(broken.out).toContain("RERANKER NOT READY: starlingai-reranker-1: running, unhealthy — every turn's routing reranks through it, so this run will be reported environment-suspect");
+    const reason = `the stack's reranker was not ready when the run began (starlingai-reranker-1: running, unhealthy) and when it ended (starlingai-reranker-1: running, unhealthy)${why}`;
+    expect(broken.out).toContain(`ENVIRONMENT SUSPECT: ${reason}`);
+    expect(environmentOf("reranker-broken")).toEqual({ suspect: true, reasons: [reason] });
+    expect(readFileSync(join(cliDir, "reranker-broken", readdirSync(join(cliDir, "reranker-broken")).find((name) => name.endsWith(".md"))!), "utf8"))
+      .toContain(`> **Environment suspect** — ${reason}`);
+
+    // Healthy when the run began, loading again when it ended (it restarted during the run).
+    const restarted = await run("reranker-restarted", statuses(container("running", "healthy"), container("running", "health: starting")).source);
+    expect(restarted.code).toBe(3);
+    expect(restarted.out).not.toContain("RERANKER NOT READY");
+    expect(environmentOf("reranker-restarted").reasons).toEqual([`the stack's reranker was not ready when it ended (starlingai-reranker-1: running, health: starting)${why}`]);
+
+    // A status that cannot be read after the run leaves the reranker unverified.
+    const unread = await run("reranker-unread", async (options?: { fresh?: boolean }) => (options?.fresh
+      ? { error: "pnpm e2e:env status --json gave no status (no output; exit code 1)" }
+      : { json: { mailService: { running: false }, reranker: container("running", "healthy") } }));
+    expect(unread.code).toBe(3);
+    expect(environmentOf("reranker-unread").reasons).toEqual([`the stack's reranker was not ready when it ended (its status could not be read: pnpm e2e:env status --json gave no status (no output; exit code 1))${why}`]);
+
+    // The rag profile off, or the reranker stopped: the run ran without one, and that is not suspect.
+    const stopped = await run("reranker-stopped", statuses(container("exited", "-"), null).source);
+    expect(stopped.code).toBe(0);
+    expect(environmentOf("reranker-stopped")).toEqual({ suspect: false, reasons: [] });
+  });
+
   it("warns, and labels the baseline comparison confounded, when the gateway image was built from another commit", async () => {
     mkdirSync(join(cliDir, "confound"), { recursive: true });
     writeFileSync(join(cliDir, "confound", "c.jsonc"), JSON.stringify({ id: "confound-c", title: "Confound C", group: "core", steps: [{ kind: "turn", message: "hello confound", expect: { reply: { includes: ["42"] } } }] }));
@@ -1846,7 +1936,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const image = { id: `sha256:${"4c".repeat(32)}`, created: "2026-10-08T13:00:00Z", revision: "f".repeat(40), dirty: false };
     const config = { compiled: "a7".repeat(32), overlay: "absent" };
     const stale = await cli(["evaluate", "--scenarios", "confound", "--out", "confound-2", "--baseline", baselinePath], {
-      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config } } }),
+      environment: async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config }, reranker: null } }),
     });
     expect(stale.err).toBe("");
     expect(stale.code).toBe(0);
@@ -1863,7 +1953,7 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     writeFileSync(join(cliDir, "ab", "ab.jsonc"), JSON.stringify({ id: "ab-a", title: "A/B", group: "core", steps: [{ kind: "turn", message: "hello ab", expect: { reply: { includes: ["42"] } } }] }));
     // One image, built after HEAD was committed: no provenance warning on either run.
     const image = { id: `sha256:${"5d".repeat(32)}`, created: "2099-01-01T00:00:00Z", revision: null, dirty: null };
-    const status = (compiled: string) => async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config: { compiled, overlay: "absent" } } } });
+    const status = (compiled: string) => async () => ({ json: { mailService: { running: false }, gateway: { running: true, image, config: { compiled, overlay: "absent" } }, reranker: null } });
     const first = await cli(["evaluate", "--scenarios", "ab", "--out", "ab-1"], { environment: status("a7".repeat(32)) });
     expect(first.code).toBe(0);
     const baselinePath = join(cliDir, "ab-1", readdirSync(join(cliDir, "ab-1")).find((file) => file.endsWith(".json"))!);

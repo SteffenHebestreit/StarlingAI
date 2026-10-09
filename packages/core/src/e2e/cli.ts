@@ -18,8 +18,9 @@
  * Exit codes: 0 every scenario that ran passed · 1 a scenario failed ·
  * 2 usage, invalid scenarios, missing credentials, a refused login, the mail-isolation
  * preflight or another run against the same gateway · 3 environment-suspect (everything skipped,
- * a fifth of the selected scenarios skipped for one service, or a quarter of the attempts ended on
- * harness errors). Through pnpm a non-zero code may surface as 1.
+ * a fifth of the selected scenarios skipped for one service, a quarter of the attempts ended on
+ * harness errors, or the stack's reranker runs but Docker did not call it healthy when the run began
+ * or ended). Through pnpm a non-zero code may surface as 1.
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -37,6 +38,8 @@ import {
   environmentFromSource,
   environmentStatusSource,
   mailIsolationCheck,
+  rerankerNotReady,
+  rerankerReason,
   ServiceProber,
   type EnvironmentStatusSource,
   type MailIsolationCheck,
@@ -396,6 +399,13 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
   }
   io.out(`Mail isolation: ${isolation.detail}`);
 
+  // The stack's reranker, from the status the preflight read, and read again after the run: a run
+  // on a reranker that is not ready grades its routing failures as the swarm's.
+  const readReranker = async (fresh: boolean): Promise<string | null> =>
+    rerankerNotReady(environment ? await environment({ fresh }) : { error: "scripts/e2e-env.mjs not found" });
+  const rerankerAtStart = await readReranker(false);
+  if (rerankerAtStart) io.out(`RERANKER NOT READY: ${rerankerAtStart} — every turn's routing reranks through it, so this run will be reported environment-suspect`);
+
   const credentials = readCredentialsFile(paths.credentialsPath);
   const gatewayUrl = gatewayUrlFromEnv(io.env);
   const client = new GatewayClient({ baseUrl: gatewayUrl, credentials });
@@ -483,6 +493,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       signal: interrupt.signal,
       ...io.runner,
     });
+    const reranker = rerankerReason(rerankerAtStart, await readReranker(true));
     const report = buildReport(results, {
       startedAt,
       finishedAt: new Date().toISOString(),
@@ -493,7 +504,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       judge: judge ? `${judge.model} @ ${judge.url}` : null,
       mail: `${mail.name} (inbox ${mail.inbox})`,
       provenance,
-    });
+    }, reranker ? [reranker] : []);
     if (baseline && baselinePath) report.baseline = compareWithBaseline(report, baseline, baselinePath);
     const written = writeReport(report, outDir);
 

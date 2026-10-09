@@ -104,21 +104,25 @@ export function interpretEnvironmentStatus(json: unknown): E2EEnvironmentStatus 
   return { ready: { mail: ready["mail"] === true, site: ready["site"] === true }, missing };
 }
 
-/** The JSON `node scripts/e2e-env.mjs status --json` printed, or why there is none. */
-export type EnvironmentStatusSource = () => Promise<{ json: unknown } | { error: string }>;
+/**
+ * The JSON `node scripts/e2e-env.mjs status --json` printed, or why there is none. `fresh` reads it
+ * again even while a cached answer would serve.
+ */
+export type EnvironmentStatusSource = (options?: { fresh?: boolean }) => Promise<{ json: unknown } | { error: string }>;
 
 /**
  * Runs `node scripts/e2e-env.mjs status --json` (read-only; it exits 1 while something is
  * missing and still prints the status). null when the repo has no such script. One answer serves
- * five minutes — the status runs a few docker commands — and both its readers (the service probes
- * and the mail-isolation preflight) share it.
+ * five minutes — the status runs a few docker commands — and its readers (the service probes, the
+ * mail-isolation preflight, the provenance and the reranker check) share it. A fresh read (the
+ * reranker check after the run) replaces the shared answer.
  */
 export function environmentStatusSource(repoRoot: string, ttlMs = 5 * 60_000): EnvironmentStatusSource | null {
   const script = join(repoRoot, "scripts", "e2e-env.mjs");
   if (!existsSync(script)) return null;
   let cached: { at: number; status: Promise<{ json: unknown } | { error: string }> } | null = null;
-  return () => {
-    if (cached && Date.now() - cached.at < ttlMs) return cached.status;
+  return (options) => {
+    if (!options?.fresh && cached && Date.now() - cached.at < ttlMs) return cached.status;
     const status = new Promise<{ json: unknown } | { error: string }>((resolveStatus) => {
       // windowsHide gives the child a hidden console of its own. A harness whose launching task
       // was stopped on Windows has lost its console, and a child that inherits the dead one dies
@@ -203,6 +207,45 @@ export function mailIsolationCheck(source: EnvironmentStatusSource | null): Mail
     if ("error" in raw) return { safe: false, detail: `cannot verify mail isolation: ${raw.error}` };
     return mailIsolationVerdict(raw.json);
   };
+}
+
+// ── The stack's reranker, before and after a run ──────────────────────────────
+
+/** Docker states of a container that does not run and was not asked to: the stack runs without it. */
+const NOT_STARTED = new Set(["created", "exited", "dead"]);
+
+/**
+ * What one reading of the e2e environment status shows of the stack's reranker: null when Docker
+ * calls it healthy, or when the stack runs none (no container, or one that is not running: the rag
+ * profile is off), else what was wrong. A reading that cannot tell (no status, no reranker block in
+ * it, a docker that could not be asked) is wrong too.
+ *
+ * Every turn's routing reranks its candidates through it, and the discovery prefetch waits on that
+ * rerank. On 2026-10-08 a reranker whose model could not load failed all 28 /rerank calls of a run
+ * while its /health answered 200; the prefetch overran its budget, core-build-artifact-mermaid lost
+ * its routing capsule, and the report graded that as a swarm failure. Its /health now loads and runs
+ * the model first, so Docker's healthcheck shows a reranker that cannot rerank; this reads it.
+ */
+export function rerankerNotReady(status: { json: unknown } | { error: string }): string | null {
+  if ("error" in status) return `its status could not be read: ${status.error}`;
+  const reranker = isRecord(status.json) ? status.json["reranker"] : undefined;
+  if (reranker === null) return null;
+  if (!isRecord(reranker)) return "the e2e environment status does not report it";
+  if (typeof reranker["error"] === "string") return `docker could not be asked: ${reranker["error"]}`;
+  const state = String(reranker["state"]);
+  const health = String(reranker["health"]);
+  if (NOT_STARTED.has(state) || (state === "running" && health === "healthy")) return null;
+  return `${String(reranker["container"])}: ${state}, ${health}`;
+}
+
+/** The environment reason for a reranker that was not ready when the run began or when it ended; null when it was at both. */
+export function rerankerReason(atStart: string | null, atEnd: string | null): string | null {
+  const when = [
+    ...(atStart ? [`when the run began (${atStart})`] : []),
+    ...(atEnd ? [`when it ended (${atEnd})`] : []),
+  ];
+  if (when.length === 0) return null;
+  return `the stack's reranker was not ready ${when.join(" and ")}: every turn's routing reranks through it, so a scenario may have failed on that alone`;
 }
 
 export const DEFAULT_E2E_SITE_URL = "http://localhost:18081";
