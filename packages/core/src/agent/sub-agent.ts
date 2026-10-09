@@ -1402,6 +1402,27 @@ export function requiresInProcessExecution(tools: readonly string[] | undefined)
       || GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => t.startsWith(prefix)));
 }
 
+/**
+ * Does this agent resolve to the containerized dispatch path (the fail-loud pre-flight at the
+ * call site below)? This is the single predicate the runtime branch and the shipped-config gate
+ * share, so a change to the rule cannot pass the gate while breaking the runtime, or the reverse.
+ * It is exactly the condition the dispatch comment describes: an agent is containerized when its
+ * tools do not force it in-process AND it either opts in explicitly (`container.enabled`) or runs
+ * under the global opt-out model (`agents.defaultContainerized` on and `container.disabled` not
+ * set). The 15 specialists that used to resolve here now carry `container.disabled: true` and run
+ * in-process (2026-10-09 user decision); the branch and its honest-failure path stay for any
+ * future agent that is containerized by default.
+ */
+export function resolvesToContainerizedDispatch(
+  agentCfg: { tools?: readonly string[]; container?: { enabled?: boolean; disabled?: boolean } },
+  defaultContainerized: boolean,
+): boolean {
+  return !requiresInProcessExecution(agentCfg.tools) && (
+    agentCfg.container?.enabled === true ||
+    (defaultContainerized === true && agentCfg.container?.disabled !== true)
+  );
+}
+
 // Tools whose output is deterministic enough within a single sub-agent run that
 // re-issuing the call with identical arguments is wasted work. The existing
 // `lastToolCallSig` map only catches *consecutive* duplicates (A→A); this set
@@ -3124,11 +3145,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // `--network none` isolation breaks mcp__* tools (they reach their MCP
     // servers via the gateway's host-side registry), so MCP-using agents are
     // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
-    const isContainerized =
-      !requiresInProcessExecution(agentCfg.tools) && (
-        agentCfg.container?.enabled === true ||
-        (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
-      );
+    const isContainerized = resolvesToContainerizedDispatch(
+      agentCfg,
+      config.agents.defaultContainerized === true,
+    );
     if (isContainerized) {
       // STATIC PRE-FLIGHT — the same check the worker makes on itself (agent/container-entrypoint.ts),
       // made here before a container is ever started. The agent-worker process registers only the
