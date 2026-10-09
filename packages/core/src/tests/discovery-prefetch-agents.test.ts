@@ -36,6 +36,21 @@ describe("prefetchCapabilityCandidates onAgents", () => {
     expect(listed).toEqual(seen[0]);
   });
 
+  // The second argument is what an --auto turn's forced first call is armed from
+  // (agent/turn-setup.ts prefetchRoutedToDeliverableEmitter). The runtime tests stub this module,
+  // so only this test sees the list that production hands over: an empty list, or one without the
+  // confidence, would leave every --auto turn unarmed.
+  it("hands over the same agents with the confidence routing admitted each at", async () => {
+    const seen: unknown[] = [];
+    await prefetchCapabilityCandidates("build me a site", { onAgents: (_names, agents) => seen.push(agents) });
+    expect(seen).toEqual([[
+      { name: "researcher", confidence: "high" },
+      { name: "web_coder", confidence: "medium" },
+      { name: "data_analyst", confidence: "medium" },
+      { name: "writer", confidence: "medium" },
+    ]]);
+  });
+
   it("honours maxAgents, and keeps the capsule when the observer throws", async () => {
     const seen: string[][] = [];
     await prefetchCapabilityCandidates("build me a site", { maxAgents: 2, onAgents: (names) => seen.push([...names]) });

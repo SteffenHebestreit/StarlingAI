@@ -9,9 +9,11 @@ import { lookupTrajectory } from "../memory/trajectory-cache.js";
 import { toSoftRoutingHint, type DynamicTurnGuidance } from "./intent-classifier.js";
 import { userMessageCarriesActionableUrl } from "./citation-honesty.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
-import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
+import { prefetchCapabilityCandidates, type DiscoveryCapsuleAgent } from "./discovery-prefetch.js";
 import { noteIntentShadowCapsule } from "./intent-shadow.js";
+import { readPromotedAgents } from "./promoted-agents.js";
 import { timedPhase } from "./turn-metrics.js";
+import { DELIVERABLE_EMITTING_TOOLS } from "../tools/delegation-artifact-classification.js";
 
 /**
  * HARD latency cap on the discovery capsule: the embedding round-trip behind it can stall on a cold
@@ -39,6 +41,12 @@ export function startDiscoveryPrefetch(params: {
   /** The turn has no catalog tools: the capsule names no workflow (prefetchCapabilityCandidates). */
   withoutWorkflows?: boolean;
   budgetMs?: number;
+  /**
+   * The capsule's agents with their routing confidence, in its order, called before the returned
+   * promise settles. Only when the capsule came within the budget, so a caller sees exactly the
+   * routing the turn's first prompt was built with; not at all on a timeout or an error.
+   */
+  onCapsuleAgents?: (agents: readonly DiscoveryCapsuleAgent[]) => void;
 }): Promise<string> {
   const budgetMs = params.budgetMs ?? DISCOVERY_PREFETCH_BUDGET_MS;
   return timedPhase("discoveryPrefetch", async () => {
@@ -46,6 +54,7 @@ export function startDiscoveryPrefetch(params: {
     // The capsule's agent names, for the intent readout's shadow (agent/intent-shadow.ts): the
     // candidate list the turn actually had, so none when the capsule came too late.
     let capsuleAgents: readonly string[] = [];
+    let capsuleCandidates: readonly DiscoveryCapsuleAgent[] = [];
     let capsuleLate = false;
     try {
       const capsule = await Promise.race([
@@ -53,7 +62,10 @@ export function startDiscoveryPrefetch(params: {
           ...(params.allowedAgents ? { allowedAgents: [...params.allowedAgents] } : {}),
           ...(params.withoutWorkflows ? { withoutWorkflows: true } : {}),
           sessionId: params.sessionId,
-          onAgents: (names) => { capsuleAgents = names; },
+          onAgents: (names, agents) => {
+            capsuleAgents = names;
+            capsuleCandidates = agents ?? [];
+          },
         }),
         new Promise<string>((resolve) => {
           timer = setTimeout(() => {
@@ -63,11 +75,49 @@ export function startDiscoveryPrefetch(params: {
         }),
       ]);
       noteIntentShadowCapsule(params.sessionId, capsuleLate ? { status: "timeout" } : { status: "ok", agents: capsuleAgents });
+      if (!capsuleLate && params.onCapsuleAgents) {
+        try {
+          params.onCapsuleAgents(capsuleCandidates);
+        } catch {
+          // An observer's failure is never the capsule's.
+        }
+      }
       return capsule;
     } finally {
       if (timer) clearTimeout(timer);
     }
   }).catch(() => "");
+}
+
+/**
+ * The discovery prefetch routed the turn to an agent whose work is a deliverable: the capsule's top
+ * agent was admitted at high confidence and holds a tool whose call is itself the deliverable
+ * (DELIVERABLE_EMITTING_TOOLS: a diagram, a chart, a site, a deck, a document).
+ *
+ * This is how an --auto turn's forced first tool call (orchestration.autonomousModeAntiRefusal)
+ * sees an artifact request the deliverable-intent word lists miss. "Zeichne den folgenden
+ * Bestellablauf als Mermaid-Flussdiagramm" matched none of their verbs or nouns, so the turn was
+ * not forced, and the model drew the diagram inline while the capsule it had been given named
+ * diagram_designer [high] (E2E core-build-artifact-mermaid). Routing reads the request in any
+ * language, and the turn has already paid for it. Only the top agent counts, and an agent the
+ * configuration does not know holds no tool.
+ *
+ * The confidence check narrows less than it reads. With an embedding model configured, as on the
+ * deployed stack, the prefetch admits an agent only at a semantic score of 0.72 or more, and 0.72 is
+ * also where "high" begins (tools/agent-routing.ts confidenceLabel), so every agent the capsule
+ * lists is high. The check filters only the lexical path routing takes without an embedding model,
+ * which admits an agent from 0.45. On the deployed stack the condition is the top agent's tools
+ * alone, whether or not the request asks for a deliverable: an --auto question about an attached
+ * file, or about how a chart works, that routes to an agent holding one of these tools is forced to
+ * call a tool until it has delegated. Narrowing that needs a signal that tells those turns apart,
+ * calibrated on the routing ledger across many turns.
+ */
+export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCapsuleAgent[]): boolean {
+  const top = agents[0];
+  if (!top || top.confidence !== "high") return false;
+  const config = getConfig();
+  const agentCfg = config.subAgents[top.name] ?? readPromotedAgents(config.workspacePath)[top.name];
+  return (agentCfg?.tools ?? []).some((tool) => DELIVERABLE_EMITTING_TOOLS.has(tool));
 }
 
 export interface TrajectoryInjection {

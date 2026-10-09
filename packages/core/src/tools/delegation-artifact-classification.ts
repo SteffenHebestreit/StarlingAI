@@ -181,6 +181,20 @@ export const ARTIFACT_PRODUCING_TOOLS = new Set([
   "spreadsheet_write", "pdf_fill", "pentest_report", "export_evidence_ledger",
 ]);
 
+/** The ARTIFACT_PRODUCING_TOOLS that change the workspace without being a deliverable of their own. */
+const WORKSPACE_MUTATION_ONLY_TOOLS: ReadonlySet<string> = new Set(["write_file", "edit_file", "create_dir", "shell_exec"]);
+
+/**
+ * The ARTIFACT_PRODUCING_TOOLS whose call is itself the deliverable: a diagram, a chart, a site,
+ * a deck, a document, an image. Holding one of the bare workspace tools says nothing about what an
+ * agent is for: 40 of the 48 configured agents hold write_file, edit_file or shell_exec (summarizer
+ * and researcher among them), while 12 hold a tool of this set. Derived from
+ * ARTIFACT_PRODUCING_TOOLS, so a generator added there is counted here too.
+ */
+export const DELIVERABLE_EMITTING_TOOLS: ReadonlySet<string> = new Set(
+  [...ARTIFACT_PRODUCING_TOOLS].filter((tool) => !WORKSPACE_MUTATION_ONLY_TOOLS.has(tool)),
+);
+
 // Coordinators can also "produce" by delegating the work. If they called
 // none of these AND none of ARTIFACT_PRODUCING_TOOLS, they truly did
 // nothing useful.
