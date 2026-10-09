@@ -325,6 +325,15 @@ export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyA
   return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
 }
 
+/** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
+async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
+  try {
+    return Object.keys(await readAllFacts(deriveSharedSessionId(ctx.sessionId))).length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function getEphemeralGenerationSettings() {
   const config = getConfig();
   return config.agents.ephemeralGeneration;
@@ -1165,6 +1174,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const skippedCandidates = new Set<string>();
   const excludedFromRouting = (): string[] => [...attemptedAgents, ...skippedCandidates];
   let routingRounds = 0;
+  // The research gate's turn trigger for a ROUTED pick: decided at this delegation's first routing
+  // round and kept for the rest (see Step 1 below).
+  let routedTurnTriggered: boolean | undefined;
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1491,6 +1503,63 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             routingCandidates = [];
           } else {
             routingCandidates = researchCapable;
+          }
+        }
+        // THE TURN TRIGGER, for a routed pick. The gate above reads the task's words, which match
+        // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
+        // asking in German to fetch a page named an agent the catalog does not have (web_crawler),
+        // so it was routed, and the router put vision_browser_analyst, which can read the shared
+        // browser tab but not open a page, ahead of browser_agent and researcher (79dd29e0,
+        // 3c91cb68). It answered from a page another session had left there. The explicit path's
+        // turn trigger never saw the step: a plan leaves a step naming no known agent to routing
+        // (evidenceGatherPoint), so the step ran exempt.
+        // The router is therefore held to the same rule here, on the same conditions: the judge said
+        // this turn needs outside facts, nothing this turn has reached outside the workspace yet, and
+        // the session holds no shared facts. A candidate that works only from what it is handed
+        // (agentCfgWorksOnlyFromHandedText) cannot gather them, so it is dropped; when no other
+        // candidate was routed, the research fallback takes the step if this turn may still dispatch
+        // one, and otherwise the candidates stay (never a dead end). A candidate with a source of its
+        // own (the web, a mailbox, a codebase) keeps its rank. Decided at the first routing round and
+        // kept, so a gatherer that fails does not leave the next round free to pick the tab reader.
+        if (routedTurnTriggered === undefined) {
+          routedTurnTriggered = ctx.turnEvidence?.required === true
+            && !ctx.turnEvidence.outsideEngaged
+            && !(await sessionHoldsSharedFacts(ctx))
+            // Re-read after the await, as the explicit path does: a sibling may have engaged one.
+            && !ctx.turnEvidence.outsideEngaged;
+        }
+        if (routedTurnTriggered && !textRequiresResearch && routingCandidates.length > 0) {
+          const turnCfg = getConfig();
+          const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
+          const gatherable = routingCandidates.filter((cand) =>
+            !agentCfgWorksOnlyFromHandedText(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+          if (gatherable.length < routingCandidates.length) {
+            const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
+              attemptedAgents,
+              (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+                && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+            );
+            // With no other candidate and no fallback this turn may dispatch, nothing is dropped.
+            const dropped = gatherable.length > 0 || fallback
+              ? routingCandidates.filter((cand) => !gatherable.includes(cand)).map((cand) => cand.name)
+              : [];
+            logAudit("delegation_routing_filtered_research_incapable", {
+              taskTitle: title,
+              droppedAgents: dropped,
+              redirectedTo: fallback ?? null,
+              trigger: "turn_evidence",
+            }, { sessionId: ctx.sessionId });
+            if (gatherable.length > 0) {
+              routingCandidates = gatherable;
+            } else if (fallback) {
+              routingCandidateMap.set(fallback, {
+                confidence: "medium",
+                matchedTerms: ["research", "turn-evidence", "redirected"],
+                score: 0.7,
+              });
+              candidateQueue.push(fallback);
+              routingCandidates = [];
+            }
           }
         }
         // Capability-aware gate: when the task needs a concrete execution tool class

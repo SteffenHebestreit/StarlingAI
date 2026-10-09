@@ -551,6 +551,92 @@ describe("the research gate's turn trigger", () => {
 
     expect(ran()).toEqual(["browser_agent"]);
   }, 30_000);
+
+  /** The live 79dd29e0 step's shape: German, a URL to fetch, and an agent the catalog does not have. */
+  const GERMAN_ROUTED_STEP = "Die URL http://www.nordlicht-werkzeuge.test/lager.html abrufen und den Lagerbestand aller Artikel zusammenzählen.";
+
+  it("routes the live German step past the tab reader on a turn the judge flagged (79dd29e0)", async () => {
+    routeAs(LIVE_SITE_RANKING);
+    // web_crawler is not a configured agent: delegate_to_agent drops the name and the step is routed.
+    const result = await executePlan("s-routed-de", plan(GERMAN_OBJECTIVE, [{ id: "s1", kind: "delegate", agent: "web_crawler", description: GERMAN_ROUTED_STEP }]), turnCtx("s-routed-de"));
+
+    expect(result.success).toBe(true);
+    expect(ran()).toEqual(["browser_agent"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["vision_browser_analyst"], redirectedTo: null, trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("drops a routed builder for the next-ranked gatherer, and sends a step with no gatherer routed to researcher", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    routeAs([{ name: "web_coder", score: 0.86 }, { name: "researcher", score: 0.81 }]);
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_STEP }, turnCtx("s-routed-builder"));
+    vi.doUnmock("../tools/agent-routing.js");
+    vi.resetModules();
+    routeAs([{ name: "web_coder", score: 0.86 }, { name: "content_writer", score: 0.8 }]);
+    const registry = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await registry.getTool("delegate_to_agent")!.execute({ task: GERMAN_STEP }, turnCtx("s-routed-writers"));
+
+    expect(ran()).toEqual(["researcher", "researcher"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["web_coder"], redirectedTo: null, trigger: "turn_evidence" }),
+      expect.objectContaining({ droppedAgents: ["web_coder", "content_writer"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("keeps the gate armed for the delegation's later rounds once a routed gatherer fails", async () => {
+    // browser_agent fails. Its dispatch claimed the turn's outside source, so a trigger decided
+    // again on the next round would let the router hand the step to the tab reader.
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const failed = args.agentName === "browser_agent";
+      return {
+        output: failed ? "browser_agent: the page did not load." : `${args.agentName}: done`,
+        stats: { ...statsFor(args), ...(failed ? { outcome: "failure" as const } : {}) },
+      };
+    });
+    routeAs([{ name: "vision_browser_analyst", score: 0.8555 }, { name: "browser_agent", score: 0.8453 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    const ctx = turnCtx("s-routed-retry");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, ctx);
+
+    expect(ran()).toEqual(["browser_agent", "researcher"]);
+  }, 30_000);
+
+  it("leaves the router's pick alone with no verdict, for an agent with a source of its own, and once the turn has gathered", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    routeAs(LIVE_SITE_RANKING);
+    await import("../tools/sub-agent.js");
+    const noVerdict = turnCtx("s-routed-no-verdict");
+    delete noVerdict.turnEvidence;
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, noVerdict);
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-engaged", { turnEvidence: { required: true, outsideEngaged: "researcher" } }));
+    await (await import("../swarm/memory.js")).writeSharedFact("s-routed-facts", "lager_total", "596 (lager.html)");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-facts"));
+    vi.doUnmock("../tools/agent-routing.js");
+    vi.resetModules();
+    routeAs([{ name: "mail_agent", score: 0.86 }, { name: "researcher", score: 0.81 }]);
+    const registry = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await registry.getTool("delegate_to_agent")!.execute({ task: "Die Rechnung von Nordlicht im Postfach suchen und den Betrag nennen." }, turnCtx("s-routed-mail"));
+
+    expect(ran()).toEqual(["vision_browser_analyst", "vision_browser_analyst", "vision_browser_analyst", "mail_agent"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([]);
+  }, 30_000);
+
+  it("leaves a routed builder slice alone when a sibling slice names its gatherer", async () => {
+    routeAs([{ name: "web_coder", score: 0.86 }, { name: "researcher", score: 0.81 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("parallel_delegate")!.execute({ tasks: [
+      { agentName: "researcher", task: "Die Website abrufen und die Angaben belegen." },
+      { task: FRENCH_BUILD },
+    ] }, turnCtx("s-routed-sibling"));
+
+    expect(ran().sort()).toEqual(["researcher", "web_coder"]);
+  }, 30_000);
 });
 
 describe("capability predicates behind the turn trigger", () => {
