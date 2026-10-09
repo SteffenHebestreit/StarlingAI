@@ -1163,6 +1163,12 @@ let _storeWrites: Promise<void> = Promise.resolve();
 /** The newest snapshot handed to an async write that has not landed yet. Taking the snapshot
  *  clears the dirty flag, so without this an exit during the write found nothing to write. */
 let _pendingStoreText: string | null = null;
+/** Records the boot could not restore, in file order: their JSON text, and their id when they had
+ *  one (a live session under that id, hydrated from Redis or created again, supersedes the text).
+ *  See loadPersistedSessions. */
+const _unrestoredRecords: Array<{ id?: string; json: string }> = [];
+/** Set when the store file could neither be read nor set aside: this process never writes it. */
+let _storeWriteBlocked = false;
 
 {
   // One exit listener per process, however often a test re-evaluates this module: the slot holds
@@ -1489,6 +1495,7 @@ export function getSessionTranscript(id: string, opts?: { limit?: number; before
 export function resetSessionsForTests(): void {
   _sessions.clear();
   _changedSessions.clear();
+  _unrestoredRecords.length = 0;
   persistSessionStore();
 }
 
@@ -1503,17 +1510,66 @@ function withTimestamp(message: SessionMessageInput): SessionHistoryMessage {
   };
 }
 
+// ── Restoring the store (2026-10-09) ────────────────────────────────────────
+// The load used to be one `try` around the whole loop: one record that did not restore aborted it,
+// the sessions after that record never loaded, and the next flush (which writes the whole store)
+// dropped every one of them. A file that did not parse went the same way. Now each record restores
+// on its own, and one that does not is kept as the JSON it was read as and written back, after the
+// live ones, by every flush, so no flush loses it. A file that cannot be read as a store is renamed
+// aside before anything can write over it. When every record restores, the store text is what it
+// always was. (The state this keeps is declared with the other store state, above the load.)
+
 function loadPersistedSessions(): void {
   if (!existsSync(SESSION_STORE_PATH)) return;
 
+  let records: unknown[];
   try {
-    const raw = JSON.parse(readFileSync(SESSION_STORE_PATH, "utf8")) as { sessions?: PersistedSessionRecord[] };
-    for (const record of raw.sessions ?? []) {
-      const session = AgentSession.fromRecord(record);
-      _sessions.set(session.id, session);
-    }
+    const raw = JSON.parse(readFileSync(SESSION_STORE_PATH, "utf8")) as unknown;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("the store is not a JSON object");
+    const sessions = (raw as { sessions?: unknown }).sessions;
+    if (sessions !== undefined && !Array.isArray(sessions)) throw new Error("the store's sessions are not a list");
+    records = sessions ?? [];
   } catch (err) {
-    log.error({ err, path: SESSION_STORE_PATH }, "Failed to load persisted sessions — starting with an empty session store");
+    setAsideUnreadableStore(err);
+    return;
+  }
+
+  let failed = 0;
+  let firstError: unknown;
+  for (const record of records) {
+    try {
+      const session = AgentSession.fromRecord(record as PersistedSessionRecord);
+      // A record that restores but cannot be written back (a date that does not parse) would
+      // otherwise throw in every flush: its record is built once here, as each flush builds it.
+      session.toRecord();
+      _sessions.set(session.id, session);
+    } catch (err) {
+      failed += 1;
+      firstError ??= err;
+      const id = (record as { id?: unknown } | null)?.id;
+      _unrestoredRecords.push({ ...(typeof id === "string" ? { id } : {}), json: JSON.stringify(record) });
+    }
+  }
+  if (failed > 0) {
+    log.error(
+      { err: firstError, failed, restored: records.length - failed, path: SESSION_STORE_PATH },
+      "Some persisted sessions could not be restored; they stay in the session store as they were",
+    );
+  }
+}
+
+/** Renames a store file that cannot be read as one to `<store>.unreadable-<UTC stamp>`, so the
+ *  gateway starts empty without writing over it. When even that fails, nothing writes the store. */
+function setAsideUnreadableStore(cause: unknown): void {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  let target = `${SESSION_STORE_PATH}.unreadable-${stamp}`;
+  for (let n = 1; existsSync(target); n += 1) target = `${SESSION_STORE_PATH}.unreadable-${stamp}-${n}`;
+  try {
+    renameSync(SESSION_STORE_PATH, target);
+    log.error({ err: cause, path: SESSION_STORE_PATH, setAside: target }, "The session store could not be read; it was set aside and the gateway starts with no sessions");
+  } catch (err) {
+    _storeWriteBlocked = true;
+    log.error({ err: cause, renameError: err, path: SESSION_STORE_PATH }, "The session store could not be read nor set aside; this process will not write it");
   }
 }
 
@@ -1561,6 +1617,18 @@ function takeSessionStoreSnapshot(): { text: string; mirror: Array<{ id: string;
     records.push(json);
     if (changed.has(session)) mirror.push({ id: session.id, json, updatedAtMs: session.getUpdatedAt().getTime() });
   }
+  // The records the boot could not restore go back as they were read (see loadPersistedSessions).
+  // A live session under the same id (hydrated from Redis, or created again) supersedes one for
+  // good. None in a store that restored whole.
+  for (let index = 0; index < _unrestoredRecords.length;) {
+    const unrestored = _unrestoredRecords[index]!;
+    if (unrestored.id !== undefined && _sessions.has(unrestored.id)) {
+      _unrestoredRecords.splice(index, 1);
+    } else {
+      records.push(unrestored.json);
+      index += 1;
+    }
+  }
   // Byte-for-byte what JSON.stringify({ sessions: records }) gives, built from the cached texts.
   return { text: `{"sessions":[${records.join(",")}]}\n`, mirror };
 }
@@ -1580,6 +1648,8 @@ export function flushSessionStore(): Promise<void> {
   if (!_storeDirty) return _storeWrites;
   const { text, mirror } = takeSessionStoreSnapshot();
   for (const entry of mirror) void saveSessionToRedis(entry.id, entry.json, entry.updatedAtMs);
+  // A store file the boot could neither read nor set aside is left as it is; Redis still mirrors.
+  if (_storeWriteBlocked) return _storeWrites;
   _pendingStoreText = text;
   _storeWrites = _storeWrites.then(async () => {
     try {
@@ -1627,6 +1697,7 @@ async function renameRetryingSharingErrors(from: string, to: string): Promise<vo
  */
 function flushSessionStoreSync(): void {
   cancelSessionStoreFlushTimer();
+  if (_storeWriteBlocked) return;
   const text = _storeDirty ? takeSessionStoreSnapshot().text : _pendingStoreText;
   if (text === null) return;
   _pendingStoreText = null;
