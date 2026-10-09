@@ -95,6 +95,33 @@ describe("delegation-boundary inline-app harvest", () => {
     expect(result.output).toContain("[INLINE DOCUMENT HARVESTED]");
   }, 30_000);
 
+  // The harvest reads the delegation's declaration first, the verb table only when it has none
+  // (delegationAsksForFile). A page quoted back in a diagnosis is not a build.
+  it("follows the declaration: \"answer\" is never harvested, \"file\" is without a table verb", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+      import("../tools/filesystem.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent")!;
+    const harvested = () => existsSync(join(tempDir, "generated", "app", "index.html"));
+
+    // A table verb ("Erstelle"), declared an answer.
+    await delegate.execute(
+      { agentName: "web_coder", task: "Erstelle eine Diagnose der HTML-Datei; ändere nichts.", deliverable: "answer" },
+      { sessionId: "session-harvest-answer", workspacePath: tempDir, swarmState: freshSwarmState() },
+    );
+    expect(harvested()).toBe(false);
+
+    // No table verb, declared a file.
+    const result = await delegate.execute(
+      { agentName: "web_coder", task: "Die Lern-WebApp als einzelne HTML-Datei mit Quiz.", deliverable: "file" },
+      { sessionId: "session-harvest-file", workspacePath: tempDir, swarmState: freshSwarmState() },
+    );
+    expect(harvested()).toBe(true);
+    expect(result.output).toContain("[INLINE DOCUMENT HARVESTED]");
+  }, 30_000);
+
   it("does not harvest from a prose result without an inline document", async () => {
     runSubAgentWithStatsMock.mockImplementationOnce(
       async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
