@@ -449,7 +449,7 @@ Every public schema field, where it is declared, and how many production files r
 | `speakReplySummaryMaxSentences` | packages/core/src/config/schemas/multimodal.ts:56 | 3 |
 | `splitOrchestrationPrompt` | packages/core/src/config/schema.ts:1835 | 5 |
 | `stablePromptPrefix` | packages/core/src/config/schemas/orchestration.ts:29 | 2 |
-| `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:740 | 3 |
+| `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:740 | 4 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:468 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:442 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1404 | 80 |
@@ -468,11 +468,11 @@ Every public schema field, where it is declared, and how many production files r
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:196 | 1 |
 | `surface` | packages/core/src/config/schema.ts:916 | 94 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:832 | 2 |
-| `synthesis` | packages/core/src/config/schema.ts:261 | 59 |
+| `synthesis` | packages/core/src/config/schema.ts:261 | 60 |
 | `systemPrompt` | packages/core/src/config/schema.ts:944 | 20 |
 | `tags` | packages/core/src/config/schema.ts:591 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1323 | 144 |
+| `task` | packages/core/src/config/schema.ts:1323 | 145 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1824 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:488 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:676 | 1 |
