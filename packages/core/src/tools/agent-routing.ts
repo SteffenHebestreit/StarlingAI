@@ -17,6 +17,7 @@ import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMulti
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { logAudit } from "../audit/logger.js";
 import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
+import { WORKSPACE_MUTATION_TASK_RE } from "./delegation-artifact-classification.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -970,6 +971,137 @@ export function preferResearchCapableCandidates(
   // Score just above the strong-match threshold (0.72): confident capability match.
   const fallbackCandidate = buildConfiguredAgentCandidate(fallbackName, 0.75);
   return fallbackCandidate ? [fallbackCandidate, ...reordered] : reordered;
+}
+
+// ── Output-format producer ranking (search_agents) ──────────────────────────
+// The same topic-over-intent bias as the research reorder above, for a request to MAKE a file of
+// a given format. A file format is often the most specific word in such a request, and the agent
+// whose catalog names that format most strongly can be the one that READS it. In E2E session
+// fa8bb08b ("Erstelle ein Word-Dokument (.docx) …") search_agents ranked document_intake first for
+// both of the orchestrator's queries ("generate Word document .docx file create document artifact",
+// 0.852, high) and told the model "NEXT ACTION: Call delegate_to_agent(document_intake) NOW".
+// document_intake extracts uploaded files and holds no .docx writer: it wrote a python-docx script it
+// could not run, then HTML, then an .rtf write_file refused, and the turn delivered no document.
+// paper_author (#2, 0.850) and content_writer (#5, 0.822) both hold generate_docx. The routing
+// catalog alone did not reorder those five; nothing in routing asked who can make the format.
+
+/** The file formats a request can ask to have made, named by their extension. */
+export type OutputFileFormat = "docx" | "pptx" | "xlsx" | "pdf";
+
+/**
+ * The tools that write each format from content the agent supplies. A tool that only changes a
+ * file of that format someone already handed over (pdf_fill fills a given PDF form) is not one:
+ * the ranking below applies only while no such file is in play, so it would have nothing to change.
+ */
+const OUTPUT_FORMAT_PRODUCER_TOOLS: Record<OutputFileFormat, readonly string[]> = {
+  docx: ["generate_docx"],
+  pptx: ["generate_pptx"],
+  xlsx: ["spreadsheet_write"],
+  pdf: ["generate_pdf", "render_pdf"],
+};
+
+const OUTPUT_FORMAT_CONTENT_TYPES: Record<OutputFileFormat, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pdf: "application/pdf",
+};
+
+/**
+ * A bare extension, which names a FORMAT: ".docx" in "Word-Dokument (.docx)" or ".docx file". An
+ * extension on a file name ("thesis.pdf", "kosten.xlsx") names a FILE, and every such mention among
+ * the 553 queries in eval/routing and eval/intent is one the user already has: "Read my thesis draft
+ * (thesis.pdf) …", "Mach aus meinem Bericht (bericht.docx) eine Präsentation".
+ */
+const OUTPUT_EXTENSION_RE = /(?<![\p{L}\p{N}_.-])\.(docx|pptx|xlsx|pdf)(?![\p{L}\p{N}_])/giu;
+
+/** A tool that runs code in the workspace sandbox, which can write any of these formats with a library. */
+function isWorkspaceCodeRunnerToolName(toolName: string): boolean {
+  return toolName === "shell_exec"
+    || toolName === "run_script"
+    || toolName.startsWith("mcp__code_sandbox__")
+    || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(toolName);
+}
+
+/** A file the user handed over, as the session records it (SessionTranscriptAttachment). */
+export interface FileInPlay {
+  filename?: string;
+  relativePath?: string;
+  contentType?: string;
+}
+
+function formatOfFileInPlay(file: FileInPlay): OutputFileFormat | undefined {
+  for (const format of Object.keys(OUTPUT_FORMAT_PRODUCER_TOOLS) as OutputFileFormat[]) {
+    const extension = `.${format}`;
+    if (file.filename?.toLowerCase().endsWith(extension) || file.relativePath?.toLowerCase().endsWith(extension)) return format;
+    if (file.contentType?.toLowerCase().split(";")[0]?.trim() === OUTPUT_FORMAT_CONTENT_TYPES[format]) return format;
+  }
+  return undefined;
+}
+
+/**
+ * The file formats a routing query asks to have MADE: a bare extension the query names
+ * (language-independent), in a query that asks for a deliverable (WORKSPACE_MUTATION_TASK_RE, the
+ * same test the routing-time artifact gate applies), for which no file of that format is in play.
+ * A format the user handed over is the INPUT ("summarise the attached report (.pdf) and write a
+ * .docx"), so the agent that reads it keeps its place. Empty for a research query: there the
+ * research reorder decides, because the evidence is gathered first and the file is made after
+ * (a writer ranked over the researcher wrote pricing reports from memory, session 00b3675d).
+ */
+export function requestedOutputFormats(query: string, filesInPlay: readonly FileInPlay[]): OutputFileFormat[] {
+  const text = (query ?? "").trim();
+  if (!text || !WORKSPACE_MUTATION_TASK_RE.test(text) || taskRequiresExternalResearch(text)) return [];
+  const named = new Set<OutputFileFormat>();
+  for (const match of text.matchAll(OUTPUT_EXTENSION_RE)) named.add(match[1]!.toLowerCase() as OutputFileFormat);
+  if (named.size === 0) return [];
+  const inPlay = new Set(filesInPlay.map(formatOfFileInPlay).filter((format) => format !== undefined));
+  return [...named].filter((format) => !inPlay.has(format));
+}
+
+/**
+ * Whether an agent can write every one of `formats` itself: it holds each format's producer tool,
+ * or a tool that runs code in the sandbox. An agent with no tool list inherits the full set and
+ * can. An agent with no config is not credited: this decides whether the router may point at it
+ * imperatively, and an agent it cannot read is not one it can vouch for.
+ */
+export function agentCfgProducesFormats(cfg: { tools?: string[] } | undefined, formats: readonly OutputFileFormat[]): boolean {
+  if (!cfg) return false;
+  if (!cfg.tools) return true; // inherits the full tool set
+  const tools = cfg.tools;
+  if (tools.some(isWorkspaceCodeRunnerToolName)) return true;
+  return formats.every((format) => OUTPUT_FORMAT_PRODUCER_TOOLS[format].some((tool) => tools.includes(tool)));
+}
+
+/**
+ * Pure reorder: candidates that can make the requested formats first, each group in its original
+ * order. Never drops a candidate. An empty set, or one where all or none can, is returned as is.
+ */
+export function reorderByFormatProducer(
+  results: AgentRoutingCandidate[],
+  canProduce: (name: string) => boolean,
+): AgentRoutingCandidate[] {
+  if (results.length === 0) return results;
+  const capable = results.filter((candidate) => canProduce(candidate.name));
+  if (capable.length === 0 || capable.length === results.length) return results;
+  return [...capable, ...results.filter((candidate) => !canProduce(candidate.name))];
+}
+
+/**
+ * Apply {@link reorderByFormatProducer} against the live config for the formats `query` asks to
+ * have made. `topCanProduce` says whether the candidate now first can make them; the caller points
+ * at it imperatively only then. A query that asks for no format returns its results untouched and
+ * `topCanProduce` true, so nothing downstream changes.
+ */
+export function preferFormatProducingCandidates(
+  results: AgentRoutingCandidate[],
+  query: string,
+  filesInPlay: readonly FileInPlay[],
+): { results: AgentRoutingCandidate[]; formats: OutputFileFormat[]; topCanProduce: boolean } {
+  const formats = requestedOutputFormats(query, filesInPlay);
+  if (formats.length === 0) return { results, formats, topCanProduce: true };
+  const canProduce = (name: string): boolean => agentCfgProducesFormats(lookupAgentCapabilities(name), formats);
+  const reordered = reorderByFormatProducer(results, canProduce);
+  return { results: reordered, formats, topCanProduce: reordered[0] !== undefined && canProduce(reordered[0].name) };
 }
 
 // ── General capability-aware routing/bidding gate ───────────────────────────

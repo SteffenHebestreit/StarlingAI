@@ -36,6 +36,7 @@ import {
   agentIsResearchCapable,
   agentGathersDirectly,
   preferResearchCapableCandidates,
+  preferFormatProducingCandidates,
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
   pickResearchFallbackAgent,
@@ -52,6 +53,7 @@ import {
   SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
+  type FileInPlay,
   type RoutingSelectionReason,
 } from "./agent-routing.js";
 import {
@@ -85,6 +87,7 @@ export {
 } from "./delegation-artifact-classification.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { getConfig } from "../config/loader.js";
+import { getSession } from "../agent/session.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingSearchStatus } from "../providers/embeddings.js";
 import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
@@ -3530,6 +3533,15 @@ registerTool({
     // surface the researcher when the whole ranking is research-incapable. Flows
     // through the audit topResult, the NEXT ACTION pointer, and suggestedFallbackAgents.
     resolution.results = preferResearchCapableCandidates(resolution.results, raw);
+    // The same guard for a request to MAKE a file of a named format (.docx, .pptx, .xlsx, .pdf):
+    // agents that can write it go first, and the imperative NEXT ACTION below points only at one
+    // that can (see preferFormatProducingCandidates). A file of that format the user handed over in
+    // this session is the input, not the deliverable, and turns this off for that format.
+    const formatGate = preferFormatProducingCandidates(resolution.results, raw, sessionFilesInPlay(ctx.sessionId));
+    resolution.results = formatGate.results;
+    const formatGateMetadata = formatGate.formats.length > 0
+      ? { outputFormats: formatGate.formats, topCanProduceOutputFormats: formatGate.topCanProduce }
+      : {};
     const semanticMetadata = buildSemanticRoutingMetadata(resolution);
     const semanticUnavailableNote = formatSemanticUnavailableNote(semanticMetadata);
 
@@ -3545,6 +3557,7 @@ registerTool({
       excludedAgents: resolution.excludedAgents ?? [],
       allLowConfidence: resolution.allLowConfidence,
       topResult: resolution.results[0]?.name ?? null,
+      ...formatGateMetadata,
     }, { sessionId: ctx.sessionId, channel: "agent-routing" });
 
     const circuitNote = resolution.trippedAgents.length > 0
@@ -3773,8 +3786,10 @@ registerTool({
     // for "research news headlines" — and the imperative wording pushed weaker
     // models to delegate to the wrong specialist. For weak top results, present
     // the candidate list neutrally and let the LLM choose, including the option
-    // to call list_agents or create_ephemeral_agent.
-    const nextActionLine = isStrongRoutingMatch(topAgent)
+    // to call list_agents or create_ephemeral_agent. The same holds for a top match
+    // that cannot write the file format the query asks to have made: no candidate
+    // could, or the reorder above would have put that one first.
+    const nextActionLine = isStrongRoutingMatch(topAgent) && formatGate.topCanProduce
       ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
       : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
@@ -3793,10 +3808,38 @@ registerTool({
         suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
         trippedAgents: resolution.trippedAgents,
         excludedAgents: resolution.excludedAgents ?? [],
+        ...formatGateMetadata,
       },
     };
   },
 });
+
+/**
+ * The files the user handed over in this session: the attachments on its user messages. An
+ * assistant message's attachments are what the swarm produced, not an input. A sub-agent's id
+ * resolves to its root's. A session this process does not hold reads as no files, which leaves
+ * the format ranking on: the guard is not lifted on what cannot be checked.
+ */
+function sessionFilesInPlay(sessionId: string): FileInPlay[] {
+  const session = getSession(deriveSharedSessionId(sessionId));
+  if (!session) return [];
+  const files: FileInPlay[] = [];
+  for (const message of session.getHistory()) {
+    if (message.role !== "user") continue;
+    const attachments = message.metadata?.["attachments"];
+    if (!Array.isArray(attachments)) continue;
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment !== "object") continue;
+      const { filename, relativePath, contentType } = attachment as Record<string, unknown>;
+      files.push({
+        ...(typeof filename === "string" ? { filename } : {}),
+        ...(typeof relativePath === "string" ? { relativePath } : {}),
+        ...(typeof contentType === "string" ? { contentType } : {}),
+      });
+    }
+  }
+  return files;
+}
 
 // ─── search_tools ────────────────────────────────────────────────────────────
 // Semantic search over the registered tool catalog. Keeps sub-agent context

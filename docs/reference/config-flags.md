@@ -132,7 +132,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:48 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:203 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:613 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:910 | 58 |
+| `deliverable` | packages/core/src/config/schema.ts:910 | 59 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:589 | 183 |
@@ -332,7 +332,7 @@ Every public schema field, where it is declared, and how many production files r
 | `path` | packages/core/src/config/schemas/decisions.ts:111 | 306 |
 | `pattern` | packages/core/src/config/schema.ts:1378 | 59 |
 | `patterns` | packages/core/src/config/schema.ts:1315 | 27 |
-| `pdf` | packages/core/src/config/schemas/render.ts:18 | 25 |
+| `pdf` | packages/core/src/config/schemas/render.ts:18 | 27 |
 | `peers` | packages/core/src/config/schema.ts:609 | 15 |
 | `performance` | packages/core/src/config/schema.ts:1776 | 47 |
 | `permitTtlMs` | packages/core/src/config/schema.ts:1700 | 2 |
@@ -345,7 +345,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:1985 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:56 | 51 |
+| `points` | packages/core/src/config/schemas/decisions.ts:56 | 53 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:327 | 39 |
 | `primary` | packages/core/src/config/schema.ts:111 | 70 |
@@ -404,7 +404,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:586 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:942 | 131 |
+| `role` | packages/core/src/config/schema.ts:942 | 132 |
 | `rolesClaim` | packages/core/src/config/schema.ts:418 | 1 |
 | `routing` | packages/core/src/config/schema.ts:260 | 106 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:851 | 1 |
