@@ -117,7 +117,7 @@ import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
-import { inferCompletedRunOutcome } from "../tools/delegation-artifact-classification.js";
+import { inferCompletedRunOutcome, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -2455,6 +2455,10 @@ export interface SubAgentRunOptions {
    * search_agents/search_workflows call the parent already failed on. */
   taskTitle?: string;
   context?: string;
+  /** What the delegating call declared this run must hand back (DelegationDeliverable in
+   * tools/delegation-artifact-classification.ts). A run declared "answer" is never classified as a
+   * staged build; undeclared and "file" are classified by the task and the tools, as before. */
+  deliverable?: DelegationDeliverable;
   /** What the user typed this turn. Rendered once into the first message, right after the task,
    * and passed on to this run's own delegations. */
   turnUserWords?: TurnUserWords;
@@ -3330,8 +3334,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // files, reasoning collapsed from 23,876 chars on the plan pass to ~100-1,300 per fill
     // pass) while `directiveInjected: false` proved the directive itself had never reached
     // the model.
+    //
+    // A run whose delegator declared deliverable "answer" is not a build, whatever its size. An
+    // execute_plan step carries the turn's objective and acceptance criteria beside its one-line
+    // description (buildStepTask), and they count as the delegator's own words. In the E2E fan-out
+    // new-delegation-routing-bounded-fanout (session 62b04e8b, 2026-10-09) three lookup steps
+    // reached browser_agent at 594, 603 and 640 chars. The two over the threshold were staged,
+    // because browser_agent holds write_file and edit_file, and spent 329 s and 612 s writing files
+    // instead of navigating; the 594-char one finished in 92 s. All three had declared "answer",
+    // which the delegation gates already read as "no file is asked for" (delegationAsksForFile).
     const stagedBuildFlags = effectiveOrchestration();
     const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
+      && opts.deliverable !== "answer"
       && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
     // RESUME vs FRESH. The classifier above reads task size and tool capability, which cannot
     // distinguish "build me X" from "X exists, finish it" — and run 2dc5832c is what that costs:

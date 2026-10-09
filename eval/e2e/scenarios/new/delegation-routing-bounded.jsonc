@@ -10,6 +10,13 @@
 // The request fans three independent site lookups out to specialists. Three lookups is also the
 // shape that pushes one agent toward its per-turn cap — the condition ffe08297 looped on.
 //
+// A lookup is never a staged build. In session 62b04e8b (2026-10-09) the turn ran the lookups as an
+// execute_plan parallelGroup; each step carried the turn's objective and criteria, two reached
+// browser_agent past the 600-char staged-build threshold, and, because browser_agent holds write_file
+// and edit_file, got the skeleton directive and spent 329 s and 612 s writing files instead of
+// navigating. Every step had declared deliverable "answer", which now reaches the run and keeps it
+// unstaged (agent/sub-agent.ts stagedBuildCandidate).
+//
 // Events asserted, emitters verified in packages/core/src:
 //   delegation_routing_rounds_exhausted {taskTitle, rounds, attemptedAgents, skippedAgents}
 //                                                         tools/sub-agent.ts:1338
@@ -17,6 +24,8 @@
 //     agent/discovery-prefetch.ts:104 and tools/sub-agent.ts:905/920), tools/sub-agent.ts:3383/3431/3497
 //     (search_agents), tools/ephemeral-agent-factory.ts:689 (ephemeral tool selection)
 //   sub_agent_started {agentName, ...}                   agent/sub-agent.ts:2951 (stage variant :2734 excluded)
+//   sub_agent_staged_build_detected {agentName, taskChars, threshold, mode, ...}
+//                                                         agent/sub-agent.ts:3426
 // A healthy routed turn logs a handful of routing rows (the real 4-turn sample in
 // tests/fixtures/latency-audit-sample.jsonl has 5 in all); 50 per turn is generous, and the runaway
 // produced hundreds a minute.
@@ -43,7 +52,7 @@
   title: "A turn that fans out to several specialists keeps routing bounded and never exhausts its routing rounds",
   group: "new",
   tags: ["routing", "delegation", "site", "slow"],
-  description: "Guards c13c211 (session ffe08297: a routed delegation re-routed to a capped agent ~750 times a minute and hung the turn for hours). On a three-way fan-out over the fixture site: no delegation_routing_rounds_exhausted, at most 50 agent_routing_evaluated rows, 2 to 16 specialist runs, and the answer still carries the three results.",
+  description: "Guards c13c211 (session ffe08297: a routed delegation re-routed to a capped agent ~750 times a minute and hung the turn for hours). On a three-way fan-out over the fixture site: no delegation_routing_rounds_exhausted, at most 50 agent_routing_evaluated rows, 2 to 16 specialist runs, no lookup run staged as a file build (session 62b04e8b), and the answer still carries the three results.",
   requires: ["model", "e2e-site"],
   identity: "eval",
   timeoutMs: 1500000,
@@ -72,7 +81,11 @@
             { type: "agent_routing_evaluated", min: 0, max: 50 },
             { type: "sub_agent_started", where: { "data.stage": { exists: false } }, min: 2, max: 16 },
           ],
-          mustNot: [{ type: "delegation_routing_rounds_exhausted" }],
+          mustNot: [
+            { type: "delegation_routing_rounds_exhausted" },
+            // A lookup declared "answer" is never handed the skeleton directive (session 62b04e8b).
+            { type: "sub_agent_staged_build_detected" },
+          ],
         },
         agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
       },

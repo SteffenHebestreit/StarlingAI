@@ -174,6 +174,17 @@ const DECK_TASK = [
   "Halte jede Folie kurz, höchstens fünf Stichpunkte, und lege die Sprechernotizen in die Notizen der Folien.",
 ].join("\n");
 
+/**
+ * A lookup step as execute_plan hands it over (buildStepTask): a one-line description, then the
+ * turn's objective and acceptance criteria. Shaped on E2E new-delegation-routing-bounded-fanout,
+ * session 62b04e8b, whose steps reached browser_agent at 594, 603 and 640 chars.
+ */
+const PLAN_STEP_LOOKUP_TASK = [
+  "STEP s2 — Preis für 30 Stück NW-3102 inklusive Mengenrabatt und Versand aus /preise.html und dem Produktkatalog ermitteln",
+  "OBJECTIVE (the whole turn): Für einen Lagerbericht der Nordlicht Werkzeuge GmbH (http://www.nordlicht-werkzeuge.test/) drei unabhängige Teilergebnisse ermitteln und danach in einer kurzen Übersicht zusammenfassen.",
+  "ACCEPTANCE CRITERIA for the turn: Alle Artikel unter Mindestbestand mit ihrem Gesamtbestand genannt; Preis für 30 Stück NW-3102 mit Mengenrabatt und Versand berechnet; Bedeutung von Fehlercode E22 aus der Dokumentation wiedergegeben; die drei Ergebnisse in einer kurzen Übersicht zusammengefasst",
+].join("\n\n");
+
 describe("staged artifact build — only the task's own words count", () => {
   it("does not stage a question about pasted code, whichever way the fence is written", () => {
     for (const task of [CART_TASK_FENCE_ON_OWN_LINES, CART_TASK_FENCE_IN_LINE]) {
@@ -458,6 +469,8 @@ describe("staged artifact build — directive injection", () => {
     workspaceDir?: string,
     /** Stands in for the effort tier's sub-agent budget (200 under tier max). */
     maxIterationsOverride?: number,
+    /** What the delegating call declared, as tools/sub-agent.ts hands it to the runner. */
+    deliverable?: "file" | "answer",
   ): Promise<string> => {
     const tempDir = workspaceDir ?? mkdtempSync(join(tmpdir(), "sai-staged-build-"));
     const configPath = join(tempDir, "starlingai.json");
@@ -499,6 +512,7 @@ describe("staged artifact build — directive injection", () => {
       parentSessionId: `parent-${Math.random().toString(36).slice(2)}`,
       workspacePath: tempDir,
       ...(maxIterationsOverride !== undefined ? { maxIterationsOverride } : {}),
+      ...(deliverable ? { deliverable } : {}),
     });
     return systemPrompt;
   };
@@ -797,6 +811,33 @@ describe("staged artifact build — directive injection", () => {
     );
     expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
     expect(firstUserTurn).toContain("THIS TURN:");
+  });
+
+  it("does not stage a run declared deliverable \"answer\", and stages the same run undeclared or declared \"file\"", async () => {
+    // E2E new-delegation-routing-bounded-fanout (session 62b04e8b): lookup steps reached
+    // browser_agent past the threshold with the turn's objective and criteria, were staged, and
+    // spent 329 s and 612 s writing files instead of navigating. Each had declared "answer".
+    const browserAgentTools = loadWorkspaceAgents<{ tools?: string[] }>()["browser_agent"]?.tools ?? [];
+    expect(browserAgentTools).toEqual(expect.arrayContaining(["write_file", "edit_file", "browser_navigate"]));
+    expect(PLAN_STEP_LOOKUP_TASK.length).toBeGreaterThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+    expect(PLAN_STEP_LOOKUP_TASK.length).toBeLessThan(700);
+    expect(isStagedArtifactBuildRun(browserAgentTools, PLAN_STEP_LOOKUP_TASK)).toBe(true);
+    const flags = { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true };
+    const audited = () => logAuditMock.mock.calls.some((args) => args[0] === "sub_agent_staged_build_detected");
+
+    const answer = await runAndCaptureSystemPrompt(flags, PLAN_STEP_LOOKUP_TASK, browserAgentTools, undefined, undefined, "answer");
+    expect(answer).toContain("You build files.");
+    expect(answer).not.toContain("STAGED BUILD");
+    expect(firstUserTurn).toContain("NW-3102");
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    expect(audited()).toBe(false);
+
+    for (const deliverable of [undefined, "file"] as const) {
+      logAuditMock.mockReset();
+      const prompt = await runAndCaptureSystemPrompt(flags, PLAN_STEP_LOOKUP_TASK, browserAgentTools, undefined, undefined, deliverable);
+      expect(prompt, String(deliverable)).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+      expect(audited(), String(deliverable)).toBe(true);
+    }
   });
 
   it("still RESUMES an unfinished build in a run that holds a one-shot assembler", async () => {
