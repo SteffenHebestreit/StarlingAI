@@ -20,7 +20,7 @@ Every public schema field, where it is declared, and how many production files r
 | `agents` | packages/core/src/config/schema.ts:1719 | 183 |
 | `alertmanager` | packages/core/src/config/schema.ts:1159 | 1 |
 | `all` | packages/core/src/config/schema.ts:1312 | 300 |
-| `allowedAgents` | packages/core/src/config/schema.ts:1332 | 30 |
+| `allowedAgents` | packages/core/src/config/schema.ts:1332 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1275 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
 | `allowedUsers` | packages/core/src/config/schema.ts:817 | 13 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:760 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:575 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1245 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1355 | 83 |
+| `scene` | packages/core/src/config/schema.ts:1355 | 84 |
 | `scopes` | packages/core/src/config/schema.ts:414 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
