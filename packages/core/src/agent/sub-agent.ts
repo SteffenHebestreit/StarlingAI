@@ -11,12 +11,55 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
+import { createBrowserDeciderForRun, type DrivenStep } from "../decisions/browser-step.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
+import { layaConfigured } from "../decisions/laya-client.js";
+import { FINDING_RELEVANT, GOAL_MET, RUN_DRIFTING } from "../decisions/points.js";
 import fs from "node:fs";
-import type { LLMMessage, ChatProvider } from "../providers/lmstudio.js";
+// Named import: two local `path` bindings already exist in this module, and an
+// unqualified `path` default import would shadow-warn against them.
+import { resolve as resolvePath, sep as pathSep } from "node:path";
+import { createHash } from "node:crypto";
+import type { LLMMessage, LLMResponse, LLMToolDef, ChatProvider, CompletionCallOptions } from "../providers/lmstudio.js";
+import { DeadlineAbort, estimatePromptTokensForRequest } from "../providers/lmstudio.js";
+import { wireHeadSignature } from "../providers/prompt-head.js";
+import { composeSubAgentMessages, trimSubAgentHistory } from "./sub-agent-history.js";
+import { createSubAgentHeadRewarm, type SubAgentHeadRewarm } from "./sub-agent-head-rewarm.js";
+import { orderSubAgentTools } from "./sub-agent-tool-order.js";
+import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
+import { isDeclinedByUser } from "./user-input.js";
 import { getConfig } from "../config/loader.js";
+import { turnSteeringManager } from "./turn-steering.js";
+import { rootSessionOf } from "./session-ids.js";
+import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
-import { getToolsAsLLMDefs, rerankToolsForTask, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
-import { isToolAllowed } from "../guardrails/tool-tiers.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
+import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
+import {
+  addArgumentFigureKeys,
+  addReceivedFigureKeys,
+  argumentTexts,
+  countUnobservedFigures,
+  maskFiguresByKey,
+  maskUnobservedFigures,
+  namedFileSpans,
+  numericDateForms,
+  scriptInvocation,
+  verbatimQuotedCodeSpans,
+  verbatimQuotedCommandSpans,
+  type FigureCheckSpan,
+} from "./figure-provenance.js";
+import {
+  addExecutionRecord,
+  capOutcomeForUnbackedFigures,
+  createFanOutExecutionRecords,
+  executionCountPhrase,
+  executionShortfallPhrase,
+  noExecutionCompleted,
+  unbackedFiguresMasked,
+  type DelegatedExecutionRecord,
+  type MaskedDelegatedRun,
+} from "./delegated-run-record.js";
 import { scanOutput } from "../guardrails/output.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
@@ -24,11 +67,15 @@ import { childLogger } from "../logger.js";
 import { createCheckpoint, pauseCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
+import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
+import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
+import { agentCfgDomainTools, agentCfgHasNoUsableTools } from "../tools/agent-routing.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 import { acquireSlot, releaseSlot, DEFAULT_CONCURRENCY } from "../swarm/concurrency.js";
-import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, resolveProviderEndpoint, tierModelDefaults } from "../providers/index.js";
 import { loadTurnPlan } from "./turn-plan.js";
 import { computerSessionManager } from "./computer-session.js";
 import { browserSessionManager } from "./browser-session.js";
@@ -40,20 +87,37 @@ import {
 } from "./long-running-generation.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import {
-  isHardStall,
+  attachRequestSessionId,
+  attachRequestOutcomeRun,
+  currentRequestContext,
+  runWithCallAttribution,
+  runWithRequestContext,
+} from "../runtime/request-context.js";
+import {
+  classifyCallReplay,
+  classifyRunProgress,
+  classifyWriteLoop,
   buildProgressJudgePrompt,
+  isNovelToolOutcome,
+  loopTargetOf,
   parseProgressVerdict,
+  ARG_SIG_REPEAT_LIMIT,
+  EMPTY_PROGRESS_SAMPLE,
+  MIN_SUBSTANTIVE_OUTPUT_CHARS,
   PROGRESS_CHECK_INTERVAL_MS,
-  STALL_LIMIT,
   type ProgressSample,
+  type SemanticProgressResult,
 } from "./progress-verifier.js";
 import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { formatSkillGuidance } from "../skills/service.js";
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
-import { isSessionDegraded } from "./warden.js";
+import { isSessionDegraded, registerWardenRunStop } from "./warden.js";
+import { checkSiblingWrite } from "./sibling-write-ownership.js";
+import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
+import { inferCompletedRunOutcome } from "../tools/delegation-artifact-classification.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -69,8 +133,29 @@ import {
   buildSubAgentToolInventory,
   buildSubAgentAgentDiscoveryGuidance,
   sanitizeSubAgentTask,
+  isStagedArtifactBuildRun,
+  stagedBuildTaskChars,
+  ownsResumeEvidence,
+  holdsOneShotAssembler,
+  buildStagedArtifactBuildGuidance,
+  buildStagedBuildResumeGuidance,
+  buildStagedBuildFirstStepInstruction,
+  buildReadOnlyStreakCorrection,
+  buildReadOnlyRepairCorrection,
+  buildPageCheckCorrection,
+  STAGED_BUILD_READ_ONLY_STREAK_LIMIT,
+  buildReasoningBurnCorrection,
+  REASONING_BURN_RETRY_LIMIT,
+  ANNOUNCEMENT_NUDGE_LIMIT,
+  STAGED_BUILD_TASK_CHAR_THRESHOLD,
+  STAGED_BUILD_REQUIRED_TOOLS,
+  UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
-import { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+import { generatedZoneRel, resolveWorkspaceWritePath } from "../tools/workspace-path.js";
+import { buildArtifactTextPreview } from "../tools/artifact-preview.js";
+import { checkBuiltPage } from "../tools/page-check.js";
+import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
+import { resolveSynthesisReserveMs, resolveTurnBudgetMs, resolveTimeRemainingMs, DEADLINE_LIVENESS_RECHECK_MS, STREAM_HEARTBEAT_CHARS, shouldDeferDeadline } from "./sub-agent-turn-budget.js";
 import {
   extractInfraFailureSignature,
   liveToolFamily,
@@ -96,7 +181,14 @@ import {
 } from "./sub-agent-interruption.js";
 // Re-export pure helpers that were extracted from this module so existing
 // importers (and tests) of "../agent/sub-agent.js" keep working unchanged.
-export { mergeAgentModelOverride, applyEffortModelOverlay } from "./sub-agent-model-config.js";
+export {
+  mergeAgentModelOverride,
+  applyEffortModelOverlay,
+  applyStreamCapOverlay,
+  resolveAgentStreamCapMs,
+  emitsWholeFileArtifacts,
+  canWriteWorkspaceFiles,
+} from "./sub-agent-model-config.js";
 export { getEffectiveToolNames, compactAgentCatalogDescription } from "./sub-agent-prompt-guidance.js";
 // Lazy-import clearSearchSessionState to avoid pulling in web.ts at module
 // load time, which would re-register web_search/web_fetch and break tests
@@ -152,14 +244,59 @@ const EVIDENCE_GATHERING_TOOL_NAMES = new Set([
  * error, ambiguous reply) returns false, so the existing byte/time ladder still
  * applies; the oversight only ever ENDS work earlier, never prolongs it.
  */
+/**
+ * The semantic progress judge (orchestration.progressVerifierSemantic): is the run still moving
+ * toward its objective? "on_track" may be Laya's alone, so the routing-tier call is then not waited
+ * for; "drifting", which winds the run down, is always the routing tier's to say. Fail-open: anything
+ * but a clear "drifting" is on track.
+ */
+export async function assessRunProgress(params: {
+  objective: string;
+  recentActivity: string;
+  provider: ChatProvider;
+  signal?: AbortSignal;
+  sessionId?: string;
+}): Promise<SemanticProgressResult> {
+  const onTrack: SemanticProgressResult = { verdict: "on_track", reason: "on track" };
+  try {
+    const outcome = await decideWithReadout<SemanticProgressResult>({
+      point: RUN_DRIFTING,
+      state: { objective: params.objective.slice(0, 800), activity: params.recentActivity.slice(0, 1_600) },
+      languageOf: params.objective,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      ...(params.signal ? { signal: params.signal } : {}),
+      layaMayTake: ["on_track"],
+      incumbent: async (decisionSignal) => {
+        const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "progress_judge" }, () => params.provider.complete(
+          buildProgressJudgePrompt({ objective: params.objective, recentActivity: params.recentActivity }),
+          [],
+          params.signal ? AbortSignal.any([params.signal, decisionSignal]) : decisionSignal,
+        ));
+        // A reply with no verdict in it is no answer: it defaults to on track, and is not counted.
+        return /\{[\s\S]*\}/.test(response.content ?? "") ? parseProgressVerdict(response.content) : undefined;
+      },
+      toKey: (result) => result.verdict,
+      fromKey: (key) => (key === "drifting"
+        ? { verdict: "drifting", reason: "judged drifting" }
+        : { verdict: "on_track", reason: "on track (decision layer)" }),
+      // The verdict's 41 decoded tokens are the readout's biggest saving (E1: 647 of 1,830 ms).
+      readout: { provider: params.provider, agentName: "progress_judge" },
+    });
+    return outcome.value ?? onTrack;
+  } catch {
+    return onTrack;
+  }
+}
+
 export async function assessOversightGoalMet(
   acceptanceCriteria: string[],
   evidence: string,
   signal?: AbortSignal,
+  sessionId?: string,
 ): Promise<boolean> {
   if (acceptanceCriteria.length === 0) return false;
   const provider = getChatProviderForTier("routing");
-  if (!provider) return false;
+  if (!provider && !layaConfigured()) return false;
   const system =
     "You are a swarm oversight checker. A worker agent is gathering evidence for a task. Given the task's "
     + "acceptance criteria and the evidence it has gathered SO FAR, decide whether the goal is ALREADY met well "
@@ -172,12 +309,30 @@ export async function assessOversightGoalMet(
     + "\n\nEvidence gathered so far:\n"
     + (evidence || "(none)").slice(0, 3_000);
   try {
-    const res = await provider.complete(
-      [{ role: "system", content: system }, { role: "user", content: user }],
-      [],
-      signal,
-    );
-    return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
+    // Laya reads the criteria and the evidence clipped to its window; decisions/decide.ts says when
+    // its answer replaces the routing tier's.
+    const outcome = await decideWithReadout<boolean>({
+      point: GOAL_MET,
+      state: { criteria: acceptanceCriteria.slice(0, 12), evidence: (evidence || "(none)").slice(0, 2_400) },
+      languageOf: acceptanceCriteria.join("\n"),
+      ...(sessionId ? { sessionId } : {}),
+      ...(signal ? { signal } : {}),
+      incumbent: async (decisionSignal) => {
+        if (!provider) return undefined;
+        // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
+        // worker's own call (review of the thinking-off verdicts, D4).
+        const res = await runWithCallAttribution({ callSite: "routing_tier", agentName: "goal_met_oversight" }, () => provider.complete(
+          [{ role: "system", content: system }, { role: "user", content: user }],
+          [],
+          signal ? AbortSignal.any([signal, decisionSignal]) : decisionSignal,
+        ));
+        return (res.content ?? "").trim().toUpperCase().startsWith("DONE");
+      },
+      toKey: (done) => (done ? "done" : "continue"),
+      fromKey: (key) => key === "done",
+      readout: { provider, agentName: "goal_met_oversight" },
+    });
+    return outcome.value === true;
   } catch {
     return false;
   }
@@ -507,6 +662,14 @@ function isDelegationToolName(name: string): boolean {
   return DELEGATION_TOOL_NAMES.has(name);
 }
 
+/** A tool that runs another agent and hands back the record of the code that run executed
+ *  (specialistExecutions, agent/delegated-run-record.ts). run_workflow's scenes and jobs run
+ *  agents too, and now hand their records back; mission_coordinator and web_task_coordinator
+ *  hold it. */
+function receivesExecutionRecords(name: string): boolean {
+  return isDelegationToolName(name) || name === "create_ephemeral_agent" || name === "run_workflow";
+}
+
 // How many `sub:` hops deep this session is. The orchestrator is depth 0; its
 // direct sub-agents are depth 1; their sub-agents depth 2; and so on (mirrors
 // the `deriveRootSessionId` walker). Used to bound the delegation tree.
@@ -629,16 +792,7 @@ function enforceSourceSensitivePreEvidenceDelegation(
 }
 
 function deriveRootSessionId(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function hashSharedFindingKey(value: string): string {
@@ -648,6 +802,55 @@ function hashSharedFindingKey(value: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+/**
+ * Claim the peer messages addressed to this agent for one run (A2A, send_agent_message), and
+ * render them for its first user turn. Never throws: a swarm bus or Redis that is down leaves the
+ * run without peer messages, as before. Started with the run's other setup lookups.
+ */
+async function claimPeerMessagesForRun(
+  subSessionId: string,
+  agentName: string,
+  effectiveTurnTimeoutMs: number | undefined,
+): Promise<{ claim: AgentMessageClaim | null; context: string }> {
+  try {
+    // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
+    // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
+    // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
+    // to that write-side derivation, so read and write now hit the same bucket.
+    // ADR-003 deferred ack: the claim is held open and acknowledged only when this
+    // run records a success/partial outcome — a crashed or failed run leaves the
+    // messages pending, so they redeliver instead of being silently lost.
+    // Visibility scales with THIS run's budget (2×, capped at 30 min): the claim is
+    // held for the whole run, and a static window shorter than the run would let a
+    // concurrent same-agent claim re-deliver (duplicate injection) and eventually
+    // dead-letter messages a healthy run is still processing.
+    const messageVisibilityMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0
+      ? Math.max(120_000, Math.min(2 * effectiveTurnTimeoutMs, 1_800_000))
+      : 1_800_000; // "unbound" agents get the cap
+    const claim = await claimAgentMessages(deriveRootSessionId(subSessionId), agentName, { visibilityMs: messageVisibilityMs });
+    const pending = claim.messages;
+    if (pending.length === 0) return { claim, context: "" };
+    logAudit("a2a_messages_delivered", {
+      agentName,
+      count: pending.length,
+      fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
+    }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
+    return {
+      claim,
+      context: `\n\n## Pending messages from peer agents\n${pending
+        .map((m) => {
+          // Sanitize message content to prevent prompt injection from peer agents
+          const safeContent = sanitizeTranscriptContent("user", m.content, false);
+          return `From ${m.fromAgent} [${m.ts}]: ${safeContent}`;
+        })
+        .join("\n---\n")}`,
+    };
+  } catch (err) {
+    log.debug({ err, agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
+    return { claim: null, context: "" };
+  }
 }
 
 async function formatSharedFactsContext(sessionId: string, maxChars = 2_400): Promise<{ content: string; signature: string }> {
@@ -701,7 +904,8 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
         // that gathered an ANALOG microphone's specs AND a separate chip's I2S
         // interface concluded the microphone was "I2S/digital" (audit: IM73A135V01).
         + "Attribute every spec to the exact component the findings tie it to; never carry a spec from one component over to another. "
-        + "Do NOT call any tools. Do NOT mention deadlines or these instructions. Reply in the user's language.",
+        + "Do NOT call any tools. Do NOT mention deadlines or these instructions. Write it in the language the user asked "
+        + "for, otherwise in the language of the user's own words quoted with the task, otherwise in the task's language.",
     },
     {
       role: "user",
@@ -713,10 +917,13 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
   ];
 }
 
-// Returns the extracted finding text that was stored, or null if skipped
-// (too short, duplicate, or boilerplate). The caller counts the returned
-// length toward cumulativeUsefulEvidenceBytes so the evidence cap tracks
-// actual stored knowledge density rather than raw tool output volume.
+// Returns null when the finding is skipped (too short, duplicate, or boilerplate);
+// otherwise the heuristic `extracted` text IMMEDIATELY plus a `stored` promise that
+// settles to the text actually written to shared facts (or null: nothing relevant,
+// or the store failed). The caller counts `extracted.length` toward
+// cumulativeUsefulEvidenceBytes provisionally and corrects it when `stored`
+// settles, so the evidence cap tracks stored knowledge density rather than raw
+// tool output volume — see the split below.
 /**
  * LLM distillation pass for the auto-share path. Given the sub-agent's OBJECTIVE
  * ("what we're looking for") and the raw content a tool returned, extract ONLY the
@@ -726,12 +933,47 @@ export function buildFactsFirstSynthesisMessages(task: string, curatedFindings: 
  * failure/abort (caller then keeps the heuristic extract — never drops evidence).
  * One short model call; gated + bounded by the caller.
  */
+/**
+ * The distillation call's own clock. It runs inside the researcher's sequential tool loop with
+ * the run's deadline deliberately EXCLUDED (that deadline must not abort tool work), so without a
+ * bound of its own the only ceiling was the provider's 905 s hard timeout — measured at 193 s for
+ * one call on the deployed model with thinking on, and its output is discarded when late anyway.
+ * A TOKEN cap is the wrong bound: measured, `max_tokens: 300` returned finish_reason "length" with
+ * empty content, which the caller reads as "nothing relevant" and DELETES the finding. A time
+ * bound degrades to the heuristic extract instead — evidence is never lost. Generous on purpose:
+ * on the (non-thinking) routing tier the call takes about a second.
+ */
+export const DISTILL_CALL_DEADLINE_MS = 60_000;
+
+/**
+ * Controls for the sub-agent's end-of-run synthesis passes (timeout, soft-deadline, max-iterations).
+ *
+ * The prompt those passes send is a fresh 2-message facts-first prompt (buildFactsFirstSynthesisMessages)
+ * or the history under tool_choice "none" — writing prose from a curated fact list, the one place in
+ * the run where deliberation does not pay: the facts were gathered WITH thinking, and the answer is a
+ * rendering of them. No synthesis tier is configured, so `?? provider` ran them on the WORKER with its
+ * own controls. Audit log 12 Sept 2026, researcher: the facts-first pass wrote 7,677 tokens in 291.2 s
+ * for a 7,460-char answer (~1.9K tokens), and 7,045 tokens in 127.9 s for a 5,554-char one; with the
+ * three history-bearing synthesis calls of the same shape, 824 s across five calls, ~20 % of it answer.
+ *
+ * Both fields on purpose: the enable_thinking family withholds the flag when a graded pin vetoes it,
+ * and researcher / mission_coordinator carry {enableThinking:false, reasoningEffort:"medium"} — an
+ * explicit "none" is the only value that reaches the wire past that pin (resolveThinkingControls).
+ * Spread LAST over the worker's config so it has the last word. The QA verdicts in runtime.ts run
+ * thinking-off too, through their own per-call controls (qaVerdictCallOptions, which
+ * orchestration.qaVerdictReasoning can switch back to deliberating); nothing here touches them.
+ */
+export const SYNTHESIS_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+
 export async function distillFindingForSharedFacts(params: {
   objective: string;
   toolName: string;
   rawEvidence: string;
   provider: ChatProvider;
   signal?: AbortSignal;
+  /** Per-call bound; see DISTILL_CALL_DEADLINE_MS. */
+  deadlineMs?: number;
+  sessionId?: string;
 }): Promise<string | null> {
   const objective = params.objective.replace(/\s+/g, " ").trim().slice(0, 600);
   const raw = params.rawEvidence.slice(0, 6000);
@@ -763,16 +1005,56 @@ export async function distillFindingForSharedFacts(params: {
     },
   ];
   try {
-    const response = await params.provider.complete(messages, [], params.signal);
-    const distilled = (response.content ?? "").trim();
-    if (!distilled || /^NONE\b/i.test(distilled)) return "";
-    return distilled;
+    const deadline = AbortSignal.timeout(params.deadlineMs ?? DISTILL_CALL_DEADLINE_MS);
+    const signal = params.signal ? AbortSignal.any([params.signal, deadline]) : deadline;
+    // "Nothing relevant here" is the one answer Laya may give alone: the call is then not waited for.
+    // Relevant content still goes to the model, the only one that can extract it (decisions/decide.ts).
+    const outcome = await decideWithReadout<string>({
+      point: FINDING_RELEVANT,
+      // The same 6,000 characters the extraction reads. Laya used to get the first 2,400 and may say
+      // "irrelevant" alone, so a fact past character 2,400 could be dropped by an answer that never
+      // saw it; the gate's samples, taken on the same short view, could not show it (adoption plan
+      // 2026-09-26, C9). FINDING_RELEVANT.maxLen widens Laya's window to hold it.
+      state: { objective, source: params.toolName, content: raw },
+      languageOf: objective,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      signal,
+      layaMayTake: ["irrelevant"],
+      incumbent: async (decisionSignal) => {
+        // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
+        // researcher's own call. Not a DECISION_POINT_BY_AGENT entry in the latency report: the
+        // distillation runs beside the work and no turn waits for it (E1).
+        const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "finding_distill" }, () =>
+          params.provider.complete(messages, [], AbortSignal.any([signal, decisionSignal])));
+        const distilled = (response.content ?? "").trim();
+        return !distilled || /^NONE\b/i.test(distilled) ? "" : distilled;
+      },
+      toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
+      fromKey: () => "",
+      // The readout reads the same clipped state Laya does; "relevant" still needs the extraction.
+      readout: { provider: params.provider, agentName: "finding_distill", parsedFor: ["relevant"] },
+    });
+    return outcome.value ?? null;
   } catch {
     return null;
   }
 }
 
-async function autoShareUsefulFinding(params: {
+/**
+ * Split in two on purpose. The synchronous half (length gate, dedup key, heuristic extract,
+ * low-value gate) needs no I/O and returns at once; the model-backed distillation and the
+ * shared-facts store run in the returned `stored` promise, OFF the tool loop's critical path.
+ *
+ * Audit log 10 Sept 2026, turn 3: the researcher's 142 s run carried 7 distillation calls
+ * interleaved with its own iterations — 6.8, 1.5, 3.8, 1.4, 4.0, 7.4, 4.8, 5.2 s, about 30 s
+ * or 21 % of the run — each awaited inline before the NEXT model call could start. Nothing on
+ * that path reads the distilled text: it feeds the shared facts (other agents, the synthesis
+ * passes) and the sufficiency byte ladder, and the raw tool result is already in this agent's
+ * history. So the loop moves on and the run joins the promises where the text is read
+ * (joinPendingShares). Never rejects — a distill failure keeps the heuristic extract, a store
+ * failure resolves null, exactly the outcomes the inline version had.
+ */
+function autoShareUsefulFinding(params: {
   sessionId: string;
   agentName: string;
   toolName: string;
@@ -782,7 +1064,7 @@ async function autoShareUsefulFinding(params: {
   provider: ChatProvider;
   signal?: AbortSignal;
   distill?: { enabled: boolean; minChars: number; budget: { remaining: number }; provider?: ChatProvider };
-}): Promise<string | null> {
+}): { extracted: string; stored: Promise<string | null> } | null {
   // Normalize only for length check and dedup key — preserve structure for extraction
   const normalized = params.evidence.replace(/\s+/g, " ").trim();
   if (normalized.length < 180) return null;
@@ -808,59 +1090,73 @@ async function autoShareUsefulFinding(params: {
     return null;
   }
 
-  // Distillation: for a LARGE web-research extract, hand the objective + raw content to
-  // a one-shot model pass that keeps only the objective-relevant facts/URLs. Keeps
-  // shared findings dense and shrinks the context the final synthesis must read. Bounded
-  // per run; on failure/abort, keep the heuristic extract (never drops evidence).
-  // Scoped to web-research tools — that is where scraped page chrome / search-result
-  // noise comes from. Structured outputs (ssh_exec, DB queries, delegation results, file
-  // contents) are returned as-is: distilling them risks dropping precise data.
-  let toShare = extracted;
+  // The budget is charged HERE, synchronously, so two results from the same iteration
+  // cannot both pass a `remaining > 0` check before either has decremented it.
   const distill = params.distill;
-  if (
+  const distillThis = Boolean(
     distill?.enabled
     && /^(?:web_search|web_fetch|browser_)/i.test(params.toolName)
     && distill.budget.remaining > 0
-    && extracted.length >= distill.minChars
-  ) {
-    distill.budget.remaining -= 1;
-    const distilled = await distillFindingForSharedFacts({
-      objective: params.objective,
-      toolName: params.toolName,
-      rawEvidence: params.evidence,
-      // Distillation is a lightweight extraction — run it on the routing tier
-      // (a smaller/faster model) when one is configured, so the per-finding
-      // distill cost stays low on a single GPU. Falls back to the agent's own
-      // provider when no routing tier is set (no behavior change).
-      provider: distill.provider ?? params.provider,
-      signal: params.signal,
-    });
-    if (distilled === "") {
-      // Nothing in this result was relevant to the objective — don't pollute facts.
+    && extracted.length >= distill.minChars,
+  );
+  if (distillThis) distill!.budget.remaining -= 1;
+
+  const stored = (async (): Promise<string | null> => {
+    // Distillation: for a LARGE web-research extract, hand the objective + raw content to
+    // a one-shot model pass that keeps only the objective-relevant facts/URLs. Keeps
+    // shared findings dense and shrinks the context the final synthesis must read. Bounded
+    // per run; on failure/abort, keep the heuristic extract (never drops evidence).
+    // Scoped to web-research tools — that is where scraped page chrome / search-result
+    // noise comes from. Structured outputs (ssh_exec, DB queries, delegation results, file
+    // contents) are returned as-is: distilling them risks dropping precise data.
+    let toShare = extracted;
+    if (distillThis) {
+      const distilled = await distillFindingForSharedFacts({
+        objective: params.objective,
+        toolName: params.toolName,
+        rawEvidence: params.evidence,
+        // Distillation is a lightweight extraction — run it on the routing tier
+        // (a smaller/faster model) when one is configured, so the per-finding
+        // distill cost stays low on a single GPU. Falls back to the agent's own
+        // provider when no routing tier is set (no behavior change).
+        provider: distill!.provider ?? params.provider,
+        signal: params.signal,
+        sessionId: params.sessionId,
+      });
+      if (distilled === "") {
+        // Nothing in this result was relevant to the objective — don't pollute facts.
+        params.sharedKeys.delete(key);
+        return null;
+      }
+      if (distilled && !extractedFindingIsLowValue(distilled)) {
+        toShare = distilled;
+      }
+    }
+
+    // Deterministic last line of defense against the distiller editorializing —
+    // strip any "(Note: …)" / "Hinweis: …" the model added in its own voice (these
+    // are never source facts and on a weak model are often wrong/backwards). If the
+    // finding was nothing but a note, it collapses to low-value and is skipped.
+    const cleaned = stripEditorialNotes(toShare);
+    if (!cleaned || extractedFindingIsLowValue(cleaned)) {
       params.sharedKeys.delete(key);
       return null;
     }
-    if (distilled && !extractedFindingIsLowValue(distilled)) {
-      toShare = distilled;
+
+    try {
+      await shareFinding(
+        params.sessionId,
+        key,
+        `[${params.agentName}/${params.toolName}] ${cleaned}`,
+      );
+    } catch (err) {
+      log.debug({ err, agentName: params.agentName, tool: params.toolName }, "Failed to auto-share useful tool evidence");
+      return null;
     }
-  }
+    return cleaned;
+  })();
 
-  // Deterministic last line of defense against the distiller editorializing —
-  // strip any "(Note: …)" / "Hinweis: …" the model added in its own voice (these
-  // are never source facts and on a weak model are often wrong/backwards). If the
-  // finding was nothing but a note, it collapses to low-value and is skipped.
-  const cleaned = stripEditorialNotes(toShare);
-  if (!cleaned || extractedFindingIsLowValue(cleaned)) {
-    params.sharedKeys.delete(key);
-    return null;
-  }
-
-  await shareFinding(
-    params.sessionId,
-    key,
-    `[${params.agentName}/${params.toolName}] ${cleaned}`,
-  );
-  return cleaned;
+  return { extracted, stored };
 }
 
 // Per-tool call caps enforced inside sub-agent runs.
@@ -900,10 +1196,14 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   // (2026-05-28) showed an honest 4-file write blocked at file 4 under
   // the old flat cap of 3.
   // Raised from 12 to accommodate incremental large-file builds (write head +
-  // many mode:"append" chunks) without tripping the flat per-tool cap; the tight
-  // per-path overwrite cap (PER_PATH_WRITE_CAP=2) remains the real loop guard.
+  // many mode:"append" chunks) without tripping the flat per-tool cap; the
+  // content-hash loop rule at the call site remains the real loop guard.
   write_file: 24,
-  edit_file: 12,
+  // Raised 12 -> 24 alongside PER_PATH_EDIT_CAP. This one is a TOTAL across every
+  // path, so at 12 it bound tighter than the per-path cap the moment a staged build
+  // touched more than one file (index.html + app.js + data.json is three skeletons
+  // and three fill sequences sharing the same budget).
+  edit_file: 24,
   generate_document: 4,
   generate_website: 2,
   generate_presentation: 2,
@@ -923,7 +1223,12 @@ const PATH_KEYED_WRITE_TOOLS = new Set<string>([
   "generate_document", "generate_docx", "generate_pptx", "generate_pdf", "render_pdf",
   "export_workspace_artifact",
 ]);
-const PER_PATH_WRITE_CAP = 2;
+// NOTE: the old flat `PER_PATH_WRITE_CAP = 2` is gone. "Same path twice" is not a
+// loop — a builder legitimately rewrites one file several times while converging on
+// it — and the cap sat absurdly below its own siblings (append 24, edit 24). What IS
+// a loop is same path + same BYTES, or an A→B→A→B oscillation, and both are now
+// detected by content hash at the call site (classifyWriteLoop in progress-verifier).
+// Plain overwrites fall back to PER_PATH_EDIT_CAP as the far-out backstop.
 // write_file(mode:"append") to the same path is the incremental-build path (write
 // head → append chunks), so one file legitimately takes many appends. Bound it
 // generously to still catch a true runaway, but well above a chunked large file.
@@ -938,8 +1243,21 @@ const PER_PATH_APPEND_CAP = 24;
  * fails when old_string is absent or ambiguous, so a confused agent stops rather than
  * silently churning. Bounded well above a real convergence run, still far below a
  * runaway.
+ *
+ * Raised 12 -> 24 for staged artifact builds. A staged build is skeleton (one
+ * write_file) + ONE edit_file per subsystem + verification-driven corrections, all
+ * against the SAME path, so the passes are the deliverable rather than a loop. The
+ * widest builder iteration budget in the workspace is 14 (web_coder, backend_coder),
+ * which buildStagedBuildFirstStepInstruction turns into 11 fill passes in the run's
+ * USER turn (the directive in the system head is a frozen cache key and states no
+ * count of its own, so this cap and that instruction are the only two things that
+ * bound the passes) — at 12 the cap bit after a single
+ * correction, i.e. exactly when the artifact was nearly finished and the work was
+ * most expensive to lose. 24 matches the write_file total below and still leaves the
+ * ambiguity failure (edit_file rejects an absent or non-unique old_string) as the
+ * real brake on a confused agent.
  */
-const PER_PATH_EDIT_CAP = 12;
+const PER_PATH_EDIT_CAP = 24;
 // A FAILED tool call (most often arguments the model can fix by re-emitting them —
 // e.g. generate_presentation rejecting a JSON-string `slides` arg) must NOT burn the
 // per-tool SUCCESS cap, or a couple of mis-serializations hard-block a build tool
@@ -1041,6 +1359,49 @@ const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
   "mcp__",
 ];
 
+/**
+ * Exact tool names that bind an agent to the gateway the same way the prefixes above do,
+ * but share no common prefix.
+ *
+ * These reach a configured EXTERNAL service — the image endpoint, TTS, STT, the vision
+ * model — and they resolve it from `multimodal.*` config that the gateway fills at load
+ * time (`imageGeneration.baseUrl` comes from SAI_PRIMARY_MODEL_URL via the loader). The
+ * agent-worker container receives neither that config nor, under `--network none`, any way
+ * to reach the host it names. So the tool fails twice over, and it fails the opaque way:
+ * the container exits 1 with empty stdout and the model never gets to say what went wrong.
+ *
+ * Observed exactly that: `image_creator` was delegated a sunrise image twice, ran 15.6s
+ * each time, and returned "exited with code 1. Output:" with nothing after it. Routing had
+ * done its job — image_creator at 0.92 — and the turn still ended by telling the user to
+ * go use DALL-E.
+ *
+ * Forcing these in-process is the same remedy MCP tools already got for the same pair of
+ * reasons, and it costs no sandboxing that was real: an agent that cannot reach the
+ * network was not being sandboxed, it was being prevented from running.
+ */
+const GATEWAY_BOUND_SERVICE_TOOL_NAMES = new Set<string>([
+  "generate_image",
+  "analyze_image",
+  "synthesize_speech",
+  "transcribe_audio",
+  "list_tts_voices",
+]);
+
+/**
+ * True when an agent carrying these tools must run IN-PROCESS rather than in a container.
+ *
+ * Exported so the rule can be gated against the real catalog instead of only being
+ * exercised by whichever agent someone happens to delegate to. The failure it prevents is
+ * silent from the outside — the container exits 1 with no stdout, so routing looks healthy
+ * and the delegation simply dies.
+ */
+export function requiresInProcessExecution(tools: readonly string[] | undefined): boolean {
+  const list = tools ?? [];
+  return list.some((t) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t))
+    || list.some((t) => GATEWAY_BOUND_SERVICE_TOOL_NAMES.has(t)
+      || GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => t.startsWith(prefix)));
+}
+
 // Tools whose output is deterministic enough within a single sub-agent run that
 // re-issuing the call with identical arguments is wasted work. The existing
 // `lastToolCallSig` map only catches *consecutive* duplicates (A→A); this set
@@ -1049,7 +1410,8 @@ const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
 // runs. Excluded by design: any tool that reflects mutating state (browser
 // session, computer session, swarm state, mail send/draft, file writes) or
 // queries that may legitimately need a fresh fetch (get_swarm_state, browser_*).
-const IDEMPOTENT_TOOLS = new Set<string>([
+// Exported for the loop replay's copy (agent/loop-replay.ts), which a test holds equal to it.
+export const IDEMPOTENT_TOOLS = new Set<string>([
   "read_file",
   "list_files",
   "list_agents",
@@ -1063,7 +1425,31 @@ const IDEMPOTENT_TOOLS = new Set<string>([
   "web_search",
   "web_fetch",
   "workspace_search",
+  // Read-only over the workspace like read_file, and dropped with it on every write below. Outside the
+  // set, run c297c5ea's content_writer re-ran the same few greps nearly 300 times, alternating between them, which
+  // the consecutive check misses and the repeat detector only logged.
+  "grep_files",
+  "glob_files",
 ]);
+
+// Tools whose every call is new work, so even the consecutive-duplicate cache below never answers
+// one: a repeated generate_image is "make another one", and in a chat the person may choose
+// different settings for it. The turn loop exempts the same tool (STATE_DEPENDENT_TOOL_NAMES).
+export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
+
+// The tools a run publishes a fact to the session's shared memory with (tools/memory.ts), and the
+// arguments of theirs that identify the fact and its source instead of stating anything. See the
+// figure check at their call site.
+const SHARED_FACT_TOOLS = new Set<string>(["share_finding", "share_evidence"]);
+// supportingKeys names other facts; share_evidence keeps it only while it is an array.
+const SHARED_FACT_IDENTITY_FIELDS = new Set<string>(["key", "sourceUrl", "supportingKeys"]);
+// Scores the tools take only as numbers (share_evidence refuses anything else): a rating of the
+// finding from 0 to 1, never a figure the run states. "0.85" reads as the figure 85. Only a rating
+// is: share_finding stores any number it is given there, and in review "accuracy_score: 8393"
+// reached the store unmasked and uncounted (see isSharedFactRating).
+const SHARED_FACT_SCORE_FIELDS = new Set<string>(["accuracyScore", "trustworthinessScore", "corroborationScore"]);
+const isSharedFactRating = (value: unknown): boolean =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 
 /**
  * Structural completeness check for a written text artifact, used by the
@@ -1079,18 +1465,134 @@ const IDEMPOTENT_TOOLS = new Set<string>([
  * must contain a closing </html> tag; a .json file must parse. Returns a short
  * human-readable reason when the file looks truncated, null when it looks
  * complete or cannot be assessed (missing path, unreadable, other formats).
+ *
+ * The one non-format check is UNFINISHED_STUB_MARKER, and it is not a heuristic
+ * either: the staged-build directive puts that exact literal in the artifact itself
+ * for every subsystem it has not written yet, so finding one is the artifact stating
+ * outright that it is unfinished. This is the check the FORMAT rules structurally
+ * cannot make — session a7b8fe3e's index.html closed its </html> perfectly and its
+ * entire game was two block comments, so every format rule passed a dead file. Scanned
+ * across the staged build's own output formats (scripts and stylesheets, not just the
+ * document), because an unfilled subsystem lives wherever the build put it.
+ *
+ * `workspaceRoot` resolves RELATIVE artifact paths. write_file's metadata sets
+ * `path` to the path the MODEL passed (relative, e.g. "generated/app/index.html")
+ * and only `outputPath` to the workspace-relative resolved one — so without a root
+ * this existsSync missed the file entirely against the gateway's cwd and returned
+ * null, i.e. every half-written write_file artifact was silently reported complete.
+ * Callers that already hold an absolute path (runtime.ts, turn-corrective.ts) are
+ * unaffected: an absolute path that exists is used as-is.
  */
-export function artifactFileLooksTruncated(artifact: Record<string, unknown>): string | null {
+/**
+ * Artifact containers that cannot meaningfully be read as text. Everything else is read,
+ * because the unfinished-marker check below is a check on the artifact's own words rather
+ * than on its syntax, and prose formats carry it exactly as code formats do.
+ */
+const BINARY_ARTIFACT_RE = /\.(?:pdf|docx?|xlsx?|pptx?|zip|gz|tar|7z|rar|png|jpe?g|gif|webp|avif|bmp|ico|tiff?|svgz|mp[34]|wav|ogg|webm|mov|avi|woff2?|ttf|otf|eot|wasm|exe|dll|so|dylib|bin|db|sqlite3?)$/;
+
+/**
+ * Formats where the unfinished marker can only be the sentinel itself: the staged-build
+ * directive writes it as a statement that THROWS where it sits, so it is executable code
+ * rather than something the file could be discussing. Judged wherever such a file lives.
+ */
+const CODE_ARTIFACT_RE = /\.(?:html?|json|js|mjs|cjs|jsx|ts|tsx|css)$/;
+
+/**
+ * Whether a path sits inside the artifact zone. `generatedZoneRel()` documents that the TOP
+ * segment stays `generated` under every layout, which is what makes a segment test correct
+ * without knowing about per-user partitioning.
+ */
+function pathIsInsideArtifactZone(absPath: string): boolean {
+  const zone = generatedZoneRel();
+  return absPath.split(/[\\/]+/).includes(zone);
+}
+
+/**
+ * THE ARTIFACT RECORD IS A SNAPSHOT, AND A STAGED BUILD OUTLIVES IT.
+ *
+ * write_file's metadata carries `size` and `textPreview` taken at write time, and it is the
+ * only tool whose metadata `recordArtifacts` can see at all: edit_file returns
+ * `{ path, replacements }` with no outputPath, so a fill pass records nothing. In a staged
+ * build pass one writes the skeleton and every later pass edits it, so the record keeps
+ * describing the skeleton while the file grows underneath it. Session 00b3675d attached a
+ * 469-byte stub preview to a finished 16 KB report — the user was shown scaffolding for a
+ * document that was complete on disk.
+ *
+ * Re-reading is cheap and the file is the truth, so the attachment describes the artifact as
+ * it now IS rather than as it was first created. Fail-open in every direction: a file since
+ * moved, deleted, unreadable, or past the size cap keeps the metadata it already had, which is
+ * exactly the previous behaviour. Only `workspace_file` artifacts are touched — a dataUrl or
+ * externalUrl artifact has no on-disk state to refresh.
+ */
+export function refreshWorkspaceArtifactSnapshot(
+  artifact: Record<string, unknown>,
+  workspacePath: string,
+): Record<string, unknown> {
+  const copy = { ...artifact };
+  if (copy["artifactKind"] !== "workspace_file") return copy;
   try {
-    const absPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
-    if (!absPath || !fs.existsSync(absPath)) return null;
+    const rel = typeof copy["outputPath"] === "string" ? copy["outputPath"] : "";
+    const raw = typeof copy["path"] === "string" ? copy["path"] : "";
+    const candidate = [rel, raw]
+      .filter(Boolean)
+      .map((p) => resolvePath(workspacePath, p))
+      .find((p) => fs.existsSync(p));
+    if (!candidate) return copy;
+    const stat = fs.statSync(candidate);
+    if (!stat.isFile() || stat.size > 5_000_000) return copy;
+    const text = fs.readFileSync(candidate, "utf8");
+    copy["size"] = text.length;
+    const preview = buildArtifactTextPreview(text);
+    if (preview) copy["textPreview"] = preview;
+  } catch { /* unreadable — keep the write-time snapshot */ }
+  return copy;
+}
+
+export function artifactFileLooksTruncated(artifact: Record<string, unknown>, workspaceRoot?: string): string | null {
+  try {
+    const rawPath = typeof artifact["path"] === "string" ? artifact["path"] : "";
+    const relPath = typeof artifact["outputPath"] === "string" ? artifact["outputPath"] : "";
+    const candidates = [
+      rawPath,
+      ...(workspaceRoot ? [rawPath ? resolvePath(workspaceRoot, rawPath) : "", relPath ? resolvePath(workspaceRoot, relPath) : ""] : []),
+    ].filter(Boolean);
+    const absPath = candidates.find((candidate) => fs.existsSync(candidate)) ?? "";
+    if (!absPath) return null;
     const stat = fs.statSync(absPath);
     if (!stat.isFile() || stat.size === 0 || stat.size > 5_000_000) return null;
     const name = (typeof artifact["filename"] === "string" && artifact["filename"]
       ? artifact["filename"]
       : absPath).toLowerCase();
-    if (name.endsWith(".html") || name.endsWith(".htm")) {
-      const text = fs.readFileSync(absPath, "utf8");
+    const isHtml = name.endsWith(".html") || name.endsWith(".htm");
+    const isJson = name.endsWith(".json");
+    // THE MARKER CHECK IS NOT A FORMAT RULE, and it used to sit behind one. The list held
+    // html/json/js/ts/css — "formats a staged build actually emits" — which was true while a
+    // staged build meant a web build. But isStagedArtifactBuildRun fires on tool capability
+    // and task size alone, so it fires just as readily on paper_author, whose entire output
+    // is Markdown. Session 00b3675d ran four such builds under generated/; their artifacts
+    // were .md, and this returned null for every one — "cannot be assessed", which the
+    // callers read as complete. scanForStubMarkers, the OTHER half of the same contract,
+    // reads every file it walks whatever its extension, so the resume path could see a
+    // marker the completeness verdict structurally could not.
+    //
+    // Widening it by extension alone would have cost the fail-open contract a prose file
+    // deserves: in a script the marker is a statement that throws, but in a document the
+    // same token can be the document TALKING about the convention (a plan that says "next
+    // up: UNFINISHED_STUB: physics" is not an unfinished artifact). So prose is judged by
+    // LOCATION instead — the rule scanForStubMarkers already states for itself, "a marker
+    // outside generated/ is prose about the convention, not a build". Inside the artifact
+    // zone a marker is the artifact; outside it, it is discussion.
+    if (BINARY_ARTIFACT_RE.test(name)) return null;
+    const markerIsAlwaysTheSentinel = CODE_ARTIFACT_RE.test(name);
+    if (!markerIsAlwaysTheSentinel && !pathIsInsideArtifactZone(absPath)) return null;
+    const text = fs.readFileSync(absPath, "utf8");
+    // Before any format rule: the artifact naming itself unfinished outranks the
+    // artifact merely parsing. A skeleton whose subsystems were never filled is
+    // syntactically flawless, so checking this second would never reach it.
+    if (text.includes(UNFINISHED_STUB_MARKER)) {
+      return `still contains an unfilled ${UNFINISHED_STUB_MARKER} marker — a staged build stopped before that subsystem was written`;
+    }
+    if (isHtml) {
       // Only judge full documents — an HTML fragment/partial template without
       // an <html> open tag has no required terminator.
       if (/<html[\s>]/i.test(text.slice(0, 2000)) && !/<\/html>/i.test(text.slice(-4000))) {
@@ -1098,8 +1600,7 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>): s
       }
       return null;
     }
-    if (name.endsWith(".json")) {
-      const text = fs.readFileSync(absPath, "utf8");
+    if (isJson) {
       try {
         JSON.parse(text);
       } catch {
@@ -1114,6 +1615,409 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>): s
 }
 
 /**
+ * Describe the workspace files a run actually mutated, for the interrupted/cut-off
+ * paths. A staged build that dies mid-way has real work on disk — the skeleton plus
+ * however many subsystems landed — and the previous salvage saw NONE of it when the
+ * fills went through edit_file (whose metadata carries no outputPath, so the artifact
+ * recorder skips it). Reporting the paths, their real on-disk size, and their
+ * structural completeness is the difference between handing the parent a resumable
+ * build and handing it the 37-character "produced no usable output" string that run
+ * f08195d2 shipped after 20,129 tokens of work.
+ *
+ * Reads the filesystem, so it is only called on the terminal paths, never per
+ * iteration. Fails open: an unreadable file is reported by path alone.
+ */
+/**
+ * Files in the workspace that still carry unfilled staged-build markers.
+ *
+ * This is the RESUME detector. The staged-build classifier reads only task size and tool
+ * capability, so it cannot tell "build me X" from "X exists, finish it" — and run 2dc5832c
+ * shows what that costs: a finish-it task got the skeleton directive and answered it with a
+ * skeleton, destroying six filled subsystems. What distinguishes the two cases is not in the
+ * task text at all, it is on disk.
+ *
+ * SCOPED TO THE ARTIFACT ZONE, and that scope is the whole correctness of this function.
+ * The first version walked the entire workspace and run db88fa5b is what it cost: four of the
+ * agent systemPrompts in workspace/agents/10-core-agents.jsonc TEACH the staged-build
+ * convention and therefore contain the literal token, so the scan reported
+ * `mode: "resume", unfilledMarkers: 13` on a brand-new "build me a Tetris game" request and
+ * told a fresh build "RESUME AN EXISTING BUILD — DO NOT START OVER … NEVER call write_file".
+ * Every run, forever. The token is only EVIDENCE of an unfinished build where builds are
+ * written; anywhere else it is documentation about builds, which is the opposite of evidence.
+ *
+ * Bounded hard (depth, file count, file size) and fails open to "not a resume", because being
+ * wrong here costs one redundant skeleton while blocking the scan would cost every resume run.
+ */
+/** One unfilled marker, located precisely enough to be used as an edit_file old_string. */
+export interface StubMarkerSite {
+  /** Workspace-relative path, e.g. generated/neon-tetris/index.html */
+  file: string;
+  /** 1-based line number, as read_file and grep_files report it. */
+  line: number;
+  /** The marker line verbatim, trimmed — the exact string edit_file must match. */
+  text: string;
+}
+
+/**
+ * WHOSE ARTIFACT IS THIS? `generated/` IS SHARED BY EVERY TURN THE DEPLOYMENT HAS EVER RUN.
+ *
+ * The workspace path defaults to one global directory (session.ts → config.workspacePath), so
+ * "there is an unfinished artifact on disk" is, unscoped, the claim "some turn, ever, left one".
+ * That is how a fresh Snake build came to be handed "RESUME AN EXISTING BUILD — DO NOT START
+ * OVER" pointed at last week's half-finished Tetris, and how one never-cleaned page could spend
+ * a corrective build on every artifact-shaped turn from every user thereafter.
+ *
+ * `modifiedSinceMs` is the scope: only files written at or after that moment are evidence about
+ * the work in hand. Callers pass the start of the run (for a verdict about what THIS run left)
+ * or the start of the session (for resume, which is legitimately about an earlier turn — just
+ * not an earlier week). Omitted means the old whole-zone behaviour, which is right only for a
+ * caller that genuinely means "anything, ever".
+ */
+export interface ArtifactScanScope {
+  modifiedSinceMs?: number;
+  /**
+   * Whose artifact: consulted for each file inside the time scope, with its absolute path. A
+   * resume scan passes ownsResumeEvidence here so one agent's unfinished build is not evidence
+   * handed to a run that does not build it (see there).
+   */
+  acceptPath?: (absPath: string) => boolean;
+}
+
+/**
+ * WHO WROTE AN ARTIFACT LAST, per conversation: the provenance ownsResumeEvidence reads.
+ *
+ * Recorded where the sub-agent loop already notices a successful file mutation, keyed by the
+ * conversation's ROOT session (a coordinator's specialists, a scene's and the orchestrator's
+ * share one zone: artifactConversationOf) and the resolved absolute path the write reported — a file, or for a directory emitter
+ * its output directory (artifactLastWriter reads both) — the same paths the resume scanners walk. Bounded
+ * like sessionArtifactEpochMs; an evicted or never-recorded file simply has no writer, which
+ * ownsResumeEvidence treats as everybody's (the behaviour before this existed).
+ */
+const artifactLastWriters = new Map<string, Map<string, string>>();
+const MAX_TRACKED_WRITER_CONVERSATIONS = 512;
+const MAX_TRACKED_WRITERS_PER_CONVERSATION = 256;
+
+/**
+ * The conversation a run belongs to, for the writer record: through `sub:` AND `workflow:`
+ * nesting (tools/workflow-catalog.ts names a scene's session workflow:<parent>:<scene>:<uuid>),
+ * the rule gateway/rpc.ts owningChatSessionId and latency-attribution.ts rootSessionId use.
+ * deriveRootSessionId stops at a workflow — right for the shared facts it scopes, wrong here: in
+ * c297c5ea the deck was built inside the sourced_presentation scene and the researcher of
+ * 1581bae5 ran under mission_coordinator, so their records sat in two maps and it saw no writer.
+ */
+function artifactConversationOf(sessionId: string): string {
+  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
+}
+
+function artifactPathKey(absPath: string): string {
+  const resolved = resolvePath(absPath);
+  // NTFS is case-insensitive: the model's "Deck.html" and the scanner's "deck.html" are one file.
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function noteArtifactWriter(conversationId: string, absPath: string, agentName: string): void {
+  let writers = artifactLastWriters.get(conversationId);
+  if (!writers) {
+    if (artifactLastWriters.size >= MAX_TRACKED_WRITER_CONVERSATIONS) {
+      const oldest = artifactLastWriters.keys().next();
+      if (!oldest.done) artifactLastWriters.delete(oldest.value);
+    }
+    writers = new Map();
+    artifactLastWriters.set(conversationId, writers);
+  }
+  const key = artifactPathKey(absPath);
+  // Re-inserted so the map's order is recency, and the oldest entry is the one evicted.
+  writers.delete(key);
+  if (writers.size >= MAX_TRACKED_WRITERS_PER_CONVERSATION) {
+    const oldest = writers.keys().next();
+    if (!oldest.done) writers.delete(oldest.value);
+  }
+  writers.set(key, agentName);
+}
+
+/**
+ * The agent whose write last COVERED this file: a record of the file itself, or of a directory it
+ * sits in. The directory case is not an edge: generate_presentation and generate_website report
+ * their output DIRECTORY as outputPath, so their pages are only ever recorded that way — and in
+ * c297c5ea the page the researcher was sent to fix (the deck's index.html) was generate_presentation's
+ * and never edit_file'd by content_writer. Keyed by the exact file alone, it had no writer and
+ * stayed everybody's, so the scoping would not have kept the researcher off it. The map is in
+ * recency order, so the last covering entry is the most recent write.
+ */
+export function artifactLastWriter(conversationId: string, absPath: string): string | undefined {
+  const writers = artifactLastWriters.get(conversationId);
+  if (!writers) return undefined;
+  const key = artifactPathKey(absPath);
+  let writer: string | undefined;
+  for (const [recorded, agentName] of writers) {
+    if (key === recorded || key.startsWith(recorded.endsWith(pathSep) ? recorded : `${recorded}${pathSep}`)) writer = agentName;
+  }
+  return writer;
+}
+
+/**
+ * When did this conversation start caring about the artifact zone?
+ *
+ * Resume is legitimately about an EARLIER TURN — "finish the game you started" is the case the
+ * whole mechanism exists for — so it cannot be scoped to this run or this turn. It can be
+ * scoped to this conversation, which is what separates "the build I asked you for ten minutes
+ * ago" from "someone else's abandoned Tetris". The first time a session delegates anything is
+ * a good enough origin: every artifact of ITS OWN is written after that moment, and every
+ * artifact belonging to a session that finished earlier is not.
+ *
+ * Bounded and self-evicting: this is a timestamp per live conversation, not a cache.
+ */
+const sessionArtifactEpochMs = new Map<string, number>();
+const MAX_TRACKED_SESSION_EPOCHS = 512;
+/**
+ * How far back an artifact this conversation never touched can still be resumable.
+ *
+ * The session epoch alone is too sharp: a gateway restart, or a user who comes back in a new
+ * conversation and says "finish the game", would both find their own work out of scope and get
+ * a fresh skeleton written over it. The window keeps those working while still discarding the
+ * artifact nobody has touched since yesterday — which is the one that was hijacking fresh
+ * builds. Whichever cutoff is EARLIER wins, so this only ever widens the session's own scope.
+ */
+const RESUMABLE_ARTIFACT_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+export function sessionArtifactEpoch(sessionId: string): number {
+  const existing = sessionArtifactEpochMs.get(sessionId);
+  if (existing !== undefined) return existing;
+  if (sessionArtifactEpochMs.size >= MAX_TRACKED_SESSION_EPOCHS) {
+    // Oldest insertion first — Map preserves it, and a session whose epoch is evicted simply
+    // falls back to a fresh one, which is the conservative direction (fewer false resumes).
+    const oldest = sessionArtifactEpochMs.keys().next();
+    if (!oldest.done) sessionArtifactEpochMs.delete(oldest.value);
+  }
+  const now = Date.now();
+  sessionArtifactEpochMs.set(sessionId, now);
+  return now;
+}
+
+/** True when this file is inside the caller's scope — unscoped, or written since it began —
+ *  and, when the caller asks whose it is, the caller's. */
+function withinScanScope(abs: string, scope: ArtifactScanScope | undefined): boolean {
+  if (scope?.modifiedSinceMs !== undefined) {
+    try {
+      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs) return false;
+    } catch {
+      return false;   // cannot date it, cannot claim it
+    }
+  }
+  return scope?.acceptPath ? scope.acceptPath(abs) : true;
+}
+
+export function findUnfilledStubFiles(
+  workspaceRoot: string,
+  scope?: ArtifactScanScope,
+): { files: string[]; count: number; markers: StubMarkerSite[] } {
+  // Artifacts only. A marker outside generated/ is prose about the convention, not a build.
+  // The zone is the AMBIENT USER'S partition of it, so one account's unfinished build is not
+  // evidence about another's — the same reason the mtime scope above exists, one tenant over.
+  const zoneRel = generatedZoneRel();
+  const artifactRoot = resolvePath(workspaceRoot, zoneRel);
+  if (!fs.existsSync(artifactRoot)) return { files: [], count: 0, markers: [] };
+  return scanForStubMarkers(artifactRoot, zoneRel, scope);
+}
+
+function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: ArtifactScanScope): { files: string[]; count: number; markers: StubMarkerSite[] } {
+  const SKIP = new Set(["node_modules", ".git", ".starlingai", "dist", "build", ".cache"]);
+  const MAX_FILES = 400;
+  const MAX_BYTES = 2_000_000;
+  const MAX_DEPTH = 6;
+  const files: string[] = [];
+  // Located, not just counted. The scan already reads every file to count markers, so
+  // recording where each one sits costs nothing and saves the agent from rediscovering it:
+  // run 6 spent seven of fourteen iterations paging a 446-line file to find one marker the
+  // scanner had already walked past.
+  const markers: StubMarkerSite[] = [];
+  const MAX_MARKERS = 24;
+  let count = 0;
+  let seen = 0;
+
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (depth > MAX_DEPTH || seen >= MAX_FILES) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (seen >= MAX_FILES) return;
+      if (entry.name.startsWith(".") && entry.name !== ".") continue;
+      if (SKIP.has(entry.name)) continue;
+      const abs = resolvePath(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(abs, relPath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!withinScanScope(abs, scope)) continue;
+      seen++;
+      try {
+        if (fs.statSync(abs).size > MAX_BYTES) continue;
+        const text = fs.readFileSync(abs, "utf-8");
+        const hits = text.split(UNFINISHED_STUB_MARKER).length - 1;
+        if (hits > 0) {
+          count += hits;
+          if (files.length < 8) files.push(relPath);
+          const lines = text.split("\n");
+          for (let i = 0; i < lines.length && markers.length < MAX_MARKERS; i++) {
+            const line = lines[i];
+            if (line !== undefined && line.includes(UNFINISHED_STUB_MARKER)) {
+              markers.push({ file: relPath, line: i + 1, text: line.trim() });
+            }
+          }
+        }
+      } catch { /* unreadable/binary — not a resume signal */ }
+    }
+  };
+
+  try {
+    walk(scanRoot, relPrefix, 0);
+  } catch { /* fail open */ }
+  return { files, count, markers };
+}
+
+/**
+ * A staged build cannot have succeeded while its own markers are still in the file.
+ *
+ * Every other outcome signal is derived from how the run ENDED — the loop exited cleanly,
+ * the model said it was finished — and none of them consults the artifact. Run 5 reported
+ * `outcome: "success"` on a page whose last line was
+ * `throw new Error('UNFINISHED_STUB: boot')`: four subsystems unwritten, the model simply
+ * believing it was done. A confident wrong verdict is the most expensive kind here, because
+ * it propagates: the orchestrator credits the agent, routing feedback boosts it, and the
+ * caller is told work happened that did not.
+ *
+ * The file is the evidence, so ask it. Downgrades only to `partial`, never to failure — real
+ * work did land, it is resumable, and the resume path keys off exactly these markers. Only a
+ * staged build is judged this way; an agent that never signed up to eliminate markers is not
+ * held to it. A scan failure leaves the verdict alone rather than inventing a bad one.
+ */
+/**
+ * Built pages under generated/ that do not work, as their own executed scripts report it.
+ *
+ * Bounded deliberately: only .html files, only the output zone, and only the first few, so
+ * this stays a fast pre-flight rather than a second test suite. It runs at the START of a
+ * staged build to decide whether there is repair work waiting, which is the moment a marker
+ * count alone gave the wrong answer twice running.
+ */
+export async function findBrokenBuiltPages(workspaceRoot: string, scope?: ArtifactScanScope): Promise<string[]> {
+  const zoneRel = generatedZoneRel();
+  const artifactRoot = resolvePath(workspaceRoot, zoneRel);
+  if (!fs.existsSync(artifactRoot)) return [];
+  const MAX_PAGES = 4;
+  const MAX_DEPTH = 4;
+  const broken: string[] = [];
+  const pages: Array<{ abs: string; relPath: string }> = [];
+
+  // Collect first, execute after: checkBuiltPage now runs each page in a child process, and a
+  // directory walk is not the place to await one.
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (depth > MAX_DEPTH || pages.length >= MAX_PAGES) return;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (pages.length >= MAX_PAGES) return;
+      if (entry.name.startsWith(".")) continue;
+      const abs = resolvePath(dir, entry.name);
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) { walk(abs, relPath, depth + 1); continue; }
+      if (!entry.isFile() || !/\.html?$/i.test(entry.name)) continue;
+      if (!withinScanScope(abs, scope)) continue;
+      pages.push({ abs, relPath });
+    }
+  };
+
+  try { walk(artifactRoot, zoneRel, 0); } catch { /* fail open */ }
+  // TOGETHER, NOT ONE AFTER ANOTHER (finding 2026-10-05). Each check is its own child process, and
+  // a staged build's setup runs this before its first model call — up to four pages in series, each
+  // a node start plus the page's frames. checkBuiltPage also holds each verdict while the page's
+  // bytes are unchanged, so the second and later passes over the same pages cost a stat and a read.
+  const verdicts = await Promise.all(pages.map(async (page) => {
+    try {
+      return await checkBuiltPage(page.abs, page.relPath);
+    } catch {
+      return { ok: true, detail: "" };   // a harness failure must never invent a defect
+    }
+  }));
+  // In walk order, as before: the first broken page is the one the resume directive names first.
+  for (const verdict of verdicts) if (!verdict.ok) broken.push(verdict.detail);
+  return broken;
+}
+
+export function stagedBuildHonestOutcome(
+  outcome: SubAgentOutcome,
+  isStagedBuild: boolean,
+  workspacePath: string,
+  pageCheck: {
+    lastPassed?: boolean;
+    mutatedSince?: boolean;
+    /**
+     * Did an unverified page fail when the runner last executed one? Passed IN rather than
+     * scanned here: executing a page now costs a child process, and this is called from the
+     * synchronous path every terminal return goes through. `undefined` means "not established"
+     * — the silence arm below then abstains rather than guessing.
+     */
+    unverifiedPageBroken?: boolean;
+  } = {},
+  scope?: ArtifactScanScope,
+): SubAgentOutcome {
+  if (outcome !== "success" || !isStagedBuild) return outcome;
+  // Filling every marker is necessary for a working page and nowhere near sufficient. Run 8
+  // reached zero markers on a page that throws on its first inline script, and its own
+  // verify_page run had already said so. A check that FAILED, or one that passed and was
+  // then edited past, both leave "it works" unestablished.
+  if (pageCheck.lastPassed === false) return "partial";
+  if (pageCheck.lastPassed === true && pageCheck.mutatedSince === true) return "partial";
+  try {
+    if (findUnfilledStubFiles(workspacePath, scope).count > 0) return "partial";
+    // A RUN THAT NEVER CHECKED IS NOT A RUN THAT PASSED.
+    //
+    // The clauses above consult the page verdict only when the agent PRODUCED one, so an
+    // agent that simply never calls verify_page escapes the check by saying nothing. The
+    // second validation run did exactly that: eight edits, every marker filled, `outcome:
+    // success` — on a page that dies with `Cannot read properties of undefined (reading
+    // 'toLocaleString')` before it draws a thing.
+    //
+    // Silence is not evidence. When the run did not check, the check runs here instead; it
+    // is the same scan the resume path uses and costs one pass over the output zone.
+    if (pageCheck.lastPassed === undefined && pageCheck.unverifiedPageBroken === true) {
+      return "partial";
+    }
+    return outcome;
+  } catch {
+    return outcome;
+  }
+}
+
+export function describeMutatedWorkspaceFiles(
+  paths: Iterable<string>,
+  workspaceRoot: string,
+): string[] {
+  const lines: string[] = [];
+  for (const relPath of paths) {
+    if (lines.length >= 6) break;
+    let sizeNote = "";
+    let truncationNote = "";
+    try {
+      const abs = resolvePath(workspaceRoot, relPath);
+      const stat = fs.existsSync(abs) ? fs.statSync(abs) : null;
+      if (!stat?.isFile()) continue;
+      sizeNote = ` (${stat.size} bytes on disk)`;
+      const reason = artifactFileLooksTruncated({ path: abs, filename: relPath }, workspaceRoot);
+      truncationNote = reason ? ` — INCOMPLETE: ${reason}` : "";
+    } catch {
+      // fall through: name the path even when it cannot be stat'd
+    }
+    lines.push(`- ${relPath}${sizeNote}${truncationNote}`);
+  }
+  return lines;
+}
+
+/**
  * Tools that observe or mutate LIVE, changing state — a browser page or a remote
  * desktop. Their result is never safe to dedup/cache against an earlier identical
  * call, because the state changes between calls: e.g. after site_fill_credentials
@@ -1122,6 +2026,16 @@ export function artifactFileLooksTruncated(artifact: Record<string, unknown>): s
  * successful login look like it failed (and trips the blocked-iteration loop
  * detector). The loop detector still catches genuinely stuck repeats.
  */
+/** A step laya-browser took, as the response of the model call it replaces: one tool call, no text, no tokens. */
+function drivenStepResponse(step: DrivenStep): LLMResponse {
+  return {
+    content: null,
+    tool_calls: [step.toolCall],
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    finishReason: "tool_calls",
+  };
+}
+
 export function isLiveStateTool(name: string): boolean {
   return name.startsWith("browser_") || name.startsWith("computer_");
 }
@@ -1138,6 +2052,33 @@ function buildApprovalRetryBlockedMessage(toolName: string, priorFailure: string
     normalized ? `Earlier approval result: ${normalized}` : "Earlier approval result: approval was not granted.",
     "Do not retry this approval-gated tool in the same run. Report the blocker and ask the user to retry when they can approve the prompt.",
   ].join(" ");
+}
+
+/** The synthetic tool result for a call the run's call-site block set refuses. The reason
+ *  strings are the sub_agent_tool_blocked `reason` values; a tool the run never held gets the
+ *  allow-list wording so that row and this text keep agreeing. */
+function describeRunBlockedTool(toolName: string, reason: string): string {
+  switch (reason) {
+    case "evidence_cap_enforced":
+      return `Tool '${toolName}' has been disabled — you have gathered enough evidence. Write your final answer now.`;
+    // No "approval_gate_unresolved" case: that withdrawal is answered one check earlier by
+    // approvalBlockedTools (buildApprovalRetryBlockedMessage, which also quotes the earlier
+    // approval result), so nothing ever reaches this switch with that reason. The reason
+    // string still exists — it is what the call site's audit row carries.
+    case "search_backend_degraded":
+      return `Tool '${toolName}' is disabled for the rest of this run: the search backend is degraded. Continue without it.`;
+    case "delegation_cascade_failed":
+      return `Tool '${toolName}' is disabled for the rest of this run: delegations have cascade-failed. Continue without it.`;
+    default:
+      // The four cases above are RUN_INTERNAL_WITHDRAWAL_REASONS — the same set warden.ts
+      // exempts from its escape counter, imported from one module so the wording here and
+      // the warden's classification cannot drift apart. Anything else (today only
+      // "not_in_agent_tools") is a tool the run never held: allow-list wording, and the
+      // warden does count that row.
+      return isRunInternalWithdrawalReason(reason)
+        ? `Tool '${toolName}' is disabled for the rest of this run: ${reason}. Continue without it.`
+        : `Tool '${toolName}' is not in this agent's allowed tool set.`;
+  }
 }
 
 function resolveSubAgentToolCap(toolName: string, isCoordinatorAgent: boolean): number | undefined {
@@ -1249,7 +2190,22 @@ function rejectSuspiciousNoToolOutput(
     // "Sub-agent produced no final response." string. Now it's a real failure
     // so the orchestrator surfaces it instead of inlining the artifact as a
     // chat code block.
-    reason = "exhausted completion budget without calling any tool — the model likely tried to inline a large artifact instead of using a focused write_file/generate_website call";
+    // Two different failures land here and the difference decides the fix, so do not
+    // assert one. Inlining a large artifact leaves a long OUTPUT; burning the budget
+    // on reasoning leaves almost none (observed: 97,714 reasoning characters, 32,768
+    // completion tokens, zero tools, 36 minutes — the previous wording blamed
+    // inlining and would have sent the next reader after the wrong cause).
+    // Say what actually happened, and do NOT name a token budget. There is no fixed
+    // completion ceiling any more: max_tokens is derived per request as
+    // contextWindow - prompt - reserve (providers/lmstudio.ts computeOutputTokenBudget).
+    // The old wording ("exhausted completion budget … raise its token budget") survived
+    // that change and became false in both halves — measured: 19,806 completion tokens
+    // against a derived budget near 113,000, stopped by the reasoning-burn supervisor,
+    // not by any ceiling. It sent every reader, and the operator, after a budget that
+    // was not the constraint. Neither branch may mention a budget the run never hit.
+    reason = output.trim().length > 400
+      ? "produced a long answer but called no tool — the model inlined a large artifact instead of using a focused write_file/generate_website call"
+      : "reasoned without acting: it generated at length, called no tool, and produced almost no output. Raising the token budget will not help — the budget was not the limit. Give it a smaller, more concrete first step, or one that names the file to write";
   }
 
   if (!reason) return null;
@@ -1276,7 +2232,12 @@ function rejectSuspiciousNoToolOutput(
     { sessionId: stats.sessionId, severity: "warn" }
   );
 
-  appendOutcome(opts.workspacePath, {
+  // Shared root, like every other writer and reader of this ledger — see the note at the
+  // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
+  // into one per account, and the readers only ever look at the shared one.
+  // For the account the run is for, like the run's other outcomes (recordOutcome).
+  const account = recordAccount(opts.userId);
+  appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
     task: opts.task.slice(0, 200),
@@ -1286,6 +2247,7 @@ function rejectSuspiciousNoToolOutput(
     durationMs: Date.now() - runStartedAt,
     timeoutMs: turnTimeoutMs,
     error: reason,
+    ...(account ? { account } : {}),
   });
 
   return { output: error, stats: failureStats };
@@ -1296,7 +2258,7 @@ function normalizeSubAgentOutput(content: string | null | undefined): string {
   return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
 }
 
-function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!metadata) return undefined;
 
   const summary: Record<string, unknown> = {};
@@ -1311,9 +2273,18 @@ function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefine
     "fetchMethod",
     "contentType",
     "contentLength",
+    // How many of the page's links web_fetch listed for the model; outputChars alone cannot
+    // say whether an agent that guessed a URL had been shown the real one.
+    "linkCount",
     "outputPath",
     "filename",
     "previewMode",
+    // How a sandbox execution ended, and how much it printed (tools/shell.ts printedChars): the
+    // only way to tell a silent run from a productive one in the audit, whose resultPreview of a
+    // silent run is the placeholder "(no output)".
+    "exitCode",
+    "programOutputChars",
+    "timedOut",
   ]) {
     if (key in metadata) {
       summary[key] = metadata[key];
@@ -1421,6 +2392,35 @@ function buildSubAgentToolAuditPayload(params: {
   return payload;
 }
 
+/** Failed tool calls a run hands back: the most recent, which are the ones any recovery followed. */
+const MAX_RECORDED_TOOL_FAILURES = 6;
+
+/**
+ * The first line of a failed call's error, as the orchestrator is shown it. That frame is built
+ * from metadata, after the redaction and framing scans have run on the result text, so the line
+ * gets both here.
+ */
+function firstToolErrorLine(result: ToolResult): string {
+  const text = result.error?.trim() || result.output.trim();
+  // Redact BEFORE cutting: a secret that straddles the cut would keep a prefix too short for any
+  // pattern to recognise, and this line travels to the browser and into stored metadata.
+  const scan = scanOutput(text);
+  const redacted = !scan.safe && scan.redacted ? scan.redacted : text;
+  const line = (redacted.split(/\r?\n/).find((entry) => entry.trim()) ?? "").trim().slice(0, 240);
+  return neutralizeToolResultFraming(line);
+}
+
+/** The well-formed entries of a `specialistToolFailures` value another delegation handed back. */
+export function readToolFailures(value: unknown): SubAgentToolFailure[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): SubAgentToolFailure[] => {
+    if (!entry || typeof entry !== "object") return [];
+    const { agent, tool, error, declinedByUser } = entry as Record<string, unknown>;
+    if (typeof tool !== "string" || typeof error !== "string") return [];
+    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error, ...(declinedByUser === true ? { declinedByUser } : {}) }];
+  });
+}
+
 
 /** Floor for the parent-remaining-budget clamp (orchestration.clampSubAgentTimeoutToParent): even
  * when the parent turn is nearly out of time, give a delegated sub-agent at least this long so it can
@@ -1455,6 +2455,9 @@ export interface SubAgentRunOptions {
    * search_agents/search_workflows call the parent already failed on. */
   taskTitle?: string;
   context?: string;
+  /** What the user typed this turn. Rendered once into the first message, right after the task,
+   * and passed on to this run's own delegations. */
+  turnUserWords?: TurnUserWords;
   parentSessionId: string;
   workspacePath: string;
   /** Authenticated user that owns the parent turn — propagated so sub-agents
@@ -1482,6 +2485,8 @@ export interface SubAgentRunOptions {
   onSwarmState?: (state: SwarmState) => void;
   /** Shared turn-local delegation counters for nested runs. Internal. */
   _turnAgentCounts?: Map<string, number>;
+  /** The turn's looped delegated runs (ToolContext._turnLoopRuns), shared with nested runs. Internal. */
+  _turnLoopRuns?: import("./delegation-loop-notes.js").TurnLoopRecord[];
   /** Shared per-agent delegation repeat-cap overrides for nested runs. Internal. */
   _turnAgentRepeatLimitOverrides?: Record<string, number>;
   /** Shared total delegation budget override for nested runs. Internal. */
@@ -1541,16 +2546,83 @@ export interface SubAgentExecutionStats {
   model: string;
   capabilities: string[];
   outcome?: SubAgentOutcome;
-  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config";
+  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config" | "missing_tools";
   containerColdStartMs?: number;
   containerBootstrapMs?: number;
   containerRuntimeMs?: number;
+}
+
+/**
+ * A tool call that ran inside a delegated run and failed. The delegating tools carry these up as
+ * `specialistToolFailures`, and the orchestrator's frame lists them beside the specialist's own
+ * account (agent/tool-result-format.ts).
+ */
+export interface SubAgentToolFailure {
+  agent?: string;
+  tool: string;
+  /** First line of the error, redacted. */
+  error: string;
+  /** The call did nothing because the person said no (a Skip): listed as their choice, not as a
+   *  failure. Set from the result's own flag (isDeclinedByUser), never from its text. */
+  declinedByUser?: true;
+}
+
+/**
+ * The loop brake acted on this run (agents.performance.loopBrake). Structured, so a delegating
+ * caller can tell the orchestrator what the run looped on without reading its text: the frame's
+ * "PARTIAL PROGRESS" says a looped run and an honestly interrupted one alike, and six sniffers key
+ * on those words, so they cannot carry the difference.
+ *
+ * Set at the FIRST enforcement and never cleared. It says the brake acted, not that the run
+ * failed: a run can be refused once, change course and finish. `endedRun` and the run's own
+ * stats.outcome / stats.terminalState say how it ended.
+ */
+export interface SubAgentLoopEnforced {
+  /** The tool the run kept calling. */
+  tool: string;
+  /** Its arguments as sent, compact JSON clipped to LOOP_TARGET_MAX_CHARS: the path, pattern or URL
+   *  it was stuck on. Model-chosen text, so it may hold words from the task. */
+  target: string;
+  /** "refuse": identical (tool, arguments) calls since the run's last successful write, the refused
+   *  one included (4 on the first refusal). "busy_stall": how often that (tool, arguments) was
+   *  issued during the stalled windows, the most frequent call there. */
+  repeats: number;
+  /** "refuse": the 4th identical call was withdrawn (classifyCallReplay). "busy_stall": the progress
+   *  supervisor wound the run down after STALL_LIMIT busy windows with nothing new (verdict "looping"). */
+  via: "refuse" | "busy_stall";
+  /** The enforcement ended the run: the busy-stall wind-down always does; a refusal does when the
+   *  model kept calling and the blocked-iteration stop fired in an iteration with a refusal in it. */
+  endedRun: boolean;
+}
+
+/**
+ * The warden's emergency stop wound this run down (warden.ts registerWardenRunStop): a tool_storm,
+ * or another kill-switch alert that named the run's own session id. Like the supervisor's wind-down
+ * it ends the run on its next iteration with what it has, so read it with stats.terminalState
+ * ("timeout", or "completed" when the synthesis succeeded).
+ */
+export interface SubAgentWardenStop {
+  /** The alert type, e.g. "tool_storm". */
+  alert: string;
 }
 
 export interface SubAgentRunResult {
   output: string;
   stats: SubAgentExecutionStats;
   artifacts?: Record<string, unknown>[];
+  /** The run's failed tool calls, recovered from or not; the last MAX_RECORDED_TOOL_FAILURES. */
+  toolFailures?: SubAgentToolFailure[];
+  /** Present only when the loop brake acted on this run; see SubAgentLoopEnforced. */
+  loopEnforced?: SubAgentLoopEnforced;
+  /** Present only when the warden's emergency stop ended this run; see SubAgentWardenStop. */
+  wardenStop?: SubAgentWardenStop;
+  /** Present only when the run (or a run it delegated to) executed code or masked unobserved
+   *  figures; see DelegatedExecutionRecord. */
+  executions?: DelegatedExecutionRecord;
+  /** Present only when the run delegated and a run of it masked figures: each such run with its own
+   *  name and files (the delegated ones as they came back, and this run when its own account did),
+   *  so its delegation can tell the turn which run that was. See MaskedDelegatedRun. */
+  maskedRuns?: MaskedDelegatedRun[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -1569,7 +2641,22 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
       "starlingai.task.preview": opts.task.slice(0, 240),
     },
     async (span) => {
-      const result = await runSubAgentWithStatsInner(opts);
+      // Establish this run's own attribution context, inheriting the caller's identity
+      // and scope. The sub-session id is attached from inside the run (it is minted
+      // there); agentName/callSite are known here.
+      const result = await runWithRequestContext(
+        {
+          // Inherit the caller's identity and scope wholesale — a sweep's pre-resolved
+          // userScopeSegment is lossy to re-derive, so listing fields by hand drops it.
+          ...(currentRequestContext() ?? {}),
+          agentName: opts.agentName,
+          callSite: "sub_agent",
+          // This run mints its own session id (attachRequestSessionId, below); inheriting
+          // the parent's would attribute every sub-agent call to the parent turn.
+          sessionId: undefined,
+        },
+        () => runSubAgentWithStatsInner(opts),
+      );
       span.setAttribute("starlingai.agent.iterations", result.stats.iterations);
       span.setAttribute("starlingai.agent.toolCount", result.stats.toolCount);
       if (result.stats.terminalState) {
@@ -1615,6 +2702,37 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     };
   }
 
+  // An agent with no tool to do its work in this process (agentCfgHasNoUsableTools), such as one
+  // whose tools are all bridged from an MCP server that is down. Routing no longer offers it, but a
+  // delegation that names it still reached the run below, which keeps only the registered tools
+  // without saying so: process_memory_keeper, named while processmem was unreachable, ran with
+  // read_shared_facts and share_finding and reported success (E2E 2026-10-08,
+  // guards-list-files-on-a-file). It fails here instead, before any model call and without an
+  // outcome record, and names the tools it lacks, so the delegation can pick another agent.
+  if (agentCfgHasNoUsableTools(agentCfg)) {
+    const unusable = agentCfgDomainTools(agentCfg);
+    const named = unusable.length > 8 ? `${unusable.slice(0, 8).join(", ")} (+${unusable.length - 8} more)` : unusable.join(", ");
+    log.warn({ agentName: opts.agentName, unusable }, "Refusing a sub-agent run: none of the agent's tools is available in this process");
+    return {
+      output: `Sub-agent '${opts.agentName}' cannot run: none of the tools it works with is available in this process (${named}). It did no work. Give this task to another agent.`,
+      stats: {
+        agentName: opts.agentName,
+        sessionId: `sub:${opts.parentSessionId}:${opts.agentName}:no-tools`,
+        promptChars: 0,
+        userContentChars: opts.task.length + (opts.context?.length ?? 0),
+        toolCount: 0,
+        toolNames: [],
+        iterations: 0,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+        model: "",
+        capabilities: agentCfg.capabilities ?? [],
+        outcome: "failure",
+        terminalState: "missing_tools",
+      },
+    };
+  }
+
   // Coordinator agents (those with run_task_graph / parallel_delegate) orchestrate
   // nested sub-agents whose cumulative runtime can approach the full turn budget.
   // Give them a much higher default floor so adaptive timeouts based on *shorter*
@@ -1632,7 +2750,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // budget) for agents whose deliverable legitimately takes a long time — an
   // explicit numeric caller override (turnTimeoutOverrideMs) still wins.
   const agentTurnTimeout = agentCfg.turnTimeoutMs as number | "unbound" | undefined;
-  const agentUnbounded = agentTurnTimeout === "unbound";
   const agentTurnTimeoutMs = typeof agentTurnTimeout === "number" ? agentTurnTimeout : undefined;
   const defaultTimeoutMs = agentTurnTimeoutMs ?? (isCoordinatorAgent ? coordinatorDefaultMs : leafDefaultMs);
   // No adaptive budget when the caller set an override or the agent declared an
@@ -1640,8 +2757,33 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   const adaptiveTimeout = opts.turnTimeoutOverrideMs === undefined && agentTurnTimeout === undefined
     ? computeAdaptiveSubAgentTimeoutMs(opts.agentName, opts.workspacePath, defaultTimeoutMs)
     : null;
-  const resolvedTurnTimeoutMs = opts.turnTimeoutOverrideMs
-    ?? (agentUnbounded ? 0 : agentTurnTimeoutMs)
+  // A caller-supplied budget is a CEILING ("do not outlive my turn"), never a GRANT
+  // ("you may run this long"), so honour the SMALLER of it and the agent's own declared
+  // budget. "unbound" declares no self-limit, so there the caller's ceiling stands alone.
+  //
+  // THIS IS A POLICY CHOICE, NOT A BUG FIX, and an earlier comment here claimed otherwise:
+  // it blamed run f08195d2 on an ephemeral's declared 300_000 being replaced by ~1.5M ms.
+  // That was false and is worth recording so it is not re-derived. Neither ephemeral entry
+  // point passes turnTimeoutOverrideMs at all — tools/ephemeral-agent-factory.ts puts
+  // turnTimeoutMs inside inlineConfig (:403, :798) and calls runSubAgentWithStats with no
+  // override — so callerCeilingMs was `undefined` there and the plain `??` chain already
+  // resolved 300_000. That run overran because the providers orphaned the abort signal the
+  // instant the stream opened, so the deadline was armed and could not reach the transport.
+  // That defect is fixed in the providers; this line had nothing to do with it.
+  //
+  // What it IS: `subAgents.<name>.turnTimeoutMs` was inert on the delegate_to_agent path.
+  // gateway/rpc.ts:842 sets turnTimeoutOverrideMs on EVERY turn (the whole gateway turn
+  // budget, 1_800_000 by default — not the remaining time), runtime.ts:1399 threads it onto
+  // the ToolContext, and tools/sub-agent.ts:1951 forwards it to every delegation. So a
+  // documented per-agent knob was silently overwritten on every delegated run: researcher's
+  // 600_000 and coder's 900_000 became 1_800_000. Taking the minimum makes the knob mean
+  // something. Costs: `--timeout 3600` no longer stretches an agent past its own declaration
+  // (use the effort dial or the agent's config, which is where a per-agent budget belongs),
+  // and the E18 soft-deadline nudge — derived in a DIFFERENT module — had to move onto the
+  // same rule or it would land after a hard deadline that is now often earlier. Both sides
+  // now call resolveTurnBudgetMs so they cannot drift again.
+  const callerCeilingMs = opts.turnTimeoutOverrideMs;
+  const resolvedTurnTimeoutMs = resolveTurnBudgetMs({ callerCeilingMs, agentTurnTimeout })
     ?? adaptiveTimeout?.timeoutMs
     ?? defaultTimeoutMs;
   // D3 (orchestration.clampSubAgentTimeoutToParent, default off): never hand a sub-agent more time
@@ -1654,6 +2796,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     : resolvedTurnTimeoutMs;
   const turnTimeoutMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0 ? effectiveTurnTimeoutMs : undefined;
   const sanitizedTask = sanitizeSubAgentTask(agentCfg.tools, opts.task);
+  const userWordsBlock = userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, sanitizedTask, opts.context);
   const sourceSensitiveTask = buildDynamicTurnGuidance(sanitizedTask)?.sourceSensitive === true;
   // Fix 4: detect when this task was routed via the no-specialist-match
   // discovery fallback. The taskTitle marker is set by both the runtime-side
@@ -1686,16 +2829,172 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     }
   }
-  let turnTimeoutReached = false;
-  const timeoutHandle = turnTimeoutMs
-    ? setTimeout(() => { turnTimeoutReached = true; }, turnTimeoutMs)
-    : undefined;
-  // The wall-clock timeout is a stop-after-current-operation deadline, not
-  // an abort signal for the provider/tool call currently in flight. External
-  // cancellation still aborts immediately through opts.signal.
-  const signal = opts.signal;
-
   const subSessionId = `sub:${opts.parentSessionId}:${opts.agentName}:${Date.now()}`;
+  // The run's context was established by runSubAgentWithStats (which cannot know this id
+  // yet — it embeds a timestamp minted here). Attach it now so every model call this run
+  // makes stamps its provider row with THIS sub-session rather than the parent turn's.
+  attachRequestSessionId(subSessionId);
+
+  let turnTimeoutReached = false;
+  // The deadline now ABORTS the in-flight completion instead of only latching a
+  // boolean. With the output ceiling gone, a token budget can no longer stop a
+  // runaway generation — the wall clock is the only real bound, and a latch read
+  // between iterations cannot enforce it against a call that never returns.
+  //
+  // RE-ARMABLE, deliberately. `turnTimeoutReached` is a boolean that the "unbounded"
+  // grant clears below; an aborted AbortController can never be un-aborted. A single
+  // permanent controller would therefore turn the grant — the dock's "let it finish
+  // naturally", and the max-effort tier's silent equivalent — into a death sentence:
+  // every later model call would reject instantly on the already-aborted signal and
+  // be reported as the very timeout the grant was supposed to suspend (audit
+  // 2445da2e, again). The deadline stays fully in force for every run that was NOT
+  // granted unbounded — those never touch either escape hatch below.
+  let deadlineAc = new AbortController();
+  // Signal for the MAIN model call ONLY. Deliberately not used for tool calls nor
+  // for the post-deadline synthesis passes (attemptTimeoutSynthesis /
+  // attemptPreDeadlineSynthesis, which compose opts.signal with their own grace
+  // controller): those must still run AFTER the deadline fires, or the accumulated
+  // evidence is destroyed by the very mechanism meant to preserve it.
+  // No turnTimeoutMs means no deadline is ever armed (an agent may declare
+  // turnTimeoutMs:"unbound" precisely to say so). Composing deadlineAc in anyway would
+  // hand every such call a signal that can never fire — inventing an AbortSignal where
+  // the contract is "there is no deadline here", and hiding that the run is unbounded
+  // from anything that inspects the signal.
+  const composeLlmSignal = (): AbortSignal | undefined => {
+    if (!turnTimeoutMs) return opts.signal;
+    return opts.signal ? AbortSignal.any([opts.signal, deadlineAc.signal]) : deadlineAc.signal;
+  };
+  let llmSignal = composeLlmSignal();
+  const signal = opts.signal;
+  // Escape hatch 1 (grant BEFORE the deadline): never fire at all. Aborting here would
+  // kill the completion the operator was just promised would finish.
+  // In-flight generation state, refreshed per chunk by the streaming hook below. Declared
+  // here because the DEADLINE reads it: a timer must be able to see that a model is writing.
+  let liveReasoningChars = 0;
+  let liveLoopSuspected = false;
+  // When the in-flight stream last delivered anything, and whether one is running at all.
+  // liveReasoningChars restarts at zero each iteration, so it cannot distinguish a young
+  // generation from a dead one; this can.
+  let lastStreamProgressAt = 0;
+  /** Reasoning chars at the last liveness heartbeat sent to the parent. */
+  let lastHeartbeatChars = 0;
+  let streamInFlight = false;
+  let deadlineExtensions = 0;
+  // THE WALL THAT ACTUALLY APPLIES. The soft deadline and the pre-deadline synthesis both
+  // computed their trigger from the ORIGINAL turnTimeoutMs, so a run whose hard deadline the
+  // liveness probe had already extended twice was still wrapped up on the original schedule.
+  // Run 10 was cut at iteration 4, mid-repair, having just been judged on_track twice.
+  let effectiveDeadlineAt = turnTimeoutMs ? Date.now() + turnTimeoutMs : undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const onDeadline = (): void => {
+    if (longRunningGenerationManager.isUnbounded(subSessionId)) {
+      log.info(
+        { agentName: opts.agentName, runSessionId: subSessionId, turnTimeoutMs },
+        "Turn deadline suppressed — this run was granted unbounded budget",
+      );
+      deadlineArmed = false;
+      return;
+    }
+    // A person is answering a question this run (or one it started) asked; the wait's end moves
+    // the deadline by the wait's length and re-arms it (humanWaits, below).
+    if (humanWaits.isWaiting()) {
+      timeoutHandle = setTimeout(onDeadline, HUMAN_WAIT_RECHECK_MS);
+      return;
+    }
+    // THE DEADLINE IS A LIVENESS PROBE, NOT A BUDGET.
+    //
+    // The fifth timer to end the same productive step. `coder` reasoned 52,116 characters
+    // across two iterations composing the fills for its markers and this deadline cut it at
+    // 891,072 ms of its 900,000 ms budget, before one edit_file was emitted. A clock cannot
+    // see that a model is working — but the stream can, and now says so.
+    //
+    // No slice limit: tuning a clock was the mistake five times over. A run producing
+    // non-circling text is working, and is stopped by the things that can actually see that
+    // — the loop detector, the supervisor, maxIterations, inactivity, the ceiling, the
+    // operator. What remains here is the one judgement a timer can make honestly: nothing
+    // is being produced.
+    const msSinceLastProgress = streamInFlight && lastStreamProgressAt > 0
+      ? Date.now() - lastStreamProgressAt
+      : undefined;
+    if (shouldDeferDeadline({
+      liveReasoningChars,
+      liveLoopSuspected,
+      minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS,
+      msSinceLastProgress,
+      progressWindowMs: DEADLINE_LIVENESS_RECHECK_MS,
+    })) {
+      deadlineExtensions++;
+      effectiveDeadlineAt = Date.now() + DEADLINE_LIVENESS_RECHECK_MS;
+      logAudit("progress_verifier_intervened", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        trigger: "timer",
+        verdict: "on_track",
+        action: "deadline_extended",
+        reason: "the turn deadline fired while the generation was still producing non-circling text",
+        liveReasoningChars,
+        msSinceLastProgress,
+        recheckMs: DEADLINE_LIVENESS_RECHECK_MS,
+        recheckCount: deadlineExtensions,
+      }, { sessionId: opts.parentSessionId, severity: "info" });
+      timeoutHandle = setTimeout(onDeadline, DEADLINE_LIVENESS_RECHECK_MS);
+      return;
+    }
+    turnTimeoutReached = true;
+    deadlineArmed = false;
+    // Only reachable when a deadline was armed, which requires a positive budget; the
+    // fallback keeps the abort well-typed without inventing a second source of truth.
+    deadlineAc.abort(new DeadlineAbort(turnTimeoutMs ?? 0));
+  };
+  if (turnTimeoutMs) timeoutHandle = setTimeout(onDeadline, turnTimeoutMs);
+  // A PERSON ANSWERING IS NOT A STALLED RUN. A tool waiting on the person's answer produces
+  // nothing, and every clock here reads "nothing" as dead: the deadline latched while the card
+  // was open, and the run came back from the answer straight into timeout synthesis instead of
+  // doing what the person had just configured. While a wait under this run is open the deadline
+  // and the supervisor hold; when it ends, its length moves every wall this run measures — the
+  // hard deadline, the pre-deadline synthesis window, the caller's soft deadline — by exactly
+  // that much.
+  let deadlineArmed = Boolean(turnTimeoutMs);
+  let humanWaitCreditMs = 0;
+  const humanWaits = trackHumanWaits(subSessionId, (waitedMs) => {
+    humanWaitCreditMs += waitedMs;
+    if (effectiveDeadlineAt === undefined) return;
+    effectiveDeadlineAt += waitedMs;
+    if (!deadlineArmed) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(onDeadline, Math.max(0, effectiveDeadlineAt - Date.now()));
+  });
+  // Escape hatch 2 (grant AFTER the deadline already fired): swap in a fresh, un-aborted
+  // controller so the run can actually call the model again. Nothing re-arms the timer —
+  // an unbounded grant suspends the deadline for good, exactly as its comment promises;
+  // maxIterations, the provider's own stream cap and the progress verifier stay as bounds.
+  const rearmDeadlineForUnboundedGrant = (): void => {
+    deadlineAc = new AbortController();
+    llmSignal = composeLlmSignal();
+  };
+  // Progress-supervisor sampling timer (assigned just before the agent loop, cleared
+  // in this function's `finally`). Declared out here, next to `timeoutHandle`, purely
+  // so the teardown can reach it.
+  let supervisorTimer: ReturnType<typeof setInterval> | undefined;
+  // The warden's emergency-stop registration for this run (registered beside the supervisor
+  // timer, removed in the same `finally`).
+  let unregisterWardenStop: (() => void) | undefined;
+  // The re-warm of this run's head (agents.performance.subAgentHeadRewarm): created once the head
+  // is built, told of the run's end in the `finally` — every return and every throw passes there.
+  let headRewarm: SubAgentHeadRewarm | null = null;
+
+  // Auto-share distillations + stores in flight (see autoShareUsefulFinding). Declared out
+  // here, next to the timers, because the run's `finally` is the one point every return AND
+  // every throw passes through: a delegated result must not reach the parent before the
+  // findings it gathered are in shared facts. joinPendingShares is also called wherever this
+  // run itself READS shared facts (oversight check, facts-first synthesis, the outcome rule).
+  // Abort semantics are the distill call's own 60 s deadline (DISTILL_CALL_DEADLINE_MS) — no
+  // new timeout here.
+  const pendingShares: Promise<void>[] = [];
+  const joinPendingShares = async (): Promise<void> => {
+    if (pendingShares.length === 0) return;
+    await Promise.allSettled(pendingShares.splice(0));
+  };
 
   // Open a checkpoint for this run. The resume side of this system was complete —
   // context rebuilding, gateway routes, dashboard — but NOTHING ever wrote one, so
@@ -1718,6 +3017,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
   // in the finally below; request_human_assist flips it to "needs help" on a
   // CAPTCHA. Only when a browser-vnc backend is actually reachable.
   let browserSessionId: string | undefined;
+  // laya-browser beside an agent holding browser_click (decisions.browser); null while it is off.
+  let browserDecider: ReturnType<typeof createBrowserDeciderForRun> = null;
   if (opts.agentName === "browser_agent" && browserSessionManager.isEnabled()) {
     try {
       browserSessionId = browserSessionManager.register({
@@ -1729,7 +3030,6 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       log.warn({ err }, "Failed to register browser session for live preview");
     }
   }
-
   try {
 
     logAudit(
@@ -1737,6 +3037,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       {
         agentName: opts.agentName,
         task: sanitizedTask.slice(0, 120),
+        // Only the length: the audit log keeps no copy of what the user wrote.
+        ...(userWordsBlock ? { userWordsChars: userWordsBlock.length } : {}),
         capabilities: agentCfg.capabilities,
         configuredTools: agentCfg.tools ?? [],
         effectiveTools: effectiveToolNames ?? [],
@@ -1771,7 +3073,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // resolvedModelConfig) produce larger, more reasoned outputs at high/max effort.
     // maxTokens only ever RAISES (never shrinks an agent's intentional larger budget).
     const effortRunProfile = currentEffortProfile();
-    const modelConfig = applyEffortModelOverlay(baseModelConfig, effortRunProfile);
+    // Same overlay chain, one more layer: the per-agent total-stream backstop. An agent
+    // that emits whole files gets 45 min instead of the flat 20 (a ~30 KB artifact is ~26
+    // min of generation at the measured ~16.8 tok/s), and every agent's cap is floored
+    // above BOTH its own declared budget and the deadline this run resolved, so
+    // DeadlineAbort — which salvages AND resynthesizes — reaches the stream first.
+    // Riding on ModelConfig means it reaches the containerized worker too (it travels in
+    // the container payload as resolvedModelConfig) with no extra plumbing.
+    //
+    // `declaredTurnTimeoutMs` is passed separately from `turnTimeoutMs` on purpose: the
+    // resolved deadline is `undefined` on a max-effort or "unbound" run, and that is
+    // precisely the run where this cap is the only wall clock left, so the agent's own
+    // declaration must still be visible to it.
+    //
+    // NOTE: the synthesis-tier provider below is built from agents.defaults.model, not
+    // from this object, so a raised cap does NOT apply to the grace/soft-deadline
+    // synthesis passes. That is intended — a grace pass must stay short — but it is
+    // silent, and it only holds when a synthesis tier is actually configured (otherwise
+    // the fallback is built from THIS object with the synthesis controls swapped in).
+    const modelConfig = applyStreamCapOverlay(
+      applyEffortModelOverlay(baseModelConfig, effortRunProfile),
+      { toolNames: effectiveToolNames, turnTimeoutMs, declaredTurnTimeoutMs: agentTurnTimeoutMs },
+    );
 
     const providerEndpoint = resolveProviderEndpoint(modelConfig, config);
 
@@ -1797,27 +3120,45 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // `--network none` isolation breaks mcp__* tools (they reach their MCP
     // servers via the gateway's host-side registry), so MCP-using agents are
     // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
-    const requiresHostRegistry = (agentCfg.tools ?? []).some((t: string) =>
-      ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t),
-    );
-    const requiresGatewayServices = (agentCfg.tools ?? []).some((toolName: string) =>
-      GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => toolName.startsWith(prefix)),
-    );
     const isContainerized =
-      !requiresHostRegistry && !requiresGatewayServices && (
+      !requiresInProcessExecution(agentCfg.tools) && (
         agentCfg.container?.enabled === true ||
         (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
       );
     if (isContainerized) {
-      const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
-      await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
+      // STATIC PRE-FLIGHT — the same check the worker makes on itself (agent/container-entrypoint.ts),
+      // made here before a container is ever started. The agent-worker process registers only the
+      // tools in WORKER_REGISTERED_TOOL_NAMES (today: none, because it imports no tool module), so an
+      // agent whose declared tools are not in that set would reach an empty registry in the worker and
+      // could only answer in prose. Refuse now, shaping the SAME honest failure the worker would write
+      // as the runner's "container error:" string so looksLikeContainerLevelFailure classifies it as a
+      // failure below. We do NOT fall back to in-process execution: start() refuses that bargain
+      // deliberately (it would erase the isolation the operator enabled defaultContainerized for), so a
+      // worker that cannot run the agent's tools must surface as a FAILED delegation the retry/fallback
+      // cascade acts on — never a silent downgrade.
+      const missingWorkerTools = (agentCfg.tools?.length ?? 0) > 0
+        ? missingContainerTools(agentCfg.tools, WORKER_REGISTERED_TOOL_NAMES)
+        : [];
       let containerRun;
-      try {
-        const containerReason = agentCfg.container?.enabled ? "explicit" : "defaultContainerized";
-        log.info({ agentName: opts.agentName, maxConcurrent, containerReason }, "Dispatching to containerized sub-agent");
-        containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
-      } finally {
-        releaseSlot(opts.agentName);
+      if (missingWorkerTools.length > 0) {
+        containerRun = {
+          output: `Sub-agent '${opts.agentName}' container error: ${formatMissingContainerToolsFailure(opts.agentName, missingWorkerTools, agentCfg.tools!.length)}`,
+          metrics: { containerRuntimeMs: 0, heartbeatSupported: false },
+        };
+        log.error(
+          { agentName: opts.agentName, missing: missingWorkerTools.slice(0, 20), declared: agentCfg.tools!.length },
+          "Refusing containerized dispatch — the agent-worker registers none of this agent's tools",
+        );
+      } else {
+        const maxConcurrent = agentCfg.maxConcurrent ?? DEFAULT_CONCURRENCY;
+        await acquireSlot(opts.agentName, maxConcurrent, opts.parentSessionId);
+        try {
+          const containerReason = agentCfg.container?.enabled ? "explicit" : "defaultContainerized";
+          log.info({ agentName: opts.agentName, maxConcurrent, containerReason }, "Dispatching to containerized sub-agent");
+          containerRun = await runSubAgentInContainer({ ...opts, signal }, agentCfg, modelConfig, providerEndpoint.baseUrl, providerEndpoint.apiKey);
+        } finally {
+          releaseSlot(opts.agentName);
+        }
       }
       // Detect container-level failures (spawn errors, non-zero exits, container
       // crashes, timeouts) that the runner reports as a failure-prefixed string
@@ -1873,37 +3214,79 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const provider = createChatProvider(modelConfig, providerEndpoint);
     // E25: prefer the synthesis-tier provider for the three sub-agent
     // synthesis paths (timeout, pre-deadline soft, max-iterations) — same
-    // rationale as runtime.ts:3127. Falls back to the primary `provider`
-    // when no tier is configured. Resolved once per run so we don't pay
-    // the lookup cost in every synthesis branch.
-    const synthProvider = getChatProviderForTier("synthesis") ?? provider;
+    // rationale as runtime.forceSynthesis. Resolved once per run so we don't
+    // pay the lookup cost in every synthesis branch.
+    // Either way the pass runs thinking-off (SYNTHESIS_CALL_CONTROLS): the tier
+    // call carries the override, and with no tier the fallback is the worker's
+    // OWN model config and endpoint with only the controls swapped — not `provider`
+    // itself, which took the worker's thinking into a prose-only pass (824 s over
+    // five calls, ~20 % of it answer).
+    const synthProvider = getChatProviderForTier("synthesis", SYNTHESIS_CALL_CONTROLS)
+      ?? createChatProvider({ ...modelConfig, ...SYNTHESIS_CALL_CONTROLS }, providerEndpoint);
+
+    // Iteration cap: explicit --iter override wins, then the active effort profile's
+    // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
+    // Resolved HERE (before the prompt is assembled) because buildStagedBuildFirstStepInstruction
+    // sizes the run's fill-pass budget from it, and that instruction rides in the USER turn.
+    // The staged-build DIRECTIVE in the system head does not: it is the frozen cache key and
+    // carries no run-derived number at all (sub-agent-prompt-guidance.ts). Consumers: that
+    // instruction and the loop below.
+    const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
+    // `let` for one reason: a step laya-browser takes in the model's place runs as an iteration
+    // but costs no model call, so it gives that iteration back (decisions.browser, bounded there).
+    let maxIterations = opts.maxIterationsOverride === 0
+      ? Number.MAX_SAFE_INTEGER
+      : (opts.maxIterationsOverride
+          ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
+          ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
 
     // Build system prompt
-    const today = new Date().toLocaleDateString("en-US", {
+    const todayDate = new Date();
+    const today = todayDate.toLocaleDateString("en-US", {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
     });
     const flowGuidance = formatFlowMemoryGuidance(opts.workspacePath, sanitizedTask, {
       targetAgent: opts.agentName,
       limit: 3,
     });
-    const memoryGuidance = await formatScopedMemoryGuidance(opts.workspacePath, sanitizedTask, {
-      sessionId: opts.parentSessionId,
-      targetAgent: opts.agentName,
-      scopes: ["session", "workspace", "user", "agent"],
-      limit: 4,
-      maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
-    });
-    // Procedural memory for specialists: surface relevant learned procedures for
-    // this specific delegated task. Relevance-gated (empty when nothing matches)
-    // and bounded, mirroring the flow/memory guidance above.
-    const skillGuidance = config.skillLibrary.enabled
-      ? await formatSkillGuidance(opts.workspacePath, sanitizedTask, {
-          maxChars: Math.min(1_200, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
-          // Agent-scoped: boost + surface procedures explicitly tagged for this
-          // specialist so its own learned skills reliably reach it.
-          agent: opts.agentName,
-        })
-      : "";
+    // THE RUN'S SETUP LOOKUPS START TOGETHER (finding 2026-10-05). Memory guidance, skill guidance,
+    // the tool order and the peer-message claim each wait on their own round-trip — three of them
+    // an embedding — and none reads another's result, yet they ran one after
+    // another before the run's first model call. They are started here, overlap the staged-build
+    // page checks below as well, and are awaited once, where the prompt is assembled.
+    const setupLookups = Promise.all([
+      formatScopedMemoryGuidance(opts.workspacePath, sanitizedTask, {
+        sessionId: opts.parentSessionId,
+        targetAgent: opts.agentName,
+        scopes: ["session", "workspace", "user", "agent"],
+        limit: 4,
+        maxChars: Math.min(1_400, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+      }),
+      // Procedural memory for specialists: surface relevant learned procedures for
+      // this specific delegated task. Relevance-gated (empty when nothing matches)
+      // and bounded, mirroring the flow/memory guidance above.
+      config.skillLibrary.enabled
+        ? formatSkillGuidance(opts.workspacePath, sanitizedTask, {
+            maxChars: Math.min(1_200, Math.round((config.agents.performance?.promptBudgetChars ?? 32_000) * 0.06)),
+            // Agent-scoped: boost + surface procedures explicitly tagged for this
+            // specialist so its own learned skills reliably reach it.
+            agent: opts.agentName,
+          })
+        : Promise.resolve(""),
+      // Get available tools for this agent, in the order its runs send them. E20: ranked by
+      // semantic relevance — the RANKING KEY note where the order is used, below, says why it is held.
+      orderSubAgentTools({
+        agentName: opts.agentName,
+        rankingKey: agentCfg.description?.trim() || opts.agentName,
+        tools: getToolsAsLLMDefs(effectiveToolNames),
+        minTools: effectiveOrchestration().toolRerankMinTools ?? 6,
+      }),
+      claimPeerMessagesForRun(subSessionId, opts.agentName, effectiveTurnTimeoutMs),
+      // Not the shared facts: they are read where the first message is composed, after the head
+      // re-warm join and the page checks — facts a sibling publishes meanwhile belong in it.
+    ]);
+    // Awaited below; this only keeps a rejection that lands before then from going unhandled.
+    setupLookups.catch(() => {});
     const taskModeGuidance = buildTaskModeGuidance(opts.agentName, sanitizedTask);
     const modelExecutionGuidance = buildModelExecutionGuidance(modelConfig.primary, modelConfig.enableThinking);
     const toolInventoryGuidance = buildSubAgentToolInventory(effectiveToolNames);
@@ -1933,23 +3316,219 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         + "Narrow scope, batch tool calls, and finish quickly. Do not spawn further delegations "
         + "or parallel tool fan-out unless strictly required to complete the task."
       : "";
-    const systemPrompt = agentCfg.systemPrompt
-      ? `${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`
-      : `You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}${discoveryFallbackNotice ? `\n\n${discoveryFallbackNotice}` : ""}${degradedNudge ? `\n\n${degradedNudge}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${flowGuidance ? `\n\n${flowGuidance}` : ""}${skillGuidance ? `\n\n${skillGuidance}` : ""}${memoryGuidance ? `\n\n${memoryGuidance}` : ""}`;
+    // Staged artifact builds. A write-capable specialist handed a whole-artifact SPEC
+    // (rather than an instruction) reasons for tens of thousands of characters and never
+    // reaches a tool call — the measured f08195d2 failure: 20,129 completion tokens,
+    // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
+    // classifier is structural (holds write_file AND edit_file; the task longer than
+    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input excluded unless the run
+    // holds a builder tool: stagedBuildTaskChars) so no topic words decide it, and it is
+    // split across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
+    // record and the on-disk salvage reporting on the interrupted paths — while
+    // `stagedArtifactBuildDirective` is what actually changes the prompt the model sees.
+    // BOTH default ON: run 3959f3ac measured the staged shape working (13 iterations, 5
+    // files, reasoning collapsed from 23,876 chars on the plan pass to ~100-1,300 per fill
+    // pass) while `directiveInjected: false` proved the directive itself had never reached
+    // the model.
+    const stagedBuildFlags = effectiveOrchestration();
+    const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
+      && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
+    // RESUME vs FRESH. The classifier above reads task size and tool capability, which cannot
+    // distinguish "build me X" from "X exists, finish it" — and run 2dc5832c is what that costs:
+    // a finish-it delegation received the skeleton directive and answered it with a skeleton,
+    // destroying six subsystems that thirteen prior iterations had filled. The distinguishing
+    // evidence is not in the task text, it is on disk.
+    //
+    // Scoped to this conversation. `generated/` is shared by every turn the deployment has ever
+    // run, so unscoped this evidence says "some turn, ever, left an unfinished build" — which
+    // handed a fresh Snake build "RESUME AN EXISTING BUILD — DO NOT START OVER" pointed at last
+    // week's Tetris, complete with its marker lines as the edits to make.
+    const conversationScope: ArtifactScanScope = {
+      modifiedSinceMs: Math.min(
+        sessionArtifactEpoch(opts.parentSessionId ?? subSessionId),
+        Date.now() - RESUMABLE_ARTIFACT_MAX_AGE_MS,
+      ),
+    };
+    // And scoped to the artifacts THIS run builds (ownsResumeEvidence). Conversation scope alone
+    // handed c297c5ea's researcher "FIX THE EXISTING BUILD" about content_writer's deck. Every
+    // later reader of `resumeScope` — the marker and page corrections, the honest-outcome check —
+    // then judges this run by its own artifacts, not by a sibling's.
+    const artifactConversation = artifactConversationOf(subSessionId);
+    let evidenceSetAside = false;
+    const resumeScope: ArtifactScanScope = {
+      ...conversationScope,
+      acceptPath: (absPath) => {
+        const ours = ownsResumeEvidence({
+          agentName: opts.agentName,
+          toolNames: effectiveToolNames,
+          lastWriter: artifactLastWriter(artifactConversation, absPath),
+        });
+        if (!ours) evidenceSetAside = true;
+        return ours;
+      },
+    };
+    const stagedResume = stagedBuildCandidate
+      ? findUnfilledStubFiles(opts.workspacePath, resumeScope)
+      : { files: [] as string[], count: 0, markers: [] as StubMarkerSite[] };
+    // A BUILD IS NOT DONE BECAUSE THE PLACEHOLDERS ARE GONE.
+    //
+    // Resume detection asked one question — are there unfilled markers on disk — so a build
+    // with none read as finished and there was nothing to hand back. Run 9 left a page whose
+    // first script dies on a duplicate declaration; the run before it left one that runs
+    // and paints its playfield off the side of its own canvas. Zero markers both times, so
+    // the orchestrator saw a completed artifact and stopped, and the user was the first
+    // thing in the loop to actually look at it.
+    //
+    // Executing the built page answers the question the marker count was standing in for.
+    // Only consulted when the markers are gone: while they remain there is already work
+    // queued, and a half-built page failing is expected rather than informative.
+    const brokenPages = stagedBuildCandidate && stagedResume.count === 0
+      ? await findBrokenBuiltPages(opts.workspacePath, resumeScope)
+      : [];
+    const isResumeBuild = stagedResume.count > 0 || brokenPages.length > 0;
+    // ANOTHER AGENT'S BUILD IS UNDER WAY, AND THIS RUN IS NOT ITS BUILDER. Neither directive fits:
+    // RESUME would hand it someone else's artifact, and FRESH ("SKELETON: one write_file") is how
+    // that same researcher came to write the deck's first skeleton at 01:23 — the whole staged
+    // build was started by the run that should only have researched it. Such a run is not a
+    // staged build at all: no directive, and none of the marker/page corrections below. Checked
+    // only when the builder filter actually set a file aside, so a builder pays nothing extra.
+    const stagedBuildWithheld = stagedBuildCandidate && !isResumeBuild && evidenceSetAside
+      && (findUnfilledStubFiles(opts.workspacePath, conversationScope).count > 0
+        || (await findBrokenBuiltPages(opts.workspacePath, conversationScope)).length > 0);
+    const isStagedBuild = stagedBuildCandidate && !stagedBuildWithheld;
+    // A FRESH build by a run that holds a one-shot assembler (ONE_SHOT_ASSEMBLER_TOOLS) gets no
+    // skeleton directive, no first-step line in the user turn, and no skeleton in the burn
+    // correction: one generate_* call is its build, and "one write_file" sent content_writer past
+    // generate_presentation to a hand-written deck. A resume is unchanged, and so is the rest of the
+    // staged-build handling (marker and page corrections, salvage, the honest outcome).
+    const assemblerBuild = isStagedBuild && !isResumeBuild && holdsOneShotAssembler(effectiveToolNames);
+    const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true && !assemblerBuild
+      ? (isResumeBuild
+          ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers, brokenPages)
+          : buildStagedArtifactBuildGuidance())
+      : "";
+    if (stagedBuildCandidate) {
+      logAudit(
+        "sub_agent_staged_build_detected",
+        {
+          agentName: opts.agentName,
+          // The size the classifier compared with the threshold (stagedBuildTaskChars).
+          taskChars: stagedBuildTaskChars(effectiveToolNames, sanitizedTask),
+          threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
+          maxIterations,
+          directiveInjected: stagedBuildGuidance.length > 0,
+          // "withheld": a build of another agent's is under way and this run is not its builder.
+          mode: stagedBuildWithheld ? "withheld" : isResumeBuild ? "resume" : "fresh",
+          unfilledMarkers: stagedResume.count,
+          markerFiles: stagedResume.files.slice(0, 4),
+          brokenPages: brokenPages.slice(0, 3),
+        },
+        { sessionId: subSessionId, severity: "info" },
+      );
+    }
+    // The staged-build directive leads, the agent's own systemPrompt follows. It is
+    // GENERIC text and several agent prompts close on a stricter finish contract
+    // (backend_coder: serve_app + verify_app + return the live /api/app/<id>/ URL);
+    // appended last, the directive's own "FINISH ... report the path" got the final
+    // word and told those agents the files on disk were the deliverable.
+    // THIS STRING IS A CACHE KEY. Measured on the serving cluster 2026-09-08: llama.cpp
+    // reuses KV state for the longest BYTE-identical prefix and holds many prefixes at once
+    // (six distinct 4.7k-token prefixes stayed simultaneously warm, 0.41 s each). A prefix
+    // that repeats exactly re-prefills in 0.41 s; one that differs ANYWHERE re-prefills in
+    // full — 40 s on deepseek-v4-flash. On that template the tool block renders directly after
+    // this system message, so a difference here also re-prefilled the tool schemas, which are the
+    // bulk of the prompt (infrastructure_agent: 40,717 chars of schema to 2,394 of prompt). The
+    // deployed Qwen3.6 template renders the tools AHEAD of it (turn-system-prompt.ts), and on that
+    // hybrid model a change anywhere in the head still keeps 0% of the cache (live probe E2).
+    //
+    // So the head holds only what is a function of the AGENT and the day: its own prompt,
+    // its model, its tool inventory, its name/workspace/date. Everything derived from the
+    // TASK moves to the tail — flow/skill/memory guidance are RAG retrievals keyed on the
+    // task text, so they differ on every run and used to invalidate everything behind them.
+    // composeSubAgentMessages already delivers the per-iteration nudges after the history
+    // for the same reason; this is the same mechanism, not a new one.
+    //
+    // stagedBuildGuidance deliberately does NOT move: the comment above explains that it has
+    // to lead, and behind the agent's own prompt it would again outrank its finish contract.
+    //
+    // It is instead made INVARIANT. The FRESH directive used to interpolate its pass budget
+    // from maxIterations, which the effort tier changes (14 configured, 200 under tier max),
+    // so each tier owned its own cold head. What establishes the cost is the station probe:
+    // a byte-identical head restored from host RAM after 8 evictions (16 tokens processed),
+    // against a full cold prefill for a head differing by one number. (Two parallel
+    // researchers on 2026-09-12 were once cited here as the incident; they cannot isolate it
+    // — they ran CONCURRENTLY, and concurrent requests do not share the prefix cache on this
+    // backend, so both were cold regardless of the head.) The count now rides in the user
+    // turn (below); the fresh directive is a constant string, so a fresh staged build's head
+    // is again a function of the agent only.
+    // The RESUME directive is still per-run — it names the marker count, files and sites read
+    // off disk — and that is by design: the located old_strings are what stopped run 6 paging
+    // a 446-line file for seven iterations. Such a run is computed once (stagedResume/brokenPages
+    // resolve before the iteration loop), so it still reuses its prefix ACROSS its own
+    // iterations and only loses reuse across runs.
+    // The task-derived half of what used to live in the system prompt: three RAG retrievals
+    // keyed on the task text, plus the routing and warden notices for this run. All five are
+    // constant for the run and none of them belong in the frozen head.
+    //
+    // They ride with the TASK (history[0]), not in a trailing message. Both positions sit
+    // behind the head, so either keeps the tool block cached — the difference is RECURRENCE.
+    // A trailing message sits after a history that grows every iteration, so it falls outside
+    // the reusable prefix and re-prefills on EVERY call: ~1,000 tokens x maxIterations (25 for
+    // browser_agent and computer_use_agent) can cost more than the single cold head+tool
+    // prefill this whole change buys back. history[0] is inside the per-run prefix, so it is
+    // prefilled once; the trimmer pins it (sub-agent-history.ts:219) so it cannot be dropped;
+    // and buildStagedBuildFirstStepInstruction already attaches run-constant text there.
+    //
+    // Gated on the SAME flag the orchestrator uses for the same decision
+    // (orchestration.stablePromptPrefix, default on). With the flag off, the blocks go back
+    // inside the system prompt, ahead of the tool schemas, as they were.
+    const stablePrefix = effectiveOrchestration().stablePromptPrefix ?? true;
+    // The setup lookups started above, awaited once.
+    const [memoryGuidance, skillGuidance, orderedTools, peerMessages] = await setupLookups;
+    const taskDerivedContext = [
+      flowGuidance,
+      skillGuidance,
+      memoryGuidance,
+      discoveryFallbackNotice,
+      degradedNudge,
+    ].filter((entry) => entry.trim().length > 0);
+    const legacyPromptSuffix = stablePrefix ? "" : taskDerivedContext.map((entry) => `\n\n${entry}`).join("");
+    const runContextBlock = stablePrefix && taskDerivedContext.length > 0
+      ? `\n\n${taskDerivedContext.join("\n\n")}`
+      : "";
 
-    // Get available tools for this agent. E20: rerank by semantic
-    // relevance to the current task so the model sees the most relevant
-    // tools first — useful when the tool list is large and the model's
-    // attention budget is finite.
-    let tools = getToolsAsLLMDefs(effectiveToolNames);
+    const systemPrompt = agentCfg.systemPrompt
+      ? `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}${agentCfg.systemPrompt}${modelExecutionGuidance ? `\n\n${modelExecutionGuidance}` : ""}${taskModeGuidance ? `\n\n${taskModeGuidance}` : ""}${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${legacyPromptSuffix}`
+      : `${stagedBuildGuidance ? `${stagedBuildGuidance}\n\n` : ""}You are a specialized AI sub-agent named "${opts.agentName}". Complete the given task and return your result.${toolInventoryGuidance ? `\n\n${toolInventoryGuidance}` : ""}${agentDiscoveryGuidance ? `\n\n${agentDiscoveryGuidance}` : ""}\n\nAgent name: ${opts.agentName}\nCurrent workspace: ${opts.workspacePath}\nToday's date: ${today}${legacyPromptSuffix}`;
+
+    // Get available tools for this agent. E20: rerank by semantic relevance so the model sees
+    // the most relevant tools first — useful when the tool list is large and the model's
+    // attention budget is finite. Ranked in setupLookups above (orderSubAgentTools).
+    let tools = orderedTools;
     // Rerank by semantic relevance only above a toolset-size threshold (B24): a small
     // toolset fits the model's attention, so we skip the embed round-trip. The threshold is
     // configurable (orchestration.toolRerankMinTools, default 6 = the long-standing value).
-    try {
-      tools = await rerankToolsForTask(tools, sanitizedTask, effectiveOrchestration().toolRerankMinTools ?? 6);
-    } catch (err) {
-      log.debug({ err, agentName: opts.agentName }, "Tool rerank failed — using registration order");
-    }
+    //
+    // THE RANKING KEY IS THE AGENT, NOT THE TASK. Ranked against the task text, the same
+    // agent got a different tool ORDER for every task it was given. Measured directly against
+    // the serving cluster — one system prompt, twenty tool schemas, only the ORDER changed:
+    //
+    //   tools in order A, first sight ....... 46.72 s   4561 tok reprocessed
+    //   the same order A again ..............  0.43 s      4 tok   WARM
+    //   the SAME tools, rotated ............. 47.17 s   4561 tok   cold
+    //   back to order A .....................  0.42 s      4 tok   WARM
+    //
+    // 4,561 of those tokens ARE the tool block, so it sits inside the cached prefix and a
+    // rotation costs a full cold prefill — 109x. Ranking against the agent's own role
+    // statement keeps the block byte-identical across all of that agent's runs, and is the
+    // better key besides: a specialist's useful tools follow from its job, not from how one
+    // task happened to be worded. 45 of the 49 configured agents carry more than
+    // toolRerankMinTools tools, so this is very nearly all of them.
+    //
+    // AND THE RANKING IS HELD (agent/sub-agent-tool-order.ts, finding 2026-10-05). Recomputed per
+    // dispatch, a failed or stalled embedding fell back to registration order — the same rotation
+    // as above, for an agent whose tools had not changed. The first full ranking per agent and
+    // tool set is reused for the process lifetime, and the embedder is not asked again.
 
     // E19 graceful-degradation ladder: if the warden flagged this session
     // with an imminent storm/flood alert, tighten the tool budget so the
@@ -1963,34 +3542,103 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       );
     }
 
+    // THE HEAD THIS RUN SENDS, as hashes (providers/prompt-head.ts). sub_agent_started cannot
+    // carry it: it is written before the staged directive, the rerank and the degraded cap above
+    // have run, and its effectiveTools is the order BEFORE the rerank — a reorder alone is a full
+    // cold prefill. In c297c5ea all 13 first calls were cold and whether content_writer's
+    // dispatches 3 and 4 shared a head could only be argued from matching restore points; with
+    // this row two dispatches with the same headHash sent the same head bytes, so a cold first
+    // call is either a changed head or an evicted one, and the log says which. The system part is
+    // hashed trimmed, which is the provider's fold of a single system message, so headHash equals
+    // the one on this run's provider_model_call rows (for a template that keeps a system role, and
+    // not on gpt-oss, whose rows also hash the `Reasoning:` line the provider puts ahead of it).
+    const head = wireHeadSignature([{ role: "system", content: systemPrompt.trim() }], tools);
+    // The provider's own estimator (the one its output budget is derived from), not a count:
+    // the first call's promptTokens minus its task is the measured figure.
+    const headTokensEst = estimatePromptTokensForRequest([{ role: "system", content: systemPrompt }], tools);
+    logAudit("sub_agent_head", {
+      agentName: opts.agentName,
+      headHash: head.headHash,
+      toolsHash: head.toolsHash,
+      systemHash: head.systemHash,
+      systemChars: head.systemChars,
+      toolCount: head.toolCount,
+      headTokensEst,
+      stagedDirective: stagedBuildGuidance ? (isResumeBuild ? "resume" : "fresh") : "none",
+    }, { sessionId: subSessionId, severity: "info" });
+
+    // THE HEAD RE-WARM (agents.performance.subAgentHeadRewarm, agent/sub-agent-head-rewarm.ts).
+    // Live probe E8: a new dispatch on this head starts cold when the previous run on it grew past
+    // ~4x the head (6x cold, 3x warm) — c297c5ea's content_writer re-dispatches paid 9-22 s each —
+    // and one head-only request as that run ends makes the next dispatches warm. Here the run
+    // joins an in-flight re-warm of its own head before its first model call: probe E6 prices a
+    // prewarm still in flight when the real call starts at +5.1 s, and a finished one saves 6.8 s.
+    headRewarm = createSubAgentHeadRewarm({
+      agentName: opts.agentName,
+      // The conversation through workflow nesting too (artifactConversationOf): in c297c5ea content_writer ran inside the
+      // sourced_presentation scene and was then delegated again by the main turn, and deriveRootSessionId, which stops at a
+      // workflow, gave the two runs two keys, so the second would not have waited for the first one's re-warm.
+      rootConversation: artifactConversationOf(subSessionId),
+      subSessionId,
+      runStartedAt,
+      headHash: head.headHash,
+      headTokens: headTokensEst,
+      tools,
+      provider,
+      providerId: providerEndpoint.providerId,
+      promptCache: modelConfig.promptCache,
+      modelPrimary: modelConfig.primary,
+    });
+    if (headRewarm) await headRewarm.joinInFlight(signal);
+
+    // A "full" agent maintains the deployment itself — it edits the config shards and runs
+    // git — so it works from the SHARED root, not from whoever asked it to. This is the one
+    // place scope and root are chosen together, which is why the exemption lives here.
+    const isFullScopeAgent = agentCfg.workspaceAccess === "full";
+    const effectiveWorkspacePath = isFullScopeAgent ? getConfig().workspacePath : opts.workspacePath;
+
     const toolContext: ToolContext = {
       sessionId: subSessionId,
-      workspacePath: opts.workspacePath,
+      workspacePath: effectiveWorkspacePath,
       // Workspace zoning: working agents see only generated/ + uploads/ (paths
       // outside re-root into generated/, mirroring the write rooting) so they
       // physically cannot wander into the platform's config zones or burn time
       // reading its docs (audit 0ac7d3fc). Core/self-maintenance agents opt in
       // to the whole workspace via workspaceAccess:"full" in their agent config.
-      workspaceScope: agentCfg.workspaceAccess === "full" ? "full" : "generated",
+      workspaceScope: isFullScopeAgent ? "full" : "generated",
       userId: opts.userId,
       ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
       allowedTools: effectiveToolNames,
       approvalCallback: opts.approvalCallback,
+      // Bound from the request context this run inherited, so it reaches every in-process depth
+      // whichever delegation path started the run; container runs never get here and have none.
+      requestUserInput: bindRequestUserInput({ requesterSessionId: subSessionId, sourceAgent: opts.agentName, signal }),
       humanInLoopSteps: opts.humanInLoopSteps,
+      // The child's own delegations report to the same progress sink as the parent's, so a nested
+      // specialist's start, finish and tool calls reach the dashboard instead of stopping one level down.
+      onSubAgentProgress: opts.onProgress,
       onComputerAction: opts.onComputerAction,
       onComputerScreenshot: opts.onComputerScreenshot,
       onComputerSessionState: opts.onComputerSessionState,
       swarmState: opts.swarmState,
       onSwarmState: opts.onSwarmState,
+      // A coordinator's specialists get the user's words, not the coordinator's paraphrase of
+      // its own paraphrase: every hop loses a little, and the constraint usually matters at the
+      // leaf that makes the call (generate_image's tier). Same object, so it is never copied.
+      turnUserWords: opts.turnUserWords,
       _turnAgentCounts: opts._turnAgentCounts,
+      _turnLoopRuns: opts._turnLoopRuns,
       _turnAgentRepeatLimitOverrides: opts._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: opts._turnTotalDelegationLimitOverride,
       _workflowExecutionStack: opts._workflowExecutionStack,
       // Propagate the parent turn's deadline so this sub-agent's OWN delegations clamp to the same
       // remaining budget (D3). Inherited unchanged — nothing can run past the turn's hard abort.
       _turnDeadlineMs: opts._turnDeadlineMs,
+      // Credited as this run's waits end, so a delegation it makes after one clamps to the moved
+      // deadline, not the one it was handed (review #14).
+      _liveTurnDeadlineMs: () => opts._turnDeadlineMs === undefined ? undefined : opts._turnDeadlineMs + humanWaitCreditMs,
       signal,
     };
 
@@ -1998,90 +3646,406 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Agents can send messages to peers via send_agent_message. Those messages
     // are queued in swarm/memory.ts and delivered here at the start of the next
     // run — giving the agent a chance to act on them without the orchestrator
-    // mediating the content.
-    let a2aContext = "";
-    let a2aMessageClaim: AgentMessageClaim | null = null;
-    try {
-      // Read from the ROOT session bucket the WRITE side targets: send_agent_message writes via
-      // deriveSharedSessionId(ctx.sessionId) (→ root), so draining the per-run CHILD subSessionId
-      // here found nothing and peer messages were silently lost. deriveRootSessionId is identical
-      // to that write-side derivation, so read and write now hit the same bucket.
-      // ADR-003 deferred ack: the claim is held open and acknowledged only when this
-      // run records a success/partial outcome — a crashed or failed run leaves the
-      // messages pending, so they redeliver instead of being silently lost.
-      // Visibility scales with THIS run's budget (2×, capped at 30 min): the claim is
-      // held for the whole run, and a static window shorter than the run would let a
-      // concurrent same-agent claim re-deliver (duplicate injection) and eventually
-      // dead-letter messages a healthy run is still processing.
-      const messageVisibilityMs = effectiveTurnTimeoutMs && effectiveTurnTimeoutMs > 0
-        ? Math.max(120_000, Math.min(2 * effectiveTurnTimeoutMs, 1_800_000))
-        : 1_800_000; // "unbound" agents get the cap
-      a2aMessageClaim = await claimAgentMessages(deriveRootSessionId(subSessionId), opts.agentName, { visibilityMs: messageVisibilityMs });
-      const pending = a2aMessageClaim.messages;
-      if (pending.length > 0) {
-        a2aContext = `\n\n## Pending messages from peer agents\n${pending
-          .map((m) => {
-            // Sanitize message content to prevent prompt injection from peer agents
-            const safeContent = sanitizeTranscriptContent("user", m.content, false);
-            return `From ${m.fromAgent} [${m.ts}]: ${safeContent}`;
-          })
-          .join("\n---\n")}`;
-        logAudit("a2a_messages_delivered", {
-          agentName: opts.agentName,
-          count: pending.length,
-          fromAgents: [...new Set(pending.map((m) => m.fromAgent))],
-        }, { sessionId: subSessionId, severity: "info", channel: "swarm" });
-      }
-    } catch (err) {
-      log.debug({ err, agentName: opts.agentName }, "Failed to consume A2A messages — swarm bus or Redis may be unavailable");
-    }
+    // mediating the content. Claimed with the other setup lookups (claimPeerMessagesForRun).
+    const a2aContext = peerMessages.context;
+    let a2aMessageClaim: AgentMessageClaim | null = peerMessages.claim;
 
+    // Read HERE, not with the setup lookups: between those and this point the run may wait up to
+    // ~8 s on its head's re-warm and on the page checks, and a fact a sibling publishes in that
+    // window would otherwise reach this run only after its first tool round, or never (2026-10-05).
+    // An in-process / Redis read, so it costs next to nothing on the path.
     const initialSharedFacts = await formatSharedFactsContext(subSessionId);
     let lastSharedFactsSignature = initialSharedFacts.signature;
     const sharedFactsContext = initialSharedFacts.content
       ? `\n\n${initialSharedFacts.content}`
       : "";
 
-    // Build initial message
-    const userContent = opts.context
-      ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}`
-      : `${sanitizedTask}${a2aContext}${sharedFactsContext}`;
+    // Build initial message. The user's words sit directly behind the task so the pairing is
+    // explicit, and only here: history[0] is never trimmed and is prefilled once per run, whereas
+    // the system head is the cache key and a trailing message would be re-read every iteration.
+    const baseUserContent = opts.context
+      ? `Context:\n${opts.context}${a2aContext}${sharedFactsContext}\n\nTask: ${sanitizedTask}${userWordsBlock}`
+      : `${sanitizedTask}${userWordsBlock}${a2aContext}${sharedFactsContext}`;
+    // Gated on the SAME condition that injects the system directive, so the two halves
+    // cannot disagree: if the directive is off, the user turn is untouched and the run
+    // behaves exactly as it did before this existed.
+    // Skeleton-first is a FRESH-build instruction only. Appending it to a resume turn is the
+    // regression that made run 2dc5832c worse rather than better: it told a model whose artifact
+    // already existed to "produce only the skeleton" and to not attempt the specification, which
+    // is precisely the write that destroyed the filled subsystems.
+    // runContextBlock is reference material, so it precedes the first-step instruction and
+    // leaves that directive the last word — the same ordering rule the staged-build comment
+    // above records for the system prompt.
+    const userContent = stagedBuildGuidance && !isResumeBuild
+      ? `${baseUserContent}${runContextBlock}${buildStagedBuildFirstStepInstruction(maxIterations, PER_PATH_EDIT_CAP)}`
+      : `${baseUserContent}${runContextBlock}`;
 
     const history: LLMMessage[] = [{ role: "user", content: userContent }];
 
-    // Iteration cap: explicit --iter override wins, then the active effort profile's
-    // sub-agent budget (0 = unbounded), then the agent's configured cap, then default.
-    const effortSubAgentIterations = effortRunProfile?.subAgentMaxIterations;
-    const maxIterations = opts.maxIterationsOverride === 0
-      ? Number.MAX_SAFE_INTEGER
-      : (opts.maxIterationsOverride
-          ?? (effortSubAgentIterations === 0 ? Number.MAX_SAFE_INTEGER : effortSubAgentIterations)
-          ?? agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS);
     let iterations = 0;
     let toolCount = 0;
     let successfulToolCount = 0;
+    // Burns seen in THIS run. Counted here rather than in the provider because the
+    // provider has no run identity — it sees one stream at a time and cannot tell a
+    // second burn from a first. See REASONING_BURN_RETRY_LIMIT.
+    let reasoningBurns = 0;
+    // Times this run announced a next step without taking it. Bounded so a model that will
+    // only ever narrate cannot spin to the iteration cap being told to act.
+    let announcementNudges = 0;
+    // Consecutive iterations in which a staged build called tools but wrote nothing. The
+    // announced-without-acting nudge cannot see this shape: the run IS calling tools, so
+    // every existing guard reads it as busy and non-circling.
+    let readOnlyStreak = 0;
+    let readOnlyCorrections = 0;
+    // Marker count as of the previous iteration. Seeded from the resume scan so the first
+    // iteration of a resumed build is compared against what it inherited.
+    let lastMarkerCount = stagedResume.count;
+    // undefined until the run checks its own page at least once.
+    let lastPageCheckPassed: boolean | undefined;
+    let mutatedSincePageCheck = false;
+    /**
+     * SILENCE IS NOT EVIDENCE, but establishing that costs a child process now.
+     *
+     * An agent that never calls verify_page used to escape the page gate by saying nothing, so
+     * the runner checks on its behalf. Executing a page is no longer an in-process call it can
+     * make from anywhere, so the answer is computed at the points that already await — the
+     * read-only-streak correction and the run's own wind-down — and read from here by the
+     * synchronous outcome path. `undefined` means nobody established it, and the outcome rule
+     * abstains rather than guessing.
+     */
+    let unverifiedPageBroken: boolean | undefined;
+    let pageCheckCorrections = 0;
+    // Highest reasoning repeat ratio observed during the current generation (0 = all novel).
+    // Logged per iteration purely to build the distribution the threshold needs.
+    let iterationRepeatRatio = 0;
+    // In-flight generation size and loop verdict, refreshed per chunk. These are what let the
+    // supervisor tell "composing a large edit" from "stalled": every other counter it reads
+    // only moves when a call RETURNS, and a 17-minute composition returns nothing until it is
+    // done. Reset at the top of each iteration so the delta a window sees is this generation's.
+
+    // Cumulative reasoning already accounted for by a correction. Subtracted in
+    // sampleProgress so the supervisor's absolute budget measures reasoning since the
+    // last correction rather than since the run began.
+    let reasoningCharsBaseline = 0;
     // I11: Pre-emptive soft-deadline synthesis tracking. We fire the
     // soft-deadline synthesis at most once per sub-agent run.
     let softDeadlineSynthesisAttempted = false;
+    /** The longest single model call this run has made, used to size the synthesis reserve
+     *  from the deployment's real latency instead of a constant. See the reserve below. */
+    let slowestModelCallMs = 0;
     // Long-running generation soft thresholds — the point past which the run
     // is SURFACED (non-blocking) to the operator dock. Static now that the
     // handoff no longer pauses for an operator "continue" grant.
     const lrgWallThresholdMs = DEFAULT_SOFT_THRESHOLD_MS;
     const lrgTokenThreshold = DEFAULT_SOFT_THRESHOLD_TOKENS;
+    // The run's OWN time: wall time less what it spent waiting on the person or on work they
+    // approved (holdTurnClocks). Session 807684e9: a render the person had configured ran five
+    // minutes, and the first iteration after it asked them "keep going?" about those minutes.
+    const workingMs = (): number => Date.now() - runStartedAt - humanWaitCreditMs;
     // When the operator answers "stop" (polled via isStopRequested), we set
     // this so the next loop iteration goes straight to attemptTimeoutSynthesis
     // instead of making another LLM call.
     let lrgOperatorStop = false;
+    // Set when the progress supervisor (not a deadline, not the operator) wound the run
+    // down. Read alongside turnTimeoutReached so the wind-down works on runs that have
+    // no turnTimeoutMs at all.
+    let supervisorStop = false;
+    // Set when the warden's emergency stop named this run (registerWardenRunStop). It winds the
+    // run down through the supervisor's latches; this says who asked, for the run's own account.
+    let wardenStop: SubAgentWardenStop | undefined;
     // The effort-tier long-running policy (low→stop / high→continue) is auto-applied
     // ONCE per run; this latches so it doesn't re-audit every subsequent iteration.
     let lrgAutoHandled = false;
-    // max-effort silent-unbounded + verify-progress guard state (see progress-verifier.ts).
+    // max-effort silent-unbounded grant state (see progress-verifier.ts).
     let lrgUnboundedGranted = false;            // unbounded budget granted once, silently
+    // Progress-supervisor state. Watches EVERY run at EVERY tier — see superviseProgress.
     let lrgLastProgressCheckAt = 0;             // throttle: one progress check per window
-    let lrgConsecutiveStalls = 0;               // structural hard-stalls in a row
-    let lrgLastSample: ProgressSample = { completionTokens: 0, toolCalls: 0 };
+    let lrgLastJudgeAt = 0;                     // throttle: one semantic judge call per window
+    let lrgConsecutiveStalls = 0;               // no-progress samples in a row
+    let lrgConsecutiveBusyStalls = 0;           // of those, busy ones in a row (calls out, nothing new back)
+    let lrgLastSample: ProgressSample = EMPTY_PROGRESS_SAMPLE;
+    // Cumulative shape counters. reasoningChars was already measured at four sites and
+    // consumed at none — it is THE pathology signal and is never counted as progress;
+    // outputChars is progress, because a long legitimate emit streams CONTENT.
+    let reasoningCharsTotal = 0;
+    let outputCharsTotal = 0;
+    // "<tool>:<path>" -> content hashes written this run, oldest first. Backs the
+    // content-shape loop rule that replaced the blunt per-path overwrite cap.
+    const writeHistory = new Map<string, string[]>();
+    /**
+     * Workspace paths THIS run wrote, normalised through the write resolver so a read spelled
+     * differently ("report.md" vs the returned "generated/report.md") still matches. Used to
+     * keep a run's own output from re-entering the shared-facts ledger as evidence — see the
+     * auto-share guard in the tool loop.
+     */
+    const pathsWrittenThisRun = new Set<string>();
+    const normalizeArtifactPath = (raw: unknown): string | null => {
+      if (typeof raw !== "string" || raw.trim().length === 0) return null;
+      try {
+        return resolveWorkspaceWritePath(raw.trim(), opts.workspacePath).relativePath;
+      } catch {
+        return raw.trim();   // outside the workspace — compare literally rather than not at all
+      }
+    };
+    // (tool, exact-args) repeat counts across the WHOLE run, for EVERY tool. Detection
+    // only — the cached-result short-circuit below stays restricted to IDEMPOTENT_TOOLS,
+    // because short-circuiting a deliberate re-poll of mutating state would be wrong.
+    const argSigRepeats = new Map<string, number>();
+    // Fingerprints of this run's substantive assistant turns. An output identical to one
+    // an earlier iteration already produced means the run has lost track and is
+    // re-emitting rather than advancing.
+    const assistantOutputSigs = new Set<string>();
     const artifacts: Record<string, unknown>[] = [];
     const artifactKeys = new Set<string>();
+    // Every tool call that ran and failed, in call order, including ones the run later recovered
+    // from: the final text rarely mentions those, and a recovery onto a different path is exactly
+    // what the orchestrator must not describe as the path the user asked for.
+    const toolFailures: SubAgentToolFailure[] = [];
+    // THE CODE THIS RUN EXECUTED, AND THE FIGURES IT HAS SEEN (E2E 2026-10-07). All seven of the
+    // coder's sandbox runs failed or printed nothing; its answer gave two figures no input of the
+    // run contained, and the run reported success. Counted at the call site, uncapped: toolFailures
+    // keeps only the last MAX_RECORDED_TOOL_FAILURES.
+    const executionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
+    // The run's OWN executions, without the specialists' records a coordinator adds to the one
+    // above. The two nudges that speak of "your code executions" read this one: in review, a
+    // coordinator that had only delegated a grep (exit 1, no match) and read two notes was told
+    // "None of your 1 code execution has completed with output yet" and lost the instruction to
+    // keep everything it had gathered. The outcome cap and the reported record keep the sum.
+    const ownExecutionRecord: DelegatedExecutionRecord = { attempted: 0, failed: 0, succeededWithOutput: 0 };
+    // EACH RUN THAT MASKED FIGURES, BY NAME. The records a coordinator adds to its own are a sum, and
+    // its artifacts hold every file its specialists wrote. In review an orchestrator delegated to a
+    // coordinator whose parallel_delegate ran a coder (broken sandbox, figures masked) and a writer
+    // that finished generated/report.html; the turn then named both files as the coordinator's,
+    // written but not run successfully, and the finished report never as a deliverable. So the runs
+    // its delegations name are kept apart (createFanOutExecutionRecords), and so are the files this
+    // run recorded itself.
+    const delegatedRuns = createFanOutExecutionRecords();
+    let delegatedToAnotherAgent = false;
+    const ownArtifacts = new Set<Record<string, unknown>>();
+    // Only a run that can execute code, or receive the record of a run that did, is checked; a
+    // researcher holds neither and pays nothing. A coordinator restates what its specialists
+    // returned: in review, build_lead (delegate_to_agent only) answered "8392 … 1255204276" over a
+    // coder whose only execution had failed and whose own answer was masked, and its answer and its
+    // share went unmasked while the record it had added up said none of the code completed.
+    // An agent without an allow-list holds every registered tool, so the wire list stands in.
+    const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
+      .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
+    // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
+    // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
+    // shared or the commands it sent to the sandbox: those are the claims being checked.
+    const observedFigureKeys = new Set<string>();
+    if (tracksFigures) {
+      addReceivedFigureKeys(observedFigureKeys, systemPrompt);
+      // The prompt's "Today's date" in the numeric forms an answer writes it in.
+      addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
+    }
+    // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
+    // into the arguments of its own calls before any input had contained them: the files it
+    // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
+    // sandbox was broken wrote its "result" into results.md from its head, read the file back, and
+    // the read counted as the figure's source, so its answer went unmasked and the run reported
+    // success. A grep over the file, a git diff, the echo of share_finding, the shared-findings
+    // refresh, read_shared_facts and a specialist repeating a delegated task's figure hand the
+    // claim back the same way. So no tool result or system message adds one of these keys; the
+    // user's own messages, the system prompt and the runtime's nudges still do. The same
+    // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
+    // the auto-share below).
+    const ownClaimFigureKeys = new Set<string>();
+    // How far into `history` the set has read. The trim digests, drops and clamps history in place,
+    // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
+    // would miss a figure the run read early and the trim has since removed. The run's own
+    // messages add nothing: their prose and their calls are what it claims.
+    let absorbedHistoryLength = 0;
+    const absorbNewHistory = (): void => {
+      if (!tracksFigures) return;
+      for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
+        const message = history[absorbedHistoryLength]!;
+        if (message.role === "assistant") continue;
+        const content = typeof message.content === "string" ? message.content : "";
+        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+      }
+    };
+    /**
+     * The figures a call's arguments introduce. A read (IDEMPOTENT_TOOLS) asks for something and
+     * claims nothing: a figure in a path, pattern or query is confirmed by an input that contains
+     * it. Read when the call is made, against what the run had received by then.
+     *
+     * A sandbox call's arguments are claims like any other's. They were read as received, as what
+     * the run executed, and in review that laundered the broken-sandbox run's figures twice: a
+     * shell_exec `cat > results.md <<'X'` heredoc holding "8393" and "7597648268" exited 0 and
+     * printed nothing, and git_commit's message "primes: 8393 Primzahlen, Summe 7597648268" is the
+     * model's prose, not a program; either way the answer stating them went out unmasked as a
+     * success, while the same text through write_file was masked. A command the run quotes whole
+     * keeps its figures (see the quoted-code check below).
+     */
+    const recordOwnClaims = (toolName: string, args: unknown): void => {
+      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
+      const claimed = new Set<string>();
+      addArgumentFigureKeys(claimed, args);
+      for (const key of claimed) {
+        if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+      }
+    };
+    // QUOTED CODE IS NOT A CLAIM. In review, the coder of a broken sandbox reported honestly and
+    // quoted the script it had written, and "const LIMIT = 200001;" came back "const LIMIT = [not
+    // observed];": broken code, and an honest report flagged as one that made figures up. So the
+    // check reads past a fenced code block that quotes, verbatim and in whole lines, a file the run
+    // wrote and that one of its sandbox calls named, a call that ran. Only such a file: results.md
+    // written from the run's head and quoted verbatim would hand the read-back case its figure back.
+    // The call is matched by the file's name, before or after the write, so a `cat results.md` lets
+    // that quote through too. The texts are the run's own arguments to write_file and edit_file, per
+    // file, and never count as received, so a figure its prose states is checked as before.
+    const writtenFileText = new Map<string, string>();
+    // The arguments of the sandbox calls that ran (their result reports programOutputChars), value
+    // by value. Read from the call's JSON, a script named right after a line break of the command
+    // (`node \` and `primes.js` on the next line, a shell line continuation) was glued to the
+    // escape's "n", never matched, and the honest quote of the script it ran came back masked.
+    const ranCallArguments: string[] = [];
+    // And their commands, as the model wrote them. A command is a claim of the run like any other
+    // argument (recordOwnClaims), and an honest report quotes what it ran: "`ls /usr/bin/ | head
+    // -50` gab nichts aus" is not a figure the run made up. So the check also reads past a quote
+    // of a WHOLE command that ran, inline or fenced. Only a whole one: a fence repeating the lines
+    // of a heredoc the command wrote would hand that file's figures back. A git_* call never
+    // reports programOutputChars, so a commit message is never quotable.
+    const ranCommands: string[] = [];
+    // And the scripts they ran by path (run_script), as path and arguments: such a call has no
+    // command, so "`primes.js 200001`" quoting what ran came back with its argument masked, and the
+    // honest report was flagged as one that made a figure up. Quotable as they are or behind the
+    // program that runs them (verbatimQuotedCommandSpans).
+    const ranScriptInvocations: string[] = [];
+    const noteWrittenText = (toolName: string, args: Record<string, unknown>, writtenPath: unknown): void => {
+      const path = normalizeArtifactPath(args["path"]) ?? normalizeArtifactPath(writtenPath);
+      if (!path) return;
+      const before = writtenFileText.get(path);
+      if (toolName === "write_file") {
+        const content = typeof args["content"] === "string" ? args["content"] : "";
+        writtenFileText.set(path, String(args["mode"] ?? "").toLowerCase() === "append" ? `${before ?? ""}${content}` : content);
+        return;
+      }
+      // edit_file, applied as the tool applies it; a file the run did not write, or one that changed
+      // since, keeps only the new text as the run's own.
+      const oldText = typeof args["old_string"] === "string" ? args["old_string"] : "";
+      const newText = typeof args["new_string"] === "string" ? args["new_string"] : "";
+      writtenFileText.set(path, before !== undefined && oldText && before.includes(oldText)
+        ? (args["replace_all"] === true ? before.split(oldText).join(newText) : before.replace(oldText, newText))
+        : `${before ?? ""}\n${newText}`);
+    };
+    /** A file one of the run's sandbox calls named, as a path ending in its name or as the name. */
+    const ranByTheRun = (path: string): boolean => {
+      const name = path.split("/").pop() ?? "";
+      const isNameChar = (char: string | undefined): boolean => char !== undefined && /[\w.-]/.test(char);
+      return name.length > 0 && ranCallArguments.some((text) => {
+        for (let at = text.indexOf(name); at >= 0; at = text.indexOf(name, at + 1)) {
+          if (!isNameChar(text[at - 1]) && !isNameChar(text[at + name.length])) return true;
+        }
+        return false;
+      });
+    };
+    const quotedCodeSpans = (text: string): FigureCheckSpan[] => [
+      ...(writtenFileText.size === 0 ? [] : verbatimQuotedCodeSpans(
+        text,
+        [...writtenFileText].filter(([path]) => ranByTheRun(path)).map(([, content]) => content),
+      )),
+      ...verbatimQuotedCommandSpans(text, ranCommands, ranScriptInvocations),
+    ];
+    // The places a text names a file the run wrote, by its path or its base name. The path the run
+    // chose stays its claim (recordOwnClaims): the write's own "File written: results-8393.txt"
+    // must not vouch for "8393 Primzahlen". Only the name itself is read past.
+    const writtenFileNameSpans = (text: string): FigureCheckSpan[] => {
+      const paths = [...writtenFileText.keys(), ...mutatedWorkspacePaths, ...pathsWrittenThisRun];
+      if (paths.length === 0) return [];
+      return namedFileSpans(text, paths.flatMap((path) => [path, path.split("/").pop() ?? ""]));
+    };
+    // Measured, never acted on: how many figures a run with at least one productive execution
+    // stated without an input containing them (the partial-output case the mask does not cover).
+    let shadowUnobservedFigures: number | undefined;
+    /**
+     * The run's own answer with every figure no input of the run contained replaced by "[not
+     * observed]" — only while the run executed code and none of it completed with output. Then
+     * nothing it ran can have produced a figure, and one its inputs do not contain was made up.
+     * A run whose script printed is left alone, and so is a silent run whose answer states none.
+     */
+    const quarantineUnobservedFigures = (text: string, site: string): string => {
+      if (!tracksFigures) return text;
+      absorbNewHistory();
+      const quoted = [...quotedCodeSpans(text), ...writtenFileNameSpans(text)];
+      if (noExecutionCompleted(executionRecord)) {
+        const { text: maskedText, masked } = maskUnobservedFigures(text, observedFigureKeys, quoted);
+        if (masked > 0) {
+          executionRecord.unobservedFigures = (executionRecord.unobservedFigures ?? 0) + masked;
+          logAudit("guardrail_flagged", {
+            type: "sub_agent_unobserved_figures_masked",
+            agentName: opts.agentName,
+            site,
+            masked,
+            attempted: executionRecord.attempted,
+            failed: executionRecord.failed,
+          }, { sessionId: subSessionId, severity: "warn" });
+        }
+        return maskedText;
+      }
+      if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
+      return text;
+    };
+    /**
+     * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
+     * CHANNELS EITHER. The keys of the run's own claims that no input of it contained. In review,
+     * with a broken sandbox, the coder wrote "8393" and "7597648268" into results.md from its head
+     * and its execution failed. Its answer was masked, but a grep over the file was auto-shared as
+     * a fact under a tool-provenance key, which a coordinator then restated unmasked as a success;
+     * and when the model answered nothing, the scaffold below carried both figures to the parent as
+     * "Recovered evidence snippets", from a read-back or from the write's own text preview.
+     * `exceptRanFiles` leaves out the figures of files the run wrote and ran, the code constants
+     * the quoted-code check above reads past too (with the same caveat: a `cat` of a file counts).
+     */
+    const unreceivedOwnClaims = (exceptRanFiles: boolean): Set<string> => {
+      absorbNewHistory();
+      const ranFileKeys = new Set<string>();
+      if (exceptRanFiles) {
+        for (const [path, content] of writtenFileText) if (ranByTheRun(path)) addArgumentFigureKeys(ranFileKeys, content);
+      }
+      return new Set([...ownClaimFigureKeys].filter((key) => !observedFigureKeys.has(key) && !ranFileKeys.has(key)));
+    };
+    // What the last scaffold built masked: a later one replaces it as the run's account.
+    let scaffoldUnobservedFigures = 0;
+    /**
+     * The interrupted-run scaffold (buildInterruptedSubAgentOutput), with its evidence lines masked
+     * for the run's own claims while none of its executions has completed with output, and the
+     * masked figures counted in its record, so the parent's frame and the turn's directive say so.
+     * The runtime's own lines (files on disk, byte counts) are never touched.
+     */
+    const buildScaffold = (params: Parameters<typeof buildInterruptedSubAgentOutput>[0]): string => {
+      if (!tracksFigures || !noExecutionCompleted(executionRecord)) return buildInterruptedSubAgentOutput(params);
+      const unreceived = unreceivedOwnClaims(true);
+      let masked = 0;
+      const output = buildInterruptedSubAgentOutput({
+        ...params,
+        maskEvidence: (line) => {
+          const result = maskFiguresByKey(line, unreceived, writtenFileNameSpans(line));
+          masked += result.masked;
+          return result.text;
+        },
+      });
+      const total = (executionRecord.unobservedFigures ?? 0) - scaffoldUnobservedFigures + masked;
+      scaffoldUnobservedFigures = masked;
+      if (total > 0) executionRecord.unobservedFigures = total;
+      else delete executionRecord.unobservedFigures;
+      if (masked > 0) {
+        logAudit("guardrail_flagged", {
+          type: "sub_agent_unobserved_figures_masked",
+          agentName: opts.agentName,
+          site: "interrupted_scaffold",
+          masked,
+          attempted: executionRecord.attempted,
+          failed: executionRecord.failed,
+        }, { sessionId: subSessionId, severity: "warn" });
+      }
+      return output;
+    };
+    // Workspace-relative paths this run successfully wrote or edited, in call order.
+    // Feeds describeMutatedWorkspaceFiles on the interrupted paths so a cut-off staged
+    // build hands back what is on disk instead of discarding it.
+    const mutatedWorkspacePaths = new Set<string>();
     const toolNames: string[] = [];
     const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     // Track last tool call signature per tool name for consecutive-duplicate detection
@@ -2091,6 +4055,26 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // the third A sees no `prev` match). Bounded only by per-tool caps and the
     // sub-agent run lifetime; both are tight, so an explicit size cap is unnecessary.
     const idempotentCallCache = new Map<string, { result: string; success: boolean; callCount: number }>();
+    // THE LOOP BRAKE (progress-verifier.ts classifyCallReplay; agents.performance.loopBrake).
+    // Per (tool, exact args): identical calls issued since the last successful write, and the
+    // tool-result messages that carried the answer to the model. Its own map, not argSigRepeats:
+    // that one counts over the whole run and feeds the identical_args_repeat log, while this one
+    // must forget everything a write makes stale — it is cleared with the two caches above. The
+    // messages are kept so the brake can see whether the answer is still verbatim in front of the
+    // model (the stale-result digest and the overflow trim rewrite or drop them).
+    const loopBrakeEnabled = config.agents.performance.loopBrake !== false;
+    const replaysSinceWrite = new Map<string, { calls: number; answers: LLMMessage[] }>();
+    let loopEnforced: SubAgentLoopEnforced | undefined;
+    // One tail hint on the run's first refusal, delivered with the next iteration's nudges.
+    let loopBrakeHint: string | null = null;
+    let loopBrakeHinted = false;
+    // Results this run has seen (isNovelToolOutcome), and how many executed calls brought a new one.
+    const seenToolOutcomes = new Set<string>();
+    let novelToolOutcomes = 0;
+    // Calls issued since the supervisor last saw progress, per (tool, args): names the loop when
+    // the busy-stall rule winds the run down. Emptied on every progress window, so it spans only
+    // the stalled stretch.
+    const attemptsSinceProgress = new Map<string, { tool: string; argsSig: string; count: number }>();
     // Per-tool call counters — prevents a single tool from dominating iteration budget
     const perToolCallCount = new Map<string, number>();
     // Per-(tool, path) counters for path-keyed write tools. A real loop
@@ -2151,6 +4135,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     let recentEvidenceSnippets: string[] = [];
     let autoSharedFindingCount = 0;
     const autoSharedFindingKeys = new Set<string>();
+    let routingTierProviderMemo: ChatProvider | undefined;
+    const routingTierProvider = (): ChatProvider => (routingTierProviderMemo ??= (
+      getChatProviderForTier("routing")
+      ?? createChatProvider({ ...modelConfig, ...tierModelDefaults("routing") }, providerEndpoint)
+    ));
     // Distillation budget for the auto-share path: a high SAFETY ceiling, not a
     // compute-saving cap — uncurated raw findings bloat the downstream build/synthesis
     // context far more than the small distill call costs (audit 65f46046), so we curate
@@ -2159,10 +4148,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       enabled: config.orchestration.distillSharedFacts,
       minChars: config.orchestration.distillSharedFactsMinChars,
       budget: { remaining: config.orchestration.distillSharedFactsMaxPerRun },
+      // ONE routing-tier provider per RUN, not one per call. Both consumers are repeat
+      // callers — per-finding distillation here, and the interval-gated progress judge in
+      // the loop below — and every construction walks resolveProviderChain and returns a
+      // fresh FailoverChatProvider whose circuit state starts closed, so a primary that is
+      // down gets re-tried in full by each of them instead of once. (This is the same cost
+      // that made the tier ladder's model-preset branch untenable; see providers/index.ts.)
+      //
       // Run per-finding distillation on the lightweight routing tier when it's
-      // configured (smaller/faster model = lower per-call cost on one GPU);
-      // falls back to this agent's provider otherwise (no behavior change).
-      provider: getChatProviderForTier("routing") ?? provider,
+      // configured (smaller/faster model = lower per-call cost on one GPU).
+      // With no tier, the fallback is this agent's model config under the
+      // ROUTING tier's controls (thinking off), not `provider` itself.
+      // What was actually measured: one distillation call at 193 s (a450970,
+      // 2026-09-05, see DISTILL_CALL_DEADLINE_MS). By that date tiers.routing was
+      // already configured, so that call ran on the ROUTING tier — the same model,
+      // but with an off-switch that was believed inert at the time and therefore
+      // went out with thinking on. Thinking off the same pass takes about a second.
+      // This fallback carries the routing controls so a deployment with NO routing
+      // tier configured does not repeat the 193 s.
+      provider: routingTierProvider(),
     };
     let cascadeSynthesisForced = false;
     let sufficiencySynthesisNudged = false;
@@ -2197,24 +4201,54 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const infraFailureStreaks = new Map<string, InfraFailureStreak>();
     const infraBlockedFamilies = new Map<string, string>();
     let requiredResearchFallbackRoute: SubAgentRequiredResearchFallbackRoute | null = null;
-    // Track tools stripped by the evidence-cap mechanism so that blocked
-    // calls to those tools are classified as "evidence_cap_enforced" rather
-    // than "not_in_agent_tools", preventing false-positive warden alerts.
-    const evidenceCapStrippedTools = new Set<string>();
+    // THE WIRE TOOL LIST IS PART OF THE CACHE KEY, so it is never shrunk mid-run.
+    //
+    // Every mid-run "strip" used to filter `tools` (evidence cap, approval gate, degraded
+    // search backend, delegation cascade) or empty it (final iteration, loop stop, the
+    // rescue passes). The tool block renders AHEAD of the history in the chat template, so
+    // each of those threw the whole prefix away. Probed on the serving station (18 tool
+    // schemas + 7K-token system prompt, cache_prompt on):
+    //   tools + tool_choice auto, warm   prompt 9,938  processed     4   0.40 s
+    //   tools + tool_choice "none"       prompt 9,938  processed     4   0.41 s
+    //   tools + tool_choice required     prompt 9,938  processed     4   0.50 s
+    //   NO tools                         prompt 7,027  processed 7,027   7.28 s
+    // In the audit log 6 of the 8 tools-stripped calls were cold (41 messages / 12,732
+    // tokens / 14.6 s TTFT; 35 messages / 17,628 tokens / 24.7 s).
+    //
+    // So a tool that is withdrawn stays on the wire and is BLOCKED HERE at the call site
+    // instead: name → reason. The reason is what the sub_agent_tool_blocked row carries,
+    // so an evidence-cap block is still classified "evidence_cap_enforced" rather than
+    // "not_in_agent_tools" (no false-positive warden alert). Checked before and
+    // independently of effectiveToolNames, which is undefined for agents without an
+    // allow-list.
+    const blockedToolReasons = new Map<string, string>();
     // G32: task-class fingerprint for outcome-weighted routing (written into every appendOutcome call)
     const taskKeywords = extractTaskKeywords(sanitizedTask);
 
+    // The account this run is for, on every outcome it writes and every lesson it records: under
+    // multi-user auth a reader shows an entry's task and lesson to that account only
+    // (memory/service.ts). The identity its tools act as (toolContext.userId, else the request's): an
+    // A2A caller's run has no request user of its own, only opts.userId.
+    const runAccount = recordAccount(opts.userId);
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get
      *  credited (wasUseful=true + importance boost). */
     const recordOutcome = (
-      fields: Parameters<typeof appendOutcome>[1],
+      recordedFields: Parameters<typeof appendOutcome>[1],
     ): void => {
-      appendOutcome(opts.workspacePath, {
+      // The ledger and the memory feedback below get the same verdict as the run's stats: a run that
+      // masked figures it could not back did not succeed, whichever of the call sites reports it.
+      const fields = { ...recordedFields, outcome: capOutcomeForUnbackedFigures(recordedFields.outcome, executionRecord) };
+      // The outcomes ledger describes the DEPLOYMENT's agents, and every reader resolves it
+      // against the shared root (tools/agent-routing.ts, gateway/sub-agent-routes.ts). Writing
+      // it against a per-user execution root would split one ledger into one per account, with
+      // the readers seeing only whatever the shared root happened to collect.
+      appendOutcome(getConfig().workspacePath, {
         ...fields,
         taskKeywords,
         sharedFindingsCount: shareFindinCallCount,
+        ...(runAccount ? { account: runAccount } : {}),
       });
       // ADR-003 ack boundary: the run's outcome is durably recorded here. A
       // success/partial outcome means the delivered peer messages were processed
@@ -2238,14 +4272,62 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         graphMarkSessionRetrievalsUnhelpful(subSessionId, { penalty: 0.03 }).catch(() => {});
       }
     };
+    // A lesson the run records (record_lesson) is filed under the task its own outcome carries,
+    // for the account it runs for. In the run's own context, which its tool calls inherit (none runs
+    // before this): two runs of one agent started in the same millisecond share a session id.
+    attachRequestOutcomeRun({
+      agent: opts.agentName,
+      task: opts.task.slice(0, 200),
+      account: runAccount,
+      progress: () => ({ iterations, totalTokens: usage.totalTokens }),
+    });
+
+    // A STAGED BUILD CANNOT SUCCEED WHILE ITS OWN MARKERS ARE STILL IN THE FILE.
+    //
+    // Every outcome above is derived from how the run ENDED — the loop exited cleanly, the
+    // model said it was finished — and none of them consults the artifact. Run 5 reported
+    // `outcome: success` on a page whose last line is
+    // `throw new Error('UNFINISHED_STUB: boot')`: four subsystems unwritten, and the model
+    // simply believed it was done. That is the worst shape a result can take, because a
+    // confident wrong answer propagates — the orchestrator credits the agent, the swarm's
+    // routing feedback boosts it, and the caller is told work happened that did not.
+    //
+    // The file is the evidence, so ask it. This downgrades to `partial`, never to failure:
+    // real work did land, it is resumable, and the resume path keys off exactly these
+    // markers. Only a staged build is judged this way — an agent that never signed up to
+    // eliminate markers is not held to it.
+    //
+    // The same holds for a run that masked figures no tool returned (E2E 2026-10-07): its helper
+    // script made inferCompletedRunOutcome say "success" over numbers the model made up. Capped to
+    // partial here, where every buildStats call passes.
+    const honestOutcome = (outcome: SubAgentOutcome): SubAgentOutcome => capOutcomeForUnbackedFigures(
+      stagedBuildHonestOutcome(outcome, isStagedBuild, opts.workspacePath, {
+        lastPassed: lastPageCheckPassed,
+        mutatedSince: mutatedSincePageCheck,
+        unverifiedPageBroken,
+      }, resumeScope),
+      executionRecord,
+    );
 
     const buildStats = (
       terminalState: SubAgentExecutionStats["terminalState"] = "completed",
-      outcome: SubAgentOutcome = terminalState === "completed" ? "success" : "failure",
-    ): SubAgentExecutionStats => ({
+      rawOutcome: SubAgentOutcome = terminalState === "completed" ? "success" : "failure",
+    ): SubAgentExecutionStats => ((outcome: SubAgentOutcome) => ({
       agentName: opts.agentName,
       sessionId: subSessionId,
-      promptChars: systemPrompt.length,
+      // Measured over the LIVE conversation, not the system prompt alone. It was blind
+      // to every message the run appended, so a turn whose prompt had grown to fill the
+      // context window reported the same number as its first iteration — useless for
+      // the one question this stat now has to answer (how much of the window the INPUT
+      // ate, and therefore how little was left for the derived output budget).
+      // The task-derived context needs no term of its own: freezing the prefix moved it into
+      // history[0], which this sum already walks. An explicit term here would double-count it.
+      promptChars: systemPrompt.length + history.reduce(
+        (sum, message) => sum
+          + (message.content?.length ?? 0)
+          + (message.tool_calls ?? []).reduce((n, call) => n + call.function.arguments.length, 0),
+        0,
+      ),
       userContentChars: userContent.length,
       toolCount,
       toolNames: [...toolNames],
@@ -2256,13 +4338,63 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       capabilities: agentCfg.capabilities ?? [],
       outcome,
       terminalState,
-    });
+    }))(honestOutcome(rawOutcome));
 
-    const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => (
-      artifacts.length > 0
-        ? { ...result, artifacts: artifacts.map((artifact) => ({ ...artifact })) }
-        : result
-    );
+    // Every return below passes through here, so it also hands back the failed tool calls, what
+    // the loop brake did, and what code the run executed.
+    const executionsToReport = (): DelegatedExecutionRecord | undefined =>
+      (executionRecord.attempted > 0 || unbackedFiguresMasked(executionRecord) ? { ...executionRecord } : undefined);
+    // A run that delegated hands back each run that masked figures (see delegatedRuns): those its
+    // delegations named, and itself, with only the files it recorded itself, when figures of its own
+    // account were masked beyond its specialists'. A run that delegated nothing is named by its own
+    // delegation, with its files, as before.
+    const maskedRunsToReport = (): MaskedDelegatedRun[] | undefined => {
+      if (!delegatedToAnotherAgent) return undefined;
+      const delegated = delegatedRuns.metadata();
+      const runs = [...(delegated.maskedRuns ?? [])];
+      const ownMasked = (executionRecord.unobservedFigures ?? 0) - (delegated.specialistExecutions?.unobservedFigures ?? 0);
+      if (ownMasked > 0) {
+        runs.push({
+          agentName: opts.agentName,
+          executions: { ...ownExecutionRecord, unobservedFigures: ownMasked },
+          artifacts: artifacts
+            .filter((artifact) => ownArtifacts.has(artifact))
+            .map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)),
+        });
+      }
+      return runs.length > 0 ? runs : undefined;
+    };
+    const withArtifacts = (result: { output: string; stats: SubAgentExecutionStats }): SubAgentRunResult => {
+      const executions = executionsToReport();
+      const maskedRuns = maskedRunsToReport();
+      return {
+        ...result,
+        ...(artifacts.length > 0
+          ? { artifacts: artifacts.map((artifact) => refreshWorkspaceArtifactSnapshot(artifact, opts.workspacePath)) }
+          : {}),
+        ...(toolFailures.length > 0 ? { toolFailures: toolFailures.slice(-MAX_RECORDED_TOOL_FAILURES) } : {}),
+        ...(loopEnforced ? { loopEnforced: { ...loopEnforced } } : {}),
+        ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
+        ...(executions ? { executions } : {}),
+        ...(maskedRuns ? { maskedRuns } : {}),
+      };
+    };
+
+    // The outcome of a run that ended normally, read from STRUCTURE first — its own
+    // `<final_answer status>`, the artifacts and evidence it left (figures the task did not
+    // already contain), whether every one of its WORK calls failed — with the five failure phrases
+    // only as the tie-breaker (2026-10-05; see inferCompletedRunOutcome). Only this run's own
+    // failed calls count: a nested specialist's failures ride along in toolFailures, and the
+    // person's declines are not failures.
+    const completedRunOutcome = (text: string): SubAgentOutcome => inferCompletedRunOutcome(text, {
+      toolCount,
+      toolNames,
+      failedToolNames: toolFailures
+        .filter((failure) => failure.agent === opts.agentName && !failure.declinedByUser)
+        .map((failure) => failure.tool),
+      artifactCount: artifacts.length,
+      task: opts.task,
+    });
 
     const logSubAgentCompletionAudit = (
       stats: SubAgentExecutionStats,
@@ -2270,6 +4402,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       extra: Record<string, unknown> = {},
       severity: "info" | "warn" | "error" = "info",
     ): void => {
+      const executions = executionsToReport();
       logAudit(
         "sub_agent_completed",
         {
@@ -2285,6 +4418,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           outcome: stats.outcome,
           terminalState: stats.terminalState,
           bytesByTool: Object.fromEntries(bytesByTool),
+          // What the loop brake did, without its target: the arguments are already on the run's
+          // sub_agent_tool_call rows, and this row is read far more widely.
+          ...(loopEnforced ? {
+            loopEnforced: { tool: loopEnforced.tool, via: loopEnforced.via, repeats: loopEnforced.repeats, endedRun: loopEnforced.endedRun },
+          } : {}),
+          // The warden's stop reached this run. With the warden_alert row's timestamp this measures
+          // how long a stopped run took to end (in c297c5ea: never, until this was wired).
+          ...(wardenStop ? { wardenStop: { alert: wardenStop.alert } } : {}),
+          // What the run executed (only a run that executed code carries it), and on a run with a
+          // productive execution, the figures the mask would have caught had none been productive.
+          ...(executions ? { executions } : {}),
+          ...(shadowUnobservedFigures !== undefined ? { shadowUnobservedFigures } : {}),
           ...extra,
         },
         { sessionId: subSessionId, severity },
@@ -2413,6 +4558,68 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     const currentPrimaryDelegationBody = (): { content: string; bytes: number } | null =>
       extractMostRecentSubstantialDelegationBody(history);
 
+    /** On-disk salvage lines for the interrupted paths. Gated by the mechanical
+     *  staged-build flag (default ON) so it can be switched off wholesale; empty
+     *  when the run mutated nothing, which keeps every existing output identical. */
+    const currentMutatedFileLines = (): string[] =>
+      (effectiveOrchestration().stagedArtifactBuilds !== false && mutatedWorkspacePaths.size > 0
+        ? describeMutatedWorkspaceFiles(mutatedWorkspacePaths, opts.workspacePath)
+        : []);
+
+    /** Under tool_choice "none" the server applies no tool grammar, so a tool_call that still
+     *  comes back is one the model wrote as text and the parser recognised. Nothing executes
+     *  it: the calls are dropped, the row records which, and the content stands as the answer
+     *  (an empty one falls into the empty-response rescue like any other). */
+    const discardToolCallsUnderToolChoiceNone = (response: LLMResponse): LLMResponse => {
+      if (response.tool_calls.length === 0) return response;
+      logAudit(
+        "guardrail_flagged",
+        {
+          type: "tool_call_under_tool_choice_none",
+          agentName: opts.agentName,
+          toolNames: response.tool_calls.map((tc) => tc.name),
+        },
+        { sessionId: subSessionId, severity: "warn" },
+      );
+      return { ...response, tool_calls: [] };
+    };
+
+    /** One forced-answer completion: the run's CURRENT wire tool list (never []) under
+     *  tool_choice "none", with the instruction as the TRAILING system message. Appending it
+     *  to the system prompt was the anti-pattern wave D measured on a 24,731-token context:
+     *  0.33 s unchanged vs 41.29 s appended vs 0.87 s as a trailing message — and the empty
+     *  list re-prefilled the same prompt (the probe numbers at blockedToolReasons). */
+    const forcedAnswerMessages = (instruction: string): LLMMessage[] => {
+      // The instruction is a system message the run receives, like a per-iteration nudge: a figure
+      // it states (the rescue's count of tool calls) is not one the answer made up.
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, instruction);
+      return composeSubAgentMessages(systemPrompt, history, [instruction]);
+    };
+    const completeWithoutTools = async (
+      via: ChatProvider,
+      messages: LLMMessage[],
+      sig: AbortSignal | undefined,
+      // WHICH list goes on the wire is a property of the PROMPT, so the caller states it.
+      // Default = the run's list, which is right for every history-bearing forced-answer
+      // pass: those replay this run's own head, so the tool block in front of it is part
+      // of the prefix the server already holds (9,938-token prompt: 4 tokens processed /
+      // 0.41 s with the list under tool_choice "none" vs 7,027 processed / 7.28 s with it
+      // removed). The facts-first passes below pass `[]` instead: their 2-message prompt
+      // has a system head that is NOT this run's systemPrompt, so nothing can match the
+      // cache and the 18 schemas are ~2,911 tokens of pure cold prefill per call.
+      // Deliberately NOT inferred — not from comparing messages[0] to systemPrompt (a
+      // string-equality heuristic that breaks the moment the head is composed differently)
+      // and not from provider identity (the no-tier synthesis fallback is a fresh object on
+      // the same model+endpoint and DOES share the server-side cache).
+      wireTools: LLMToolDef[] = tools,
+    ): Promise<LLMResponse> => {
+      const callOptions: CompletionCallOptions = { toolChoice: "none" };
+      const response = via.completeViaStream
+        ? await via.completeViaStream(messages, wireTools, sig, callOptions)
+        : await via.complete(messages, wireTools, sig, callOptions);
+      return discardToolCallsUnderToolChoiceNone(response);
+    };
+
     const rescueSanitizedEmptyResult = async (rawResult: string): Promise<string> => {
       const visibleResult = stripHallucinatedToolTags(rawResult);
       if (visibleResult || toolCount === 0 || signal?.aborted) {
@@ -2424,30 +4631,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           { agentName: opts.agentName, iterations, toolCalls: toolCount },
           "Sub-agent final output became empty after stripping hallucinated tool markup — forcing synthesis rescue",
         );
-        const rescueMessages: LLMMessage[] = [
-          {
-            role: "system",
-            content: systemPrompt +
-              "\n\nYour previous final answer contained only invalid tool-call markup and became empty after sanitization. " +
-              "DO NOT call any more tools. Produce your COMPLETE final answer now from the evidence already gathered in the conversation. " +
-              "Include the key facts, URLs, and extracts you retrieved.",
-          },
-          ...history,
-        ];
-        const rescueResponse = await provider.complete(rescueMessages, [], signal);
+        // synthProvider, not `provider`: this is a prose-from-history forced-answer pass,
+        // the same shape as the three synthesis passes, and the worker's own thinking pin
+        // buys nothing here (824 s across five such calls, ~20 % of it answer). With a
+        // synthesis TIER configured this moves the rescue onto the tier model too — the
+        // trade runSynthesisCompletion's construction already accepts.
+        const rescueResponse = await completeWithoutTools(
+          synthProvider,
+          forcedAnswerMessages(
+            "Your previous final answer contained only invalid tool-call markup and became empty after sanitization. " +
+            "Tool calls are disabled for this reply. Produce your COMPLETE final answer now from the evidence already gathered in the conversation. " +
+            "Include the key facts, URLs, and extracts you retrieved.",
+          ),
+          signal,
+        );
         usage.promptTokens += rescueResponse.usage.promptTokens;
         usage.completionTokens += rescueResponse.usage.completionTokens;
         usage.totalTokens += rescueResponse.usage.totalTokens;
 
-        if (rescueResponse.tool_calls.length === 0) {
-          const rescued = stripHallucinatedToolTags(normalizeSubAgentOutput(rescueResponse.content));
-          if (rescued) {
-            log.info(
-              { agentName: opts.agentName, rescuedLength: rescued.length },
-              "Sanitized-empty output rescue succeeded",
-            );
-            return rescued;
-          }
+        const rescued = stripHallucinatedToolTags(normalizeSubAgentOutput(rescueResponse.content));
+        if (rescued) {
+          log.info(
+            { agentName: opts.agentName, rescuedLength: rescued.length },
+            "Sanitized-empty output rescue succeeded",
+          );
+          return rescued;
         }
       } catch (rescueErr) {
         log.warn({ rescueErr, agentName: opts.agentName }, "Sanitized-empty output rescue failed");
@@ -2475,7 +4683,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced no final response after substantive work.",
         swarmState: opts.swarmState,
@@ -2485,6 +4693,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         artifacts,
         evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
         primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+        mutatedFileLines: currentMutatedFileLines(),
       });
       log.warn(
         { agentName: opts.agentName, toolCount, successfulToolCount, iterations },
@@ -2512,7 +4721,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return { result: rawResult, forcedOutcome: null };
       }
 
-      const recovered = buildInterruptedSubAgentOutput({
+      const recovered = buildScaffold({
         agentName: opts.agentName,
         reason: "produced an incomplete synthesis after substantive work.",
         swarmState: toolContext.swarmState,
@@ -2522,6 +4731,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         artifacts,
         evidenceSnippets: usableHistorySnippets,
         primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+        mutatedFileLines: currentMutatedFileLines(),
       });
       log.warn(
         { agentName: opts.agentName, resultLength: rawResult.length, recoveredSnippets: usableHistorySnippets.length },
@@ -2540,6 +4750,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // synthesis prompt from those when substantial; fall back to history otherwise.
     const SYNTH_FACTS_MIN_CHARS = 400;
     const readCuratedFindingsForSynthesis = async (budgetChars = 12_000): Promise<string> => {
+      // Distillations still in flight are exactly the findings this prompt is built from.
+      await joinPendingShares();
       try {
         const facts = await readAllFacts(deriveRootSessionId(subSessionId));
         const entries = Object.entries(facts)
@@ -2559,15 +4771,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         return "";
       }
     };
-    const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] =>
-      buildFactsFirstSynthesisMessages(opts.task, curated);
+    // The user's words ride along: this prompt replaces the run's history, and without them a
+    // synthesis of an English paraphrase had nothing to tell it the user wrote in German.
+    const buildFactsFirstSynthMessages = (curated: string): LLMMessage[] => {
+      // The findings are something the run receives, like the forced-answer instruction: up to
+      // 12,000 characters of them, where the snapshot it started with held 12 or 2,400. A
+      // teammate's figure that reached it only here was masked as made up (review of E2E
+      // 2026-10-07). What the run shared itself is in them too, and stays its own claim.
+      if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, curated, ownClaimFigureKeys);
+      return buildFactsFirstSynthesisMessages(`${opts.task}${userWordsBlock}`, curated);
+    };
     /** Run a forced-synthesis completion, preferring the streaming accumulator so
      *  it gets token-progress + the per-chunk inactivity abort (a hung synthesis
      *  is exactly the failure we're guarding against). */
-    const runSynthesisCompletion = (msgs: LLMMessage[], sig?: AbortSignal) =>
-      synthProvider.completeViaStream
-        ? synthProvider.completeViaStream(msgs, [], sig)
-        : synthProvider.complete(msgs, [], sig);
+    const runSynthesisCompletion = (msgs: LLMMessage[], sig?: AbortSignal, wireTools: LLMToolDef[] = tools) =>
+      completeWithoutTools(synthProvider, msgs, sig, wireTools);
+    /** The wire list for a synthesis pass: the run's list when the prompt replays this run's
+     *  head (warm prefix), `[]` when it is the facts-first 2-message prompt (nothing to warm —
+     *  see completeWithoutTools). */
+    const synthesisWireTools = (factsFirst: boolean): LLMToolDef[] => (factsFirst ? [] : tools);
 
     // "Done is done" (audit 2445da2e): when a BUILD-shaped run has already
     // persisted its deliverable(s), a final-synthesis LLM call adds no
@@ -2599,7 +4821,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           path: typeof artifact["outputPath"] === "string" && artifact["outputPath"]
             ? String(artifact["outputPath"])
             : (typeof artifact["filename"] === "string" ? String(artifact["filename"]) : "artifact"),
-          reason: artifactFileLooksTruncated(artifact),
+          // Workspace root supplied: write_file records the MODEL's relative path, which
+          // only resolves against this run's workspace — without it the probe missed every
+          // file and a half-written build was branded complete.
+          reason: artifactFileLooksTruncated(artifact, opts.workspacePath),
         }))
         .filter((entry): entry is { path: string; reason: string } => Boolean(entry.reason));
       if (truncated.length > 0) {
@@ -2690,6 +4915,17 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // capped at 25s so an 8-minute coordinator does not get an
       // unboundedly large deadline-grace either.
       const graceTimeoutMs = Math.max(5_000, Math.min(25_000, Math.round(turnTimeoutMs * 0.15)));
+
+      // JOIN BEFORE THE CLOCK STARTS. readCuratedFindingsForSynthesis opens with
+      // joinPendingShares(), and a distill still in flight is bounded only by its own
+      // DISTILL_CALL_DEADLINE_MS (60 s) — measured 1.4-7.4 s per finding. Arming the grace
+      // timer first charged that wait to the synthesis window: with turnTimeoutMs 60 s the
+      // window is 9 s, so a 7.4 s distill that started just before the deadline left ~1.6 s
+      // for the inference this window exists to fit. The join is the same wait either way;
+      // it just no longer eats the budget. (The join stays inside
+      // readCuratedFindingsForSynthesis for its other callers.)
+      await joinPendingShares();
+
       const graceAbort = new AbortController();
       const graceTimer = setTimeout(() => graceAbort.abort(), graceTimeoutMs);
       const graceSignal = opts.signal
@@ -2698,27 +4934,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\nYour execution time budget has expired. DO NOT call any more tools. " +
-                "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
-                "Include the key facts, URLs, and evidence you already retrieved. " +
-                "Do NOT mention the timeout unless the prior evidence itself requires it.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, graceSignal);
+          : forcedAnswerMessages(
+            "Your execution time budget has expired. Tool calls are disabled. " +
+            "Produce your COMPLETE final answer immediately from the tool results already in the conversation. " +
+            "Include the key facts, URLs, and evidence you already retrieved. " +
+            "Do NOT mention the timeout unless the prior evidence itself requires it.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, graceSignal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
-
-        if (synthResponse.tool_calls.length > 0) {
-          return null;
-        }
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
@@ -2740,6 +4968,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (result === "Sub-agent produced no final response.") {
           return null;
         }
+        // The model's answer only: a recovered scaffold is the runtime's own account of the run,
+        // whose evidence lines buildScaffold masked as it built them.
+        if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
+          result = quarantineUnobservedFigures(result, "grace_synthesis");
+        }
 
         const outputScan = scanOutput(result);
         if (!outputScan.safe && outputScan.redacted) {
@@ -2753,9 +4986,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -2823,6 +5054,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       const passthrough = tryReturnSingleDelegationPassthrough("soft_deadline_synthesis");
       if (passthrough) return passthrough;
 
+      // Join before arming the timer, for the same reason as attemptTimeoutSynthesis: a
+      // distill still in flight is bounded only by DISTILL_CALL_DEADLINE_MS and would
+      // otherwise be charged to `budgetMs`, the window reserved for the inference itself.
+      await joinPendingShares();
+
       const synthAbort = new AbortController();
       const synthTimer = setTimeout(() => synthAbort.abort(), budgetMs);
       const synthSignal = opts.signal
@@ -2831,34 +5067,37 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\n[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
-                "You have used most of your execution budget. Stop calling tools. " +
-                "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
-                "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
-                "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
-                "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
-                "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
-                "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, synthSignal);
+          // The instruction rides as a TRAILING system message, not appended to the head.
+          // This was the last site still composing `systemPrompt + "..."`: on a 24,731-token
+          // context that head mutation measured 41.29 s against 0.87 s for the same text as a
+          // trailing message (0.33 s unchanged) — and since the call routes through
+          // completeWithoutTools the run's tool block sits in front of the mutated head, so
+          // the whole prefix was thrown away on the one path that only fires when the run has
+          // already run out of time. The wording stays richer than the other forced-answer
+          // passes on purpose: the sufficiency strip reaches this branch mid-run, where
+          // multi-source coverage and the verbatim clause are what the answer needs.
+          : forcedAnswerMessages(
+            "[SOFT DEADLINE REACHED — SYNTHESIZE NOW]\n" +
+            "You have used most of your execution budget. Stop calling tools. " +
+            "Produce your COMPLETE final answer immediately from the tool results already in the conversation history above. " +
+            "Include EVERY headline, fact, URL, name, number, source attribution, and snippet you already retrieved — across ALL sources, not just the first one. " +
+            "If the evidence covers multiple sources (e.g. several news outlets), your answer MUST visibly cover all of them. " +
+            "If your synthesis would exceed roughly 3000 characters, also include the full content verbatim — do not abbreviate, do not collapse list items, do not write '(truncated)'. " +
+            "If you genuinely have no usable evidence, say so plainly and list what you tried. " +
+            "Do NOT mention the soft deadline. Do NOT call any tools. Write the answer the user actually asked for.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, synthSignal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
 
-        // If the model still tried to call tools despite the explicit "no
-        // tools" instruction, fall through and let the iteration loop
-        // either succeed normally or hit the hard timeout.
-        if (synthResponse.tool_calls.length > 0) {
-          return null;
-        }
+        // No tool_calls check here: completeWithoutTools sends tool_choice "none" and
+        // discards anything the model wrote as text that the parser recognised
+        // (discardToolCallsUnderToolChoiceNone), so tool_calls is always empty by the
+        // time it returns — the same reasoning as the max-iterations pass below.
 
         let result = normalizeSubAgentOutput(synthResponse.content);
         if (result === "Sub-agent produced no final response.") {
@@ -2878,6 +5117,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         if (result === "Sub-agent produced no final response.") {
           return null;
         }
+        if (!recovered.forcedOutcome) result = quarantineUnobservedFigures(result, "soft_deadline_synthesis");
 
         const outputScan = scanOutput(result);
         if (!outputScan.safe && outputScan.redacted) {
@@ -2890,9 +5130,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -2985,7 +5223,241 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
     };
 
+    /** Point-in-time shape reading. Pure counter reads — no allocation of note, no LLM. */
+    const sampleProgress = (): ProgressSample => {
+      let distinctWriteHashes = 0;
+      for (const hashes of writeHistory.values()) distinctWriteHashes += new Set(hashes).size;
+      return {
+        // New results, not successful calls (see ProgressSample). With the loop brake off, the
+        // successful-call count and no busy arm: the supervisor exactly as it was before it.
+        productiveToolCalls: loopBrakeEnabled ? novelToolOutcomes : successfulToolCount,
+        attemptedToolCalls: toolCount,
+        mutatedPaths: mutatedWorkspacePaths.size,
+        distinctWriteHashes,
+        outputChars: outputCharsTotal,
+        // Reasoning SINCE THE LAST CORRECTION, not since the run began.
+        //
+        // The burn rule below fires on an absolute budget, and this counter is cumulative,
+        // so a run that has already burned 45,000 characters sits permanently at or above
+        // the budget. Every subsequent sample would re-reach the same verdict on the same
+        // evidence and wind the run down — including the corrected run, whose whole point
+        // is that it has been told to stop and has not yet had a turn to obey.
+        //
+        // Rebasing keeps the rule intact rather than weakening it: the supervisor still
+        // winds down on a FRESH budget's worth of reasoning with nothing to show, which is
+        // the pathology it exists for. It just stops re-punishing the run for the burn the
+        // correction already answered.
+        reasoningChars: Math.max(0, reasoningCharsTotal - reasoningCharsBaseline),
+        liveReasoningChars,
+        liveLoopSuspected,
+      };
+    };
+
+    /**
+     * Wind this run down the way an operator `stop` does: latch the two flags the loop
+     * already reacts to, so the next iteration goes to attemptTimeoutSynthesis and the
+     * evidence collected so far is synthesised and handed back. Never a hard kill.
+     *
+     * Deliberately does NOT call longRunningGenerationManager.requestStop(). That sets a
+     * latch keyed on the ROOT (turn) session, which is right for an operator decision —
+     * the operator means the whole turn — and wrong for the supervisor now that it runs
+     * for every sub-agent: one pathological leaf would wind down its healthy siblings
+     * too. The supervisor is INSIDE the run it is judging and needs no cross-run channel
+     * to reach it.
+     */
+    const windDownForSupervisor = (): void => {
+      lrgOperatorStop = true;
+      turnTimeoutReached = true;
+      // The consumer below is `turnTimeoutReached && turnTimeoutMs`. An agent that
+      // declares no turn timeout — increasingly the point, now that supervision replaces
+      // the static budgets — would latch the flag and have nobody read it, which is
+      // exactly how a fix ships inert. This flag makes the wind-down independent of
+      // whether a deadline happens to exist.
+      supervisorStop = true;
+    };
+
+    /**
+     * THE SUPERVISOR — the thing that replaces the static limits.
+     *
+     * Cheap and pure: a few counter reads and one comparison, no LLM in the hot path.
+     * Runs for EVERY sub-agent at EVERY tier, and especially for a run that was granted
+     * unbounded budget — a run nobody is timing is the run that most needs watching.
+     *
+     * Its predecessor could never reach a verdict. It lived inside the `unbounded`
+     * branch, below a markUnbounded() call that flipped the very guard the branch sat
+     * under, so it executed at most ONCE per run while its stall rule required two
+     * consecutive samples. It is now called unconditionally at the top of each iteration
+     * AND on a timer, so a run parked inside one very long streaming completion is still
+     * visible — the old placement could only sample BETWEEN iterations.
+     */
+    const superviseProgress = (trigger: "iteration" | "timer"): void => {
+      if (lrgOperatorStop) return;
+      // No sample while a person is answering: a run parked on them makes no progress by design,
+      // and the next sample comes a full interval after the answer.
+      if (humanWaits.isWaiting()) {
+        lrgLastProgressCheckAt = Date.now();
+        return;
+      }
+      if (Date.now() - lrgLastProgressCheckAt < PROGRESS_CHECK_INTERVAL_MS) return;
+      lrgLastProgressCheckAt = Date.now();
+      const cur = sampleProgress();
+      const decision = classifyRunProgress(lrgLastSample, cur, lrgConsecutiveStalls, lrgConsecutiveBusyStalls, loopBrakeEnabled);
+      lrgConsecutiveStalls = decision.consecutiveStalls;
+      lrgConsecutiveBusyStalls = decision.consecutiveBusyStalls;
+      lrgLastSample = cur;
+      // The tally names the loop if the stretch of stalled windows ends in a busy-stall wind-down,
+      // so it starts over whenever a window was not a stall.
+      if (decision.consecutiveStalls === 0) attemptsSinceProgress.clear();
+      if (decision.action === "continue") return;
+      if (decision.action === "ask") {
+        // AMBIGUOUS — a run that has produced something and gone quiet may be
+        // mid-verification. Surface it to the operator dock instead of deciding; the
+        // notify path is idempotent per run, so this cannot spam.
+        longRunningGenerationManager.notifyLongRunning({
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
+          reason: `${opts.agentName}: ${decision.reason}`,
+          elapsedMs: workingMs(),
+          completionTokens: usage.completionTokens,
+          iterations,
+        });
+        return;
+      }
+      windDownForSupervisor();
+      if (decision.verdict === "looping") {
+        // The most frequent call of the stalled stretch is what the run was stuck on.
+        let top: { tool: string; argsSig: string; count: number } | undefined;
+        for (const entry of attemptsSinceProgress.values()) if (!top || entry.count > top.count) top = entry;
+        if (top) {
+          loopEnforced ??= { tool: top.tool, target: loopTargetOf(top.argsSig), repeats: top.count, via: "busy_stall", endedRun: true };
+          // A run first refused and later wound down WAS ended by the brake.
+          loopEnforced.endedRun = true;
+        }
+      }
+      logAudit("progress_verifier_intervened", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        trigger,
+        verdict: decision.verdict,
+        reason: decision.reason,
+        elapsedMs: Date.now() - runStartedAt,
+        productiveToolCalls: cur.productiveToolCalls,
+        attemptedToolCalls: cur.attemptedToolCalls,
+        mutatedPaths: cur.mutatedPaths,
+        reasoningChars: cur.reasoningChars,
+        outputChars: cur.outputChars,
+        iterations,
+      }, { sessionId: opts.parentSessionId, severity: "warn" });
+    };
+    supervisorTimer = setInterval(() => superviseProgress("timer"), PROGRESS_CHECK_INTERVAL_MS);
+    supervisorTimer.unref?.();
+    // The warden's emergency stop, for THIS run. Its tool_storm counts the calls logged under the
+    // run's own session id and names that id, so it is the run, not the turn, that has to hear it
+    // (warden.ts registerWardenRunStop: until this was wired the stop reached nothing, and the
+    // c297c5ea content_writer runs went on for 2-6 minutes after it). Same wind-down as the
+    // supervisor's: the next iteration synthesises what the run has, never a hard kill.
+    unregisterWardenStop = registerWardenRunStop(subSessionId, (stop) => {
+      wardenStop ??= { alert: stop.alert };
+      windDownForSupervisor();
+    });
+
+    // Mid-turn steering for the run doing the work. The orchestrator folds a message in at its own
+    // next iteration, which waits for this delegation to return: in session ffe08297 the user's
+    // message reached the orchestrator five minutes later and never reached this run. So each
+    // iteration reads the turn's steering log and folds in what this run has not seen. What the
+    // orchestrator had already taken when the run started is in its prompt (turnUserWords).
+    const steeringRoot = opts.parentSessionId ?? subSessionId;
+    const steeringSeen = new Set(turnSteeringManager.turnLogOf(steeringRoot).filter((m) => m.taken).map((m) => m.id));
+    const foldNewSteeringIntoRun = (): void => {
+      if (!(getConfig().orchestration?.midTurnSteering ?? true)) return;
+      const fresh = turnSteeringManager.turnLogOf(steeringRoot).filter((m) => !steeringSeen.has(m.id));
+      if (fresh.length === 0) return;
+      for (const message of fresh) steeringSeen.add(message.id);
+      const note = `${STEERING_PREFIX} The user sent this while you were working on this task. It is their own `
+        + "instruction: apply it to the REST of your work now — adjust course, drop what it makes irrelevant — "
+        + "without redoing steps you have finished.\n" + fresh.map((message) => `- ${message.text}`).join("\n");
+      // Strict chat templates reject two user turns in a row: a run that has not answered yet
+      // (or just took a correction) gets the note on its last user message instead.
+      const last = history.at(-1);
+      if (last?.role === "user" && typeof last.content === "string") last.content = `${last.content}\n\n${note}`;
+      else history.push({ role: "user", content: note });
+      logAudit("sub_agent_steering_injected", {
+        agentName: opts.agentName,
+        runSessionId: subSessionId,
+        count: fresh.length,
+        iteration: iterations,
+      }, { sessionId: opts.parentSessionId, severity: "info" });
+      opts.onProgress?.({
+        agentName: opts.agentName,
+        kind: "thinking",
+        iteration: iterations,
+        summary: `${opts.agentName} picked up your message`,
+      });
+    };
+
+    browserDecider = createBrowserDeciderForRun({
+      agentName: opts.agentName,
+      sessionId: subSessionId,
+      task: sanitizedTask,
+      toolNames: effectiveToolNames ?? tools.map((tool) => tool.name),
+    });
+
     while (iterations < maxIterations) {
+      // Tools used by THIS iteration alone. `toolNames` accumulates over the whole run, so
+      // it cannot answer "did this pass change anything", which is what the read-only streak
+      // check below needs.
+      const iterationToolNames: string[] = [];
+      // SUPERVISION RUNS FIRST AND ALWAYS, before any budget/tier branch below can
+      // decide this run is somebody else's problem.
+      superviseProgress("iteration");
+      foldNewSteeringIntoRun();
+
+      // SEMANTIC direction judge — opt-in (orchestration.progressVerifierSemantic,
+      // default off pending live eval), bounded, fail-open. The structural rules above
+      // see a run that has stopped DOING; a busy run can still be doing the wrong thing,
+      // which structure alone cannot see. Throttled on its own clock so the (default-on)
+      // supervisor sampling above never starves it, and vice versa. It was previously
+      // nested in the max-effort `unbounded` branch and was unreachable for the same
+      // reason the structural check was.
+      if (!lrgOperatorStop && getConfig().orchestration?.progressVerifierSemantic
+        && Date.now() - lrgLastJudgeAt >= PROGRESS_CHECK_INTERVAL_MS) {
+        lrgLastJudgeAt = Date.now();
+        try {
+          const lastAssistant = [...history].reverse().find(
+            (m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0,
+          );
+          const recentActivity = [
+            lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
+            toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
+          ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
+          // A drifting/on-track verdict; with no routing tier it runs on this agent's
+          // model under the routing controls (thinking off), never on `provider`. Shared
+          // with the distillation path so an interval-gated judge does not build (and reset
+          // the circuit state of) a provider chain on every check.
+          const verdict = await assessRunProgress({
+            objective: opts.task,
+            recentActivity,
+            provider: routingTierProvider(),
+            ...(signal ? { signal } : {}),
+            sessionId: subSessionId,
+          });
+          if (verdict.verdict === "drifting") {
+            windDownForSupervisor();
+            logAudit("progress_verifier_intervened", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              trigger: "semantic_judge",
+              verdict: "drifting",
+              reason: verdict.reason,
+              elapsedMs: Date.now() - runStartedAt,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "warn" });
+          }
+        } catch {
+          // fail-open: a judge failure must never stop a healthy run.
+        }
+      }
       // Long-running-generation handoff — NON-BLOCKING. When this run has
       // burned past the soft thresholds (wall time OR completion tokens),
       // SURFACE it to the operator dock (so the operator can stop it or
@@ -3013,6 +5485,19 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // still wins.
       if (!lrgOperatorStop && turnTimeoutReached && longRunningGenerationManager.isUnbounded(subSessionId)) {
         turnTimeoutReached = false;
+        // Clearing the latch alone is not enough: the deadline also ABORTED the run's
+        // model signal, and an aborted controller stays aborted. Without this the run
+        // would resume only to have its very next completion reject instantly and be
+        // recorded as a timeout — the grant honoured on paper and defeated in fact.
+        rearmDeadlineForUnboundedGrant();
+        logAudit("long_running_generation_auto_resolved", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          action: "deadline_suspended_by_unbounded_grant",
+          turnTimeoutMs,
+          elapsedMs: Date.now() - runStartedAt,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "info" });
       }
       if (!lrgOperatorStop && !longRunningGenerationManager.isUnbounded(subSessionId)) {
         if (longRunningGenerationManager.isStopRequested(subSessionId)) {
@@ -3023,7 +5508,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           lrgOperatorStop = true;
           turnTimeoutReached = true;
         } else if (
-          (Date.now() - runStartedAt) > lrgWallThresholdMs
+          workingMs() > lrgWallThresholdMs
           || usage.completionTokens > lrgTokenThreshold
         ) {
           // Effort-tier policy answers "this run is taking a while — keep going?"
@@ -3077,69 +5562,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 completionTokens: usage.completionTokens,
               }, { sessionId: opts.parentSessionId, severity: "info" });
             }
-            // Throttled progress check: at most one per window so the judge (when
-            // enabled) can't contend with every iteration of the run it watches.
-            if (Date.now() - lrgLastProgressCheckAt >= PROGRESS_CHECK_INTERVAL_MS) {
-              lrgLastProgressCheckAt = Date.now();
-              const sample: ProgressSample = { completionTokens: usage.completionTokens, toolCalls: toolCount };
-              // (1) STRUCTURAL stall guard — always on, deterministic, no LLM, no keywords.
-              lrgConsecutiveStalls = isHardStall(lrgLastSample, sample) ? lrgConsecutiveStalls + 1 : 0;
-              lrgLastSample = sample;
-              let intervention: { verdict: "stalled" | "drifting"; reason: string } | null = null;
-              if (lrgConsecutiveStalls >= STALL_LIMIT) {
-                intervention = {
-                  verdict: "stalled",
-                  reason: `no new completion tokens or tool calls across ${lrgConsecutiveStalls} ${Math.round(PROGRESS_CHECK_INTERVAL_MS / 1000)}s windows`,
-                };
-              } else if (getConfig().orchestration?.progressVerifierSemantic) {
-                // (2) SEMANTIC direction judge — opt-in, bounded, fail-open. A busy
-                // run can still be working toward the wrong goal; one small judge
-                // call reads the objective + recent activity and flags drift. Any
-                // error/timeout/parse-failure resolves to on_track (never dead-ends).
-                try {
-                  const lastAssistant = [...history].reverse().find(
-                    (m) => m.role === "assistant" && typeof m.content === "string" && m.content.trim().length > 0,
-                  );
-                  const recentActivity = [
-                    lastAssistant ? `Latest output:\n${String(lastAssistant.content).slice(0, 1200)}` : "",
-                    toolNames.length ? `Recent tool calls: ${toolNames.slice(-8).join(", ")}` : "",
-                  ].filter(Boolean).join("\n\n") || "(no assistant output or tool calls yet)";
-                  const judgeProvider = getChatProviderForTier("routing") ?? provider;
-                  const judgeResp = await judgeProvider.complete(
-                    buildProgressJudgePrompt({ objective: opts.task, recentActivity }),
-                    [],
-                    signal,
-                  );
-                  const verdict = parseProgressVerdict(judgeResp.content);
-                  if (verdict.verdict === "drifting") intervention = { verdict: "drifting", reason: verdict.reason };
-                } catch {
-                  // fail-open: a judge failure must never stop a healthy run.
-                }
-              }
-              if (intervention) {
-                longRunningGenerationManager.requestStop(subSessionId, `progress_verifier:${intervention.verdict}`);
-                lrgOperatorStop = true;
-                turnTimeoutReached = true;
-                logAudit("progress_verifier_intervened", {
-                  agentName: opts.agentName,
-                  runSessionId: subSessionId,
-                  verdict: intervention.verdict,
-                  reason: intervention.reason,
-                  elapsedMs: Date.now() - runStartedAt,
-                  completionTokens: usage.completionTokens,
-                  toolCalls: toolCount,
-                  iterations,
-                }, { sessionId: opts.parentSessionId, severity: "warn" });
-              }
-            }
+            // The progress check that used to live here has moved to the top of the
+            // loop (superviseProgress). It was unreachable from this position: the
+            // markUnbounded() call just above flips the `!isUnbounded` guard this whole
+            // branch sits under, so the check ran at most ONCE per run while its stall
+            // rule needed two consecutive samples. It also only watched `max` effort,
+            // which is backwards — an unbounded run is the one that most needs a
+            // supervisor, but so does every other run now that the static caps are gone.
           } else if (lrgAction === "ask") {
             // Idempotent per run: only the first crossing surfaces a dock entry.
             longRunningGenerationManager.notifyLongRunning({
               agentName: opts.agentName,
               runSessionId: subSessionId,
               ...(opts.parentSessionId ? { parentSessionId: opts.parentSessionId } : {}),
-              reason: `${opts.agentName} has been generating for ${Math.round((Date.now() - runStartedAt) / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
-              elapsedMs: Date.now() - runStartedAt,
+              reason: `${opts.agentName} has been generating for ${Math.round(workingMs() / 1000)}s and burned ${usage.completionTokens} completion tokens across ${iterations} iterations; ${toolCount} tool calls so far`,
+              elapsedMs: workingMs(),
               completionTokens: usage.completionTokens,
               iterations,
             });
@@ -3183,8 +5620,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // a couple of seconds before the hard wall. A larger reservation
         // gives the synthesis pass a real chance to fire even when the
         // last tool round took 30-40s.
-        const reservedSynthesisMs = Math.max(30_000, Math.min(75_000, Math.round(turnTimeoutMs * 0.33)));
-        if (elapsed >= turnTimeoutMs - reservedSynthesisMs) {
+        //
+        // THAT LAST SENTENCE IS THE BUG, and it is a constant sized for a model this
+        // deployment no longer runs. The reserve is a promise — "keep enough time to write
+        // the answer" — and 75 s cannot keep it when one call costs more than 75 s.
+        //
+        // Session 3f15dc63, a "what is the weather tomorrow" turn: researcher had the whole
+        // forecast in shared facts at 528 s, entered synthesis with 75 s reserved, and its
+        // synthesis call spent 121.8 s in PREFILL ALONE (159.5 s total, 18,140-token prompt on
+        // deepseek-v4-flash, which cannot reuse KV state). The reserve expired mid-prefill, the
+        // agent hit its hard deadline, returned `partial`, and the parent coordinator then spent
+        // a further 283.9 s re-synthesising an answer that already existed. The turn took
+        // 20.1 minutes; the answer was ready at 8.8.
+        //
+        // So size it from what a call ACTUALLY costs here. slowestModelCallMs is this run's own
+        // measurement, so a fast deployment keeps the old 75 s behaviour (its calls are far
+        // quicker) and a slow one reserves what it needs, with 25% headroom because the
+        // synthesis prompt is the largest one the run will send. Bounded at 60% of the budget:
+        // past that the reserve would eat the work it exists to summarise, and an agent that
+        // cannot fit both research and one synthesis call inside its deadline has a deadline
+        // problem, not a reserve problem.
+        const reservedSynthesisMs = resolveSynthesisReserveMs({ turnTimeoutMs, slowestModelCallMs });
+        // Reserve the window before the deadline that is REAL, which is the one the liveness
+        // probe has been moving. Measuring against the original budget wraps up a run the
+        // supervisor has explicitly judged to be working.
+        const wallAt = effectiveDeadlineAt ?? (runStartedAt + turnTimeoutMs);
+        if (Date.now() >= wallAt - reservedSynthesisMs) {
           softDeadlineSynthesisAttempted = true;
           logAudit(
             "sub_agent_soft_deadline",
@@ -3207,11 +5668,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
       }
 
-      if (turnTimeoutReached && turnTimeoutMs) {
+      if (turnTimeoutReached && (turnTimeoutMs || supervisorStop)) {
         const synthesized = await attemptTimeoutSynthesis();
         if (synthesized) {
           return synthesized;
         }
+        // The warden's stop rides the supervisor's latches, so it is checked first: the run was not
+        // judged stalled, it was stopped for a burst of tool calls (or another kill-switch alert).
+        const windDownReason = wardenStop
+          ? `was stopped by the warden (${wardenStop.alert})`
+          : supervisorStop
+            ? "was wound down by the progress supervisor (no forward progress)"
+            : `timed out after ${turnTimeoutMs}ms after finishing the current operation`;
         const interruptedOutcome = classifyInterruptedOutcome({
           successfulToolCount,
           artifacts,
@@ -3226,11 +5694,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           totalTokens: usage.totalTokens,
           durationMs: Date.now() - runStartedAt,
           timeoutMs: turnTimeoutMs,
-          error: `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
+          error: wardenStop
+            ? `warden stopped the run (${wardenStop.alert})`
+            : supervisorStop
+              ? "progress supervisor wound the run down after no forward progress"
+              : `timeout (${turnTimeoutMs}ms) reached after current operation finished`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
-          reason: `timed out after ${turnTimeoutMs}ms after finishing the current operation`,
+          reason: windDownReason,
           swarmState: toolContext.swarmState,
           toolNames,
           toolCount,
@@ -3238,6 +5710,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
@@ -3264,7 +5737,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: "cancelled",
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: "was cancelled",
           swarmState: toolContext.swarmState,
@@ -3274,6 +5747,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("cancelled", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -3287,64 +5761,131 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // When running low on iterations, take increasingly aggressive
       // measures to force the agent to synthesize instead of tool-calling.
       const remaining = maxIterations - iterations;
-      const elapsedMs = Date.now() - runStartedAt;
       const synthesisBufferMs = turnTimeoutMs
         ? Math.max(3_000, Math.min(10_000, Math.round(turnTimeoutMs * 0.15)))
         : undefined;
-      const timeRemainingMs = turnTimeoutMs ? Math.max(0, turnTimeoutMs - elapsedMs) : undefined;
+      // Against the deferred wall, not the static budget — see resolveTimeRemainingMs. With
+      // the static one this pinned at 0 for the whole extended lifetime of a deferred run, so
+      // the branch below stripped the run's tools on every remaining iteration.
+      const timeRemainingMs = resolveTimeRemainingMs({
+        turnTimeoutMs,
+        runStartedAt,
+        effectiveDeadlineAt,
+        nowMs: Date.now(),
+      });
       const timeBudgetCritical = toolCount > 0
         && synthesisBufferMs !== undefined
         && timeRemainingMs !== undefined
         && timeRemainingMs <= synthesisBufferMs;
-      let effectiveSystemPrompt = systemPrompt;
-      let effectiveTools = tools;
+      // THE SUB-AGENT'S HEAD IS A CACHE KEY TOO. Wave A (2066738) made the ORCHESTRATOR's
+      // leading system run byte-identical across a turn's iterations; this loop, where most of a
+      // delegating turn's iterations actually run, kept appending its nudges onto the system
+      // message and threw the prefix away every time one appeared or vanished. Measured on a
+      // 24,731-token sub-agent context: an unchanged head prefills in 0.33 s, the same request
+      // with the BUDGET WARNING appended to the system message 41.29 s, and the identical text
+      // moved to a trailing message 0.87 s. Three of the six nudges are one-shot latches, so they
+      // break the prefix twice each — once appearing, once gone.
+      //
+      // So the nudges are collected here and delivered AFTER the history, where the provider
+      // relabels a non-leading system message as context in place (foldSystemMessages) and the
+      // model reads them as the most recent instruction — which is what a per-iteration nudge is.
+      // Only genuinely PER-ITERATION content belongs here. Run-constant context rides with
+      // history[0] instead (see runContextBlock): a trailing message is re-prefilled on every
+      // call because the history in front of it grows, so putting run-constant text here
+      // multiplies its prefill cost by the iteration count.
+      const iterationNudges: string[] = [];
+      // The wire list is the run's list on EVERY call. "No more tools" is tool_choice "none"
+      // for this call, not an empty list: the server renders the same tool block and applies
+      // no tool grammar, so the prefix survives (9,938-token prompt: 4 tokens processed /
+      // 0.41 s under "none" vs 7,027 processed / 7.28 s with the list removed). A tool_call
+      // that still comes back is discarded below (discardToolCallsUnderToolChoiceNone).
+      const effectiveTools = tools;
+      // No run-scoped "tools are off" latch feeds this: the loop-stop below sets nothing and
+      // BREAKS in the same block, and every call after the loop (post-loop synthesis, the
+      // rescues) reaches tool_choice "none" through completeWithoutTools, not through here.
+      let callToolChoice: "auto" | "none" = "auto";
 
       if (timeBudgetCritical) {
-        effectiveTools = [];
-        effectiveSystemPrompt +=
-          `\n\n⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
-          "NO MORE TOOLS AVAILABLE. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
-          "Include the key facts, URLs, and extracts you already retrieved.";
+        callToolChoice = "none";
+        iterationNudges.push(
+          `⚠️ TIME BUDGET CRITICAL: Only about ${timeRemainingMs}ms remain before timeout. ` +
+          "TOOL CALLS ARE DISABLED. Produce your COMPLETE final answer NOW from the evidence already gathered. " +
+          "Include the key facts, URLs, and extracts you already retrieved.");
         log.info(
           { agentName: opts.agentName, iterations, toolCount, timeRemainingMs, synthesisBufferMs },
-          "Time budget nearly exhausted — stripping tools to force synthesis",
+          "Time budget nearly exhausted — disabling tool calls to force synthesis",
         );
       } else if (remaining === 1 && toolCount > 0) {
-        // HARD: last iteration — strip ALL tools so the LLM *cannot* make
-        // any more tool calls and is forced to produce a text answer.
-        effectiveTools = [];
-        effectiveSystemPrompt +=
-          "\n\n⚠️ FINAL ITERATION — NO MORE TOOLS AVAILABLE. " +
-          "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
-          "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
-          "URLs, facts, and extracts verbatim. Do NOT summarize away details. " +
-          "Your response is the ONLY output the coordinator will receive from you.";
+        // HARD: last iteration — tool_choice "none" so the LLM is forced to produce a text
+        // answer. This used to empty the tool list as "the only hard guarantee"; it was not one
+        // (the model can still write a call as text, and the parser still recognises it), and it
+        // cost a full re-prefill on the last iteration — 6 of the 8 tools-stripped calls in the
+        // audit log were cold (41 messages / 12,732 tokens / 14.6 s TTFT; 35 messages / 17,628
+        // tokens / 24.7 s). The actual guarantee is the same on both paths: the server applies no
+        // tool grammar under tool_choice "none", and any tool_call that still comes back is
+        // discarded here and never executed.
+        callToolChoice = "none";
+        // A run whose code never completed with output has gathered no result to "synthesize", and
+        // telling it to include ALL facts verbatim is how the coder of E2E 2026-10-07 came to write
+        // a table of numbers nothing had computed. In that state the middle of the nudge says what
+        // its executions did instead; replaced, not appended, so the tail stays one message. Its
+        // own executions only (ownExecutionRecord): a specialist's are not "your code executions".
+        const finalIterationBody = noExecutionCompleted(ownExecutionRecord)
+          ? `None of your ${executionCountPhrase(ownExecutionRecord)} completed with output (${executionShortfallPhrase(ownExecutionRecord)}), `
+            + "so no tool has returned a computed value: report what you ran and what came back, and state no figure that no tool returned. "
+          : "You have used all your tool-call iterations. Produce your COMPLETE final answer NOW. " +
+            "Synthesize everything you have gathered from previous tool calls — include ALL content, " +
+            "URLs, facts, and extracts verbatim. Do NOT summarize away details. ";
+        iterationNudges.push(
+          "⚠️ FINAL ITERATION — TOOL CALLS ARE DISABLED. " +
+          finalIterationBody +
+          "Your response is the ONLY output the coordinator will receive from you.");
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
-          "Last iteration reached — stripping tools to force synthesis",
+          "Last iteration reached — disabling tool calls to force synthesis",
         );
       } else if (remaining === 2 && toolCount > 0) {
-        effectiveSystemPrompt +=
-          `\n\n⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
-          "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
-          "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
+        // Same state, same reason: "you have already gathered substantial content" is false then.
+        const budgetWarningBody = noExecutionCompleted(ownExecutionRecord)
+          ? `None of your ${executionCountPhrase(ownExecutionRecord)} has completed with output yet (${executionShortfallPhrase(ownExecutionRecord)}). `
+            + "Use what remains to get one, or report exactly what failed — state no figure that no tool returned."
+          : "You have already gathered substantial content. Stop calling tools UNLESS critical information is still missing. " +
+            "Use your next response to produce your complete final answer with all facts, URLs, and evidence you have collected so far.";
+        iterationNudges.push(
+          `⚠️ BUDGET WARNING: You have only ${remaining} iterations remaining (out of ${maxIterations}). ` +
+          budgetWarningBody);
       }
 
       // E18: Soft deadline — inject a wrap-up nudge once when the caller-supplied
       // deadline expires. Coordinators set this to ~70% of their own budget so
       // specialists begin wrapping up before the hard timeout fires.
+      // A caller-set soft deadline is still a clock, and it must answer to the same evidence
+      // the hard one does: telling a run that is demonstrably producing to "wrap up within
+      // 1-2 iterations" ends it just as effectively as aborting it, and reads as the model's
+      // own choice in the transcript. Deferred while the generation is alive and not
+      // circling; a quiet or looping run gets the nudge as before.
+      const softDeadlineDeferred = shouldDeferDeadline({
+        liveReasoningChars,
+        liveLoopSuspected,
+        minProducedChars: MIN_SUBSTANTIVE_OUTPUT_CHARS,
+        msSinceLastProgress: streamInFlight && lastStreamProgressAt > 0
+          ? Date.now() - lastStreamProgressAt
+          : undefined,
+        progressWindowMs: DEADLINE_LIVENESS_RECHECK_MS,
+      });
       if (
         opts.softDeadlineMs !== undefined
         && !softDeadlineInjected
-        && Date.now() >= opts.softDeadlineMs
+        && Date.now() >= opts.softDeadlineMs + humanWaitCreditMs
         && toolCount > 0
+        && !softDeadlineDeferred
       ) {
         softDeadlineInjected = true;
-        effectiveSystemPrompt +=
-          "\n\n⚠️ SOFT DEADLINE REACHED: Your allocated time budget for this task is expiring. " +
+        iterationNudges.push(
+          "⚠️ SOFT DEADLINE REACHED: Your allocated time budget for this task is expiring. " +
           "Plan to wrap up within the next 1–2 iterations: " +
           "call share_finding with any important evidence you have gathered, " +
-          "then produce your complete final answer.";
+          "then produce your complete final answer.");
         log.info(
           { agentName: opts.agentName, iterations, softDeadlineMs: opts.softDeadlineMs },
           "Soft deadline reached — injecting wrap-up nudge",
@@ -3361,10 +5902,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && iterations >= Math.floor(maxIterations * 0.7)
       ) {
         softDeadlineInjected = true; // reuse the flag so this fires only once
-        effectiveSystemPrompt +=
-          "\n\n⚠️ ITERATION BUDGET WARNING: You have used many iterations without calling any tools. " +
+        iterationNudges.push(
+          "⚠️ ITERATION BUDGET WARNING: You have used many iterations without calling any tools. " +
           "If you need to gather information, call the appropriate tools now. " +
-          "If you already have enough context, produce your final answer immediately.";
+          "If you already have enough context, produce your final answer immediately.");
         log.info(
           { agentName: opts.agentName, iterations, maxIterations, toolCount },
           "§12: Iteration-budget nudge injected (no tool calls at 70% of budget)",
@@ -3378,15 +5919,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // full fan-out.
       if (!degradedMidTurnApplied && isSessionDegraded(subSessionId)) {
         degradedMidTurnApplied = true;
-        effectiveSystemPrompt +=
-          "\n\n⚠️ VELOCITY WARNING (mid-turn): The warden flagged this session "
+        iterationNudges.push(
+          "⚠️ VELOCITY WARNING (mid-turn): The warden flagged this session "
           + "as approaching a tool-storm / messaging-flood threshold while you were "
           + "running. Narrow scope, batch tool calls, and finish quickly. Do not "
           + "spawn further delegations or parallel tool fan-out unless strictly "
-          + "required to complete the task.";
-        if (effectiveTools.length > 6) {
-          effectiveTools = effectiveTools.slice(0, 6);
-        }
+          + "required to complete the task.");
+        // The list used to be sliced to 6 for THIS iteration only (effectiveTools is rebuilt
+        // from `tools` every loop), so it bought one iteration of a shorter list at the price
+        // of two prefix breaks — once shrinking, once growing back. The nudge is what narrows
+        // the run; the list stays on the wire unchanged.
         log.info(
           {
             agentName: opts.agentName,
@@ -3394,21 +5936,101 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             iteration: iterations + 1,
             remainingTools: effectiveTools.length,
           },
-          "Sub-agent entered degraded mode mid-turn — nudge injected, tool list capped",
+          "Sub-agent entered degraded mode mid-turn — nudge injected",
         );
       }
 
-      const messages: LLMMessage[] = [
-        { role: "system", content: effectiveSystemPrompt },
-        ...history,
-      ];
+      // The loop brake's one hint, on the iteration after its first refusal. In the tail with the
+      // other per-iteration nudges, never in the head: a one-shot line in the system prompt would
+      // break the prefix twice, once appearing and once gone (composeSubAgentMessages).
+      if (loopBrakeHint) {
+        iterationNudges.push(loopBrakeHint);
+        loopBrakeHint = null;
+      }
 
-      opts.onProgress?.({
-        agentName: opts.agentName,
-        kind: "thinking",
-        iteration: iterations + 1,
-        summary: `Planning the next delegated step in ${opts.agentName}.`,
+      // INPUT bound. The completion budget is derived from what the prompt leaves
+      // free, so an append-only history would starve it before it overflows the
+      // window. Trim BEFORE assembling the request, not after.
+      // The nudges still occupy context wherever they sit, so they still count against the input
+      // bound — only their POSITION changed.
+      const nudgeMessage = iterationNudges.join("\n\n");
+      // Read what the run has received BEFORE the trim digests, drops or clamps it (see
+      // absorbNewHistory); the nudges count too, since the model reads them as context.
+      if (tracksFigures) {
+        absorbNewHistory();
+        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
+      }
+      const trimmed = trimSubAgentHistory(history, {
+        systemPromptChars: systemPrompt.length + nudgeMessage.length,
+        tools: effectiveTools,
+        contextWindow: modelConfig.contextWindow,
       });
+      // The trim shortens history in place, so everything left in it has been read.
+      if (tracksFigures) absorbedHistoryLength = history.length;
+      // A digest is a KV-prefix break (everything behind the rewritten message re-prefills,
+      // 10-16 s cold on the audited runs), so each batch is its own row: the log must show
+      // how many breaks a run paid, not just how many messages it dropped. The row carries
+      // the TRIGGER and the mass because the two triggers are different events: "batch" is
+      // one break per DIGEST_BATCH_MIN_CHARS of stale mass (the design), while "overflow"
+      // fires below that threshold and, on a model whose contextWindow the prompt keeps
+      // exceeding, fires again every iteration on whatever just went stale — one break per
+      // iteration, the pathology the batching removed. Without trigger + digestedStaleChars
+      // + contextWindow on the row, a run paying that every iteration and a healthy 40K
+      // batch produce indistinguishable log lines.
+      if (trimmed.digested > 0) {
+        logAudit(
+          "sub_agent_history_digested",
+          {
+            agentName: opts.agentName,
+            iteration: iterations + 1,
+            digested: trimmed.digested,
+            digestedStaleChars: trimmed.digestedStaleChars,
+            digestTrigger: trimmed.digestTrigger,
+            contextWindow: modelConfig.contextWindow,
+            remainingMessages: history.length,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
+      if (trimmed.dropped > 0) {
+        logAudit(
+          "sub_agent_history_trimmed",
+          {
+            agentName: opts.agentName,
+            iteration: iterations + 1,
+            droppedMessages: trimmed.dropped,
+            remainingMessages: history.length,
+            contextWindow: modelConfig.contextWindow,
+          },
+          { sessionId: subSessionId, severity: "info" },
+        );
+      }
+
+      const messages: LLMMessage[] = composeSubAgentMessages(systemPrompt, history, iterationNudges);
+
+      // laya-browser's own step, when it is sure of one (decisions.browser mode "drive"): it runs as
+      // this iteration's tool call and no model call is made. Never while the loop has something to
+      // tell the model, wants its answer rather than another action, or is being stopped.
+      const drivenStep: DrivenStep | null = browserDecider
+        && callToolChoice === "auto"
+        && iterationNudges.length === 0
+        && !turnTimeoutReached
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        ? await browserDecider.proposeStep(llmSignal)
+        : null;
+      // It costs no model call, so it does not use up one of the model's iterations.
+      if (drivenStep && maxIterations < Number.MAX_SAFE_INTEGER) maxIterations += 1;
+
+      if (!drivenStep) {
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "thinking",
+          iteration: iterations + 1,
+          summary: `Planning the next delegated step in ${opts.agentName}.`,
+        });
+      }
 
       let response;
       try {
@@ -3417,10 +6039,96 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // on the prompt vs stalled) and inherits stream()'s per-chunk inactivity
         // abort, which the plain non-streaming complete() lacks. Falls back to
         // complete() for any provider/mock that doesn't implement it.
-        response = provider.completeViaStream
-          ? await provider.completeViaStream(messages, effectiveTools, signal)
-          : await provider.complete(messages, effectiveTools, signal);
+        // Reset per iteration: the ratio describes THIS generation, not the run.
+        iterationRepeatRatio = 0;
+        liveReasoningChars = 0;
+        // A generation that has just STARTED is alive even before its first token — on this
+        // model time-to-first-token alone is around a minute.
+        //
+        // ONLY on the streaming path. The whole justification for recency is that the stream
+        // can see the model working; plain complete() reports nothing until it returns, so
+        // there "started recently" would mean "alive" for as long as it hung. Where there is
+        // no visibility the deadline stays the authority, exactly as before.
+        streamInFlight = Boolean(provider.completeViaStream);
+        lastStreamProgressAt = Date.now();
+        lastHeartbeatChars = 0;
+        const modelCallStartedAt = Date.now();
+        const callOptions: CompletionCallOptions = {
+          toolChoice: callToolChoice,
+          // "none" on this loop has exactly three producers — the final iteration, the
+          // time-critical nudge and the loop-stop — and all three are the same forced
+          // "answer from what you already gathered" shape as the synthesis passes. Nothing
+          // is left to deliberate about, so the call runs under SYNTHESIS_CALL_CONTROLS
+          // (thinking off, past a graded pin) rather than the worker's own controls, which
+          // put 824 s across five prose-only calls with ~20 % of it answer. A tool-using
+          // iteration is untouched: no `controls` key at all means "no opinion".
+          ...(callToolChoice === "none" ? { controls: SYNTHESIS_CALL_CONTROLS } : {}),
+          // Cheap observation so the loop threshold can be fitted from real runs
+          // instead of guessed. A number per chunk, never the reasoning text.
+          onProgress: (p) => {
+            iterationRepeatRatio = p.reasoningRepeatRatio;
+            liveReasoningChars = p.reasoningChars;
+            liveLoopSuspected = p.reasoningLoopDetected;
+            lastStreamProgressAt = Date.now();
+            // THE PARENT CANNOT HEAR A CHILD THAT ONLY SPEAKS BETWEEN ITERATIONS.
+            //
+            // Progress events are emitted once per ITERATION, so a delegate inside one
+            // long generation is silent for as long as that generation runs. Validation
+            // run 4 spent thirteen minutes composing a single fill, and the orchestrator
+            // — whose own deadline defers on exactly this signal — saw nothing at all and
+            // concluded, correctly on the evidence it had, that the run was dead.
+            //
+            // Every layer that defers to liveness needs the heartbeat, not just this one.
+            // Sampled rather than per-chunk: a token-rate beat would be thousands of
+            // events per generation for a question answered just as well by one every
+            // few seconds.
+            if (p.reasoningChars - lastHeartbeatChars >= STREAM_HEARTBEAT_CHARS) {
+              lastHeartbeatChars = p.reasoningChars;
+              opts.onProgress?.({
+                agentName: opts.agentName,
+                kind: "thinking",
+                iteration: iterations + 1,
+                summary: `${opts.agentName} is composing (${p.reasoningChars.toLocaleString("en-US")} chars).`,
+              });
+            }
+          },
+          // The operator's unbounded grant, readable from INSIDE the provider while
+          // the stream is still running. A callback, not a boolean: the grant
+          // routinely lands mid-generation (that is when the dock asks), and the
+          // provider consults it only at the instant its burn guard would fire.
+          // Both scopes count — the run-scoped grant this loop's own escape hatches
+          // read, and a turn-scoped grant covering the whole delegation tree.
+          isUnbounded: () =>
+            longRunningGenerationManager.isUnbounded(subSessionId)
+            || longRunningGenerationManager.isTurnUnbounded(subSessionId),
+        };
+        response = drivenStep
+          ? drivenStepResponse(drivenStep)
+          : provider.completeViaStream
+            ? await provider.completeViaStream(messages, effectiveTools, llmSignal, callOptions)
+            : await provider.complete(messages, effectiveTools, llmSignal, callOptions);
+        // WHAT ONE CALL COSTS HERE, observed rather than assumed. The synthesis reserve
+        // below is a deadline promise — "leave enough time to write the answer" — and a
+        // promise sized by a constant is only kept on a model as fast as the constant.
+        slowestModelCallMs = Math.max(slowestModelCallMs, Date.now() - modelCallStartedAt);
+        // The stream is done; from here until the next one starts there is no generation
+        // to be alive, so recency must stop voting. Without this a run that finished its
+        // last completion would defer its deadline forever on a stale timestamp.
+        //
+        // THE CHAR COUNT IS THE SAME KIND OF STALENESS. `liveReasoningChars` answers "has
+        // THIS generation said a lot yet", and shouldDeferDeadline's first arm returns true
+        // on it without consulting recency — so leaving the finished generation's total
+        // standing made every later check defer on a run with no generation at all. That
+        // suppressed the E18 wrap-up nudge (evaluated at the TOP of the next iteration,
+        // before the reset at the stream call below) for the whole rest of the run, and let
+        // a run wedged in a non-returning tool call re-arm its hard deadline forever.
+        streamInFlight = false;
+        liveReasoningChars = 0;
+        liveLoopSuspected = false;
       } catch (err) {
+        streamInFlight = false;
+        liveReasoningChars = 0;
+        liveLoopSuspected = false;
         if (opts.signal?.aborted) {
           const interruptedOutcome = classifyInterruptedOutcome({
             successfulToolCount,
@@ -3438,7 +6146,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: "cancelled",
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "was cancelled",
             swarmState: toolContext.swarmState,
@@ -3448,6 +6156,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             artifacts,
             evidenceSnippets: recentEvidenceSnippets,
             primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
           });
           const stats = buildStats("cancelled", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, { cancelled: true }, "warn");
@@ -3455,6 +6164,88 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             output,
             stats,
           });
+        }
+        // The TURN DEADLINE aborted the in-flight completion (not the operator).
+        // Take the same route the between-iterations latch takes above so the run
+        // still gets its synthesis pass and its evidence relay, instead of being
+        // reported as a generic "Sub-agent LLM call failed".
+        //
+        // Reached only when the provider's salvage found NOTHING to keep (the
+        // deadline landed during prefill). When the model had already produced
+        // content or a tool call, completeViaStream returns normally with
+        // finishReason "length" and the existing latch handles the wind-down.
+        //
+        // Escape hatch 3 (grant landed WHILE this completion was in flight — the
+        // operator answered the dock in the moments after the timer fired): the grant
+        // outranks the deadline here too. Re-arm and take another pass instead of
+        // reporting a timeout the operator just waived. Bounded: `iterations` still
+        // advances and the one-shot timer never re-arms, so this cannot spin.
+        if (
+          deadlineAc.signal.aborted
+          && !opts.signal?.aborted
+          && longRunningGenerationManager.isUnbounded(subSessionId)
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          turnTimeoutReached = false;
+          rearmDeadlineForUnboundedGrant();
+          logAudit("long_running_generation_auto_resolved", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            action: "deadline_abort_retried_under_unbounded_grant",
+            turnTimeoutMs,
+            elapsedMs: Date.now() - runStartedAt,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          iterations++;
+          continue;
+        }
+        if (deadlineAc.signal.aborted && turnTimeoutMs && !opts.signal?.aborted) {
+          const synthesized = await attemptTimeoutSynthesis();
+          if (synthesized) return synthesized;
+          const interruptedOutcome = classifyInterruptedOutcome({
+            successfulToolCount,
+            artifacts,
+            swarmState: toolContext.swarmState,
+          });
+          recordOutcome({
+            ts: new Date().toISOString(),
+            agent: opts.agentName,
+            task: opts.task.slice(0, 200),
+            outcome: interruptedOutcome,
+            iterations,
+            totalTokens: usage.totalTokens,
+            durationMs: Date.now() - runStartedAt,
+            timeoutMs: turnTimeoutMs,
+            error: `timeout (${turnTimeoutMs}ms) aborted the in-flight completion`,
+          });
+          const output = buildScaffold({
+            agentName: opts.agentName,
+            reason: `timed out after ${turnTimeoutMs}ms while a completion was still generating`,
+            swarmState: toolContext.swarmState,
+            toolNames,
+            toolCount,
+            iterations,
+            artifacts,
+            evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
+            primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
+          });
+          const stats = buildStats("timeout", interruptedOutcome);
+          logSubAgentCompletionAudit(
+            stats,
+            output,
+            {
+              timeoutMs: turnTimeoutMs,
+              abortedInFlightCompletion: true,
+              // The branch keys off "the deadline had fired", not off the identity of
+              // the caught error — a provider failure that happened to land in the same
+              // window is wound down here too. Record what actually threw so the audit
+              // is never blind about which of the two it was.
+              providerError: err instanceof Error ? err.message : String(err),
+            },
+            "warn",
+          );
+          return withArtifacts({ output, stats });
         }
         // A stalled/timed-out FINAL call after the deliverable already exists is
         // not a failed run — return the finished build instead of branding it
@@ -3481,7 +6272,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             timeoutMs: turnTimeoutMs,
             error: String(err).slice(0, 200),
           });
-          const output = buildInterruptedSubAgentOutput({
+          const output = buildScaffold({
             agentName: opts.agentName,
             reason: "timed out while finalizing the answer after substantive work",
             swarmState: toolContext.swarmState,
@@ -3491,6 +6282,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             artifacts,
             evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
             primaryDelegationBody: currentPrimaryDelegationBody(),
+            mutatedFileLines: currentMutatedFileLines(),
           });
           const stats = buildStats("timeout", interruptedOutcome);
           logSubAgentCompletionAudit(stats, output, {
@@ -3520,13 +6312,43 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       usage.promptTokens += response.usage.promptTokens;
       usage.completionTokens += response.usage.completionTokens;
       usage.totalTokens += response.usage.totalTokens;
+      // What this call left in the server's cache, for the head re-warm as the run ends. A step
+      // laya-browser took in the model's place sent nothing.
+      if (!drivenStep) headRewarm?.noteLoopCall(messages, effectiveTools, response.usage.promptTokens);
 
       // Surface the model's chain-of-thought for this iteration to the UI
       // (behind a debug toggle) and the audit log. This is exactly where the
       // qwen "burned 4096-6144 thinking tokens and stalled" pathology shows
       // up — making it visible is the whole point of capturing reasoning.
+      // Feed the supervisor's shape counters. Both were already being measured here and
+      // at three sibling sites, and consumed nowhere.
+      const responseText = typeof response.content === "string" ? response.content : "";
+      outputCharsTotal += responseText.length;
+      // LOST TRACK: an assistant turn byte-identical to one an earlier iteration already
+      // produced means the run is re-emitting, not advancing — the shape a loop takes when
+      // it happens above the tool layer, where the per-tool guards cannot see it. The
+      // substantive-output floor keeps short acknowledgements ("Done.", "OK") from tripping
+      // it; the healthy reference run's 13 iterations were all distinct.
+      if (!lrgOperatorStop && responseText.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+        const outputSig = createHash("sha1").update(responseText.trim()).digest("hex").slice(0, 16);
+        if (assistantOutputSigs.has(outputSig)) {
+          windDownForSupervisor();
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "iteration",
+            verdict: "looping",
+            reason: "assistant output is identical to an earlier iteration — the run is re-emitting, not advancing",
+            elapsedMs: Date.now() - runStartedAt,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+        } else {
+          assistantOutputSigs.add(outputSig);
+        }
+      }
       if (response.reasoning && response.reasoning.trim()) {
         const reasoningText = response.reasoning.trim();
+        reasoningCharsTotal += reasoningText.length;
         logAudit(
           "sub_agent_reasoning",
           {
@@ -3535,9 +6357,116 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reasoningChars: reasoningText.length,
             // Preserve observability without persisting provider reasoning.
             reasoningCaptured: true,
+            // The SHAPE of that reasoning as a single number. This is the corpus that
+            // turns REASONING_LOOP_REPEAT_RATIO from a conservative guess into a fitted
+            // threshold: pair it with this iteration's tool calls and a healthy-vs-stuck
+            // distribution falls out of ordinary use, with no reasoning text stored.
+            repeatRatio: Number(iterationRepeatRatio.toFixed(3)),
           },
           { sessionId: subSessionId, severity: "info" },
         );
+      }
+
+      // THE PROVIDER STOPPED A BURNING GENERATION MID-STREAM.
+      //
+      // This is the verdict the supervisor above would have reached had it been able to
+      // see inside the call — it samples between iterations and on a timer that reads
+      // counters only a RETURNED call updates, and the measured failure spent its whole
+      // 20.7 minutes inside ONE stream, so the supervisor had nothing to read. The
+      // provider now reaches the same conclusion from the deltas as they arrive and
+      // salvages the partial; all that is left here is to decide what it MEANS.
+      if (response.truncatedBy === "reasoning_burn") {
+        reasoningBurns++;
+        const burnReasoningChars = response.reasoning?.trim().length ?? 0;
+        // CORRECT THE MODEL BEFORE KILLING THE RUN.
+        //
+        // The first burn used to be fatal, and run dfe964f3 is what that cost: wound down
+        // at iteration 1 of 14, thirteen iterations unused, and the swarm re-dispatched the
+        // byte-identical task to the next-ranked agent, which began burning the same way.
+        // Nobody had told the model anything. A burn is a recoverable mistake — the model
+        // tried to compose a whole artifact in its head — and the one thing never tried was
+        // saying so and asking for a single small action.
+        //
+        // Bounded three ways, so this cannot become the spin it is correcting: the counter
+        // is per-run and the SECOND burn falls through to the wind-down below; an operator
+        // stop or cancellation is honoured first, so this can never resurrect a run a human
+        // ended; and the corrective turn consumes an iteration like any other, so the
+        // iteration cap still terminates the loop.
+        const iterationsRemain = iterations + 1 < maxIterations;
+        if (
+          reasoningBurns < REASONING_BURN_RETRY_LIMIT
+          && iterationsRemain
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          // Alternation matters: this history feeds strict chat templates that reject two
+          // consecutive user turns, so the cut-off assistant turn is recorded before the
+          // correction. Its content is never empty for the same reason — a burn salvages
+          // little or nothing, and an empty assistant turn is rejected by those templates too.
+          const salvagedText = typeof response.content === "string" ? response.content.trim() : "";
+          history.push({
+            role: "assistant",
+            content: salvagedText.length > 0
+              ? salvagedText
+              : "(this turn was cut off while planning — no action was taken)",
+          });
+          history.push({
+            role: "user",
+            content: buildReasoningBurnCorrection(burnReasoningChars, isStagedBuild && !assemblerBuild),
+          });
+          // Answer this burn once. Without the rebase the supervisor re-reads the same
+          // 45,000 characters on its very next sample and winds the corrected run down
+          // before it can obey — the correction would be live, green and inert.
+          reasoningCharsBaseline = reasoningCharsTotal;
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "mid_stream",
+            verdict: "burning",
+            action: "corrected",
+            reason: "the provider aborted an in-flight generation that was burning reasoning; "
+              + "the run was given a corrective turn demanding one concrete tool call",
+            elapsedMs: Date.now() - runStartedAt,
+            // The supervisor's own counter (new results with the loop brake on), so every row of
+            // this event type means the same thing by it.
+            productiveToolCalls: sampleProgress().productiveToolCalls,
+            mutatedPaths: mutatedWorkspacePaths.size,
+            reasoningChars: burnReasoningChars,
+            outputChars: outputCharsTotal,
+            burnCount: reasoningBurns,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          iterations++;
+          continue;
+        }
+        // Out of corrections (or the run is already ending). Wind down and take the loop's
+        // existing wind-down branch rather than falling through: a burn returns zero tool
+        // calls, so the "no tool calls = final answer" path below would report a
+        // 45,000-character monologue as the agent's ANSWER. `continue` puts the run through
+        // attemptTimeoutSynthesis and the interrupted output builder — the same route a
+        // deadline takes. Terminating by construction: the wind-down branch returns before
+        // another completion is issued.
+        windDownForSupervisor();
+        logAudit("progress_verifier_intervened", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          trigger: "mid_stream",
+          verdict: "burning",
+          action: "wound_down",
+          reason: "the provider aborted an in-flight generation that was burning reasoning "
+            + "with no tool call and no answer text",
+          elapsedMs: Date.now() - runStartedAt,
+          productiveToolCalls: sampleProgress().productiveToolCalls,
+          mutatedPaths: mutatedWorkspacePaths.size,
+          reasoningChars: reasoningCharsTotal,
+          outputChars: outputCharsTotal,
+          burnCount: reasoningBurns,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "warn" });
+        iterations++;
+        continue;
       }
 
       if (turnTimeoutReached && turnTimeoutMs && response.tool_calls.length > 0) {
@@ -3561,7 +6490,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           timeoutMs: turnTimeoutMs,
           error: `timeout (${turnTimeoutMs}ms) reached before starting another tool run`,
         });
-        const output = buildInterruptedSubAgentOutput({
+        const output = buildScaffold({
           agentName: opts.agentName,
           reason: `timed out after ${turnTimeoutMs}ms before starting another tool run`,
           swarmState: toolContext.swarmState,
@@ -3571,14 +6500,82 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: resolveInterruptedEvidenceSnippets({ recentEvidenceSnippets, history }),
           primaryDelegationBody: currentPrimaryDelegationBody(),
+          mutatedFileLines: currentMutatedFileLines(),
         });
         const stats = buildStats("timeout", interruptedOutcome);
         logSubAgentCompletionAudit(stats, output, { timeoutMs: turnTimeoutMs, stopAfterCurrentOperation: true, operatorStopped: lrgOperatorStop }, lrgOperatorStop ? "info" : "warn");
         return withArtifacts({ output, stats });
       }
 
+      // Under tool_choice "none" a tool_call is dropped here, never executed — after the
+      // wind-down branch above, which reads one as "the model was still trying to work" and
+      // only ever returns. Nothing between the call and this line runs a tool.
+      if (callToolChoice === "none") response = discardToolCallsUnderToolChoiceNone(response);
+
       // No tool calls — final answer
       if (response.tool_calls.length === 0) {
+        // AN ANNOUNCEMENT IS NOT A DELIVERABLE WHILE THE ARTIFACT IS STILL UNFINISHED.
+        //
+        // Run db88fa5b ended here, and it is the clearest failure measured so far. web_coder
+        // had used 8 of 14 iterations and 13 tool calls; its ninth turn returned exactly one
+        // sentence — "Now I'll fill the styles stub with the full CSS subsystem (board 3D
+        // scene, cells, panels, overlays)." — with no tool call. That is a model saying what
+        // it is ABOUT to do. The loop read "no tool calls = final answer", ended the run with
+        // six iterations unused, and the user was handed a scaffold plus a status report.
+        //
+        // The empty-response rescue below does not catch it: the response is not empty, it is
+        // an intention. The distinguishing evidence is not in the text (that would be a
+        // phrase-matching heuristic, and models announce in every language) — it is on disk:
+        // markers this build left behind mean the artifact it was asked for is demonstrably
+        // unfinished, whatever the turn says. So we do not accept the turn, we hand it back.
+        //
+        // Bounded exactly like the burn correction: iterations must remain, an operator stop
+        // or cancellation wins first, and after ANNOUNCEMENT_NUDGE_LIMIT the run is allowed to
+        // end so a model that will not act cannot spin to the iteration cap.
+        if (
+          isStagedBuild
+          && announcementNudges < ANNOUNCEMENT_NUDGE_LIMIT
+          && iterations + 1 < maxIterations
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          const remaining = findUnfilledStubFiles(opts.workspacePath, resumeScope);
+          if (remaining.count > 0) {
+            announcementNudges++;
+            const announced = normalizeSubAgentOutput(response.content).trim();
+            history.push({
+              role: "assistant",
+              content: announced.length > 0 ? announced : "(no action taken)",
+            });
+            history.push({
+              role: "user",
+              content: [
+                `YOU DESCRIBED THE NEXT STEP BUT DID NOT TAKE IT — and the artifact is not finished.`,
+                `${remaining.count} ${UNFINISHED_STUB_MARKER} marker(s) are still on disk in: ${remaining.files.slice(0, 4).join(", ")}.`,
+                `Saying what you are about to do is not doing it, and this run does not end while those markers remain.`,
+                `Your next message must be an edit_file call replacing ONE of those marker lines with that subsystem's complete code — that line as old_string. No preamble, no plan, just the call.`,
+                `You have ${maxIterations - iterations - 1} iteration(s) left; several edit_file calls in one turn is the fastest way through.`,
+              ].join("\n"),
+            });
+            logAudit("progress_verifier_intervened", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              trigger: "iteration",
+              verdict: "announced_without_acting",
+              action: "corrected",
+              reason: "the run returned an intention with no tool call while unfilled markers remained on disk",
+              unfilledMarkers: remaining.count,
+              markerFiles: remaining.files.slice(0, 4),
+              nudgeCount: announcementNudges,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "warn" });
+            iterations++;
+            continue;
+          }
+        }
+
         let result = normalizeSubAgentOutput(response.content);
 
         // Recovery: if the agent used tools (gathered real content) but returned
@@ -3592,30 +6589,28 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             "Sub-agent returned empty response after tool use — forcing synthesis pass",
           );
           try {
-            const rescueMessages: LLMMessage[] = [
-              {
-                role: "system",
-                content: systemPrompt +
-                  "\n\nYou returned an empty response but you have already gathered content from previous tool calls. " +
-                  "DO NOT call any more tools. " +
-                  "Produce your COMPLETE final answer now. Include ALL content you retrieved — URLs, facts, and extracts. " +
-                  "Your response is the ONLY output the coordinator will receive from you.",
-              },
-              ...history,
-            ];
-            const rescueResponse = await provider.complete(rescueMessages, [], signal);
+            // synthProvider (see rescueSanitizedEmptyResult): forced answer from history,
+            // thinking off — the worker's pin is what produced the empty response.
+            const rescueResponse = await completeWithoutTools(
+              synthProvider,
+              forcedAnswerMessages(
+                "You returned an empty response but you have already gathered content from previous tool calls. " +
+                "Tool calls are disabled for this reply. " +
+                "Produce your COMPLETE final answer now. Include ALL content you retrieved — URLs, facts, and extracts. " +
+                "Your response is the ONLY output the coordinator will receive from you.",
+              ),
+              signal,
+            );
             usage.promptTokens += rescueResponse.usage.promptTokens;
             usage.completionTokens += rescueResponse.usage.completionTokens;
             usage.totalTokens += rescueResponse.usage.totalTokens;
-            if (rescueResponse.tool_calls.length === 0) {
-              const rescued = normalizeSubAgentOutput(rescueResponse.content);
-              if (rescued !== "Sub-agent produced no final response.") {
-                result = rescued;
-                log.info(
-                  { agentName: opts.agentName, rescuedLength: result.length },
-                  "Empty-response synthesis rescue succeeded",
-                );
-              }
+            const rescued = normalizeSubAgentOutput(rescueResponse.content);
+            if (rescued !== "Sub-agent produced no final response.") {
+              result = rescued;
+              log.info(
+                { agentName: opts.agentName, rescuedLength: result.length },
+                "Empty-response synthesis rescue succeeded",
+              );
             }
           } catch (rescueErr) {
             log.warn({ rescueErr, agentName: opts.agentName }, "Empty-response synthesis rescue failed");
@@ -3628,6 +6623,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
         const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
         result = truncationRecovered.result;
+        // E2E 2026-10-07 ended here: "8.393" and "7.597.648.268" after seven sandbox runs that failed
+        // or printed nothing. A recovered scaffold is the runtime's own account, whose evidence lines
+        // buildScaffold masked as it built them.
+        if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
+          result = quarantineUnobservedFigures(result, "final_answer");
+        }
 
         // Scan for secrets before returning to parent session
         const outputScan = scanOutput(result);
@@ -3642,9 +6643,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
-          ?? (/no results|not found|unable to|failed to|error:/i.test(result.slice(0, 300))
-            ? "partial"
-            : "success");
+          ?? completedRunOutcome(result);
         const stats = buildStats("completed", semanticOutcome);
         const suspicious = rejectSuspiciousNoToolOutput(
           opts,
@@ -3658,6 +6657,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         }
 
         history.push({ role: "assistant", content: result });
+        browserDecider?.noteFinalAnswer();
+
+        // ONE ORDERING FOR EVERY TERMINAL PATH: findings first, completion row last.
+        // The max-iterations path already joins before its completion row; without this the
+        // final-answer path logged sub_agent_completed first and the shared_finding_auto rows
+        // landed after it, in the run's `finally`. Per-run analysis windows rows UP TO
+        // sub_agent_completed (the pattern the perf audits use), so those findings silently
+        // vanished from exactly the runs that succeeded. Costs no latency the `finally` would
+        // not have paid anyway: the result is already computed here.
+        await joinPendingShares();
 
         logSubAgentCompletionAudit(
           stats,
@@ -3745,10 +6754,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         tool_calls: assistantToolCalls,
       });
 
+      // laya-browser's view of the model's step, taken before the step changes the page.
+      if (browserDecider && !drivenStep) await browserDecider.beforeModelActions(response.tool_calls, signal);
+
       const toolResults: LLMMessage[] = [];
+      // Which calls announced a start on the progress channel, and which announced an end.
+      // See the sweep after the call loop: the two must match.
+      const progressStarted = new Set<string>();
+      const progressFinished = new Set<string>();
       let decisiveDirectRemoteToolResult: import("../tools/registry.js").ToolResult | null = null;
       let decisiveDirectRemoteToolName: string | null = null;
       let executedToolThisIteration = false;
+      // The loop brake refused a call this iteration (see loopBrakeRefuses): when the blocked-
+      // iteration stop fires on such an iteration, the brake is what ended the run.
+      let refusedThisIteration = false;
       // Structural delegation-dead-end detection: a COORDINATOR sub-agent whose every
       // delegation this iteration FAILED (e.g. coordinator_recursion_blocked — every
       // candidate is itself a coordinator, so no leaf ran) re-fires varying tasks and
@@ -3783,6 +6802,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
         toolCount++;
+        {
+          // Every issued call, whatever happens to it below: the busy-stall rule's evidence.
+          const issuedSig = JSON.stringify(tc.arguments ?? {});
+          const issuedKey = `${tc.name}::${issuedSig}`;
+          const tally = attemptsSinceProgress.get(issuedKey);
+          if (tally) tally.count += 1;
+          else attemptsSinceProgress.set(issuedKey, { tool: tc.name, argsSig: issuedSig, count: 1 });
+        }
 
         if (tc.arguments && "_parse_error" in tc.arguments) {
           const rawArgs = String((tc.arguments as Record<string, unknown>)["_raw"] ?? "");
@@ -3792,7 +6819,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // so recover mechanically: write the salvaged first part and coach the model
           // to continue with mode:"append" — the truncation becomes forward progress
           // instead of "path is required" + zero bytes.
-          const looksTruncatedByOutputLimit = response.finishReason === "length" || rawArgs.length > 4_000;
+          // `_parse_error` means the arguments did not PARSE, not that they were
+          // TRUNCATED, so the guard has to answer "was this CUT OFF?":
+          //   - finishReason "length" / truncatedBy — the provider says so outright.
+          //     (Every path that sets truncatedBy today also sets "length"; it is kept
+          //     as the direct, self-describing signal rather than an inference.)
+          //   - the size heuristic, restored but no longer BARE. With no output ceiling
+          //     multi-KB write_file calls are normal, so "large" on its own would fire
+          //     on essentially every big write and coach an append onto a complete file.
+          //     Requiring the raw JSON to also be visibly UNTERMINATED (a cut stream
+          //     stops mid-string; a complete-but-invalid object still closes its brace)
+          //     keeps the case the provider flags miss entirely — a truncation that
+          //     arrives with finishReason "stop", i.e. the non-streaming complete()
+          //     path and Anthropic, which never sets truncatedBy — without the false
+          //     positives that motivated dropping it.
+          const rawArgsLookCutOff = rawArgs.length > 4_000 && !/\}$/.test(rawArgs.trimEnd());
+          const looksTruncatedByOutputLimit =
+            response.finishReason === "length"
+            || response.truncatedBy !== undefined
+            || rawArgsLookCutOff;
           const salvaged = tc.name === "write_file" && looksTruncatedByOutputLimit
             ? salvageTruncatedWriteFileArgs(rawArgs)
             : null;
@@ -3830,6 +6875,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             continue;
           }
         }
+        // Whatever happens to the call below, its arguments are what the model claimed.
+        recordOwnClaims(tc.name, tc.arguments);
 
         const priorApprovalFailure = approvalBlockedTools.get(tc.name);
         if (priorApprovalFailure) {
@@ -3907,15 +6954,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
-        // Enforce tool allow-list
-        if (effectiveToolNames && !effectiveToolNames.includes(tc.name)) {
-          log.warn({ agentName: opts.agentName, tool: tc.name }, "Sub-agent attempted disallowed tool");
-          // Distinguish between tools stripped by the evidence-cap mechanism
+        // Enforce the run's call-site block set, then the tool allow-list. The block set is
+        // checked FIRST and on its own: it is how a withdrawn tool is withdrawn (the wire list
+        // never shrinks), and effectiveToolNames is undefined for agents without an allow-list.
+        const runBlockReason = blockedToolReasons.get(tc.name);
+        if (runBlockReason || (effectiveToolNames && !effectiveToolNames.includes(tc.name))) {
+          log.warn({ agentName: opts.agentName, tool: tc.name, reason: runBlockReason }, "Sub-agent attempted disallowed tool");
+          // Distinguish between tools withdrawn by this run's own mechanisms
           // (normal synthesis enforcement, not a security event) and tools
           // genuinely absent from the agent's configured tool set.
-          const blockReason = evidenceCapStrippedTools.has(tc.name)
-            ? "evidence_cap_enforced"
-            : "not_in_agent_tools";
+          const blockReason = runBlockReason ?? "not_in_agent_tools";
           logAudit(
             "sub_agent_tool_blocked",
             { agentName: opts.agentName, tool: tc.name, reason: blockReason },
@@ -3923,9 +6971,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           );
           toolResults.push({
             role: "tool",
-            content: evidenceCapStrippedTools.has(tc.name)
-              ? `Tool '${tc.name}' has been disabled — you have gathered enough evidence. Write your final answer now.`
-              : `Tool '${tc.name}' is not in this agent's allowed tool set.`,
+            content: describeRunBlockedTool(tc.name, blockReason),
             tool_call_id: tc.id,
           });
           continue;
@@ -3957,8 +7003,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           args: tc.arguments,
           summary: `Running ${tc.name} in ${opts.agentName}.`,
         });
+        if (tc.id) progressStarted.add(tc.id);
 
         toolNames.push(tc.name);
+        iterationToolNames.push(tc.name);
 
         // Per-tool call cap — prevent wasteful loops on a single tool.
         // For path-keyed write tools, the primary cap is per-(tool, path):
@@ -3974,6 +7022,32 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           })()
           : null;
         if (writePath !== null) {
+          // WRITE OWNERSHIP among concurrently running siblings (sibling-write-ownership.ts;
+          // orchestration.siblingWriteOwnership). c297c5ea: the write_paper node of a
+          // run_task_graph edited the deck twice while write_presentation was building it, and
+          // never wrote paper.md. A path a running sibling's task names, or that a running
+          // sibling wrote first, is refused here, before anything else counts the call.
+          // export_workspace_artifact is in PATH_KEYED_WRITE_TOOLS for its per-path cap, but it
+          // only READS an existing file into a download card: refusing it would stop a sibling
+          // from handing over the owner's finished file, and letting it claim would take a file
+          // away from the sibling that is actually writing it.
+          const siblingOwner = tc.name === "export_workspace_artifact" ? null : checkSiblingWrite(writePath);
+          if (siblingOwner) {
+            const refusal = `Refused: '${tc.name}' on '${writePath}': that file belongs to ${siblingOwner.owner}, `
+              + `a sibling task of this ${siblingOwner.kind} running in parallel with yours. Write only the files your own `
+              + "task is for; the owner's version is there once it finishes.";
+            emitSubAgentToolAudit({
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "done",
+              args: tc.arguments,
+              toolCallId: tc.id,
+              errorText: refusal,
+              skippedReason: "sibling_write_owned",
+            });
+            toolResults.push({ role: "tool", content: refusal, tool_call_id: tc.id });
+            continue;
+          }
           // Appending to one file is HOW a large artifact is built incrementally
           // (write head → append chunks), so repeated write_file(mode:"append") to
           // the same path is expected, not a loop. Give it a much higher per-path
@@ -3981,11 +7055,48 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const isAppendWrite = tc.name === "write_file"
             && typeof tc.arguments?.["mode"] === "string"
             && String(tc.arguments["mode"]).toLowerCase() === "append";
-          const pathCap = isAppendWrite
-            ? PER_PATH_APPEND_CAP
-            : tc.name === "edit_file" ? PER_PATH_EDIT_CAP : PER_PATH_WRITE_CAP;
+          const pathCap = isAppendWrite ? PER_PATH_APPEND_CAP : PER_PATH_EDIT_CAP;
           const pathKey = `${tc.name}:${writePath}`;
           const pathCount = perWritePathCount.get(pathKey) ?? 0;
+          // Content-shape loop detection, ahead of the count cap. Cheap (one sha1 of the
+          // payload), language-independent, and it sees the two things a COUNT cannot: a
+          // byte-identical rewrite the model keeps re-issuing, and an A→B→A→B flip-flop.
+          // A genuine convergence — three edits with three different bodies, which is what
+          // the healthy reference run did while fixing its own off-by-one — passes both.
+          // Also feeds the supervisor's distinctWriteHashes signal as a side effect.
+          const writePayload = String(
+            tc.arguments?.["content"] ?? tc.arguments?.["new_string"] ?? tc.arguments?.["text"] ?? "",
+          );
+          if (writePayload.length > 0) {
+            const contentHash = createHash("sha1").update(writePayload).digest("hex").slice(0, 16);
+            const hashes = writeHistory.get(pathKey) ?? [];
+            const loopKind = classifyWriteLoop(hashes, contentHash);
+            if (loopKind) {
+              const loopMsg = `Tool '${tc.name}' is looping on '${writePath}': this exact content has already `
+                + `been written this run (${loopKind}). The file on disk already has it — move on or finalize.`;
+              log.warn(
+                { agentName: opts.agentName, tool: tc.name, path: writePath, reason: loopKind },
+                "Sub-agent write loop detected (content hash)",
+              );
+              logAudit("sub_agent_tool_loop_detected", {
+                agentName: opts.agentName, tool: tc.name, path: writePath, reason: loopKind,
+              }, { sessionId: subSessionId, severity: "warn" });
+              emitSubAgentToolAudit({
+                agentName: opts.agentName,
+                tool: tc.name,
+                phase: "done",
+                args: tc.arguments,
+                toolCallId: tc.id,
+                errorText: loopMsg,
+                skippedReason: "write_content_loop",
+              });
+              toolResults.push({ role: "tool", content: loopMsg, tool_call_id: tc.id });
+              continue;
+            }
+            // Bounded: only the tail matters to either rule, and a run must not grow an
+            // unbounded history for a file it is appending to 24 times.
+            writeHistory.set(pathKey, [...hashes, contentHash].slice(-32));
+          }
           if (pathCount >= pathCap) {
             log.warn(
               { agentName: opts.agentName, tool: tc.name, path: writePath, count: pathCount, cap: pathCap, append: isAppendWrite },
@@ -4084,10 +7195,83 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // pure-query tools so we never short-circuit a deliberate re-poll of
         // mutating state (browser session, swarm state, mail send, etc).
         const argsSig = JSON.stringify(tc.arguments);
+        const idemKey = `${tc.name}::${argsSig}`;
+        // DETECT for every tool; RETURN a cached result only for idempotent ones. The
+        // restriction below is right as a CACHING rule — never short-circuit a deliberate
+        // re-poll of mutating state — and wrong as a DETECTION rule, which is why a
+        // non-idempotent call repeating verbatim was visible to nothing at all. Counting
+        // costs one map write.
+        const argSigRepeatCount = (argSigRepeats.get(idemKey) ?? 0) + 1;
+        argSigRepeats.set(idemKey, argSigRepeatCount);
+        if (argSigRepeatCount >= ARG_SIG_REPEAT_LIMIT && !IDEMPOTENT_TOOLS.has(tc.name)) {
+          logAudit("sub_agent_tool_loop_detected", {
+            agentName: opts.agentName,
+            tool: tc.name,
+            reason: "identical_args_repeat",
+            repeats: argSigRepeatCount,
+          }, { sessionId: subSessionId, severity: "warn" });
+        }
+        // THE LOOP BRAKE (progress-verifier.ts classifyCallReplay), consulted by both cache
+        // branches below before they answer. False: answer from the cache as before. True: this
+        // call was withdrawn, its refusal is already pushed, and it did NOT execute — so unlike a
+        // cached success it leaves executedToolThisIteration alone, and an iteration of refusals
+        // is a blocked one that the two-in-a-row stop below ends. The wire list is not touched.
+        const loopBrakeEntry = loopBrakeEnabled ? replaysSinceWrite.get(idemKey) : undefined;
+        const loopBrakeRefuses = (answerBody: string): boolean => {
+          if (!loopBrakeEntry) return false;
+          // Still verbatim in front of the model: in this iteration's results or in the history,
+          // with the whole answer intact. The digest rewrites a stale result in place and the trim
+          // drops it, and a call after either is the re-read the digest asks for.
+          const verbatim = loopBrakeEntry.answers.some((message) => typeof message.content === "string"
+            && message.content.includes(answerBody)
+            && (toolResults.includes(message) || history.includes(message)));
+          if (!verbatim) loopBrakeEntry.answers = [];
+          const decision = classifyCallReplay({ priorIdenticalSinceWrite: loopBrakeEntry.calls, priorAnswerVerbatim: verbatim });
+          loopBrakeEntry.calls = decision.identicalAfter;
+          if (decision.action === "replay") return false;
+          const answered = loopBrakeEntry.answers.length;
+          const refusal = `Refused: '${tc.name}' with these exact arguments is withdrawn until a file changes. `
+            + `It returned the same result ${answered} times since the last file change, and that answer is still above, `
+            + "unchanged. Calling it again with the same arguments will be refused again. Work from that answer: change "
+            + "the arguments or the approach, or write your final answer.";
+          emitSubAgentToolAudit({
+            agentName: opts.agentName,
+            tool: tc.name,
+            phase: "done",
+            args: tc.arguments,
+            toolCallId: tc.id,
+            errorText: refusal,
+            skippedReason: "loop_brake_refused",
+          });
+          logAudit("sub_agent_tool_loop_enforced", {
+            agentName: opts.agentName,
+            action: "refuse",
+            tool: tc.name,
+            repeats: decision.identicalAfter,
+            answered,
+            sinceWrite: true,
+            toolCallId: tc.id,
+          }, { sessionId: subSessionId, severity: "warn" });
+          toolResults.push({ role: "tool", content: refusal, tool_call_id: tc.id });
+          refusedThisIteration = true;
+          const target = loopTargetOf(argsSig);
+          if (!loopEnforced) {
+            loopEnforced = { tool: tc.name, target, repeats: decision.identicalAfter, via: "refuse", endedRun: false };
+          } else if (loopEnforced.via === "refuse" && loopEnforced.tool === tc.name && loopEnforced.target === target) {
+            loopEnforced.repeats = decision.identicalAfter;
+          }
+          if (!loopBrakeHinted) {
+            loopBrakeHinted = true;
+            loopBrakeHint = `⚠️ LOOP BRAKE: '${tc.name}' was called again with arguments it had already answered ${answered} `
+              + "times since the last file change, and the call was refused. Repeating a call does not change its answer. "
+              + "Use the answer you already have, try a different tool or different arguments, or write your final answer now.";
+          }
+          return true;
+        };
         if (IDEMPOTENT_TOOLS.has(tc.name)) {
-          const idemKey = `${tc.name}::${argsSig}`;
           const cached = idempotentCallCache.get(idemKey);
           if (cached) {
+            if (loopBrakeRefuses(cached.result)) continue;
             cached.callCount += 1;
             log.warn(
               { agentName: opts.agentName, tool: tc.name, repeatCount: cached.callCount },
@@ -4106,11 +7290,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               successOverride: cached.success,
               cachedResult: true,
             });
-            toolResults.push({
+            const replayed: LLMMessage = {
               role: "tool",
               content: `${cached.result}\n\n${cachedNote}`,
               tool_call_id: tc.id,
-            });
+            };
+            toolResults.push(replayed);
+            loopBrakeEntry?.answers.push(replayed);
             // A cached *successful* result is a returned result, not a block.
             // Session 39af10b8 (2026-05-29): content_writer re-called
             // read_shared_facts 3× (1 real + 2 cached "no facts"), the cached
@@ -4129,7 +7315,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
-        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name)) {
+        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
+          if (loopBrakeRefuses(prev.result)) continue;
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
             "Sub-agent repeated identical tool call — returning cached result",
@@ -4147,11 +7334,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             successOverride: prev.success,
             cachedResult: true,
           });
-          toolResults.push({
+          const replayed: LLMMessage = {
             role: "tool",
             content: `${prev.result}\n\n${cachedNote}`,
             tool_call_id: tc.id,
-          });
+          };
+          toolResults.push(replayed);
+          loopBrakeEntry?.answers.push(replayed);
           // See the ABA-dedup branch above: a cached-success return is
           // progress, not a blocked iteration. Only a cached failure keeps
           // counting toward the all-tools-stripped loop break.
@@ -4159,8 +7348,77 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           continue;
         }
 
-        const result = await executeTool(tc.name, tc.arguments, toolContext);
+        // What a run shares becomes a fact other agents build on, so a figure it publishes while no
+        // execution of its own has completed with output is held to the same rule as its answer.
+        // Its arguments are the model's own claim, checked against what the run had received
+        // before it made this call. Every text field is: the tool stores notes, source title,
+        // publisher and dates with the value (formatSharedFindingValue), and in review a figure
+        // in `notes` reached the store and the FACT lines while `value` and `claim` were masked.
+        // The key names the finding and the URL its source; neither is a figure the run states.
+        // A value need not be a string: the tools store String(value) (tools/memory.ts), and in
+        // review `value: 8393` (a JSON number, which the runtime's kwargs repair also produces)
+        // and `value: [8393, 7597648268]` reached the store as "8393" and "8393,7597648268"
+        // while the same figures as strings were masked. So a number or an array is checked as
+        // the text the tool will store, and a field nothing was masked in keeps its type.
+        let executedArgs = tc.arguments;
+        if (SHARED_FACT_TOOLS.has(tc.name) && tracksFigures && noExecutionCompleted(executionRecord)) {
+          absorbNewHistory();
+          const maskedArgs: Record<string, unknown> = { ...tc.arguments };
+          let maskedInShare = 0;
+          for (const [field, value] of Object.entries(maskedArgs)) {
+            if (SHARED_FACT_IDENTITY_FIELDS.has(field)) continue;
+            // Any other score is checked as the text the tool stores; masked, it is text, which
+            // share_finding drops and share_evidence refuses.
+            if (SHARED_FACT_SCORE_FIELDS.has(field) && isSharedFactRating(value)) continue;
+            // An object stores as "[object Object]" and states no figure.
+            const stored = typeof value === "string"
+              ? value
+              : (typeof value === "number" || Array.isArray(value) ? String(value) : undefined);
+            if (stored === undefined) continue;
+            const { text, masked } = maskUnobservedFigures(stored, observedFigureKeys);
+            if (masked === 0) continue;
+            maskedArgs[field] = text;
+            maskedInShare += masked;
+          }
+          if (maskedInShare > 0) {
+            executedArgs = maskedArgs;
+            executionRecord.unobservedFigures = (executionRecord.unobservedFigures ?? 0) + maskedInShare;
+            logAudit("guardrail_flagged", {
+              type: "sub_agent_unobserved_figures_masked",
+              agentName: opts.agentName,
+              site: tc.name,
+              masked: maskedInShare,
+              attempted: executionRecord.attempted,
+              failed: executionRecord.failed,
+            }, { sessionId: subSessionId, severity: "warn" });
+          }
+        }
+        const result = await executeTool(tc.name, executedArgs, toolContext, { toolCallId: tc.id });
         executedToolThisIteration = true;
+        // An execution is a sandbox call whose result says the program ran (programOutputChars,
+        // tools/shell.ts). A refused approval or a rejected argument never sets the field, and a
+        // git_* call never does either, so its output cannot stand in for a computation.
+        {
+          const printed = result.metadata?.["programOutputChars"];
+          if (requiresSandbox(tc.name) && typeof printed === "number") {
+            for (const record of [executionRecord, ownExecutionRecord]) {
+              record.attempted += 1;
+              if (!result.success) record.failed += 1;
+              else if (printed > 0) record.succeededWithOutput += 1;
+            }
+            if (tracksFigures) {
+              ranCallArguments.push(...argumentTexts(tc.arguments));
+              const command = tc.arguments?.["command"];
+              if (typeof command === "string") ranCommands.push(command);
+              const invocation = scriptInvocation(tc.arguments);
+              if (invocation) ranScriptInvocations.push(invocation);
+            }
+          }
+        }
+        if (tracksFigures && result.success && (tc.name === "write_file" || tc.name === "edit_file")) {
+          noteWrittenText(tc.name, tc.arguments ?? {}, result.metadata?.["outputPath"]);
+        }
+        browserDecider?.afterToolCall(tc, result);
         if (isDelegationToolName(tc.name)) {
           delegationCallsThisIteration += 1;
           // Structural failure signal (no error-string match): the delegate tool reports
@@ -4195,6 +7453,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           toolCallId: tc.id,
           result,
         });
+        // Recorded only here, where the call RAN. The branches above answer a call without running
+        // it, and an approval that was not granted is a refusal, not a failure of the work. A call
+        // the person declined (a Skip in the settings step) is recorded as that: listed as a failure,
+        // it told the orchestrator the render had broken.
+        if (!result.success && !isApprovalGateFailure(result.error ?? result.output)) {
+          toolFailures.push({
+            agent: opts.agentName,
+            tool: tc.name,
+            error: firstToolErrorLine(result),
+            ...(isDeclinedByUser(result.metadata) ? { declinedByUser: true as const } : {}),
+          });
+        }
+        // A delegation brings its own specialists' failures along, so one two levels down reaches
+        // the orchestrator too.
+        toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
+        // And what they executed: a coordinator whose specialist masked figures did not succeed either.
+        if (receivesExecutionRecords(tc.name)) {
+          delegatedToAnotherAgent = true;
+          const delegatedAgent = tc.arguments?.["agentName"];
+          addExecutionRecord(executionRecord, delegatedRuns.add(result.metadata, typeof delegatedAgent === "string" ? delegatedAgent : undefined));
+        }
         let resultContent = result.success
           ? result.output
           : (result.error?.trim()
@@ -4210,8 +7489,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (!result.success && isApprovalGateFailure(result.error ?? resultContent)) {
           const approvalFailure = result.error?.trim() || resultContent.replace(/^Error:\s*/i, "").trim();
+          // Stays on the wire; blocked at the call site by approvalBlockedTools, which is
+          // checked BEFORE the blockedToolReasons enforcement block and `continue`s. So a
+          // second `blockedToolReasons.set(tc.name, "approval_gate_unresolved")` here could
+          // never be read: it produced no message and no row, while the entry below carries
+          // the EARLIER APPROVAL RESULT into the synthetic result — which the generic
+          // run-block wording cannot. One map owns this withdrawal; the reason string still
+          // reaches the audit row (and the warden's withdrawal exemption) from the call site.
           approvalBlockedTools.set(tc.name, approvalFailure);
-          tools = tools.filter((tool) => tool.name !== tc.name);
           resultContent += "\n\n[APPROVAL BLOCKED] Human approval was not granted for this sensitive action. Do not request the same approval-gated tool again in this run; report the blocker and ask the user to retry when they can approve it.";
           logAudit(
             "sub_agent_tool_blocked",
@@ -4277,8 +7562,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // exhausting the sub-agent's context budget and dropping subsequent tool calls.
         resultContent = truncateToolResult(resultContent, tc.name);
 
+        // THE RUN'S OWN VERDICT ON WHETHER ITS PAGE RUNS.
+        //
+        // Run 8 called verify_page, was told the page throws on its first inline script,
+        // edited twice, and then reported outcome "success" without ever asking again — and
+        // the marker check passed it, because filling every marker is necessary for a working
+        // page and nowhere near sufficient. The evidence was already in the run's own history;
+        // nothing was reading it back.
+        if (tc.name === "verify_page") {
+          lastPageCheckPassed = result.success;
+          mutatedSincePageCheck = false;
+        } else if (STAGED_BUILD_REQUIRED_TOOLS.includes(tc.name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]) && result.success) {
+          // Any edit after a passing check makes that check stale — it verified other bytes.
+          mutatedSincePageCheck = true;
+        }
+
         if (result.success) {
           successfulToolCount += 1;
+          // The supervisor's progress counter: a success counts only when it brought back a result
+          // this run has not seen (isNovelToolOutcome). Taken from resultContent here, before any
+          // note or nudge is appended to the message that carries it.
+          if (isNovelToolOutcome(seenToolOutcomes, tc.name, resultContent, true)) novelToolOutcomes += 1;
           // Track substantive evidence for share_finding nudge (Phase A5)
           const SUBSTANTIVE_THRESHOLDS: Record<string, number> = {
             web_search: 1_024,
@@ -4404,6 +7708,44 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           // (audit 1ac79471: content_writer's context led with a search_agents dump
           // recommending browser_agent for a build). Guard ONLY the snippet+share
           // section — the rest of the per-tool loop body must still run.
+          // A RUN'S OWN OUTPUT IS NOT EVIDENCE FOR ITS OWN CLAIMS.
+          //
+          // Shared facts are what the swarm treats as gathered knowledge: the final synthesis
+          // and the evidence backstop read from them, and a finding carries a provenance-shaped
+          // key naming the agent and tool that produced it. read_file is not excluded from
+          // auto-share — correctly, since reading an uploaded document or another agent's
+          // output IS gathering. But a staged build reads its own artifact back as its FINISH
+          // step, and that read is the agent's own prose returning as a fact.
+          //
+          // Session 00b3675d: paper_author wrote a report, read it back, and the read auto-
+          // shared as `auto_paper_author_read_file_15g6ems`. Its next report then cited that
+          // key as corroborating a plan it had labelled "UNVERIFIED — no official source
+          // confirms this plan exists" and "Source of report: User testimony only". The user
+          // had just told it, correctly, that the plan exists. The loop closed with the
+          // agent's own doubt cited as independent verification of itself.
+          //
+          // Only this run's OWN writes are excluded, matched on the resolved path, so nothing
+          // gathered from elsewhere is lost.
+          if (result.success && PATH_KEYED_WRITE_TOOLS.has(tc.name)) {
+            const written = normalizeArtifactPath(
+              tc.arguments?.["path"] ?? tc.arguments?.["output_file"] ?? tc.arguments?.["filename"],
+            );
+            if (written) pathsWrittenThisRun.add(written);
+          }
+          const readsBackOwnOutput = tc.name === "read_file"
+            && (() => {
+              const p = normalizeArtifactPath(tc.arguments?.["path"]);
+              return p !== null && pathsWrittenThisRun.has(p);
+            })();
+          if (readsBackOwnOutput) {
+            logAudit("sub_agent_tool_call", {
+              agentName: opts.agentName,
+              tool: tc.name,
+              phase: "shared_finding_skipped",
+              reason: "read_back_of_own_write",
+              path: typeof tc.arguments?.["path"] === "string" ? tc.arguments["path"] : null,
+            }, { sessionId: subSessionId, severity: "info" });
+          }
           const snippetThreshold = recoveredInterruptedEvidence ? 80 : 180;
           if (isUsefulEvidence && !ROUTING_METADATA_TOOL_NAMES.has(tc.name) && usefulTrimmed.length >= snippetThreshold) {
             const snippet = truncateToolAuditText(usefulTrimmed, 900);
@@ -4411,11 +7753,36 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
               recentEvidenceSnippets = [...recentEvidenceSnippets, `${tc.name}: ${snippet}`].slice(-6);
             }
             try {
-              // autoShareUsefulFinding returns the extracted finding text that was
-              // stored, or null if skipped. Count only the extracted length so that
-              // cumulativeUsefulEvidenceBytes reflects actual stored knowledge
-              // density — not raw dump volume inflated by search headers and URLs.
-              const extractedFinding = await autoShareUsefulFinding({
+              // autoShareUsefulFinding returns the heuristic extract at once (or null if
+              // skipped) and a promise for the distilled text actually stored. Count only
+              // extracted length so that cumulativeUsefulEvidenceBytes reflects stored
+              // knowledge density — not raw dump volume inflated by search headers and
+              // URLs. The extract is counted PROVISIONALLY here, without waiting for the
+              // distillation (measured 1.4-7.4 s per finding, ~30 s of a 142 s run, all of
+              // it in front of the next model call); the settle handler below corrects the
+              // count to the stored length — negative when the distiller shortened it, the
+              // whole amount back when it found nothing relevant — and only then reports
+              // the finding as shared. The run joins these promises before it reads shared
+              // facts and before it returns (joinPendingShares).
+              // The read-back of this run's own write is kept out of shared facts (above)
+              // but still reaches recentEvidenceSnippets: that is the run's own working
+              // memory, where re-reading what it wrote is exactly the point.
+              // So is any other result that hands back figures the run wrote itself and no
+              // input of it held, while none of its executions has completed with output: in
+              // review a grep over the coder's head-written results.md was shared as
+              // auto_coder_grep_files_*, and its coordinator restated the figures as a success.
+              // Checked by figure, not by tool, so a grep, a git diff or a search counts alike.
+              const handsBackOwnClaims = !readsBackOwnOutput && tracksFigures && noExecutionCompleted(executionRecord)
+                && maskFiguresByKey(usefulTrimmed, unreceivedOwnClaims(false), writtenFileNameSpans(usefulTrimmed)).masked > 0;
+              if (handsBackOwnClaims) {
+                logAudit("sub_agent_tool_call", {
+                  agentName: opts.agentName,
+                  tool: tc.name,
+                  phase: "shared_finding_skipped",
+                  reason: "hands_back_own_claims",
+                }, { sessionId: subSessionId, severity: "info" });
+              }
+              const share = readsBackOwnOutput || handsBackOwnClaims ? null : autoShareUsefulFinding({
                 sessionId: subSessionId,
                 agentName: opts.agentName,
                 toolName: tc.name,
@@ -4423,19 +7790,41 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
                 sharedKeys: autoSharedFindingKeys,
                 objective: opts.task,
                 provider,
-                signal,
+                // The HARD deadline, not just opts.signal. The distill now outlives the
+                // iteration that started it, and its only other bound is
+                // DISTILL_CALL_DEADLINE_MS (60 s) — so on a run whose turn budget expires
+                // mid-distill it kept the GPU and the synthesis window waiting for a
+                // finding the run no longer has time to use. Aborting it is safe by
+                // construction: the catch inside keeps the heuristic extract, which is the
+                // documented never-drops-evidence outcome.
+                signal: llmSignal,
                 distill: distillSharedFacts,
               });
-              if (extractedFinding !== null) {
-                autoSharedFindingCount += 1;
-                cumulativeUsefulEvidenceBytes += extractedFinding.length;
-                logAudit("sub_agent_tool_call", {
-                  agentName: opts.agentName,
-                  tool: tc.name,
-                  phase: "shared_finding_auto",
-                  autoSharedFindingCount,
-                  extractedChars: extractedFinding.length,
-                }, { sessionId: subSessionId, severity: "info" });
+              if (share !== null) {
+                const provisionalChars = share.extracted.length;
+                cumulativeUsefulEvidenceBytes += provisionalChars;
+                const toolName = tc.name;
+                pendingShares.push(share.stored.then((storedFinding) => {
+                  if (storedFinding === null) {
+                    cumulativeUsefulEvidenceBytes -= provisionalChars;
+                    return;
+                  }
+                  cumulativeUsefulEvidenceBytes += storedFinding.length - provisionalChars;
+                  autoSharedFindingCount += 1;
+                  logAudit("sub_agent_tool_call", {
+                    agentName: opts.agentName,
+                    tool: toolName,
+                    phase: "shared_finding_auto",
+                    autoSharedFindingCount,
+                    extractedChars: storedFinding.length,
+                    provisionalChars,
+                    usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
+                  }, { sessionId: subSessionId, severity: "info" });
+                }).catch((err) => {
+                  // `stored` never rejects by construction; a rejection here keeps the
+                  // provisional count — the heuristic extract, as the inline path did.
+                  log.debug({ err, agentName: opts.agentName, tool: toolName }, "Failed to auto-share useful tool evidence");
+                }));
               }
             } catch (err) {
               log.debug({ err, agentName: opts.agentName, tool: tc.name }, "Failed to auto-share useful tool evidence");
@@ -4471,23 +7860,79 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           }
         }
 
-        // When web_search reports degraded/hard-blocked, remove it from the
-        // tools array so the LLM cannot call it on subsequent iterations.
+        // When web_search reports degraded/hard-blocked, block it at the call site for the
+        // rest of the run (the wire list stays — see blockedToolReasons).
         if (tc.name === "web_search" && result.metadata?.searchDegraded && !result.success) {
-          const beforeLen = tools.length;
-          tools = tools.filter(t => t.name !== "web_search");
-          if (tools.length < beforeLen) {
+          if (!blockedToolReasons.has("web_search") && tools.some((t) => t.name === "web_search")) {
+            blockedToolReasons.set("web_search", "search_backend_degraded");
             log.info(
               { agentName: opts.agentName, iterations },
-              "Removed web_search from tools — search backend degraded",
+              "Blocked web_search for the rest of the run — search backend degraded",
             );
           }
         }
 
+        const recordedBefore = artifacts.length;
         recordArtifacts(result.metadata, {
           sourceAgent: opts.agentName,
           sourceTool: tc.name,
         });
+        if (!receivesExecutionRecords(tc.name)) {
+          for (const artifact of artifacts.slice(recordedBefore)) ownArtifacts.add(artifact);
+        }
+
+        // Staged-build salvage bookkeeping. edit_file's metadata carries no
+        // outputPath/dataUrl/externalUrl, so recordArtifacts ignores it entirely — a
+        // run that FILLED an existing skeleton and was then cut off had nothing in
+        // `artifacts` and reported nothing at all. Track the workspace-relative path
+        // of every successful file mutation so the interrupted paths below can name
+        // what is actually on disk. Cheap (a Set of strings) and independent of the
+        // artifact-attachment semantics, which stay untouched.
+        // Any successful call that WROTE something invalidates the read caches below,
+        // not just the two staged-build writers: generate_website and friends move the
+        // same bytes and report it the same way, through an outputPath in metadata.
+        const wroteMeta = (result.metadata ?? {}) as Record<string, unknown>;
+        const reportedOutputPath = typeof wroteMeta["outputPath"] === "string" && wroteMeta["outputPath"];
+        if (result.success && ((STAGED_BUILD_REQUIRED_TOOLS as readonly string[]).includes(tc.name) || reportedOutputPath)) {
+          const meta = wroteMeta;
+          const mutatedPath = typeof meta["outputPath"] === "string" && meta["outputPath"]
+            ? String(meta["outputPath"])
+            : (typeof meta["path"] === "string" ? String(meta["path"]) : "");
+          if (mutatedPath) mutatedWorkspacePaths.add(mutatedPath);
+          // Provenance for resume scoping (ownsResumeEvidence): this agent is now the file's last
+          // writer in this conversation. Resolved the way the write tools resolve their target, so
+          // it is the same absolute path the resume scanners walk; an unresolvable path is simply
+          // not recorded (no writer = everybody's, the old behaviour).
+          if (mutatedPath) {
+            try {
+              noteArtifactWriter(artifactConversation, resolveWorkspaceWritePath(mutatedPath, effectiveWorkspacePath).resolved, opts.agentName);
+            } catch { /* outside the workspace: nothing to scope */ }
+          }
+
+          // A CACHED READ OF A FILE THAT HAS SINCE CHANGED IS A WRONG ANSWER.
+          //
+          // Both caches above key on (tool name, arguments) and neither knows the
+          // workspace moved underneath them, so after this write every earlier read of
+          // the same path replays pre-write bytes. That makes the build -> test -> fix
+          // loop structurally unable to converge, which is exactly what session
+          // 88dda7d2 hit: web_coder ran verify_page (FAIL), edit_file (fixed the
+          // SyntaxError), verify_page again -- and got the FAILING verdict from before
+          // its own fix, reporting "I could not capture a fresh PASS/FAIL line". The
+          // cached-failure note even tells it "Do NOT call it again", so the loop is
+          // trained to stop testing at the moment testing would have paid off.
+          //
+          // read_file has the same hole through IDEMPOTENT_TOOLS: edit a file, read it
+          // back to check the edit, receive the bytes from before the edit.
+          //
+          // Dropping both caches on a successful write costs a few repeated calls and
+          // buys the only thing that matters here -- that a check performed after a
+          // change reflects the change.
+          idempotentCallCache.clear();
+          lastToolCallSig.clear();
+          // The loop brake counts "since the last write" for the same reason: a repeat after a
+          // change is a check of the change, not a loop.
+          replaysSinceWrite.clear();
+        }
 
         opts.onProgress?.({
           agentName: opts.agentName,
@@ -4501,11 +7946,50 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             ? `Finished ${tc.name} in ${opts.agentName}.`
             : `Encountered an issue while running ${tc.name} in ${opts.agentName}.`,
         });
+        if (tc.id) progressFinished.add(tc.id);
 
-        toolResults.push({
+        const executedAnswer: LLMMessage = {
           role: "tool",
           content: resultContent,
           tool_call_id: tc.id,
+        };
+        toolResults.push(executedAnswer);
+        // A fresh answer restarts the brake's count for this call, and only where a cache can
+        // replay it: live-state tools, NEVER_REPLAYED_TOOLS and a write that just emptied the
+        // caches are never answered from one, so the brake never sees them either.
+        if (loopBrakeEnabled && (idempotentCallCache.has(idemKey)
+          || (lastToolCallSig.get(tc.name)?.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
+          replaysSinceWrite.set(idemKey, { calls: 1, answers: [executedAnswer] });
+        }
+      }
+
+      // EVERY CALL THAT ANNOUNCED A START ANNOUNCES AN END.
+      //
+      // Seven branches in the loop above answer a call without running it — the ABA and
+      // consecutive-duplicate caches, the per-tool, per-path, failure and artifact-persist
+      // caps, and the write-content loop guard — and each `continue`s past the only
+      // tool_done emit. Their tool_start was already on the wire, so the chat showed those
+      // calls running for the rest of the turn and then called them "no result reported",
+      // although each had been answered instantly. The caches fire routinely on local models
+      // (web_search, web_fetch and read_file are idempotent-cached).
+      //
+      // Swept here rather than patched at each branch, so a skip branch added later cannot
+      // reopen the gap. The answer each branch pushed is exactly what the call returned.
+      for (const id of progressStarted) {
+        if (progressFinished.has(id)) continue;
+        const call = response.tool_calls.find(entry => entry.id === id);
+        if (!call) continue;
+        const answered = toolResults.find(entry => entry.tool_call_id === id);
+        const content = typeof answered?.content === "string" ? answered.content : "";
+        opts.onProgress?.({
+          agentName: opts.agentName,
+          kind: "tool_done",
+          iteration: iterations + 1,
+          toolName: call.name,
+          toolCallId: id,
+          result: content,
+          metadata: { notExecuted: true, cached: /\[Note: This is a cached/.test(content) },
+          summary: `Answered ${call.name} in ${opts.agentName} without running it.`,
         });
       }
 
@@ -4565,10 +8049,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           const lastTR = toolResults[toolResults.length - 1]!;
           lastTR.content += delegationDeadEnd
             ? "\n\n[DELEGATION DEAD-END STOP] Every delegation in the last iterations failed (e.g. every candidate is itself a coordinator, so no leaf specialist ran). Re-delegating hits the same wall. " +
-              "No tools will be available on the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
+              "Tool calls are disabled from the next step. STOP delegating and write your final answer NOW from the shared facts and evidence already gathered this turn; if nothing usable exists, say so honestly."
             : "\n\n[TOOL LOOP STOP] Every tool call in the last iterations was blocked, capped, or malformed. " +
-              "No tools will be available on the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
-          tools = [];
+              "Tool calls are disabled from the next step. Produce the final answer from existing evidence now; do not retry the same tool call.";
+          // The loop brake's refusals are what made this iteration a blocked one: it ended the run.
+          if (refusedThisIteration && loopEnforced) loopEnforced.endedRun = true;
+          // The wire list is untouched here — an emptied list re-prefills the whole prompt
+          // (see blockedToolReasons). Nothing needs a run-scoped "tools off" flag either:
+          // this block BREAKS out of the loop a few lines down, so there is no later
+          // iteration to read one, and the post-loop synthesis and the rescues send
+          // tool_choice "none" themselves through completeWithoutTools.
           if (effectiveToolNames) effectiveToolNames = [];
           logAudit(
             "sub_agent_tool_loop_detected",
@@ -4606,7 +8096,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (remaining === 2 && toolCount > 0 && toolResults.length > 0) {
         const lastTR = toolResults[toolResults.length - 1]!;
         lastTR.content += "\n\n[⚠️ BUDGET: You have 1 iteration left after this one. " +
-          "On your next turn you will have NO tools available. " +
+          "On your next turn tool calls will be disabled. " +
           "Produce your COMPLETE final answer NOW or on the very next turn.]";
       }
 
@@ -4662,6 +8152,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         evidenceIterationsSinceNudge += 1;
       }
 
+      // EVERY LATCH BELOW DECIDES ON SETTLED BYTES.
+      //
+      // Each finding's provisional ≤600-char extract is added to cumulativeUsefulEvidenceBytes
+      // the moment the tool result is seen, and the tool-result loop above is sequential — so a
+      // whole iteration's extracts are counted before ANY distillation settles. Seven searches
+      // at the cap is +4,200 provisional; if the distiller answers NONE for five of them the
+      // settled total is 1,200, but `sufficiencySynthesisNudged` has already latched (it never
+      // un-fires) and NUDGE_IGNORED_STRIP_ITERATIONS then hard-strips the gather tools on a run
+      // holding 1.2 KB of evidence. Joining here — at the boundary, once, in front of the whole
+      // ladder (oversight gate, tool strip, nudge) — makes all three read the same settled
+      // number. Guarded by the same threshold the first rung uses, so below it (the common case,
+      // and the one where waiting would cost the most iterations) the join never runs.
+      if (pendingShares.length > 0 && cumulativeUsefulEvidenceBytes >= SUFFICIENT_EVIDENCE_NUDGE_BYTES) {
+        await joinPendingShares();
+      }
+
       // I13: In-loop sufficiency / cascade-failure guard. Runs after tool
       // results have been collected for this iteration but before they are
       // pushed into history and the next LLM call is made. This is the
@@ -4695,10 +8201,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && !signal?.aborted
       ) {
         oversightChecksUsed += 1;
+        // The check judges the STORED findings — the boundary join above this whole ladder
+        // already settled them (it fires on the same byte threshold this condition uses).
         const sharedForOversight = await formatSharedFactsContext(subSessionId).catch(() => ({ content: "" }));
         const oversightEvidence = sharedForOversight.content
           || toolResults.map((tr) => tr.content).join("\n");
-        oversightGoalMet = await assessOversightGoalMet(oversightCriteria, oversightEvidence, signal);
+        oversightGoalMet = await assessOversightGoalMet(oversightCriteria, oversightEvidence, signal, subSessionId);
         if (oversightGoalMet) {
           logAudit(
             "sub_agent_synthesis_forced",
@@ -4716,13 +8224,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
       if (!cascadeSynthesisForced && cumulativeTimeoutSignalCount >= 2 && toolResults.length > 0) {
         cascadeSynthesisForced = true;
-        const beforeLen = tools.length;
-        tools = tools.filter((t) =>
-          t.name !== "delegate_to_agent"
-          && t.name !== "parallel_delegate"
-          && t.name !== "swarm_delegate"
-          && t.name !== "run_task_graph",
-        );
+        // Blocked at the call site, not removed from the wire (see blockedToolReasons).
+        const cascadeBlockedNames = tools
+          .map((t) => t.name)
+          .filter((name) =>
+            name === "delegate_to_agent"
+            || name === "parallel_delegate"
+            || name === "swarm_delegate"
+            || name === "run_task_graph",
+          );
+        for (const name of cascadeBlockedNames) blockedToolReasons.set(name, "delegation_cascade_failed");
         // I13.2: Direct-fallback tool injection. After delegation has
         // cascade-failed, a delegation-only coordinator agent (e.g.
         // web_task_coordinator) is left with NO working capability and
@@ -4739,6 +8250,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             (def) => !tools.some((t) => t.name === def.name),
           );
           if (fallbackDefs.length > 0) {
+            // A deliberate EXTENSION of the wire list: it costs one prefill (the tool block
+            // renders ahead of the history), paid once, for a coordinator that otherwise ends here.
             tools = [...tools, ...fallbackDefs];
             const newAllowList = [...effectiveToolNames];
             for (const def of fallbackDefs) {
@@ -4770,7 +8283,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
             reason: "cascade_timeout",
             timeoutSignals: cumulativeTimeoutSignalCount,
             usefulEvidenceBytes: cumulativeUsefulEvidenceBytes,
-            delegationToolsRemoved: beforeLen - (tools.length - fallbackToolNames.length),
+            delegationToolsRemoved: cascadeBlockedNames.length,
             fallbackToolsInjected: fallbackToolNames,
             iterations,
           },
@@ -4778,7 +8291,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
         log.warn(
           { agentName: opts.agentName, timeoutSignals: cumulativeTimeoutSignalCount, fallbackToolsInjected: fallbackToolNames, iterations },
-          "Cascade timeout detected — stripped delegation tools and injected direct fallbacks",
+          "Cascade timeout detected — blocked delegation tools and injected direct fallbacks",
         );
       } else if (
         !sufficiencyToolsStripped
@@ -4824,8 +8337,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const strippedToolNames = tools
           .filter((tool) => stripSet.has(tool.name))
           .map((tool) => tool.name);
-        for (const name of strippedToolNames) evidenceCapStrippedTools.add(name);
-        tools = tools.filter((tool) => !stripSet.has(tool.name));
+        // "Stripped" from what the agent may CALL, not from the wire (see blockedToolReasons).
+        for (const name of strippedToolNames) blockedToolReasons.set(name, "evidence_cap_enforced");
         if (effectiveToolNames) {
           effectiveToolNames = effectiveToolNames.filter((name) => !stripSet.has(name));
         }
@@ -4932,7 +8445,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         && toolResults.length > 0
         && toolResults.every((tr) => {
           const c = typeof tr.content === "string" ? tr.content : "";
-          return /^Tool '[^']+' (?:has been disabled|has been called|is not in this agent's allowed tool set|is blocked by security policy)/.test(c);
+          return /^Tool '[^']+' (?:has been disabled|is disabled for the rest of this run|has been called|is not in this agent's allowed tool set|is blocked by security policy)/.test(c);
         })
       ) {
         logAudit(
@@ -4947,6 +8460,148 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
         break;
       }
+
+      // A PAGE THAT FAILED ITS OWN CHECK IS NOT FINISHED.
+      //
+      // Zero markers is what a COMPLETE artifact looks like and says nothing about a WORKING
+      // one. Run 8 filled its last marker, ran verify_page, was told the page throws on its
+      // first inline script, edited twice and reported success — never asking again. The
+      // evidence was already in the run's own history; nothing read it back. Handing it back
+      // costs one iteration and is the difference between a delivered game and a blank page.
+      if (
+        isStagedBuild
+        && lastPageCheckPassed !== undefined
+        && (lastPageCheckPassed === false || mutatedSincePageCheck)
+        && pageCheckCorrections < ANNOUNCEMENT_NUDGE_LIMIT
+        && iterations + 1 < maxIterations
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        && !longRunningGenerationManager.isStopRequested(subSessionId)
+      ) {
+        // NOT gated on a tool-free turn. It was, and that state is unreachable here: the loop
+        // handles `tool_calls.length === 0` far above and either returns or continues, so this
+        // block — the whole point of which is to hand a run back its own failing page verdict —
+        // never executed once. It belongs exactly here instead, after the tool results are
+        // appended, which is where its sibling corrections already inject.
+        pageCheckCorrections++;
+        history.push({
+          role: "user",
+          content: buildPageCheckCorrection({
+            stale: lastPageCheckPassed === true,
+            iterationsLeft: maxIterations - iterations - 1,
+          }),
+        });
+        logAudit("progress_verifier_intervened", {
+          agentName: opts.agentName,
+          runSessionId: subSessionId,
+          trigger: "iteration",
+          verdict: lastPageCheckPassed === false ? "page_check_failed" : "page_check_stale",
+          action: "corrected",
+          reason: "the run was finishing while its own verify_page verdict said the page does not run",
+          correctionCount: pageCheckCorrections,
+          iterations,
+        }, { sessionId: opts.parentSessionId, severity: "warn" });
+        iterations++;
+        continue;
+      }
+
+      // A BUILD THAT KEEPS LOOKING INSTEAD OF WRITING.
+      //
+      // The announced-without-acting nudge above fires only when a turn returns text and no
+      // tool call. Runs 6 and 7 never matched it: they called a tool on every single
+      // iteration — read_file, read_file, grep_files, read_file — so a busy, non-circling,
+      // tool-using agent sailed past every guard while the marker count never moved. Run 6
+      // spent seven of its fourteen iterations that way and wrote nothing; run 7 was still
+      // reading at eleven.
+      //
+      // Reading is not the failure, unbounded reading is, and the distinguishing evidence is
+      // structural rather than textual: tools ran, none of them could change a file. The
+      // correction hands back the marker's exact location and text — both already known —
+      // and asks for the call. Bounded like its siblings: it corrects, it does not kill, and
+      // after the limit the run is left to end on its own terms.
+      // Progress is measured on the ARTIFACT, not on whether a write tool ran. Run 8's third
+      // iteration called edit_file — and spent it refining the keyboard handler, code that
+      // already worked, while the one marker it owed went untouched. A write-tool test would
+      // have read that as progress and handed the run another three iterations of reading.
+      // The marker count moving is the thing that cannot be faked: it drops when a subsystem
+      // is filled, and rises when a fresh skeleton is written, so a change in either
+      // direction is real work while an unchanged count is not.
+      const markerCountNow = isStagedBuild
+        ? findUnfilledStubFiles(opts.workspacePath, resumeScope).count
+        : 0;
+      if (isStagedBuild) {
+        // WHAT COUNTS AS PROGRESS DEPENDS ON THE MODE, and using one mode's measure for both
+        // is the same mistake a third time. A FILL is judged by the marker count moving,
+        // because an edit elsewhere in the file is not the work. A REPAIR has no markers at
+        // all — the count sits at zero forever — so that test never resets the streak and
+        // the correction fires at an agent that is editing. Run 12 landed two real edits to
+        // fitCanvas and was nagged anyway on the very next read.
+        //
+        // In a repair the requested action IS the edit, and whether it helped is the page
+        // check's judgement on the next pass, not this counter's.
+        const wroteThisIteration = iterationToolNames.some(
+          (name) => STAGED_BUILD_REQUIRED_TOOLS.includes(name as typeof STAGED_BUILD_REQUIRED_TOOLS[number]),
+        );
+        const madeProgress = markerCountNow !== lastMarkerCount
+          || (markerCountNow === 0 && wroteThisIteration);
+        if (madeProgress) readOnlyStreak = 0;
+        else if (iterationToolNames.length > 0) readOnlyStreak++;
+        lastMarkerCount = markerCountNow;
+      }
+
+      if (
+        isStagedBuild
+        && readOnlyStreak >= STAGED_BUILD_READ_ONLY_STREAK_LIMIT
+        && readOnlyCorrections < ANNOUNCEMENT_NUDGE_LIMIT
+        && iterations + 1 < maxIterations
+        && !lrgOperatorStop
+        && !supervisorStop
+        && !opts.signal?.aborted
+        && !longRunningGenerationManager.isStopRequested(subSessionId)
+      ) {
+        // REPAIR HAS NO MARKERS TO POINT AT. This guard originally required markers still on
+        // disk, which is right for a fill but silently disables the correction for the mode
+        // that needs it just as much: a repair run has zero markers by definition, so run 11
+        // could read forever with nothing to stop it. The work is named by the failing page
+        // instead.
+        const remaining = findUnfilledStubFiles(opts.workspacePath, resumeScope);
+        const stillBroken = remaining.count === 0 ? await findBrokenBuiltPages(opts.workspacePath, resumeScope) : [];
+        unverifiedPageBroken = remaining.count === 0 ? stillBroken.length > 0 : unverifiedPageBroken;
+        if (remaining.count > 0 || stillBroken.length > 0) {
+          readOnlyCorrections++;
+          history.push({
+            role: "user",
+            content: remaining.count > 0
+              ? buildReadOnlyStreakCorrection({
+                  streak: readOnlyStreak,
+                  markerCount: remaining.count,
+                  markerSites: remaining.markers,
+                  iterationsLeft: maxIterations - iterations - 1,
+                })
+              : buildReadOnlyRepairCorrection({
+                  streak: readOnlyStreak,
+                  brokenPages: stillBroken,
+                  iterationsLeft: maxIterations - iterations - 1,
+                }),
+          });
+          logAudit("progress_verifier_intervened", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            trigger: "iteration",
+            verdict: "reading_without_writing",
+            action: "corrected",
+            reason: "a staged build called only read-only tools for consecutive iterations while markers remained",
+            readOnlyStreak,
+            unfilledMarkers: remaining.count,
+            markerFiles: remaining.files.slice(0, 4),
+            brokenPages: stillBroken.slice(0, 2),
+            correctionCount: readOnlyCorrections,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "warn" });
+          readOnlyStreak = 0;
+        }
+      }
       iterations++;
     }
 
@@ -4957,8 +8612,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     );
 
     // Force a final synthesis pass — send the conversation history back to the
-    // LLM with NO tools so it cannot make more tool calls and must produce a
-    // plain-text answer from whatever it has gathered so far.
+    // LLM under tool_choice "none" so it must produce a plain-text answer from
+    // whatever it has gathered so far (the wire tool list stays: see completeWithoutTools).
     if (!signal?.aborted) {
       // Single-delegation passthrough — when the only substantive evidence is
       // one large delegation, the post-loop synthesis pass is wasted work.
@@ -4967,69 +8622,72 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       if (passthrough) return passthrough;
       try {
         const curatedFindings = await readCuratedFindingsForSynthesis();
-        const synthMessages: LLMMessage[] = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS
+        const factsFirst = curatedFindings.length >= SYNTH_FACTS_MIN_CHARS;
+        const synthMessages: LLMMessage[] = factsFirst
           ? buildFactsFirstSynthMessages(curatedFindings)
-          : [
-            {
-              role: "system",
-              content: systemPrompt +
-                "\n\nYou have exhausted your tool-call budget. " +
-                "DO NOT call any more tools. " +
-                "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
-                "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
-                "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
-                "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
-                "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
-            },
-            ...history,
-          ];
-        const synthResponse = await runSynthesisCompletion(synthMessages, signal);
+          : forcedAnswerMessages(
+            "You have exhausted your tool-call budget. " +
+            "Tool calls are disabled. " +
+            "Synthesize everything you have gathered so far and return your COMPLETE final answer now. " +
+            "Include ALL content you retrieved from web_fetch, read_file, or any other tool — " +
+            "do not summarize away details. Your response is the ONLY output the coordinator will receive from you. " +
+            "If you fetched useful content earlier in the conversation, reproduce the key facts, URLs, and extracts verbatim. " +
+            "If search failed but you have model knowledge on the topic, provide that and note it was not live-verified.",
+          );
+        const synthResponse = await runSynthesisCompletion(synthMessages, signal, synthesisWireTools(factsFirst));
         usage.promptTokens += synthResponse.usage.promptTokens;
         usage.completionTokens += synthResponse.usage.completionTokens;
         usage.totalTokens += synthResponse.usage.totalTokens;
 
-        if (synthResponse.tool_calls.length === 0) {
-          let result = normalizeSubAgentOutput(synthResponse.content);
+        let result = normalizeSubAgentOutput(synthResponse.content);
 
-          // ── Empty-response rescue for synthesis path ─────────────────────
-          // Qwen models sometimes return empty content even in the synthesis
-          // pass. If the agent used tools, retry once with an emphatic prompt.
-          if (result === "Sub-agent produced no final response." && toolCount > 0 && !signal?.aborted) {
-            try {
-              log.warn({ agentName: opts.agentName, toolCount }, "Synthesis returned empty — attempting rescue");
-              const rescueMessages: LLMMessage[] = [
-                {
-                  role: "system",
-                  content:
-                    "You returned an empty response but you have already gathered content from " +
-                    toolCount + " tool calls during this session. " +
-                    "Review your conversation history — you MUST have information from web_fetch, " +
-                    "read_file, or other tools. Produce your COMPLETE final answer now. " +
-                    "Include ALL content you retrieved — URLs, facts, and extracts verbatim. " +
-                    "Do NOT call any tools. Do NOT return an empty response.",
-                },
-                ...history,
-              ];
-              const rescueResponse = await provider.complete(rescueMessages, [], signal);
-              usage.promptTokens += rescueResponse.usage.promptTokens;
-              usage.completionTokens += rescueResponse.usage.completionTokens;
-              usage.totalTokens += rescueResponse.usage.totalTokens;
-              const rescueResult = normalizeSubAgentOutput(rescueResponse.content);
-              if (rescueResult !== "Sub-agent produced no final response.") {
-                log.info({ agentName: opts.agentName, rescueLength: rescueResult.length }, "Synthesis rescue succeeded");
-                result = rescueResult;
-              } else {
-                log.warn({ agentName: opts.agentName }, "Synthesis rescue also returned empty");
-              }
-            } catch (rescueErr) {
-              log.warn({ rescueErr, agentName: opts.agentName }, "Synthesis rescue failed");
+        // ── Empty-response rescue for synthesis path ─────────────────────
+        // Qwen models sometimes return empty content even in the synthesis
+        // pass. If the agent used tools, retry once with an emphatic prompt.
+        if (result === "Sub-agent produced no final response." && toolCount > 0 && !signal?.aborted) {
+          try {
+            log.warn({ agentName: opts.agentName, toolCount }, "Synthesis returned empty — attempting rescue");
+            // Was a standalone system message in place of the system prompt — a third
+            // prompt head for the same run, cold on every call.
+            // synthProvider (see rescueSanitizedEmptyResult): same forced-answer shape as
+            // the synthesis pass it is rescuing, so it runs under the same thinking-off
+            // controls rather than the worker's pin.
+            const rescueResponse = await completeWithoutTools(
+              synthProvider,
+              forcedAnswerMessages(
+                "You returned an empty response but you have already gathered content from " +
+                toolCount + " tool calls during this session. " +
+                "Review your conversation history — you MUST have information from web_fetch, " +
+                "read_file, or other tools. Produce your COMPLETE final answer now. " +
+                "Include ALL content you retrieved — URLs, facts, and extracts verbatim. " +
+                "Tool calls are disabled for this reply. Do NOT return an empty response.",
+              ),
+              signal,
+            );
+            usage.promptTokens += rescueResponse.usage.promptTokens;
+            usage.completionTokens += rescueResponse.usage.completionTokens;
+            usage.totalTokens += rescueResponse.usage.totalTokens;
+            const rescueResult = normalizeSubAgentOutput(rescueResponse.content);
+            if (rescueResult !== "Sub-agent produced no final response.") {
+              log.info({ agentName: opts.agentName, rescueLength: rescueResult.length }, "Synthesis rescue succeeded");
+              result = rescueResult;
+            } else {
+              log.warn({ agentName: opts.agentName }, "Synthesis rescue also returned empty");
             }
+          } catch (rescueErr) {
+            log.warn({ rescueErr, agentName: opts.agentName }, "Synthesis rescue failed");
           }
+        }
 
+        // Any tool_call the synthesis came back with was discarded by completeWithoutTools
+        // (never executed). A run that STILL has no answer after the rescue takes the
+        // recovered-evidence route below, exactly as a tool_calls-only synthesis always did.
+        if (result !== "Sub-agent produced no final response.") {
           result = await rescueSanitizedEmptyResult(result);
           result = maybePreferWorkflowOutput(result, workflowPassthroughOutput, toolNames);
           const truncationRecovered = recoverHallucinatedTruncationAfterSubstantiveWork(result);
           result = truncationRecovered.result;
+          if (!truncationRecovered.forcedOutcome) result = quarantineUnobservedFigures(result, "max_iterations_synthesis");
 
           const outputScan = scanOutput(result);
           if (!outputScan.safe && outputScan.redacted) {
@@ -5126,7 +8784,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
         })
       : recoveredEvidenceSnippets.length > 0
-      ? buildInterruptedSubAgentOutput({
+      ? buildScaffold({
           agentName: opts.agentName,
           reason: `reached the maximum number of tool-call iterations (${maxIterations}). Partial result may be incomplete.`,
           swarmState: toolContext.swarmState,
@@ -5136,6 +8794,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           artifacts,
           evidenceSnippets: recoveredEvidenceSnippets,
           primaryDelegationBody: extractMostRecentSubstantialDelegationBody(history),
+          mutatedFileLines: currentMutatedFileLines(),
         })
       : `Sub-agent '${opts.agentName}' reached the maximum number of tool-call iterations (${maxIterations}) before producing usable topic-related output.`;
     // A run halted by the iteration guardrail that still GATHERED usable
@@ -5147,7 +8806,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // count). This deliberately does NOT key on raw successfulToolCount: a
     // successful search_workflows that returned "no workflows matched" succeeded
     // as a call but gathered nothing, and stays a failure.
+    // autoSharedFindingCount is incremented when a share SETTLES — join before reading it.
+    await joinPendingShares();
     const gatheredSharedFindings = shareFindinCallCount > 0 || autoSharedFindingCount > 0;
+    // The run is ending without the agent ever having checked its own page. Establish the
+    // answer here, where awaiting is free, so the outcome rule below can use it.
+    if (isStagedBuild && lastPageCheckPassed === undefined && unverifiedPageBroken === undefined) {
+      unverifiedPageBroken = (await findBrokenBuiltPages(opts.workspacePath, resumeScope)).length > 0;
+    }
     const maxIterationsStats = completedFromArtifact
       ? buildStats("completed", "success")
       : buildStats(
@@ -5167,7 +8833,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       stats: maxIterationsStats,
     });
   } finally {
+    // FIRST, before anything below awaits (joinPendingShares can hold this finally for up to 60 s):
+    // the run's last call is done, and E8 sent its head-only request straight after the run, when
+    // it processed 13 tokens (cache_n 8,031). Fire-and-forget; a stopped turn sends none.
+    headRewarm?.runEnded({ signal: opts.signal });
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    humanWaits.dispose();
+    if (supervisorTimer) clearInterval(supervisorTimer);
+    unregisterWardenStop?.();
+    browserDecider?.finish();
+    // The run's result is already computed; it is handed to the parent only once every
+    // finding it gathered is in shared facts (or its distill hit the 60 s deadline).
+    await joinPendingShares();
 
     // Tear down the live browser preview for this run (also unblocks any
     // still-pending human-assist wait with a "stopped" outcome).

@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { selectCorrectiveResumeTarget } from "../agent/runtime.js";
+
+// The tool calls runCorrectiveBuild dispatches, captured instead of run (see the last describe).
+const dispatched = vi.hoisted(() => [] as Array<{ name: string; args: Record<string, unknown> }>);
+vi.mock("../tools/registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/registry.js")>();
+  return {
+    ...actual,
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>) => {
+      dispatched.push({ name, args });
+      return { success: false, output: "", error: "no builder runs in this test" };
+    }),
+  };
+});
 
 /**
  * Resume-over-regenerate (the user's write_file/resume idea): when a build attempt this
@@ -67,5 +80,39 @@ describe("selectCorrectiveResumeTarget", () => {
 
   it("returns null for an empty attachment list", () => {
     expect(selectCorrectiveResumeTarget([], probe)).toBeNull();
+  });
+});
+
+// The runtime's own corrective build knows what it asked for. Its delegation declares a file
+// (DelegationDeliverable), so a builder that answers it in prose is judged a missed deliverable —
+// the declaration, not the verbs of the BUILD TASK text, is what the verdict reads.
+describe("runCorrectiveBuild — the runtime's build declares the file it wants", () => {
+  it("dispatches the build to delegate_to_agent with deliverable \"file\"", async () => {
+    const { runCorrectiveBuild } = await import("../agent/turn-corrective.js");
+    const { classifyDeliverableIntent } = await import("../agent/deliverable-intent.js");
+    const userMessage = "Erstelle eine Lernwebsite zur CPSA-F Zertifizierung als HTML-Datei.";
+    dispatched.length = 0;
+    const built = await runCorrectiveBuild("", {
+      signal: new AbortController().signal,
+      session: { id: "corrective-deliverable", channel: "test", addMessage: () => {}, getWorkspacePath: () => "/w" } as never,
+      userMessage,
+      deliverableIntent: classifyDeliverableIntent(userMessage),
+      toolContext: { sessionId: "corrective-deliverable", workspacePath: "/w" },
+      getIterationCount: () => 1,
+      getProvider: () => { throw new Error("no synthesis without an artifact"); },
+      getStashedBuilderTaskSpec: () => null,
+      getQaCorrectiveBuildUsed: () => false,
+      setQaCorrectiveBuildUsed: () => {},
+      incrementDelegationCount: () => {},
+      forceSynthesis: async () => null,
+      selectCorrectiveResumeTarget: () => null,
+      collectTurnArtifactAttachments: () => [],
+      extractArtifactsFromMetadata: () => {},
+      logWarn: () => {},
+    });
+    expect(built).toBeNull(); // the mocked builder produced nothing
+    const build = dispatched.find((call) => call.name === "delegate_to_agent");
+    expect(build?.args["agentName"]).toBe("content_writer");
+    expect(build?.args["deliverable"]).toBe("file");
   });
 });

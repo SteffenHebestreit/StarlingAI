@@ -5,26 +5,15 @@
  * external services.  Request bodies, headers, and query parameters
  * are fully configurable.
  */
-import { lookup as dnsLookup } from "node:dns/promises";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { isPrivateHost } from "./web.js";
+// The one SSRF predicate (private by literal OR by DNS, all address families), shared with
+// web_fetch and the browser tools so guardrails.allowedPrivateHosts means the same everywhere.
+import { connectRefusalReason, guardedDispatcher, hostIsBlocked } from "./web.js";
 
 const log = childLogger("tool:http-request");
 const MAX_RESPONSE_BODY = 64_000; // truncate large bodies
 const MAX_REDIRECTS = 5;
-
-/** SSRF predicate: private by literal OR by DNS (all address families, incl. IPv6). */
-async function hostIsBlocked(host: string): Promise<boolean> {
-  if (isPrivateHost(host)) return true;
-  try {
-    const records = await dnsLookup(host, { all: true });
-    if (records.some((r) => isPrivateHost(r.address))) return true;
-  } catch {
-    /* DNS failure — IP literal / offline resolver; non-fatal */
-  }
-  return false;
-}
 
 registerTool({
   name: "http_request",
@@ -114,13 +103,16 @@ registerTool({
           clearTimeout(timer);
           return { success: false, output: "", error: "Requesting private/internal network addresses is not allowed" };
         }
+        // The connection resolves the name through the guard too: one that passed the check
+        // above and answers with a private address when connecting is refused there.
         response = await fetch(current, {
           method,
           headers: currentHeaders,
           body: ["GET", "HEAD", "OPTIONS"].includes(method) ? undefined : body,
           signal: controller.signal,
           redirect: "manual",
-        });
+          dispatcher: guardedDispatcher,
+        } as RequestInit);
         if (response.status < 300 || response.status >= 400 || !response.headers.has("location")) break;
         if (hop >= MAX_REDIRECTS) { clearTimeout(timer); return { success: false, output: "", error: "Too many redirects" }; }
         const next = new URL(response.headers.get("location")!, current);
@@ -167,10 +159,13 @@ registerTool({
       clearTimeout(timer);
       const message = err instanceof Error ? err.message : String(err);
       log.warn({ url, method, err }, "http_request failed");
+      const refusedConnection = connectRefusalReason(err);
       return {
         success: false,
         output: "",
-        error: message.includes("aborted") ? `Request timed out after ${timeoutMs}ms` : message,
+        error: refusedConnection
+          ? `Requesting private/internal network addresses is not allowed: ${refusedConnection}`
+          : message.includes("aborted") ? `Request timed out after ${timeoutMs}ms` : message,
       };
     }
   },

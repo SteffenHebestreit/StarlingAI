@@ -2,15 +2,34 @@
  * Agent Runtime — the main agent loop.
  * LLM call → parse tool calls → execute (with guardrails) → loop → final response
  */
-import { getChatProvider, getChatProviderForTier, getChatProviderWithOverride } from "../providers/index.js";
-import { salvageToolCallArguments } from "../providers/lmstudio.js";
+import { randomUUID } from "node:crypto";
+import {
+  startsTurn,
+  currentTurnStartIndex,
+  MID_TURN_SOURCE_METADATA,
+  MID_TURN_USER_MESSAGE_METADATA,
+  STEERING_METADATA,
+  STEERING_PREFIX,
+} from "./turn-boundary.js";
+import { extractArtifactsFromMetadata } from "./artifact-metadata.js";
+// The system's one definition of "substantive output" — shared with the mid-stream burn
+// shape so a salvaged partial and a burn verdict cannot disagree about what counts as prose.
+import { MIN_SUBSTANTIVE_OUTPUT_CHARS } from "./progress-verifier.js";
+import { unattendedInputCallback } from "../tools/ask-user.js";
+import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCaveat } from "./artifact-verification-gate.js";
+import { applyActiveModelPreset, createChatProvider, getChatProvider, getChatProviderForTier, getChatProviderWithOverride, tierModelDefaults } from "../providers/index.js";
+import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { assembleTurnSystemMessages } from "./turn-system-prompt.js";
+import { assembleTurnSystemMessages, buildDirectiveAgentPrompt, turnIsStillDiscovering } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
+import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
+import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
-import { loadTurnPlan, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { formatQaTurnRecord } from "./qa-turn-record.js";
+import type { TurnUserWords } from "./delegation-user-words.js";
 import {
   buildDeliverableConsistencyCheckMessages,
   buildDeliverableConsistencyRepairInstruction,
@@ -28,7 +47,10 @@ import {
   effectiveOrchestratorMaxToolIterations,
   currentEffortTier,
 } from "../runtime/effort-context.js";
-import { runWithRequestContext } from "../runtime/request-context.js";
+import { runWithRequestContext, runWithCallAttribution, currentRequestContext } from "../runtime/request-context.js";
+import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
+import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
+import { resolveRoutingTierProvider } from "./routing-tier-provider.js";
 import {
   classifyTurnProgress,
   buildTurnOversightPrompt,
@@ -36,17 +58,31 @@ import {
   TURN_OVERSIGHT_CHECK_INTERVAL_MS,
   type TurnProgressSample,
 } from "./turn-oversight.js";
+import { countLoopedPartials } from "./delegation-loop-notes.js";
 import { childLogger } from "../logger.js";
 import type { AgentSession, SessionHistoryMessage } from "./session.js";
 import { classifyToolIntervention } from "./interventions.js";
-import { getMainAssistantToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import { getMainAssistantToolNames, getLoadableDirectMainToolNames, type MainAssistantToolMode } from "./default-tools.js";
+import {
+  DELEGATION_WAIT_TOOL_NAMES,
+  toolCallContribution,
+  toolResultContribution,
+  nestedCallContribution,
+  readNestedToolCalls,
+  retrievedKnowledgeBaseContent,
+  knowledgeBaseSourceUrls,
+  STATE_DEPENDENT_TOOL_NAMES,
+} from "./turn-tool-contribution.js";
+import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
+import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
-import { turnSteeringManager } from "./turn-steering.js";
+import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
 import { consumePendingSessionCancel } from "../swarm/control.js";
 import { artifactFileLooksTruncated, runSubAgent } from "./sub-agent.js";
 import { collectJudgeableArtifactRefs, runQaToolJudgeCheck, type QaJudgeArtifactRef } from "./qa-tool-judge.js";
 import { probeArtifacts } from "./artifact-probes.js";
+import { collectSessionArtifactPaths, repairArtifactPathReferences, workspaceFileExists, type ArtifactPathRepair } from "./artifact-path-repair.js";
 import { listEvidenceClaims, sweepEvidenceConflicts } from "../swarm/evidence-ledger.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
 import { join } from "node:path";
@@ -62,6 +98,7 @@ import { postProcessToolResult, type ToolResultPostProcessContext } from "./turn
 import { beginFactTurn } from "../swarm/memory.js";
 import {
   buildDynamicTurnGuidance,
+  hasSubstantialInlineTechnicalContent,
 } from "./intent-classifier.js";
 import { buildEffectiveResearchSubject } from "./source-sensitive-delegation.js";
 import { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksLikeDegenerateLineRepetition, collapseRepeatedLines } from "./text-dedup.js";
@@ -109,12 +146,17 @@ export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
 // (which stays here) uses looksLikeDelegatedFailureEvidence from this module.
 import {
   buildModelVisibleToolResult,
+  isExplicitDelegationSuccess,
+  delegationCarriesOwnEvidence,
   looksLikeDelegatedFailureEvidence,
+  looksLikeStructuralDelegationFailure,
 } from "./tool-result-format.js";
 
 // Re-export the originally-exported buildModelVisibleToolResult so existing imports
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
+import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
+import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
 // pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
@@ -151,6 +193,7 @@ import {
   findRecentJunkDelegationResult,
   findRecentFailedDelegation,
 } from "./response-finalization.js";
+import { isExecutionChatterOnly } from "./sanitize-response.js";
 
 // Required-research fallback routing + search-agents-no-match cluster (god-file
 // seam): pure routing helpers that push a stalled source-sensitive turn into a
@@ -189,6 +232,7 @@ export {
 // Pure honesty / source-caveat / synthesis-directive text helpers (god-file seam).
 import {
   buildSynthesisRequiredDirective,
+  buildUnobservedRunsNote,
   looksLikeUnsourcedSpecificClaims,
   prependTurnIncompleteCaveat,
 } from "./citation-honesty.js";
@@ -197,6 +241,7 @@ import {
 import {
   buildUngroundedClaimJudgeMessages,
   buildSourceSensitiveQuestionJudgeMessages,
+  JUDGE_ANSWER_TOKEN_RE,
   parseUngroundedClaimVerdict,
   UNGROUNDED_JUDGE_MIN_CHARS,
 } from "./ungrounded-claim-judge.js";
@@ -216,16 +261,18 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, turnEvidenceRequirement } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
 import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "./delegation-budget.js";
+import { DEADLINE_LIVENESS_RECHECK_MS } from "./sub-agent-turn-budget.js";
 
 // Pure response/tool-call collapsing + delegation arg helpers (god-file seam).
 import {
   deriveDelegationTaskFromArgs,
   getPerTurnToolCallLimit,
+  giveBackRejectedCall,
   buildDelegationLoopResponse,
   collapseDuplicateToolCallsInResponse,
   collapseExcessDirectDelegationsInResponse,
@@ -329,6 +376,8 @@ import {
 import {
   runWithPhaseTimings,
   buildTurnPerformanceMetrics,
+  timedPhase,
+  timedQaModelCall,
 } from "./turn-metrics.js";
 
 // Re-export the originally-exported metrics symbols so existing imports from
@@ -358,14 +407,57 @@ export {
 
 const log = childLogger("agent:runtime");
 
-const DEFAULT_MAX_TOOL_ITERATIONS = 20;
+// Iteration counts never separated a healthy run from a stuck one — the reference build
+// (run 3959f3ac) used 13 of its 14 while the two pathologies beside it used 1 and 0 — so a
+// tight ceiling only ever cut the run that was working. Relaxed; the progress supervisor,
+// which watches what a run PRODUCES, is what stops one that is not.
+const DEFAULT_MAX_TOOL_ITERATIONS = 40;
 const MAX_LENGTH_CONTINUATION_ATTEMPTS = 2;
 const MAX_CONTINUATION_OVERLAP_CHARS = 400;
+/**
+ * A FORCED TOOL CALL IS A DISPATCH, NOT A DELIBERATION.
+ *
+ * Audit log turn 2, 10 Sept, "wie wird das wetter morgen?": the forced iteration (tool_choice
+ * "required", 10 orchestration tools, the orchestrator's thinking ON) reasoned for 8,000 tokens,
+ * finished with reason "length" and ZERO tool calls — 150.0 s of a 208 s turn. 1f4a295 refuses
+ * to continue such a call (forced_tool_call_burned_budget), so the burn itself is what remains.
+ * The call only has to name an agent and a task. Thinking-off makes the burn rarer but does not
+ * remove it: on a prompt the model wants to answer itself, 9 of 12 forced calls came with thinking
+ * off and 1 of 12 with it on, and every miss ran to the ceiling (2026-10-08). What holds there is
+ * the prefilled tool call at the call site (ModelConfig.toolCallPrefill, off by default). The
+ * ceiling bounds a runaway that gets past them: the largest forced-call arguments observed are a
+ * record_plan with steps + acceptance criteria ≈1,200 tokens and a coordinator task ≈500 chars,
+ * so 4,000 clears them and caps a runaway at ~2 min at the measured 34.5 tok/s instead of the
+ * 150 s above.
+ *
+ * NOT ON THE PLAN CALL. The burn above was the DISPATCH iteration. But
+ * filterForcedOrchestrationTools offers record_plan exactly while no plan exists, so the FIRST
+ * forced iteration of an orchestration turn is the call that writes the plan — steps and
+ * acceptance criteria, the one piece of real deliberation the turn does, measured at 13.1 s with
+ * thinking ON and a plan at the end of it. Silencing that call is not the same trade, so the
+ * controls are applied only once `forcedPlanState.planRecorded` is true; the token ceiling
+ * applies to both (it was sized to clear a record_plan in the first place).
+ *
+ * FAMILY CAVEAT — where "thinking off" is a prompt line, not a flag. The off-switch was measured
+ * on qwen over llama.cpp, where enable_thinking is a request field and costs nothing structural.
+ * On the gpt-oss family this provider implements effort as a `Reasoning: <effort>` system message
+ * PREPENDED at position 0 (lmstudio.ts withReasoningSystemLine, with "none" folded up to "low"),
+ * so a per-call override would rewrite the first line of the prompt for one iteration and back
+ * again for the next — two full re-prefills of the whole conversation on a block-granular prefix
+ * cache. No gpt-oss model is configured in this deployment (every station is qwen), so this is a
+ * caveat for whoever configures one, not a live cost: the fix then is a per-family decision, not
+ * dropping the control.
+ */
+const FORCED_TOOL_CALL_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+const FORCED_TOOL_CALL_MAX_TOKENS = 4000;
 // The public turn input/output shapes (RunTurnOptions, TurnOutput) were extracted
 // to the leaf module ./turn-types.ts (god-file seam) so the turn-preparation
 // helpers can depend on them without importing runtime.js. Re-exported here so
 // every external `import { TurnOutput } from ".../runtime.js"` keeps working.
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
+import { layaConfigured } from "../decisions/laya-client.js";
+import { SOURCE_SENSITIVE, UNGROUNDED_DRAFT } from "../decisions/points.js";
 export type { RunTurnOptions, TurnOutput } from "./turn-types.js";
 
 // Shared-facts / evidence / recovery-backstop cluster moved to ./evidence-recovery.ts
@@ -466,7 +558,7 @@ async function finalizeUserFacingAssistantResponse(
       provider,
       signal,
       "You have already executed the necessary tools. Write the final user-facing answer now."
-      + " Synthesize the tool results and [SHARED FINDINGS AVAILABLE] entries into a complete, well-structured answer in the user's language."
+      + ` Synthesize the tool results and [SHARED FINDINGS AVAILABLE] entries into a complete, well-structured answer ${IN_REPLY_LANGUAGE}.`
       + " Do NOT echo raw shared-finding key names (e.g. auto_xxx_yyy) — convert them into readable sentences."
       + " Do NOT narrate searches, fetches, document generation, or tool calls. Never include literal [Tool: ...] traces.",
     );
@@ -498,7 +590,7 @@ function resolveEmptyAssistantResponseFallback(
 
   const history = session.getHistory();
   if (hasRecentForcedSynthesisNudge(history)) {
-    const evidence = findRecentDelegateEvidence(history);
+    const evidence = findRecentDelegateEvidence(history, { scopeToCurrentTurn: true });
     if (evidence) {
       logAudit(
         "guardrail_flagged",
@@ -603,39 +695,11 @@ const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "delegation_failures_terminal",
 ]);
 
-/**
- * ALLOWLIST of tools that actually ADVANCE a "must orchestrate before answering"
- * turn — delegation launchers + the discovery tools that feed them. When the
- * runtime forces a tool call to COMPEL orchestration (cost-center 1), the forced
- * candidate set is restricted to THESE only.
- *
- * This is deliberately an allowlist, not a blocklist: tool_choice:"required" forces
- * SOME tool, and the slow local model otherwise satisfies it with whatever cheap
- * no-op tool is in scope and loops on it without ever delegating — first
- * memory_store (audit be828e39: ×3 → max_tool_iterations → unsourced fabrication),
- * then record_plan (audit, 5-mic probe: ×3 → "writing final from evidence" with
- * zero research). A blocklist just moves the escape hatch to the next no-op tool;
- * an allowlist closes them all, including any added later. Memory/self/plan/state
- * tools (memory_*, recall_context, record_plan, get_swarm_state, …) are excluded
- * by omission — they're still freely available on non-forced iterations.
- */
-const FORCE_ORCHESTRATION_TOOLS = new Set([
-  "delegate_to_agent",
-  "parallel_delegate",
-  "swarm_delegate",
-  "run_workflow",
-  "run_task_graph",
-  "search_agents",
-  "search_workflows",
-  "list_agents",
-  "create_ephemeral_agent",
-]);
-
-/** Keep only orchestration/delegation tools so a forced tool call can ONLY be
- * satisfied by an action that advances the turn. Exported for testing. */
-export function filterForcedOrchestrationTools<T extends { name: string }>(tools: readonly T[]): T[] {
-  return tools.filter((tool) => FORCE_ORCHESTRATION_TOOLS.has(tool.name));
-}
+// The forced-iteration tool allowlist and its filter live in ./forced-orchestration-tools.ts
+// (moved verbatim) so the prompt-cache warm-keeper can derive the forced heads from the same
+// function without importing this module, which imports it. Re-exported: tests and the latency
+// probe import it from here.
+export { filterForcedOrchestrationTools };
 
 function shouldBypassTerminalSynthesisWithEvidence(
   finishReason: string,
@@ -856,6 +920,28 @@ export function taskGraphResultIsFailure(metadata: Record<string, unknown>): boo
   return failed || blocked;
 }
 
+/**
+ * Whether a result's failure is a run that masked figures, and nothing else: an execute_plan whose
+ * every failed step failed for that (maskedSteps), a workflow stopped by such a step
+ * (blockedByMaskedFigures), or a single delegation whose own run masked them, with nothing under
+ * it masked by another agent. A fan-out (parallel_delegate, run_task_graph) names no agent of its
+ * own, so its failure stays its own.
+ */
+export function failureIsOnlyMaskedRuns(metadata: Record<string, unknown>): boolean {
+  if (metadata["planExecution"] === true) {
+    const failed = typeof metadata["failed"] === "number" ? metadata["failed"] : 0;
+    const maskedSteps = Array.isArray(metadata["maskedSteps"])
+      ? new Set(metadata["maskedSteps"].filter((id): id is string => typeof id === "string")).size
+      : 0;
+    return failed > 0 && maskedSteps >= failed;
+  }
+  if (metadata["blocked"] === true) return metadata["blockedByMaskedFigures"] === true;
+  const agentName = metadata["agentName"];
+  return typeof agentName === "string"
+    && unbackedFiguresMasked(readExecutionRecord(metadata["specialistExecutions"]))
+    && readMaskedRuns(metadata["maskedRuns"]).every((run) => run.agentName === agentName);
+}
+
 export function classifyPostOrchestrationDisposition(
   toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>,
 ): PostOrchestrationDisposition {
@@ -865,7 +951,13 @@ export function classifyPostOrchestrationDisposition(
   // honesty backstop never armed. When the flag is on, recognize the incomplete-graph result too.
   const taskGraphFailureDisposition = getConfig().orchestration?.taskGraphFailureDisposition === true;
   const orchestrationResults = toolResultMessages.filter((message) => {
-    const text = typeof message.content === "string" ? message.content : "";
+    const text = typeof message.content === "string" ? stripDelegatedRunRecord(message.content) : "";
+    // execute_plan dispatches the delegations and workflows the markers below name, one level down,
+    // so its OWN result carries none of them and matched nothing here. An iteration whose only call
+    // was execute_plan therefore classified as "none" — which skips the entire post-orchestration
+    // block, including the plan-driven continuation written for exactly this path and the failure
+    // branch that arms the failed-research honesty backstop. Same defect class as the D2 note above.
+    if ((message.metadata ?? {})["planExecution"] === true) return true;
     const isWorkflowExecutionResult = /^Workflow\s+.+\s+\[[^\]]+\]\s+(blocked|completed)\./i.test(text);
     const isIncompleteTaskGraph = taskGraphFailureDisposition && text.includes("Task graph finished with incomplete status");
     return text.includes("Observed evidence:")
@@ -886,7 +978,7 @@ export function classifyPostOrchestrationDisposition(
   let sawContinuationCue = false;
 
   for (const message of orchestrationResults) {
-    const text = typeof message.content === "string" ? message.content : "";
+    const text = typeof message.content === "string" ? stripDelegatedRunRecord(message.content) : "";
     const metadata = message.metadata ?? {};
     const agentName = typeof metadata["agentName"] === "string"
       ? String(metadata["agentName"])
@@ -903,6 +995,22 @@ export function classifyPostOrchestrationDisposition(
     const interruptedPartialWithoutUsableEvidence = agentName !== "computer_use_agent"
       && delegationPartial
       && (looksLikeInterruptedDelegationWithoutUsableEvidence(text) || (!hasInterruptedShape && looksLikeOrchestrationOnlyEvidence(observedEvidence)));
+
+
+    // BEFORE the text sniffers below. The plan's report embeds every step's result verbatim, so a
+    // step whose output merely contains "please confirm" or "which one" would hijack the whole
+    // turn's disposition to ask_user — a genuine mid-plan clarification blocks in the ask_user tool
+    // itself rather than being inferred from text here.
+    if (metadata["planExecution"] === true) {
+      const count = (key: string): number => (typeof metadata[key] === "number" ? metadata[key] as number : 0);
+      // A plan with a failed step did not deliver its objective — classified as a delegation
+      // failure so the failed-research honesty backstop arms, exactly as a failed graph is.
+      if (count("failed") > 0) return "failure";
+      // Steps the orchestrator still owes (its own, or blocked behind them) are not a failure: the
+      // tool has said what remains, so continue the plan rather than synthesize over the gap.
+      if (count("manual") + count("pending") > 0) sawContinuationCue = true;
+      continue;
+    }
 
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
@@ -957,7 +1065,11 @@ export function classifyPostOrchestrationDisposition(
       // Sniff only the delegated EVIDENCE, never the harness-built instruction
       // preamble above it — preamble wording must not be classifiable as a
       // failure signal (same defect class as the workflow case above).
-      || (!delegationPartial && looksLikeDelegatedFailureEvidence(observedEvidence))
+      // Only an EXPLICIT success verdict (a `<final_answer status="success">` close) is trusted
+      // over the prose sniff — the same rule as the model-visible frame in tool-result-format.ts.
+      // The runtime's defaulted "success" is not a verdict.
+      || (!delegationPartial && looksLikeStructuralDelegationFailure(observedEvidence))
+      || (!delegationPartial && !isExplicitDelegationSuccess(metadata) && looksLikeDelegatedFailureEvidence(observedEvidence, delegationCarriesOwnEvidence(metadata)))
     ) {
       return "failure";
     }
@@ -1001,6 +1113,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   // Tell the prompt-cache warm-keeper the orchestrator model is busy (abort any
   // in-flight warm-up so it never queues ahead of this turn); re-arm on completion.
   markOrchestratorActivity();
+  // The intent readout's post-turn shadow (orchestration.intentReadout, agent/intent-shadow.ts):
+  // every turn start aborts a shadow in flight, and a shadowed turn's reply is out before its
+  // shadow is asked. `delivered` stays undefined for a turn that threw.
+  let intentShadow: IntentShadowHandle | undefined;
+  let delivered: TurnOutput | undefined;
   try {
     // Run the ENTIRE turn under the authenticated user's request context so that
     // prompt assembly, personality, the user-model, and durable memory all see the
@@ -1009,23 +1126,67 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // The per-tool wrap in tools/registry.ts re-sets the same userId for each tool.
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
-    return await runWithRequestContext(
-      { userId: opts.session.userId },
+    // sessionId/agentName/callSite are ATTRIBUTION, not scoping: they let the two
+    // provider emitters stamp every `provider_model_call` row with the turn that
+    // issued it. Without them the rows carry no session at all and model calls can
+    // only be attributed to a turn by timestamp window.
+    // The user-input channel is the one thing inherited: a workflow turn nested inside a chat
+    // turn still reaches that chat's person, and a top-level turn from any other surface has none.
+    const userInput = opts.userInput ?? currentRequestContext()?.userInput;
+    // So is the turn id, which every turn has: the chat's request id, the one a gateway set around
+    // this call, or the enclosing turn's for a nested one; a fresh one for a turn nobody named.
+    const turnId = userInput?.turnId ?? currentRequestContext()?.turnId ?? randomUUID();
+    // The person's language, for fixed text only (status lines, backstop messages). Inherited by a
+    // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
+    const userMessageLanguage = currentRequestContext()?.userMessageLanguage
+      ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
+    intentShadow = intentShadowTurnStarted({
+      sessionId: opts.session.id,
+      turnId,
+      ...(opts.session.userId ? { userId: opts.session.userId } : {}),
+      channel: opts.session.channel,
+      userMessage: opts.userMessage,
+      // Read now, before the turn records its message: the same digest the facet triage reads.
+      priorTurnDigest: () => buildPriorTurnDigest(opts.session),
+      // Any attribution already set means a turn (or a sub-agent) is running this one.
+      nested: currentRequestContext()?.callSite !== undefined,
+    });
+    delivered = await runWithRequestContext(
+      {
+        userId: opts.session.userId,
+        sessionId: opts.session.id,
+        agentName: "main",
+        callSite: "main_turn",
+        ...(userInput ? { userInput } : {}),
+        turnId,
+        // Not inherited: a nested turn writes to its own session, which no chat.send started.
+        ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
+        ...(userMessageLanguage ? { userMessageLanguage } : {}),
+        // Not inherited either: a nested turn's message is a workflow step, not the person's words.
+        ...(opts.userWords !== undefined ? { userWords: opts.userWords } : {}),
+      },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );
+    return delivered;
   } finally {
     markOrchestratorIdle();
+    intentShadowTurnEnded(intentShadow, delivered);
   }
 }
 
-/** Tools where the orchestrator BLOCKS awaiting delegated children — their wall-clock duration is the
- *  "parent waiting for kids" time excluded from the turn budget by D5 (excludeDelegationWaitFromTurnBudget). */
-const DELEGATION_WAIT_TOOL_NAMES = new Set([
-  "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow",
-]);
-
 async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const config = getConfig();
+  // A PLAN BELONGS TO ONE TURN. The slot lives for the session TTL and nothing ever cleared it, so
+  // every reader of it could be handed the PREVIOUS turn's plan: riskGatedQA judged this turn's
+  // answer against last turn's acceptance criteria and inherited its riskTier, the oversight judge
+  // read last turn's objective, decidePlanContinuation rendered [CONTINUE PLAN] for work already
+  // finished, and execute_plan replayed last turn's results as this turn's evidence. runTurn is
+  // called once per user message, and approvals resume inside the turn rather than re-entering it,
+  // so clearing here is exactly "start of turn".
+  await clearTurnPlanForSession(opts.session.id);
+  // The base prompt is held still for this turn from here on — a personality or outcomes write
+  // mid-turn must not re-prefill the whole request behind it.
+  opts.session.beginTurnSystemPrompt();
   // Per-turn timeout — inline override wins, then the active effort profile's timeout
   // (0 = "unleashed"), then config, then default 15 min. (The gateway normally folds
   // the profile timeout into turnTimeoutOverrideMs already; this fallback covers
@@ -1042,14 +1203,138 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   const turnAbort = turnTimeoutMs ? new AbortController() : undefined;
   const inertAbort = new AbortController();
   const turnStartMs = Date.now();
+  // Hoisted above the deadline plumbing: the timers below read it to ask the
+  // long-running-generation manager whether THIS turn holds an operator grant.
+  const sessionId = opts.session.id;
   // Absolute deadline for this turn — captured when the abort timer is armed so a delegated sub-agent
   // can clamp to the parent's REMAINING budget (D3). MUTABLE: the delegation-wait exclusion (D5) pushes
   // it out while the orchestrator is BLOCKED awaiting a child, but never past turnDeadlineCeilingMs.
   let turnDeadlineMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs : undefined;
-  const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + DELEGATION_WAIT_CEILING_MS : undefined;
-  let timeoutHandle = turnAbort && turnTimeoutMs
-    ? setTimeout(() => turnAbort.abort(), turnTimeoutMs)
-    : undefined;
+  // D5's ceiling is the turn budget PLUS a delegation-wait allowance, not the bare
+  // allowance. At the shipped config the two numbers were identical (both 1,800,000), so
+  // extendDeadlineForDelegationWait resolved to max(D, min(D+w, D)) === D and D5 could not
+  // move the deadline by a millisecond despite shipping default(true). The exclusion says
+  // "the tier budget bounds the parent's OWN work, not its children's", which only means
+  // anything if waiting on a child can push the deadline PAST the tier budget.
+  const turnDeadlineCeilingMs = turnTimeoutMs ? turnStartMs + turnTimeoutMs + DELEGATION_WAIT_CEILING_MS : undefined;
+  // The abort reason is TYPED. The provider salvage discriminates an operator cancel
+  // (discard the partial — the user asked for it to stop) from a wall-clock deadline
+  // (keep the partial — the run wanted to finish). A bare abort() reads as a cancel,
+  // so the orchestrator's own deadline would throw away content the model had already
+  // produced; with the output ceiling gone a single orchestrator completion can run
+  // long enough for that to be the normal case, not the rare one.
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  // Liveness beat for the deadline above. Every delegated child's reasoning chunk and tool
+  // call passes through here, which is the only evidence the parent has while it sits
+  // blocked in delegate_to_agent. Declared before armTurnDeadline so the timer closes over
+  // it rather than over a temporal-dead-zone binding.
+  let lastSubAgentProgressAt = 0;
+  const noteSubAgentProgress: NonNullable<RunTurnOptions["onSubAgentProgress"]> = (event) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onSubAgentProgress?.(event);
+  };
+  // THE ORCHESTRATOR IS A GENERATION TOO.
+  //
+  // The beat above covers a turn BLOCKED on a delegate, which is where the long stretches
+  // usually are — but not always. Session e95eec63 spent 1,084,567 ms inside the
+  // orchestrator's OWN first completion, 38,668 characters of reasoning before a single tool
+  // call, with no sub-agent yet in existence to report anything. Its deadline was watching a
+  // signal that could not fire, and concluded the turn was dead.
+  //
+  // Its own text and reasoning are the same kind of evidence on the same clock, so they feed
+  // the same timestamp.
+  const noteChunk: NonNullable<RunTurnOptions["onChunk"]> = (text) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onChunk?.(text);
+  };
+  const noteReasoning: NonNullable<RunTurnOptions["onReasoning"]> = (text) => {
+    lastSubAgentProgressAt = Date.now();
+    opts.onReasoning?.(text);
+  };
+  // The deadline is SUSPENDED, not merely re-armed, while the turn holds an operator
+  // unbounded grant. Audit 3959f3ac: the dock promised "let it finish naturally", the
+  // operator chose it at 07:35:24, and this timer overrode the operator 19 minutes later —
+  // because nothing outside sub-agent.ts could read the grant. It re-arms at the 24h
+  // ceiling rather than clearing outright, so a granted turn still cannot pin its session
+  // and abort controllers forever.
+  const armTurnDeadline = (budgetMs: number, fireInMs = budgetMs): void => {
+    if (!turnAbort) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(() => {
+      // A person is answering a question this turn asked (at any depth). Nothing is being
+      // produced, and nothing should be: the wait's end credits its whole length back below.
+      // Never past the absolute ceiling: a wait's length can come from the model (review #29).
+      if (humanWaits.isWaiting() && Date.now() - turnStartMs < MAX_TURN_CEILING_MS) {
+        armTurnDeadline(budgetMs, HUMAN_WAIT_RECHECK_MS);
+        return;
+      }
+      if (longRunningGenerationManager.isTurnUnbounded(sessionId)) {
+        // Same event the sub-agent side already logs when a grant re-arms ITS deadline
+        // (sub-agent.ts, "unbounded_grant_rearmed_deadline") — this is that decision one
+        // layer up, so it reads as one story in the audit log rather than two.
+        logAudit("long_running_generation_auto_resolved", {
+          agentName: "orchestrator",
+          runSessionId: sessionId,
+          reason: "turn_deadline_suspended_by_unbounded_grant",
+          appliedAt: "expiry",
+          turnTimeoutMs: budgetMs,
+          ceilingMs: MAX_TURN_CEILING_MS,
+        }, { sessionId, severity: "info" });
+        turnDeadlineMs = Date.now() + MAX_TURN_CEILING_MS;
+        armTurnDeadline(MAX_TURN_CEILING_MS);
+        return;
+      }
+      // THE LAST HARD TIMER, AND THE ONE THAT ACTUALLY KILLED RUN 5.
+      //
+      // The sub-agent's own deadline became a liveness probe and correctly extended twice;
+      // the gateway clock correctly paused for the delegation wait. Then this fired at
+      // exactly 30:00 and cancelled a delegate that had been building for 1,611 seconds and
+      // was still writing — the same wrong premise one layer up, that elapsed time is
+      // evidence of a stuck run.
+      //
+      // The parent spends that whole time BLOCKED inside delegate_to_agent, so its own
+      // liveness is its child's: every reasoning chunk and tool call the child emits arrives
+      // here as a progress event. A child that produced within the last recheck window is
+      // working, and aborting it discards real output — while a genuinely wedged child goes
+      // silent and stops deferring within one window. The child runs under its own
+      // loop and drift supervision, so nothing here needs to re-judge the CONTENT; it only
+      // needs to stop treating the clock as the judge.
+      const sinceProgressMs = lastSubAgentProgressAt > 0 ? Date.now() - lastSubAgentProgressAt : Infinity;
+      const withinCeiling = Date.now() - turnStartMs < MAX_TURN_CEILING_MS;
+      if (sinceProgressMs < DEADLINE_LIVENESS_RECHECK_MS && withinCeiling) {
+        logAudit("progress_verifier_intervened", {
+          agentName: "orchestrator",
+          runSessionId: sessionId,
+          verdict: "on_track",
+          action: "turn_deadline_extended",
+          reason: "delegated_child_still_producing",
+          sinceProgressMs,
+          recheckMs: DEADLINE_LIVENESS_RECHECK_MS,
+          turnTimeoutMs: budgetMs,
+        }, { sessionId, severity: "info" });
+        turnDeadlineMs = Date.now() + DEADLINE_LIVENESS_RECHECK_MS;
+        armTurnDeadline(budgetMs, DEADLINE_LIVENESS_RECHECK_MS);
+        return;
+      }
+      turnAbort.abort(new DeadlineAbort(budgetMs));
+    }, Math.max(0, fireInMs));
+  };
+  // Time spent waiting on the person is not the turn's own time: the deadline moves by exactly
+  // that much when a wait ends. Not through the delegation-wait ceiling — a wait is bounded by
+  // its own request deadline — and counted, so the delegation-wait credit for the call that
+  // contained it does not grant the same minutes twice.
+  // The liveness beat is credited too. Moving only the deadline left the beat where it was before
+  // the wait, so the first check after a long answer measured the whole wait as silence and
+  // aborted a turn that had been producing right up to its question (review #13).
+  let humanWaitCreditedMs = 0;
+  const humanWaits = trackHumanWaits(sessionId, (waitedMs) => {
+    humanWaitCreditedMs += waitedMs;
+    if (lastSubAgentProgressAt > 0) lastSubAgentProgressAt = Math.min(Date.now(), lastSubAgentProgressAt + waitedMs);
+    if (!turnAbort || turnDeadlineMs === undefined || turnAbort.signal.aborted) return;
+    turnDeadlineMs = Math.min(turnDeadlineMs + waitedMs, turnStartMs + MAX_TURN_CEILING_MS);
+    armTurnDeadline(Math.max(0, turnDeadlineMs - turnStartMs), Math.max(0, turnDeadlineMs - Date.now()));
+  }, { turnId: currentRequestContext()?.turnId });
+  if (turnAbort && turnTimeoutMs) armTurnDeadline(turnTimeoutMs);
   // D5 (orchestration.excludeDelegationWaitFromTurnBudget): push the turn deadline out by `ms` (the
   // wall-clock the orchestrator sat BLOCKED awaiting a delegated child) and re-arm the abort, so the
   // tier budget bounds the parent's OWN work — not its children's. Bounded by the absolute ceiling;
@@ -1059,14 +1344,32 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       return turnDeadlineMs;
     }
     turnDeadlineMs = extendDeadlineForDelegationWait(turnDeadlineMs, ms, turnDeadlineCeilingMs);
-    if (timeoutHandle) clearTimeout(timeoutHandle);
-    timeoutHandle = setTimeout(() => turnAbort.abort(), Math.max(0, turnDeadlineMs - Date.now()));
+    // Re-arm through armTurnDeadline so the grant check applies to the EXTENDED deadline
+    // too — a separate setTimeout here is how the grant got bypassed on the original path.
+    armTurnDeadline(Math.max(0, turnDeadlineMs - turnStartMs), Math.max(0, turnDeadlineMs - Date.now()));
     return turnDeadlineMs;
   };
 
+  // The grant is honoured the MOMENT the operator makes it, not at the next expiry: the
+  // deadline is a timer, and a timer cannot poll. Without this a grant made one minute
+  // before expiry would still let the abort fire and only be caught on the re-arm path.
+  const onUnboundedGrant = (grantedRoot: string): void => {
+    if (grantedRoot !== sessionId || !turnAbort || !turnTimeoutMs) return;
+    logAudit("long_running_generation_auto_resolved", {
+      agentName: "orchestrator",
+      runSessionId: sessionId,
+      reason: "turn_deadline_suspended_by_unbounded_grant",
+      appliedAt: "grant",
+      turnTimeoutMs,
+      ceilingMs: MAX_TURN_CEILING_MS,
+    }, { sessionId, severity: "info" });
+    turnDeadlineMs = Date.now() + MAX_TURN_CEILING_MS;
+    armTurnDeadline(MAX_TURN_CEILING_MS);
+  };
+  longRunningGenerationManager.on("lrg:unbounded", onUnboundedGrant);
+
   // Warden abort: allows the Warden to cancel this turn mid-flight on severe anomalies.
   const wardenAbort = new AbortController();
-  const sessionId = opts.session.id;
   registerSessionAbortController(sessionId, wardenAbort);
   // CTL-205 catch-up: a distributed cancel issued while no turn was live (or the
   // owning process was restarting) is consumed at turn start and aborts now.
@@ -1079,9 +1382,14 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
   // Fresh turn: clear any per-turn "operator stopped" latch so a stop in a
   // previous turn never auto-stops this one's long-running generations.
   longRunningGenerationManager.clearStopRequested(sessionId);
+  // A grant is TURN-scoped. Without this it would silently make every later turn of a
+  // long-lived session unbounded too — the same leak clearStopRequested exists to prevent.
+  longRunningGenerationManager.clearUnbounded(sessionId);
   // Mark this turn live so the user can steer it mid-flight (drained in the loop);
-  // cleared in the finally below so the active flag never leaks across turns.
-  turnSteeringManager.markTurnActive(sessionId);
+  // cleared in the finally below so the active flag never leaks across turns. The token
+  // makes that clearing this turn's own: a superseded turn unwinding late cannot switch
+  // off the turn that replaced it.
+  const steeringToken = turnSteeringManager.markTurnActive(sessionId, opts.steeringToken);
 
   // Merge caller signal + timeout signal + warden signal: any source can cancel the turn.
   const allSignals: AbortSignal[] = [];
@@ -1092,17 +1400,45 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
     ? allSignals[0]!
     : AbortSignal.any(allSignals);
 
+  let unconsumedSteering: SteeringMessage[] = [];
   try {
     // Activate the effort profile for the whole turn so the scattered
     // getConfig().orchestration reads (via effectiveOrchestration()) and the
     // reasoning/prompt/iteration knobs pick it up without threading a parameter
     // through every helper.
     const out = await runWithEffortContext(opts.effortTier, () =>
-      _runTurn(opts, signal, turnAbort?.signal ?? inertAbort.signal, {
+      _runTurn({
+        ...opts,
+        steeringToken,
+        onSubAgentProgress: noteSubAgentProgress,
+        onChunk: noteChunk,
+        onReasoning: noteReasoning,
+      }, signal, turnAbort?.signal ?? inertAbort.signal, {
         deadlineMs: turnDeadlineMs,
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
+        humanWaitCreditedMs: () => humanWaitCreditedMs,
+        currentDeadlineMs: () => turnDeadlineMs,
       }));
-    const finalized = finalizeTurnOutput(out, sessionId);
+    // Steering that arrived after the last drain is handed back rather than folded in here: the
+    // answer is written, and discarding it to make room would cost the user the whole synthesis.
+    // Closing in the same step as reading keeps a message from slipping in between; the client
+    // sends what comes back as the next turn.
+    unconsumedSteering = turnSteeringManager.closeTurn(sessionId, steeringToken).map(({ id, text }) => ({ id, text }));
+    // The repair persistAssistantTurnState already applied to the saved answer, reused rather than
+    // re-derived: saving can trim history, and a second pass over fewer known paths could repair
+    // the returned copy differently. It is audited here only, where every turn passes exactly once.
+    const pathRepair = takeFinalAnswerRepair(opts.session, out.response);
+    for (const repair of pathRepair.repairs) {
+      logAudit("artifact_path_repaired", { surface: "final_answer", from: repair.from, to: repair.to }, {
+        sessionId,
+        channel: opts.session.channel,
+        severity: "info",
+      });
+    }
+    const finalized = finalizeTurnOutput(
+      pathRepair.repairs.length > 0 ? { ...out, response: pathRepair.text } : out,
+      sessionId,
+    );
     const qualityScorecard = finalized.qualityScorecard ?? buildTurnQualityScorecard({
       delegationCount: 0,
       shareFindingCount: 0,
@@ -1119,7 +1455,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
       channel: opts.session.channel,
       severity: "info",
     });
-    return { ...finalized, qualityScorecard };
+    return { ...finalized, qualityScorecard, ...(unconsumedSteering.length > 0 ? { unconsumedSteering } : {}) };
   } catch (err) {
     // A thrown/aborted turn (provider hard-timeout, the per-turn timeout abort, a
     // Warden cancel, or any unexpected throw) bypasses finalizeTurnOutput's
@@ -1149,11 +1485,14 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         artifactCount: 0,
       }),
     }, { sessionId, channel: opts.session.channel, severity: "error" });
+    recordUnconsumedSteering(err, [...unconsumedSteering, ...turnSteeringManager.closeTurn(sessionId, steeringToken)]);
     throw err;
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
-    deregisterSessionAbortController(sessionId);
-    turnSteeringManager.markTurnDone(sessionId);
+    humanWaits.dispose();
+    longRunningGenerationManager.off("lrg:unbounded", onUnboundedGrant);
+    deregisterSessionAbortController(sessionId, wardenAbort);
+    turnSteeringManager.markTurnDone(sessionId, steeringToken);
   }
 }
 
@@ -1164,11 +1503,242 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
 // ./turn-prepare.ts (god-file seam). They thread state explicitly and depend on
 // no main-loop closure. Imported above; _runTurn calls them exactly as before.
 
+/**
+ * Issue the up-front source-sensitivity judge call WITHOUT waiting for it, so it overlaps the
+ * work between here and the await site (document-RAG retrieval) instead of running in series
+ * in front of the orchestrator's first token. Returns null when there is no routing tier
+ * (the caller logs that). The promise never rejects unhandled: a second consumer swallows the
+ * rejection, and the await site observes the same rejection through `verdict` for its fail-safe
+ * path. `abort()` cancels the request when the turn turns out not to need the verdict — the
+ * signal is the turn signal composed with a controller of its own, so a turn cancel still
+ * reaches the call.
+ */
+/**
+ * Wall-clock bound on the facet triage.
+ *
+ * Set from what a routing-tier call actually costs on this backend rather than from a round
+ * number: a 25-token call measured 2.1 s alone and 4.06 s with four in flight, and the
+ * triage's own shape (a ~600-token warm prefix and up to 220 output tokens) is larger. A cap
+ * below that floor would turn ordinary load into a permanent timeout.
+ */
+const TRIAGE_TIMEOUT_MS = 8000;
+
+/** A link in the request. Structural; the same test the dynamic-guidance URL signal uses. */
+const TURN_URL_RE = /https?:\/\/[^\s<>"'`)\]]+/i;
+
+/** Discovery tools withheld after a search_agents no-match, so the model cannot loop on
+ *  broader retries of a search that already came back empty. */
+const DISCOVERY_TOOL_NAMES = new Set(["search_agents", "list_agents"]);
+
+/**
+ * The per-iteration call-site allowlist under `stableToolBlock: "freeze"`.
+ *
+ * Under freeze the wire array is never narrowed — that is the whole point — so the
+ * restriction cannot be derived from it. An earlier version built the allowlist from the
+ * (un-narrowed) active array, which meant it contained every tool and the discovery
+ * refusal could never fire: the narrowing was silently DELETED rather than relocated, and
+ * the model could keep re-calling search_agents after a no-match. Exported so both branches
+ * are asserted directly instead of being inferred from a whole turn.
+ */
+export function buildIterationToolRestriction(input: {
+  tools: ReadonlyArray<{ name: string }>;
+  forcedTools: ReadonlyArray<{ name: string }>;
+  forceToolChoice: boolean;
+  withholdDiscoveryTools: boolean;
+}): { allowed: Set<string>; reason: "must_orchestrate" | "discovery_withheld" } | undefined {
+  // Forcing is the stronger restriction and subsumes the discovery one: the forced subset
+  // is chosen for its ability to ADVANCE the turn, and a repeat search does not. That holds
+  // only because `forcedTools` is cut from the DISCOVERY-NARROWED list (resolveIterationTools):
+  // search_agents and list_agents are forced-orchestration tools themselves.
+  if (input.forceToolChoice) {
+    return { allowed: new Set(input.forcedTools.map((tool) => tool.name)), reason: "must_orchestrate" };
+  }
+  if (input.withholdDiscoveryTools) {
+    return {
+      allowed: new Set(input.tools.map((tool) => tool.name).filter((name) => !DISCOVERY_TOOL_NAMES.has(name))),
+      reason: "discovery_withheld",
+    };
+  }
+  return undefined;
+}
+
+/**
+ * What one iteration offers: the tools it may CALL, the forced subset, the array on the wire, and
+ * under `stableToolBlock: "freeze"` the call-site allowlist that carries the narrowing.
+ *
+ * The discovery withhold narrows what the iteration may call under BOTH wire policies; only the
+ * wire array stays whole under freeze. It used to be skipped under freeze, so the forced subset was
+ * cut from the full block and kept search_agents and list_agents (both forced-orchestration tools):
+ * after a no-match, a forced iteration allowed the very search that had come back empty, and the
+ * refusal for any other tool suggested it (review of 2026-10-05). Exported so the composition with
+ * the real filterForcedOrchestrationTools is asserted under both policies.
+ */
+export async function resolveIterationTools<T extends { name: string }>(input: {
+  tools: T[];
+  freeze: boolean;
+  withholdDiscoveryTools: boolean;
+  /** The turn must orchestrate before answering and forcing is enabled. */
+  forceWanted: boolean;
+  /** Read only when forcing applies: whether this turn has recorded its plan yet. */
+  planRecorded: () => Promise<boolean>;
+}): Promise<{
+  forcedPlanState: { planRecorded: boolean } | undefined;
+  forcedTools: T[];
+  forceToolChoice: boolean;
+  streamTools: T[];
+  restriction: ReturnType<typeof buildIterationToolRestriction>;
+}> {
+  const activeTools = input.withholdDiscoveryTools
+    ? input.tools.filter((tool) => !DISCOVERY_TOOL_NAMES.has(tool.name))
+    : input.tools;
+  const wantForceToolChoice = input.forceWanted && activeTools.length > 0;
+  // When forcing a tool call to compel orchestration, drop the always-available
+  // direct memory/self tools so tool_choice:"required" can only be satisfied by a
+  // real orchestration/delegation tool. Without this the slow model loops on
+  // memory_store and never delegates (audit be828e39).
+  const forcedPlanState = wantForceToolChoice ? { planRecorded: await input.planRecorded() } : undefined;
+  const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools, forcedPlanState) : activeTools;
+  const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
+  // Under "freeze" the wire array stays the turn's array; the narrowing that would have
+  // been expressed by sending fewer schemas becomes this per-iteration allowlist, applied
+  // where the call is dispatched. Without it, tool_choice:"required" over the full block
+  // can be satisfied by memory_store — the loop audit be828e39 recorded.
+  const restriction = input.freeze
+    ? buildIterationToolRestriction({ tools: input.tools, forcedTools, forceToolChoice, withholdDiscoveryTools: input.withholdDiscoveryTools })
+    : undefined;
+  const streamTools = input.freeze ? input.tools : (forceToolChoice ? forcedTools : activeTools);
+  return { forcedPlanState, forcedTools, forceToolChoice, streamTools, restriction };
+}
+
+/**
+ * Two lines of the previous exchange, so a follow-up that carries no subject of its own
+ * ("now do the other one") is labelled against what it refers to.
+ *
+ * Structural: present whenever a prior assistant turn exists, with no length gate. The three
+ * existing follow-up detectors key on message length and on EN/DE cue words; this needs
+ * neither, because the classifier reads the digest itself.
+ */
+function buildPriorTurnDigest(session: AgentSession): string | undefined {
+  const history = session.getHistory();
+  let priorUser: string | undefined;
+  let priorAssistant: string | undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index]!;
+    if (typeof message.content !== "string" || !message.content.trim()) continue;
+    if (!priorAssistant && message.role === "assistant") priorAssistant = message.content.trim();
+    else if (priorAssistant && !priorUser && message.role === "user") priorUser = message.content.trim();
+    if (priorAssistant && priorUser) break;
+  }
+  if (!priorAssistant && !priorUser) return undefined;
+  return [
+    priorUser ? `User asked: ${priorUser.slice(0, 160)}` : "",
+    priorAssistant ? `Assistant answered: ${priorAssistant.slice(0, 160)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+// resolveRoutingTierProvider now lives in ./routing-tier-provider.js, so the delegation
+// tool path can use it without importing the turn. Re-exported here because callers —
+// including the routing eval — have always imported it from this module.
+export { resolveRoutingTierProvider } from "./routing-tier-provider.js";
+
+/**
+ * Start the facet triage in the background (orchestration.routingTriage).
+ *
+ * Catalog-blind by construction, so it is issued here — alongside the judge and the document
+ * retrieval — rather than after the embedding shortlist it will later be fused with.
+ */
+function startFacetTriage(
+  userMessage: string,
+  priorTurnDigest: string | undefined,
+  timeoutMs: number,
+  turnSignal: AbortSignal,
+  inWorkflowStep: boolean,
+): Promise<TriageOutcome> | null {
+  const mode = effectiveOrchestration().routingTriage ?? "off";
+  if (mode === "off") return null;
+  // A scene or job step is already routed: its agent set, its task and its deliverable
+  // were decided when the workflow was authored. Classifying it again buys nothing and
+  // costs one routing-tier call per step — four of them on a four-step job.
+  if (inWorkflowStep) return null;
+  const provider = resolveRoutingTierProvider();
+  // Label the provider rows this call produces. Without it every routing-tier call is
+  // indistinguishable from the orchestrator's own — and under a model preset it runs on
+  // the SAME model id, so nothing else could tell them apart.
+  const outcome = runWithCallAttribution({ callSite: "routing_tier", agentName: "triage" }, () => runTriage(
+    { userMessage, ...(priorTurnDigest ? { priorTurnDigest } : {}) },
+    {
+      timeoutMs,
+      complete: async (messages, options) => (await provider.complete(messages, [], turnSignal, {
+        maxTokens: options.maxTokens,
+        controls: options.controls,
+        responseFormat: options.responseFormat,
+      })).content ?? "",
+    },
+  ));
+  outcome.catch(() => { /* resolved shape only; runTriage never rejects */ });
+  return outcome;
+}
+
+/** The up-front judge's verdict: source-sensitive or not, whether anyone answered, and who. */
+interface UpfrontSourceSensitiveVerdict {
+  sensitive: boolean;
+  /** False for a reply with no yes/no in it: a non-answer, resolved to the fail-safe "clear". */
+  answered: boolean;
+  decidedBy: "laya" | "incumbent";
+}
+
+function startUpfrontSourceSensitiveClassifier(
+  userMessage: string,
+  turnSignal: AbortSignal,
+  sessionId: string,
+): { verdict: Promise<UpfrontSourceSensitiveVerdict>; abort: () => void } | null {
+  // Under a model preset the tier resolver returns null for every tier, so without the
+  // fallback this judge simply does not run on a preset deployment — and its verdict is the
+  // single switch that arms forced research.
+  const classifierProvider = effectiveOrchestration().routingTierPresetFallback === true
+    ? resolveRoutingTierProvider()
+    : getChatProviderForTier("routing");
+  if (!classifierProvider && !layaConfigured()) return null;
+  const abortController = new AbortController();
+  const signal = AbortSignal.any([turnSignal, abortController.signal]);
+  // Laya answers in milliseconds what the routing tier answers in one to two seconds on the shared
+  // GPU, before the orchestrator's first call; decisions/decide.ts says when its answer is taken.
+  const verdict = decideWithReadout<boolean>({
+    point: SOURCE_SENSITIVE,
+    state: { message: userMessage.slice(0, 2_000) },
+    languageOf: userMessage,
+    sessionId,
+    signal,
+    incumbent: async (decisionSignal) => {
+      if (!classifierProvider) return undefined;
+      const raw = await runWithCallAttribution({ callSite: "routing_tier", agentName: "source_sensitivity_judge" }, () =>
+        classifierProvider
+          .complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], AbortSignal.any([signal, decisionSignal]))
+          .then((resp) => resp.content ?? ""));
+      // A reply with no yes/no token is no answer: fail-safe "clear", and not counted as agreement.
+      return JUDGE_ANSWER_TOKEN_RE.test(raw) ? parseUngroundedClaimVerdict(raw) : undefined;
+    },
+    toKey: (sensitive) => (sensitive ? "yes" : "no"),
+    fromKey: (key) => key === "yes",
+    // The same question as one letter on the same model, where decisions.readout says so.
+    readout: { provider: classifierProvider, agentName: "source_sensitivity_judge" },
+  }).then((outcome) => ({ sensitive: outcome.value === true, answered: outcome.value !== undefined, decidedBy: outcome.decidedBy }));
+  verdict.catch(() => { /* consumed at the await site, or discarded after abort() */ });
+  return { verdict, abort: () => abortController.abort() };
+}
+
 async function _runTurn(
   opts: RunTurnOptions,
   signal: AbortSignal,
   timeoutSignal: AbortSignal,
-  turnBudget?: { deadlineMs?: number; extendForDelegationWait: (ms: number) => number | undefined },
+  turnBudget?: {
+    deadlineMs?: number;
+    extendForDelegationWait: (ms: number) => number | undefined;
+    /** Human-wait time already credited to the deadline, so far this turn. */
+    humanWaitCreditedMs?: () => number;
+    /** The deadline as it stands now, after every credit. */
+    currentDeadlineMs?: () => number | undefined;
+  },
 ): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
@@ -1208,6 +1778,17 @@ async function _runTurn(
 
   const detectedDynamicGuidance = buildDynamicTurnGuidance(userMessage);
   const hasTurnAttachments = Boolean(opts.userAttachments?.length);
+  // Structural input class for routing: attachments outrank a link, a link outranks pasted
+  // source, and plain text carries no signal at all. Language-independent by construction —
+  // a URL is a URL and an attachment is an attachment in every language.
+  const turnInputClass: "file_upload" | "url" | "codebase" | "text" =
+    hasTurnAttachments
+      ? "file_upload"
+      : TURN_URL_RE.test(userMessage)
+        ? "url"
+        : hasSubstantialInlineTechnicalContent(userMessage)
+          ? "codebase"
+          : "text";
 
   // ── Receptionist fast lane ────────────────────────────────────────────────
   // Opt-in first-contact gatekeeper (config.receptionist.enabled). When no task
@@ -1220,8 +1801,16 @@ async function _runTurn(
   // Runs BEFORE document-RAG augmentation so a trivial "hi" never pays the
   // (CPU-bound) engram search cost; turns WITH attachments skip the fast lane so
   // their files are always ingested + injected below.
+  //
+  // The agent the user directed this turn to (`--agent NAME`). allowedAgents narrows routing to it,
+  // and that alone let the orchestrator answer the turn itself: code_analyst never ran on two
+  // diagnoses the E2E suite pinned to it (2026-10-07), and the agent evaluations that pin an agent
+  // this way were measuring the orchestrator. Until that agent has run, the turn delegates to it.
+  // Read before the fast lane, which skips such a turn: small talk directed to an agent was answered
+  // by the front desk, and the agent never ran (review of 0b5089e, 2026-10-08).
+  const directiveAgent = opts.directiveAgent?.trim() || undefined;
   const fastLaneOutput = await prepareReceptionistFastLane({
-    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && getConfig().receptionist?.enabled === true,
+    eligible: detectedDynamicGuidance === null && !hasTurnAttachments && directiveAgent === undefined && getConfig().receptionist?.enabled === true,
     userMessage,
     signal,
     opts,
@@ -1230,6 +1819,80 @@ async function _runTurn(
     turnStartedAt,
   });
   if (fastLaneOutput) return fastLaneOutput;
+
+  // ── Up-front source-sensitivity classifier: STARTED here, awaited below ─────
+  // The classifier is a routing-tier call that reads only the user message, and it used to
+  // run in series in front of the orchestrator's first token. It is now issued as soon as
+  // its cheap preconditions are known — but NOT before the fast lane, which is the whole
+  // point of where this sits.
+  //
+  // Starting it any earlier put it on the same llama-swap selector the receptionist uses
+  // (both resolve to lmstudio/qwen) on a turn whose verdict nobody would ever read: measured
+  // on the station, one 25-token call takes 2.1 s alone but 4.06 s with four in flight, so a
+  // trivial "hi" paid contention for a discarded answer — and the discard itself was not free
+  // either, because an aborted complete() used to log at ERROR and count a provider failure
+  // (fixed in providers/lmstudio.ts, same wave). Below the fast-lane return, a turn the front
+  // desk answered issues no classifier call at all.
+  //
+  // What the placement buys on the turns that DO get here is the overlap with
+  // prepareDocumentRag: the engram search is CPU/IO work on another host, so that overlap is
+  // free. Overlap with the orchestrator's own first GPU call is NOT claimed — no real turn was
+  // measured for it. The preconditions known at this point (flag, tool mode, no computer-access
+  // turn, a routing tier) decide whether the request is worth issuing; the two that are not
+  // known yet (a reuse-prior-evidence follow-up, a document-RAG-grounded turn) are re-checked
+  // at the await site, which aborts the request when either holds. The verdict handling and
+  // audit rows live there, unchanged. `null` means no routing tier, so the await site can
+  // still log `upfront_source_sensitive_no_routing_tier`.
+  const upfrontClassifier = (
+    effectiveOrchestration().upfrontSourceSensitiveClassifier === true
+    && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
+    && !detectedDynamicGuidance?.computerAccessSensitive
+  )
+    ? startUpfrontSourceSensitiveClassifier(userMessage, signal, session.id)
+    : null;
+
+  // ── Discovery prefetch: STARTED here, consumed by the first prompt assembly ──
+  // It reads only the user's message and the turn's agent grant, so like the judge above it starts
+  // the moment the fast lane has declined the turn (finding 2026-10-05). Started inside the first
+  // prompt assembly it began only after the judge's wait and the document retrieval, and its
+  // embedding round-trip (capped at DISCOVERY_PREFETCH_BUDGET_MS) sat on the path to the first
+  // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
+  // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
+  // On an --auto turn under orchestration.autonomousModeAntiRefusal the capsule's routing is also
+  // read back: a top agent that holds a deliverable-emitting tool arms the same forced first tool
+  // call as an artifact request the word lists recognise (autonomousArtifactBuild below). With an
+  // embedding model every agent the prefetch admits is high confidence, so on the deployed stack
+  // that is the whole condition (prefetchRoutedToDeliverableEmitter). Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a
+  // late or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and
+  // autoApprove are not checked again for it below, so every other turn starts the prefetch exactly
+  // as before and can never be armed by it.
+  let prefetchRoutedToDeliverable = false;
+  const readPrefetchRouting = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+    && opts.autoApprove === true;
+  const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
+    ? startDiscoveryPrefetch({
+      userMessage,
+      sessionId: session.id,
+      ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
+      ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
+      ...(readPrefetchRouting
+        ? { onCapsuleAgents: (agents) => { prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents); } }
+        : {}),
+    })
+    : undefined;
+
+  // ── Facet triage (orchestration.routingTriage) ──────────────────────────────
+  // Issued alongside the judge and the document retrieval, not after the embedding
+  // shortlist: the prompt names no catalog entry, so it has nothing to wait for. In
+  // "shadow" it only produces audit rows — the turn is unchanged — so the agreement with
+  // the judge it is meant to replace can be measured before anything depends on it.
+  const facetTriagePromise = startFacetTriage(
+    userMessage,
+    buildPriorTurnDigest(session),
+    TRIAGE_TIMEOUT_MS,
+    signal,
+    session.channel === "scene",
+  );
 
   // ── Document RAG augmentation ───────────────────────────────────────────────
   // Runs AFTER the fast lane, so trivial turns never pay the engram search cost.
@@ -1260,8 +1923,16 @@ async function _runTurn(
   // "research, then answer". Bounded: one routing-tier call per orchestration_only turn; skipped for a
   // reuse-prior-evidence follow-up, a computer-access turn, or a document-RAG-grounded turn (that
   // answer is grounded in the attached file, not memory). Fail-SAFE to off on any error — the
-  // post-draft guards remain the backstop.
+  // post-draft guards remain the backstop. The request itself was issued above — after the fast
+  // lane declined the turn, overlapping the document-RAG search; this is where its verdict is
+  // consumed.
   let upfrontSourceSensitive = false;
+  // Did the judge actually PRODUCE a verdict? `upfrontSourceSensitive` is fail-safe: it
+  // stays false when the call throws or replies with no yes/no token, so its value alone
+  // cannot distinguish "judged not source-sensitive" from "never answered". The shadow
+  // agreement statistic must not charge a provider failure to the triage as a disagreement.
+  let upfrontJudgeAnswered = false;
+  let upfrontJudgeDecidedBy: "laya" | "incumbent" | undefined;
   if (
     effectiveOrchestration().upfrontSourceSensitiveClassifier === true
     && getConfig().agents.mainAssistant.toolMode === "orchestration_only"
@@ -1269,16 +1940,29 @@ async function _runTurn(
     && !detectedDynamicGuidance?.computerAccessSensitive
     && !documentRagFoundDocs
   ) {
-    const classifierProvider = getChatProviderForTier("routing");
-    if (classifierProvider) {
+    if (upfrontClassifier) {
       try {
-        const verdictRaw = (await classifierProvider.complete(buildSourceSensitiveQuestionJudgeMessages(userMessage), [], signal)).content ?? "";
-        upfrontSourceSensitive = parseUngroundedClaimVerdict(verdictRaw);
+        // Timed as its own phase so the wait stops landing in untrackedMs, where a turn could
+        // not show that it spent two seconds on this verdict. This is the WAIT here, not the
+        // call: the request went out before the document search, and the part of it that
+        // overlapped that search is already inside the documentRag phase, so nothing is
+        // counted twice.
+        const upfrontVerdict = await timedPhase("sourceSensitiveJudgeWait", () => upfrontClassifier.verdict);
+        upfrontSourceSensitive = upfrontVerdict.sensitive;
+        // A reply with no yes/no token resolves to the fail-safe false; that is a
+        // non-answer, not a verdict, and is excluded from the agreement statistic.
+        upfrontJudgeAnswered = upfrontVerdict.answered;
+        upfrontJudgeDecidedBy = upfrontVerdict.decidedBy;
         // Always log the verdict (not just the positive case) so the audit shows the classifier RAN
         // and what it decided — otherwise a silent "no" is indistinguishable from the classifier being
         // absent/disabled, which made the "did it fire?" question undiagnosable from the audit.
+        // `answered` separates a judged "clear" from a reply with no verdict in it, which resolves to
+        // the same fail-safe clear: "clear 6 of 6" could not rule out six empty replies (review of
+        // the thinking-off verdicts, D3a).
         logAudit("guardrail_flagged", {
           type: upfrontSourceSensitive ? "upfront_source_sensitive_detected" : "upfront_source_sensitive_clear",
+          answered: upfrontJudgeAnswered,
+          ...(upfrontJudgeDecidedBy === "laya" ? { decidedBy: "laya" } : {}),
         }, { sessionId: session.id, severity: "info" });
       } catch (err) {
         log.debug({ err, sessionId: session.id }, "Up-front source-sensitivity classifier failed — relying on post-draft guards");
@@ -1288,6 +1972,75 @@ async function _runTurn(
       // model is distinguishable in the audit from the classifier running and returning "clear".
       logAudit("guardrail_flagged", { type: "upfront_source_sensitive_no_routing_tier" }, { sessionId: session.id, severity: "info" });
     }
+  } else {
+    // A follow-up reusing prior evidence, or a document-grounded turn: the verdict is not wanted.
+    upfrontClassifier?.abort();
+  }
+  // ── Facet triage: shadow accounting ─────────────────────────────────────────
+  // Awaited here because this is where the judge's verdict exists, and the agreement
+  // between the two is the gate for ever letting the triage replace it. In "shadow"
+  // nothing below reads the verdict — the row is the entire product of the call.
+  //
+  // The judge is SKIPPED on document-grounded and evidence-reuse turns (its verdict is
+  // unwanted there, not merely unavailable), so those turns are recorded with the
+  // structural flags and excluded from the agreement statistic rather than counted as
+  // disagreements — comparing against a verdict that was never produced would make the
+  // gate unreachable.
+  const facetTriage = facetTriagePromise ? await facetTriagePromise : null;
+  if (facetTriage) {
+    // Comparable only when the judge was eligible AND actually answered. Testing
+    // eligibility alone recorded every provider failure as a judged `false`, so a bad
+    // window of backend errors would have looked like the triage disagreeing.
+    const judgeComparable = !reusePriorDelegateEvidenceForFollowUp
+      && !documentRagFoundDocs
+      && !!upfrontClassifier
+      && upfrontJudgeAnswered;
+    logAudit("routing_triage_decided", {
+      mode: effectiveOrchestration().routingTriage ?? "off",
+      promptVersion: TRIAGE_PROMPT_VERSION,
+      ok: facetTriage.verdict !== null,
+      failureReason: facetTriage.failureReason ?? null,
+      attempts: facetTriage.attempts,
+      elapsedMs: facetTriage.elapsedMs,
+      verdict: facetTriage.verdict
+        ? {
+            mode: facetTriage.verdict.mode,
+            domain: facetTriage.verdict.domain,
+            deliverable: facetTriage.verdict.deliverable,
+            decision: facetTriage.verdict.decision,
+            multi: facetTriage.verdict.multi,
+            alone: facetTriage.verdict.alone,
+            sourceSensitive: facetTriage.verdict.sourceSensitive,
+            confidence: facetTriage.verdict.confidence,
+            language: facetTriage.verdict.language,
+            missingCount: facetTriage.verdict.missing.length,
+          }
+        : null,
+      // The gate: does `source_sensitive` reproduce the judge it would replace?
+      judgeComparable,
+      // Why it is not comparable, so a run of nulls is diagnosable rather than mysterious.
+      judgeStatus: !upfrontClassifier
+        ? "not_started"
+        : !upfrontJudgeAnswered
+          ? "no_answer"
+          : (reusePriorDelegateEvidenceForFollowUp || documentRagFoundDocs)
+            ? "verdict_unwanted"
+            : "answered",
+      judgeVerdict: judgeComparable ? upfrontSourceSensitive : null,
+      sourceSensitiveAgrees: judgeComparable && facetTriage.verdict
+        ? facetTriage.verdict.sourceSensitive === upfrontSourceSensitive
+        : null,
+      structural: {
+        documentGrounded: documentRagFoundDocs,
+        reusePriorEvidence: reusePriorDelegateEvidenceForFollowUp,
+        autonomous: opts.autoApprove === true,
+        // What the turn physically carries, as a taxonomy input modality. Purely
+        // structural — an attachment, a link, or pasted source — and the signal the fusion
+        // uses to prefer an agent that can actually READ the input over one that merely
+        // matches the topic.
+        inputClass: turnInputClass,
+      },
+    }, { sessionId: session.id, severity: "info" });
   }
   const effectiveToolMode: MainAssistantToolMode | undefined = detectedDynamicGuidance?.computerAccessSensitive && !detectedDynamicGuidance?.pentestSensitive
     ? "delegate_only"
@@ -1347,6 +2100,19 @@ async function _runTurn(
   if (suppressAgentCatalogTool) {
     allowedToolNames = allowedToolNames.filter((toolName) => toolName !== "list_agents");
   }
+  // A scene or job step runs a workflow that is already running, with the agents its author named.
+  // With the catalog tools it searched for that workflow, which its own task names, tried to run it
+  // again, and ran a different scene in place of its agents (E2E 2026-10-08). load_tool cannot bring
+  // them back: it loads direct tools only, and these are orchestration tools.
+  if (opts._withoutWorkflowCatalog) {
+    allowedToolNames = allowedToolNames.filter((toolName) => !isWorkflowCatalogToolName(toolName));
+  }
+  // A step whose task names its agents runs those agents (agent/workflow-step-pipeline.ts). Agent and
+  // skill discovery spent its model calls and proposed agents its scene does not allow. A step whose
+  // task names none keeps them.
+  if (opts._workflowStepPipeline?.length) {
+    allowedToolNames = allowedToolNames.filter((toolName) => !WORKFLOW_STEP_DISCOVERY_TOOL_NAMES.has(toolName));
+  }
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);
@@ -1359,27 +2125,48 @@ async function _runTurn(
   // for the full actual prompt cost (system + tool schemas + history), and the
   // context window of the model actually running this turn so the trimmer
   // budgets against the real window rather than the global default.
-  session.setToolSchemasChars(JSON.stringify(tools).length);
-  session.setContextWindow(getConfig().agents.defaults.model.contextWindow);
+  session.setToolSchemasChars(JSON.stringify(tools).length, tools.length);
+  // Resolve through the active preset: the dashboard Local⇄Claude switch can carry
+  // its own contextWindow, and passing the raw default made the trimmer budget
+  // against a window the turn is not actually running on.
+  session.setContextWindow(applyActiveModelPreset(getConfig().agents.defaults.model).contextWindow);
   const resolvedApprovalCallback = opts.autoApprove
     ? async (_toolName: string, _args: Record<string, unknown>) => true
     : opts.approvalCallback;
 
   const carriedSwarmTasks = loadPreviousTurnSwarmTasks(session.getHistory());
   const carriedSwarmTaskFingerprint = stableSerialize(carriedSwarmTasks);
+  // The judge's verdict, for the delegations this turn makes (the research gate's turn trigger in
+  // tools/sub-agent.ts). Undefined on every turn the judge did not flag, and then the context
+  // carries no field at all.
+  const turnEvidence = turnEvidenceRequirement({
+    upfrontSourceSensitive,
+    channel: session.channel,
+    workflowDepth: opts._workflowExecutionStack?.length ?? 0,
+    ...(opts.directiveAgent ? { directiveAgent: opts.directiveAgent } : {}),
+  });
   const toolContext: ToolContext = {
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
     userRole: session.userRole,
     approvalCallback: resolvedApprovalCallback,
-    inputCallback: opts.inputCallback,
+    // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
+    // continue on your stated assumption". Before, the tool refused and the model looped on it.
+    inputCallback: opts.inputCallback ?? (opts.autoApprove ? unattendedInputCallback : undefined),
+    requestUserInput: bindRequestUserInput({ requesterSessionId: session.id, signal }),
     onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
     onComputerSessionState: opts.onComputerSessionState,
     allowedAgents: opts.allowedAgents,
     allowedTools: allowedToolNames,
+    loadableTools: getLoadableDirectMainToolNames(effectiveToolMode),
+    // Live, not a snapshot: a tool that dispatches other tools has to spend the SAME per-turn
+    // budget this loop is spending, or the turn enforces its caps twice over — five delegations
+    // by hand and then five more inside a plan, in a turn that advertises five.
+    getTurnToolCallCount: (tool: string) => _turnToolCallCounts.get(tool) ?? 0,
+    turnStartedAt,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
     maxIterationsOverride: opts.maxIterationsOverride,
@@ -1387,7 +2174,19 @@ async function _runTurn(
     onSwarmState: opts.onSwarmState,
     signal,
     _turnDeadlineMs: turnBudget?.deadlineMs,
+    // Read when a delegation starts, not when the last tool call returned: a wait inside
+    // execute_plan's first step moved the deadline, and its next step was clamped to the old one.
+    _liveTurnDeadlineMs: () => turnBudget?.currentDeadlineMs?.() ?? toolContext._turnDeadlineMs,
     _workflowExecutionStack: opts._workflowExecutionStack,
+    // The turn's looped delegated runs (delegation-loop-notes.ts), created here so the runs a
+    // nested delegation records reach this turn's oversight and artifact gate.
+    _turnLoopRuns: [],
+    // Always an object, even when no entry point supplied the opening words (a scene template):
+    // mid-turn steering is typed by a person on every surface, and is pushed in below.
+    turnUserWords: { opening: opts.userWords ?? "", midTurn: [] },
+    ...(turnEvidence ? { turnEvidence } : {}),
+    // Undefined on a turn no agent was named for, and then the context carries no field at all.
+    ...(directiveAgent ? { directiveAgent } : {}),
     swarmState: {
       objective: userMessage,
       startedAt: new Date().toISOString(),
@@ -1397,6 +2196,13 @@ async function _runTurn(
       tasks: carriedSwarmTasks,
     },
   };
+  // The QA verdict checks the answer against what the user typed this turn. The terminal guards
+  // are handed the gate as a plain function, so it is bound to this turn's words here, once.
+  const runQaDeliveryGateForTurn: TerminalGuardContext["runQaDeliveryGate"] = (
+    gateSession, gateProvider, gateSignal, answer, criteria, maxRounds, escalate, requireEvidence,
+  ) => runQaDeliveryGate(
+    gateSession, gateProvider, gateSignal, answer, criteria, maxRounds, escalate, requireEvidence, toolContext.turnUserWords,
+  );
   let turnUsedSwarmTools = false;
   const getTurnSwarmState = (): SwarmState | undefined => selectPersistableSwarmState(
     toolContext.swarmState,
@@ -1410,8 +2216,13 @@ async function _runTurn(
   // Per-tool output tracking within this turn — detects stuck loops (same result ≥N times).
   const _recentOutputsByTool = new Map<string, string[]>();
   const _turnToolCallCounts = new Map<string, number>();
+  /** Tools whose call was turned away before any effect and so given back its count, once a turn. */
+  const _rejectedCallsGivenBack = new Set<string>();
   const _lastToolResultByName = new Map<string, string>();
-  const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown> }>();
+  const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>();
+  // The retrieval evidence this turn's frames have shown the model, in characters: the turn's
+  // retrieval results share one budget (tool-result-format.ts retrievalEvidenceAllowance).
+  const _turnRetrievalShown = { chars: 0 };
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -1439,10 +2250,26 @@ async function _runTurn(
   // synthesize from the cached output instead of burning more LLM iterations.
   let _turnReusedDelegationCount = 0;
   const REUSED_DELEGATION_LOOP_THRESHOLD = 2;
+  // Per-iteration call-site allowlist under orchestration.stableToolBlock="freeze": the
+  // narrowing the wire array used to express, applied where the call is dispatched so the
+  // schemas on the wire never move. Undefined = no narrowing for this iteration.
+  let iterationToolRestriction: { allowed: Set<string>; reason: "must_orchestrate" | "discovery_withheld" } | undefined;
   // F29: Turn-level scorecard accumulators
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
+  // A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent), and the
+  // tool-output screen let it through to the model. It grounds a source-sensitive answer the way a
+  // research delegation does, so it releases the turn's research requirement; see where
+  // requiresDelegatedResearch is read below.
+  let _turnRetrievedKnowledgeBaseContent = false;
+  // The page URLs those reads returned (knowledgeBaseSourceUrls). The citation guard keeps an
+  // answer's citation of one of them and strips every other URL it cites.
+  const _turnKnowledgeBaseSourceUrls = new Set<string>();
   let _forcedSynthesisFired = false;
+  // The latest delegation that carried a run record masked figures no tool had returned
+  // (agent/delegated-run-record.ts). A later delegation with a record decides again, so a retry
+  // whose code printed clears it.
+  let _turnDelegatedFiguresUnobserved = false;
   const turnQualitySignals = createTurnQualitySignals();
   const buildCurrentTurnScorecard = (finalAnswerLength: number, finishReason: string, blocked = false) =>
     buildTurnQualityScorecard({
@@ -1456,6 +2283,7 @@ async function _runTurn(
       blocked,
       artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
       quality: turnQualitySignals,
+      delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
     });
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
@@ -1536,6 +2364,22 @@ async function _runTurn(
   });
   let delegatedResearchRetryUsed = false;
   let delegatedResearchEnforcementPrompt = "";
+  // Whether the agent the user directed this turn to (directiveAgent) has run: set from a tool
+  // RESULT that shows the agent ran (directive-agent.ts). The delegation tally this used to read is
+  // kept on the request, so a delegation the runtime or the tool turned away (unparseable
+  // arguments, another agent outside the grant, an ephemeral agent refused before it ran) released
+  // the directive and the orchestrator answered itself. The agent called by its own name as a tool
+  // ran without counting, so the model's finished answer was then rewritten into a second
+  // delegation; the synthesis-required guard rejected it, and the turn shipped a forced partial
+  // answer (review of 0b5089e/a3773aa, 2026-10-08).
+  let directiveAgentRan = false;
+  // The agents of a workflow step's pipeline (opts._workflowStepPipeline) whose delegations returned this
+  // turn, read from the results the way directiveAgentRan is. Empty, and never written, on any other turn.
+  const workflowStepPipeline = opts._workflowStepPipeline ?? [];
+  const workflowStepAgentsReturned = new Set<string>();
+  // This turn's document excerpts for the delegation the runtime dispatched itself, keyed by that
+  // call's id: handed to it beside its arguments when it runs (ToolContext.delegationDocuments).
+  let directiveDispatchDocuments: { toolCallId: string; documents: string } | undefined;
   let maintenanceDelegationRetryUsed = false;
   let maintenanceMisrouteRetryUsed = false;
   let maintenanceDelegationEnforcementPrompt = "";
@@ -1582,7 +2426,7 @@ async function _runTurn(
     let foundCurrentUser = false;
     for (let i = hist.length - 1; i >= Math.max(0, hist.length - 40); i--) {
       const msg = hist[i];
-      if (msg?.role === "user") {
+      if (msg && startsTurn(msg)) {
         if (!foundCurrentUser) { foundCurrentUser = true; continue; }
         // Reached the start of the prior turn — stop here
         break;
@@ -1622,12 +2466,34 @@ async function _runTurn(
   const turnEffortProfile = currentEffortProfile();
   const turnThinking = opts.enableThinking ?? turnEffortProfile?.enableThinking;
   const turnReasoningEffort = turnEffortProfile?.reasoningEffort;
+  const turnModelOverride = {
+    ...(turnThinking !== undefined ? { enableThinking: turnThinking } : {}),
+    ...(turnReasoningEffort !== undefined ? { reasoningEffort: turnReasoningEffort } : {}),
+  };
   const provider = (turnThinking !== undefined || turnReasoningEffort !== undefined)
-    ? getChatProviderWithOverride({
-        ...(turnThinking !== undefined ? { enableThinking: turnThinking } : {}),
-        ...(turnReasoningEffort !== undefined ? { reasoningEffort: turnReasoningEffort } : {}),
-      })
+    ? getChatProviderWithOverride(turnModelOverride)
     : getChatProvider();
+  // The orchestrator's OWN merged model config — the exact input the two lines above build
+  // `provider` from (the main assistant has no model block of its own; agents.defaults.model IS
+  // its config), with this turn's effort overlay and the active preset applied. Tier-shaped calls
+  // below fall back to THIS config with tierModelDefaults laid over it when the tier ladder
+  // returns null, instead of borrowing `provider` — which is the thinking-ON orchestrator.
+  // getChatProviderForTier returns null whenever a model preset is active, so under the
+  // dashboard's Claude preset that fallback is the ONLY path a judge/synthesis call takes.
+  const orchestratorModelConfig = applyActiveModelPreset(
+    { ...getConfig().agents.defaults.model, ...turnModelOverride },
+    getConfig(),
+  );
+  // Built at most once per TURN. The oversight judge below runs inside the tool-iteration
+  // loop, and every construction walks resolveProviderChain and returns a fresh
+  // FailoverChatProvider with its circuit state closed — so a primary that is down would be
+  // re-tried in full by each verdict instead of once (the same per-call cost that made the
+  // tier ladder's model-preset branch untenable; see providers/index.ts).
+  let routingTierProviderMemo: ChatProvider | undefined;
+  const routingTierProvider = (): ChatProvider => (routingTierProviderMemo ??= (
+    getChatProviderForTier("routing")
+    ?? createChatProvider({ ...orchestratorModelConfig, ...tierModelDefaults("routing") })
+  ));
   // Tool development sessions have no iteration cap — they use convergence-based completion
   // and lease/heartbeat oversight via the tool-dev-warden instead.
   const isToolDevSession = !!opts._toolDevSessionId;
@@ -1652,6 +2518,11 @@ async function _runTurn(
     sessionId: session.id,
     channel: session.channel,
   });
+  // The cached trajectory the model was actually SHOWN — set from the first prompt assembly, which
+  // may have dropped it to fit the budget. Only a shown entry is scored "used" or invalidated by
+  // this turn's outcome (turn-success-finalize.ts): crediting or blaming one the model never saw
+  // taught the cache about turns it took no part in (finding 2026-10-05).
+  let shownTrajectoryIdentity: typeof injectedTrajectoryIdentity = null;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
   while (iterationCount < maxToolIterations) {
@@ -1711,22 +2582,41 @@ async function _runTurn(
     // Mid-turn user steering: fold any messages the user sent WHILE this turn
     // has been running into the conversation as authoritative guidance before the
     // next model call, so they redirect the remaining work without aborting (Stop
-    // is the abort path). Drains the per-turn queue; a no-op on iteration 0 (the
-    // queue was cleared at turn start). Opt-out via orchestration.midTurnSteering.
+    // is the abort path). Drains the per-turn queue. Iteration 0 drains too: the
+    // prep phases before the first model call take long enough for a message to
+    // arrive, and the gateway opens the queue before the turn starts. Opt-out via
+    // orchestration.midTurnSteering.
     if (getConfig().orchestration?.midTurnSteering ?? true) {
-      const steering = turnSteeringManager.drain(session.id);
+      const steering = turnSteeringManager.drain(session.id, opts.steeringToken).map(({ id, text }) => ({ id, text }));
       if (steering.length > 0) {
-        const joined = steering.map((s) => `- ${s}`).join("\n");
+        const texts = steering.map((entry) => entry.text);
+        const joined = texts.map((s) => `- ${s}`).join("\n");
         session.addMessage({
           role: "user",
-          content: "[USER STEERING — sent mid-turn] The user added the following while you were working. "
+          content: STEERING_PREFIX + " The user added the following while you were working. "
             + "Take it into account in the REMAINING steps of this turn: adjust course, drop now-irrelevant work, and prioritise it. "
             + "Do not restart from scratch or re-do already-completed steps.\n" + joined,
+          // Injected INSIDE the turn: every "current turn" reader keys on user messages WITHOUT
+          // this marker (agent/turn-boundary.ts), so steering does not cut the turn in two. The
+          // person's own messages ride along, so the transcript shows what they wrote, not the
+          // instructions around it.
+          metadata: {
+            [MID_TURN_USER_MESSAGE_METADATA]: true,
+            [MID_TURN_SOURCE_METADATA]: "user",
+            [STEERING_METADATA]: steering,
+          },
         });
+        const at = session.getHistory().at(-1)?.timestamp ?? new Date().toISOString();
+        // The orchestrator reads this from history; a specialist it delegates to afterwards has no
+        // history, so it gets the same words through the tool context.
+        toolContext.turnUserWords?.midTurn.push(...texts);
         logAudit("turn_steering_injected", {
           count: steering.length,
           iteration: iterationCount,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
+        // Which messages were taken, and when, BEFORE the status: the client splits the running
+        // answer at this point, and the status line then lands on the part that follows.
+        opts.onSteeringConsumed?.({ messages: steering, iteration: iterationCount, at });
         opts.onStatus?.({ phase: "steering", message: "Folding in your mid-turn message…", iteration: iterationCount });
       }
     }
@@ -1753,6 +2643,10 @@ async function _runTurn(
         delegations: _turnDelegationCount,
         artifacts: turnArtifacts.length,
         delegationFailures: _consecutiveDelegationFailures,
+        // C5' (e): a looped partial is churn, though it arrives as a successful delegation.
+        ...(effectiveOrchestration().loopAwareDelegation === true
+          ? { loopedPartials: countLoopedPartials(toolContext._turnLoopRuns) }
+          : {}),
       };
       const progressSignal = classifyTurnProgress(_oversightLastSample, curSample);
       _oversightLastSample = curSample;
@@ -1785,8 +2679,13 @@ async function _runTurn(
         ].filter(Boolean).join("\n\n") || "(no orchestrator output or tool calls yet)";
         let oversight = { verdict: "on_track" as "on_track" | "stuck" | "redirect", directive: "", reason: "" };
         try {
-          const judgeProvider = getChatProviderForTier("routing") ?? provider;
-          const oversightResp = await judgeProvider.complete(
+          // A progress verdict is a routing-shaped call: read the activity, answer
+          // on_track/stuck/redirect. `?? provider` ran it on the orchestrator itself, thinking ON
+          // — the same shape the sub-agent progress judge was fixed for. With no routing tier
+          // (and there is none under an active model preset) it now builds from the
+          // orchestrator's own merged config with the routing tier's thinking-off controls over
+          // it, so the verdict costs a verdict rather than a reasoning pass mid-turn.
+          const oversightResp = await runWithCallAttribution({ callSite: "routing_tier", agentName: "turn_oversight" }, () => routingTierProvider().complete(
             buildTurnOversightPrompt({
               objective: oversightPlan?.objective?.trim() || userMessage,
               ...(oversightPlan?.acceptanceCriteria?.length ? { acceptanceCriteria: oversightPlan.acceptanceCriteria } : {}),
@@ -1797,7 +2696,8 @@ async function _runTurn(
             }),
             [],
             signal,
-          );
+          ));
+          // Labelled like the other routing-tier verdicts (review of the thinking-off verdicts, D4).
           oversight = parseTurnOversightVerdict(oversightResp.content);
         } catch {
           // fail-open: an oversight error must never derail a healthy run.
@@ -1809,6 +2709,8 @@ async function _runTurn(
             role: "user",
             content: "[OVERSIGHT — max-effort progress check] A progress monitor judged this turn is not converging on the deliverable. "
               + "Apply this correction in your NEXT step — do NOT restart from scratch or re-do finished work:\n" + oversight.directive,
+            // User-role for the model, but not the person's words: the transcript leaves it out.
+            metadata: { [MID_TURN_USER_MESSAGE_METADATA]: true, [MID_TURN_SOURCE_METADATA]: "oversight" },
           });
           logAudit("turn_oversight_redirected", {
             iteration: iterationCount,
@@ -1816,7 +2718,14 @@ async function _runTurn(
             reason: oversight.reason,
             directive: oversight.directive.slice(0, 300),
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-          opts.onStatus?.({ phase: "oversight", message: "Fortschritts-Check: Ich korrigiere den Kurs, um den Auftrag noch abzuschließen.", iteration: iterationCount });
+          opts.onStatus?.({
+            phase: "oversight",
+            message: localizedFixedText({
+              de: "Fortschritts-Check: Ich korrigiere den Kurs, um den Auftrag noch abzuschließen.",
+              en: "Progress check: correcting course to still finish the task.",
+            }),
+            iteration: iterationCount,
+          });
         } else if (oversight.verdict !== "on_track") {
           // STUCK, or a redirect was already tried and the turn is STILL not progressing →
           // never-empty floor: deliver the best result obtainable from what already exists.
@@ -1831,7 +2740,7 @@ async function _runTurn(
           const synthesized = await forceSynthesis(
             session, provider, signal,
             "A progress monitor determined this max-effort turn can no longer make progress. "
-            + "Using ONLY what has already been gathered and any files already produced this turn, deliver the most complete, useful result you can NOW, in the user's language. "
+            + `Using ONLY what has already been gathered and any files already produced this turn, deliver the most complete, useful result you can NOW, ${IN_REPLY_LANGUAGE}. `
             + "If a file was produced but is incomplete, say so plainly and give its path. Be explicit about what is done and what is not. Do NOT paste large code blocks.",
           );
           if (synthesized) {
@@ -1862,6 +2771,7 @@ async function _runTurn(
       }
     }
 
+    const directiveAgentPending = directiveAgent !== undefined && !directiveAgentRan;
     const {
       messages,
       collapsedHistory,
@@ -1869,10 +2779,14 @@ async function _runTurn(
       lastPromptMetrics: assembledPromptMetrics,
       injectedSkillSlugs: assembledInjectedSkillSlugs,
       heldOutSkillSlugs: assembledHeldOutSkillSlugs,
+      trajectoryShown,
+      planFirstPending,
     } = await assembleTurnSystemMessages({
       session,
       iterationCount,
       userMessage,
+      allowedAgents: opts.allowedAgents,
+      ...(startedDiscoveryPrefetch ? { startedDiscoveryPrefetch } : {}),
       initialDynamicGuidance,
       documentRagFoundDocs,
       trajectoryInjectionContext,
@@ -1889,6 +2803,9 @@ async function _runTurn(
       workflowCatalogEnforcementPrompt,
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
+      directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
+      turnToolCallCounts: _turnToolCallCounts,
+      turnDelegationCount: _turnDelegationCount,
       injectedSkillSlugs,
       heldOutSkillSlugs,
       applyRoutingTone,
@@ -1901,6 +2818,7 @@ async function _runTurn(
     lastPromptMetrics = assembledPromptMetrics;
     injectedSkillSlugs = assembledInjectedSkillSlugs;
     heldOutSkillSlugs = assembledHeldOutSkillSlugs;
+    if (iterationCount === 0 && trajectoryShown) shownTrajectoryIdentity = injectedTrajectoryIdentity;
 
     if (iterationCount === 0 && dynamicGuidance) {
       logAudit("turn_guidance_applied", {
@@ -1937,7 +2855,11 @@ async function _runTurn(
       const chunkSink = iterationCount === 0 && !suppressInitialInlineStreaming ? opts.onChunk : undefined;
       if (!chunkSink) {
         opts.onStatus?.({
-          phase: suppressInitialInlineStreaming ? "routing" : "synthesizing",
+          // "reviewing", not "synthesizing": this fires after EVERY tool round, so it is live
+          // status and nothing more. "synthesizing" is kept for the forced paths — a loop or the
+          // iteration cap cutting the turn short — which the chat keeps on the finished answer
+          // as a narration line, and which would be buried if this routine line shared a phase.
+          phase: suppressInitialInlineStreaming ? "routing" : "reviewing",
           message: suppressInitialInlineStreaming
             ? "Selecting the required specialist path before drafting the answer."
             : "Reviewing completed tool results and preparing the final response.",
@@ -1948,9 +2870,16 @@ async function _runTurn(
       // tools so the model cannot loop on broader keyword retries. Under soft
       // routing enforcement we keep them available and rely on the (softened)
       // fallback hint instead — trust-the-LLM over a hard tool removal.
-      const activeTools = (searchAgentsNoMatchFallbackPrompt && !softRoutingEnforcement)
-        ? tools.filter((tool) => tool.name !== "search_agents" && tool.name !== "list_agents")
-        : tools;
+      // orchestration.stableToolBlock: when "freeze", the wire array is the turn's array on
+      // EVERY iteration and the two restrictions below (discovery withheld after a
+      // search_agents no-match; the forced-orchestration subset) are enforced at the call
+      // site instead. Same capability, same refusals — the bytes just stop moving, which is
+      // what the KV prefix is keyed on. Both are computed in resolveIterationTools.
+      // effectiveOrchestration(), not getConfig(): the eval harness flips orchestration flags
+      // through an AsyncLocalStorage overlay, and a flag read straight from the config is
+      // invisible to it — so the A/B this flag's own documentation calls for could not be run.
+      const freezeToolBlock = (effectiveOrchestration().stableToolBlock ?? "off") === "freeze";
+      const withholdDiscoveryTools = Boolean(searchAgentsNoMatchFallbackPrompt) && !softRoutingEnforcement;
       // Cost-center 1 (audit 5d51862f): while the turn still MUST orchestrate and has NOT
       // yet delegated, force a tool call so the slow local model can't burn ~2 min drafting
       // a tool-free prose answer that the source-sensitive / required-research guardrail
@@ -1965,32 +2894,73 @@ async function _runTurn(
       // artifact request also forces the first tool call, even if the narrower
       // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
       // wantsArtifact); no topic/keywords.
+      // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable): the word
+      // lists are English and German, and a request they miss ("Zeichne … als
+      // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
+      // first. That signal is gated once, where the prefetch starts (readPrefetchRouting: the same
+      // flag and autoApprove), and is true only when that gate passed.
       const autonomousArtifactBuild =
-        (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-        && opts.autoApprove === true
-        && deliverableIntent.wantsArtifact;
+        ((getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+          && opts.autoApprove === true
+          && deliverableIntent.wantsArtifact)
+        || prefetchRoutedToDeliverable;
+      // The directive (`--agent`) is released by its agent having run, not by the tally: a
+      // delegation the tally counted may never have reached that agent.
+      // The research requirement is also released by a knowledge-base read that brought content
+      // back: that is the retrieval it asks for. Kept forced, a turn that had just searched the
+      // knowledge base the user named could only go on searching it or delegate the same question.
       const mustOrchestrateBeforeAnswering =
-        (requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
+        ((((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
+          && _turnDelegationCount === 0)
+          || directiveAgentPending)
         && !inWorkflowStep
         && !delegatedResearchRetryUsed
-        && _turnDelegationCount === 0
         && !workflowRunCompletedThisTurn
         && ((_turnToolCallCounts.get("run_workflow") ?? 0) === 0);
-      const wantForceToolChoice = mustOrchestrateBeforeAnswering
-        && activeTools.length > 0
-        && (getConfig().orchestration?.forceToolChoiceWhenOrchestrationRequired ?? true);
-      // When forcing a tool call to compel orchestration, drop the always-available
-      // direct memory/self tools so tool_choice:"required" can only be satisfied by a
-      // real orchestration/delegation tool. Without this the slow model loops on
-      // memory_store and never delegates (audit be828e39).
-      const forcedTools = wantForceToolChoice ? filterForcedOrchestrationTools(activeTools) : activeTools;
-      const forceToolChoice = wantForceToolChoice && forcedTools.length > 0;
-      const streamTools = forceToolChoice ? forcedTools : activeTools;
+      const { forcedPlanState, forceToolChoice, streamTools, restriction } = await resolveIterationTools({
+        tools,
+        freeze: freezeToolBlock,
+        withholdDiscoveryTools,
+        forceWanted: mustOrchestrateBeforeAnswering
+          && (getConfig().orchestration?.forceToolChoiceWhenOrchestrationRequired ?? true),
+        planRecorded: async () => (await loadTurnPlan(session.id)) !== null,
+      });
+      iterationToolRestriction = restriction;
       llmResponse = await collectStream(
-        provider.stream(messages, streamTools, signal, forceToolChoice ? { toolChoice: "required" } : undefined),
+        provider.stream(
+          messages,
+          streamTools,
+          signal,
+          forceToolChoice
+            ? {
+                toolChoice: "required",
+                // Thinking-off is for the DISPATCH. While no plan exists the forced call is the
+                // one that records it (record_plan is the only plan tool on offer then), and that
+                // call's whole job is the deliberation — see FORCED_TOOL_CALL_CONTROLS.
+                ...(forcedPlanState?.planRecorded !== false ? { controls: FORCED_TOOL_CALL_CONTROLS } : {}),
+                maxTokens: FORCED_TOOL_CALL_MAX_TOKENS,
+                // "required" DOES NOT MAKE THE CALL COME FIRST on the deployed llama.cpp: it only
+                // keeps the turn from ending until a call is complete, so a model that wants to
+                // answer itself writes prose up to the ceiling (13,263 characters on the --agent
+                // turn of 2026-10-07). With `<tool_call>\n<function=` prefilled the call is the
+                // continuation: 24 of 24 against 10 of 24 on one prompt. Asked on every forced
+                // call; the provider sends it only where ModelConfig.toolCallPrefill names the
+                // syntax, so with that unset the request is what it was. Named while an --agent
+                // directive is pending: that call has one right answer, the delegation the user
+                // asked for. On the PLANNING call a continuation also closes the think block
+                // (0 reasoning characters, 4 of 4), so with the flag set the plan is recorded
+                // without deliberating; a two-phase call that thinks first is the follow-up.
+                prefillToolCall: directiveAgentPending ? { tool: "delegate_to_agent" } : {},
+              }
+            : undefined,
+        ),
         chunkSink,
         {
-          deferTextUntilToolDecision: streamTools.length > 0,
+          // While an --agent directive is pending, a response that calls nothing is replaced by the
+          // delegation below, so its prose is a draft the user would see and then lose: it is held
+          // back, and dropped once no call came.
+          deferTextUntilToolDecision: streamTools.length > 0 || directiveAgentPending,
+          ...(directiveAgentPending ? { discardTextWithoutToolCall: true } : {}),
           // Provider chain-of-thought is intentionally not streamed to the
           // client. Keep phase/status telemetry instead of raw reasoning.
         },
@@ -2010,7 +2980,48 @@ async function _runTurn(
           reasoningCaptured: true,
         }, { sessionId: session.id, channel: session.channel, severity: "info" });
       }
-      if (llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
+      // A FORCED CALL THAT RETURNED PROSE IS A FAILED TOOL CALL, NOT A TRUNCATED ANSWER.
+      //
+      // continueLengthLimitedResponse exists for a real answer the completion cap cut in half.
+      // It is the wrong instrument here. When forceToolChoice was set, the model was REQUIRED to
+      // emit an orchestration tool call; prose means it did not, and the turn already knows that
+      // prose cannot stand — the same conditions that set mustOrchestrateBeforeAnswering are what
+      // `tool_free_research_answer_rejected` fires on afterwards. Continuing it spends the
+      // completion budget extending an answer the runtime is already committed to rejecting.
+      //
+      // Session 887379b3 is the bill: a forced call burned its full 8,000 tokens (150.0 s), the
+      // continuation burned 8,000 more (155.3 s), the second continuation another 8,000 (143.2 s)
+      // — 448 s of a 506 s turn, 24,000 tokens generated and every one discarded, and the answer
+      // was then rejected exactly as predicted. The turn's own guardrail had flagged it
+      // `upfront_source_sensitive_detected` 2 minutes before the first burn began.
+      //
+      // Skipping the continuation leaves llmResponse as the cut prose. The iteration loop then
+      // proceeds as it does for any tool-free answer on an orchestration turn: the routing nudge
+      // fires and the next call gets its chance to delegate — which is what eventually produced
+      // the answer in that session anyway, 448 s later than it needed to.
+      const forcedCallReturnedProse = forceToolChoice
+        && llmResponse.tool_calls.length === 0
+        && llmResponse.finishReason === "length";
+      if (forcedCallReturnedProse) {
+        logAudit("guardrail_flagged", {
+          type: "forced_tool_call_burned_budget",
+          iteration: iterationCount,
+          completionChars: llmResponse.content?.length ?? 0,
+          toolsOffered: streamTools.length,
+          finishReason: "length",
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        guardrailEvents.push({
+          type: "forced_tool_call_burned_budget",
+          details: `forced tool call returned ${llmResponse.content?.length ?? 0} chars of prose and hit the completion cap; continuation skipped`,
+        });
+      }
+      // Nor is a response the --agent dispatch below replaces: while the directive is pending, one
+      // that calls nothing becomes the delegation, its prose discarded. Continued, a call left unforced
+      // (orchestration.forceToolChoiceWhenOrchestrationRequired off, or after a workflow ran) spent up
+      // to MAX_LENGTH_CONTINUATION_ATTEMPTS slow-model calls on that prose, and on iteration 0 their
+      // text streamed to the user, who then lost it (integration review, 2026-10-08).
+      const replacedByDirectiveDispatch = directiveAgentPending && llmResponse.tool_calls.length === 0;
+      if (!forcedCallReturnedProse && !replacedByDirectiveDispatch && llmResponse.tool_calls.length === 0 && llmResponse.finishReason === "length") {
         const continued = await continueLengthLimitedResponse(provider, messages, llmResponse, signal, chunkSink);
         llmResponse = continued.response;
         llmCalls += continued.additionalCalls;
@@ -2050,78 +3061,209 @@ async function _runTurn(
         }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       }
     } catch (err) {
-      log.error({ err, sessionId: session.id }, "LLM call failed");
-      const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
-      const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-      const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
-      if (recoveryEvidence) {
-        const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
-          sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
-        });
-        persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
-        if (opts.onChunk) opts.onChunk(finalResponse);
-        const performance = buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: finalResponse.length,
-          finishReason: "llm_error_evidence_backstop",
-          blocked: false,
-          toolIterations: iterationCount,
-        });
-        logAudit("guardrail_flagged", {
-          type: "llm_error_evidence_backstop",
-          error: String(err).slice(0, 300),
-          evidenceLength: recoveryEvidence.evidence.length,
-          evidenceItems: recoveryEvidence.itemCount,
-        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-        logAudit("turn_performance", { ...performance, usage: totalUsage }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
-          sessionId: session.id,
-          channel: session.channel,
-          severity: "info",
-        });
-        return {
-          response: finalResponse,
-          toolCallsExecuted: iterationCount,
-          guardrailEvents,
-          usage: totalUsage,
-          blocked: false,
-          swarmState: getTurnSwarmState(),
-          performance,
-          qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
-        };
+      // A STOP IS NOT A PROVIDER ERROR. Session 807684e9: the person pressed Stop 1.2 s after the
+      // image delegation returned, the cancel aborted this call 90 ms later, and the abort landed
+      // here as "LLM call failed" — so the backstop below relayed the specialist's summary as the
+      // turn's answer, persisted and delivered, to someone who had asked for nothing more. The loop
+      // top already reads an abort that is not the internal deadline as a cancel; a call it cut
+      // short takes the same exit. The salvage and the backstop stay for provider errors and for
+      // the deadline, where the run wanted to finish.
+      if (opts.signal?.aborted === true || (signal.aborted && !timeoutSignal.aborted)) {
+        log.info({ sessionId: session.id, iteration: iterationCount }, "LLM call aborted by a stop — turn cancelled");
+        return blocked(
+          "Request cancelled or timed out",
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "aborted",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
       }
-      return blocked(
-        `LLM error: ${String(err)}`,
-        getTurnSwarmState(),
-        buildTurnPerformanceMetrics({
-          turnStartedAt,
-          firstModelResponseMs,
-          llmCalls,
-          llmTimeMs,
-          toolCallsRequested,
-          toolExecutionTimeMs,
-          lastPromptMetrics,
-          completionChars: 0,
-          finishReason: "llm_error",
-          blocked: true,
-          toolIterations: iterationCount,
-        }),
-      );
+      log.error({ err, sessionId: session.id }, "LLM call failed");
+      // THE MODEL'S OWN PARTIAL OUTRANKS THE EVIDENCE BACKSTOP.
+      //
+      // collectStream now attaches what it had accumulated when the stream was cut. That is a
+      // better answer than anything reassembled from delegate evidence below, because it IS the
+      // answer this turn was writing — and until it existed, a cut orchestrator call delivered
+      // nothing whatever it had produced. Session 40dbcb5f: nineteen minutes, prose in hand,
+      // zero characters to the user.
+      //
+      // Only substantive prose qualifies. A cut that produced a sentence fragment is not worth
+      // shipping over the evidence path, and reasoning alone is never shown — it is the model's
+      // scratchpad, not its answer. The caveat is mandatory: this text did not finish.
+      const partial = (err as { partialResponse?: LLMResponse } | null)?.partialResponse;
+      if (directiveAgentPending && !timeoutSignal.aborted) {
+        // A pending --agent turn's call broke off: a stall, a socket error. Its one right answer
+        // was the delegation to the named agent, and the directive block below dispatches it in
+        // the call's place, as it does for a call that answered in prose (a3773aa). The call's
+        // prose is the orchestrator's own answer, which the turn does not show (6dbbe90): salvaged,
+        // it shipped as the turn's answer and the named agent never ran (integration review,
+        // 2026-10-08). Past the turn's deadline there is no time left to run the agent; the turn
+        // ends below as any other cut call does, without that prose.
+        llmResponse = {
+          content: null,
+          tool_calls: [],
+          usage: partial?.usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          finishReason: "incomplete",
+        };
+      } else {
+        const partialText = typeof partial?.content === "string" ? partial.content.trim() : "";
+        if (!directiveAgentPending && partialText.length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+          const cleaned = sanitizeUserFacingAssistantResponse(partialText, 0);
+          if (cleaned.trim().length >= MIN_SUBSTANTIVE_OUTPUT_CHARS) {
+            const finalResponse = prependTurnIncompleteCaveat(cleaned);
+            persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+            if (opts.onChunk) opts.onChunk(finalResponse);
+            logAudit("guardrail_flagged", {
+              type: "llm_error_partial_salvaged",
+              error: String(err).slice(0, 300),
+              partialChars: cleaned.length,
+              reasoningChars: partial?.reasoning?.length ?? 0,
+            }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+            const performance = buildTurnPerformanceMetrics({
+              turnStartedAt,
+              firstModelResponseMs,
+              llmCalls,
+              llmTimeMs,
+              toolCallsRequested,
+              toolExecutionTimeMs,
+              lastPromptMetrics,
+              completionChars: finalResponse.length,
+              finishReason: "llm_error_partial_salvaged",
+              blocked: false,
+              toolIterations: iterationCount,
+            });
+            logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+              sessionId: session.id, channel: session.channel, severity: "info",
+            });
+            return {
+              response: finalResponse,
+              toolCallsExecuted: iterationCount,
+              guardrailEvents,
+              usage: totalUsage,
+              blocked: false,
+              swarmState: getTurnSwarmState(),
+              performance,
+              qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
+            };
+          }
+        }
+        const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
+        const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
+        const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
+        if (recoveryEvidence) {
+          const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
+            sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
+          });
+          persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
+          if (opts.onChunk) opts.onChunk(finalResponse);
+          const performance = buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: finalResponse.length,
+            finishReason: "llm_error_evidence_backstop",
+            blocked: false,
+            toolIterations: iterationCount,
+          });
+          logAudit("guardrail_flagged", {
+            type: "llm_error_evidence_backstop",
+            error: String(err).slice(0, 300),
+            evidenceLength: recoveryEvidence.evidence.length,
+            evidenceItems: recoveryEvidence.itemCount,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+          logAudit("turn_performance", { ...performance, usage: totalUsage }, {
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
+          });
+          logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
+            sessionId: session.id,
+            channel: session.channel,
+            severity: "info",
+          });
+          return {
+            response: finalResponse,
+            toolCallsExecuted: iterationCount,
+            guardrailEvents,
+            usage: totalUsage,
+            blocked: false,
+            swarmState: getTurnSwarmState(),
+            performance,
+            qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
+          };
+        }
+        return blocked(
+          `LLM error: ${String(err)}`,
+          getTurnSwarmState(),
+          buildTurnPerformanceMetrics({
+            turnStartedAt,
+            firstModelResponseMs,
+            llmCalls,
+            llmTimeMs,
+            toolCallsRequested,
+            toolExecutionTimeMs,
+            lastPromptMetrics,
+            completionChars: 0,
+            finishReason: "llm_error",
+            blocked: true,
+            toolIterations: iterationCount,
+          }),
+        );
+      }
     }
 
     totalUsage.promptTokens += llmResponse.usage.promptTokens;
     totalUsage.completionTokens += llmResponse.usage.completionTokens;
     totalUsage.totalTokens += llmResponse.usage.totalTokens;
+
+    // The user named the agent (`--agent`): a response that calls nothing is replaced by the
+    // delegation itself, the user's request as its task. The forced tool choice alone did not hold:
+    // under `tool_choice: required` the local model wrote 13,000 characters of prose, and the turn
+    // shipped them as the answer (E2E, 2026-10-07).
+    if (directiveAgent !== undefined && directiveAgentPending && llmResponse.tool_calls.length === 0) {
+      // The request goes as it is, with what the orchestrator had in view beside it: the excerpts
+      // of this turn's attachments and the exchange before it (directive-agent.ts). The excerpts
+      // stay out of the arguments, which the history and the audit keep after the next turn has
+      // pruned the excerpts' own note; the call is handed them when it runs.
+      const { context, documents } = buildDirectiveDelegationContext(session.getHistory(), { priorUserRequest, priorAssistantAnswer });
+      const dispatchId = `directive_${randomUUID()}`;
+      directiveDispatchDocuments = documents ? { toolCallId: dispatchId, documents } : undefined;
+      // Built afresh: the prose call's truncation marker must not mark the dispatch incomplete.
+      llmResponse = {
+        content: null,
+        tool_calls: [{
+          id: dispatchId,
+          name: "delegate_to_agent",
+          arguments: { agentName: directiveAgent, task: userMessage, ...(context ? { context } : {}) },
+        }],
+        usage: llmResponse.usage,
+        finishReason: "tool_calls",
+      };
+      logAudit("tool_call_recovered", {
+        originalTool: null,
+        rewrittenTo: "delegate_to_agent",
+        reason: "directive_agent_dispatched",
+        agentName: directiveAgent,
+      }, { sessionId: session.id, severity: "warn" });
+      guardrailEvents.push({ type: "tool_recovered", details: `directive_agent_dispatched:${directiveAgent}` });
+    }
 
     for (const tc of llmResponse.tool_calls) normalizeToolCall(tc);
     llmResponse.tool_calls = collapseDuplicateToolCallsInResponse(llmResponse.tool_calls, session.id, guardrailEvents);
@@ -2150,6 +3292,16 @@ async function _runTurn(
         enforceRequiredResearchFallbackRouteOnToolCall(tc, requiredResearchFallbackRoute, session.id, guardrailEvents);
       }
     }
+    // This response asks only for the delegation the user directed the turn to, and that agent has
+    // not run yet. The workflow-catalog check and the synthesis-required guard below let it through,
+    // and the workflow-run force after a catalog search spares the whole directed turn: the user
+    // named the agent, and a catalog match or a synthesis note left by other orchestration is the
+    // runtime's own guess. Turned away, it never ran at all — the workflow ran in its place, or the
+    // guard rejected it and shipped a forced partial answer (review of a3773aa, 2026-10-08).
+    const directiveDelegationRequested = directiveAgent !== undefined
+      && directiveAgentPending
+      && llmResponse.tool_calls.length > 0
+      && llmResponse.tool_calls.every((toolCall) => isDelegationToAgent(toolCall, directiveAgent));
 
     if (llmResponse.tool_calls.length > 0 && llmResponse.content?.trim()) {
       logAudit("assistant_text_with_tool_calls_suppressed", {
@@ -2265,7 +3417,7 @@ async function _runTurn(
         approvedRunCandidateRetryUsed = true;
         approvedRunCandidateEnforcementPrompt = [
           "COMPLIANCE CORRECTION: the user just approved a recent n8n RUN_CANDIDATE follow-up.",
-          `You MUST call run_workflow now with name \"${approvedRunCandidateFollowUp.workflowName}\", workflowType \"${approvedRunCandidateFollowUp.workflowType}\", and params.workflowName \"${approvedRunCandidateFollowUp.candidateName}\".`,
+          `You MUST call run_workflow now with name "${approvedRunCandidateFollowUp.workflowName}", workflowType "${approvedRunCandidateFollowUp.workflowType}", and params.workflowName "${approvedRunCandidateFollowUp.candidateName}".`,
           "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, run_task_graph, or give a tool-free answer first.",
           "Any response that skips this exact run_workflow call is invalid for this turn.",
         ].join(" ");
@@ -2356,12 +3508,23 @@ async function _runTurn(
       AGENT_DISCOVERY_TOOL_NAMES.has(toolCall.name) && toolCall.name !== "search_workflows"
     );
     const repeatedWorkflowSearchRequested = llmResponse.tool_calls.some((toolCall) => toolCall.name === "search_workflows");
+    // A directed turn is not held to this check at all, as the two tool-free checks further down are
+    // not. Exempting only the directed delegation left every other call to it: an undirected
+    // delegation before the named agent ran, or a follow-up delegation after it ran, was dropped with
+    // "Call run_workflow now" and, made again, rewritten into the matched workflow, so a workflow the
+    // user did not name ran before or after the agent they did (review of f607ce0, 2026-10-08).
+    // A scene or job step is not held to it either. Its own task names the workflow it runs, so a
+    // search there finds that workflow; the check then dropped the step's delegation to the agents
+    // its author named with "Call run_workflow now", and the rewrite below would have turned it into
+    // a run of the running workflow, or of another one, in their place (E2E 2026-10-08).
     if (
       !workflowCatalogSuppressedForMaintenance
+      && !isWorkflowExecutionTurn
       &&
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
       && !runWorkflowRequested
+      && directiveAgent === undefined
       && (nonWorkflowOrchestrationRequested || nonWorkflowDiscoveryRequested || repeatedWorkflowSearchRequested)
     ) {
       if (!workflowExecutionRetryUsed) {
@@ -2431,7 +3594,10 @@ async function _runTurn(
       }
     }
 
-    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0) {
+    // The directed delegation is not held to the catalog check either: dropped, it was followed by
+    // a correction to run the matched workflow instead, beside the line that names the agent, and a
+    // model that obeyed ran the workflow before the agent (review of 6955e34, 2026-10-08).
+    if (workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && llmResponse.tool_calls.length > 0 && !directiveDelegationRequested) {
       if (!workflowCatalogRetryUsed) {
         workflowCatalogRetryUsed = true;
         workflowCatalogEnforcementPrompt = [
@@ -2475,7 +3641,7 @@ async function _runTurn(
       && message.content.startsWith("[USER RESPONSE REQUIRED]"),
     );
 
-    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration) {
+    if (synthesisRequiredInHistory && llmResponse.tool_calls.length > 0 && !forcedWorkflowRunThisIteration && !directiveDelegationRequested) {
       // Fix 3: If the prior delegation was a partial/timeout whose surfaced
       // substance is below the usability floor (e.g. 900-char truncation
       // stub), the model's recovery delegation is the correct response —
@@ -2555,10 +3721,10 @@ async function _runTurn(
         // the paper's TOC ending in "…"). Pivot to a completion summary.
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
-          ? "THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer in the user's language that: (1) states what was completed, (2) lists every attached artifact path with a one-line description ("
+          ? `THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer ${IN_REPLY_LANGUAGE} that: (1) states what was completed, (2) lists every attached artifact path with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
             + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
-          : "RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer in the user's language that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverifiziert — Recherche unvollständig] when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.";
+          : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
         break;
@@ -2634,7 +3800,12 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_maintenance_answer_rejected");
       }
 
-      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn) {
+      // A turn the user directed to an agent answers from that agent's result, and the catalog
+      // check does not ask it for a workflow on top: the agent has run by the time a tool-free
+      // answer gets here (until then such an answer is replaced by the delegation itself). The
+      // answer was rejected with an order to call run_workflow, and a model that obeyed ran the
+      // matched job after the agent the user had named (review of 6955e34, 2026-10-08).
+      if (!releasedAfterRoutingNudge && workflowCatalogRequired && !workflowCatalogAttemptedThisTurn && directiveAgent === undefined) {
         if (!workflowCatalogRetryUsed) {
           workflowCatalogRetryUsed = true;
           workflowCatalogEnforcementPrompt = [
@@ -2659,12 +3830,20 @@ async function _runTurn(
         releaseAfterRoutingNudge("tool_free_workflow_answer_rejected");
       }
 
+      // The same holds for a workflow a catalog search matched earlier in a directed turn. The
+      // answer from the named agent's result was rejected with "Call run_workflow now"; a model that
+      // obeyed had its run_workflow turned away by the synthesis-required guard, and the turn
+      // shipped a forced partial answer in place of the agent-backed one (integration review,
+      // 2026-10-08). A scene or job step's answer is not rejected for it either, for the reason
+      // given at the check on its tool calls above.
       if (
         !releasedAfterRoutingNudge
         && !workflowCatalogSuppressedForMaintenance
+        && !isWorkflowExecutionTurn
         &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn
+        && directiveAgent === undefined
       ) {
         if (!workflowExecutionRetryUsed) {
           workflowExecutionRetryUsed = true;
@@ -2761,10 +3940,13 @@ async function _runTurn(
       // orchestration_only turn that ran NO grounding retrieval this turn (no document RAG, no
       // search_documents / recall_context content call, no shared finding). The structural tier's
       // boolean value is unchanged by factoring this out — same conjunction as before.
+      // A knowledge-base read that brought content back is the same kind of grounding as a
+      // search_documents call, so its draft is not "unretrieved" either.
       const ungroundedDraftIsUnretrieved = activeMainAssistantToolMode === "orchestration_only"
         && !documentRagFoundDocs
         && (_turnToolCallCounts.get("search_documents") ?? 0) === 0
         && (_turnToolCallCounts.get("recall_context") ?? 0) === 0
+        && !_turnRetrievedKnowledgeBaseContent
         && _turnShareFindingCount === 0;
       let requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
         && ungroundedDraftIsUnretrieved
@@ -2783,19 +3965,43 @@ async function _runTurn(
         && !releasedAfterRoutingNudge
         && rawResponse.trim().length >= UNGROUNDED_JUDGE_MIN_CHARS) {
         const judgeProvider = getChatProviderForTier("routing");
-        if (judgeProvider) {
+        if (judgeProvider || layaConfigured()) {
           try {
-            const verdictRaw = (await judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], signal)).content ?? "";
-            if (parseUngroundedClaimVerdict(verdictRaw)) {
+            // Laya reads the question and the draft clipped to its window; decisions/decide.ts says
+            // when its answer replaces the routing-tier judge's.
+            const outcome = await decideWithReadout<boolean>({
+              point: UNGROUNDED_DRAFT,
+              state: { question: userMessage.slice(0, 800), draft: rawResponse.slice(0, 2_400) },
+              languageOf: userMessage,
+              sessionId: session.id,
+              signal,
+              incumbent: async (decisionSignal) => {
+                if (!judgeProvider) return undefined;
+                // Labelled like the up-front judge (review of the thinking-off verdicts, D4).
+                const verdictRaw = (await runWithCallAttribution({ callSite: "routing_tier", agentName: "ungrounded_claim_judge" }, () =>
+                  judgeProvider.complete(buildUngroundedClaimJudgeMessages(userMessage, rawResponse), [], AbortSignal.any([signal, decisionSignal])))).content ?? "";
+                return JUDGE_ANSWER_TOKEN_RE.test(verdictRaw) ? parseUngroundedClaimVerdict(verdictRaw) : undefined;
+              },
+              toKey: (ungrounded) => (ungrounded ? "yes" : "no"),
+              fromKey: (key) => key === "yes",
+              readout: { provider: judgeProvider, agentName: "ungrounded_claim_judge" },
+            });
+            if (outcome.value === true) {
               requiresUngroundedFactualResearch = true;
-              logAudit("guardrail_flagged", { type: "semantic_ungrounded_factual_detected" }, { sessionId: session.id, severity: "info" });
+              logAudit("guardrail_flagged", {
+                type: "semantic_ungrounded_factual_detected",
+                ...(outcome.decidedBy === "laya" ? { decidedBy: "laya" } : {}),
+              }, { sessionId: session.id, severity: "info" });
             }
           } catch (err) {
             log.debug({ err, sessionId: session.id }, "Semantic ungrounded-claim judge failed — relying on structural tier");
           }
         }
       }
-      if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
+      // A knowledge-base read that brought content back satisfies the research requirement, as it
+      // does for mustOrchestrateBeforeAnswering. It does not satisfy requiresUrlFetch: the page the
+      // user linked is still unread.
+      if (!releasedAfterRoutingNudge && ((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
@@ -2858,7 +4064,7 @@ async function _runTurn(
             log.warn({ err, sessionId: session.id }, "Auto-research delegation on refusal failed");
           }
           const autoEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
-          const autoDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+          const autoDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
           const recovery = chooseBetterRecoveryEvidence(autoDelegateEvidence, autoEvidence, { preferHigherScore: true });
           if (recovery && !looksLikeWeakRecoveryEvidence(recovery.evidence)) {
             const synthesized = await forceSynthesis(
@@ -2866,7 +4072,7 @@ async function _runTurn(
               provider,
               signal,
               "WEB RESEARCH RESULTS — synthesize the final answer now. A research specialist gathered the findings below for the user's request. "
-              + "Write the complete answer in the SAME language as the user's request, grounded ONLY in these findings and this conversation's tool results. "
+              + `Write the complete answer ${IN_REPLY_LANGUAGE}, grounded ONLY in these findings and this conversation's tool results. `
               + "Do not invent any specifics — names, numbers, dates, sources, or claims — beyond the findings; mark anything the findings do not cover as still to verify.\n"
               + "Findings:\n" + recovery.evidence.slice(0, 6_000),
             );
@@ -2915,11 +4121,11 @@ async function _runTurn(
         const honest = await forceSynthesis(
           session, provider, signal,
           "Your draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out — but this turn neither produced nor delegated anything. Do NOT ship that stale copy. "
-          + "Reply briefly and honestly IN THE USER'S LANGUAGE: state that the requested deliverable was NOT built or changed in this turn, and offer to delegate it now to the right specialist (for an HTML/web learning app, content_writer or web_coder). "
+          + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state that the requested deliverable was NOT built or changed in this turn, and offer to delegate it now to the right specialist (for an HTML/web learning app, content_writer or web_coder). `
           + "Do NOT re-paste the earlier answer, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
         );
         const honestClean = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
-        rawResponse = (honestClean && honestClean.trim().length > 0 && !looksLikeRegurgitatedPriorAnswer(honestClean, session.getHistory()))
+        rawResponse = (honestClean && honestClean.trim().length > 0 && !isExecutionChatterOnly(honestClean) && !looksLikeRegurgitatedPriorAnswer(honestClean, session.getHistory()))
           ? honestClean
           : "Ich habe die Lernplattform/das Artefakt in diesem Schritt nicht tatsächlich gebaut und gebe die vorherige Antwort nicht erneut als erledigt aus. Bestätige kurz, dann delegiere ich den Bau an den passenden Spezialisten (content_writer bzw. web_coder).\n\nI did not actually build the platform/artifact this turn and won't re-post the previous answer as if it were done. Confirm and I'll delegate the build to the right specialist (content_writer / web_coder).";
       }
@@ -2941,6 +4147,9 @@ async function _runTurn(
       const terminalGuardCtx: TerminalGuardContext = {
         signal,
         session,
+        // Scopes the guard's disk evidence to what THIS turn left, in a generated/ zone
+        // shared by every turn the deployment has ever run.
+        turnStartedAtMs: turnStartedAt,
         provider,
         userMessage,
         toolContext,
@@ -2956,6 +4165,7 @@ async function _runTurn(
         consecutiveDelegationFailures: _consecutiveDelegationFailures,
         turnToolCallCounts: _turnToolCallCounts,
         turnShareFindingCount: _turnShareFindingCount,
+        turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
         workflowRunCompletedThisTurn,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
@@ -2967,7 +4177,7 @@ async function _runTurn(
         finalizeUserFacingAssistantResponse,
         forceSynthesis,
         collectTurnArtifactAttachments,
-        runQaDeliveryGate,
+        runQaDeliveryGate: runQaDeliveryGateForTurn,
         runDeliverableConsistencyGate,
         runCorrectiveBuild,
         runCorrectiveReroute,
@@ -3002,11 +4212,12 @@ async function _runTurn(
         freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
         injectedSkillSlugs,
         heldOutSkillSlugs,
-        injectedTrajectoryIdentity,
+        injectedTrajectoryIdentity: shownTrajectoryIdentity,
         userMessage,
         guardrailEvents,
         artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
         qualitySignals: turnQualitySignals,
+        delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
       });
     }
 
@@ -3049,6 +4260,22 @@ async function _runTurn(
     const toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }> = [];
     let workflowExecutionCorrectionPending = false;
     let workflowExecutionCorrectionExhausted = false;
+    // What else this response asked for, for a tool that acts on the response's behalf: record_plan
+    // folds the plan's execution into its own call only when it was the response's one call
+    // (orchestration.planRoundFold, ToolContext.responseToolCalls).
+    toolContext.responseToolCalls = llmResponse.tool_calls.map((call) => call.name);
+    // The tail asked for a plan before acting, and with this response's calls the turn has still only
+    // searched: a strong routing match names the agent for the plan's delegate steps instead of
+    // saying to delegate now (ToolContext.planFirstPending). Counted as the next iteration's nudge
+    // counts them. planFirstPending holds only while the nudge is in this prompt, which is on
+    // iterations 0 and 1, so from iteration 2 a strong match says to delegate now again.
+    toolContext.planFirstPending = planFirstPending && turnIsStillDiscovering(
+      llmResponse.tool_calls.reduce(
+        (tally, call) => tally.set(call.name, (tally.get(call.name) ?? 0) + 1),
+        new Map(_turnToolCallCounts),
+      ),
+      _turnDelegationCount,
+    );
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;
@@ -3068,15 +4295,12 @@ async function _runTurn(
       }
 
       toolCallsRequested += 1;
-      // F29: Count delegation and share_finding calls for the turn scorecard
-      if (
-        tc.name === "delegate_to_agent" ||
-        tc.name === "parallel_delegate" ||
-        tc.name === "run_task_graph" ||
-        tc.name === "swarm_delegate" ||
-        tc.name === "create_ephemeral_agent"
-      ) {
-        _turnDelegationCount += 1;
+      // F29: Count delegation and share_finding calls for the turn scorecard. The call-time half of
+      // the tail (agent/turn-tool-contribution.ts) — shared with the plan executor, so a step it
+      // dispatches counts exactly as the same call would here.
+      const contribution = toolCallContribution(tc.name);
+      if (contribution.delegations > 0) {
+        _turnDelegationCount += contribution.delegations;
       } else if (tc.name === "share_finding") {
         _turnShareFindingCount += 1;
         // G33: Collect finding text for trajectory cache
@@ -3227,6 +4451,33 @@ async function _runTurn(
         }
       }
 
+      // Per-iteration state restriction (orchestration.stableToolBlock="freeze"). The tool
+      // IS in the turn's set and IS permitted by policy; it just cannot advance the state
+      // this iteration is in. Refusing here — instead of withholding the schema — is what
+      // keeps the wire array byte-identical. The message names the tools that would satisfy
+      // the requirement, so the model has strictly more to go on than when the schema was
+      // simply absent.
+      if (iterationToolRestriction && !iterationToolRestriction.allowed.has(tc.name)) {
+        const satisfying = [...iterationToolRestriction.allowed].slice(0, 12).join(", ");
+        logAudit("tool_restriction_refused", {
+          tool: tc.name,
+          reason: iterationToolRestriction.reason,
+          iteration: iterationCount,
+          allowedCount: iterationToolRestriction.allowed.size,
+        }, { sessionId: session.id, severity: "warn" });
+        guardrailEvents.push({ type: "tool_blocked", details: `${tc.name}:${iterationToolRestriction.reason}` });
+        const restrictionMessage = iterationToolRestriction.reason === "must_orchestrate"
+          ? `Error: '${tc.name}' cannot advance this turn yet — this request must be routed to a specialist, workflow or plan before you answer or record anything else. Call one of these instead: ${satisfying}.`
+          : `Error: '${tc.name}' is not usable right now — agent discovery already returned no match for this request, so searching again will not produce a different answer. Call one of these instead: ${satisfying}.`;
+        if (opts.onToolResult) opts.onToolResult(tc.id, tc.name, restrictionMessage);
+        toolResultMessages.push({
+          role: "tool",
+          content: restrictionMessage,
+          tool_call_id: tc.id,
+        });
+        continue;
+      }
+
       // Block disallowed tools
       if (!isToolAllowed(tc.name)) {
         logAudit("tool_call_blocked", { tool: tc.name, reason: "not_allowed" }, {
@@ -3324,8 +4575,26 @@ async function _runTurn(
 
       const argsSig = JSON.stringify(tc.arguments ?? {});
       const cachedToolCall = _lastToolCallSig.get(tc.name);
-      if (tc.name !== "delegate_to_agent" && cachedToolCall && cachedToolCall.args === argsSig) {
-        const cachedResultText = `${cachedToolCall.result}\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+      // The identical-arguments cache assumes a tool's result is a function of its ARGUMENTS. For a
+      // tool that reads state another tool writes, that is false, and the cache turns the second
+      // call into a silent no-op. execute_plan is the sharpest case: it takes no required arguments
+      // at all, so every call has the signature "{}" — a plan recorded AFTER an execute_plan call
+      // could never be run, and the documented resume (do the manual steps, then call again with
+      // their ids) could never work either. Seen in production: execute_plan was called before
+      // record_plan, failed with "No plan recorded this turn", and the two calls after the plan was
+      // recorded were both served that failure from the cache. The turn then reported a previous
+      // turn's completed plan as this turn's work, and the work was never done.
+      const resultDependsOnState = STATE_DEPENDENT_TOOL_NAMES.has(tc.name);
+      if (
+        !resultDependsOnState
+        && cachedToolCall
+        && cachedToolCall.args === argsSig
+        && cachedToolCall.success !== false
+      ) {
+        // The note goes to the frame beside the text as well, so a retrieval result cut to its
+        // budget keeps it (tool-result-format.ts ToolResultFrameContext).
+        const cachedNote = `\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        const cachedResultText = `${cachedToolCall.result}${cachedNote}`;
         _lastToolResultByName.set(tc.name, cachedToolCall.result);
 
         logAudit("tool_call_completed", {
@@ -3345,7 +4614,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
@@ -3374,8 +4643,18 @@ async function _runTurn(
       }
 
       const toolStartedAt = Date.now();
-      const result = await executeTool(tc.name, tc.arguments, toolContext);
+      const humanWaitCreditedBefore = turnBudget?.humanWaitCreditedMs?.() ?? 0;
+      // The runtime's own dispatch on a turn directed to an agent carries this turn's document
+      // excerpts for this call alone, beside its arguments (ToolContext.delegationDocuments).
+      if (tc.name === "delegate_to_agent" && directiveDispatchDocuments?.toolCallId === tc.id) {
+        toolContext.delegationDocuments = directiveDispatchDocuments.documents;
+      }
+      const result = await executeTool(tc.name, tc.arguments, toolContext, { toolCallId: tc.id })
+        .finally(() => { delete toolContext.delegationDocuments; });
       const toolDurationMs = Date.now() - toolStartedAt;
+      // The part of this call spent waiting on the person was credited to the deadline as it ended.
+      const humanWaitMs = (turnBudget?.humanWaitCreditedMs?.() ?? 0) - humanWaitCreditedBefore;
+      const delegationWaitMs = toolDurationMs - humanWaitMs;
       if (PERSISTED_SWARM_STATE_TOOL_NAMES.has(tc.name)) {
         turnUsedSwarmTools = true;
       }
@@ -3386,12 +4665,15 @@ async function _runTurn(
       // parent's own work, not its children's (run e3cf6c22). Bounded by the absolute ceiling.
       if (
         DELEGATION_WAIT_TOOL_NAMES.has(tc.name)
-        && toolDurationMs > 0
+        && delegationWaitMs > 0
         && getConfig().orchestration?.excludeDelegationWaitFromTurnBudget !== false
       ) {
-        const extendedDeadline = turnBudget?.extendForDelegationWait(toolDurationMs);
+        const extendedDeadline = turnBudget?.extendForDelegationWait(delegationWaitMs);
         if (extendedDeadline !== undefined) toolContext._turnDeadlineMs = extendedDeadline;
-        opts.onDelegationWaitMs?.(toolDurationMs);
+        opts.onDelegationWaitMs?.(delegationWaitMs);
+      } else if (humanWaitMs > 0) {
+        // The wait's own credit moved the deadline; later delegations clamp to the moved one.
+        toolContext._turnDeadlineMs = turnBudget?.currentDeadlineMs?.() ?? toolContext._turnDeadlineMs;
       }
       const intervention = classifyToolIntervention({
         toolName: tc.name,
@@ -3416,6 +4698,12 @@ async function _runTurn(
         { sessionId: session.id, severity: result.success ? "info" : "warn" }
       );
 
+      // A call its tool turned away before doing anything does not use up the tool's per-turn
+      // allowance, once per tool and turn. create_ephemeral_agent (cap 1) rejected a mixed-family
+      // grant with "split the mission into focused agents", and the corrected call was then turned
+      // away as over the limit, so the turn answered without running anything (E2E, 2026-10-07).
+      giveBackRejectedCall(_turnToolCallCounts, _rejectedCallsGivenBack, tc.name, result);
+
       let resultText = result.success
         ? result.output
         : (result.error?.trim()
@@ -3430,8 +4718,43 @@ async function _runTurn(
           : [];
       } else if (tc.name === "run_workflow" && workflowMatchesFromResult.length > 0) {
         workflowSearchMatches = mergeWorkflowCatalogMatches(workflowSearchMatches, workflowMatchesFromResult);
-      } else if (tc.name === "run_workflow" && result.success) {
+      } else if (toolResultContribution(tc.name, result).workflowCompleted) {
         workflowRunCompletedThisTurn = true;
+      }
+      // tc.name is read here, after the agent-name-as-tool rewrite, so the agent called by its own
+      // name counts as the delegation it became.
+      if (directiveAgent !== undefined && delegationRanAgent(tc.name, result.metadata, directiveAgent)) {
+        directiveAgentRan = true;
+      }
+      if (result.success) {
+        for (const agent of workflowStepPipeline) {
+          if (delegationRanAgent(tc.name, result.metadata, agent)) workflowStepAgentsReturned.add(agent);
+        }
+      }
+
+      // execute_plan delegates from INSIDE one tool call, so the loop above never sees those
+      // delegations and the turn ended believing it had orchestrated nothing: the shared-facts
+      // refresh before final synthesis is gated on this counter, as is the evidence-anchoring
+      // grounding gate, and the scorecard reported delegationCount 0 for a turn that ran N
+      // specialists. Counted from the result, so only steps that really dispatched count.
+      // THE SAME TAIL, FOR THE CALLS A TOOL MADE ON THE TURN'S BEHALF. execute_plan reports each
+      // step it dispatched, and every one is accounted for exactly as if the model had asked for it
+      // here: the delegation tally, the workflow-completed flag, the per-turn budget. This is the
+      // seam that stops the next behaviour added above from silently skipping plan steps.
+      for (const nested of readNestedToolCalls(tc.name, result.metadata)) {
+        const nestedContribution = nestedCallContribution(nested);
+        _turnDelegationCount += nestedContribution.delegations;
+        if (nestedContribution.workflowCompleted) workflowRunCompletedThisTurn = true;
+        _turnToolCallCounts.set(nested.tool, (_turnToolCallCounts.get(nested.tool) ?? 0) + 1);
+        // A plan step or a fan-out slice reports the agents its own result named. The grant does
+        // not say who ran: routing within it may find no match, and the architect fallback, which
+        // no grant binds, then answers with an ephemeral agent (directive-agent.ts).
+        if (directiveAgent !== undefined && nestedCallRanAgent(nested, directiveAgent)) directiveAgentRan = true;
+        if (nested.success) {
+          for (const agent of workflowStepPipeline) {
+            if (nestedCallRanAgent(nested, agent)) workflowStepAgentsReturned.add(agent);
+          }
+        }
       }
 
       pendingSearchAgentSuggestion = tc.name === "search_agents"
@@ -3496,8 +4819,12 @@ async function _runTurn(
         if (typeof loaded === "string" && loaded && !allowedToolNameSet.has(loaded)) {
           allowedToolNameSet.add(loaded);
           allowedToolNames = [...allowedToolNames, loaded];
+          // The tool context captured the list once, at turn start. Tools that fan out check it to
+          // stay inside the caller's grant, so leaving it stale means a just-loaded tool is refused
+          // to the very turn that loaded it.
+          toolContext.allowedTools = allowedToolNames;
           tools = getToolsAsLLMDefs(allowedToolNames);
-          session.setToolSchemasChars(JSON.stringify(tools).length);
+          session.setToolSchemasChars(JSON.stringify(tools).length, tools.length);
           logAudit("tool_loaded_into_turn", {
             tool: loaded,
             catalogSize: allowedToolNames.length,
@@ -3558,6 +4885,9 @@ async function _runTurn(
 
       // ── Identical output loop detection ──────────────────────────────────
       // Track BOTH successes and failures — repeated errors are loops too.
+      // The notice it appends goes to the frame beside the text as well, so a retrieval result cut
+      // to its budget keeps it (tool-result-format.ts ToolResultFrameContext).
+      let runtimeNote: string | undefined;
       {
         const outputFingerprint = buildRepeatedOutputFingerprint(tc.name, tc.arguments, resultText);
         const prev = _recentOutputsByTool.get(tc.name) ?? [];
@@ -3632,9 +4962,10 @@ async function _runTurn(
             };
           }
 
-          resultText +=
+          runtimeNote =
             `\n\n[System notice: ${tc.name} has returned identical output ${IDENTICAL_OUTPUT_LOOP_THRESHOLD} times in a row. ` +
             `You are stuck in a loop. Do NOT call this tool again. Summarise what you have found so far and report it to the user, or try a clearly different approach.]`;
+          resultText += runtimeNote;
           if (loopIntervention) opts.onIntervention?.(loopIntervention);
           _recentOutputsByTool.set(tc.name, []); // reset so alert fires at most once per burst
         }
@@ -3651,13 +4982,25 @@ async function _runTurn(
         intervention,
         argsSig,
         session,
+        runtimeNote,
+        retrievalShown: _turnRetrievalShown,
         onIntervention: opts.onIntervention,
         onToolResult: opts.onToolResult,
         guardrailEvents,
         lastToolCallSig: _lastToolCallSig,
         toolResultMessages,
       };
-      resultText = await postProcessToolResult(resultText, toolResultPostProcessContext);
+      // The returned text is the inline-era leftover: what reaches the model is what this
+      // appends to `toolResultMessages`, and nothing below reads the text again.
+      const { outputBlocked } = await postProcessToolResult(resultText, toolResultPostProcessContext);
+      // A knowledge-base read grounds the turn only if its content reached the model. The flag was
+      // set from the raw result, before the screen above, so a search whose excerpts were blocked
+      // (an injection-shaped tag in a crawled page, a moderation block) still released the turn,
+      // and the model answered from memory with only the block error in front of it.
+      if (!outputBlocked && retrievedKnowledgeBaseContent(tc.name, result)) {
+        _turnRetrievedKnowledgeBaseContent = true;
+        for (const url of knowledgeBaseSourceUrls(tc.name, result)) _turnKnowledgeBaseSourceUrls.add(url);
+      }
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -3684,6 +5027,60 @@ async function _runTurn(
 
     session.addMessages(toolResultMessages);
 
+    // DELEGATED FIGURES NO TOOL RETURNED (E2E 2026-10-07). The coder's sandbox runs all failed or
+    // printed nothing, it stated two figures anyway, and they reached the user word for word. The
+    // run now masks such figures itself; here the turn reads its record (metadata, never the
+    // frame text) and stops treating that run as a finished result: no plan continuation on top of
+    // it, an honest synthesis directive, and a partial scorecard.
+    const maskedDelegatedRuns: Array<{ agent: string; line: string; files: string[] }> = [];
+    {
+      let sawExecutionRecord = false;
+      let maskedFigures = 0;
+      for (const message of toolResultMessages) {
+        const record = readExecutionRecord(message.metadata?.["specialistExecutions"]);
+        if (!record) continue;
+        sawExecutionRecord = true;
+        if (!unbackedFiguresMasked(record)) continue;
+        maskedFigures += record.unobservedFigures ?? 0;
+        // A fan-out (parallel_delegate, run_task_graph, execute_plan, run_workflow) names no agent
+        // of its own and carries every run's files: its record is a sum. Each run that masked
+        // figures is listed with its own name and files, so another run's finished report is not
+        // presented as the masked run's unrun output.
+        const fanOutRuns = readMaskedRuns(message.metadata?.["maskedRuns"]);
+        if (fanOutRuns.length > 0) {
+          for (const run of fanOutRuns) {
+            const runFiles: Array<Record<string, unknown>> = [];
+            extractArtifactsFromMetadata({ artifacts: run.artifacts }, runFiles, new Set());
+            maskedDelegatedRuns.push({
+              agent: run.agentName,
+              line: executionRecordLine(run.executions),
+              files: runFiles.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
+            });
+          }
+          continue;
+        }
+        const agentName = message.metadata?.["agentName"];
+        // The files this delegation recorded, named the way the turn's attachments are, so the
+        // directive can tell them from the files another delegation of the turn finished.
+        const runFiles: Array<Record<string, unknown>> = [];
+        extractArtifactsFromMetadata(message.metadata ?? {}, runFiles, new Set());
+        maskedDelegatedRuns.push({
+          agent: typeof agentName === "string" && agentName ? agentName : "delegated agent",
+          line: executionRecordLine(record),
+          files: runFiles.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
+        });
+      }
+      if (sawExecutionRecord) _turnDelegatedFiguresUnobserved = maskedDelegatedRuns.length > 0;
+      if (maskedDelegatedRuns.length > 0) {
+        guardrailEvents.push({ type: "guardrail_flagged", details: "delegated_figures_unobserved" });
+        logAudit("guardrail_flagged", {
+          type: "delegated_figures_unobserved",
+          agents: maskedDelegatedRuns.map((run) => run.agent),
+          unobservedFigures: maskedFigures,
+        }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+      }
+    }
+
     if (workflowExecutionCorrectionPending) {
       continue;
     }
@@ -3692,7 +5089,23 @@ async function _runTurn(
     // When orchestration returns grounded evidence, inject a strong nudge
     // telling the model to synthesize NOW instead of re-delegating for the same data.
     {
-      const disposition = classifyPostOrchestrationDisposition(toolResultMessages);
+      const classifiedDisposition = classifyPostOrchestrationDisposition(toolResultMessages);
+      // A plan step or a workflow step whose run masked figures is recorded as failed, so nothing
+      // builds on it (tools/plan-executor.ts, tools/workflow-catalog.ts), and the plan reads as a
+      // failure here. What the turn owes the user then is the honest account a masked
+      // delegate_to_agent gets below, not "attempt a different strategy": the sandbox the run
+      // needed did not run its code. Only when those runs are the whole failure, though. In review
+      // a plan's research step that really failed sat beside a masked coder step, and the turn got
+      // only the coder's directive: the failure counter went back to 0, the failed-research
+      // backstop never armed, and the research was answered under no guard. Such a failure stays
+      // one, with the masked runs' account added to its directive (buildUnobservedRunsNote).
+      const disposition = classifiedDisposition === "failure"
+        && maskedDelegatedRuns.length > 0
+        && classifyPostOrchestrationDisposition(
+          toolResultMessages.filter((message) => !failureIsOnlyMaskedRuns(message.metadata ?? {})),
+        ) !== "failure"
+        ? "synthesize"
+        : classifiedDisposition;
       if (disposition === "synthesize") {
         _consecutiveDelegationFailures = 0;
         // #1 (audit 763394da): before synthesizing/relaying after a successful
@@ -3702,11 +5115,19 @@ async function _runTurn(
         if (getConfig().orchestration?.planDrivenContinuation ?? false) {
           const continuationPlan = await loadTurnPlan(session.id);
           const delegateCap = getConfig().orchestration?.perTurnCaps?.["delegate_to_agent"] ?? 5;
+          // A `reuse` step that ran is progress against the plan, but the delegation counter
+          // deliberately does not count run_workflow at call time (a workflow that never ran
+          // must not read as executed orchestration — audit 1303e254). The success-gated flag is
+          // the honest half of that pair, so it is added HERE, where the question is only
+          // "has the plan progressed", and not to the signal the honesty chain reads.
+          const executedDelegations = _turnDelegationCount + (workflowRunCompletedThisTurn ? 1 : 0);
+          // A step whose figures were made up is not a step the next one may build on.
+          const lastDelegationSucceeded = maskedDelegatedRuns.length === 0;
           const planDecision = decidePlanContinuation({
             plan: continuationPlan,
-            executedDelegations: _turnDelegationCount,
+            executedDelegations,
             delegationCap: delegateCap,
-            lastDelegationSucceeded: true,
+            lastDelegationSucceeded,
             enabled: true,
           });
           if (planDecision.continue && continuationPlan) {
@@ -3720,6 +5141,38 @@ async function _runTurn(
               content: renderPlanContinuationDirective(continuationPlan, planDecision.done, planDecision.total),
             });
             continue;
+          }
+          // A workflow step's turn usually records no plan of its own, and the agents its task names stand in
+          // for one (agent/workflow-step-pipeline.ts). Without them the turn ended at its first
+          // delegation that returned: the scene's researcher ran, and the agents named after it were
+          // forbidden by the synthesis requirement below (E2E 2026-10-09). A plan the turn did record
+          // is followed first, above, while it has steps left. Once it has none the pipeline still
+          // applies: a step's turn that recorded a plan of researcher alone ran it inside record_plan's
+          // own call (orchestration.planRoundFold), the finished plan did not continue, and the agents
+          // named after researcher were forbidden again (review, 2026-10-09). The agents a plan ran
+          // are read from its nested calls above, so they are not offered again.
+          if (workflowStepPipeline.length > 0) {
+            const remainingStepAgents = remainingWorkflowStepAgents({
+              pipeline: workflowStepPipeline,
+              returned: workflowStepAgentsReturned,
+              executedDelegations,
+              delegationCap: delegateCap,
+              lastDelegationSucceeded,
+            });
+            if (remainingStepAgents.length > 0) {
+              logAudit("guardrail_flagged", {
+                type: "plan_driven_continuation",
+                source: "workflow_step",
+                done: workflowStepPipeline.length - remainingStepAgents.length,
+                total: workflowStepPipeline.length,
+                remaining: remainingStepAgents,
+              }, { sessionId: session.id, channel: session.channel, severity: "info" });
+              session.addMessage({
+                role: "system",
+                content: renderWorkflowStepContinuationDirective(remainingStepAgents),
+              });
+              continue;
+            }
           }
         }
         // Cost-center 2 (audit 5d51862f): if this turn's ONLY orchestration was a single
@@ -3746,11 +5199,53 @@ async function _runTurn(
             builderAgent: deliverableIntent.builder,
           }, { sessionId: session.id, channel: session.channel, severity: "warn" });
         }
-        const relayDeliverable = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
+        const relayCandidate = (getConfig().orchestration?.relaySingleDeliverable ?? true) && !turnNeedsUnbuiltAppArtifact
           ? extractSingleRelayableDeliverable(toolResultMessages, _turnDelegationCount)
           : null;
+        // A turn the user directed to an agent (`--agent`) is not answered by another agent's
+        // deliverable before that agent has run. The one delegation counted here may never have
+        // reached it: a delegation naming no agent is routed within the grant, and when routing
+        // finds no match the architect fallback's ephemeral agent answers. Relayed, that answer
+        // ended the turn scored complete before the forced iteration could delegate to the named
+        // agent (integration review, 2026-10-08). Read from directiveAgentRan, which the tool loop
+        // above sets: directiveAgentPending was read before this round's tools ran, so it still
+        // holds when the named agent itself returned the deliverable, which is relayed as before.
+        const relayHeldForDirective = relayCandidate !== null && directiveAgent !== undefined && !directiveAgentRan;
+        if (relayHeldForDirective) {
+          logAudit("guardrail_flagged", {
+            type: "single_deliverable_relay_suppressed_directive_pending",
+            directiveAgent,
+          }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+        }
+        const relayDeliverable = relayHeldForDirective ? null : relayCandidate;
         if (relayDeliverable) {
-          const finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
+          let finalResponse = sanitizeUserFacingAssistantResponse(relayDeliverable, iterationCount);
+          // This early return bypasses the terminal guards, and with them the artifact verification
+          // gate — so the one path that ships a delegated deliverable VERBATIM was the one path that
+          // never opened the file it shipped. Same gate, same caveats, before the answer is persisted.
+          const relayVerification = await runArtifactVerificationGate({
+            session,
+            signal,
+            toolContext,
+            collectTurnArtifactAttachments,
+            incrementDelegationCount: () => { _turnDelegationCount += 1; },
+          });
+          if (relayVerification.status === "fail") {
+            finalResponse += buildFailureCaveat(relayVerification.failures);
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_failed" });
+            logAudit("guardrail_flagged", {
+              type: "artifact_verification_failed",
+              path: "single_deliverable_relay",
+              failures: relayVerification.failures,
+              repairAttempts: relayVerification.repairAttempts,
+              probedCount: relayVerification.probedCount,
+            }, { sessionId: session.id, channel: session.channel, severity: "error" });
+          } else if (relayVerification.status === "repaired") {
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_repaired" });
+          } else if (relayVerification.status === "unverifiable" && relayVerification.failures) {
+            finalResponse += buildUnverifiableCaveat(relayVerification.failures);
+            guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_verification_unverifiable" });
+          }
           persistAssistantTurnState(session, finalResponse, getTurnSwarmState());
           if (opts.onChunk) opts.onChunk(finalResponse);
           const performance = buildTurnPerformanceMetrics({
@@ -3800,7 +5295,7 @@ async function _runTurn(
         const partialEvidenceSynthesis =
           synthesisArtifacts.length === 0
           && getConfig().orchestration?.honestSynthesisOnPartialEvidence === true
-          && _turnDelegationCount > 0
+          && (_turnDelegationCount > 0 || workflowRunCompletedThisTurn)
           && findRecentJunkDelegationResult(toolResultMessages) !== null;
         if (partialEvidenceSynthesis) {
           logAudit("guardrail_flagged", {
@@ -3812,6 +5307,7 @@ async function _runTurn(
           content: buildSynthesisRequiredDirective({
             artifactPaths: synthesisArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")),
             partialEvidence: partialEvidenceSynthesis,
+            unobservedRuns: maskedDelegatedRuns,
           }),
         });
       } else if (disposition === "continue") {
@@ -3834,6 +5330,7 @@ async function _runTurn(
         });
       } else if (disposition === "failure") {
         _consecutiveDelegationFailures += 1;
+        const maskedRunsNote = maskedDelegatedRuns.length > 0 ? ` ${buildUnobservedRunsNote(maskedDelegatedRuns)}` : "";
         if (_consecutiveDelegationFailures >= 2) {
           // D16: Warden escalation. The system message alone relied on the model to obey
           // "stop delegating" — a model that keeps delegating (or varies the delegation
@@ -3854,12 +5351,12 @@ async function _runTurn(
               "You MUST stop delegating and respond to the user now. " +
               "If any partial evidence exists in the evidence blocks above, synthesize it into the best possible answer. " +
               "If there is no usable evidence, tell the user honestly that the information could not be retrieved at this time and suggest what they could do next. " +
-              "Do NOT call any more delegation tools in this turn.",
+              "Do NOT call any more delegation tools in this turn." + maskedRunsNote,
           });
           terminalFinishReason = "delegation_failures_terminal";
           terminalSynthesisInstruction =
             "Two or more consecutive delegation attempts failed this turn, so no further delegation will be attempted. " +
-            "Using ONLY the evidence already gathered in this conversation (including any shared findings), write the best possible final answer NOW, in the user's language. " +
+            `Using ONLY the evidence already gathered in this conversation (including any shared findings), write the best possible final answer NOW, ${IN_REPLY_LANGUAGE}. ` +
             "If no usable evidence exists, tell the user honestly that the information could not be retrieved and suggest a concrete next step. " +
             "Do NOT re-paste an earlier turn's answer as if new work was completed.";
           break;
@@ -3868,12 +5365,14 @@ async function _runTurn(
             role: "system",
             content:
               "[DELEGATION FAILED] The latest delegated action failed or did not return useful evidence. " +
-              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance.",
+              "Do NOT retry the same exact delegation. You may attempt a different strategy or ask the user for guidance." + maskedRunsNote,
           });
         }
       }
 
-      if (toolResultMessages.length > 0) {
+      // Once per turn: appended after every tool round it compounded — several identical copies
+      // in one turn's history, all re-sent on every later iteration of the same turn.
+      if (toolResultMessages.length > 0 && !session.hasTransientNoteThisTurn("[USER INTERACTION OWNERSHIP]")) {
         session.addMessage({
           role: "system",
           content:
@@ -3892,7 +5391,11 @@ async function _runTurn(
     // any facts that sub-agents published to shared session memory.  This prevents
     // the orchestrator from hallucinating training-data values (e.g. wrong mic
     // interface type) when a researcher has already verified and shared the truth.
-    if (_turnDelegationCount > 0) {
+    // A workflow's sub-agents publish to the same shared memory a delegated specialist does, and
+    // the delegation tally deliberately excludes run_workflow — so a turn whose orchestration WAS a
+    // workflow wrote its final answer without the facts it had just verified. Same combined signal
+    // the rest of the turn uses for "real orchestration ran".
+    if (_turnDelegationCount > 0 || workflowRunCompletedThisTurn) {
       _sharedFindingsSystemMessage = await formatSharedFactsForFinalSynthesis(session.id);
     }
 
@@ -3981,7 +5484,7 @@ async function _runTurn(
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
   opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
-  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory());
+  const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   const terminalSharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
   const terminalEvidenceBackstop = chooseBetterRecoveryEvidence(
     terminalDelegateEvidence,
@@ -4024,7 +5527,7 @@ async function _runTurn(
     const honest = await forceSynthesis(
       session, provider, signal,
       "Your previous draft re-pasted an earlier turn's answer almost verbatim, which falsely implies the user's NEW request in THIS turn was already carried out. Do NOT ship that stale copy. "
-      + "Reply briefly and honestly IN THE USER'S LANGUAGE: describe only what actually happened in THIS turn (what, if anything, was produced or attempted this turn), and if the requested change was NOT applied to the deliverable, say so plainly and offer to delegate it to the right specialist so it gets done. "
+      + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: describe only what actually happened in THIS turn (what, if anything, was produced or attempted this turn), and if the requested change was NOT applied to the deliverable, say so plainly and offer to delegate it to the right specialist so it gets done. `
       + "Do NOT re-paste the earlier deliverable as if it had been updated, do NOT invent a file path, and do NOT claim a success you cannot point to in this turn's own results.",
     );
     synthesized = (honest && !looksLikeRegurgitatedPriorAnswer(honest, session.getHistory()))
@@ -4130,7 +5633,13 @@ async function _runTurn(
     : useSuppressedTextOverSynthesis && lastSuppressedAssistantText !== null
       ? lastSuppressedAssistantText
       : (synthesized ?? fallbackMsg);
-  const normalizedFinalMsg = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount) || fallbackMsg;
+  // A synthesis that is only step narration ("Let me compile the final report now.") is no answer
+  // on a turn that is already over its budget — the sanitizer no longer empties it (2026-10-05),
+  // so the fallback is chosen here, as the emptied text used to choose it.
+  const sanitizedFinalCandidate = sanitizeUserFacingAssistantResponse(finalCandidate, iterationCount);
+  const normalizedFinalMsg = sanitizedFinalCandidate && !isExecutionChatterOnly(sanitizedFinalCandidate)
+    ? sanitizedFinalCandidate
+    : fallbackMsg;
   const evidenceBackstopMsg = looksLikeGenericNoUsableReply(normalizedFinalMsg)
     ? (evidenceForUserDisplay ?? resolveEmptyAssistantResponseFallback("", "", session))
     : normalizedFinalMsg;
@@ -4259,6 +5768,7 @@ async function _runTurn(
   const backstopGuardCtx: TerminalGuardContext = {
     signal,
     session,
+    turnStartedAtMs: turnStartedAt,
     provider,
     userMessage,
     toolContext,
@@ -4274,6 +5784,7 @@ async function _runTurn(
     consecutiveDelegationFailures: _consecutiveDelegationFailures,
     turnToolCallCounts: _turnToolCallCounts,
     turnShareFindingCount: _turnShareFindingCount,
+    turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
     workflowRunCompletedThisTurn,
     releasedWithoutResearchEvidence: false,
     autoResearchAnswer: null,
@@ -4286,7 +5797,7 @@ async function _runTurn(
     finalizeUserFacingAssistantResponse,
     forceSynthesis,
     collectTurnArtifactAttachments,
-    runQaDeliveryGate,
+    runQaDeliveryGate: runQaDeliveryGateForTurn,
     runDeliverableConsistencyGate,
     runCorrectiveBuild,
     runCorrectiveReroute,
@@ -4319,11 +5830,12 @@ async function _runTurn(
     freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
     injectedSkillSlugs,
     heldOutSkillSlugs,
-    injectedTrajectoryIdentity,
+    injectedTrajectoryIdentity: shownTrajectoryIdentity,
     userMessage,
     guardrailEvents,
     artifactCount: collectTurnArtifactAttachments(session).filter((artifact) => artifact["isDirectory"] !== true).length,
     qualitySignals: turnQualitySignals,
+    delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
   });
 }
 
@@ -4348,7 +5860,7 @@ export function buildLeanSynthesisPrompt(opts: { assistantName?: string } = {}):
   return [
     "You are the main assistant inside StarlingAI. The orchestration for this turn is done — you are now writing the FINAL answer for the user from the evidence already gathered in this conversation (tool results and shared findings). You have no tools in this step: do not plan, route, delegate, or describe next actions; just deliver the answer.",
     opts.assistantName ? `Be direct, accurate, and concise. If asked your name, you are "${opts.assistantName}".` : "Be direct, accurate, and concise.",
-    "Reply in the user's language. Format in Markdown — use headings, lists, tables, and fenced code blocks with language tags where they add clarity.",
+    `${buildReplyLanguageRule()} Format in Markdown — use headings, lists, tables, and fenced code blocks with language tags where they add clarity.`,
     "GROUNDING: copy exact facts, names, numbers, values, statuses, and URLs from the tool-result evidence; never substitute values from your own knowledge. If a claim is not supported by the evidence in this conversation, omit it or mark it unverified.",
     "FULL COVERAGE: when the evidence is a list, table, or multi-source set, include EVERY item and EVERY source — do not keep only the first, drop the second half, or replace items with 'and others'.",
     "Never claim the evidence is 'truncated', 'cut off', 'abgeschnitten', or 'not visible' — the full results are in your context; relay every item, number, and URL, and do not append markers like '(truncated)'.",
@@ -4357,7 +5869,12 @@ export function buildLeanSynthesisPrompt(opts: { assistantName?: string } = {}):
 
 export async function forceSynthesis(
   session: AgentSession,
-  provider: ChatProvider,
+  /** The turn's orchestrator provider. No longer used — see the synthesis-provider comment
+   *  below: this call must not run on the thinking-on orchestrator, and every one of the
+   *  seventeen call sites passes that same provider. Kept in the signature (and in the
+   *  ctx.forceSynthesis contract the extracted guard modules call through) rather than
+   *  churning them all. */
+  _provider: ChatProvider,
   signal: AbortSignal,
   instruction: string,
 ): Promise<string | null> {
@@ -4380,13 +5897,27 @@ export async function forceSynthesis(
       synthSystemPrompt = buildLeanSynthesisPrompt({ assistantName });
     }
 
+    // The turn's reply-language line: the system prompt's rule names no default language, so a
+    // message with no language of its own needs the line that does (reply-language.ts). It quotes
+    // the message that opened the turn. The latest user-role message can be one the runtime wrote
+    // while the turn ran (the frame around the person's mid-turn steering, the oversight redirect):
+    // that one reads as English, and quoted it pointed the final answer at English system text with
+    // the person's own words cut to a few letters (turn-boundary.ts).
+    const history = session.getHistory();
+    const turnMessage = history[currentTurnStartIndex(history)]?.content;
+    const languageLine = typeof turnMessage === "string"
+      ? ` ${buildTurnReplyLanguageInstruction(turnMessage, undefined, {
+        firstTurn: isFirstUserTurn(history),
+        userWords: currentRequestContext()?.userWords,
+      })}`
+      : "";
     // Inject a synthesize-now user message (not stored in permanent history)
     const messages: LLMMessage[] = [
       { role: "system", content: synthSystemPrompt },
       { role: "system", content: buildTemporalContextPrompt() },
       ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
       ...session.getCollapsedHistory(),
-      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.` },
+      { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.${languageLine}` },
     ];
 
     // No hard timeout on the synthesis call — the provider (LMStudio / API)
@@ -4399,10 +5930,34 @@ export async function forceSynthesis(
     // E25: prefer the synthesis-tier provider when configured — smaller,
     // instruction-tuned models produce tighter final answers and avoid the
     // reasoning-model tendency to re-narrate tool calls during rewrite.
-    const synthesisProvider = getChatProviderForTier("synthesis") ?? provider;
+    //
+    // With no synthesis tier — which is every turn under an active model preset, since
+    // getChatProviderForTier returns null there — `?? provider` handed a WRITING call to the
+    // thinking-on orchestrator: rewrite prose from evidence already in the context, the exact
+    // shape sub-agent.ts runs under SYNTHESIS_CALL_CONTROLS. It reasons its way through a rewrite
+    // it has all the material for. The fallback below runs that call thinking-off instead.
+    // Two honest notes on it: (1) forceSynthesis takes a ChatProvider, not a ModelConfig, so
+    // there is no caller config in scope here — this rebuilds the orchestrator's own merged
+    // config from agents.defaults.model (the main assistant has no model block of its own) with
+    // the active preset applied; the turn-effort overlay it omits sets exactly the two fields
+    // this call overrides anyway. (2) The controls are written out rather than taken from
+    // tierModelDefaults("synthesis"), which is {}. That {} used to be what kept the QA VERDICT
+    // calls below deliberating; they no longer lean on it — each verdict carries its own
+    // per-call controls, thinking-off unless orchestration.qaVerdictReasoning is on (see
+    // qaVerdictCallOptions).
+    const synthesisProvider = getChatProviderForTier("synthesis")
+      ?? createChatProvider({
+        ...applyActiveModelPreset(getConfig().agents.defaults.model, getConfig()),
+        enableThinking: false,
+        reasoningEffort: "none",
+      });
 
     try {
-      const response = await synthesisProvider.complete(messages, [], synthAbort.signal);
+      // Labelled so its provider row reads callSite "synthesis", not the orchestrator's
+      // main_turn: RequestCallSite had the label and nothing set it, so every rewrite, the QA
+      // loop's included, was logged as though the orchestrator had made it.
+      const response = await runWithCallAttribution({ callSite: "synthesis" }, () =>
+        synthesisProvider.complete(messages, [], synthAbort.signal));
       const text = response.content?.trim();
       return text || null;
     } finally {
@@ -4414,12 +5969,34 @@ export async function forceSynthesis(
 }
 
 /**
+ * Per-call options for a QA VERDICT: the one-line PASS / FAIL: … reply of the delivery gate and
+ * of the consistency gate. They used to run with the provider's own controls, which with no
+ * synthesis tier means the thinking-on orchestrator: session f4ebf47b paid 30.1 s and 47.4 s for
+ * two verdicts (1,646 and 2,682 completion tokens), 77 s of a 145 s turn. The owner then
+ * measured the 35B serially on the same classification (2026-09-25): 1.4–5× faster with reasoning
+ * off, and with it on it sometimes answered NOTHING, ~600 thinking tokens and empty content.
+ *
+ * Per-call controls, not a rebuilt provider, so the verdict still runs on the caller's own
+ * provider — its preset scope, its effort overlay and its failover chain's circuit state, the
+ * three things getChatProviderForTier's comment says a provider built from the defaults loses.
+ * Both fields on purpose, as SYNTHESIS_CALL_CONTROLS: a graded pin in a config withholds the
+ * enable_thinking flag, and "none" is the value that reaches the wire past it.
+ * orchestration.qaVerdictReasoning brings the deliberation back without a code change.
+ */
+const QA_VERDICT_CONTROLS = { enableThinking: false, reasoningEffort: "none" } as const;
+
+function qaVerdictCallOptions(): { controls: typeof QA_VERDICT_CONTROLS } | undefined {
+  return effectiveOrchestration().qaVerdictReasoning === true ? undefined : { controls: QA_VERDICT_CONTROLS };
+}
+
+/**
  * Final QA delivery gate (staged orchestration — docs/staged-orchestration.md).
  * After the existing correctness gates have refined `answer`, verify it against the
  * turn plan's acceptance criteria and loop ONE improvement pass per unmet round until
  * a QA check passes or the round budget is spent. The bounded fail-open loop lives in
  * qa-delivery-loop.ts; this supplies model-backed check (a verdict-only call on the
- * synthesis tier) and improve (the established forceSynthesis repair). Any error or
+ * synthesis tier, thinking-off — see qaVerdictCallOptions) and improve (the established
+ * forceSynthesis repair). Any error or
  * empty improvement ships the best answer so far — the gate never blocks delivery.
  */
 async function runQaDeliveryGate(
@@ -4431,7 +6008,8 @@ async function runQaDeliveryGate(
   maxRounds: number,
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean }> {
+  turnUserWords?: TurnUserWords,
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -4445,7 +6023,27 @@ async function runQaDeliveryGate(
   // Enabling qaToolJudge forces evidence discipline on its OWN: an uninspected bare PASS from the
   // judge must still be downgraded to unverified, which previously only happened if the separate
   // qaEvidenceRequired flag was also on — contradicting the judge's contract. OR them here.
-  const effectiveRequireEvidence = requireEvidence || qaToolJudgeOn;
+  //
+  // qaStrictVerdicts belongs in the same OR, for the same reason and more sharply: strict's entire
+  // contract is "a PASS carrying no verifiable evidence is not trusted". Without evidence being
+  // REQUESTED, the reviewer is instructed to "reply exactly: PASS" — so every pass is bare by
+  // construction, every bare pass is downgraded to unverified, and the user is told that every
+  // answer is unconfirmed. The caveat then carries no information: it is a constant.
+  //
+  // Measured on this deployment, same prompt, 4 runs per arm (2026-09-08). Strict WITHOUT the
+  // evidence request: 3 of 4 shipped the caveat, every one of them `status=unverified, rounds=0`
+  // — a rubber stamp downgraded, not a finding; one of those answers carried exact versions,
+  // release dates and two source URLs from 33 gathering calls and was still stamped "the QA check
+  // did NOT confirm this answer against concrete evidence". Strict WITH it: 0 of 4 caveated —
+  // two evidence-backed passes, and one genuine FAIL that ran 2 repair rounds and replaced a
+  // fabricated release with an honest "not provided in current evidence". Turning the caveat off
+  // would have hidden the symptom; asking for the evidence it demands is what makes it mean
+  // something.
+  const effectiveRequireEvidence = qaRequiresEvidence({
+    requireEvidence,
+    qaToolJudge: qaToolJudgeOn,
+    qaStrictVerdicts: effectiveOrchestration().qaStrictVerdicts,
+  });
   let artifactProbeStatus: ArtifactProbeStatus = qaToolJudgeOn ? "not_applicable" : "not_requested";
   let artifactProbeCount = 0;
   const toolJudgeCheck = async (current: string, crit: string[], refs: QaJudgeArtifactRef[]): Promise<QaVerdict> =>
@@ -4471,7 +6069,7 @@ async function runQaDeliveryGate(
       }));
 
   const check = async (current: string, crit: string[]): Promise<QaVerdict> => {
-    if (signal.aborted) return { pass: true }; // fail open on abort
+    if (signal.aborted) return { pass: true, noVerdict: true }; // fail open on abort — nobody judged it
     // QA-304: deterministic artifact probes run FIRST — no model call. A broken,
     // truncated, or dead artifact is an objective FAIL with reproducible receipts
     // that no reviewer prose can rubber-stamp past; passing receipts become
@@ -4505,10 +6103,15 @@ async function runQaDeliveryGate(
     const toolJudgeRefs = qaToolJudgeOn
       ? collectJudgeableArtifactRefs(collectTurnArtifactAttachments(session))
       : [];
+    // The files this turn produced, as their tools recorded them, and the user's own words. The
+    // criteria and the answer are both the orchestrator's account; this is what they are checked
+    // against. Read each round, so a file an escalation round produced is on it — and handed to
+    // whichever verdict runs, the tool-equipped judge included.
+    const turnRecordBlock = formatQaTurnRecord(session.getHistory(), turnUserWords);
     if (toolJudgeRefs.length > 0) {
       artifactProbeCount = toolJudgeRefs.length;
       try {
-        const verdict = await toolJudgeCheck(current, crit, toolJudgeRefs);
+        const verdict = await toolJudgeCheck(current, turnRecordBlock ? [...crit, turnRecordBlock.trim()] : crit, toolJudgeRefs);
         artifactProbeStatus = resolveQaVerdictStatus(verdict);
         return verdict;
       } catch (err) {
@@ -4544,6 +6147,7 @@ async function runQaDeliveryGate(
       "Acceptance criteria:",
       ...crit.map((c, i) => `${i + 1}. ${c}`),
       ...(disputedEvidenceBlock ? [disputedEvidenceBlock] : []),
+      ...(turnRecordBlock ? [turnRecordBlock] : []),
       "",
       "ANSWER:",
       current,
@@ -4561,7 +6165,8 @@ async function runQaDeliveryGate(
     ];
     const abort = new AbortController();
     try {
-      const resp = await verdictProvider.complete(messages, [], abort.signal);
+      const resp = await timedQaModelCall(() => runWithCallAttribution({ callSite: "qa", agentName: "qa_verdict" }, () =>
+        verdictProvider.complete(messages, [], abort.signal, qaVerdictCallOptions())));
       return parseQaVerdict(resp.content ?? "");
     } finally {
       abort.abort();
@@ -4571,10 +6176,12 @@ async function runQaDeliveryGate(
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
     const instruction = "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
-      + "Fix ONLY these flaws while keeping everything that was already correct, in the SAME language as the user's request:\n"
+      + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
       + flaws
       + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
-    const improved = await forceSynthesis(session, provider, signal, instruction);
+    // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
+    const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the improver collapsed the answer to a stub).
@@ -4627,6 +6234,7 @@ async function runQaDeliveryGate(
     artifactProbeCount,
     escalated: result.escalated,
     unverified: result.unverified,
+    ...(result.noVerdict ? { noVerdict: true } : {}),
   };
 }
 
@@ -4644,15 +6252,17 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
-    if (signal.aborted) return { pass: true }; // fail open on abort
+    if (signal.aborted) return { pass: true, noVerdict: true }; // fail open on abort — nobody judged it
     const messages = buildDeliverableConsistencyCheckMessages(current, userStatements);
     const abort = new AbortController();
     try {
-      const resp = await verdictProvider.complete(messages, [], abort.signal);
+      // The same one-line PASS / FAIL: … verdict as the delivery gate's, so the same controls.
+      const resp = await timedQaModelCall(() => runWithCallAttribution({ callSite: "qa", agentName: "consistency_verdict" }, () =>
+        verdictProvider.complete(messages, [], abort.signal, qaVerdictCallOptions())));
       return parseQaVerdict(resp.content ?? "");
     } finally {
       abort.abort();
@@ -4661,7 +6271,8 @@ async function runDeliverableConsistencyGate(
 
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
-    const improved = await forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws));
+    const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
+      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws))));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
@@ -4679,6 +6290,11 @@ async function runDeliverableConsistencyGate(
     changed: result.answer.trim() !== answer.trim(),
     rounds: result.rounds,
     passed: result.passed,
+    // This gate asks for a bare "PASS" (deliverable-consistency.ts), which the shared parser reads
+    // as unverified for want of evidence, so every genuine pass was logged status "unverified" and
+    // a reader counting "pass" saw none (review of the thinking-off verdicts, D1).
+    status: result.passed && !result.noVerdict ? "pass" : result.status,
+    ...(result.noVerdict ? { noVerdict: true } : {}),
   };
 }
 
@@ -4790,12 +6406,37 @@ function persistAssistantTurnState(session: AgentSession, content: string, swarm
   const metadata: Record<string, unknown> = {};
   if (swarmState) metadata["swarmState"] = structuredClone(swarmState);
   if (attachments.length > 0) metadata["attachments"] = attachments;
+  // Save the answer with any mis-copied artifact path already repaired, BEFORE adding it: adding
+  // can trim history. runTurnImpl returns and audits this same repair.
+  const repair = repairFinalAnswerArtifactPaths(session, content);
+  lastFinalAnswerRepair.set(session, { input: content, repair });
+  const saved = repair.text;
 
   if (Object.keys(metadata).length > 0) {
-    session.addMessage({ role: "assistant", content, metadata });
+    session.addMessage({ role: "assistant", content: saved, metadata });
     return;
   }
-  session.addMessage({ role: "assistant", content });
+  session.addMessage({ role: "assistant", content: saved });
+}
+
+/**
+ * Puts file paths the model mis-copied into a final answer back to the paths this session's tools
+ * recorded (artifact-path-repair.ts has the rules). The saved answer is repaired here and the
+ * returned one reuses that result (takeFinalAnswerRepair), so the two come out identical.
+ */
+const lastFinalAnswerRepair = new WeakMap<AgentSession, { input: string; repair: { text: string; repairs: ArtifactPathRepair[] } }>();
+
+/** The repair made when the answer was saved, when it was this text; otherwise a fresh one. */
+function takeFinalAnswerRepair(session: AgentSession, text: string): { text: string; repairs: ArtifactPathRepair[] } {
+  const saved = lastFinalAnswerRepair.get(session);
+  lastFinalAnswerRepair.delete(session);
+  return saved && saved.input === text ? saved.repair : repairFinalAnswerArtifactPaths(session, text);
+}
+
+function repairFinalAnswerArtifactPaths(session: AgentSession, text: string): { text: string; repairs: ArtifactPathRepair[] } {
+  if (typeof text !== "string" || !text) return { text, repairs: [] };
+  const knownPaths = collectSessionArtifactPaths(session.getHistory());
+  return repairArtifactPathReferences(text, knownPaths, workspaceFileExists(session.getWorkspacePath()));
 }
 
 /**
@@ -4825,10 +6466,7 @@ export function buildTimeoutDeliveryMessage(
   opts: { effortTier?: string; timeoutMs: number },
 ): { response: string; recoveredAssistantText: boolean } {
   const history = session.getHistory() as ReadonlyArray<{ role: string; content?: string | null }>;
-  let lastUserIdx = -1;
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    if (history[i]!.role === "user") { lastUserIdx = i; break; }
-  }
+  const lastUserIdx = currentTurnStartIndex(history);
   // Substantial assistant text produced AFTER this turn's opening user message.
   let turnAssistantText = "";
   for (let i = history.length - 1; i > lastUserIdx; i -= 1) {
@@ -4905,56 +6543,12 @@ export function collectTurnArtifactAttachments(session: AgentSession): Array<Rec
   // persisted assistant turns.
   for (let i = history.length - 1; i >= 0; i--) {
     const msg = history[i] as unknown as RawMessage;
-    if (msg.role === "user") break;
+    if (startsTurn(msg)) break;
     if (msg.role !== "tool") continue;
     if (!msg.metadata || typeof msg.metadata !== "object") continue;
     extractArtifactsFromMetadata(msg.metadata, attachments, seen);
   }
   return attachments;
-}
-
-function extractArtifactsFromMetadata(
-  metadata: Record<string, unknown>,
-  out: Array<Record<string, unknown>>,
-  seen: Set<string>,
-): void {
-  const filename = typeof metadata["filename"] === "string" ? metadata["filename"].trim() : "";
-  const outputPath = typeof metadata["outputPath"] === "string" ? metadata["outputPath"].trim() : "";
-  const externalUrl = typeof metadata["externalUrl"] === "string" ? metadata["externalUrl"].trim() : "";
-
-  if (filename || outputPath || externalUrl) {
-    const key = [outputPath, externalUrl, filename, typeof metadata["sourceTool"] === "string" ? metadata["sourceTool"] : ""].join("::");
-    if (!seen.has(key)) {
-      seen.add(key);
-      // A `filename` is required by the transcript builder. Derive one when
-      // only a path is available. `pop()` can yield an empty string for a
-      // trailing-slash path (e.g. "subdir/") — fall back to the raw path
-      // so the transcript builder never sees an empty filename.
-      const derivedFilename = filename
-        || (outputPath ? (outputPath.split("/").pop() || outputPath) : "")
-        || externalUrl;
-      const entry: Record<string, unknown> = { filename: derivedFilename };
-      if (outputPath) entry["relativePath"] = outputPath;
-      if (externalUrl) entry["externalUrl"] = externalUrl;
-      if (typeof metadata["contentType"] === "string") entry["contentType"] = metadata["contentType"];
-      if (typeof metadata["previewMode"] === "string") entry["previewMode"] = metadata["previewMode"];
-      if (typeof metadata["size"] === "number") entry["size"] = metadata["size"];
-      else if (typeof metadata["bytes"] === "number") entry["size"] = metadata["bytes"];
-      if (metadata["isDirectory"] === true) entry["isDirectory"] = true;
-      if (typeof metadata["title"] === "string" && metadata["title"]) entry["title"] = metadata["title"];
-      if (typeof metadata["sourceTool"] === "string" && metadata["sourceTool"]) entry["sourceTool"] = metadata["sourceTool"];
-      out.push(entry);
-    }
-  }
-
-  const nested = metadata["artifacts"];
-  if (Array.isArray(nested)) {
-    for (const item of nested) {
-      if (item && typeof item === "object") {
-        extractArtifactsFromMetadata(item as Record<string, unknown>, out, seen);
-      }
-    }
-  }
 }
 
 function appendNonDuplicatedContinuation(existing: string, continuation: string): string {
@@ -4991,7 +6585,7 @@ const INLINE_ARTIFACT_LANGS = ["html", "javascript", "js", "ts", "tsx", "jsx", "
 
 export function looksLikeRunawayInlineArtifact(content: string): boolean {
   if (content.length < INLINE_ARTIFACT_FENCE_BYTES) return false;
-  const fenceRe = /```([a-zA-Z0-9_+\-]*)\n([\s\S]*?)(?:```|$)/g;
+  const fenceRe = /```([a-zA-Z0-9_+-]*)\n([\s\S]*?)(?:```|$)/g;
   let match: RegExpExecArray | null;
   while ((match = fenceRe.exec(content)) !== null) {
     const lang = (match[1] ?? "").toLowerCase();
@@ -5071,12 +6665,13 @@ async function continueLengthLimitedResponse(
 
 /**
  * Consume a streaming LLM generator into a complete LLMResponse.
- * Optionally defers text until the response is known not to contain tool calls.
+ * Optionally defers text until the response is known not to contain tool calls, and with
+ * `discardTextWithoutToolCall` never sends it: the caller replaces a response that calls nothing.
  */
-async function collectStream(
+export async function collectStream(
   generator: AsyncGenerator<StreamChunk>,
   onChunk?: (text: string) => void,
-  options: { deferTextUntilToolDecision?: boolean; onReasoning?: (text: string) => void } = {},
+  options: { deferTextUntilToolDecision?: boolean; discardTextWithoutToolCall?: boolean; onReasoning?: (text: string) => void } = {},
 ): Promise<LLMResponse> {
   let content = "";
   let reasoning = "";
@@ -5085,27 +6680,73 @@ async function collectStream(
   let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let sawToolCall = false;
 
-  for await (const chunk of generator) {
-    if (chunk.type === "reasoning_delta" && chunk.content) {
-      reasoning += chunk.content;
-      // Reasoning always streams live — it precedes the answer and the UI
-      // collapses it once the first answer token arrives.
-      options.onReasoning?.(chunk.content);
-    } else if (chunk.type === "text_delta" && chunk.content) {
-      content += chunk.content;
-      if (!options.deferTextUntilToolDecision) {
-        onChunk?.(chunk.content);
+  // WHAT WAS ALREADY PRODUCED SURVIVES THE CUT.
+  //
+  // This loop had no catch, so any throw from the provider discarded every character
+  // accumulated above it. That is the orchestrator's whole answer path: completeViaStream
+  // owns the partial-result salvage and the sub-agents get it, while the orchestrator calls
+  // provider.stream() through here and got none of it. Session 40dbcb5f is what that costs
+  // the user — one call ran nineteen minutes, the runtime was holding reasoning and prose
+  // when it ended, and the turn delivered nothing at all.
+  //
+  // Salvage is unconditional and the throw is NOT swallowed: a cut still fails the turn, and
+  // the caller still classifies on the error's identity (a DeadlineAbort resynthesizes, an
+  // operator cancel propagates, a ReasoningBurnAbort is the provider's own verdict). The only
+  // thing that changes is that the partial reaches the caller instead of the floor, marked
+  // `incomplete` so nothing downstream can mistake a guillotined answer for a finished one.
+  const salvage = (): LLMResponse => {
+    const tool_calls_partial = [...toolCallBuffers.values()].map((buf) => ({
+      id: buf.id,
+      name: buf.name,
+      arguments: (buf.args.trim() ? salvageToolCallArguments(buf.args) : {}) ?? {},
+    }));
+    return {
+      content: content || null,
+      ...(reasoning ? { reasoning } : {}),
+      // A half-streamed tool call cannot be dispatched — its arguments may be truncated
+      // mid-JSON — so a cut yields the TEXT it produced and drops the incomplete calls.
+      tool_calls: tool_calls_partial.filter((t) => t.name && Object.keys(t.arguments).length > 0),
+      usage,
+      finishReason: "incomplete",
+    };
+  };
+
+  try {
+    for await (const chunk of generator) {
+      if (chunk.type === "reasoning_delta" && chunk.content) {
+        reasoning += chunk.content;
+        // Reasoning always streams live — it precedes the answer and the UI
+        // collapses it once the first answer token arrives.
+        options.onReasoning?.(chunk.content);
+      } else if (chunk.type === "text_delta" && chunk.content) {
+        content += chunk.content;
+        if (!options.deferTextUntilToolDecision) {
+          onChunk?.(chunk.content);
+        }
+      } else if (chunk.type === "tool_call_start" && chunk.toolCallId && chunk.toolName) {
+        sawToolCall = true;
+        toolCallBuffers.set(chunk.toolCallId, { id: chunk.toolCallId, name: chunk.toolName, args: "" });
+      } else if (chunk.type === "tool_call_delta" && chunk.toolCallId && chunk.argumentsDelta) {
+        const buf = toolCallBuffers.get(chunk.toolCallId);
+        if (buf) buf.args += chunk.argumentsDelta;
+      } else if (chunk.type === "done") {
+        if (chunk.finishReason) finishReason = chunk.finishReason;
+        if (chunk.usage) usage = chunk.usage;
       }
-    } else if (chunk.type === "tool_call_start" && chunk.toolCallId && chunk.toolName) {
-      sawToolCall = true;
-      toolCallBuffers.set(chunk.toolCallId, { id: chunk.toolCallId, name: chunk.toolName, args: "" });
-    } else if (chunk.type === "tool_call_delta" && chunk.toolCallId && chunk.argumentsDelta) {
-      const buf = toolCallBuffers.get(chunk.toolCallId);
-      if (buf) buf.args += chunk.argumentsDelta;
-    } else if (chunk.type === "done") {
-      if (chunk.finishReason) finishReason = chunk.finishReason;
-      if (chunk.usage) usage = chunk.usage;
     }
+  } catch (err) {
+    const partial = salvage();
+    if ((partial.content?.length ?? 0) > 0 || (partial.reasoning?.length ?? 0) > 0) {
+      log.warn(
+        {
+          contentChars: partial.content?.length ?? 0,
+          reasoningChars: partial.reasoning?.length ?? 0,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "Stream ended early — salvaging the partial the orchestrator had already produced",
+      );
+    }
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { partialResponse: partial });
   }
 
   const tool_calls = [...toolCallBuffers.values()].map(buf => ({
@@ -5122,7 +6763,7 @@ async function collectStream(
     })(),
   }));
 
-  if (options.deferTextUntilToolDecision && onChunk && !sawToolCall && content) {
+  if (options.deferTextUntilToolDecision && !options.discardTextWithoutToolCall && onChunk && !sawToolCall && content) {
     onChunk(content);
   }
 

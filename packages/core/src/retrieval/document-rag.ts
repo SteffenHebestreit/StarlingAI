@@ -468,12 +468,16 @@ export function buildInlineDocumentContext(
   return `${header}\n\n${body}`;
 }
 
-/** List the documents visible to this turn's scope. */
-export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[]> {
+/**
+ * List the documents visible to this turn's scope — or null when the document store did not
+ * answer. An outage used to come back as [], which list_documents turned into "No documents have
+ * been ingested", and the model told the user their uploaded files did not exist.
+ */
+export async function listScopedDocuments(ctx: RagScopeContext): Promise<EngramDocumentInfo[] | null> {
   if (!engramConfigured()) return [];
   const scopeSources = new Set(activeScopeSources(ctx));
   const docs = await engramListDocuments();
-  if (!docs) return [];
+  if (!docs) return null;
   return annotateInvalidated(docs.filter((d) => d.sources.some((s) => scopeSources.has(s))));
 }
 
@@ -483,6 +487,14 @@ export interface TurnAttachment {
   relativePath?: string;
   contentType?: string;
   isDirectory?: boolean;
+}
+
+const IMAGE_EXTENSION = /\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|avif)$/i;
+
+/** A picture, by its declared type or, when none was sent, by its name. */
+export function isImageAttachment(att: Pick<TurnAttachment, "filename" | "relativePath" | "contentType">): boolean {
+  if (att.contentType) return att.contentType.toLowerCase().startsWith("image/");
+  return IMAGE_EXTENSION.test(att.relativePath ?? att.filename);
 }
 
 /**
@@ -521,6 +533,11 @@ export async function augmentTurnWithDocuments(input: {
     ]);
     for (const att of input.attachments) {
       if (att.isDirectory || !att.relativePath) continue;
+      // An uploaded picture is stored so it can be an edit base, not so it can be read as a
+      // document: its analysis is already inlined into the message, and extracting text from
+      // the pixels here would at best duplicate it and at worst add an "attachment not
+      // readable" note that contradicts it.
+      if (isImageAttachment(att)) continue;
       try {
         // Chat attachments are persisted through the object store (scanAndStoreUpload →
         // putUpload), and under `storage.backend: "s3"` — the bundled compose DEFAULT —

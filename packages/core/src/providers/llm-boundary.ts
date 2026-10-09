@@ -26,7 +26,7 @@
 
 import { childLogger } from "../logger.js";
 import { currentUserId } from "../runtime/request-context.js";
-import type { ChatProvider, LLMMessage, LLMResponse, LLMToolDef, StreamChunk } from "./lmstudio.js";
+import type { ChatProvider, CompletionCallOptions, LLMMessage, LLMResponse, LLMToolDef, StreamCallOptions, StreamChunk } from "./lmstudio.js";
 
 const log = childLogger("llm-boundary");
 
@@ -181,15 +181,27 @@ export function wrapProviderWithBoundary<T extends ChatProvider>(provider: T): T
   return new Proxy(provider, {
     get(target, prop, receiver) {
       if (prop === "complete") {
-        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
-          applyAfterResponse(await target.complete(applyBeforeRequest(messages), tools, signal));
+        // `options` is forwarded for the same reason the completeViaStream arm forwards it,
+        // though on a different footing: nothing reaches this arm today (createChatProvider
+        // builds only LMStudioProvider, AnthropicProvider or FailoverChatProvider, all three
+        // implement completeViaStream, and both call sites branch on it first). This closes a
+        // latent contract hole — completeViaStream is OPTIONAL on ChatProvider, so a conforming
+        // provider that implements complete() alone would silently lose the per-call thinking
+        // controls, max_tokens ceiling and tool_choice. Not a production drop; closed so the
+        // optional method cannot become load-bearing by accident.
+        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions) =>
+          applyAfterResponse(await target.complete(applyBeforeRequest(messages), tools, signal, options));
       }
       if (prop === "completeViaStream" && typeof target.completeViaStream === "function") {
-        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal) =>
-          applyAfterResponse(await target.completeViaStream!(applyBeforeRequest(messages), tools, signal));
+        // `options` is forwarded, not dropped: it carries the per-chunk observation hook
+        // and the operator's unbounded grant, and a wrapper that swallows them silently
+        // disarms the mid-stream burn guard for every deployment with a transformer
+        // registered — the same class of bypass FailoverChatProvider shipped once.
+        return async (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions) =>
+          applyAfterResponse(await target.completeViaStream!(applyBeforeRequest(messages), tools, signal, options));
       }
       if (prop === "stream") {
-        return (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }) => {
+        return (messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: StreamCallOptions) => {
           // Capture the boundary context EAGERLY (in the caller's request async
           // context) so the inbound stream transform keys its state to the same
           // user that beforeRequest pseudonymized under.

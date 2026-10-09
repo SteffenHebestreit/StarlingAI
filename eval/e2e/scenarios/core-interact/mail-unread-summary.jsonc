@@ -1,0 +1,69 @@
+// Mail triage against the GreenMail test mailbox eval@e2e.test (eval/e2e/ENVIRONMENT.md "Mail").
+// Two synthetic messages are delivered over SMTP (unread: nothing has set \Seen), then the assistant
+// summarises the unread mail. Everything is fictional; every address is under the reserved .test TLD.
+//
+// Path: orchestrator (toolMode orchestration_only, no mail tools of its own) -> mail_agent
+// (mail_list_unread / mail_search / mail_read) -> gateway forwards X-Sai-User: eval -> mail-service
+// account "eval" -> GreenMail IMAP.
+//
+// Event names verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase}  agent/sub-agent.ts:6527 (start), payload :2296
+//   sub_agent_started {agentName}                 agent/sub-agent.ts:2950 (via agents.mustRun)
+{
+  id: "core-ix-mail-unread-summary",
+  title: "Mail: summarise the unread mail of the eval inbox",
+  group: "core",
+  tags: ["mail", "smoke"],
+  description: "Delivers a supplier delay notice and a newsletter to eval@e2e.test, then asks for a summary of the unread mail. The mail agent must read the mailbox (list unread / search / read) and the summary must name the delay notice's order number and new date and mention the newsletter. Reading must not send, delete or move anything, and nothing may go out to the supplier. Protects: the mail-service round trip for the eval identity, and read-only triage staying read-only.",
+  requires: ["model", "mail"],
+  timeoutMs: 900000,
+  steps: [
+    { kind: "mail", action: "clear" },
+    {
+      kind: "mail",
+      action: "deliver",
+      message: {
+        from: "lieferant@polarhafen-handel.test",
+        subject: "Lieferverzug Auftrag PH-5521: neuer Termin 23.10.2026",
+        text: "Guten Tag,\n\nleider verzögert sich Ihr Auftrag PH-5521 (40 x Schutzbrille Klarsicht NW-3102). Neuer Liefertermin ist der 23.10.2026. Bitte bestätigen Sie kurz, ob das für Sie passt.\n\nViele Grüße\nAuftragsservice Polarhafen Handel (fiktives Unternehmen, Testnachricht)",
+      },
+    },
+    {
+      kind: "mail",
+      action: "deliver",
+      message: {
+        from: "redaktion@werkstatt-magazin.test",
+        subject: "Werkstatt-Magazin Ausgabe 41: Drehmoment richtig einstellen",
+        text: "Neu in Ausgabe 41: Drehmoment richtig einstellen, Akkuwerkzeuge pflegen und ein Bericht über Ordnung in der Werkstatt.\n\n(Fiktiver Newsletter, Testnachricht)",
+      },
+    },
+    // Both arrived in GreenMail before the turn starts (expect waits up to 30 s).
+    { kind: "mail", action: "expect", match: { subjectIncludes: ["PH-5521"], min: 1, max: 1 } },
+    { kind: "mail", action: "expect", match: { subjectIncludes: ["Ausgabe 41"], min: 1, max: 1 } },
+    {
+      kind: "turn",
+      id: "summarise-unread",
+      message: "Fasse bitte meine ungelesenen E-Mails kurz zusammen: jeweils Absender, Betreff und worum es geht.",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          includes: ["PH-5521"],
+          matches: [
+            "23\\.\\s?10\\.|23\\.\\s*Oktober|2026-10-23|October\\s+23",
+            "Werkstatt-Magazin|Ausgabe 41|Newsletter|Drehmoment",
+          ],
+        },
+        agents: { mustRun: ["mail_agent"] },
+        tools: { mustNotCall: ["mail_send_draft", "mail_delete", "mail_move", "mail_delete_mailbox"] },
+        events: {
+          must: [
+            { type: "sub_agent_tool_call", where: { "data.agentName": "mail_agent", "data.tool": { in: ["mail_list_unread", "mail_search", "mail_read"] }, "data.phase": "start" } },
+          ],
+        },
+      },
+    },
+    // Read-only triage sent nothing anywhere.
+    { kind: "mail", action: "expect", match: { to: "lieferant@polarhafen-handel.test", min: 0, max: 0 } },
+    { kind: "mail", action: "expect", match: { to: "redaktion@werkstatt-magazin.test", min: 0, max: 0 } },
+  ],
+}

@@ -423,6 +423,22 @@ paths:
       responses:
         '200': { description: File content }
         '404': { description: Not found }
+    delete:
+      tags: [Workspace]
+      summary: Remove one file a turn wrote, under generated/ in the caller's own workspace root
+      description: |
+        Removes one regular file, never a directory. Only `generated/`, the zone a turn
+        writes to, is reachable: config shards, ledgers and the memory store elsewhere in
+        the root are refused, and so is a path whose real directory, after links, is not
+        under `generated/`. Requires an operator bearer token (a token with no role claim
+        counts as operator).
+      parameters: [ { name: path, in: query, required: true, schema: { type: string }, description: 'Workspace-relative path, e.g. `generated/e2e-guards/page.html`.' } ]
+      responses:
+        '204': { description: Removed }
+        '400': { description: '`path` missing, a directory, outside the caller''s root, or outside `generated/`' }
+        '401': { description: Missing or invalid bearer token }
+        '403': { description: Role below operator }
+        '404': { description: Not there }
   /api/workspace/archive:
     get:
       tags: [Workspace]
@@ -494,10 +510,10 @@ paths:
   /api/agents/{name}/model:
     patch:
       tags: [Agents]
-      summary: Hot-patch an agent's model config
+      summary: Set an agent's model config, saved to the config overlay
       parameters: [ { name: name, in: path, required: true, schema: { type: string } } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
-      responses: { '200': { description: Patched }, '404': { description: Unknown agent } }
+      responses: { '200': { description: Saved }, '400': { description: 'Invalid value, or a saved key would go to a new endpoint' }, '404': { description: Unknown agent }, '409': { description: 'Agent is not in the saved config (bridged from an A2A peer)' } }
   /api/agents/outcomes:
     get:
       tags: [Agents]

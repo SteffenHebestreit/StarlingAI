@@ -65,4 +65,23 @@ describe("flow memory", () => {
     expect(guidance).toContain("Prefer [target=browser_agent]");
     expect(guidance).toContain("Avoid [target=browser_agent]");
   });
+
+  it("never recommends setting a path the assistant now refuses", () => {
+    // A proposal applied under agents.subAgents.* was recorded as applied, and "Prefer … set
+    // agents.subAgents…" steered the assistant back to a path that changes nothing (final review of
+    // the leftovers, 5).
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-flow-memory-paths-"));
+    dirs.push(workspacePath);
+    appendFlowMemoryEntry(workspacePath, {
+      ts: "2026-09-20T10:00:00.000Z",
+      scope: "enhancement",
+      request: "make the coder more careful",
+      summary: "Lower the coder temperature",
+      outcome: "applied",
+      actions: ["set agents.subAgents.coder.model.temperature", "set subAgents.coder.model.maxTokens"],
+    });
+    const guidance = formatFlowMemoryGuidance(workspacePath, "coder careful temperature", { limit: 2 });
+    expect(guidance).toContain("set subAgents.coder.model.maxTokens");
+    expect(guidance).not.toContain("agents.subAgents");
+  });
 });

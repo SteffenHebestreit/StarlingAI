@@ -257,12 +257,26 @@ export async function readAllFacts(sessionId: string): Promise<Record<string, st
   return Object.fromEntries(_facts.get(sessionId) ?? new Map());
 }
 
+/**
+ * True when a fact value is one whitespace-free token: a path, URL, id, hash or
+ * e-mail address. Such a value names one thing, so it duplicates another value
+ * only when the two are equal. Token overlap cannot compare them: sibling files in
+ * one directory share almost every token, so they score as near-identical.
+ */
+export function isAtomicFactValue(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed !== "" && !/\s/.test(trimmed);
+}
+
 // ── Turn plan slot ───────────────────────────────────────────────────────────
 // A reserved per-session slot holding the orchestrator's structured plan for the
 // current turn (JSON). Kept OUT of the facts hash so the raw JSON never leaks
 // into human-facing shared-facts context dumps; sub-agents and QA read it
 // explicitly via readTurnPlan. Scoped to the root session id by the caller.
-const PLAN_VALUE_MAX = 8000;        // chars — a plan is short; cap prevents bloat
+// chars — a plan is short; cap prevents bloat. Exported because the cap is a HARD SLICE and the
+// reader JSON.parses: anything written over this length comes back as invalid JSON and the plan
+// reads as absent, so the writer's caller has to fit the plan itself rather than discover the loss.
+export const PLAN_VALUE_MAX = 32000;
 const planKey = (sid: string) => `starlingai:mem:${sid}:turnplan`;
 const _turnPlans = new Map<string, string>();
 

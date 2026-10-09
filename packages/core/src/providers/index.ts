@@ -1,4 +1,5 @@
 import { getConfig } from "../config/loader.js";
+import { withPromotedAgents } from "../agent/promoted-agents.js";
 import { LMStudioProvider, type ChatProvider, type OpenAICompatibleProviderRuntimeSnapshot } from "./lmstudio.js";
 import { AnthropicProvider, ANTHROPIC_DEFAULT_BASE_URL } from "./anthropic.js";
 import { loadStoredTokenSet, getValidAccessToken, startAnthropicTokenRefresher, anthropicRefreshDisabledReason } from "./anthropic-oauth.js";
@@ -303,6 +304,10 @@ export function applyActiveModelPreset(modelConfig: ModelConfig, config: Config 
     ...(preset.contextWindow !== undefined ? { contextWindow: preset.contextWindow } : {}),
     // Tier-ladder models are tuned for the local stack; bypass while testing a preset.
     tiers: undefined,
+    // The tool-call syntax a prefilled forced call opens is the replaced model's too. Kept, every
+    // forced call to the preset model would start with an opener its server's tool-call grammar
+    // may not take, which fails the request (ModelConfig.toolCallPrefill).
+    toolCallPrefill: undefined,
   };
 }
 
@@ -384,18 +389,49 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
  *   - "synthesis" → consumed by runtime.forceSynthesis to run the final
  *                   user-facing rewrite on a lighter / faster model
  */
+/**
+ * What a tier asks of the model beyond its identity.
+ *
+ * The ROUTING tier exists for yes/no verdicts — is this question source-sensitive, does this
+ * short message need escalating, is this draft ungrounded. It inherited the default model's
+ * `enableThinking: true`, and the qwen3.6 family only honours that switch (it ignores
+ * `reasoningEffort`), so every one of those verdicts reasoned first: measured 6.1 s and ~1,000
+ * reasoning characters per yes/no on the single GPU, one to three of them serialized before the
+ * user's first token. A verdict call defaults to thinking-off, expressed both ways so it survives
+ * a model swap; a caller that genuinely needs deliberation passes an override, which wins.
+ */
+export function tierModelDefaults(tier: "routing" | "synthesis"): Partial<ModelConfig> {
+  return tier === "routing" ? { enableThinking: false, reasoningEffort: "none" } : {};
+}
+
 export function getChatProviderForTier(
   tier: "routing" | "synthesis",
   override: Partial<ModelConfig> = {},
 ): ChatProvider | null {
   const config = getConfig();
-  // While a model preset is active (dashboard Local ⇄ Claude switch) the tier
-  // ladder is bypassed — tier models are tuned for the local stack, and a
-  // capability test should run every path on the preset model.
+  // While a model preset is active (dashboard Local ⇄ Claude switch) the tier ladder is
+  // bypassed — tier models are tuned for the local stack, and a capability test should
+  // run every path on the preset model.
+  //
+  // A branch returning a preset-model provider here was tried and WITHDRAWN. Returning a
+  // provider from this function means building one out of `config.agents.defaults.model`,
+  // and three things break at once: (1) SCOPE — getChatProviderWithOverride applies the
+  // preset with no scope context, and presetAppliesUnderScope answers true for an absent
+  // ctx, so under modelPresetScope "coordinator_qa" a worker deliberately left on local
+  // qwen would have every distillation, judge and synthesis call routed to the preset
+  // model; (2) CONFIG DIVERGENCE — the caller's own agent contextWindow, the effort
+  // overlay's maxTokens and its failover chain are all absent from the defaults, so the
+  // tier provider is a different model config from the one the caller runs on; (3)
+  // CIRCUIT STATE — a fresh FailoverChatProvider per call throws away the breaker state
+  // the cached provider holds, so a dead endpoint is retried in full on every tier call.
+  // The rule the call sites already implement is the right one: null here, and each site
+  // falls back to ITS OWN merged model config carrying the tier's controls — see sub-agent.ts's
+  // synthProvider, the distillation provider and the progress-judge provider, each written
+  // `getChatProviderForTier(tier) ?? createChatProvider({ ...modelConfig, ...tierModelDefaults(tier) }, providerEndpoint)`.
   if (getActiveModelPreset(config)) return null;
   const tierModel = config.agents.defaults.model.tiers?.[tier];
   if (!tierModel) return null;
-  return getChatProviderWithOverride({ ...override, primary: tierModel });
+  return getChatProviderWithOverride({ ...tierModelDefaults(tier), ...override, primary: tierModel });
 }
 
 export function getEmbeddingProvider(): LMStudioProvider {
@@ -643,7 +679,7 @@ export async function initProviders(): Promise<void> {
     // Build semantic agent search index if an embedding model is configured
     const embeddingModel = config.agents.defaults.model.embeddingModel;
     if (embeddingModel) {
-      const subAgents = config.subAgents ?? {};
+      const subAgents = withPromotedAgents(config.subAgents ?? {}, config.workspacePath);
       buildAgentIndex(subAgents, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
     }
   } catch (err) {

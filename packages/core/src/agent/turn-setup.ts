@@ -9,6 +9,116 @@ import { lookupTrajectory } from "../memory/trajectory-cache.js";
 import { toSoftRoutingHint, type DynamicTurnGuidance } from "./intent-classifier.js";
 import { userMessageCarriesActionableUrl } from "./citation-honesty.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
+import { prefetchCapabilityCandidates, type DiscoveryCapsuleAgent } from "./discovery-prefetch.js";
+import { noteIntentShadowCapsule } from "./intent-shadow.js";
+import { readPromotedAgents } from "./promoted-agents.js";
+import { timedPhase } from "./turn-metrics.js";
+import { DELIVERABLE_EMITTING_TOOLS } from "../tools/delegation-artifact-classification.js";
+
+/**
+ * HARD latency cap on the discovery capsule: the embedding round-trip behind it can stall on a cold
+ * or queued embed backend (observed ~15 s on a busy LM Studio). A slow prefetch is abandoned (empty
+ * capsule) rather than delaying the turn; the model then discovers on demand.
+ */
+export const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
+
+/**
+ * Start a turn's discovery prefetch (orchestration.discoveryPrefetch): bounded by `budgetMs`, timed
+ * as the `discoveryPrefetch` phase, noted for the intent readout's shadow, and never rejecting — an
+ * error and the timeout both resolve to "".
+ *
+ * WHERE IT STARTS (finding 2026-10-05). It reads only the user's message and the turn's agent grant,
+ * so the runtime starts it the moment the receptionist's fast lane has declined the turn, beside the
+ * source judge, and hands the promise to the first prompt assembly. Started inside that assembly it
+ * began only after the judge's wait and the document retrieval, and its embedding round-trip — up to
+ * the whole cap — sat on the path to the first orchestrator token instead of behind them.
+ */
+export function startDiscoveryPrefetch(params: {
+  userMessage: string;
+  sessionId: string;
+  /** The turn's agent grant (a scene, a restricted session): unscoped, the capsule named agents the turn could not call. */
+  allowedAgents?: readonly string[];
+  /** The turn has no catalog tools: the capsule names no workflow (prefetchCapabilityCandidates). */
+  withoutWorkflows?: boolean;
+  budgetMs?: number;
+  /**
+   * The capsule's agents with their routing confidence, in its order, called before the returned
+   * promise settles. Only when the capsule came within the budget, so a caller sees exactly the
+   * routing the turn's first prompt was built with; not at all on a timeout or an error.
+   */
+  onCapsuleAgents?: (agents: readonly DiscoveryCapsuleAgent[]) => void;
+}): Promise<string> {
+  const budgetMs = params.budgetMs ?? DISCOVERY_PREFETCH_BUDGET_MS;
+  return timedPhase("discoveryPrefetch", async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The capsule's agent names, for the intent readout's shadow (agent/intent-shadow.ts): the
+    // candidate list the turn actually had, so none when the capsule came too late.
+    let capsuleAgents: readonly string[] = [];
+    let capsuleCandidates: readonly DiscoveryCapsuleAgent[] = [];
+    let capsuleLate = false;
+    try {
+      const capsule = await Promise.race([
+        prefetchCapabilityCandidates(params.userMessage, {
+          ...(params.allowedAgents ? { allowedAgents: [...params.allowedAgents] } : {}),
+          ...(params.withoutWorkflows ? { withoutWorkflows: true } : {}),
+          sessionId: params.sessionId,
+          onAgents: (names, agents) => {
+            capsuleAgents = names;
+            capsuleCandidates = agents ?? [];
+          },
+        }),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => {
+            capsuleLate = true;
+            resolve("");
+          }, budgetMs);
+        }),
+      ]);
+      noteIntentShadowCapsule(params.sessionId, capsuleLate ? { status: "timeout" } : { status: "ok", agents: capsuleAgents });
+      if (!capsuleLate && params.onCapsuleAgents) {
+        try {
+          params.onCapsuleAgents(capsuleCandidates);
+        } catch {
+          // An observer's failure is never the capsule's.
+        }
+      }
+      return capsule;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }).catch(() => "");
+}
+
+/**
+ * The discovery prefetch routed the turn to an agent whose work is a deliverable: the capsule's top
+ * agent was admitted at high confidence and holds a tool whose call is itself the deliverable
+ * (DELIVERABLE_EMITTING_TOOLS: a diagram, a chart, a site, a deck, a document).
+ *
+ * This is how an --auto turn's forced first tool call (orchestration.autonomousModeAntiRefusal)
+ * sees an artifact request the deliverable-intent word lists miss. "Zeichne den folgenden
+ * Bestellablauf als Mermaid-Flussdiagramm" matched none of their verbs or nouns, so the turn was
+ * not forced, and the model drew the diagram inline while the capsule it had been given named
+ * diagram_designer [high] (E2E core-build-artifact-mermaid). Routing reads the request in any
+ * language, and the turn has already paid for it. Only the top agent counts, and an agent the
+ * configuration does not know holds no tool.
+ *
+ * The confidence check narrows less than it reads. With an embedding model configured, as on the
+ * deployed stack, the prefetch admits an agent only at a semantic score of 0.72 or more, and 0.72 is
+ * also where "high" begins (tools/agent-routing.ts confidenceLabel), so every agent the capsule
+ * lists is high. The check filters only the lexical path routing takes without an embedding model,
+ * which admits an agent from 0.45. On the deployed stack the condition is the top agent's tools
+ * alone, whether or not the request asks for a deliverable: an --auto question about an attached
+ * file, or about how a chart works, that routes to an agent holding one of these tools is forced to
+ * call a tool until it has delegated. Narrowing that needs a signal that tells those turns apart,
+ * calibrated on the routing ledger across many turns.
+ */
+export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCapsuleAgent[]): boolean {
+  const top = agents[0];
+  if (!top || top.confidence !== "high") return false;
+  const config = getConfig();
+  const agentCfg = config.subAgents[top.name] ?? readPromotedAgents(config.workspacePath)[top.name];
+  return (agentCfg?.tools ?? []).some((tool) => DELIVERABLE_EMITTING_TOOLS.has(tool));
+}
 
 export interface TrajectoryInjection {
   /** Extra `[CACHED RECENT EVIDENCE …]` system context, or "" when no usable hit. */
@@ -19,10 +129,26 @@ export interface TrajectoryInjection {
 }
 
 /**
+ * Whether iteration 0 injects the per-turn context blocks — memory, user model, skills, flow
+ * guidance and the cached trajectory. Not under agents.performance.leanContextInjection, where the
+ * model pulls that context with recall_context instead. One definition for the prompt assembly that
+ * injects the blocks (turn-system-prompt.ts) and the up-front lookups that feed them.
+ */
+export function turnContextInjected(): boolean {
+  return getConfig().agents.performance.leanContextInjection !== true;
+}
+
+/**
  * Before the first LLM call, look up a cached trajectory for a semantically similar
  * recent query and, on a hit, return it as extra system context so the model can
  * decide whether to reuse or re-research the evidence. Best-effort — a lookup error
  * yields the empty result and never blocks the turn. Emits trajectory_cache_hit.
+ *
+ * NOT WHEN IT CANNOT BE SHOWN (finding 2026-10-05). The lookup sits on the critical path (a query
+ * embedding plus a parse of the cache file), and under leanContextInjection — the default — the
+ * prompt assembly never injects its result. It now runs only when turnContextInjected(), the same
+ * condition the assembly injects on; the identity it returns is still only a candidate until the
+ * assembly reports the context as shown (AssembleTurnSystemMessagesResult.trajectoryShown).
  */
 export async function lookupTrajectoryInjection(params: {
   userMessage: string;
@@ -33,6 +159,7 @@ export async function lookupTrajectoryInjection(params: {
 }): Promise<TrajectoryInjection> {
   let trajectoryInjectionContext = "";
   let injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null = null;
+  if (!turnContextInjected()) return { trajectoryInjectionContext, injectedTrajectoryIdentity };
   try {
     const cachedHit = await lookupTrajectory(
       params.userMessage,
@@ -63,6 +190,31 @@ export async function lookupTrajectoryInjection(params: {
     }
   } catch { /* best-effort — never block the turn */ }
   return { trajectoryInjectionContext, injectedTrajectoryIdentity };
+}
+
+/**
+ * The evidence requirement a turn hands its tools (ToolContext.turnEvidence), or undefined.
+ *
+ * The up-front judge's verdict reached only the turn's own enforcement (requiresDelegatedResearch,
+ * the tool mode). The delegations the turn then made — inside record_plan's fold and execute_plan
+ * above all — never saw it, so the research gate fell back to an English-only word shape and a plan
+ * written in German ran web_coder on a research step (E2E 2026-10-07). Only the orchestrator's own
+ * turn carries it: a workflow step runs the agents the scene's author named, and a directed turn
+ * (`--agent`) runs the agent the user named. A workflow step is either a nested turn (channel
+ * "workflow", or a workflow on the execution stack) or a queued scene or job, scheduled tasks
+ * included, which the scene worker runs as a turn of its own on channel "scene" with no stack: the
+ * judge runs on those too, and the trigger would otherwise replace the agent the author named.
+ */
+export function turnEvidenceRequirement(params: {
+  upfrontSourceSensitive: boolean;
+  channel: string;
+  workflowDepth: number;
+  directiveAgent?: string;
+}): { required: true } | undefined {
+  if (!params.upfrontSourceSensitive) return undefined;
+  if (params.channel === "workflow" || params.channel === "scene" || params.workflowDepth > 0) return undefined;
+  if (params.directiveAgent?.trim()) return undefined;
+  return { required: true };
 }
 
 export interface TurnEnforcementSignals {

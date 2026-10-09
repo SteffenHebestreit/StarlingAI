@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { resolve } from "node:path";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { join, resolve } from "node:path";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
+import * as configLoader from "../config/loader.js";
 
 const WS = resolve("/tmp/ws");
 
@@ -113,5 +115,124 @@ describe("write-zoning: scope-confined agents cannot write live-config zones via
       const r = resolveWorkspaceWritePath("agents/50-authored-ok.jsonc", WS);
       expect(r.relativePath).toBe("agents/50-authored-ok.jsonc");
     });
+  });
+});
+
+/**
+ * ONE ARTIFACT ZONE, TWO ACCOUNTS.
+ *
+ * `generated/` is a single directory shared by every turn the deployment has ever run. With one
+ * operator that is fine; with two accounts it means one user's half-finished build is evidence
+ * to the other's resume detection, and every artifact is readable by anyone holding a token.
+ * Durable memory, the user-model and personality already partition per account — these pin the
+ * same rule for the working zone.
+ *
+ * The gate is a PRESENT AMBIENT USER, never the auth flag alone: an unattended run under
+ * multi-user auth has no user to partition by and must keep writing where it always did,
+ * rather than into a bucket named after nobody.
+ */
+describe("the workspace root is per-user", () => {
+  const SHARED = resolve("/tmp/ws");
+  const mockAuth = (enabled: boolean): void => {
+    vi.spyOn(configLoader, "getConfig").mockReturnValue(
+      { auth: { enabled } } as unknown as ReturnType<typeof configLoader.getConfig>,
+    );
+  };
+  const asUser = <T,>(userId: string, fn: () => T): T => runWithRequestContext({ userId }, fn);
+  const aliceRoot = () => resolve(SHARED, "users", safeUserSegment("alice"));
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("is a no-op with auth off — the single-operator default is untouched", () => {
+    mockAuth(false);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).toBe(SHARED);
+  });
+
+  it("is a no-op with auth ON but no ambient user — an unattended run stays shared", () => {
+    // The trap: gating on the flag alone sends a scheduled job, an inbound MCP call or a webhook
+    // trigger into a root named after nobody, and splits one logical workspace in two.
+    mockAuth(true);
+    expect(userWorkspaceRoot(SHARED)).toBe(SHARED);
+  });
+
+  it("gives each account its own root under the shared one", () => {
+    mockAuth(true);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).toBe(aliceRoot());
+    expect(asUser("bob", () => userWorkspaceRoot(SHARED))).not.toBe(aliceRoot());
+  });
+
+  it("leaves a root that already is the user's as it is, however often it was nested", () => {
+    // A restored session hands its persisted root back in, and so does a workflow run with the
+    // caller's root and id: each pass nested it once more, <shared>/users/<seg>/users/<seg>, a
+    // directory with none of the user's memory in it (found in review, 2026-10-08).
+    mockAuth(true);
+    const segment = safeUserSegment("alice");
+    const doubled = resolve(aliceRoot(), "users", segment);
+    expect(asUser("alice", () => userWorkspaceRoot(aliceRoot()))).toBe(aliceRoot());
+    expect(asUser("alice", () => userWorkspaceRoot(doubled))).toBe(aliceRoot());
+    expect(asUser("alice", () => userWorkspaceRoot(resolve(doubled, "users", segment)))).toBe(aliceRoot());
+    // Only the user's own segment is taken back: any other directory stays the root it is.
+    const elsewhere = resolve(SHARED, "users", "someone-0123456789abcdef");
+    expect(asUser("alice", () => userWorkspaceRoot(elsewhere))).toBe(resolve(elsewhere, "users", segment));
+  });
+
+  it("puts the working zones inside that root, with no second partition", () => {
+    // The zone name stays plain: the user segment lives in the ROOT, and applying it here too
+    // would produce <root>/users/<seg>/generated/users/<seg>.
+    mockAuth(true);
+    expect(asUser("alice", () => generatedZoneRel())).toBe(GENERATED_SUBDIR);
+    const r = asUser("alice", () => resolveWorkspaceWritePath("app/index.html", aliceRoot()));
+    expect(r.relativePath).toBe("generated/app/index.html");
+    expect(r.resolved).toBe(resolve(aliceRoot(), "generated/app/index.html"));
+  });
+
+  it("makes a sibling account unreachable by the boundary that already existed", () => {
+    // No new refusal rule: another account is simply outside this root, so it escapes the
+    // workspace boundary exactly like any other outside path. That is the point of moving the
+    // partition up — a mount of this root has no sibling in it to reach.
+    mockAuth(true);
+    const bobSegment = safeUserSegment("bob");
+    expect(() => asUser("alice", () => resolvePathWithinWorkspace(`../${bobSegment}/generated/x`, aliceRoot())))
+      .toThrow(/escapes workspace boundary/);
+  });
+
+  it("keeps the config zones out of the user root, where the shared root still has them", () => {
+    // agents/ jobs/ scenes/ tools/ describe the DEPLOYMENT and are swept by the config loader.
+    // They live at the shared root; the two workspaceAccess:"full" agents work from there.
+    mockAuth(true);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED)).startsWith(SHARED)).toBe(true);
+    expect(asUser("alice", () => userWorkspaceRoot(SHARED))).not.toBe(SHARED);
+  });
+
+  it("still re-roots a scope-confined agent into its own working zone", () => {
+    mockAuth(true);
+    const r = runWithRequestContext({ userId: "alice", workspaceScope: "generated" },
+      () => resolvePathWithinWorkspace("agents/10-core-agents.jsonc", aliceRoot()));
+    expect(r.relativePath).toBe("generated/agents/10-core-agents.jsonc");
+    expect(r.resolved.startsWith(aliceRoot())).toBe(true);
+  });
+});
+
+describe("deploymentWorkspaceRoot", () => {
+  // The inverse of userWorkspaceRoot, for the ledgers that describe the DEPLOYMENT rather than a
+  // person. Code holding only its own execution root would otherwise read one account's slice of
+  // them — which is empty, and silently so: an agent's lessons simply stop appearing.
+  it("maps a per-user root back to the shared one", () => {
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace", "users", "steffen-67913ee9be1346dc")))
+      .toBe(join("/srv", "workspace"));
+  });
+
+  it("leaves a root that is not per-user alone", () => {
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace"))).toBe(join("/srv", "workspace"));
+    expect(deploymentWorkspaceRoot(join("/tmp", "some-test-dir"))).toBe(join("/tmp", "some-test-dir"));
+    // "users" as a leaf is a directory named users, not a per-user root.
+    expect(deploymentWorkspaceRoot(join("/srv", "workspace", "users")))
+      .toBe(join("/srv", "workspace", "users"));
+  });
+
+  it("round-trips with userWorkspaceRoot", () => {
+    const shared = join("/srv", "workspace");
+    const perUser = join(shared, "users", "someone-0123456789abcdef");
+    expect(deploymentWorkspaceRoot(perUser)).toBe(shared);
   });
 });

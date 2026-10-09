@@ -1,0 +1,66 @@
+// GROUP "new" — the plan round fold (orchestration.planRoundFold, default on; commit 203cf5d).
+//
+// A record_plan that is the ONLY call of its response runs the executor inside the same tool call
+// (tools/turn-plan-tool.ts foldPlanExecution) instead of answering "CALL execute_plan", which cost a
+// whole orchestrator round on every planned turn (1-2 s warm, 8-13 s on a cold head).
+//
+// Events asserted, emitters verified in packages/core/src:
+//   plan_round_folded {agentName, steps}                         tools/turn-plan-tool.ts:236
+//   plan_executed {agentName, steps, done, failed, manual, pending, dispatched}
+//                                                                 tools/plan-executor.ts:481
+//   tools.mustCall record_plan = orchestrator tool_call_requested {tool} agent/runtime.ts:4234
+// The orchestrator's tool context has no currentAgentName, so both rows say agentName "main". The
+// folded executor is not a tool_call_requested of its own, so maxCalls.execute_plan only counts
+// calls the model made by hand after the fold.
+//
+// Why the message looks like this: >= 300 characters with three questions gives the turn the
+// multi-step PLAN FIRST guidance (agent/intent-classifier.ts looksMultiDomainResearch,
+// agent/turn-system-prompt.ts), which asks for record_plan as the only call of its response. Effort
+// is pinned to medium: under low effort a high-risk plan with 3+ delegate steps gets the budget
+// note instead of the fold. `--auto` because the harness answers no question or approval card.
+// Ground truth (eval/e2e/ENVIRONMENT.md): 146 employees (/), express shipping 14,90 € (/preise.html),
+// factory torque level 7 (/dokumentation.html).
+{
+  id: "new-plan-round-fold-site-facts",
+  title: "A recorded plan runs in the same call (plan round fold) and the summary carries three site facts",
+  group: "new",
+  tags: ["plan", "plan-round-fold", "site", "slow"],
+  description: "Guards the plan round fold (203cf5d): a record_plan that is its response's only call must run the plan itself (plan_round_folded, then plan_executed with at least one dispatched step) instead of spending another orchestrator round on execute_plan. Also checks the folded run's results reach the answer: 146 employees, express shipping 14,90 €, factory torque level 7.",
+  requires: ["model", "e2e-site"],
+  identity: "eval",
+  timeoutMs: 1200000,
+  steps: [
+    {
+      kind: "turn",
+      id: "three-facts-planned",
+      message: "Für eine kurze Firmennotiz brauche ich drei Angaben von der Website der Nordlicht Werkzeuge GmbH (http://www.nordlicht-werkzeuge.test/):\n1. Wie viele Mitarbeiterinnen und Mitarbeiter hat das Unternehmen laut Startseite?\n2. Was kostet dort der Expressversand?\n3. Welche Drehmomentstufe ist beim Akku-Schrauber NW-AS 18 laut Dokumentation ab Werk eingestellt?\nPlane die Schritte bitte kurz und arbeite den Plan dann ab. Fasse die drei Angaben am Ende in höchstens vier Sätzen zusammen. --auto",
+      effort: "medium",
+      timeoutMs: 900000,
+      expect: {
+        status: "ok",
+        reply: {
+          matches: [
+            // 146 employees, not 1460 or 2146.
+            "\\b146\\b",
+            // Express shipping 14,90 € (either decimal mark); the word boundary keeps out 114,90 and 24,90.
+            "\\b14[,.]90",
+            // Factory torque level 7: "Stufe 7", "Drehmomentstufe: 7", "level 7", "7. Stufe" — not "Stufe 17".
+            "(stufe|level|stage)\\D{0,12}7\\b|\\b7\\.?\\s*(stufe|level)",
+          ],
+          minChars: 40,
+        },
+        events: {
+          must: [
+            { type: "plan_round_folded", where: { "data.agentName": "main" }, min: 1, max: 3 },
+            { type: "plan_executed", where: { "data.agentName": "main", "data.dispatched": { gte: 1 } }, min: 1 },
+          ],
+        },
+        tools: {
+          mustCall: ["record_plan"],
+          maxCalls: { record_plan: 3, execute_plan: 2 },
+        },
+        agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+      },
+    },
+  ],
+}

@@ -83,4 +83,22 @@ describe("outcome prompt formatting", () => {
     expect(promptSection).not.toContain("Task B");
     expect(promptSection).not.toContain("researcher");
   });
+
+  it("keeps the success count, so a few partials among many runs do not read as an agent that always fails", () => {
+    // The note rides in the turn's tail since 2026-10-05, where a changing count costs nothing.
+    // Without the successes, 2 partials of 27 runs read like 2 of 2 under "prefer an alternative".
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-05T22:00:00.000Z"));
+
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-outcomes-prompt-"));
+    dirs.push(workspacePath);
+
+    const runs = 27;
+    for (let i = 0; i < runs; i += 1) {
+      const ts = new Date(Date.parse("2026-04-05T21:00:00.000Z") + i * 60_000).toISOString();
+      appendOutcome(workspacePath, { ts, agent: "researcher", task: `t${i}`, outcome: i < 2 ? "partial" : "success", iterations: 1, totalTokens: 10 });
+    }
+
+    expect(formatOutcomesForPrompt(workspacePath)).toContain("**researcher**: 0 failure(s), 2 partial(s) [25 success(es)]");
+  });
 });

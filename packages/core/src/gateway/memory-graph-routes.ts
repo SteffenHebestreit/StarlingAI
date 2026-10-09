@@ -14,8 +14,9 @@
  * MemGraph) is offline. Closure-free — module-level auth/getConfig + lazy imports.
  */
 import type { Hono } from "hono";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
 import { getConfig } from "../config/loader.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 
 export function registerMemoryGraphRoutes(app: Hono): void {
   app.get("/api/memory/entries", async (c) => {
@@ -27,7 +28,9 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = (await import("../config/loader.js")).getConfig();
       const records = scope === "user"
         ? listUserMemoryRecords(cfg.workspacePath)
-        : listWorkspaceMemoryRecords(cfg.workspacePath);
+        // The caller's own workspace root: under multi-user auth workspace memory is written per
+        // user, and this read the shared root, so a user's own entries never showed (2026-10-07).
+        : listWorkspaceMemoryRecords(userWorkspaceRoot(cfg.workspacePath));
       const limitRaw = Number(c.req.query("limit") ?? 200);
       // A non-numeric ?limit=abc → NaN → slice(0, NaN) silently returns ZERO records;
       // fall back to the default instead (mirrors sub-agent-routes.ts / health.ts).
@@ -65,7 +68,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = getConfig();
       const record = scope === "user"
         ? updateUserMemoryRecord(cfg.workspacePath, key, patch)
-        : updateWorkspaceMemoryRecord(cfg.workspacePath, key, patch);
+        : updateWorkspaceMemoryRecord(userWorkspaceRoot(cfg.workspacePath), key, patch);
       if (!record) return c.json({ error: "Memory entry not found" }, 404);
       return c.json({ scope, record });
     } catch (err) {
@@ -83,7 +86,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const cfg = getConfig();
       const deleted = scope === "user"
         ? deleteUserMemoryRecord(cfg.workspacePath, key)
-        : deleteWorkspaceMemoryRecord(cfg.workspacePath, key);
+        : deleteWorkspaceMemoryRecord(userWorkspaceRoot(cfg.workspacePath), key);
       if (!deleted) return c.json({ error: "Memory entry not found" }, 404);
       return c.json({ scope, key, deleted: true });
     } catch (err) {
@@ -100,7 +103,7 @@ export function registerMemoryGraphRoutes(app: Hono): void {
     try {
       const { computeMemoryCurationReport } = await import("../memory/steward.js");
       const cfg = getConfig();
-      return c.json(computeMemoryCurationReport(cfg.workspacePath));
+      return c.json(computeMemoryCurationReport(userWorkspaceRoot(cfg.workspacePath)));
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
@@ -113,8 +116,9 @@ export function registerMemoryGraphRoutes(app: Hono): void {
       const { computeMemoryCurationReport } = await import("../memory/steward.js");
       const { compactWorkspaceMemoryRecords } = await import("../memory/service.js");
       const cfg = getConfig();
-      const before = computeMemoryCurationReport(cfg.workspacePath);
-      const after = compactWorkspaceMemoryRecords(cfg.workspacePath);
+      const root = userWorkspaceRoot(cfg.workspacePath);
+      const before = computeMemoryCurationReport(root);
+      const after = compactWorkspaceMemoryRecords(root);
       return c.json({ before, after });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -141,10 +145,21 @@ export function registerMemoryGraphRoutes(app: Hono): void {
   });
 
   app.get("/api/graph/overview", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
+    const authHeader = c.req.header("Authorization");
+    const token = extractBearerToken(authHeader);
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    // Under multi-user auth the graph holds every account's memory, and this view checked the token
+    // alone (found 2026-10-08): it is an operator's, and shows the caller's own memory nodes and the
+    // shared root's, never another account's. Auth off: any signed token, every node, as before.
+    if (getConfig().auth?.enabled === true) {
+      const user = await authenticatedUser(authHeader);
+      if (!user) return c.json({ error: "Unauthorized" }, 401);
+      if (!userHasRole(user, "operator")) return c.json({ error: "Operator role required" }, 403);
+    }
     try {
-      const { isGraphDbAvailable, runCypher, toPlainRecords } = await import("../db/neo4j.js");
+      const { isGraphDbAvailable, runCypher } = await import("../db/neo4j.js");
+      const { graphMemoryReader, graphMemoryReadablePredicate, isGraphMemoryReadable } = await import("../memory/graph-service.js");
+      const { isNode } = await import("neo4j-driver");
       if (!isGraphDbAvailable()) {
         return c.json({ available: false, nodes: [], edges: [], note: "MemGraph is offline. Set MEMGRAPH_URL and start the memgraph service to enable the knowledge-graph view." });
       }
@@ -169,24 +184,36 @@ export function registerMemoryGraphRoutes(app: Hono): void {
            WITH n LIMIT $limit
            OPTIONAL MATCH (n)-[r]-(m)
            RETURN n, r, m`;
-      const result = await runCypher(cypher, { limit });
-      const records = result ? toPlainRecords(result) : [];
+      const reader = graphMemoryReader();
+      const result = reader
+        // Under multi-user auth the sample is drawn from the nodes this account may read, so its LIMIT
+        // counts those and not every account's, and a neighbour passes the same test.
+        ? await runCypher(
+          `MATCH (n${labelFilter ? `:${labelFilter}` : ""})
+           WHERE ${graphMemoryReadablePredicate("n")}
+           WITH n LIMIT $limit
+           OPTIONAL MATCH (n)-[r]-(m) WHERE ${graphMemoryReadablePredicate("m")}
+           RETURN n, r, m`,
+          { limit, ...reader },
+        )
+        : await runCypher(cypher, { limit });
       const nodesById = new Map<string, Record<string, unknown>>();
       const edgesByKey = new Map<string, Record<string, unknown>>();
+      // Reads the raw records: a node's identity, which names it in the view and ties its edges to it,
+      // does not survive toPlainRecords, and reading the flattened rows the view never showed a node.
       const captureNode = (raw: unknown): string | undefined => {
-        if (!raw || typeof raw !== "object") return undefined;
-        const node = raw as { identity?: { toString(): string } | string; labels?: string[]; properties?: Record<string, unknown> };
-        const id = typeof node.identity === "object" && node.identity !== null && "toString" in node.identity
-          ? (node.identity as { toString(): string }).toString()
-          : String(node.identity ?? "");
-        if (!id) return undefined;
+        if (!isNode(raw)) return undefined;
+        // The query filters already; this holds if it ever does not.
+        if (reader && !isGraphMemoryReadable(raw.labels, raw.properties, reader)) return undefined;
+        const id = String(raw.identity);
         if (!nodesById.has(id)) {
-          const props = node.properties ?? {};
-          const name = typeof (props as { name?: unknown }).name === "string" ? String((props as { name: string }).name) : "";
+          // A vector is no use to the view, and a node's own would outweigh everything else in it.
+          const props: Record<string, unknown> = { ...raw.properties };
+          delete props["embedding"];
           nodesById.set(id, {
             id,
-            labels: Array.isArray(node.labels) ? node.labels : [],
-            name,
+            labels: raw.labels,
+            name: typeof props["name"] === "string" ? props["name"] : "",
             properties: props,
           });
         }
@@ -208,10 +235,12 @@ export function registerMemoryGraphRoutes(app: Hono): void {
           properties: rel.properties ?? {},
         });
       };
-      for (const row of records) {
-        const sourceId = captureNode(row["n"]);
-        const targetId = captureNode(row["m"]);
-        captureEdge(row["r"], sourceId, targetId);
+      for (const record of result?.records ?? []) {
+        const sourceId = captureNode(record.get("n"));
+        // A row whose node this account may not read shows nothing of it, its edges included.
+        if (!sourceId) continue;
+        const targetId = captureNode(record.get("m"));
+        captureEdge(record.get("r"), sourceId, targetId);
       }
       return c.json({
         available: true,

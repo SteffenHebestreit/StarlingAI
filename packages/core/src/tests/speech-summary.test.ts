@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
+import { warmTextLanguageDetector } from "../agent/text-language.js";
 import { stripMarkdownForSpeech, detectSpeechSummaryLanguage } from "../gateway/speech-summary.js";
+
+// The detector loads lazily (text-language.ts); the gateway warms it at boot, a test does it here.
+beforeAll(async () => { await warmTextLanguageDetector(); });
 
 describe("stripMarkdownForSpeech", () => {
   it("removes fenced code blocks and replaces with placeholder", () => {
@@ -114,5 +118,20 @@ describe("detectSpeechSummaryLanguage", () => {
 
   it("returns null for empty string", () => {
     expect(detectSpeechSummaryLanguage("")).toBeNull();
+  });
+});
+
+describe("detectSpeechSummaryLanguage — any language, not just German or English", () => {
+  it("names a French reply so the summary stays French", () => {
+    expect(detectSpeechSummaryLanguage("Voici le résumé : le serveur répond à nouveau et la latence est revenue à la normale.")).toBe("French");
+  });
+
+  it("does not read English containing 'was' and 'die' as German", () => {
+    expect(detectSpeechSummaryLanguage("The die was cast, and the rollout was finished before noon.")).toBe("English");
+  });
+
+  it("returns null when there is too little prose to call", () => {
+    expect(detectSpeechSummaryLanguage("ok")).toBeNull();
+    expect(detectSpeechSummaryLanguage("```js\nconst x = 1;\n```")).toBeNull();
   });
 });

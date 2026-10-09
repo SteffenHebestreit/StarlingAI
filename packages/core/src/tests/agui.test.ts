@@ -31,14 +31,26 @@ function parseSseEvents(chunks: string[]): Array<Record<string, unknown>> {
     .flatMap(chunk => chunk.split("\n\n"))
     .map(part => part.trim())
     .filter(Boolean)
+    // Comment lines are part of the SSE grammar and carry no event — the keepalive
+    // heartbeat is written as one. A parser that JSON.parses them throws on a healthy
+    // stream, which is exactly what a real client would have done too.
+    .filter(part => !part.startsWith(":"))
     .map(part => part.replace(/^data:\s*/m, ""))
     .map(part => JSON.parse(part) as Record<string, unknown>);
+}
+
+/** SSE comment lines — the keepalive heartbeat. */
+function heartbeats(chunks: string[]): string[] {
+  return chunks.filter(chunk => chunk.startsWith(":"));
 }
 
 describe("AG-UI streaming", () => {
   afterEach(async () => {
     vi.resetModules();
     vi.unmock("../agent/runtime.js");
+    // The vi.unmock in a test's own finally did not undo its vi.doMock: a test that forced auth on
+    // left it on for every test after it.
+    vi.doUnmock("../config/loader.js");
     delete process.env["SAI_CONFIG_PATH"];
 
     const configLoader = await import("../config/loader.js");
@@ -47,6 +59,66 @@ describe("AG-UI streaming", () => {
     const session = await import("../agent/session.js");
     for (const active of session.getAllSessions()) {
       session.endSession(active.id);
+    }
+  });
+
+  it("heartbeats through a silent turn, and stops when the turn ends", async () => {
+    // THE DEFECT THIS FIXES, measured. A delegated sub-agent call produces no SSE traffic
+    // for its whole duration (15.8 minutes in the run that prompted this). Node's own
+    // fetch aborts a silent body at 300s, and the disconnect handler in agui.ts aborts the
+    // TURN — so the client's timeout cancelled the run it was waiting on and the gateway
+    // logged a sub-agent failure at iteration 0. Silence had to become non-silent.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-hb-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 1_800_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+
+    vi.doMock("../agent/runtime.js", () => ({
+      // A turn that produces NOTHING until released — the shape of a delegation.
+      runTurn: vi.fn(async () => {
+        await turnGate;
+        return {
+          response: "done",
+          toolCallsExecuted: 0,
+          guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          blocked: false,
+        };
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      const streamed = handleAguiStream(res as never, { message: "build something large" });
+
+      // Four heartbeat intervals of total silence — well past undici's 300s body timeout
+      // in real terms, and the window in which the old code wrote nothing at all.
+      await vi.advanceTimersByTimeAsync(62_000);
+      expect(heartbeats(res.chunks).length).toBeGreaterThanOrEqual(4);
+
+      releaseTurn();
+      await streamed;
+
+      // The interval is cleared on completion: a leaked one writes to a closed stream
+      // every 15s forever, which is worse than the silence it replaced.
+      const afterFinish = res.chunks.length;
+      await vi.advanceTimersByTimeAsync(62_000);
+      expect(res.chunks.length).toBe(afterFinish);
+
+      // ...and the heartbeats did not corrupt the event stream.
+      const events = parseSseEvents(res.chunks);
+      expect(events.some(event => event["type"] === "RUN_STARTED")).toBe(true);
+      expect(events.some(event => event["type"] === "RUN_FINISHED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      rmSync(tempDir, { recursive: true, force: true });
     }
   });
 
@@ -114,6 +186,215 @@ describe("AG-UI streaming", () => {
     }
   });
 
+  it("defers the gateway turn clock while the turn is still producing", async () => {
+    // Validation run 3 died at 31:05 — five seconds after the runtime supervisor judged it
+    // on_track and extended, and while the delegate was mid-composition. Three deferrals
+    // inside the runtime were overruled by the outermost clock, which could not see any of
+    // the evidence they were reading. It can now: every delegate chunk arrives here.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-live-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      // A tiny budget so the clock fires well inside the test; the ratio is what matters.
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 150 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const onSubAgentProgress = opts["onSubAgentProgress"] as ((e: Record<string, unknown>) => void) | undefined;
+        // Keep producing past the budget, exactly as a live delegate does.
+        for (let i = 0; i < 6; i++) {
+          onSubAgentProgress?.({ agentName: "web_coder", kind: "reasoning", iteration: i, reasoning: `step ${i}` });
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        (opts["onChunk"] as ((t: string) => void) | undefined)?.("the finished deliverable");
+        return {
+          response: "the finished deliverable", toolCallsExecuted: 1, guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false,
+        };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { message: "build it" });
+
+      const events = parseSseEvents(res.chunks);
+      // The turn survived its budget and delivered, instead of being cut mid-composition.
+      expect(events.some(e => e["type"] === "RUN_ERROR")).toBe(false);
+      expect(res.chunks.join("")).toContain("the finished deliverable");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("holds the gateway clock while a person works, and does not count the wait as silence", async () => {
+    // Review #18: the runtime leaves a human wait out of the delegation wait it reports, and this
+    // surface had no tracker to add it back — so a CAPTCHA handoff was neither held nor credited.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-human-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    // The loader fixes its source when it loads, and the cleanup before this test loaded it with
+    // no file set: fresh modules read this one.
+    vi.resetModules();
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const { userInputBroker } = await import("../agent/user-input-broker.js");
+        const sessionId = (opts["session"] as { id: string }).id;
+        await new Promise((r) => setTimeout(r, 9_000));
+        (opts["onChunk"] as (t: string) => void)("checking the login page");
+        await new Promise((r) => setTimeout(r, 1_000));
+        // browser_agent hands the browser to the person for 390 s.
+        const endWait = userInputBroker.beginHumanWait(`sub:${sessionId}:browser_agent:1790000000000`);
+        await new Promise((r) => setTimeout(r, 390_000));
+        endWait();
+        await new Promise(() => { /* then works on silently */ });
+        return undefined;
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      void handleAguiStream(res as never, { message: "log in and fetch the invoices" });
+      const errored = () => parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_ERROR");
+
+      // Far past the 95 s deadline, and past the liveness window, while the person works.
+      await vi.advanceTimersByTimeAsync(399_000);
+      expect(errored()).toBe(false);
+      // The wait ends at 400 s: the deadline moves to 485 s, and the turn last spoke 1 s before it.
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(errored()).toBe(false);
+      // A turn that stays quiet afterwards is still ended.
+      await vi.advanceTimersByTimeAsync(320_000);
+      expect(errored()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      (await import("../agent/user-input-broker.js")).userInputBroker.resetForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not hold a run for a wait an earlier run on the thread left open", async () => {
+    // Review of round 1, B #7: an AG-UI turn has no question channel, so its waits named no turn, and
+    // one it left open held every later run on the thread until the 24 h ceiling.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-leftover-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    let runs = 0;
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        runs += 1;
+        if (runs === 1) {
+          // A handoff whose tool never hears that the run is over.
+          const { userInputBroker } = await import("../agent/user-input-broker.js");
+          userInputBroker.beginHumanWait(`sub:${(opts["session"] as { id: string }).id}:browser_agent:1790000000000`);
+          return { response: "Handed the browser over.", blocked: false };
+        }
+        await new Promise(() => { /* silent */ });
+        return undefined;
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      await handleAguiStream(new FakeResponse() as never, { message: "log in", sessionId: "agui-thread-leftover" });
+      const res = new FakeResponse();
+      void handleAguiStream(res as never, { message: "fetch the invoices", sessionId: "agui-thread-leftover" });
+      // A 30 s budget and the synthesis grace: a silent run is ended on time.
+      await vi.advanceTimersByTimeAsync(96_000);
+      expect(parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_ERROR")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      (await import("../agent/user-input-broker.js")).userInputBroker.resetForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards a delegated sub-agent's thinking and tool calls to the stream", async () => {
+    // Regression: this path subscribed to none of the sub-agent progress events, so a turn
+    // that delegated a long build emitted heartbeats and nothing else for as long as the
+    // delegate ran. The stream must carry the child's reasoning and tool activity, tagged
+    // with the agent that produced it so a client can keep it out of the assistant's lane.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const onSubAgentProgress = opts["onSubAgentProgress"] as
+          ((event: Record<string, unknown>) => void) | undefined;
+
+        onSubAgentProgress?.({ agentName: "web_coder", kind: "started", iteration: 0 });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "reasoning", iteration: 1,
+          reasoning: "I need a 2.5D projection for the well",
+        });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "tool_start", iteration: 1,
+          toolName: "write_file", toolCallId: "call_1", args: { path: "index.html" },
+        });
+        onSubAgentProgress?.({
+          agentName: "web_coder", kind: "tool_done", iteration: 1,
+          toolName: "write_file", toolCallId: "call_1", result: "wrote 13474 bytes",
+        });
+        onSubAgentProgress?.({ agentName: "web_coder", kind: "completed", iteration: 2 });
+        (opts["onChunk"] as ((t: string) => void) | undefined)?.("done");
+
+        return {
+          response: "done", toolCallsExecuted: 1, guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false,
+        };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { message: "build tetris" });
+
+      const events = parseSseEvents(res.chunks);
+
+      // The child's chain-of-thought reaches the client, attributed and marked delegated so
+      // it is never spliced into the orchestrator's own thinking panel.
+      const thinking = events.filter(e => e["type"] === "THINKING_TEXT_MESSAGE_CONTENT"
+        && e["delegated"] === true);
+      expect(thinking).toHaveLength(1);
+      expect(thinking[0]?.["delta"]).toBe("I need a 2.5D projection for the well");
+      expect(thinking[0]?.["sourceAgent"]).toBe("web_coder");
+
+      const started = events.find(e => e["type"] === "TOOL_CALL_STARTED" && e["delegated"] === true);
+      expect(started?.["toolCallName"]).toBe("write_file");
+      expect(started?.["toolCallId"]).toBe("call_1");
+
+      const ended = events.find(e => e["type"] === "TOOL_CALL_ENDED" && e["delegated"] === true);
+      expect(ended?.["output"]).toBe("wrote 13474 bytes");
+
+      // started/completed are lifecycle, not content — they get their own event type rather
+      // than masquerading as assistant tool calls.
+      const status = events.filter(e => e["type"] === "SUB_AGENT_STATUS");
+      expect(status.map(e => e["status"])).toEqual(["started", "completed"]);
+      expect(status[0]?.["agentName"]).toBe("web_coder");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("runs the turn under the requested sessionId + authenticated userId (document-RAG scope)", async () => {
     // Regression: handleAguiStream previously called createSession without the
     // requested sessionId or a userId, so session/user-scoped documents dropped
@@ -154,7 +435,7 @@ describe("AG-UI streaming", () => {
     // Regression: handleAguiStream resolved an existing session purely by id with no
     // ownership check, so any authenticated caller who knew a victim's sessionId could
     // run a turn AS the victim (their history + user-scoped memory/documents). Mirrors
-    // the RPC canAccessSession invariant. Operators may still access any session.
+    // the RPC canAccessSession invariant. Admins may still access any session.
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-owner-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
@@ -187,10 +468,15 @@ describe("AG-UI streaming", () => {
       expect(ran).toHaveBeenCalledTimes(1);
 
       // A non-privileged "viewer" bob tries to drive it → opaque 404, turn never runs.
-      // (Instance operators/admins are trusted to access any session, mirroring RPC.)
       const resBob = new FakeResponse();
       await handleAguiStream(resBob as never, { sessionId: "victim-sess", message: "leak it" }, { userId: "bob", role: "viewer" });
       expect(resBob.statusCode).toBe(404);
+      expect(ran).toHaveBeenCalledTimes(1);
+
+      // Nor as an operator: that is the role every account gets by default, so it exempts no one.
+      const resOperator = new FakeResponse();
+      await handleAguiStream(resOperator as never, { sessionId: "victim-sess", message: "leak it" }, { userId: "bob", role: "operator" });
+      expect(resOperator.statusCode).toBe(404);
       expect(ran).toHaveBeenCalledTimes(1);
 
       // An admin (instance-wide) role may access any session.
@@ -206,6 +492,297 @@ describe("AG-UI streaming", () => {
       expect(ran).toHaveBeenCalledTimes(3);
     } finally {
       vi.unmock("../config/loader.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, does not start a session under an id in a namespace the system mints ids in", async () => {
+    // Regression (review, 2026-10-08): an id no session had was adopted as it came. An A2A run has
+    // no session record, and its id is predictable from the account's name, so bob could start a
+    // session under alice's a2a-in run id (or under a sub-agent id of that run), own it, and his
+    // turn, its sub-agents and the shared-facts route read the facts bucket alice's run wrote.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-reserved-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const session = await import("../agent/session.js");
+      const { safeUserSegment } = await import("../runtime/user-scope.js");
+      const { INTERNAL_SESSION_ID_PREFIXES } = await import("../agent/session-ids.js");
+      const aliceRun = `a2a-in:${safeUserSegment("alice")}:ferry-plan`;
+
+      for (const sessionId of [
+        aliceRun,
+        `sub:${aliceRun}:researcher:1790000000000`,
+        `workflow:${aliceRun}:daily_brief:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11`,
+        "mcp:alice:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11",
+        // Every namespace the system mints ids in, fed:, a2a-out:, eval: and job: among them.
+        ...INTERNAL_SESSION_ID_PREFIXES.map((prefix) => `${prefix}alice:0b6e1f62-5d0c-4a7e-9a52-3c1f0f9d2b11`),
+      ]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId, message: "what did she find?" }, { userId: "bob", role: "operator" });
+        expect(res.statusCode, sessionId).toBe(404);
+        expect(session.getSessionRecord(sessionId), sessionId).toBeUndefined();
+      }
+      expect(ran).not.toHaveBeenCalled();
+
+      // A client that pre-generates a UUID still starts its own session under it.
+      const ownId = "5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90";
+      const resOwn = new FakeResponse();
+      await handleAguiStream(resOwn as never, { sessionId: ownId, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resOwn.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(session.getSessionRecord(ownId)?.userId).toBe("bob");
+    } finally {
+      vi.unmock("../config/loader.js");
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, does not start a session under another session's id with an :ephemeral tail", async () => {
+    // Regression (review, 2026-10-09): `<alice's id>:ephemeral` is in no namespace the system mints
+    // ids in, so it was adopted. A sub-agent run of that session is
+    // `sub:<alice's id>:ephemeral:<agent>:<stamp>`, which parses back to alice's session as its root
+    // (`ephemeral` reads as an ephemeral agent's namespace), and her shared facts, turn steering,
+    // plan and grants were bob's runs' too. Only an id with no colon may be chosen now.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-ephemeral-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const session = await import("../agent/session.js");
+      const { rootSessionOf } = await import("../agent/session-ids.js");
+      const alice = session.createSession({ channel: "webchat", userId: "alice" });
+      const borrowed = `${alice.id}:ephemeral`;
+      // What made the id worth having: bob's sub-agent runs under it resolve to alice's session.
+      expect(rootSessionOf(`sub:${borrowed}:researcher:1790000000000`)).toBe(alice.id);
+
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: borrowed, message: "what is she planning?" }, { userId: "bob", role: "operator" });
+      expect(res.statusCode).toBe(404);
+      expect(session.getSessionRecord(borrowed)).toBeUndefined();
+      expect(ran).not.toHaveBeenCalled();
+
+      // A plain UUID a client pre-generates is still bob's to start a session under.
+      const ownId = "9c4e7b21-3a6f-4d58-8e0b-1f2a3c4d5e6f";
+      const resOwn = new FakeResponse();
+      await handleAguiStream(resOwn as never, { sessionId: ownId, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resOwn.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(session.getSessionRecord(ownId)?.userId).toBe("bob");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("under active auth, refuses a sessionId that is not a string before looking it up", async () => {
+    // Regression (review, 2026-10-09): `["<alice's id>"]` missed every lookup keyed by the value
+    // itself (no session record, so no owner gate), passed the id-shape check as its string, and a
+    // session owned by bob was created with the array as its id. Its sub-agent runs' root, and the
+    // Redis keys built from the id, were alice's session.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-type-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+    vi.doMock("../config/loader.js", async () => {
+      const actual = await vi.importActual<typeof import("../config/loader.js")>("../config/loader.js");
+      return {
+        ...actual,
+        getConfig: () => {
+          const cfg = actual.getConfig();
+          return { ...cfg, auth: { ...cfg.auth, enabled: true, provider: "builtin", users: [] } };
+        },
+      };
+    });
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const { clientMayCreateSessionId } = await import("../gateway/session-route-access.js");
+      const session = await import("../agent/session.js");
+      const alice = session.createSession({ channel: "webchat", userId: "alice" });
+      const before = session.getAllSessions().length;
+
+      for (const sessionId of [[alice.id], [`${alice.id}:ephemeral`], { toString: () => alice.id }, 42]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId: sessionId as never, message: "what is she planning?" }, { userId: "bob", role: "operator" });
+        expect(res.statusCode, JSON.stringify(sessionId)).toBe(400);
+        expect(JSON.parse(res.chunks.join(""))).toEqual({ error: "sessionId must be a string" });
+      }
+      expect(ran).not.toHaveBeenCalled();
+      expect(session.getAllSessions()).toHaveLength(before);
+      // The id-shape check on its own refuses a non-string too.
+      expect(clientMayCreateSessionId([alice.id])).toBe(false);
+      expect(clientMayCreateSessionId(alice.id)).toBe(true);
+
+      // A null id is no id: a new session of bob's own, as before.
+      const resNull = new FakeResponse();
+      await handleAguiStream(resNull as never, { sessionId: null as never, message: "hi" }, { userId: "bob", role: "operator" });
+      expect(resNull.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with auth off, takes a non-string sessionId as it comes, as before", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-type-off-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const ran = vi.fn(async () => ({ response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn: ran }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const { clientMayCreateSessionId } = await import("../gateway/session-route-access.js");
+      const res = new FakeResponse();
+      await handleAguiStream(res as never, { sessionId: ["5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90"] as never, message: "hi" });
+      expect(res.statusCode).toBe(200);
+      expect(ran).toHaveBeenCalledTimes(1);
+      expect(clientMayCreateSessionId(["5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90"])).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("with auth off, starts a session under any id a request names, as before", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-reserved-off-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let seenSessionId: string | undefined;
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        seenSessionId = (opts["session"] as { id: string }).id;
+        return { response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      for (const sessionId of ["a2a-in:ferry-plan", "5f0c2a8e-7b1d-4c3e-9f6a-2d8b4e1c7a90:ephemeral"]) {
+        const res = new FakeResponse();
+        await handleAguiStream(res as never, { sessionId, message: "hi" });
+        expect(res.statusCode, sessionId).toBe(200);
+        expect(seenSessionId).toBe(sessionId);
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+/**
+ * D5 PARITY — the gateway clock must pause while the turn waits on a child.
+ *
+ * Run d5747607 is the bill for this being absent. A resume build was making real progress —
+ * six successful edit_file calls in its final iteration, the artifact grown 9,410 → 13,474
+ * bytes — and the turn was aborted at 31:05: exactly turnTimeoutMs (30 min) plus the 65s
+ * synthesis grace, while the delegation alone had consumed 25 of those minutes. rpc.ts has
+ * excluded delegation wait since D5; this path never did, so the same build survives on the
+ * dashboard and dies over HTTP.
+ *
+ * The second cost is worse than the lost build: an aborted turn never reaches finalization,
+ * so QA and the artifact probe both logged not_run. The clock killed the only gate that
+ * would have reported the artifact unfinished.
+ */
+describe("AG-UI turn deadline", () => {
+  it("hands runTurn a delegation-wait hook, and extending it defers the abort", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-d5-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    let seenHook: ((ms: number) => void) | undefined;
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        seenHook = opts["onDelegationWaitMs"] as ((ms: number) => void) | undefined;
+        await turnGate;
+        return {
+          response: "built it",
+          toolCallsExecuted: 6,
+          guardrailEvents: [],
+          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+          blocked: false,
+        };
+      }),
+    }));
+
+    vi.useFakeTimers();
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const res = new FakeResponse();
+      const streamed = handleAguiStream(res as never, { message: "build the game" });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // THE WIRING. Without the hook the runtime cannot tell this clock anything.
+      expect(typeof seenHook, "runTurn must receive onDelegationWaitMs").toBe("function");
+
+      // A child blocked the turn for 25s of a 30s budget — push the deadline out by that.
+      seenHook!(25_000);
+
+      // Past the ORIGINAL deadline (30s + 65s grace). Un-extended, the turn is dead here.
+      await vi.advanceTimersByTimeAsync(96_000);
+      const events = parseSseEvents(res.chunks);
+      expect(
+        events.some((e) => e["type"] === "RUN_ERROR"),
+        "the turn must not be aborted while its budget was paused for a child",
+      ).toBe(false);
+
+      releaseTurn();
+      await streamed;
+      expect(parseSseEvents(res.chunks).some((e) => e["type"] === "RUN_FINISHED")).toBe(true);
+    } finally {
+      vi.useRealTimers();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -36,6 +36,37 @@ describe("filesystem tools", () => {
     for (const p of [".env.example", "src/index.ts", "uploads/a.png", "notes.md"]) {
       expect(isSensitiveWorkspacePath(p)).toBe(false);
     }
+  });
+
+  it("read_file on a missing file says that creating it is not changing it, on a line of its own", async () => {
+    // E2E guards: the coder was told to change a file and not to create one. read_file said
+    // "File not found", and the coder created the file with write_file anyway.
+    const { getTool } = await import("../tools/registry.js");
+    const { MISSING_FILE_IS_NOT_A_CHANGE } = await import("../tools/filesystem.js");
+    const r = await getTool("read_file")!.execute(
+      { path: "generated/e2e-guards/sommeraktion.html" },
+      { sessionId: "session-read-missing", workspacePath: tempDir },
+    );
+    expect(r.success).toBe(false);
+    // The first line, which audit rows and failure lists keep, is what it always was.
+    expect(r.error).toBe(`File not found: generated/e2e-guards/sommeraktion.html\n${MISSING_FILE_IS_NOT_A_CHANGE}`);
+    expect(MISSING_FILE_IS_NOT_A_CHANGE).not.toContain("\n");
+    expect(MISSING_FILE_IS_NOT_A_CHANGE).toMatch(/report it as missing instead of creating it/);
+  });
+
+  it("edit_file on a missing file says the same, so the direct path to a change carries it too", async () => {
+    // edit_file is the tool for changing a file. A coder told to change a missing file that goes
+    // to it first, rather than to read_file, meets the missing file there.
+    const { getTool } = await import("../tools/registry.js");
+    const { MISSING_FILE_IS_NOT_A_CHANGE } = await import("../tools/filesystem.js");
+    const r = await getTool("edit_file")!.execute(
+      { path: "generated/e2e-guards/sommeraktion.html", old_string: "20 %", new_string: "25 %" },
+      { sessionId: "session-edit-missing", workspacePath: tempDir },
+    );
+    expect(r.success).toBe(false);
+    // The first line, which audit rows and failure lists keep, is what it always was.
+    expect(r.error).toBe(`File not found: generated/e2e-guards/sommeraktion.html\n${MISSING_FILE_IS_NOT_A_CHANGE}`);
+    expect(existsSync(join(tempDir, "generated/e2e-guards/sommeraktion.html"))).toBe(false);
   });
 
   it("reads jsonc files used by workspace agent shards", async () => {
@@ -436,5 +467,71 @@ describe("filesystem tools — sensitive-path denylist (#9)", () => {
     if (!result.success) {
       expect(result.error).not.toMatch(/protected workspace data/i);
     }
+  });
+
+  // The denylist also covers `*.env` files at any depth (prod.env), and a runtime's env accessor
+  // ends the same way — so a coder's everyday `node -e "…process.env…"` was refused as a secret read.
+  it("lets runtime env accessors through but still blocks *.env files", async () => {
+    await import("../tools/shell.js");
+    const { getTool } = await import("../tools/registry.js");
+    const ctx = { sessionId: "s-shell-env-accessor", workspacePath: tempDir };
+    const shell = getTool("shell_exec")!;
+
+    for (const command of ['node -e "void process.env"', "grep -rn import.meta.env src", "grep -rn Deno.env ."]) {
+      const result = await shell.execute({ command }, ctx);
+      if (!result.success) {
+        expect(result.error, `"${command}" hit the guard`).not.toMatch(/protected workspace data/i);
+      }
+    }
+    for (const command of ["cat prod.env", "cat config/process.env", "cp docker/staging.env /tmp/x"]) {
+      const result = await shell.execute({ command }, ctx);
+      expect(result.success, `expected "${command}" to be blocked`).toBe(false);
+      expect(result.error).toMatch(/protected workspace data/i);
+    }
+  });
+});
+
+/**
+ * A deck with inlined photos is a text file of several megabytes (run c297c5ea: 3.9 MB). read_file and
+ * edit_file refused anything over 1 MB, so the agent that built the deck could neither check nor fix it.
+ */
+describe("read_file and edit_file on a generated file of several megabytes", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "starlingai-fs-big-"));
+  const photo = `<img src="data:image/jpeg;base64,${"QUJD".repeat(750_000)}">`;   // one 3 MB line
+
+  beforeAll(async () => {
+    mkdirSync(join(tempDir, "generated", "deck"), { recursive: true });
+    writeFileSync(join(tempDir, "generated", "deck", "index.html"),
+      ["<!DOCTYPE html>", `  ${photo}`, "<script>Reveal.initialize({ hash: true });</script>", ""].join("\n"));
+    await import("../tools/filesystem.js");
+  });
+
+  const ctx = { sessionId: "s", workspacePath: tempDir };
+
+  it("reads a window of it with the long line clipped", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("read_file")!.execute({ path: "generated/deck/index.html", offset: 1, limit: 3 }, ctx);
+    expect(r.success).toBe(true);
+    const out = String(r.output);
+    expect(out).toContain("3\t<script>Reveal.initialize({ hash: true });</script>");
+    expect(out).toMatch(/2\t {2}<img src="data:image\/jpeg;base64,QUJD.*\[\d+ chars not shown\]/);
+    expect(out.length).toBeLessThan(3_000);
+  });
+
+  it("reads it unwindowed as head and tail", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("read_file")!.execute({ path: "generated/deck/index.html" }, ctx);
+    expect(r.success).toBe(true);
+    expect(r.metadata?.["truncated"]).toBe(true);
+    expect(String(r.output).length).toBeLessThan(20_000);
+  });
+
+  it("edits it", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const r = await getTool("edit_file")!.execute(
+      { path: "deck/index.html", old_string: "hash: true", new_string: "hash: true, slideNumber: true" }, ctx);
+    expect(r.success).toBe(true);
+    const back = await getTool("read_file")!.execute({ path: "generated/deck/index.html", offset: 3, limit: 1 }, ctx);
+    expect(String(back.output)).toContain("slideNumber: true");
   });
 });

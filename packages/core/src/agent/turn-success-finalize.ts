@@ -61,11 +61,19 @@ export interface FinalizeSuccessfulTurnParams {
   freshnessSensitive: boolean;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
+  /**
+   * The cached trajectory the model was SHOWN this turn (in the prompt as sent, after the budget
+   * trimmer), or null. The runtime passes only that one: a lookup hit that was never injected —
+   * every hit under leanContextInjection, or one the trimmer dropped — took no part in the answer,
+   * so it is neither logged as used nor invalidated by it (finding 2026-10-05).
+   */
   injectedTrajectoryIdentity: { normalizedQuery: string; finishedAt: string } | null;
   userMessage: string;
   guardrailEvents: TurnOutput["guardrailEvents"];
   artifactCount?: number;
   qualitySignals?: TurnQualitySignals;
+  /** The turn's latest delegation masked figures no tool had returned (see buildTurnQualityScorecard). */
+  delegatedFiguresUnobserved?: boolean;
 }
 
 /**
@@ -81,6 +89,7 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     delegationCount, shareFindingCount, forcedSynthesisFired, consecutiveDelegationFailures,
     sharedFindingsThisTurn, freshnessSensitive, injectedSkillSlugs, heldOutSkillSlugs,
     injectedTrajectoryIdentity, userMessage, guardrailEvents, artifactCount, qualitySignals,
+    delegatedFiguresUnobserved,
   } = p;
 
   persistTurnState(session, finalResponse, getTurnSwarmState());
@@ -120,6 +129,10 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     blocked: false,
     artifactCount: artifactCount ?? 0,
     quality: qualitySignals ?? createTurnQualitySignals(),
+    // Most turns are scored here, at their normal ending, so the flag has to reach this builder
+    // too: without it the turn of E2E 2026-10-07 still scored "completed" after its honest
+    // synthesis, because only the runtime's early returns read the flag.
+    delegatedFiguresUnobserved,
   });
   // G33: Write trajectory for future cache reuse
   if (shareFindingCount > 0 && finalResponse.length > 50) {

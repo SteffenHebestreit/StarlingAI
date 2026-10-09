@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { PRODUCT } from "./product.mjs";
-import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
+import { NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
+// Shard walk, order (code point, not locale) and merge live in one place so the routing
+// taxonomy check (routing-taxonomy-check.mjs) merges exactly what this build does.
+import { collectShardPaths, deepMerge } from "./config-shards.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultSourceFile = join(repoRoot, PRODUCT.configFileName);
@@ -116,7 +119,7 @@ function buildTwoZone() {
 
   if (existsSync(defaultConfigDir) && isDir(defaultConfigDir)) {
     // Two-zone layout
-    for (const shardPath of collectShardPaths(defaultConfigDir)) {
+    for (const shardPath of collectShardPaths(defaultConfigDir, { excludeZones: NON_CONFIG_BASE_ZONES })) {
       const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
       merged = deepMerge(merged, shardRaw);
     }
@@ -129,7 +132,7 @@ function buildTwoZone() {
   } else if (existsSync(legacySourceDir) && isDir(legacySourceDir)) {
     // Legacy single-directory layout
     console.warn("[config-layout] WARNING: Using legacy starling_config/ — migrate to config/ + workspace/ layout");
-    for (const shardPath of collectShardPaths(legacySourceDir, { excludeZones: NON_CONFIG_WORKSPACE_ZONES })) {
+    for (const shardPath of collectShardPaths(legacySourceDir, { excludeZones: [...NON_CONFIG_BASE_ZONES, ...NON_CONFIG_WORKSPACE_ZONES] })) {
       const shardRaw = JSON5.parse(readFileSync(shardPath, "utf8"));
       merged = deepMerge(merged, shardRaw);
     }
@@ -259,52 +262,6 @@ function writeShard(targetDir, relativePath, payload) {
   const fullPath = join(targetDir, relativePath);
   mkdirSync(dirname(fullPath), { recursive: true });
   writeFileSync(fullPath, `${JSON.stringify(cleaned, null, 2)}\n`, "utf8");
-}
-
-function collectShardPaths(sourceDir, { excludeZones = [] } = {}) {
-  if (!existsSync(sourceDir)) return [];
-  const shardPaths = [];
-  const skipZones = new Set(excludeZones);
-
-  const visit = (currentDir, depth) => {
-    for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
-      const nextPath = join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        // SECURITY: skip depth-0 working zones (generated/, uploads/, tools/) so
-        // an agent-written or uploaded data.json with a top-level "agents" key
-        // cannot merge into the compiled config. Mirrors the runtime loader's
-        // NON_CONFIG_WORKSPACE_ZONES guard, closing the build-vs-loader gap.
-        if (depth === 0 && skipZones.has(entry.name)) continue;
-        visit(nextPath, depth + 1);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const extension = extname(entry.name).toLowerCase();
-      if (extension !== ".json" && extension !== ".jsonc") continue;
-      if (entry.name === "runtime.overrides.json") continue;
-      shardPaths.push(nextPath);
-    }
-  };
-
-  visit(sourceDir, 0);
-  return shardPaths.sort((left, right) => relative(sourceDir, left).localeCompare(relative(sourceDir, right)));
-}
-
-function deepMerge(base, overlay) {
-  const merged = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    const baseValue = merged[key];
-    if (isPlainObject(baseValue) && isPlainObject(value)) {
-      merged[key] = deepMerge(baseValue, value);
-      continue;
-    }
-    merged[key] = value;
-  }
-  return merged;
-}
-
-function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isDir(path) {

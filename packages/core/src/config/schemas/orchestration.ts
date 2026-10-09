@@ -19,12 +19,21 @@ export const OrchestrationSchema = z.object({
    *  checkpoint that QA checks against and the operator dock can surface for
    *  high-stakes approval. Trivial turns still answer directly. Default: true. */
   planFirst: z.boolean().default(true),
+  /** When true, the per-turn guidance (language/identity, plan nudge, discovery capsule, shared
+   *  findings, …) is placed AFTER the conversation history instead of inside the leading system
+   *  run, so the leading run — base prompt, orchestration module, date — is byte-identical across
+   *  the iterations of a turn and the provider's KV-cache prefix survives them. Measured on the
+   *  single-GPU deployment: an identical prefix prefills in ~1.4 s, one with 200 varying
+   *  characters ahead of it in ~6.3 s; the ~9K-token tool block sits behind the head. Off restores
+   *  the previous all-system-leading shape. Default: true. */
+  stablePromptPrefix: z.boolean().default(true),
   /** When true, high-stakes turns (sourced factual claims, approval-gated
    *  actions, or a plan the orchestrator flagged high-risk) get an automatic
    *  verification pass that checks the answer against the plan's acceptance
-   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip QA
-   *  entirely. Source-sensitive turns reuse the existing evidence backstop.
-   *  Default: true. */
+   *  criteria and repairs it if it falls short. Low-stakes/chat turns skip this
+   *  one-shot check — but not QA: while qaDeliveryLoop is on, the loop replaces it
+   *  on every plan with acceptance criteria, whatever the risk tier. Source-sensitive
+   *  turns reuse the existing evidence backstop. Default: true. */
   riskGatedQA: z.boolean().default(true),
   /** Plan-driven continuation (audit 763394da). The post-orchestration disposition
    *  defaults to "synthesize" after the FIRST successful delegation and never
@@ -40,6 +49,20 @@ export const OrchestrationSchema = z.object({
    *  it stays gated until a pass^k eval confirms it doesn't over-run single-
    *  deliverable turns. */
   planDrivenContinuation: z.boolean().default(false),
+  /** Plan round fold (latency lever plan_round_fold, finding 2026-10-05). record_plan used to
+   *  only save the plan and answer "CALL execute_plan", so every planned turn paid one extra
+   *  orchestrator round just to issue that call: 1-2 s warm, 8-13 s on a cold head, more with
+   *  thinking on. When true, a record_plan that was the ONLY call of its response and whose plan
+   *  has a dispatchable step (a delegate step, a reuse step naming its workflow, a direct step
+   *  naming its tool) runs the execute_plan executor in the same tool call and returns the plan
+   *  receipt and the execution report together. It does not fold while a plan approval is
+   *  pending or was refused (the approval pause still runs first), when the low-effort budget
+   *  warning fires (the orchestrator decides first), when execute_plan is outside the caller's
+   *  grant or at its per-turn cap, or for a sub-agent. The folded steps are reported to the turn
+   *  like execute_plan's (nestedCalls), so the delegation tally, per-turn tool counts and
+   *  planDrivenContinuation read the same outcomes. Off restores the two-round shape.
+   *  Default: true. */
+  planRoundFold: z.boolean().default(true),
   /** Autonomous-mode anti-refusal (audit 763394da). `--auto` sets autoApprove
    *  (auto-approve tool calls) but does NOT tell the model "execute autonomously,
    *  don't ask" — so an --auto multi-step build was met with a clarifying question
@@ -295,6 +318,19 @@ export const OrchestrationSchema = z.object({
   /** Max improvement rounds for the QA delivery loop (each round = one check + one
    *  improve call). Bounded low because every round is extra slow-model latency. */
   qaDeliveryLoopMaxRounds: z.number().int().min(1).max(4).default(2),
+  /** Let the QA VERDICT calls reason before they answer. Default OFF: the delivery-loop verdict
+   *  and the deliverable-consistency verdict run thinking-off for that one call
+   *  (enableThinking:false + reasoningEffort:"none" as per-call controls — the provider, its
+   *  preset and its failover chain stay the caller's own). The reply is one line, PASS or
+   *  FAIL: …, and on the thinking-on orchestrator it cost 30.1 s and 47.4 s per verdict
+   *  (1,646 and 2,682 completion tokens) in session f4ebf47b, 77 s of a 145 s turn. The owner's
+   *  serial, cache-defeating measurement (2026-09-25, same decision, same input): the 35B
+   *  classified 1.4–5× faster with reasoning off, and with it on it sometimes returned NO
+   *  answer — ~600 thinking tokens, then empty content. True brings the deliberation back
+   *  without a code change. The improve (rewrite) call is not a verdict and this switch does
+   *  not touch it: with no synthesis tier it runs thinking-off (forceSynthesis's fallback), and
+   *  with tiers.synthesis set it runs as that tier's model is configured. */
+  qaVerdictReasoning: z.boolean().default(false),
   /** When true, the QA delivery loop escalates to the COORDINATOR after a cheap
    *  re-synthesis round has already failed the re-check — handing the flaws back to
    *  mission_coordinator to make a plan and do NEW work (re-research / re-build),
@@ -389,6 +425,50 @@ export const OrchestrationSchema = z.object({
    *  fails a write (work is never lost); the size/prefix gates keep legitimate full rewrites
    *  clear. Default OFF until pass^k confirms no false nudges. */
   detectWriteChurnOverwrite: z.boolean().default(false),
+  /** Staged artifact builds — MECHANICAL half (sub-agent.ts). A write-capable specialist
+   *  handed a whole-artifact spec tries to emit the whole artifact in ONE completion, which
+   *  does not land on this hardware: a live probe against the serving model showed a 46-char
+   *  task reasoning 109 chars and calling its tool in ~4 s, while a 2,400-char 8-group build
+   *  spec produced 60,385 chars of reasoning, ZERO tool calls, and was guillotined by the
+   *  provider stream cap (run f08195d2 — 20,129 completion tokens, resultLength 37). Thinking
+   *  cannot be disabled on this endpoint (every documented switch measured inert) and
+   *  tool_choice:"required" makes it worse, so the only controlling variable is TASK SIZE IN
+   *  ONE COMPLETION. When true, the runner classifies such runs structurally (agent holds BOTH
+   *  write_file and edit_file AND the task exceeds STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced
+   *  and quoted input excluded unless the agent holds a builder tool: stagedBuildTaskChars —
+   *  capability + size only, never topic words), emits a staged_artifact_build_detected audit
+   *  record, and reports the files a cut-off build actually left on disk in its partial output
+   *  instead of discarding them. Purely additive: no prompt text, no routing, no tool-list
+   *  change — so it ships default ON. The prompt half is a separate flag below. */
+  stagedArtifactBuilds: z.boolean().default(true),
+  /** Staged artifact builds — PROMPT half (sub-agent.ts system-prompt assembly). When true, a
+   *  run classified by `stagedArtifactBuilds` above also receives a staged-build directive in
+   *  its system prompt at iteration 0: pass 0 writes a minimal but VALID skeleton with a unique
+   *  anchor comment per stub via write_file, each later pass fills exactly ONE stub via
+   *  edit_file against that anchor, and a final read_file verifies the artifact closes. Names
+   *  only capabilities that exist (write_file overwrite/append, edit_file's exact unique-match
+   *  replacement, read_file, grep_files) — there is no range/line patch tool.
+   *
+   *  Now defaults ON. It shipped OFF pending a pass^k eval, and the consequence was run
+   *  3959f3ac: `sub_agent_staged_build_detected` fired with `directiveInjected: false`, so
+   *  the mechanism was reporting itself as active while the model never saw a word of it.
+   *  That run also settled the eval question the flag was waiting on — the staged shape is
+   *  what made the build land (13 iterations, 5 files, reasoning collapsed from 23,876 chars
+   *  on the planning pass to ~100-1,300 per fill pass) — but it landed off backend_coder's
+   *  own hand-copied staging paragraph, which only 4 of the 39 write+edit-capable agents
+   *  carry. The other 35, and every ephemeral, still had nothing. It is inert unless
+   *  stagedArtifactBuilds is also true. A fresh build by a run that holds a one-shot assembler
+   *  (ONE_SHOT_ASSEMBLER_TOOLS: generate_presentation, generate_docx, generate_pptx, render_pdf)
+   *  gets no directive, because its generate_* call is the build.
+   *
+   *  THE SCHEMA DEFAULT IS WHAT A FORK INHERITS, and this is a PROMPT change: it rewrites the
+   *  system prompt of every write+edit-capable agent whose task passes the size threshold — 39
+   *  of the 49 shipped agents, plus every ephemeral. The measurement that settled it (run
+   *  3959f3ac) is one deployment's, on one serving model, which is the kind of evidence the
+   *  pass^k gate exists to generalise. So it ships default OFF and this deployment turns it ON
+   *  explicitly in config/gateway/40-orchestration.jsonc, where that measurement is recorded
+   *  beside it — a fork inherits the mechanism and chooses the prompt for itself. */
+  stagedArtifactBuildDirective: z.boolean().default(false),
   /** Cross-agent artifact-reuse directive (sub-agent.ts formatArtifactReferencesForSharedContext).
    *  Artifacts a sub-agent produces this turn are already surfaced to LATER delegated agents inside
    *  the shared partial-results context, but as a PASSIVE "Artifacts generated by this result" list —
@@ -420,6 +500,36 @@ export const OrchestrationSchema = z.object({
    *  context still flows from the original run's shared facts. Default OFF until pass^k eval
    *  (behavioral: a retried graph now reuses prior results instead of re-running). */
   durableTaskGraph: z.boolean().default(false),
+  /** Write ownership among the concurrently running siblings of one run_task_graph or
+   *  parallel_delegate (agent/sibling-write-ownership.ts). A path that exactly one running
+   *  sibling's task names is that sibling's; any other path is the first running sibling's to
+   *  write it; another running sibling's write_file / edit_file / generate_* on it is refused with
+   *  a tool result that names the owner. A finished sibling owns nothing, so a dependent node may
+   *  write after its prerequisite. Session c297c5ea: the write_paper node edited the deck twice
+   *  while write_presentation was building it and never wrote paper.md; the three task texts named
+   *  three different files, so only a check at write time could see it. Structural (path tokens
+   *  and path equality), no prompt text. Default ON as a correctness fix; false is the escape hatch
+   *  if a fan-out ever needs siblings to co-write one file. */
+  siblingWriteOwnership: z.boolean().default(true),
+  /** Loop-aware delegation (agent/delegation-loop-notes.ts), for a delegated run the loop brake,
+   *  the busy-stall supervisor or the warden ended, or that used up its iteration limit. Session
+   *  c297c5ea: a content_writer that looped 199 iterations on one grep reached the orchestrator as
+   *  "PARTIAL PROGRESS … Do NOT treat this as a workflow failure. Proceed with any dependent
+   *  tools.", and the artifact gate then sent a fresh mission_coordinator that ran 1,990 s against
+   *  a 720 s timeout. When true:
+   *   (a) that partial's frame says what the run looped on (tool, target, repeats) and "Do NOT
+   *       delegate again for this task in this turn." instead of "Proceed with any dependent tools"
+   *       — the "PARTIAL PROGRESS" verdict line stays byte-identical for the six sniffers on it;
+   *   (b) a later run of the same agent in the same turn is told the looped call (agent + tool +
+   *       target) in its context;
+   *   (d) when the runs that produced a broken artifact looped, the artifact gate's repair is one
+   *       direct builder of that agent instead of a fresh mission_coordinator (and no repair when
+   *       only a coordinator looped: the file ships with its caveat);
+   *   (e) the max-effort turn oversight counts a loop-ended run as a failure for its churn signal
+   *       (a looped partial arrives as delegationSucceeded:true, so it was invisible there).
+   *  Changes what the orchestrator reads and does, so default OFF until a pass^k A/B shows the
+   *  same-turn re-dispatch rate drops without the deliverable rate dropping. */
+  loopAwareDelegation: z.boolean().default(false),
   /** Clamp a sub-agent's turn timeout to the PARENT turn's remaining budget (sub-agent.ts). A leaf
    *  agent's timeout derives from its own config / the gateway timeout, ignoring how much of the parent
    *  turn is left — so a researcher was handed 600s under a 120s low-effort turn, planned for 10 min,
@@ -610,6 +720,138 @@ export const OrchestrationSchema = z.object({
    *  once a delegation/workflow has run so the model can synthesize, and only forces before
    *  the routing-nudge fallback. Default on. */
   forceToolChoiceWhenOrchestrationRequired: z.boolean().default(true),
+  /**
+   * Keep the turn's tool array BYTE-IDENTICAL across every iteration of the turn.
+   *
+   * Today the array is re-derived per iteration and mutates twice inside one forced turn:
+   * a search_agents no-match removes the two discovery tools, and a forced iteration cuts
+   * the block down to the orchestration subset (measured 10 → 8 → 34 schemas within one
+   * turn). The chat template renders tools adjacent to the system text, so every mutation
+   * re-prefills the whole prefix behind it — on this cluster a same-content REORDER of the
+   * tool block measured 47.2 s against 0.43 s for an identical one. Three cold prefills per
+   * forced turn is the single largest avoidable cost the audit found.
+   *
+   * With `"freeze"` the array never changes: the same restrictions are enforced at the CALL
+   * SITE instead (the model's non-conforming call is refused with the same message and the
+   * list of tools that would satisfy the requirement, exactly as sub-agents already do), so
+   * capability is identical and only the wire bytes stop moving. The refusal costs one extra
+   * warm iteration when it fires, which is why `tool_restriction_refused` is logged: if the
+   * refusal rate is material the trade is not paying and the flag goes back to "off".
+   *
+   * Default "off" — behaviour change, pass^k-gated.
+   */
+  stableToolBlock: z.enum(["off", "freeze"]).default("off"),
+  /**
+   * Facet triage — ONE short routing-tier classification call per escalated turn.
+   *
+   * The per-turn classifier has returned hardwired `false` for every routing flag since the
+   * de-lexicalization, so the swarm's real router is 7,331 characters of hand-written
+   * intent-to-agent prose in the always-on prompt. This replaces it with a labelled verdict:
+   * where the request sits in the routing taxonomy (mode, domain, deliverable, multi, alone,
+   * source-sensitivity), from a catalog-blind prompt that runs in parallel with the
+   * embedding shortlist.
+   *
+   * "shadow" issues the call and logs `routing_triage_decided` — including whether its
+   * `source_sensitive` reproduces the upfront judge it is meant to replace — while changing
+   * NOTHING about the turn. That agreement is the gate; the judge's own skip conditions
+   * (document-grounded and evidence-reuse turns) are excluded from it rather than counted as
+   * disagreements.
+   *
+   * Costs one small call per escalated turn in shadow, which is why it is default "off".
+   */
+  routingTriage: z.enum(["off", "shadow"]).default("off"),
+  /**
+   * Intent readout — the request's facets read off ONE grammar-bound letter reply of the routing
+   * tier (decisions/intent-readout.ts), and the pre-router's pick read the same way over the
+   * turn's discovery capsule.
+   *
+   * The single-question letter readout beat the parsed incumbents on synthetic gold (source
+   * sensitivity 100% vs 93.8%, fast lane 97.5% vs 95%) and read the pre-route question at 72.5%
+   * top-1, 78 of 80 right at a top probability of 0.85 or more (2026-09-27). What it has never
+   * been measured against is what real turns then DID.
+   *
+   * "shadow" asks both AFTER a top-level turn has delivered its reply, fire-and-forget, and logs
+   * `intent_readout_shadow`: each facet's choice, top probability and margin, the pre-router's
+   * pick, and beside them the turn's own outcomes (the up-front source judge's verdict, whether
+   * the fast lane answered, the specialists it delegated to, whether a workflow ran and whether
+   * the score threshold forced it, whether the orchestration module was included). The turn is
+   * unchanged: the calls go out after delivery, are aborted the moment any turn starts, are
+   * skipped while another turn runs, and carry their own call site (`intent_shadow`), which
+   * latency:report keeps off the turn. `pnpm intent:report` turns the rows into the agreement
+   * tables that decide whether any consumer may read the readout. Fast-lane turns are included:
+   * the front desk answering is the one direct outcome the readout's "answer directly" can be
+   * checked against.
+   *
+   * Costs two ~1 s routing-tier calls after every top-level turn, in sequence (the readout in the
+   * served option order, then reversed), plus one for the pre-router when there was a capsule; their
+   * two ~1k-token prefixes can displace a warm head on a one-slot server until re-warmed — default "off".
+   */
+  intentReadout: z.enum(["off", "shadow"]).default("off"),
+  /**
+   * Let routing-tier work run under an active model preset.
+   *
+   * `getChatProviderForTier` returns null while a preset is active — deliberately, because
+   * building a tier provider inside the resolver breaks scope, config and breaker state
+   * (see providers/index.ts). The consequence is that on a preset deployment the
+   * receptionist fast lane and the upfront source-sensitivity judge never execute AT ALL:
+   * the live audit recorded 0 of 5 fast-lane attempts, and not one logged a reason.
+   *
+   * When true, those two resolve a provider at the CALL SITE from the turn's own merged
+   * model config carrying the tier's controls — the pattern the codebase already sanctions
+   * for its other tier calls. This is a real behaviour change on a preset deployment: the
+   * judge starts arming forced research on turns where it previously stayed silent, which
+   * is what it was written to do but has not been doing there.
+   *
+   * It is also what makes the routing-triage shadow gate measurable: without the judge
+   * running, every shadow row reports `judgeComparable: false` and the agreement statistic
+   * the gate is defined on has no data.
+   *
+   * Default off — behaviour change on exactly the deployments it applies to.
+   */
+  routingTierPresetFallback: z.boolean().default(false),
+
+  /**
+   * Tell the model which agents ALMOST matched, when routing admitted none.
+   *
+   * Today a query where every agent scored 0.71 against the 0.72 floor produces the same
+   * answer as a query nothing matched: "No agents matched X. Delegate without an agentName,
+   * or create an ephemeral agent." The near misses are discarded before anyone sees them, so
+   * the model is invited to invent a specialist while the right one sits a few hundredths
+   * under the bar.
+   *
+   * Measured on this catalog: 7 of 25 German requests admitted NOTHING, and the correct
+   * agent was among the sub-floor scores every time — "ich braeuchte jemanden im schwarm fuer
+   * uebersetzungen" put swarm_maintainer at 0.7115. Their English twins all cleared the gate,
+   * so the ~0.09 the paraphrase costs is the whole difference.
+   *
+   * This does NOT lower the floor and does not admit anything: the candidates stay out of
+   * `results`, the delegation still has to be the model's own decision, and the wording says
+   * the scores were below the bar. It replaces "nothing exists" with "nothing cleared the
+   * bar, and here is what came closest".
+   *
+   * Default off — it changes what the model is told, so it is pass^k-gated like every other
+   * behaviour change here.
+   */
+  surfaceRoutingNearMisses: z.boolean().default(false),
+  /**
+   * After routing finds NOTHING, retry once on an English restatement of the request.
+   *
+   * The catalog is written in English and scored against it, so a German request lands a few
+   * hundredths below its English twin — enough to miss the 0.72 admission floor while meaning
+   * the same thing. Measured on 138 live queries (88 DE / 50 EN) against the real pipeline:
+   * raw recall 87 -> 107 and recall at the discovery capsule 84 -> 97, with ZERO cases
+   * regressing.
+   *
+   * Default ON, unlike the flags around it, because it is not a behaviour change on a working
+   * turn. It fires only where routing already returned nothing, and it can only add
+   * candidates the model was going to be denied entirely; when the restatement also finds
+   * nothing, the original message is reported unchanged. The measurement says it costs one
+   * routing-tier call on about 18% of routing attempts.
+   *
+   * Set false to make a routing miss fail fast — worth it if the routing tier is slow or
+   * unavailable, since the rescue is a few seconds spent before saying "no agent matched".
+   */
+  routingRestatementRescue: z.boolean().default(true),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow
@@ -622,7 +864,7 @@ export const OrchestrationSchema = z.object({
    *  that turn as steering at the next tool-loop iteration (instead of only being
    *  able to Stop). The runtime drains a per-turn queue before each model call and
    *  appends it as an authoritative user message. Default on; opt-out disables the
-   *  drain so such messages are ignored mid-turn. */
+   *  drain, so such messages come back unconsumed when the turn ends. */
   midTurnSteering: z.boolean().default(true),
   /** When true, a high-stakes or wide plan pauses for human approval in the
    *  operator dock before the orchestrator executes it. Off by default until the

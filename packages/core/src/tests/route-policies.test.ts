@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   _resetRoutePoliciesForTests,
   findRoutePolicy,
+  policyAdmitsRole,
   registerRoutePolicies,
 } from "../gateway/route-policies.js";
 import { roleRank, userHasRole } from "../gateway/auth.js";
@@ -49,6 +50,24 @@ describe("route policy matching", () => {
   it("ignores query strings when matching", () => {
     registerRoutePolicies("test", [{ pattern: "/api/knowledge/status", roles: ["mfa"] }]);
     expect(findRoutePolicy("GET", "/api/knowledge/status?verbose=1")).not.toBeNull();
+  });
+});
+
+describe("policyAdmitsRole", () => {
+  it("admits higher built-in roles through a policy that lists a lower one", () => {
+    expect(policyAdmitsRole({ roles: ["operator"] }, "admin")).toBe(true);
+    expect(policyAdmitsRole({ roles: ["operator"] }, "operator")).toBe(true);
+    expect(policyAdmitsRole({ roles: ["viewer"] }, "operator")).toBe(true);
+    expect(policyAdmitsRole({ roles: ["operator"] }, "viewer")).toBe(false);
+    expect(policyAdmitsRole({ roles: ["admin"] }, "operator")).toBe(false);
+    expect(policyAdmitsRole({ roles: [] }, "admin")).toBe(false);
+  });
+
+  it("never lets an extension role inherit, in either direction", () => {
+    expect(policyAdmitsRole({ roles: ["patient"] }, "viewer")).toBe(false);
+    expect(policyAdmitsRole({ roles: ["operator"] }, "doctor")).toBe(false);
+    expect(policyAdmitsRole({ roles: ["doctor"] }, "doctor")).toBe(true);
+    expect(policyAdmitsRole({ roles: ["doctor"] }, "admin")).toBe(false);
   });
 });
 

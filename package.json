@@ -32,14 +32,22 @@
     "check": "node scripts/check-root-layout.mjs && pnpm -r check",
     "check:root": "node scripts/check-root-layout.mjs",
     "upstream:check": "node scripts/check-upstream.mjs",
-    "lint": "eslint packages/core/src packages/mail-service/src",
+    "lint": "eslint packages/core/src packages/mail-service/src --max-warnings 0",
     "gateway:dev": "pnpm --filter @starlingai/core dev",
     "computer-remote:dev": "pnpm --filter @starlingai/core dev:computer-remote",
     "web:dev": "pnpm --filter @starlingai/web dev",
     "agents:evaluate": "pnpm --filter @starlingai/core agents:evaluate",
+    "routing:canary": "pnpm --filter @starlingai/core routing:canary",
     "packs:evaluate": "pnpm --filter @starlingai/core packs:evaluate",
     "docs:reference": "pnpm --filter @starlingai/core docs:reference",
-    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate"
+    "runtime-guidance:evaluate": "pnpm --filter @starlingai/core runtime-guidance:evaluate",
+    "routing:eval": "pnpm --filter @starlingai/core routing:eval",
+    "routing:eval:discriminance": "pnpm --filter @starlingai/core routing:eval:discriminance",
+    "routing:taxonomy-check": "node scripts/routing-taxonomy-check.mjs",
+    "e2e:env": "node scripts/e2e-env.mjs",
+    "e2e:evaluate": "pnpm --filter @starlingai/core e2e:evaluate",
+    "e2e:validate": "pnpm --filter @starlingai/core e2e:validate",
+    "e2e:setup": "pnpm --filter @starlingai/core e2e:setup"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -50,12 +58,12 @@
   },
   "pnpm": {
     "overrides": {
-      "nodemailer": "^9.0.1",
+      "nodemailer": "^10.0.6",
       "shell-quote": "^1.8.4",
-      "fast-uri": "^3.1.5",
+      "fast-uri": "^3.1.6",
       "form-data": "^4.0.6",
       "linkify-it": "^5.0.1",
-      "@grpc/grpc-js": "^1.14.4",
+      "@grpc/grpc-js": "^1.14.5",
       "@grpc/proto-loader>protobufjs": "^7.6.1",
       "@opentelemetry/otlp-transformer>protobufjs": "^8.4.1",
       "vitest": "3.2.6",
@@ -66,8 +74,11 @@
       "follow-redirects": "^1.16.0",
       "@opentelemetry/propagator-jaeger": "^2.10.0",
       "postcss": "^8.5.26",
-      "brace-expansion@1": "^1.1.18",
-      "nanoid@3": "^3.3.18"
+      "brace-expansion@1": "^1.1.20",
+      "nanoid@3": "^3.3.18",
+      "deepmerge-ts": "^8.0.0",
+      "proxy-addr": "^2.0.8",
+      "source-map-js": "^1.2.2"
     },
     "auditConfig": {
       "ignoreGhsas": [

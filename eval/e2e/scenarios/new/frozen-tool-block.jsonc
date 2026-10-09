@@ -1,0 +1,58 @@
+// GROUP "new" — the frozen tool block on a forced turn (orchestration.stableToolBlock "freeze",
+// commit 1d3209a).
+//
+// Frozen, the forced orchestration calls send the warmed full tool block instead of switching to a
+// tool subset (live probe E7: 8.3 s per switch, two switches per forced turn); the subset is enforced
+// where the call is dispatched instead. A call outside it is refused and logged as
+// tool_restriction_refused, and each refusal costs one warm iteration — the config comment says to
+// watch it, and to turn freeze off if refusals are frequent. This scenario keeps them few on a turn
+// that is both forced and planned, and checks the turn still delivers the documented fact.
+//
+// The turn is FORCED when the up-front source judge flags the question (requiresDelegatedResearch,
+// agent/turn-setup.ts:193) — that verdict is asserted, so a run where the turn was not forced fails
+// on its premise instead of passing vacuously. While no plan exists the forced allowlist offers
+// record_plan once (agent/forced-orchestration-tools.ts), so the turn is planned as well.
+//
+// Events asserted, emitters verified in packages/core/src:
+//   guardrail_flagged {type: "upfront_source_sensitive_detected", answered, decidedBy?}
+//                                                    agent/runtime.ts:1901-1903
+//   tool_restriction_refused {tool, reason ("must_orchestrate" | "discovery_withheld"), iteration,
+//                             allowedCount}          agent/runtime.ts:4198
+// Ground truth (eval/e2e/ENVIRONMENT.md, /dokumentation.html): NW-3104 on the NW-LG 18 charges from
+// 0 to 80 % in 38 minutes (full in 61).
+{
+  id: "new-frozen-tool-block-forced-turn",
+  title: "On a forced, planned turn the frozen tool block refuses few calls and the turn delivers the documented fact",
+  group: "new",
+  tags: ["tool-block", "forced", "site", "slow"],
+  description: "Guards stableToolBlock \"freeze\" (1d3209a): on a turn the source judge forces to orchestrate, calls outside the forced subset are refused at the call site (tool_restriction_refused) instead of the tool array switching. Refusals must stay at 2 or fewer — more means the trade costs warm iterations — and the turn must still complete with the page's answer (38 minutes) from a research specialist.",
+  requires: ["model", "e2e-site"],
+  identity: "eval",
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "forced-doc-fact",
+      message: "Wie lange braucht der Akku-Pack NW-3104 am Schnellladegerät NW-LG 18, um von 0 auf 80 % zu laden? Maßgeblich ist die Dokumentation unter http://www.nordlicht-werkzeuge.test/dokumentation.html --auto",
+      effort: "medium",
+      timeoutMs: 600000,
+      expect: {
+        status: "ok",
+        reply: {
+          // "38 Minuten", "38 min", "38 Min.", "38 minutes".
+          matches: ["\\b38\\s*min"],
+          minChars: 15,
+        },
+        events: {
+          must: [
+            // The premise: the turn was forced to orchestrate.
+            { type: "guardrail_flagged", where: { "data.type": "upfront_source_sensitive_detected" }, min: 1 },
+            // The frozen block's cost stays small.
+            { type: "tool_restriction_refused", min: 0, max: 2 },
+          ],
+        },
+        agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+      },
+    },
+  ],
+}

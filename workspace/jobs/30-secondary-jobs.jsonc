@@ -35,7 +35,7 @@
         "outputDir": { "description": "Workspace folder to build the deck + its images into (deck at <outputDir>/index.html, images at <outputDir>/images)", "default": "presentation" },
         "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
         "deliverables": { "description": "Which artifacts to produce", "default": "a reveal.js HTML presentation, a Markdown file of per-slide bullet details, and a ~1000-word paper that cites the verified sources" },
-        "language": { "description": "Output language", "default": "the language of the user's request" }
+        "language": { "description": "Output language", "default": "the language the user asked for, otherwise the language of the user's request" }
       },
       "steps": [
         { "scene": "deck_research", "label": "Research and cite the facts", "params": { "topic": "{{topic}}", "language": "{{language}}" } },
@@ -130,7 +130,7 @@
         },
         "outputLanguage": {
           "description": "Language for the final packet",
-          "default": "English"
+          "default": "the language the user asked for, otherwise the language of the user's request"
         },
         "channels": {
           "description": "Channel to deliver the packet link or summary to",

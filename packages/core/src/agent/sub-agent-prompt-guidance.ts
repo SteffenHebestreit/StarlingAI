@@ -31,6 +31,529 @@ export function getEffectiveToolNames(agentName: string, configuredTools: string
   return configuredTools;
 }
 
+/**
+ * Tools a staged artifact build actually needs. BOTH halves are required, and the
+ * pair is what makes this a capability test rather than a role guess: write_file
+ * creates the skeleton, edit_file fills one stub per later pass. An agent holding
+ * only one of them cannot stage anything, so the directive would be noise. This is
+ * deliberately NOT ARTIFACT_PRODUCING_TOOLS (which also holds shell_exec, create_dir
+ * and the one-shot generate_* emitters — none of which build in passes).
+ */
+export const STAGED_BUILD_REQUIRED_TOOLS = ["write_file", "edit_file"] as const;
+
+/**
+ * Task size (characters) above which a whole-artifact build must be staged.
+ *
+ * The live probe against the serving model bracketed the failure but did not locate
+ * its knee: a 46-char task ("Write a file hello.txt containing exactly: hi") reasoned
+ * 109 chars and called its tool in ~4 s, while a 2,400-char spec with 8 numbered
+ * requirement groups produced 60,385 reasoning chars, ZERO tool calls, and was killed
+ * at the 20-minute stream cap (run f08195d2). So the knee is somewhere in (46, 2400].
+ *
+ * It is NOT in the middle. The reasoning-to-task ratio over that bracket grew from
+ * ~2.4x (109/46) to ~25x (60385/2400) — a 10x blow-up — so the transition sits much
+ * nearer the small end than the large one. The geometric midpoint of the bracket,
+ * sqrt(46 * 2400) ~= 332, is the honest centre of a multiplicative range; we round UP
+ * to 600 to buy margin against false positives. 600 chars is ~150 tokens, roughly three
+ * sentences: below it a delegation is an INSTRUCTION (which lands in seconds), above it
+ * it is a SPECIFICATION. Staging a task that did not need it costs one extra tool call;
+ * not staging one that did costs the entire run, so the asymmetry still favours firing.
+ */
+export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
+
+/**
+ * A line that opens a fenced block: a run of three or more backticks or tildes, then at
+ * most one info word ("javascript") and the end of the line. A longer info string
+ * (```js title="a.js") is not read as an opener, and the task is then measured whole.
+ */
+const FENCE_OPENER_LINE = /^\s*(`{3,}|~{3,})[ \t]*[^\s`]*\s*$/;
+/**
+ * The same run after text on its line ("Analyse this fragment: ```js"): a delegating model
+ * writes it there as often as at the start of a line. Here it must follow whitespace and
+ * touch its info word, so neither the closing run of an inline ```span``` nor a run named
+ * in prose ("wrap it in ``` fences") opens a block.
+ */
+const FENCE_OPENER_TRAILING = /\s(`{3,}|~{3,})[^\s`]*\s*$/;
+/**
+ * A line that starts with a fence run standing alone: nothing after it, or whitespace and
+ * then the task's own words again ("``` Then name the cause."). It closes a block opened
+ * by the same character with a run no longer than its own. A run touching a word
+ * ("```js") opens a nested block in the material and closes nothing.
+ */
+const FENCE_CLOSER = /^\s*(`{3,}|~{3,})(?=\s|$)(.*)$/;
+/** Any run of three or more backticks or tildes, wherever it sits on a line. */
+const FENCE_RUN = /`{3,}|~{3,}/g;
+/** A quoted line, as Markdown and mail both write it: `>` after at most three spaces. */
+const QUOTED_LINE = /^ {0,3}>/;
+
+/**
+ * How long a task is in its delegator's OWN words: fenced blocks and quoted lines do not
+ * count. They are material the specialist works from, not requirements it has to plan.
+ *
+ * In the cart assessment the user pasted cart.js and asked why its total goes negative.
+ * The orchestrator copied the code into the delegation, which made the task 681 chars,
+ * about 420 of them code. That crossed the 600-char threshold, so code_analyst, which
+ * holds write_file and edit_file, was told to build in passes. It wrote a report file
+ * with four markers, and the progress verifier then sent it back to fill them. The
+ * question itself was about 260 chars long.
+ *
+ * Material is set aside only when the text places every fence it holds: each block it
+ * opens is closed, and no run of three backticks or tildes is left over, whether in
+ * prose, glued to the word before it, under an info string this does not read, beside
+ * another run on an opening or closing line, or inside a block where it could have been
+ * that block's end. Any other text is measured whole, as it was before this. One fence
+ * read wrongly pairs the next one wrongly, and what lies between two blocks is then set
+ * aside as material, which in such a task is usually its instructions: a task with a
+ * ```js title="a.js" block, twelve numbered requirements and a second block measured 57
+ * of its 1,175 chars. A task with nothing fenced or quoted is measured exactly as
+ * before: its trimmed length. One pass over the lines, because a delegation task has no
+ * length cap.
+ */
+export function taskOwnWordChars(task: string): number {
+  const whole = task.trim().length;
+  const own: string[] = [];
+  let open: { run: string; before: string } | null = null;
+  for (const line of task.split("\n")) {
+    const runs = line.match(FENCE_RUN) ?? [];
+    if (open) {
+      const openRun = open.run;
+      const closer = FENCE_CLOSER.exec(line);
+      const run = closer?.[1];
+      if (run !== undefined && run[0] === openRun[0] && run.length >= openRun.length) {
+        // A second run on the closing line is a fence this cannot place.
+        if (runs.length > 1) return whole;
+        // The words around the block on its opening and closing lines are the task's own.
+        if (open.before.trim()) own.push(open.before.trimEnd());
+        if (closer?.[2]?.trim()) own.push(closer[2].trimStart());
+        open = null;
+        continue;
+      }
+      // A run of the block's own character, at least as long as its opener, that does not
+      // close it: the block's end written after code on its line, or the next block's start.
+      // Shorter runs, and runs of the other character, are the material's own nested fences.
+      if (runs.some((other) => other[0] === openRun[0] && other.length >= openRun.length)) return whole;
+      continue;
+    }
+    if (QUOTED_LINE.test(line)) continue;
+    if (runs.length === 0) {
+      own.push(line);
+      continue;
+    }
+    const opener = FENCE_OPENER_LINE.exec(line) ?? FENCE_OPENER_TRAILING.exec(line);
+    if (!opener?.[1] || runs.length > 1) return whole;
+    const runStart = opener.index + opener[0].indexOf(opener[1]);
+    open = { run: opener[1], before: line.slice(0, runStart) };
+  }
+  // A block nothing closes: its intended end may have been read as an earlier block's.
+  if (open) return whole;
+  return own.join("\n").trim().length;
+}
+
+/**
+ * The size isStagedArtifactBuildRun compares with the threshold, and the audit row reports.
+ *
+ * A run that holds a dedicated builder tool (ARTIFACT_BUILDER_TOOLS) is measured on the whole
+ * task, fenced and quoted text included. What such a run is handed in a fence is often what it
+ * builds: a requirement list the delegator fenced, or a Markdown body to turn into a page or a
+ * deck. Not staging a build that needed it costs the whole run (f08195d2), so a builder keeps
+ * the measure it was staged on before. Any other write-capable run (code_analyst, the
+ * researcher, the summarizer, the coder) is measured on its own words (taskOwnWordChars): what
+ * it is handed in a fence is input it reads, analyses or changes. In the cart assessment a
+ * pasted cart.js made code_analyst's "why" question 681 chars long, and it was told to build a
+ * report file.
+ */
+export function stagedBuildTaskChars(toolNames: readonly string[] | undefined, task: string): number {
+  return holdsArtifactBuilderTool(toolNames) ? task.trim().length : taskOwnWordChars(task);
+}
+
+/**
+ * Structural classifier for "this run must build in passes": the agent can both
+ * create and amend a file, and the task is a specification rather than an
+ * instruction. Capability + size only — no topic words, no language tables.
+ * Size is stagedBuildTaskChars: the whole task for a run holding a builder tool, the
+ * task's own words for any other.
+ */
+export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
+  const available = new Set(toolNames ?? []);
+  if (!STAGED_BUILD_REQUIRED_TOOLS.every((toolName) => available.has(toolName))) return false;
+  return stagedBuildTaskChars(toolNames, task) > STAGED_BUILD_TASK_CHAR_THRESHOLD;
+}
+
+/**
+ * Tools whose only job is to produce or check a BUILT artifact: the document/page/deck/image
+ * emitters, and the page and app checkers. write_file and edit_file are deliberately absent —
+ * they are how every note-taking specialist saves its work (the researcher, the summarizer and
+ * the evidence analyst all hold both), so holding them says nothing about building a page.
+ */
+export const ARTIFACT_BUILDER_TOOLS: ReadonlySet<string> = new Set([
+  "generate_document", "generate_website", "generate_presentation", "generate_docx", "generate_pptx", "generate_pdf",
+  "render_pdf", "bundle_artifact_zip",
+  "generate_image", "transform_image", "generate_svg", "generate_qr_code",
+  "generate_chart_html", "generate_mermaid_diagram",
+  "spreadsheet_write", "pdf_fill",
+  "verify_page", "verify_app", "serve_app",
+]);
+
+export function holdsArtifactBuilderTool(toolNames: readonly string[] | undefined): boolean {
+  return (toolNames ?? []).some((toolName) => ARTIFACT_BUILDER_TOOLS.has(toolName));
+}
+
+/**
+ * One-shot assemblers: each turns compact authored content (slides, Markdown, a slide or block
+ * list) into the finished deck, Office file or PDF in one call. For a run that holds one, that call
+ * is the build, so a FRESH staged build gets no skeleton directive (sub-agent.ts). In E2E
+ * core-build-artifact-revealjs-deck (2026-10-09) the orchestrator's deck tasks grew to 817-1,349
+ * chars, past the threshold. content_writer was told "SKELETON (first tool call): one write_file",
+ * hand-wrote index.html with UNFINISHED_STUB markers, and never called generate_presentation. Its
+ * deck runs used generate_presentation in 2 of 2 unstaged runs and 1 of 4 staged ones.
+ *
+ * Two emitters are left out. web_coder holds generate_website beside the tools it hand-builds pages
+ * with, and its large builds are what the directive exists for (dfe964f3). generate_document saves
+ * exactly the text it is passed, so it is the document form of write_file, and six specialists
+ * besides content_writer hold it.
+ */
+export const ONE_SHOT_ASSEMBLER_TOOLS: ReadonlySet<string> = new Set([
+  "generate_presentation", "generate_docx", "generate_pptx", "render_pdf",
+]);
+
+export function holdsOneShotAssembler(toolNames: readonly string[] | undefined): boolean {
+  return (toolNames ?? []).some((toolName) => ONE_SHOT_ASSEMBLER_TOOLS.has(toolName));
+}
+
+/**
+ * IS THIS UNFINISHED ARTIFACT THIS RUN'S TO FINISH?
+ *
+ * Resume detection reads the conversation's artifact zone, and the staged-build classifier fires
+ * on any write+edit holder with a long task — so in c297c5ea the researcher, dispatched at
+ * 02:11:10 with an 839-character research task, was handed "FIX THE EXISTING BUILD — DO NOT START
+ * OVER" about content_writer's broken reveal.js pages (row 1581bae5), and spent two edit_file
+ * calls on a presentation it had no part in. A resume is the builder's job, so the evidence is
+ * scoped to the runs that build it. Structural, per file:
+ *
+ * - a run holding a dedicated builder tool (ARTIFACT_BUILDER_TOOLS) may finish any artifact:
+ *   content_writer resumed the researcher-made skeleton at 01:29 and that was the right hand-off;
+ * - otherwise only an artifact this AGENT wrote last — a write/edit-only specialist resuming its
+ *   own staged build keeps its resume;
+ * - and an artifact nobody is recorded as having written (a gateway restart, a container run, a
+ *   file from before this conversation) stays everybody's, which is the behaviour before this.
+ *
+ * Why last writer and not any writer: in c297c5ea the researcher HAD written the deck — the first
+ * skeleton, at 01:23, because the fresh staged directive told it to — and content_writer had made
+ * some thirty edits since. "Wrote it once" would have handed it the repair anyway.
+ */
+export function ownsResumeEvidence(params: {
+  agentName: string;
+  toolNames: readonly string[] | undefined;
+  /** The agent recorded as the file's most recent writer in this conversation, if any. */
+  lastWriter: string | undefined;
+}): boolean {
+  if (holdsArtifactBuilderTool(params.toolNames)) return true;
+  return params.lastWriter === undefined || params.lastWriter === params.agentName;
+}
+
+/**
+ * The token an unbuilt subsystem carries inside a staged build.
+ *
+ * The directive used to ask for a COMMENT anchor above a short stub, and session
+ * a7b8fe3e is what that costs: content_writer's skeleton carried three block comments
+ * named CSS_STUB, JS_PART1 and JS_PART2, filled the first, ran out of iterations, and
+ * shipped a 2,684-byte index.html with a script block containing nothing but the two
+ * remaining comments. Structurally perfect, completely dead, reported as complete —
+ * because a comment is SILENT: it neither breaks the artifact nor names itself to any
+ * checker. This marker is the opposite on both counts. It throws where it sits, so the
+ * half-built artifact fails at the first attempt to use it, and it is one distinctive
+ * greppable string that artifactFileLooksTruncated (sub-agent.ts) reads back off disk —
+ * so the prompt half and the mechanical half agree on one literal instead of the prompt
+ * asking for an anchor shape nothing downstream could recognise.
+ */
+export const UNFINISHED_STUB_MARKER = "UNFINISHED_STUB";
+
+/**
+ * How many times one run may burn its reasoning budget before the supervisor stops
+ * trying to correct it and winds the run down.
+ *
+ * Two, meaning ONE correction. The first burn is a cold-start failure mode — the model
+ * received a whole specification and tried to compose the answer in its head — and it is
+ * worth exactly one turn to say so and demand a concrete action. A model that burns again
+ * AFTER being told in plain language to stop planning is not going to be talked out of it,
+ * and each burn costs ~15 minutes of GPU on the measured hardware, so the second one ends
+ * the run. Raising this trades a bounded wait for a diminishing chance.
+ */
+export const REASONING_BURN_RETRY_LIMIT = 2;
+
+/**
+ * How many times a run may announce its next step without taking it before the loop lets it end.
+ *
+ * Two. Run db88fa5b returned "Now I'll fill the styles stub with the full CSS subsystem" as its
+ * FINAL answer with six iterations unused, and the same session's predecessors ended on "Next
+ * turn: start filling the first marker (core) via edit_file" and "I'm running out of budget — one
+ * iteration remains". Three runs, three announcements, three deliveries of a scaffold. One
+ * hand-back is usually enough to convert an intention into a call; a model still narrating after
+ * two is narrating, and the run should end honestly rather than burn its cap being asked again.
+ */
+export const ANNOUNCEMENT_NUDGE_LIMIT = 2;
+
+/**
+ * The corrective turn pushed into a sub-agent's history after its FIRST reasoning burn.
+ *
+ * Why a correction rather than a death: run dfe964f3 measured what killing it costs.
+ * web_coder burned 45,001 reasoning characters with zero tool calls, the run was wound
+ * down at iteration 1 of 14, and the swarm re-dispatched the byte-identical 1,709-char
+ * task to the next-ranked agent, which began burning the same way. Nothing in that loop
+ * ever told the MODEL what it had done wrong. The run had thirteen unused iterations.
+ *
+ * The text names the measured number because a model that has just produced 45,000
+ * characters of plan has no idea it did — reasoning is not in its own context on the next
+ * turn, so "you have already planned this" is unfalsifiable to it unless we quote the size.
+ *
+ * It deliberately does NOT restate the task or suggest what to build: the specification is
+ * already in the history above it, and repeating it is what invites another design pass.
+ * The one thing it adds is permission to produce something incomplete, because the burn is
+ * a model refusing to emit until it is sure, and "smallest thing that is real" is the only
+ * instruction that dissolves that.
+ */
+export function buildReasoningBurnCorrection(reasoningChars: number, stagedBuild: boolean): string {
+  return [
+    "STOP PLANNING — YOU JUST SPENT " + reasoningChars.toLocaleString("en-US") + " CHARACTERS THINKING AND PRODUCED NOTHING.",
+    "That generation was cut off. No file was written, no tool ran, and none of that thinking was kept — it is not in this conversation and you cannot recover it. Repeating it will fail the same way and end this run.",
+    stagedBuild
+      ? "Your next message must be exactly ONE " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call creating the skeleton described in your instructions: a small, complete, closing file whose unbuilt parts are single " + UNFINISHED_STUB_MARKER + " lines that throw. Do not design those parts now. Naming them is the whole job of this turn."
+      : "Your next message must be exactly ONE tool call that performs the smallest concrete step of this task. Not the whole task — the first real step.",
+    "Emit that tool call immediately, before any further analysis. Something small and real beats something complete and imagined; you have more turns after this one to extend it.",
+  ].join("\n");
+}
+
+/**
+ * The staged-build directive itself. Every capability it names is real: write_file
+ * (mode defaults to "overwrite", mode:"append" exists), edit_file (EXACT string
+ * replacement that fails on an absent or ambiguous old_string — hence the unique
+ * anchors), read_file and grep_files. There is no range/line-number patch tool, so
+ * the directive never mentions one.
+ *
+ * THIS TEXT IS PART OF THE CACHE KEY, so it carries NO number derived from the run.
+ * It used to interpolate the pass budget ("about 11 of them"), and the effort tier changes
+ * maxIterations (14 configured, 200 under tier max in the audit log) — so every tier owned
+ * its own cold head. The justification is the STATION PROBE, not an incident: a byte-identical
+ * head restores from host RAM even after 8 evictions (16 tokens processed), while a head that
+ * differs by one number is a full cold prefill. (The two parallel researchers of 2026-09-12
+ * that were once cited here prove nothing about this: they ran CONCURRENTLY, and concurrent
+ * requests never share the prefix cache on this backend, so both were cold whatever the head
+ * said — and nothing established their tier differed from the run 26 minutes earlier.) The
+ * pass count now rides in the USER turn (buildStagedBuildFirstStepInstruction), which is
+ * per-run anyway, and the FILL step points the model there.
+ *
+ * The reserve of 3 that budget assumes (skeleton, verification read, tool-stripped final
+ * synthesis) buys NO input reads, which is why the preamble spends a sentence on
+ * reading. Session a7b8fe3e burned five of content_writer's ten iterations re-reading a
+ * 16,091-char source file it had already read whole at iteration 1, in four chunked
+ * read_file calls plus two re-reads of its own output — 54,586 bytes read against 141
+ * bytes written. Passes are for writing; the raw material is already in the transcript.
+ *
+ * Step 3 deliberately does NOT hardcode "report the path" as the only valid finish.
+ * This text is generic and is injected alongside agent prompts that end on a stricter
+ * contract — backend_coder must serve_app + verify_app and return the live
+ * /api/app/<id>/ URL, and a directive that closed on "report the path" would be
+ * telling it the files on disk are enough. The runner keeps the agent's own prompt
+ * LAST for the same reason (sub-agent.ts system-prompt assembly).
+ */
+export function buildStagedArtifactBuildGuidance(): string {
+  return [
+    "STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.",
+    "A whole artifact emitted in a single completion does not finish on this hardware: the model reasons for tens of thousands of characters and the call is killed before any tool runs. Build the artifact in passes, ONE tool call per iteration, smallest working version first. Read each source file ONCE, whole, then work from what you read — a pass spent re-reading is a pass not spent writing, and you have few.",
+    `1. SKELETON (first tool call): one write_file, a few KB, holding a minimal whole artifact whose outer structure already CLOSES (for HTML: doctype, head, body and the closing </html>) and whose content is all FINAL. Never a placeholder comment, a TODO or an empty stub body — a commented-out gap is silent, so a run that stops there leaves a file that LOOKS finished and does nothing. Write each subsystem you have not built yet as ONE line carrying the exact token ${UNFINISHED_STUB_MARKER} and its name, throwing where that line sits in executable code: throw new Error("${UNFINISHED_STUB_MARKER}: physics"); That line is both your UNIQUE anchor and the loud signal — the harness greps for it and reports an artifact still holding one as INCOMPLETE instead of delivered.`,
+    `2. FILL (one subsystem per iteration; the task states how many passes you have): replace exactly ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE content as new_string — never a partial version, never a smaller placeholder. edit_file is an EXACT string replacement and FAILS unless old_string matches exactly one place, so keep every marker name distinct and add surrounding lines rather than falling back to write_file. Use grep_files to re-locate a marker if a replacement is rejected. Never re-emit the whole file to change part of it.`,
+    `3. FINISH: read_file the artifact and confirm no ${UNFINISHED_STUB_MARKER} remains. If it is an HTML page and you hold verify_page, RUN IT — verify_page executes the page's scripts and reports what they throw. A page that serves a 200 and dies on its first line looks identical to a finished one from the outside, so reading the code is not evidence it works. FAIL means fix the named error and run it again; do not report a page as done while verify_page fails. verify_page also reports WHERE the page painted on each canvas — a page whose drawing lands outside its own canvas runs perfectly and shows the user nothing, so treat an off-canvas or never-drawn-on verdict as a real defect in your projection maths, not a warning. LOOK AT IT IF YOU CAN: if you hold browser_navigate and browser_screenshot, open the page, screenshot it, and inspect that image (analyze_image if you cannot see it directly) before reporting done — a check that the code runs is not a check that a human sees what you intended. Then carry out whatever final step your own instructions require (e.g. serving and verifying the app) and report the path or the live URL — not the contents.`,
+    `Budget the subsystems to the passes you have and merge the small ones. If you run out of budget the partial is handed back with its remaining ${UNFINISHED_STUB_MARKER} markers named, so it is resumable and is never mistaken for a finished artifact.`,
+  ].join("\n");
+}
+
+/**
+ * The staged-build first-step instruction, appended to the USER turn.
+ *
+ * The directive above says "SKELETON (first tool call): one write_file" and run dfe964f3
+ * logged `directiveInjected: true` — so the model was told, and burned 45,001 characters
+ * anyway. Placement is why. The directive is assembled into the SYSTEM prompt while the
+ * specification arrives as the user turn, and a model handed a 1,709-character spec of a
+ * finished artifact answers the spec. The strategy was in the room; the instruction it was
+ * actually responding to was not.
+ *
+ * So the narrowing is repeated where the ask lives, as the LAST thing in the user turn: the
+ * spec is demoted to reference material in the same breath that the turn's actual job is
+ * named. This duplicates the system directive by design — the point is position, not novelty.
+ *
+ * It is appended, never substituted. Dropping the specification from the first turn would
+ * cost the model the vocabulary it needs to NAME the subsystems, and naming them is the
+ * one thing this turn has to get right.
+ *
+ * The pass budget lives HERE, not in the system directive, because this turn is per-run
+ * anyway while the directive is the KV-cache key (see buildStagedArtifactBuildGuidance).
+ * It is the run's own maxIterations minus the skeleton, the verification read and the
+ * tool-stripped final synthesis, clamped to the runner's per-path edit_file ceiling
+ * (passed in — the constant lives in the runner, which imports this module) so the
+ * turn can never promise more passes than the harness will allow.
+ */
+export function buildStagedBuildFirstStepInstruction(maxIterations: number, perPathEditCap: number): string {
+  const fillPasses = Math.max(2, Math.min(maxIterations - 3, perPathEditCap));
+  return [
+    "",
+    "",
+    "THIS TURN: the specification above is REFERENCE MATERIAL for later passes, not the work of this turn.",
+    "Right now, produce only the skeleton — one " + STAGED_BUILD_REQUIRED_TOOLS[0] + " call, a small complete file that closes, with every part you have not built yet written as a single " + UNFINISHED_STUB_MARKER + " line that throws. Decide only what the parts are CALLED, not how they work.",
+    "You have about " + fillPasses + " fill passes after this turn, one part each — name no more parts than that, and merge the small ones.",
+    "Do not attempt to satisfy the specification in this turn. You have further turns for that, one part at a time.",
+  ].join("\n");
+}
+
+/**
+ * The directive for a run whose skeleton ALREADY EXISTS on disk.
+ *
+ * Run 2dc5832c is the failure this replaces, and it is the worst one measured so far. The
+ * staged-build classifier is size-and-tools only, so it fires identically on "build me X" and
+ * on "the file exists, finish it" — and the directive it injects opens with "SKELETON (first
+ * tool call): one write_file". All four delegations in that session logged
+ * directiveInjected: true, and the fourth answered a finish-it task by writing a fresh
+ * 4,037-byte skeleton over a file in which six of eight subsystems had just been filled by
+ * thirteen iterations of edit_file. The instruction was followed exactly; it was the wrong
+ * instruction.
+ *
+ * Detection is structural and needs no topic words: unfilled markers exist on disk, and the
+ * harness is the only thing that ever writes that token. Given that, the correct first move is
+ * the OPPOSITE of a skeleton, so this text inverts the two rules that matter — never write_file
+ * the whole artifact, and start from what is already there.
+ */
+/**
+ * How many consecutive READ-ONLY iterations a staged build may spend before it is told to
+ * write. Three is enough for a genuine look-around (locate, read the surrounding code, check
+ * one reference) and short of the pattern that has now cost two runs.
+ */
+export const STAGED_BUILD_READ_ONLY_STREAK_LIMIT = 3;
+
+/**
+ * The correction for a build that keeps LOOKING instead of writing.
+ *
+ * Distinct from the announced-without-acting nudge, which only fires when a turn returns
+ * text and no tool call at all. Runs 6 and 7 never hit that: they called a tool every single
+ * iteration — read_file, read_file, grep_files, read_file — so every existing guard saw a
+ * busy, non-circling, tool-using agent and had nothing to object to. Run 6 spent seven of
+ * fourteen iterations that way and never wrote the one marker it had left.
+ *
+ * Reading is not the failure; unbounded reading is. The marker's exact location and text are
+ * already known, so this hands them back and asks for the call.
+ */
+export function buildReadOnlyStreakCorrection(params: {
+  streak: number;
+  markerCount: number;
+  markerSites: readonly { file: string; line: number; text: string }[];
+  iterationsLeft: number;
+}): string {
+  const target = params.markerSites[0];
+  return [
+    `${params.streak} ITERATIONS IN A ROW WITHOUT WRITING ANYTHING — and the artifact is still unfinished.`,
+    `${params.markerCount} ${UNFINISHED_STUB_MARKER} marker(s) remain. You have already read this file; more reading will not tell you anything new about what to write.`,
+    ...(target
+      ? [`The next one is ${target.file} line ${target.line}, and this is the exact old_string:
+   ${target.text}`]
+      : []),
+    `Your next message must be an edit_file call replacing that line with the subsystem's COMPLETE code. No preamble, no further reads.`,
+    `If you need a detail you have not got, write the subsystem with your best reasonable implementation rather than reading again — a working version you can refine beats a marker that throws.`,
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
+/**
+ * The correction for a build whose own page check said the page is broken.
+ *
+ * Run 8 filled its last marker, called verify_page, was told the page throws on its first
+ * inline script, made two edits, and finished reporting success — never asking again. Zero
+ * markers is what a COMPLETE artifact looks like; it says nothing about a WORKING one, and
+ * the run had already produced the evidence that it was not.
+ *
+ * `stale` distinguishes the two ways this goes wrong: a check that failed outright, and a
+ * check that passed but has since been edited past, which verified different bytes.
+ */
+export function buildPageCheckCorrection(params: {
+  stale: boolean;
+  iterationsLeft: number;
+}): string {
+  return [
+    params.stale
+      ? "YOU EDITED THE PAGE AFTER ITS LAST SUCCESSFUL CHECK — that check no longer describes this file."
+      : "YOUR OWN verify_page RUN SAID THIS PAGE DOES NOT RUN, and you have not re-checked it since.",
+    "Every subsystem being written is not the same as the page working: an artifact with no unfinished markers can still throw on its first line and looks finished from the outside.",
+    "Call verify_page now. If it fails, fix the FIRST error it names and call it again — the later errors are usually consequences of the first.",
+    "Do not report this page as done while its check fails.",
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
+/**
+ * The read-without-writing correction for a REPAIR run, which has no markers to point at.
+ *
+ * Same failure, different mode: the agent circles the file gathering context and never edits.
+ * In a fill there is always a marker to name; in a repair the work is named by the fault the
+ * page itself reported, so that is what gets handed back.
+ */
+export function buildReadOnlyRepairCorrection(params: {
+  streak: number;
+  brokenPages: readonly string[];
+  iterationsLeft: number;
+}): string {
+  return [
+    `${params.streak} ITERATIONS IN A ROW WITHOUT CHANGING ANYTHING — and the page is still broken.`,
+    "You have read this file. More reading will not tell you anything new about what to change.",
+    "This is what running it reports:",
+    ...params.brokenPages.slice(0, 2).map((p) => `   ${p}`),
+    "Your next message must be an edit_file call that changes the code responsible. No preamble, no further reads.",
+    "If you are not certain of the ideal fix, make the smallest change that could plausibly correct it and call verify_page — a wrong attempt you can measure beats another read.",
+    `You have ${params.iterationsLeft} iteration(s) left.`,
+  ].join("\n");
+}
+
+export function buildStagedBuildResumeGuidance(
+  markerFiles: readonly string[],
+  markerCount: number,
+  markerSites: readonly { file: string; line: number; text: string }[] = [],
+  /** Built pages that do not work, as their own scripts reported it. */
+  brokenPages: readonly string[] = [],
+): string {
+  // REPAIR IS ALSO A RESUME. A build whose markers are gone but whose page throws on its
+  // first line, or paints its content off the side of its own canvas, is not finished — and
+  // told "resume", an agent with nothing left to fill would otherwise go looking for markers
+  // that are not there. Naming the defect makes the work obvious.
+  if (markerCount === 0 && brokenPages.length > 0) {
+    return [
+      "FIX THE EXISTING BUILD — DO NOT START OVER.",
+      `Every ${UNFINISHED_STUB_MARKER} marker is filled, but the page does not work. This is what running it reports:`,
+      ...brokenPages.slice(0, 3).map((p) => `   ${p}`),
+      "The work already on disk is REAL. Read the code around the fault, fix THAT, and call verify_page again — do not rewrite the file.",
+      "A drawing that lands outside its canvas is a projection/transform bug, not a missing feature: the page runs perfectly and shows the user nothing.",
+      "NEVER call write_file on this artifact. Re-emitting the whole file destroys the passes that produced it, and the harness will reject the write.",
+    ].join("\n");
+  }
+  const shown = markerFiles.slice(0, 4).join(", ");
+  // The scan that produced this count already walked past every marker, so name them.
+  // Without this the directive said "go locate them", and run 6 obeyed literally: seven of
+  // fourteen iterations paging a 446-line file to find the one marker left in it. A located
+  // marker is also the exact old_string edit_file needs, so this removes the search AND the
+  // most common cause of a rejected replacement.
+  const located = markerSites.slice(0, 12)
+    .map(site => `   ${site.file}:${site.line}  ${site.text}`)
+    .join("\n");
+  return [
+    "RESUME AN EXISTING BUILD — DO NOT START OVER.",
+    `A previous pass already wrote this artifact and left ${markerCount} unfilled ${UNFINISHED_STUB_MARKER} marker(s) in: ${shown}. The work already on disk is REAL and is worth more than anything you can emit in one call.`,
+    ...(located
+      ? [`These are the markers, already located for you — each line below is the exact old_string to replace:\n${located}`]
+      : []),
+    located
+      ? `1. You do NOT need to search for them. Read only the code AROUND a marker if you need its context (read_file with offset/limit), then fill it.`
+      : `1. READ the file once (read_file), or ${"grep_files"} for ${UNFINISHED_STUB_MARKER} to locate the markers exactly.`,
+    `2. Replace ONE ${UNFINISHED_STUB_MARKER} line per call with edit_file, that line as old_string and the subsystem's COMPLETE code as new_string. Several such calls in one turn is good and is the fastest way through.`,
+    `3. FINISH: confirm no ${UNFINISHED_STUB_MARKER} remains, and if it is an HTML page and you hold verify_page, RUN IT and fix whatever it reports — including where it says the page painted, since drawing outside a canvas is invisible to the user but silent to the code. If you hold browser_navigate and browser_screenshot, open the page and look at the screenshot before saying you are done. Then carry out whatever final step your own instructions require.`,
+    `NEVER call write_file on this artifact. Re-emitting the whole file replaces finished subsystems with placeholders and destroys the passes that produced them — the harness will reject such a write, and the attempt costs you an iteration.`,
+  ].join("\n");
+}
+
 export function buildTaskModeGuidance(agentName: string, _task: string): string {
   // Task-text keyword branches (mail read-only, shell/ops remote-CLI, computer
   // observation-only) were removed — guidance must not be selected from topic

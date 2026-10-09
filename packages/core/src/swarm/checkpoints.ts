@@ -69,6 +69,55 @@ const AGENT_STATE_MAX_SIZE = 16_000; // max serialized agentState size in bytes
 /** In-process fallback store (keyed by taskId). */
 const _store = new Map<string, TaskCheckpoint>();
 
+/**
+ * A CHECKPOINT EXISTS TO BE RESUMED, SO ONE THAT CANNOT BE IS NOT KEPT.
+ *
+ * Every delegated run opens one — a Map entry and a ~2 KB JSON file each — and the only
+ * reclamation used to be the startup scan below, which deletes disk files older than the TTL
+ * and never touches the Map at all. A gateway that stays up does not restart, so it never
+ * reclaimed anything: 200 runs, all COMPLETED, left 200 files (442 KB) and 200 live Map
+ * entries, and the dashboard's `GET /api/checkpoints` serialised every one of them on each
+ * poll while showing only the paused ones.
+ *
+ * Two rules close it. A completed run is discarded outright (there is nothing to resume, and
+ * nothing displays it). Everything else is swept on the same TTL the startup scan already
+ * applies — lazily, from the paths that already touch the store, so there is no interval timer
+ * to own, leak or test around.
+ */
+const SWEEP_INTERVAL_MS = 5 * 60 * 1_000;
+let lastSweepAtMs = 0;
+
+/** Forget a checkpoint entirely: in-process and on disk. */
+function discardCheckpoint(workspacePath: string, taskId: string): void {
+  _store.delete(taskId);
+  try {
+    const path = checkpointPath(workspacePath, taskId);
+    if (existsSync(path)) unlinkSync(path);
+  } catch (err) {
+    log.warn({ err, taskId }, "Failed to remove checkpoint file");
+  }
+}
+
+/**
+ * Drop what has aged past the TTL, in memory and on disk. Rate-limited to one pass per
+ * SWEEP_INTERVAL_MS because its callers are hot paths. Returns how many it reclaimed.
+ */
+export function sweepExpiredCheckpoints(workspacePath: string, opts: { force?: boolean } = {}): number {
+  const now = Date.now();
+  if (!opts.force && now - lastSweepAtMs < SWEEP_INTERVAL_MS) return 0;
+  lastSweepAtMs = now;
+  const cutoff = now - CHECKPOINT_TTL_MS;
+  let reclaimed = 0;
+  for (const [taskId, cp] of [..._store.entries()]) {
+    const updatedAtMs = new Date(cp.updatedAt).getTime();
+    if (Number.isFinite(updatedAtMs) && updatedAtMs >= cutoff) continue;
+    discardCheckpoint(workspacePath, taskId);
+    reclaimed++;
+  }
+  if (reclaimed > 0) log.info({ reclaimed, held: _store.size }, "Expired task checkpoints reclaimed");
+  return reclaimed;
+}
+
 function checkpointDir(workspacePath: string): string {
   return join(workspacePath, PRODUCT.stateDirName, "checkpoints");
 }
@@ -114,6 +163,8 @@ export function createCheckpoint(opts: {
 
   _store.set(taskId, checkpoint);
   persistCheckpoint(config.workspacePath, checkpoint);
+  // Opening one is the natural moment to close the ones nobody came back for.
+  sweepExpiredCheckpoints(config.workspacePath);
 
   emitSwarmEvent("task_checkpoint_created", {
     sessionId: opts.parentSessionId,
@@ -217,28 +268,32 @@ export function resumeCheckpoint(taskId: string): TaskCheckpoint | null {
   return cp;
 }
 
-/** Mark a checkpoint complete (called when the resumed agent finishes). */
+/**
+ * Mark a checkpoint complete (called when the resumed agent finishes).
+ *
+ * Completing it also DISCARDS it. A completed run has nothing to resume — the comment at the
+ * call site in sub-agent.ts says exactly that — and the dashboard filters to `paused` before
+ * rendering, so a retained "completed" record was read by nothing and freed by nothing. The
+ * audit record is the history; the checkpoint was the resume handle.
+ */
 export function completeCheckpoint(taskId: string): boolean {
   const config = getConfig();
   let cp = _store.get(taskId);
-  if (!cp) {
-    cp = loadCheckpointFromDisk(config.workspacePath, taskId);
-    if (cp) _store.set(taskId, cp);
-  }
+  if (!cp) cp = loadCheckpointFromDisk(config.workspacePath, taskId);
   if (!cp) return false;
 
-  cp.status = "completed";
-  cp.updatedAt = new Date().toISOString();
-  _store.set(taskId, cp);
-  persistCheckpoint(config.workspacePath, cp);
+  discardCheckpoint(config.workspacePath, taskId);
   logAudit("task_checkpoint_completed", { taskId, agentName: cp.agentName },
     { sessionId: cp.parentSessionId, severity: "info", channel: "swarm" });
-  log.info({ taskId }, "Task checkpoint completed");
+  log.info({ taskId, held: _store.size }, "Task checkpoint completed and released");
   return true;
 }
 
 /** Return all in-memory checkpoints (for the dashboard). */
 export function listCheckpoints(filter?: { status?: CheckpointStatus; agentName?: string }): TaskCheckpoint[] {
+  try {
+    sweepExpiredCheckpoints(getConfig().workspacePath);
+  } catch { /* listing must not fail because a sweep could not */ }
   const all = [..._store.values()];
   if (!filter) return all;
   return all.filter(cp => {

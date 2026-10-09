@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<!--
+  The measured failure, session a7b8fe3e: "inline styles.css and game.js into one
+  standalone HTML". Iteration 3 wrote this skeleton with CSS_STUB / JS_PART1 /
+  JS_PART2 slots, iteration 5 filled the CSS, and the run then spent five iterations
+  re-reading game.js and ran out of budget. What shipped is below, verbatim in shape:
+  a balanced, well-formed, entirely dead page. The old probe said "pass" on it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asteroid Belt</title>
+<style>
+:root {
+  --bg: #0b0d17;
+  --fg: #e8ecff;
+  --accent: #5ad1ff;
+  --danger: #ff5a5a;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+#stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+canvas {
+  background: radial-gradient(circle at 50% 40%, #16203c 0%, #05070f 100%);
+  border: 1px solid rgba(90, 209, 255, 0.35);
+  border-radius: 8px;
+  max-width: 100%;
+  max-height: 100%;
+}
+#hud {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 8px rgba(90, 209, 255, 0.6);
+}
+#hud .label { opacity: 0.6; margin-right: 6px; }
+#hud .value { color: var(--accent); }
+#overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(5, 7, 15, 0.72);
+}
+#overlay.hidden { display: none; }
+#overlay h1 { margin: 0; font-size: 2.4rem; }
+#overlay p { margin: 0; opacity: 0.8; }
+button {
+  padding: 10px 22px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { background: rgba(90, 209, 255, 0.12); }
+.dead { color: var(--danger); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="960" height="600"></canvas>
+  <div id="hud">
+    <span class="label">SCORE</span><span class="value" id="score">0</span>
+    <span class="label">LIVES</span><span class="value" id="lives">3</span>
+  </div>
+  <div id="overlay">
+    <h1>Asteroid Belt</h1>
+    <p>Arrow keys to steer, space to fire.</p>
+    <button id="start">Start</button>
+  </div>
+</div>
+<script>
+/* JS_PART1 */
+/* JS_PART2 */
+</script>
+</body>
+</html>

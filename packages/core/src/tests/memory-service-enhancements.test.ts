@@ -121,6 +121,8 @@ describe("memory service — LRU + decay + embedding", () => {
       // A4: the single shared embedding (in-flight promise) is handed to the graph
       // write-through so it does not embed the record a second time.
       expect.any(Promise),
+      // The directory the record is stored in, which decides a workspace node's graph tenant.
+      expect.stringContaining(ws),
     );
   });
 

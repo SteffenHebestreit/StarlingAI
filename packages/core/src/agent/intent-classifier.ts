@@ -21,6 +21,7 @@ import { getConfig } from "../config/loader.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
 import { PRODUCT } from "../product/index.js";
+import { buildTurnReplyLanguageInstruction, type TurnReplyLanguageOptions } from "./reply-language.js";
 
 // ── Intent term / pattern tables ─────────────────────────────────────────────
 //
@@ -117,20 +118,147 @@ const ASSISTANT_NAMING_PATTERNS: readonly RegExp[] = [
 
 // Capturing variants used to extract the actual name for deterministic
 // persistence (see extractAssistantName). Each captures the name token in $1.
-const ASSISTANT_NAMING_CAPTURE_PATTERNS: readonly RegExp[] = [
-  /\bhei(?:ß|ss)t\s+du\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\bdu\s+hei(?:ß|ss)t(?:\s+(?:ab|jetzt|sofort|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\bdein\s+name\s+(?:ist|sei|lautet|wird)(?:\s+(?:ab|jetzt|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\b(?:nenne|taufe)\s+dich(?:\s+ab\s+jetzt)?\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\byour\s+name\s+is(?:\s+now)?\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\bi(?:'ll|\s+will)\s+call\s+you\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
-  /\byou\s+are\s+(?:now\s+)?called\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+// Global so every occurrence is judged: "Heißt du Claude? Nein — ab jetzt heißt
+// du Luna." must reject the question and still find the statement.
+// `nameEndsClause`: the verb is ambiguous ("call you" is also a phone call), so
+// the name must end its clause — "I will call you Monday about the contract"
+// names nobody (verified 2026-10-05: it renamed the assistant "Monday").
+const ASSISTANT_NAMING_CAPTURE_PATTERNS: ReadonlyArray<{ re: RegExp; nameEndsClause?: boolean }> = [
+  { re: /\bhei(?:ß|ss)t\s+du(?:\s+(?:ab|jetzt|sofort|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
+  { re: /\bdu\s+hei(?:ß|ss)t(?:\s+(?:ab|jetzt|sofort|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
+  { re: /\bdein\s+name\s+(?:ist|sei|lautet|wird)(?:\s+(?:ab|jetzt|nun))*\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
+  { re: /\b(?:nenne|taufe)\s+dich(?:\s+ab\s+jetzt)?\s+["“”'»]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
+  { re: /\byour\s+name\s+is(?:\s+now)?\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
+  { re: /\bi(?:'ll|\s+will)\s+call\s+you\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu, nameEndsClause: true },
+  { re: /\byou\s+are\s+(?:now\s+)?called\s+["“”'«]?\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
   // "ab jetzt bist du \"Luna\"" / "du bist (jetzt) \"Luna\"" — QUOTE REQUIRED.
   // Unlike "heißt du X" (where the verb unambiguously introduces a name), German
   // "du bist X" + noun-capitalization is ambiguous, so only an explicitly quoted
   // name counts as a rename here.
-  /\b(?:du\s+)?bist\s+(?:du\s+)?(?:ab\s+|jetzt\s+|sofort\s+|nun\s+)*["“”'«»]\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/iu,
+  { re: /\b(?:du\s+)?bist\s+(?:du\s+)?(?:ab\s+|jetzt\s+|sofort\s+|nun\s+)*["“”'«»]\s*([\p{L}][\p{L}\p{M}\d_-]{1,39})/giu },
 ];
+
+// ── Is the naming clause an unambiguous STATEMENT? (verified misfires 2026-10-05) ──
+// The name is persisted for good, so it is taken only from a plain naming statement.
+// Three shapes looked like one and renamed the assistant permanently:
+//   "Heißt du Claude?"                                          → a question
+//   "In der Geschichte heißt du Robin, und du bist ein Ritter." → a story frame
+//   "I will call you Monday about the contract."               → a phone call
+// The checks below read STRUCTURE — sentence punctuation, quote parity, word order, what
+// stands before and after the name. Where a word decides, it comes from a CLOSED class
+// (temporal scope, discourse glue, tag questions, weekdays/months, fiction frames and
+// third-person reporting verbs), never from the topic of the message.
+
+// A colon does NOT end the sentence: "Er sagte: du heißt Max" keeps its frame.
+const NAMING_SENTENCE_END_RE = /[.!?\n]/;
+// Boundaries INSIDE a sentence that close a lead segment: "Übrigens: …", "Hey Claude, …",
+// "Perfekt – …", "Nein — …", "Na gut - …".
+const LEAD_SEGMENT_BOUNDARY_RE = /[:,–—]|\s-\s/u;
+// Double-quote marks of every convention. Single quotes are left out: they double as the
+// apostrophe ("I'll", "geht's"), so their parity says nothing.
+const DOUBLE_QUOTE_MARKS_RE = /["“”„«»]/g;
+// Quote marks that may open a quoted NAME right after the naming verb.
+const NAME_OPENING_QUOTE_RE = /["“”„'‚‘’«»]$/u;
+// The only words that may stand DIRECTLY before the naming clause (after the last boundary):
+// temporal scope ("ab jetzt", "von nun an", "in Zukunft", "ab morgen", "from now on"),
+// discourse glue ("also", "dann", "okay", "and", "so", "bitte") and the speaker as subject
+// ("ich", "I"). Anything else there — "In der Geschichte", "Im Spiel", "In this story",
+// "I know" — scopes the name to a frame or a belief, which is not a rename of the assistant.
+const UNFRAMED_LEAD_WORDS = new Set([
+  "ab", "von", "an", "seit", "jetzt", "nun", "sofort", "heute", "morgen", "übermorgen", "in", "zukunft",
+  "künftig", "kuenftig", "zukünftig", "zukuenftig", "also", "dann", "und", "okay", "ok",
+  "gut", "so", "ja", "nein", "doch", "bitte", "ich", "wir",
+  "from", "now", "on", "going", "forward", "starting", "today", "tomorrow", "henceforth", "then",
+  "and", "well", "alright", "please", "yes", "no", "i", "we",
+  // The speaker's own decision ("I have decided your name is Nova", "Ich habe beschlossen …") —
+  // a belief ("I know/think your name is Claude") stays out.
+  "have", "decided", "hereby", "declare", "habe", "hab", "beschlossen", "entschieden", "hiermit",
+]);
+// A frame that scopes a name to fiction, a game or someone else's words: genre/frame nouns
+// and third-person reporting verbs. Tested on every lead segment that ends in a boundary and on
+// every EARLIER sentence of the message ("Write a story. Your name is Robin …").
+const NAMING_FRAME_MARKER_RE = /(?<![\p{L}])(?:story|stories|tale|tales|novel|game|games|role-?play|roleplay|scene|script|character|pretend|imagine|fiction|geschichte|geschichten|erzählung|märchen|roman|spiel|spielen|rollenspiel|szene|hörspiel|theaterstück|theater|figur|rolle|stell\s+dir\s+vor|tu\s+so|says|said|told|tells|thinks|thought|believes|claims|claimed|wrote|writes|meint|meinte|sagt|sagte|gesagt|erzählt|erzählte|behauptet|behauptete|glaubt|glaubte|denkt|dachte|schreibt|schrieb|geschrieben)(?![\p{L}])/iu;
+// A lasting scope makes the sentence a declaration even with a tag question after it.
+const NAMING_SCOPE_MARKER_RE = /(?<![\p{L}])(?:ab\s+(?:jetzt|sofort|heute|morgen)|von\s+(?:nun|jetzt|heute)\s+an|in\s+zukunft|k(?:ü|ue)nftig|zuk(?:ü|ue)nftig|from\s+now\s+on|going\s+forward|henceforth|starting\s+(?:now|today|tomorrow)|from\s+(?:today|tomorrow)(?:\s+on)?)(?![\p{L}])/iu;
+// Tag questions after a comma/dash that closes the naming statement. An AGREEMENT tag asks
+// the assistant to accept the declaration ("…, okay?") — still a rename. A CONFIRMATION tag asks
+// whether a belief is true ("Your name is Claude, right?") — a question, unless the sentence
+// carries a lasting scope ("Ab jetzt heißt du Max, oder?").
+const AGREEMENT_TAGS = new Set([
+  "okay", "ok", "alright", "all right", "got it", "understood", "deal", "fine", "cool", "good", "agreed",
+  "sounds good", "is that ok", "is that okay", "einverstanden", "in ordnung", "passt das", "passt", "klar",
+  "alles klar", "verstanden", "gut", "geht das", "ist das ok", "ist das okay",
+]);
+const CONFIRMATION_TAGS = new Set([
+  "right", "correct", "isn't it", "isnt it", "is it", "aren't you", "don't you", "no", "oder", "nicht wahr",
+  "stimmt's", "stimmts", "stimmt das", "stimmt", "richtig", "ja", "gell", "ne", "nicht",
+]);
+const TAG_QUESTION_MAX_WORDS = 4;
+// What may follow a "call you <Name>" in its clause: nothing, or a lasting-scope marker
+// ("I'll call you Luna from now on").
+const NAME_CLAUSE_TAIL_OK_RE = /^(?:from now on|going forward|henceforth|starting (?:now|today)|ab (?:jetzt|sofort|heute)|von nun an|in zukunft|k(?:ü|ue|u)nftig|zuk(?:ü|ue|u)nftig)?$/u;
+// "I'll call you Monday" is a phone call: weekdays, months and time words are not a name
+// after "call you" unless quoted.
+const CALL_YOU_TIME_WORDS = new Set([
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+  "january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december",
+  "tomorrow", "tonight", "today", "later", "soon", "asap", "noon", "midnight", "morning", "evening",
+]);
+
+const lettersOnly = (value: string): string =>
+  value.replace(/[^\p{L}\s'’]/gu, " ").replace(/\s+/gu, " ").trim().toLowerCase();
+
+/** Whether the naming match at `matchStart`..`nameEnd` is a plain, unframed statement. */
+function isUnframedNamingStatement(
+  text: string,
+  matchStart: number,
+  matchText: string,
+  nameEnd: number,
+  nameEndsClause: boolean,
+): boolean {
+  // Inside quoted speech: an odd number of double-quote marks before the match.
+  if ((text.slice(0, matchStart).match(DOUBLE_QUOTE_MARKS_RE) ?? []).length % 2 === 1) return false;
+
+  // The sentence it sits in.
+  let sentenceStart = 0;
+  for (let i = matchStart - 1; i >= 0; i -= 1) {
+    if (NAMING_SENTENCE_END_RE.test(text[i]!)) { sentenceStart = i + 1; break; }
+  }
+  const after = text.slice(nameEnd);
+  const endOffset = after.search(NAMING_SENTENCE_END_RE);
+  const sentenceRest = endOffset >= 0 ? after.slice(0, endOffset) : after;
+  const scoped = NAMING_SCOPE_MARKER_RE.test(text.slice(sentenceStart, nameEnd + sentenceRest.length));
+
+  // Not a question — except a short tag question that closes the statement (see AGREEMENT_TAGS).
+  const tailMatch = /(?:[,–—]|\s-\s)([^,–—]*)$/u.exec(sentenceRest);
+  const tail = tailMatch ? lettersOnly(tailMatch[1]!) : "";
+  if (endOffset >= 0 && after[endOffset] === "?") {
+    if (!tailMatch || !tail || tail.split(" ").length > TAG_QUESTION_MAX_WORDS) return false;
+    if (!AGREEMENT_TAGS.has(tail) && !scoped) return false;
+  } else if (tailMatch && CONFIRMATION_TAGS.has(tail) && !scoped) {
+    return false; // "Your name is Claude, isn't it" without its question mark
+  }
+
+  const lead = text.slice(sentenceStart, matchStart).trim();
+  // German verb-first ("Heißt du Claude", "Bist du \"Luna\"") is a yes/no question even
+  // without its question mark; a statement puts something before the verb ("Ab jetzt heißt du").
+  if (!lead && /^(?:hei(?:ß|ss)t|bist)\s+du\b/iu.test(matchText)) return false;
+  // Lead segments closed by a boundary ("Übrigens:", "Hallo mein lieber Assistent,", "Perfekt –")
+  // may hold anything but a frame; the segment directly before the naming clause holds only
+  // closed-class unframing words.
+  const segments = lead.split(LEAD_SEGMENT_BOUNDARY_RE);
+  const directLead = segments.pop() ?? "";
+  if (lettersOnly(directLead).split(" ").filter(Boolean).some((word) => !UNFRAMED_LEAD_WORDS.has(word))) return false;
+  if (segments.some((segment) => NAMING_FRAME_MARKER_RE.test(segment))) return false;
+  // A frame set up in an earlier sentence scopes this one too.
+  if (NAMING_FRAME_MARKER_RE.test(text.slice(0, sentenceStart))) return false;
+
+  if (nameEndsClause) {
+    const clauseTail = lettersOnly(after.replace(/^["“”'»«]+/u, "").split(/[,;:.!?\n]/u)[0]!);
+    if (!NAME_CLAUSE_TAIL_OK_RE.test(clauseTail)) return false;
+  }
+  return true;
+}
 
 // Common words that follow a naming phrase but are NOT names — guards the
 // extractor against e.g. "heißt du wirklich so?" capturing "wirklich".
@@ -146,20 +274,30 @@ const NON_NAME_TOKENS = new Set([
  * deterministically — local models tend to *acknowledge* a rename ("saved!")
  * without ever calling assistant_personality_update (audit b71523fb: "Ab jetzt
  * heißt du Luna" → claimed saved, toolCalls=0, nothing persisted).
+ * Only a plain naming STATEMENT counts — not a question, not quoted speech, not a
+ * story/role-play frame, not "call you <X> about …" (see isUnframedNamingStatement).
  */
 export function extractAssistantName(message: string): string | undefined {
   const text = message.trim();
-  for (const re of ASSISTANT_NAMING_CAPTURE_PATTERNS) {
-    const match = re.exec(text);
-    const captured = match?.[1];
-    if (!captured) continue;
-    const quoted = /["“”'«»]/.test(match![0]);
-    const name = captured.replace(/["“”'»«]+$/u, "").trim();
-    if (name.length < 2) continue;
-    if (NON_NAME_TOKENS.has(name.toLowerCase())) continue;
-    // Require a proper-noun signal: quoted in the message, or capitalized.
-    if (!quoted && !/^\p{Lu}/u.test(name)) continue;
-    return name.charAt(0).toUpperCase() + name.slice(1);
+  for (const { re, nameEndsClause } of ASSISTANT_NAMING_CAPTURE_PATTERNS) {
+    for (const match of text.matchAll(re)) {
+      const captured = match[1];
+      if (!captured) continue;
+      const matchStart = match.index ?? 0;
+      const nameStart = matchStart + match[0].length - captured.length;
+      // Quoted means a quote mark right before the NAME — not the apostrophe of "I'll"
+      // earlier in the match, which let a lowercase "I'll call you tomorrow" through.
+      const quoted = NAME_OPENING_QUOTE_RE.test(text.slice(matchStart, nameStart).trimEnd());
+      const name = captured.replace(/["“”'»«]+$/u, "").trim();
+      if (name.length < 2) continue;
+      if (NON_NAME_TOKENS.has(name.toLowerCase())) continue;
+      // Require a proper-noun signal: quoted in the message, or capitalized.
+      if (!quoted && !/^\p{Lu}/u.test(name)) continue;
+      // "I'll call you Monday" schedules a call; a quoted "Monday" would be a name.
+      if (nameEndsClause && !quoted && CALL_YOU_TIME_WORDS.has(name.toLowerCase())) continue;
+      if (!isUnframedNamingStatement(text, matchStart, match[0], nameStart + captured.length, nameEndsClause === true)) continue;
+      return name.charAt(0).toUpperCase() + name.slice(1);
+    }
   }
   return undefined;
 }
@@ -337,10 +475,9 @@ function computeDynamicTurnGuidance(userMessage: string): DynamicTurnGuidance | 
 
 // ── Language / identity guidance ──────────────────────────────────────────────
 
-export function buildLanguageAndIdentityTurnGuidance(userMessage: string): string {
+export function buildLanguageAndIdentityTurnGuidance(userMessage: string, opts: TurnReplyLanguageOptions = {}): string {
   const profile = loadMainAssistantPersonality();
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  const languageInstruction = buildLanguageInstructionForTurn(compactMessage);
+  const languageInstruction = buildLanguageInstructionForTurn(userMessage, opts);
   const behaviorInstruction = "Be polite, brief, and efficient. Avoid small talk, filler, and unnecessary pleasantries. Do not introduce yourself or mention your name unless the user explicitly asks. The user already knows they are speaking to the assistant.";
   const nameInstruction = profile.identity.name
     ? `If the user explicitly asks for your name or what to call you, use ${JSON.stringify(profile.identity.name)} as your assistant name. Do not call yourself ${JSON.stringify(PRODUCT.name)} in conversation unless the user is explicitly asking about the product or platform name.`
@@ -352,10 +489,13 @@ export function buildLanguageAndIdentityTurnGuidance(userMessage: string): strin
 // DELETED in the de-lexicalization. Language is decided by the LLM from the user's latest
 // message in any language — never a keyword table that defaulted ambiguous openings to German.
 
-export function buildLanguageInstructionForTurn(userMessage: string): string {
-  const compactMessage = userMessage.trim().replace(/\s+/g, " ").slice(0, 280);
-  if (!compactMessage) return "Reply in the same language as the user's latest message.";
-  return `The user's latest message is ${JSON.stringify(compactMessage)}. Reply in the same language as that message.`;
+/**
+ * The reply-language line for this turn. It used to say only "reply in the same language as that
+ * message", and as the one instruction that quotes the message it outranked everything else: a
+ * German message asking for an English answer got German. The precedence is in reply-language.ts.
+ */
+export function buildLanguageInstructionForTurn(userMessage: string, opts: TurnReplyLanguageOptions = {}): string {
+  return buildTurnReplyLanguageInstruction(userMessage, undefined, opts);
 }
 
 // ── Soft routing enforcement ──────────────────────────────────────────────────

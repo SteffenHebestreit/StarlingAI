@@ -52,10 +52,14 @@ describe("LMStudioProvider hard timeout", () => {
       (value) => ({ ok: true as const, value }),
       (err) => ({ ok: false as const, err: err as Error }),
     );
-    // Hard ceiling = requestTimeoutMs + 5000. With our 100ms timeoutMs that's
-    // capped to the DEFAULT (30_000) by computeOpenAICompatibleRequestTimeoutMs
-    // floor, then +5000 grace. Advance well past it.
-    await vi.advanceTimersByTimeAsync(40_000);
+    // Hard ceiling = max(requestTimeoutMs, MAX_PROVIDER_TIMEOUT_MS) + 5000. Our 100ms
+    // timeoutMs is raised to the MINIMUM SILENCE BUDGET (600_000) by
+    // computeOpenAICompatibleRequestTimeoutMs, and the non-streaming ceiling is floored at
+    // 900_000: requestTimeoutMs measures SILENCE and the streaming path re-arms it per
+    // chunk, but this path has no chunks, so the same number would otherwise bound a whole
+    // generation — and a terminal hard timeout on the rescue/synthesis calls that land here
+    // discards the very evidence they exist to preserve. Advance well past it.
+    await vi.advanceTimersByTimeAsync(1_000_000);
     const result = await settled;
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.err.message).toMatch(/exceeded hard timeout/);
@@ -90,7 +94,7 @@ describe("LMStudioProvider hard timeout", () => {
       (err) => ({ ok: false as const, err: err as Error }),
     );
     // Advance far past several hard-timeout windows + retry delays.
-    await vi.advanceTimersByTimeAsync(120_000);
+    await vi.advanceTimersByTimeAsync(2_000_000);
     const result = await settled;
 
     expect(result.ok).toBe(false);

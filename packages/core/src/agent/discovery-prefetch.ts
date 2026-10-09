@@ -17,7 +17,7 @@
  */
 
 import { resolveAgentRouting } from "../tools/sub-agent.js";
-import { agentIsMetaFactory } from "../tools/agent-routing.js";
+import { agentIsMetaFactory, logRoutingEvaluated } from "../tools/agent-routing.js";
 import { searchWorkflowCandidates } from "../tools/workflow-catalog.js";
 
 function oneLine(text: string | undefined, max: number): string {
@@ -58,6 +58,12 @@ export function formatDiscoveryCapsule(
   ].join("\n");
 }
 
+/** An agent the capsule lists, with the confidence routing admitted it at. */
+export interface DiscoveryCapsuleAgent {
+  name: string;
+  confidence?: string;
+}
+
 /**
  * Discover candidate agents + workflows for a query in parallel and format the
  * capsule. Best-effort: a failure in either discovery degrades to whatever the other
@@ -65,12 +71,32 @@ export function formatDiscoveryCapsule(
  */
 export async function prefetchCapabilityCandidates(
   query: string,
-  opts?: { allowedAgents?: string[]; maxAgents?: number; maxWorkflows?: number },
+  opts?: {
+    allowedAgents?: string[];
+    maxAgents?: number;
+    maxWorkflows?: number;
+    sessionId?: string;
+    /**
+     * The capsule's agent names, in the order the capsule lists them, once they are known (also
+     * when there are none). The capsule itself is text; the intent readout's shadow needs the
+     * candidate list the turn actually had (agent/intent-shadow.ts). The second argument is the
+     * same list with each agent's routing confidence, for a caller that acts on how sure the
+     * routing was (the runtime's --auto artifact build, agent/turn-setup.ts).
+     */
+    onAgents?: (names: readonly string[], agents: readonly DiscoveryCapsuleAgent[]) => void;
+    /**
+     * The turn has no catalog tools (a scene or job step, agent/runtime.ts). No workflow is looked
+     * up or named: the capsule would point the turn at run_workflow, which it cannot call, and at
+     * the workflow it is running, which its own task matches.
+     */
+    withoutWorkflows?: boolean;
+  },
 ): Promise<string> {
   const q = query.trim();
   if (!q) return "";
   const maxAgents = Math.max(1, opts?.maxAgents ?? 4);
   const maxWorkflows = Math.max(1, opts?.maxWorkflows ?? 3);
+  const startedAt = Date.now();
 
   const [agentRes, workflowRes] = await Promise.all([
     resolveAgentRouting(q, {
@@ -81,8 +107,29 @@ export async function prefetchCapabilityCandidates(
     // semanticOutlier: only surface a workflow when its embedding score is a clear
     // standout from the ~0.5 baseline — never steer the model into a deliverable-shape
     // workflow the request did not clearly call for (audit 7839e153). Pure semantic.
-    searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
+    opts?.withoutWorkflows
+      ? Promise.resolve([])
+      : searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
   ]);
+
+  // Log the routing decision on EVERY prefetch, including the empty ones. The capsule is
+  // only rendered when something matched, and `discovery_prefetch` only fires when the
+  // capsule is non-empty, so the misses — which are also the slow ones (~2.5 s vs ~0.5 s
+  // when something matched) — left no trace at all.
+  if (agentRes) {
+    logRoutingEvaluated({
+      surface: "discovery_prefetch",
+      query: q,
+      resolution: agentRes,
+      elapsedMs: Date.now() - startedAt,
+      ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+      extra: {
+        workflowCount: (workflowRes ?? []).length,
+        workflowTop: workflowRes?.[0]?.name ?? null,
+        workflowTopScore: workflowRes?.[0]?.semanticScore ?? null,
+      },
+    });
+  }
 
   const agents = (agentRes?.results ?? [])
     // Drop meta/factory agents (agent_factory): UNDIRECTED routing/bidding never picks them, so
@@ -101,5 +148,13 @@ export async function prefetchCapabilityCandidates(
     description: workflow.description,
   }));
 
+  try {
+    opts?.onAgents?.(
+      agents.map((agent) => agent.name),
+      agents.map((agent) => ({ name: agent.name, confidence: agent.confidence })),
+    );
+  } catch {
+    // An observer's failure is never the capsule's.
+  }
   return formatDiscoveryCapsule(agents, workflows);
 }

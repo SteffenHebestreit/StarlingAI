@@ -428,6 +428,36 @@ describe("memory tools", () => {
     expect(searchResult.output).toContain("[user/preference]");
   });
 
+  it("promotes nothing when the requested sources are only the destination itself", async () => {
+    // Filtered down to an empty list, such a request reached the search as "no scopes", which
+    // reads every scope: workspace into workspace copied the session's facts and the agents'
+    // lessons, which nobody asked for (found in review, 2026-10-08).
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-memory-tools-"));
+    const userMemoryPath = mkdtempSync(join(tmpdir(), "starlingai-user-memory-tools-"));
+    dirs.push(workspacePath, userMemoryPath);
+    process.env["SAI_USER_MEMORY_PATH"] = userMemoryPath;
+    appendOutcome(workspacePath, {
+      ts: "2026-04-01T12:00:00.000Z",
+      agent: "browser_agent",
+      task: "Avoid browser loops",
+      outcome: "success",
+      iterations: 2,
+      totalTokens: 800,
+      lesson: "Stop retrying when the page state is stable and the needed evidence is already visible.",
+    });
+    await writeSharedFact("parent-session", "loop_guard", "Browser loops end once the page state is stable.");
+    const ctx = { sessionId: "sub:parent-session:productivity_agent:1", workspacePath, userId: "test-user" };
+
+    const { executeTool } = await import("../tools/registry.js");
+    const intoWorkspace = await executeTool("memory_promote", { query: "browser loops", scopes: ["workspace"] }, ctx);
+    const intoUser = await executeTool("memory_promote", { query: "browser loops", scopes: ["user"], destinationScope: "user" }, ctx);
+
+    expect(intoWorkspace.output).toContain("Workspace memory promotion completed, but no matching entries were promoted.");
+    expect(intoUser.output).toContain("User memory promotion completed, but no matching entries were promoted.");
+    const durable = await executeTool("memory_search", { query: "browser loops", scopes: ["workspace", "user"] }, ctx);
+    expect(durable.output).toContain("No memories found");
+  });
+
   it("rejects near-duplicate share_finding when token overlap ≥85%", async () => {
     const { executeTool } = await import("../tools/registry.js");
 
@@ -480,5 +510,85 @@ describe("memory tools", () => {
     expect(update.success).toBe(true);
     // Same key → no dedup rejection (overwrite is expected)
     expect(update.metadata?.["deduplicated"]).toBeUndefined();
+  });
+
+  // Paths from session f4ebf47b. The two files share every token except `v2`, which the
+  // tokenizer drops, so token overlap scored them 100% and the v2 finding was lost.
+  const T2_PATH = "generated/.starlingai/generated/image-1790107355849_realistic.png";
+  const T3_PATH = "generated/.starlingai/generated/image-1790107355849_realistic_v2.png";
+
+  it("does not report a different file as a duplicate of a sibling path", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+    await writeSharedFact("ids-sess", "image:image-1790107355849_realistic.png", T2_PATH);
+
+    const result = await executeTool("share_finding", {
+      key: "final_image",
+      value: T3_PATH,
+    }, { sessionId: "sub:ids-sess:image_creator:1", workspacePath: "" });
+
+    expect(result.metadata?.["deduplicated"]).toBeUndefined();
+    expect((await readAllFacts("ids-sess"))["final_image"]).toBe(T3_PATH);
+  });
+
+  it("treats a re-share of an existing key as an update even when another key is similar", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+    await writeSharedFact("upd-sess", "deploy_status", "Deployment to staging is in progress; waiting for health checks to pass.");
+    await writeSharedFact("upd-sess", "deployment_log_2", "Deployment to staging completed, all health checks passed on the cluster nodes.");
+
+    // 90% token overlap with deployment_log_2, so the cross-key check would skip it and
+    // leave deploy_status saying "in progress".
+    const done = "Deployment to staging completed, all health checks passed on the cluster.";
+    const result = await executeTool("share_finding", {
+      key: "deploy_status",
+      value: done,
+    }, { sessionId: "sub:upd-sess:devops:1", workspacePath: "" });
+
+    expect(result.metadata?.["deduplicated"]).toBeUndefined();
+    expect((await readAllFacts("upd-sess"))["deploy_status"]).toBe(done);
+  });
+
+  it("still skips an identical identifier under a new key and names the key holding it", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+    await writeSharedFact("same-sess", "image:x.png", T2_PATH);
+
+    const result = await executeTool("share_finding", {
+      key: "sunset_beach_image",
+      value: T2_PATH,
+    }, { sessionId: "sub:same-sess:image_creator:1", workspacePath: "" });
+
+    expect(result.metadata?.["deduplicated"]).toBe(true);
+    expect(result.output).toContain("has the same value as existing fact 'image:x.png'");
+    expect((await readAllFacts("same-sess"))["sunset_beach_image"]).toBeUndefined();
+  });
+
+  it("keeps two prose findings apart when they differ only in short numbers", async () => {
+    const { executeTool } = await import("../tools/registry.js");
+    await executeTool("share_finding", {
+      key: "gdp_q2",
+      value: "UK GDP grew 0.6% in Q2 2026, per the ONS release today.",
+    }, { sessionId: "sub:num-sess:researcher:1", workspacePath: "" });
+
+    const result = await executeTool("share_finding", {
+      key: "gdp_q3",
+      value: "UK GDP grew 0.4% in Q3 2026, per the ONS release today.",
+    }, { sessionId: "sub:num-sess:researcher:1", workspacePath: "" });
+
+    expect(result.metadata?.["deduplicated"]).toBeUndefined();
+    expect((await readAllFacts("num-sess"))["gdp_q3"]).toContain("0.4% in Q3");
+  });
+
+  it("keeps a long finding that changes ONE number apart, however much text it shares", async () => {
+    // Twenty-odd shared tokens and one changed figure: Jaccard alone is above 0.85 here.
+    const { executeTool } = await import("../tools/registry.js");
+    const sentence = (price: string) =>
+      `The Radeon 8060S workstation bundle is listed at ${price} EUR including VAT by the vendor's German store, with free shipping and a three year warranty.`;
+    await executeTool("share_finding", { key: "bundle_price_a", value: sentence("2499") },
+      { sessionId: "sub:long-num:researcher:1", workspacePath: "" });
+
+    const result = await executeTool("share_finding", { key: "bundle_price_b", value: sentence("2299") },
+      { sessionId: "sub:long-num:researcher:1", workspacePath: "" });
+
+    expect(result.metadata?.["deduplicated"]).toBeUndefined();
+    expect((await readAllFacts("long-num"))["bundle_price_b"]).toContain("2299 EUR");
   });
 });

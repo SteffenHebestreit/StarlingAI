@@ -37,6 +37,12 @@ export interface ToolResultPostProcessContext {
   readonly intervention: InterventionNotice | null;
   readonly argsSig: string;
   readonly session: AgentSession;
+  /** The note the turn loop appended to the result text itself, handed to the frame beside it
+   *  (tool-result-format.ts ToolResultFrameContext). */
+  readonly runtimeNote?: string;
+  /** The turn's tally of the retrieval evidence its frames have shown, which the frame reads and
+   *  advances in place (tool-result-format.ts ToolResultFrameContext). */
+  readonly retrievalShown?: { chars: number };
 
   // --- enclosing `opts` callbacks (passed through, never imported) ---
   readonly onIntervention?: (notice: InterventionNotice) => void;
@@ -44,21 +50,31 @@ export interface ToolResultPostProcessContext {
 
   // --- mutable collectors mutated in place (same references as the enclosing turn) ---
   readonly guardrailEvents: Array<{ type: string; details: string }>;
-  readonly lastToolCallSig: Map<string, { args: string; result: string; metadata?: Record<string, unknown> }>;
+  readonly lastToolCallSig: Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>;
   readonly toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>;
+}
+
+/** What the post-processing left of one tool result. */
+export interface ToolResultPostProcessOutcome {
+  /** The possibly-redacted or blocked text, as the inline code left it. */
+  readonly resultText: string;
+  /** The injection screen or the moderation model replaced the output with a block error, so the
+   *  model never saw what the tool returned. A redaction keeps the output and is not a block. */
+  readonly outputBlocked: boolean;
 }
 
 /**
  * Runs the tool-output post-processing tail for ONE tool call. `resultText` is passed in
  * (the already-computed result string, possibly amended by upstream loop-detection notices)
  * and the possibly-redacted/blocked final value is returned so the caller can read it back
- * exactly as the inline code left it. All side effects (guardrail events, signature cache,
- * message append, callbacks) happen on the shared context references.
+ * exactly as the inline code left it, with whether a screen blocked it. All side effects
+ * (guardrail events, signature cache, message append, callbacks) happen on the shared context
+ * references.
  */
 export const postProcessToolResult = async (
   resultText: string,
   ctx: ToolResultPostProcessContext,
-): Promise<string> => {
+): Promise<ToolResultPostProcessOutcome> => {
   const { toolCall: tc, result, intervention, argsSig, session, guardrailEvents } = ctx;
 
   // Redact any secrets that leaked into the tool output before the LLM ever sees it
@@ -76,7 +92,9 @@ export const postProcessToolResult = async (
 
   // Prevent indirect prompt injection from tool output payloads
   const outCheck = checkToolOutput(resultText);
+  let outputBlocked = false;
   if (!outCheck.allowed) {
+    outputBlocked = true;
     const blockedIntervention = classifyToolIntervention({
       toolName: tc.name,
       success: false,
@@ -99,6 +117,7 @@ export const postProcessToolResult = async (
   if (outCheck.allowed) {
     const moderatedToolResult = await moderateToolResultText(resultText);
     if (moderatedToolResult?.blocked) {
+      outputBlocked = true;
       logAudit("tool_output_blocked", {
         tool: tc.name,
         reason: `Model moderation blocked tool output: ${moderatedToolResult.summary}`,
@@ -120,11 +139,19 @@ export const postProcessToolResult = async (
     args: argsSig,
     result: resultText,
     metadata: result.metadata,
+    // A FAILED call is not a result to replay. Without this the cache stored the failure text and
+    // the replay reported it as success:true — a tool that had errored came back as one that had
+    // worked, and the model wrote its answer as though the work were done. The sub-agent loop has
+    // always recorded this; the turn loop did not.
+    success: result.success,
   });
 
   if (ctx.onToolResult) ctx.onToolResult(tc.id, tc.name, resultText, result.metadata);
 
-  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata);
+  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata, {
+    runtimeNote: ctx.runtimeNote,
+    retrievalShown: ctx.retrievalShown,
+  });
 
   ctx.toolResultMessages.push({
     role: "tool",
@@ -133,5 +160,5 @@ export const postProcessToolResult = async (
     metadata: result.metadata,
   });
 
-  return resultText;
+  return { resultText, outputBlocked };
 };

@@ -5,11 +5,60 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { getMcpConnections } from "../mcp/registry.js";
-import { checkImageGenerationHealth, imageGenerationServiceConfigured, requestImageGeneration } from "../multimodal/image-generation.js";
+import {
+  ImageGenerationTimeoutError,
+  ImageRenderTooLongError,
+  ImageUpstreamRequestError,
+  checkImageGenerationHealth,
+  describeImageTierChoices,
+  describeRenderDuration,
+  expectedImageRenderSeconds,
+  imageEngineLabel,
+  imageGenerationServiceConfigured,
+  imageRenderLimitError,
+  imageRequestBoundsError,
+  imageTierChoices,
+  imageTierDefaults,
+  previewImageRequest,
+  readImageHeaderSize,
+  requestImageGeneration,
+  resolveNamedImageEngine,
+  type ImageGenerationRequest,
+} from "../multimodal/image-generation.js";
+import {
+  IMAGE_SETTINGS_KIND,
+  IMAGE_SETTINGS_MAX_ANSWER_BYTES,
+  applyImageSettings,
+  buildImageSettingsProposal,
+  collectBaseCandidates,
+  describeAgentMask,
+  describeImageSettingsForAgent,
+  describeRenderSettings,
+  describeReusedMaskForAgent,
+  describeSettingsChange,
+  truncate,
+  validateImageSettingsAnswer,
+  type AgentMask,
+  type BaseCandidate,
+  type BaseCandidateSource,
+  type CandidateSourceEntry,
+  type ImageSettingsDecision,
+  type ImageSettingsProposal,
+  type ImageSettingsSource,
+} from "../multimodal/image-settings.js";
+import { encodeImageAs, transformImage, type ImageTransformOp } from "../multimodal/image-transform.js";
+import { readAllFacts, writeSharedFact } from "../swarm/memory.js";
+import { getSessionRecord } from "../agent/session.js";
+import { holdTurnClocks } from "../agent/user-input-broker.js";
+import { DECLINED_BY_USER_METADATA_KEY } from "../agent/user-input.js";
+import { currentCallAttribution, currentRequestContext } from "../runtime/request-context.js";
+import { logAudit } from "../audit/logger.js";
+import { readServerTimings } from "../providers/lmstudio.js";
+import type { MultimodalImageGenerationConfig } from "../config/schemas/multimodal.js";
+import { deriveSharedSessionId } from "./memory.js";
 import { resolveProviderEndpointForModel } from "../providers/index.js";
-import { registerTool, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
-import { PRODUCT } from "../product/index.js";
+import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:multimodal");
 
@@ -266,16 +315,25 @@ registerTool({
       }
 
       const audio = new Uint8Array(await response.arrayBuffer());
-      const outputPath = stringArg(args["outputPath"]) ?? `${PRODUCT.stateDirName}/generated/tts-${Date.now()}.wav`;
-      const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
+      const requestedOutputPath = stringArg(args["outputPath"]);
+      const outputPath = requestedOutputPath ?? `tts-${Date.now()}.wav`;
+      const resolvedOutput = requestedOutputPath
+        ? resolveWorkspacePath(outputPath, ctx.workspacePath)
+        : resolveDefaultArtifactPath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
       await writeFile(resolvedOutput.resolved, audio);
 
+      // REPORT WHERE THE FILE IS, NOT WHERE IT WAS ASKED FOR. The write goes to the RESOLVED
+      // path — which the zoning may re-root, and which the per-user artifact partition
+      // certainly does — while the raw request was what came back in the output text and the
+      // artifact record. Anything that later opens the reported path (the artifact probe, the
+      // serve routes, the model's own next read) was looking somewhere the file is not.
       return {
         success: true,
-        output: `Audio saved to ${outputPath}`,
+        output: `Audio saved to ${resolvedOutput.relativePath}`,
         metadata: {
-          outputPath,
+          outputPath: resolvedOutput.relativePath,
+          requestedPath: outputPath,
           bytes: audio.byteLength,
           contentType: response.headers.get("content-type") ?? "audio/wav",
         },
@@ -334,21 +392,316 @@ registerTool({
   },
 });
 
+/** Drop a trailing extension without touching directory separators in the path. */
+function stripFileExtension(value: string): string {
+  const ext = extname(value);
+  return ext ? value.slice(0, -ext.length) : value;
+}
+
+/**
+ * Publish a produced image where the NEXT agent can find it, without anyone remembering to.
+ *
+ * Session 2c6bdb30: turn one generated a sunset, turn two was asked to make it realistic. The
+ * orchestrator's task said "basierend auf dem Originalbild" and named no path, and turn one's
+ * agent had not called share_finding, so the shared facts were empty. image_creator then
+ * probed `/workspace/workspace/users/<seg>`, `workspace/users/<seg>` and the same path again
+ * — all directories, all ENOENT — and fell back to a fresh generation. The user got another
+ * unrelated beach and no indication that "based on the original" had been dropped.
+ *
+ * Relying on the producing agent to publish is what failed: it is one instruction among
+ * many, and turn one skipped it. Writing the fact here makes the path available whether or
+ * not any agent remembers, under the SHARED session id so a sibling or a later turn sees it
+ * rather than only the sub-session that made it.
+ *
+ * Best-effort by construction: a memory backend that is down must never fail a generation
+ * that already succeeded and is already on disk.
+ */
+async function publishImageArtifact(sessionId: string | undefined, relativePath: string): Promise<void> {
+  if (!sessionId) return;
+  try {
+    const shared = deriveSharedSessionId(sessionId);
+    // A stable pointer for "the image we just made", plus a durable per-file entry, because
+    // "the previous one" and "the one called sunset_beach" are both things users say.
+    await writeSharedFact(shared, "latest_image", relativePath);
+    await writeSharedFact(shared, `image:${basename(relativePath)}`, relativePath);
+  } catch {
+    // Nothing here is worth failing a finished image for.
+  }
+}
+
+
+/** Test seam: the handoff is the behaviour under test, not an implementation detail. */
+export const publishImageArtifactForTests = publishImageArtifact;
+
+registerTool({
+  name: "transform_image",
+  description:
+    "Apply exact, deterministic edits to an existing image in the workspace: sharpen, soften,"
+    + " resize, crop, rotate, flip, brightness, contrast, grayscale, normalize. Runs locally in"
+    + " milliseconds and costs the cluster nothing — it does NOT re-generate the picture, so"
+    + " everything you are not changing stays exactly as it was. Use this, never the image model,"
+    + " when the request is about the image as a picture rather than about its content.",
+  embeddingDescription:
+    "Sharpen, soften, blur, resize, scale, crop, trim, rotate, flip, brighten, darken, contrast,"
+    + " grayscale, black and white, normalize an existing image. Bild schärfen, weichzeichnen,"
+    + " skalieren, zuschneiden, drehen, spiegeln, heller, dunkler, Kontrast, Graustufen."
+    + " Post-processing, retouch, adjust a picture without regenerating it.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Relative workspace path to the image to transform" },
+      operations: {
+        type: "array",
+        description:
+          "Operations applied IN ORDER, so one call can crop and then sharpen. Each item is"
+          + " {op, ...}: sharpen{amount 0-3, default 1}, soften{radius 1-144, default 2},"
+          + " resize{width?, height?} (omit one to keep the aspect ratio), crop{x,y,width,height},"
+          + " rotate{degrees}, flip{horizontal?, vertical?}, brightness{amount -1..1},"
+          + " contrast{amount -1..1}, grayscale{}, normalize{}.",
+        items: { type: "object" },
+      },
+      outputPath: {
+        type: "string",
+        description:
+          "Optional relative output path. Omitted, the result is written NEXT TO the source with a"
+          + " suffix — the original is never overwritten, so an unwanted edit costs nothing.",
+      },
+    },
+    required: ["path", "operations"],
+  },
+  async execute(args, ctx) {
+    const path = String(args["path"] ?? "").trim();
+    if (!path) return fail("path is required");
+    const operations = Array.isArray(args["operations"]) ? args["operations"] as ImageTransformOp[] : [];
+    if (operations.length === 0) {
+      return fail("operations is required — e.g. [{\"op\":\"sharpen\",\"amount\":0.5}]");
+    }
+
+    try {
+      const source = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+      const result = await transformImage(Buffer.from(source.bytes), operations);
+
+      const requested = stringArg(args["outputPath"]);
+      // Same rule as generate_image: the bytes decide the extension. transformImage returns
+      // PNG, so a caller naming ".jpg" is encoded to JPEG rather than mislabelled.
+      const requestedExt = requested ? extname(requested).toLowerCase() : "";
+      const encoded = await encodeImageAs(result.bytes, requestedExt, ".png");
+      // A sibling by default. Overwriting the source would destroy the only copy of an image
+      // that may have cost minutes of GPU, and an edit the user dislikes would be unrecoverable.
+      const outputPath = requested
+        ? (requestedExt
+            ? `${stripFileExtension(requested)}${encoded.extension}`
+            : `${requested}${encoded.extension}`)
+        : `${stripFileExtension(path)}-edited-${Date.now()}${encoded.extension}`;
+      const resolved = resolveWorkspacePath(outputPath, ctx.workspacePath);
+      await mkdir(resolve(resolved.resolved, ".."), { recursive: true });
+      await writeFile(resolved.resolved, encoded.bytes);
+      await publishImageArtifact(ctx.sessionId, resolved.relativePath);
+
+      const resized = result.before.width !== result.after.width || result.before.height !== result.after.height;
+      return {
+        success: true,
+        output: `Applied ${result.applied.join(", ")} to ${path}. Saved to ${resolved.relativePath}`
+          + (resized ? ` (${result.before.width}x${result.before.height} -> ${result.after.width}x${result.after.height})` : ""),
+        metadata: {
+          sourcePath: path,
+          outputPath: resolved.relativePath,
+          filename: basename(resolved.relativePath),
+          bytes: encoded.bytes.byteLength,
+          contentType: encoded.mimeType,
+          applied: result.applied,
+          width: result.after.width,
+          height: result.after.height,
+          originalWidth: result.before.width,
+          originalHeight: result.before.height,
+        },
+      };
+    } catch (error) {
+      log.error({ error, path }, "transform_image failed");
+      return fail(error instanceof Error ? error.message : String(error));
+    }
+  },
+});
+
+const GENERATE_IMAGE_DESCRIPTION =
+  "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
+  + " seconds on dedicated hardware, costs the rest of the system nothing) and `quality` (minutes, runs one"
+  + " at a time cluster-wide and slows every other model on that machine while it runs). See the `tier`"
+  + " parameter for when each is right. In a chat the user may first see your settings and keep them,"
+  + " change engine, prompt, size, steps, seed or base picture, paint a mask, or skip the render; the"
+  + " output says which settings ran and who chose them. Report those, and never re-render to restore yours.";
+
+/**
+ * The engines behind the tiers, named, so "the qwen model" can be matched to a tier.
+ *
+ * Read from config each time the description is read rather than baked in at registration:
+ * the names belong to the deployment, not to this file. Deterministic for a given config, so
+ * the tool block stays byte-identical between calls and only moves when the config does.
+ */
+function describeImageEngines(): string {
+  try {
+    const config = getConfig().multimodal?.imageGeneration;
+    const engines = config ? describeImageTierChoices(config) : "";
+    // Computed, not written into the text: the quality default moved from 20 to 40 steps and the
+    // "~2-3 min" this replaced would have been half the real time.
+    const times = config
+      ? imageTierChoices(config).map((choice) => `\`${choice.tier}\` about ${describeRenderDuration(
+        expectedImageRenderSeconds(config, { tier: choice.tier, ...imageTierDefaults(config, choice.tier) }),
+      )}`).join(", ")
+      : "";
+    // The server's limit, so the agent does not propose a render it would cut off.
+    const limit = config?.maxRenderMs
+      ? ` The image server gives up on any render after ${Math.round(config.maxRenderMs / 60_000)} min, and a render`
+        + " expected to take longer is refused before it runs: more steps, a larger size and guidance above an engine's"
+        + " default of 1 or less (which doubles the time) all make it longer."
+      : "";
+    return (engines ? ` Engines: ${engines}. A user who names one of these is asking for that tier.` : "")
+      + (times ? ` At its defaults a render takes: ${times}.` : "")
+      + limit;
+  } catch {
+    return "";
+  }
+}
+
 registerTool({
   name: "generate_image",
-  description: "Generate an image from a text prompt using the configured image-generation backend and save it to the workspace.",
+  get description() {
+    return GENERATE_IMAGE_DESCRIPTION + describeImageEngines();
+  },
   embeddingDescription: "Generate, create, make an image, picture, illustration from a text prompt. Bild generieren, erzeugen, Illustration erstellen, KI-Bild aus Text. AI image generation, DALL-E style.",
   parameters: {
     type: "object",
     properties: {
-      prompt: { type: "string", description: "Text description of the image to generate" },
-      model: { type: "string", description: "Optional image model override for backends that support per-request model selection" },
-      negativePrompt: { type: "string", description: "Optional negative prompt to steer generation away from unwanted content" },
-      width: { type: "number", description: "Image width in pixels (snapped to the nearest supported resolution)" },
-      height: { type: "number", description: "Image height in pixels (snapped to the nearest supported resolution)" },
-      steps: { type: "number", description: "Number of diffusion steps (higher = better quality, slower)" },
-      guidanceScale: { type: "number", description: "Guidance scale — how closely the model follows the prompt (default 5.0)" },
+      prompt: {
+        type: "string",
+        description:
+          "Text description of the image to generate. It sets the VISUAL REGISTER — photograph,"
+          + " illustration, painting — so write it in the register the user asked for, and put"
+          + " the register FIRST: measured here with the seed pinned, the fast engine rendered"
+          + " one 250-word description as a painting when its camera terms came last and as a"
+          + " photograph when they led, on two seeds out of two. Decorative wording"
+          + " ('beautiful', 'vibrant', 'stunning', named saturated colours) produces a stylised,"
+          + " poster-like image; for a photograph describe one the way a photographer would —"
+          + " camera and lens, natural unedited colour, real material texture, haze or grain."
+          + " Wording cannot make the fast engine follow a detailed layout; see `tier`.",
+      },
+      model: {
+        type: "string",
+        description:
+          "Rarely needed — choose the engine with `tier`. Accepts only the model ids or engine names"
+          + " listed in this tool's description; any other name is refused before anything renders.",
+      },
+      negativePrompt: {
+        type: "string",
+        description:
+          "Optional negative prompt to steer generation away from unwanted content. It ONLY works with"
+          + " guidance above 1: at guidance 1 or less — the quality engine's default — it changes nothing"
+          + " (measured: identical pixels), and raising guidance above 1 there doubles the render time."
+          + " On the quality engine, describe what you want in the prompt instead.",
+      },
+      width: {
+        type: "number",
+        description:
+          "OMIT THIS unless you know the backend accepts the size. Nothing is resampled: a backend that"
+          + " generates one fixed resolution REJECTS any other width outright, costing a wasted call."
+          + " Leaving it out uses the configured default, which always fits. At most 2048.",
+      },
+      height: {
+        type: "number",
+        description: "OMIT THIS. Same rule as `width` — leaving it out uses the configured default.",
+      },
+      steps: {
+        type: "number",
+        description: "Number of diffusion steps, 1 to 100 (higher = better quality, slower: the render time grows with them). Omit to use the configured default.",
+      },
+      guidanceScale: {
+        type: "number",
+        description:
+          "Guidance scale — how closely the model follows the prompt, and what gives a negative prompt its"
+          + " effect (none at 1 or less). Omit to use the configured default: the quality engine is meant to"
+          + " render at 1, and anything above 1 doubles its time.",
+      },
       seed: { type: "number", description: "Optional random seed for reproducible results" },
+      tier: {
+        type: "string",
+        enum: ["fast", "quality"],
+        description:
+          "Which engine renders it. 'fast' is the default: about ten seconds on dedicated hardware,"
+          + " costing the rest of the system nothing — right for an ordinary picture, a realistic"
+          + " one included (with the register first it comes back photographic). 'quality' takes"
+          + " minutes (this tool's description says how many), runs one at a time across the whole cluster and slows every"
+          + " other model on that machine by roughly 70% while it runs. Choose 'quality' when the"
+          + " user was unhappy with a fast result or asks for a better one, names the quality"
+          + " engine, or when the new picture must keep an EXISTING picture's layout: measured here"
+          + " with the seed pinned, the fast engine ignored a described layout in 6 renders out of"
+          + " 6, while the quality engine followed it. A user who names an engine or tier gets"
+          + " exactly that one; if it fails, say so — never render on the other tier and present"
+          + " it as what they asked for.",
+      },
+      baseImage: {
+        type: "string",
+        description:
+          "Relative workspace path to an existing image to EDIT rather than replace. Use this when"
+          + " the user wants something changed INSIDE a picture while its look stays — add, remove,"
+          + " fix, recolour — because without it the elements they asked to keep will disappear."
+          + " Do NOT use it to change the picture's LOOK ('make it realistic', 'as a painting'):"
+          + " an edit inherits its base's look at every strength that keeps the layout, so the"
+          + " result comes back in the old style. For that, describe the existing layout in the"
+          + " prompt and generate without baseImage on tier 'quality' — measured here, that engine"
+          + " reproduced a described layout as a photograph, where a 0.75 edit of the same picture"
+          + " stayed an illustration and the fast engine ignored the layout. If the"
+          + " backend cannot edit, this fails with a clear message: report that honestly instead"
+          + " of passing a fresh generation off as a revision.",
+      },
+      strength: {
+        type: "number",
+        description:
+          "With `baseImage`, how much of the original is re-rendered, 0 to 1. Low (0.2-0.35)"
+          + " moves tone and colour only and cannot add or remove anything; 0.65-0.8 rebuilds"
+          + " most of the content while the broad layout survives; above ~0.85 keeps nothing"
+          + " and is a fresh image with extra steps. Defaults to 0.45. To ADD, REMOVE or"
+          + " REPLACE something while keeping the rest, pair `mask` with 0.6-0.85: only the"
+          + " masked region is rebuilt."
+          + " WHAT STRENGTH CANNOT DO: it does not change the VISUAL REGISTER of the base."
+          + " An edit inherits whether its base looks like a photograph, an illustration or a"
+          + " painting, at every strength that still preserves the composition. Measured: a"
+          + " stylised base edited at 0.75 with an explicitly photographic prompt AND an"
+          + " anti-illustration negative prompt stayed an illustration (mean pixel distance"
+          + " from the base 31.2, against 32.7 for a plain prompt — the prompt work bought"
+          + " nothing), while the SAME call from a photographic base stayed photographic. So if"
+          + " the user asks for a different register ('make it real', 'less cartoonish'),"
+          + " raising strength will NOT deliver it. Generate a new image instead on tier 'quality',"
+          + " describing the composition you want to keep in words, and say plainly that the composition"
+          + " is re-interpreted rather than preserved. Use an edit for what an edit does: keep"
+          + " this picture, change something in it.",
+      },
+      mask: {
+        type: "string",
+        description:
+          "With `baseImage`, a relative workspace path to an RGBA PNG selecting WHICH REGION may"
+          + " change — everything outside it is returned untouched. ALPHA semantics: a"
+          + " TRANSPARENT pixel may be edited, an OPAQUE pixel is protected. Getting that"
+          + " backwards edits exactly the part the user wanted kept and still returns a"
+          + " perfectly plausible picture, so never guess the polarity. The mask must select"
+          + " something and not everything; both are rejected. Pass one only when a mask file"
+          + " already exists — you cannot draw one, and inventing a path fails. In a chat the user"
+          + " can paint one in the settings step, so for add/remove/replace without a mask still"
+          + " call with baseImage; a mask they painted is kept as the shared fact `latest_mask`. It selects"
+          + " one region of the pictures in `latest_mask_base`: reuse it only to change that SAME region again;"
+          + " for another region or picture call without it — it is refused on any other picture."
+          + " Useful for 'change only the sky', 'replace the car', 'leave her face alone'."
+          + " LIMIT: the model never sees the"
+          + " mask — the region is composited in — so this REPLACES a region cleanly but cannot"
+          + " continue existing content across it. 'Extend this wall into the gap' will not"
+          + " work; 'put boulders on this beach' will.",
+      },
+      maskBlur: {
+        type: "number",
+        description:
+          "Feather width in pixels for the mask edge, with `mask`, 0 to 64. Omit it: the default of 24"
+          + " pastes the original back outside the mask (measured: unchanged pixels). 0 gives a hard cut"
+          + " and the engine re-renders the protected region too (measured: mean drift 8.4).",
+      },
       outputPath: { type: "string", description: "Optional relative output path inside the workspace for the generated PNG" },
     },
     required: ["prompt"],
@@ -366,6 +719,46 @@ registerTool({
         return fail("Image generation is disabled: configure multimodal.imageGeneration.baseUrl to enable it.");
       }
 
+      // Names are checked HERE, before anything touches the backend. Session f4ebf47b sent
+      // `model: "Qwen"`, the router answered 404, and the agent's only recovery was to drop the
+      // name — which lands on the fast tier, the opposite of what the user asked for. A refusal
+      // that lists what exists costs one cheap iteration and points at the right engine.
+      const choices = imageTierChoices(config);
+      const statedTier = stringArg(args["tier"])?.toLowerCase();
+      if (statedTier && statedTier !== "fast" && statedTier !== "quality") {
+        return fail(
+          `Unknown tier "${stringArg(args["tier"])}". This deployment has: ${describeImageTierChoices(config) || "`fast`"}.`
+          + " Nothing was rendered.",
+        );
+      }
+      let requestedTier = statedTier as "fast" | "quality" | undefined;
+      const namedModel = stringArg(args["model"]);
+      if (namedModel && choices.length > 0) {
+        const tierOfName = resolveNamedImageEngine(config, namedModel);
+        if (!tierOfName) {
+          return fail(
+            `Unknown image engine "${namedModel}". This deployment has: ${describeImageTierChoices(config)}.`
+            + " Choose one with `tier` and omit `model`. Nothing was rendered.",
+          );
+        }
+        // The engine the user named wins over a tier stated beside it — the same rule the
+        // library applies — and only the tier travels on, so the backend resolves its own model.
+        requestedTier = tierOfName;
+      }
+
+      // Held to what may be rendered before anything else runs: the render's budget grows with its
+      // steps and size, so 1000 steps at 2048x2048 would have been offered on the settings card as a
+      // 19-hour render.
+      const outOfBounds = imageRequestBoundsError({
+        ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
+        ...(typeof args["width"] === "number" ? { width: args["width"] } : {}),
+        ...(typeof args["height"] === "number" ? { height: args["height"] } : {}),
+        ...(typeof args["maskBlur"] === "number" ? { maskBlur: args["maskBlur"] } : {}),
+      });
+      if (outOfBounds) {
+        return fail(`${outOfBounds}. Nothing was rendered: call again within those bounds, or leave them out for the engine's defaults.`);
+      }
+
       const health = await checkImageGenerationHealth(config);
       if (!health.ok) {
         if (health.disabled) {
@@ -377,47 +770,225 @@ registerTool({
         return fail(`Image generation service is offline (${config.baseUrl}). The endpoint is unavailable. Do not retry - inform the user.`);
       }
 
-      const result = await requestImageGeneration(config, {
+      // Pass the tier ONLY when the caller stated one (or named an engine, above). Forcing
+      // "fast" on every call that omitted it is what made editing unreachable:
+      // requestImageGeneration then had no way to tell "the caller wants fast" from "the caller
+      // did not say", so a baseImage request was pinned to a tier that cannot edit and refused.
+      // An unknown tier used to fall back to fast silently; it is refused above instead,
+      // because a quiet fallback is the same wrong-engine outcome with no one told.
+      // The tiers want DIFFERENT sampling defaults and both read the fields. Measured with
+      // the seed pinned so only the parameter could vary: the fast tier renders differently
+      // at guidance 1.0 than at 7.5, and the quality tier costs 22s at guidance 4 against
+      // 11s at 1.0 because true CFG doubles the forward passes — and Qwen-Image 2.1 is meant
+      // to render without it. One shared default is wrong for one of them whichever value it takes.
+      // Read the base image before anything else touches the backend, so a bad path fails
+      // immediately rather than after a two-minute render.
+      let baseFile: WorkspaceBinaryFile | undefined;
+      const baseImagePath = stringArg(args["baseImage"]);
+      if (baseImagePath) {
+        try {
+          baseFile = await readWorkspaceBinaryFile(baseImagePath, ctx.workspacePath);
+        } catch (error) {
+          return fail(
+            `Could not read baseImage "${baseImagePath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      let maskFile: WorkspaceBinaryFile | undefined;
+      const maskPath = stringArg(args["mask"]);
+      if (maskPath) {
+        try {
+          maskFile = await readWorkspaceBinaryFile(maskPath, ctx.workspacePath);
+        } catch (error) {
+          return fail(
+            `Could not read mask "${maskPath}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      // A painted mask selects one region of ONE picture, and the agent cannot see which. Offered
+      // for any later edit, it rebuilt the sky again when the user had asked to remove the boat.
+      let paintedMaskFor: string | undefined;
+      if (maskFile && baseFile) {
+        const fits = await paintedMaskFits(ctx, maskFile.relativePath);
+        paintedMaskFor = fits?.[0];
+        if (fits && !fits.includes(baseFile.relativePath)) {
+          return fail(
+            `The mask ${maskFile.relativePath} was painted for ${fits[0]}, not for ${baseFile.relativePath}: a mask`
+            + " selects one region of one picture. Nothing was rendered. For another picture or another region, call"
+            + " generate_image without `mask`; in a chat the user paints the region in the settings step.",
+          );
+        }
+      }
+
+      const agentRequest: ImageGenerationRequest = {
         prompt,
-        model: stringArg(args["model"]) ?? config.model,
-        negativePrompt: stringArg(args["negativePrompt"]) ?? config.defaultNegativePrompt,
-        width: typeof args["width"] === "number" ? args["width"] : config.defaultWidth,
-        height: typeof args["height"] === "number" ? args["height"] : config.defaultHeight,
-        steps: typeof args["steps"] === "number" ? args["steps"] : config.defaultSteps,
-        guidanceScale: typeof args["guidanceScale"] === "number" ? args["guidanceScale"] : config.defaultGuidanceScale,
-        seed: typeof args["seed"] === "number" ? args["seed"] : undefined,
-      });
+        ...(requestedTier ? { tier: requestedTier } : {}),
+        // No `?? config.model` here: the backend resolves the tier's model itself, and
+        // defaulting to the fast model would silently turn a quality request into a fast one.
+        // A name is forwarded only where no engines are configured to check it against.
+        ...(namedModel && choices.length === 0 ? { model: namedModel } : {}),
+        // Only what the caller asked for; requestImageGeneration applies the tier's defaults.
+        ...(stringArg(args["negativePrompt"]) ? { negativePrompt: stringArg(args["negativePrompt"])! } : {}),
+        ...(typeof args["width"] === "number" ? { width: args["width"] } : {}),
+        ...(typeof args["height"] === "number" ? { height: args["height"] } : {}),
+        ...(typeof args["steps"] === "number" ? { steps: args["steps"] } : {}),
+        ...(typeof args["guidanceScale"] === "number" ? { guidanceScale: args["guidanceScale"] } : {}),
+        ...(typeof args["seed"] === "number" ? { seed: args["seed"] } : {}),
+        ...(baseFile ? { initImage: Buffer.from(baseFile.bytes).toString("base64") } : {}),
+        ...(typeof args["strength"] === "number" ? { strength: args["strength"] } : {}),
+        ...(maskFile ? { mask: Buffer.from(maskFile.bytes).toString("base64") } : {}),
+        ...(typeof args["maskBlur"] === "number" ? { maskBlur: args["maskBlur"] } : {}),
+      };
+
+      // A picture the person skipped is not put to them again in the same turn. The skip told the
+      // agent not to retry; it sent the same picture again seconds later, and again after the
+      // second skip (session fa673f2c). The refusal is flagged as theirs, like the skip itself.
+      const skipKey = skippedRenderKey(agentRequest.prompt, baseFile?.relativePath);
+      if (ctx.turnUserWords && skippedRenders.get(ctx.turnUserWords)?.has(skipKey)) {
+        return {
+          ...fail(
+            "The user already skipped this picture in the settings step this turn, so it was not put to them again"
+            + " and nothing was rendered. Do not call generate_image for it again: finish, and say the render was skipped.",
+          ),
+          metadata: { settings: { source: "user_skipped", changed: [], waitedMs: 0 }, [DECLINED_BY_USER_METADATA_KEY]: true },
+        };
+      }
+
+      // A render the image server would cut off is refused before anyone is asked to approve it,
+      // with what would fit: the agent can correct it before the person ever sees it.
+      const tooLong = imageRenderLimitError(
+        config,
+        previewImageRequest(config, agentRequest, baseFile ? readImageHeaderSize(baseFile.bytes) : undefined),
+      );
+      if (tooLong) return fail(tooLong);
+
+      // The person may now take, change or skip what the agent chose. Asked AFTER the health
+      // probe, so an offline backend never keeps anyone waiting, and after the agent's own base
+      // and mask were read, so a bad path fails at once and the agent's picture can be offered.
+      const settingsStep = await askForImageSettings(ctx, config, agentRequest, { base: baseFile, mask: maskFile, paintedMaskFor });
+      if (settingsStep.stop) {
+        // A Skip is the person's choice, not a broken render: flagged, so the run record lists it
+        // apart from the calls that failed instead of telling the orchestrator the render broke.
+        const declined = settingsStep.metadata?.["source"] === "user_skipped";
+        if (declined && ctx.turnUserWords) {
+          const skipped = skippedRenders.get(ctx.turnUserWords) ?? new Set<string>();
+          skippedRenders.set(ctx.turnUserWords, skipped.add(skipKey));
+        }
+        return {
+          ...fail(settingsStep.stop),
+          ...(settingsStep.metadata
+            ? { metadata: { settings: settingsStep.metadata, ...(declined ? { [DECLINED_BY_USER_METADATA_KEY]: true } : {}) } }
+            : {}),
+        };
+      }
+
+      // A render the person approved in the settings step runs as long as its settings need —
+      // minutes, on the quality engine — and none of the run's clocks may read that as a stall
+      // (session 807684e9). Held for the render only, and only where somebody really answered.
+      const release = settingsStep.answered ? holdTurnClocks(ctx.sessionId, "image_render") : undefined;
+      let result: Awaited<ReturnType<typeof requestImageGeneration>>;
+      try {
+        result = await requestImageGeneration(config, settingsStep.request);
+      } catch (error) {
+        if (error instanceof ImageRenderTooLongError) return fail(error.message);
+        if (!(error instanceof ImageGenerationTimeoutError)) throw error;
+        return timedOutRender(error, settingsStep.metadata);
+      } finally {
+        release?.();
+      }
+
+      // Its picture is one the painted mask fits, so the tool cannot tell a second change to the
+      // same region from a different change; only a person looking can, and the output says whether one did.
+      const maskNote = paintedMaskFor && agentRequest.mask && settingsStep.request.mask === agentRequest.mask
+        ? describeReusedMaskForAgent(paintedMaskFor, settingsStep.metadata?.["source"] as ImageSettingsSource | undefined)
+        : "";
 
       const imageBytes = Buffer.from(result.imageBase64, "base64");
       const requestedOutputPath = stringArg(args["outputPath"]);
+      // The backend produces PNG only, so a caller naming ".jpg" used to get PNG bytes under
+      // that name. The artifact verifier then refused the file and the swarm burned eight
+      // minutes trying to repair it. Encode into the format actually asked for, or correct
+      // the name — never write a mismatch.
+      const requestedExtension = requestedOutputPath ? extname(requestedOutputPath).toLowerCase() : "";
+      const encoded = await encodeImageAs(imageBytes, requestedExtension, result.extension);
       const outputPath = requestedOutputPath
-        ? (extname(requestedOutputPath) ? requestedOutputPath : `${requestedOutputPath}${result.extension}`)
-        : `${PRODUCT.stateDirName}/generated/image-${Date.now()}${result.extension}`;
-      const resolvedOutput = resolveWorkspacePath(outputPath, ctx.workspacePath);
+        ? (requestedExtension
+            ? `${stripFileExtension(requestedOutputPath)}${encoded.extension}`
+            : `${requestedOutputPath}${encoded.extension}`)
+        : `image-${Date.now()}${encoded.extension}`;
+      const resolvedOutput = requestedOutputPath
+        ? resolveWorkspacePath(outputPath, ctx.workspacePath)
+        : resolveDefaultArtifactPath(outputPath, ctx.workspacePath);
       await mkdir(resolve(resolvedOutput.resolved, ".."), { recursive: true });
-      await writeFile(resolvedOutput.resolved, imageBytes);
+      await writeFile(resolvedOutput.resolved, encoded.bytes);
+      await publishImageArtifact(ctx.sessionId, resolvedOutput.relativePath);
+      await recordMaskedRender(ctx, settingsStep, maskFile, resolvedOutput.relativePath);
 
+      // Which engine rendered it is said in the OUTPUT, not only in metadata. The specialist
+      // reads the output and nothing else; in f4ebf47b it retried on the fast tier after a
+      // failed named-model call, never learned the difference, and the picture was reported
+      // as the engine the user asked for.
+      const engine = imageEngineLabel(config, result.tier);
+      const seconds = typeof result.elapsedMs === "number" ? ` in ${(result.elapsedMs / 1000).toFixed(1)} s` : "";
+      // Not in that time, and minutes long after a timeout: said, or the slow answer is unexplained.
+      const waited = result.deviceWaitMs
+        ? `, after waiting ${Math.round(result.deviceWaitMs / 1000)} s for the engine to finish an earlier render that timed out`
+        : "";
+      const renderedBy = result.tier
+        ? `on the ${result.tier} tier${engine ? ` (${engine})` : result.model ? ` (model ${result.model})` : ""}${seconds}${waited}`
+        : "";
+
+      // Same as synthesize_speech above: the resolved path is the one the bytes are at.
       return {
         success: true,
-        output: `Image generated successfully. Saved to ${outputPath}`,
+        output: `Image generated${renderedBy ? ` ${renderedBy}` : " successfully"}. Saved to ${resolvedOutput.relativePath}`
+          + settingsStep.note
+          + maskNote
+          + (result.tierUpgradedForEdit
+            ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
+              + " rather than the fast one. Say so if the user asked for speed."
+            : "")
+          + (result.engineArgsRemoved
+            ? " — NOTE: an <sd_cpp_extra_args> block was removed from the prompt before it was sent; settings"
+              + " go in this tool's own parameters, and the ones above are what ran."
+            : "")
+          + (result.negativePromptIgnored
+            ? " — NOTE: the negative prompt had no effect: at guidance 1 or less nothing uses it. Do not tell the"
+              + " user it steered the picture."
+            : "")
+          + (encoded.correctedFrom
+            ? ` — NOTE: ${encoded.correctedFrom} cannot be produced here, so the file is ${encoded.extension}.`
+              + " Use this path; the one you asked for does not exist."
+            : ""),
         metadata: {
-          outputPath,
-          filename: basename(outputPath),
-          bytes: imageBytes.byteLength,
-          contentType: result.mimeType,
-          dataUrl: `data:${result.mimeType};base64,${result.imageBase64}`,
+          outputPath: resolvedOutput.relativePath,
+          requestedPath: outputPath,
+          filename: basename(resolvedOutput.relativePath),
+          bytes: encoded.bytes.byteLength,
+          contentType: encoded.mimeType,
+          dataUrl: `data:${encoded.mimeType};base64,${encoded.bytes.toString("base64")}`,
+          ...(encoded.correctedFrom ? { requestedFormat: encoded.correctedFrom, writtenFormat: encoded.extension } : {}),
           width: result.width,
           height: result.height,
           seed: result.seed,
           model: result.model,
+          tier: result.tier,
+          ...(engine ? { engine } : {}),
           elapsedMs: result.elapsedMs,
+          ...(result.deviceWaitMs ? { deviceWaitMs: result.deviceWaitMs } : {}),
+          ...(settingsStep.metadata ? { settings: settingsStep.metadata } : {}),
         },
       };
     } catch (error) {
-      log.error({ error }, "generate_image failed");
+      // `err`, the key the logger serializes: under `error` the row read {} and hid the cause.
+      log.error({ err: error }, "generate_image failed");
       const msg = error instanceof Error ? error.message : String(error);
-      // Surface a clear service-down message so the agent doesn't over-explain.
-      if (msg.includes("fetch failed") || msg.includes("ECONNREFUSED") || msg.includes("ENOTFOUND")) {
+      // "Offline" only for an endpoint that could not be reached at all. Any "fetch failed" used to
+      // read as offline — including a render cut short on the way, which is what session 9cc3f362
+      // was told twice while the service was up and had rendered a picture a minute earlier.
+      if (error instanceof ImageUpstreamRequestError && error.unreachable) {
         const config = getConfig().multimodal?.imageGeneration;
         return fail(`Image generation service is offline (${config?.baseUrl ?? "not configured"}). The endpoint is unavailable. Do not retry - inform the user the service is unavailable.`);
       }
@@ -425,6 +996,315 @@ registerTool({
     }
   },
 });
+
+/** What the settings step decided: the request to render, and what to tell the agent about it. */
+interface ImageSettingsStep {
+  request: ImageGenerationRequest;
+  /** Appended to the tool output; empty where nobody could be asked. */
+  note: string;
+  /** metadata.settings: who chose, what changed, how long the person took. */
+  metadata?: Record<string, unknown>;
+  /** Set when nothing may be rendered; the tool fails with it. */
+  stop?: string;
+  /** The person answered — Auto or their own settings — rather than a deadline or a standing choice. */
+  answered?: boolean;
+}
+
+/**
+ * The pictures the person skipped in the settings step, per turn. Keyed by the turn's own words
+ * object — one per turn, handed by reference to every specialist in it — so a skip holds for the
+ * whole turn and is forgotten with it: the next message is free to ask for the picture again.
+ */
+const skippedRenders = new WeakMap<object, Set<string>>();
+
+/** The same picture: the same prompt (spacing and case aside) on the same base, whatever the settings. */
+function skippedRenderKey(prompt: string, basePath: string | undefined): string {
+  return `${prompt.replace(/\s+/g, " ").trim().toLowerCase()}\u0000${basePath ?? ""}`;
+}
+
+/**
+ * A render that ran out of its time, as the agent must hear it: the error names the engine, the
+ * limit, the settings and what they were expected to take, and that the same settings must not be
+ * tried again. `dispatchUncertain`, because the engine is still rendering what we abandoned.
+ */
+function timedOutRender(error: ImageGenerationTimeoutError, settings: Record<string, unknown> | undefined): ToolResult {
+  const { tier, model, timeoutMs, expectedSeconds, steps, width, height, cutByServerAfterMs } = error.details;
+  return {
+    success: false,
+    output: "",
+    error: error.message,
+    dispatchUncertain: true,
+    metadata: {
+      timedOut: true,
+      tier,
+      ...(model ? { model } : {}),
+      timeoutMs,
+      ...(cutByServerAfterMs !== undefined ? { cutByServerAfterMs } : {}),
+      expectedSeconds: Math.round(expectedSeconds),
+      steps,
+      width,
+      height,
+      ...(settings ? { settings } : {}),
+    },
+  };
+}
+
+/**
+ * Put the render to the person before it runs (multimodal/image-settings.ts). Asked on EVERY call:
+ * a repeat call is a new render, and "make another one" deserves the same chance to change it.
+ * Where nobody can answer, or the chat is set to Auto, the broker says so at once and the agent's
+ * request runs unchanged; the proposal is only built when someone will really see it.
+ */
+async function askForImageSettings(
+  ctx: ToolContext,
+  config: MultimodalImageGenerationConfig,
+  agentRequest: ImageGenerationRequest,
+  agentFiles: { base?: WorkspaceBinaryFile; mask?: WorkspaceBinaryFile; paintedMaskFor?: string | undefined },
+): Promise<ImageSettingsStep> {
+  const prompt = config.settingsPrompt;
+  if (!ctx.requestUserInput || prompt?.enabled === false) return { request: agentRequest, note: "" };
+
+  let candidates: BaseCandidate[] = [];
+  let agentMask: AgentMask | undefined;
+  let proposal: ImageSettingsProposal | undefined;
+  const outcome = await ctx.requestUserInput<ImageSettingsDecision>({
+    kind: IMAGE_SETTINGS_KIND,
+    // Says who is asking and for what; the card and form already label themselves as settings.
+    title: `${ctx.currentAgentName ?? "The assistant"} wants to ${agentRequest.initImage ? "edit a picture" : "render a new picture"}`,
+    payload: async () => {
+      // Even at a cap of 0 the agent's own base is offered (see collectBaseCandidates).
+      const max = prompt?.maxBaseCandidates ?? 6;
+      candidates = await collectBaseCandidates(await baseCandidateEntries(ctx, agentFiles.base, max), max);
+      agentMask = agentFiles.mask ? await describeAgentMask(agentFiles.mask.bytes, agentFiles.mask.relativePath) : undefined;
+      // Said on the card, so an Auto on it is an Auto on that region.
+      if (agentMask && agentFiles.paintedMaskFor) agentMask = { ...agentMask, paintedEarlier: true };
+      proposal = buildImageSettingsProposal(config, agentRequest, candidates, agentMask);
+      return proposal as unknown as Record<string, unknown>;
+    },
+    ...(prompt?.timeoutMs ? { timeoutMs: prompt.timeoutMs } : {}),
+    ...(prompt?.configureTimeoutMs ? { holdTimeoutMs: prompt.configureTimeoutMs } : {}),
+    maxAnswerBytes: IMAGE_SETTINGS_MAX_ANSWER_BYTES,
+    validate: (answer) => proposal
+      ? validateImageSettingsAnswer(answer, { config, proposal, candidates, ...(agentMask ? { agentMask } : {}) })
+      : { ok: false, errors: [{ field: "inputId", message: "expired" }] },
+    preview: (candidateId) => {
+      const candidate = candidates.find((entry) => entry.id === candidateId);
+      return candidate
+        ? { dataUrl: `data:${candidate.mime};base64,${candidate.bytes.toString("base64")}`, width: candidate.width, height: candidate.height }
+        : null;
+    },
+    autoIf: (settings) => settings.imageSettingsPrompt === "auto",
+  });
+
+  const decision = "value" in outcome ? outcome.value : undefined;
+  if (decision?.alwaysAuto && outcome.rootSessionId) {
+    // "Always Auto in this chat": a standing choice for the chat, read by every later render.
+    getSessionRecord(outcome.rootSessionId)?.setSettings({ imageSettingsPrompt: "auto" });
+  }
+
+  if (outcome.outcome === "cancelled") {
+    if (outcome.reason === "user_skipped") {
+      ctx.turnUserWords?.midTurn.push("(image settings) skipped this render");
+      return {
+        request: agentRequest,
+        note: "",
+        stop: "The user skipped this render in the settings step, so nothing was rendered. Do not retry;"
+          + " tell the user and ask what they want instead.",
+        // The failure stays a failure for the agent, which must not retry; the tag is what lets the
+        // chat show a choice the user made as "Skipped by you" rather than as a red failed step.
+        metadata: { source: "user_skipped", changed: [], waitedMs: outcome.waitedMs },
+      };
+    }
+    return { request: agentRequest, note: "", stop: "The turn was stopped during the settings step, so nothing was rendered." };
+  }
+
+  if (outcome.outcome === "auto") {
+    const source: ImageSettingsSource = outcome.reason === "user" ? "auto" : outcome.reason;
+    return {
+      request: agentRequest,
+      note: describeImageSettingsForAgent({ source }),
+      ...(source !== "no_channel" ? { metadata: { source, changed: [], waitedMs: outcome.waitedMs } } : {}),
+      ...(source === "auto" ? { answered: true } : {}),
+    };
+  }
+
+  const settings = outcome.value.settings;
+  if (!settings || !proposal) return { request: agentRequest, note: "" };
+  let maskPath: string | undefined;
+  if (settings.edit?.mask) {
+    maskPath = await writePaintedMask(ctx, settings.edit.base.relativePath, settings.edit.mask.bytes);
+  } else if (settings.edit?.keepAgentMask) {
+    maskPath = agentFiles.mask?.relativePath;
+  }
+  const request = applyImageSettings(agentRequest, settings);
+  const change = describeSettingsChange(proposal, settings);
+  // Their choices are the person's own words for every specialist that runs after this one.
+  ctx.turnUserWords?.midTurn.push(
+    `(image settings) ${change.summary}`
+    + (change.changed.includes("prompt") ? ` — their prompt: "${truncate(settings.prompt, 300)}"` : ""),
+  );
+  const ran = describeRenderSettings(config, request, {
+    ...(settings.edit ? { baseLabel: settings.edit.base.relativePath } : {}),
+    ...(maskPath ? { maskPath } : {}),
+    ...(settings.edit?.mask ? { maskCoverage: settings.edit.mask.coverage } : {}),
+  });
+  return {
+    request,
+    note: describeImageSettingsForAgent({ source: "user", ran, change, prompt: settings.prompt }),
+    answered: true,
+    metadata: {
+      source: "user",
+      changed: change.changed,
+      waitedMs: outcome.waitedMs,
+      ...(maskPath ? { maskPath } : {}),
+      ...(settings.edit ? { baseImage: settings.edit.base.relativePath } : {}),
+    },
+  };
+}
+
+const RASTER_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+
+/**
+ * The pictures that may be offered as a base, agent's first, then newest first: the latest image,
+ * the chat's image attachments from the newest message back (uploads and earlier renders alike),
+ * then the older renders the shared facts remember. Paths go through the workspace guard here and
+ * again when read; the client only ever sees the ids handed out for them.
+ */
+async function baseCandidateEntries(
+  ctx: ToolContext,
+  agentBase: WorkspaceBinaryFile | undefined,
+  max: number,
+): Promise<CandidateSourceEntry[]> {
+  const entries: CandidateSourceEntry[] = [];
+  const seen = new Set<string>();
+  const add = (path: string | undefined, source: BaseCandidateSource, read?: () => Promise<Uint8Array>) => {
+    if (!path?.trim()) return;
+    let relativePath: string;
+    try {
+      relativePath = resolveWorkspacePath(path.trim(), ctx.workspacePath).relativePath;
+    } catch {
+      return;
+    }
+    if (seen.has(relativePath)) return;
+    seen.add(relativePath);
+    entries.push({
+      relativePath,
+      source,
+      read: read ?? (async () => (await readWorkspaceBinaryFile(relativePath, ctx.workspacePath)).bytes),
+    });
+  };
+  if (agentBase) add(agentBase.relativePath, "agent", async () => agentBase.bytes);
+
+  const shared = deriveSharedSessionId(ctx.sessionId);
+  let facts: Record<string, string> = {};
+  try {
+    facts = await readAllFacts(shared);
+  } catch {
+    // Without the memory backend the chat's own attachments are still offered.
+  }
+  add(facts["latest_image"], "latest_image");
+  const rootSessionId = currentRequestContext()?.userInput?.rootSessionId ?? shared;
+  const history = getSessionRecord(rootSessionId)?.getHistory() ?? [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const attachments = history[index]?.metadata?.["attachments"];
+    if (!Array.isArray(attachments)) continue;
+    for (const attachment of attachments as Array<Record<string, unknown>>) {
+      const path = typeof attachment?.["relativePath"] === "string" ? attachment["relativePath"] : undefined;
+      const contentType = typeof attachment?.["contentType"] === "string" ? attachment["contentType"] : "";
+      const isRaster = contentType
+        ? contentType.startsWith("image/") && !contentType.includes("svg")
+        : attachment?.["previewMode"] === "image" || RASTER_EXTENSIONS.has(extname(path ?? "").toLowerCase());
+      if (path && isRaster) add(path, "attachment");
+    }
+  }
+  for (const key of Object.keys(facts).filter((name) => name.startsWith("image:")).reverse()) {
+    add(facts[key], "shared_fact");
+  }
+  // Reading stops once enough decode; a bound on the scan keeps a long chat from reading them all.
+  return entries.slice(0, Math.max(1, max) * 4);
+}
+
+/**
+ * Keep a painted mask where the agent can reuse it: a follow-up "change it again" passes it as
+ * `mask` instead of asking the person to paint the same region twice. Best-effort — the render
+ * carries the mask's bytes itself, so a failed write costs only the reuse.
+ */
+async function writePaintedMask(ctx: ToolContext, baseRelativePath: string, bytes: Buffer): Promise<string | undefined> {
+  try {
+    const stem = basename(stripFileExtension(baseRelativePath)).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 60) || "image";
+    const target = resolveWorkspaceWritePath(`generated/image-masks/${stem}-mask-${Date.now()}.png`, ctx.workspacePath);
+    await mkdir(resolve(target.resolved, ".."), { recursive: true });
+    await writeFile(target.resolved, bytes);
+    try {
+      const shared = deriveSharedSessionId(ctx.sessionId);
+      await writeSharedFact(shared, "latest_mask", target.relativePath);
+      await writeSharedFact(shared, LATEST_MASK_BASE, JSON.stringify([baseRelativePath]));
+    } catch {
+      // The file is there; only the pointer to it is missing.
+    }
+    return target.relativePath;
+  } catch (error) {
+    log.warn({ error }, "Could not keep the painted mask");
+    return undefined;
+  }
+}
+
+/**
+ * The pictures `latest_mask` fits, next to it in the shared facts: the one it was painted for, then
+ * the latest render made with it — the picture a follow-up "change it again" edits.
+ */
+const LATEST_MASK_BASE = "latest_mask_base";
+
+/** The pictures a mask fits, when it is the painted `latest_mask`; undefined for any other mask. */
+async function paintedMaskFits(ctx: ToolContext, maskRelativePath: string): Promise<string[] | undefined> {
+  let facts: Record<string, string>;
+  try {
+    facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
+  } catch {
+    return undefined;
+  }
+  const normalize = (path: string | undefined): string | undefined => {
+    if (!path?.trim()) return undefined;
+    try {
+      return resolveWorkspacePath(path.trim(), ctx.workspacePath).relativePath;
+    } catch {
+      return undefined;
+    }
+  };
+  if (normalize(facts["latest_mask"]) !== maskRelativePath) return undefined;
+  const recorded = facts[LATEST_MASK_BASE];
+  if (!recorded) return undefined;
+  let paths: unknown;
+  try {
+    paths = JSON.parse(recorded);
+  } catch {
+    paths = [recorded];
+  }
+  const fits = (Array.isArray(paths) ? paths : [paths])
+    .map((path) => normalize(typeof path === "string" ? path : undefined))
+    .filter((path): path is string => Boolean(path));
+  return fits.length > 0 ? fits : undefined;
+}
+
+/** After a render made with the painted mask: the result is a picture that mask fits too. */
+async function recordMaskedRender(
+  ctx: ToolContext,
+  step: ImageSettingsStep,
+  agentMask: WorkspaceBinaryFile | undefined,
+  outputRelativePath: string,
+): Promise<void> {
+  if (!step.request.mask || !step.request.initImage) return;
+  // The person's settings name their own mask; anything else ran the agent's.
+  const mask = step.metadata?.["source"] === "user" ? step.metadata["maskPath"] : agentMask?.relativePath;
+  if (typeof mask !== "string") return;
+  const fits = await paintedMaskFits(ctx, mask);
+  if (!fits) return;
+  try {
+    await writeSharedFact(deriveSharedSessionId(ctx.sessionId), LATEST_MASK_BASE, JSON.stringify([...new Set([fits[0]!, outputRelativePath])]));
+  } catch {
+    // Only the follow-up loses: it is refused the mask and the user paints the region again.
+  }
+}
 
 registerBrowserTool({
   name: "browser_navigate",
@@ -529,6 +1409,8 @@ registerBrowserTool({
 
 interface WorkspaceBinaryFile {
   resolvedPath: string;
+  /** The guard-approved workspace-relative form of the path. */
+  relativePath: string;
   filename: string;
   contentType: string;
   bytes: Uint8Array;
@@ -549,29 +1431,76 @@ function registerBrowserTool(input: {
     description: input.description,
     parameters: input.parameters,
     async execute(args) {
+      const { checkUrlSsrf, leaveRefusedPage, refusedBrowserAnswer } = await import("./web.js");
       if (input.guardUrlArg) {
         const raw = args[input.guardUrlArg];
         if (typeof raw === "string" && raw.trim()) {
-          const { checkUrlSsrf } = await import("./web.js");
           const blocked = await checkUrlSsrf(raw);
           if (blocked) return fail(`Refusing to navigate the browser: ${blocked}.`);
         }
       }
       try {
-        const output = await callPlaywrightTool(input.mcpToolName, args);
+        const raw = await callPlaywrightTool(input.mcpToolName, args);
+        // The check above sees only the URL the browser is sent to. A redirect, the page's own
+        // script or a click then moved it with nothing checking where, and the answer carried
+        // that page: a public URL that redirected to http://10.0.0.5/ answered with its snapshot.
+        // The page an answer reports, and the snapshot fetched after an action, are now checked
+        // before any of it is shown; an answer of the page that reports no URL (a screenshot)
+        // has the tab's address read for it.
+        let refused = await refusedBrowserAnswer([raw]);
+        let output = raw;
+        if (!refused && PAGE_ACTION_TOOLS.has(input.mcpToolName)) {
+          const inlined = await withInlineSnapshot(raw);
+          output = inlined.output;
+          refused = await refusedBrowserAnswer([inlined.snapshot]);
+        }
+        if (refused) {
+          await leaveRefusedPage();
+          return fail(`Refusing to show the page the browser is on: ${refused}. The browser was sent to about:blank.`);
+        }
         return { success: true, output, metadata: { server: "playwright", tool: input.mcpToolName } };
       } catch (error) {
-        log.error({ error, tool: input.mcpToolName }, "browser tool failed");
+        log.error({ err: error, tool: input.mcpToolName }, "browser tool failed");
         return fail(error instanceof Error ? error.message : String(error));
       }
     },
   });
 }
 
+/** The actions after which the agent must see the page they produced before it can choose the next one. */
+const PAGE_ACTION_TOOLS = new Set(["browser_navigate", "browser_click", "browser_type", "browser_select_option", "browser_wait_for"]);
+
+/**
+ * Playwright MCP 1.61 answers an action with a LINK to a snapshot file inside its own container,
+ * which the agent cannot open, where earlier versions put the snapshot in the answer. The agent was
+ * written for one call per action, so without the page it would spend a whole extra model turn on
+ * browser_snapshot after every click — or act on refs it never saw.
+ */
+const SNAPSHOT_FILE_LINK = /^#{1,4}[ \t]*Snapshot[ \t]*\n-[ \t]*\[Snapshot\]\([^)\n]*\)[^\n]*$/m;
+
+/**
+ * The action's answer with the page's snapshot in place of the link to it, and that snapshot as
+ * fetched ("" when none was), whose Page URL may differ from the action's: the page can move on
+ * in between.
+ */
+async function withInlineSnapshot(output: string): Promise<{ output: string; snapshot: string }> {
+  if (!SNAPSHOT_FILE_LINK.test(output)) return { output, snapshot: "" };
+  let snapshot = "";
+  try {
+    snapshot = await callPlaywrightTool("browser_snapshot", {});
+    const section = snapshot.match(/#{1,4}[ \t]*Snapshot[ \t]*\n```[\s\S]*?```/)?.[0];
+    if (section) return { output: output.replace(SNAPSHOT_FILE_LINK, section), snapshot };
+  } catch (error) {
+    log.warn({ err: error }, "browser snapshot after an action failed");
+  }
+  return { output: output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)"), snapshot };
+}
+
 async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
   const resolved = resolveWorkspacePath(path, workspacePath);
   const describe = (bytes: Buffer): WorkspaceBinaryFile => ({
     resolvedPath: resolved.resolved,
+    relativePath: resolved.relativePath,
     filename: basename(resolved.resolved),
     contentType: inferMimeType(resolved.resolved),
     bytes,
@@ -601,6 +1530,20 @@ async function readWorkspaceBinaryFile(path: string, workspacePath: string): Pro
     if (!stored) throw err;
     return describe(Buffer.from(stored));
   }
+}
+
+/**
+ * Where a file lands that the caller did not name: wherever the write resolver roots a plain name —
+ * the artifact zone in the scoped workspaces, and the workspace root itself in scope "full", which
+ * no agent holding these tools runs in today. The defaults used to be
+ * `.starlingai/generated/<name>`, which the zone then re-rooted into
+ * `generated/.starlingai/generated/<name>` — a hidden, doubled directory, every time (session
+ * 807684e9). A plain name, rooted by the write resolver, lands once under `generated/`. Files
+ * already written at the old place are still read by the paths the facts and transcripts carry.
+ */
+function resolveDefaultArtifactPath(name: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const { resolved, relativePath } = resolveWorkspaceWritePath(name, workspacePath);
+  return { resolved, relativePath };
 }
 
 function resolveWorkspacePath(path: string, workspacePath: string): { resolved: string; relativePath: string } {
@@ -695,7 +1638,7 @@ export async function extractDocumentBytesToMarkdown(
   const config = getConfig().multimodal.files;
   if (!config.mcpServer && !multimodalServiceConfigured(config.baseUrl)) return "";
   try {
-    const body = await convertFileToMarkdown({ resolvedPath: filename, filename, contentType, bytes });
+    const body = await convertFileToMarkdown({ resolvedPath: filename, relativePath: filename, filename, contentType, bytes });
     return String(body["markdown"] ?? "").trim();
   } catch (error) {
     log.warn({ error, filename }, "extractDocumentBytesToMarkdown failed");
@@ -761,43 +1704,101 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
   // and leaves the actual content field empty.
   const needsThinkingOff = /(qwen|gemma-4)/i.test(modelId);
 
-  const response = await fetchWithTimeout(
-    `${baseUrl}/chat/completions`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
+  // ONE provider_model_call ROW PER VISION CALL, shaped like the chat provider's.
+  //
+  // This is a raw request to the same model server the chat calls use, and it used to leave no
+  // row at all: in the one fully audited session it took 13-25 s a call, about 60 s in all
+  // against 14 s for both routing classifiers together, and no latency analysis could see it.
+  // The row carries the chat row's fields so one query reads both. agentName and callSite name
+  // the call; `requestedBy` keeps the agent that asked, which the ambient context would
+  // otherwise have put in agentName. It is written on failure too (finishReason "error", no
+  // usage), because a call that failed still spent the time, and counting only the ones that
+  // returned would bias every figure. The analyze_image tool's own tool_call row spans this
+  // call, so an analysis that adds tool time to model time must count it once, not twice.
+  const startedAt = Date.now();
+  const auditVisionCall = (result: {
+    finishReason: unknown;
+    usage?: unknown;
+    timings?: unknown;
+    reasoning?: unknown;
+  } | undefined): void => {
+    const attribution = currentCallAttribution();
+    const usage = result?.usage && typeof result.usage === "object" ? result.usage as Record<string, unknown> : undefined;
+    const count = (value: unknown): number | null => (typeof value === "number" ? value : null);
+    const details = usage?.["completion_tokens_details"] as Record<string, unknown> | undefined;
+    const timings = readServerTimings(result?.timings);
+    logAudit("provider_model_call", {
+      ...(attribution.data.agentName ? { requestedBy: attribution.data.agentName } : {}),
+      agentName: "analyze_image",
+      callSite: "vision",
+      model: modelId,
+      mode: "complete",
+      durationMs: Date.now() - startedAt,
+      promptTokens: count(usage?.["prompt_tokens"]),
+      completionTokens: count(usage?.["completion_tokens"]),
+      reasoningTokens: count(details?.["reasoning_tokens"]),
+      reasoningChars: result ? (typeof result.reasoning === "string" ? result.reasoning.length : 0) : null,
+      finishReason: result ? (typeof result.finishReason === "string" ? result.finishReason : null) : "error",
+      toolCount: 0,
+      messageCount: 1,
+      controls: {
+        reasoningEffort: null,
+        enableThinking: needsThinkingOff ? false : null,
+        cachePrompt: false,
       },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image_url", image_url: { url: dataUrl } },
-            { type: "text", text: prompt },
-          ],
-        }],
-        max_tokens: 2048,
-        temperature: 0.1,
-        ...(needsThinkingOff && {
-          chat_template_kwargs: { enable_thinking: false },
+      ...(timings ? { timings } : {}),
+    }, { ...attribution.opts, severity: "info" });
+  };
+
+  let body: Record<string, unknown>;
+  try {
+    const response = await fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image_url", image_url: { url: dataUrl } },
+              { type: "text", text: prompt },
+            ],
+          }],
+          max_tokens: 2048,
+          temperature: 0.1,
+          ...(needsThinkingOff && {
+            chat_template_kwargs: { enable_thinking: false },
+          }),
         }),
-      }),
-    },
-    config.multimodal.files.visionTimeoutMs,
-  );
+      },
+      config.multimodal.files.visionTimeoutMs,
+    );
 
-  if (!response.ok) {
-    throw new Error(await extractUpstreamError(response, "Vision analysis failed"));
+    if (!response.ok) {
+      throw new Error(await extractUpstreamError(response, "Vision analysis failed"));
+    }
+
+    body = await parseUpstreamJsonResponse(response, "Vision analysis returned a non-JSON response");
+  } catch (error) {
+    auditVisionCall(undefined);
+    throw error;
   }
-
-  const body = await parseUpstreamJsonResponse(response, "Vision analysis returned a non-JSON response");
   const choices = Array.isArray(body["choices"]) ? body["choices"] : [];
   const firstChoice = choices[0];
   const message = firstChoice && typeof firstChoice === "object" && "message" in firstChoice
     ? (firstChoice["message"] as Record<string, unknown>)
     : undefined;
+  auditVisionCall({
+    finishReason: firstChoice && typeof firstChoice === "object" ? (firstChoice as Record<string, unknown>)["finish_reason"] : undefined,
+    usage: body["usage"],
+    timings: body["timings"],
+    reasoning: message?.["reasoning_content"],
+  });
   const content = message?.["content"];
   // Some providers return content as an array of {type,text} segments.
   const text = typeof content === "string"
@@ -806,6 +1807,28 @@ export async function analyzeImageBytes(bytes: Uint8Array, contentType: string, 
       ? (content as Array<Record<string, unknown>>).map(s => typeof s["text"] === "string" ? s["text"] : "").join("")
       : "";
   return text.trim();
+}
+
+/**
+ * The element argument under the name the connected Playwright MCP server declares. It was `ref`
+ * and became `target` in 1.61, whose schema requires `target` and rejects a call that sends only
+ * `ref` ("expected string, received undefined") — so every click, type and select the browser
+ * agent made failed once the image updated. Read from the schema the server itself listed; with no
+ * schema, or one that names both or neither, the arguments go as given.
+ */
+function adaptElementArgument(args: Record<string, unknown>, inputSchema: Record<string, unknown> | undefined): Record<string, unknown> {
+  const properties = inputSchema?.["properties"];
+  if (!properties || typeof properties !== "object") return args;
+  const declares = (key: string) => Object.prototype.hasOwnProperty.call(properties, key);
+  if ("ref" in args && !("target" in args) && declares("target") && !declares("ref")) {
+    const { ref, ...rest } = args;
+    return { ...rest, target: ref };
+  }
+  if ("target" in args && !("ref" in args) && declares("ref") && !declares("target")) {
+    const { target, ...rest } = args;
+    return { ...rest, ref: target };
+  }
+  return args;
 }
 
 export async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {
@@ -823,7 +1846,8 @@ export async function callPlaywrightTool(toolName: string, args: Record<string, 
     log.info({ requestedToolName: toolName, resolvedToolName }, "Resolved legacy Playwright tool name");
   }
 
-  const result = await connection.client.callTool({ name: resolvedToolName, arguments: args });
+  const schema = (connection.tools ?? []).find((tool) => tool.name === resolvedToolName)?.inputSchema;
+  const result = await connection.client.callTool({ name: resolvedToolName, arguments: adaptElementArgument(args, schema) });
   const output = (result.content as Array<{ type: string; text?: string }> | undefined)
     ?.map(item => (item.type === "text" ? (item.text ?? "") : JSON.stringify(item)))
     .join("\n")

@@ -24,6 +24,9 @@ import { buildApprovalIdempotencyKey } from "../approval/durable-store.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
+import { buildWorkflowExecutionKey } from "./workflow-execution-key.js";
+import { workflowStepPipeline } from "./workflow-step-pipeline.js";
+import { getScene } from "../credentials/scenes.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -266,7 +269,39 @@ async function runSingleSceneJob(
     session,
     userMessage: job.payload.task ?? "",
     ...buildTurnHooks(job, controller, counters),
+    ...queuedWorkflowTurnOptions(
+      [queuedWorkflowKey(job)],
+      job.definitionType === "job" ? [] : workflowStepPipeline(getScene(job.sceneName)?.task, job.payload.allowedAgents),
+    ),
   });
+}
+
+/** The queued scene or job on the execution stack, under the type it was queued as. */
+function queuedWorkflowKey(job: ClaimedSceneJob): string {
+  return buildWorkflowExecutionKey(job.sceneName, job.definitionType === "job" ? "job" : "scene");
+}
+
+/**
+ * A queued scene, or a step of a queued job, runs a workflow that is already running, as a step run
+ * from chat does (tools/workflow-catalog.ts), and gets the same two things. Without them the turn kept
+ * search_workflows and run_workflow and was held to the catalog search like a chat turn, as the
+ * inline step was in the E2E run of 2026-10-08: a search that found the running scene got the step's
+ * delegation to its own agents dropped with "Call run_workflow now", and a second miss was rewritten
+ * into a run of that scene, nested inside itself, since nothing was on the stack for the recursion
+ * check to read. The stack also reaches the agents the turn delegates to, so a coordinator among them
+ * cannot start the running workflow again either. The pipeline is the agents the scene's task names,
+ * read from the scene as its author wrote it (the queued task has its parameters filled in), and keeps
+ * the turn going while some of them have not run (agent/workflow-step-pipeline.ts).
+ */
+function queuedWorkflowTurnOptions(
+  workflowExecutionStack: string[],
+  pipeline: string[],
+): { _workflowExecutionStack: string[]; _withoutWorkflowCatalog: true; _workflowStepPipeline?: string[] } {
+  return {
+    _workflowExecutionStack: workflowExecutionStack,
+    _withoutWorkflowCatalog: true,
+    ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
+  };
 }
 
 async function runWorkflowJob(
@@ -329,6 +364,11 @@ async function runWorkflowJob(
         completedSteps: index,
         currentStep: step.label,
       }),
+      // The job and the scene this step runs, as runJobInline stacks them.
+      ...queuedWorkflowTurnOptions(
+        [queuedWorkflowKey(job), buildWorkflowExecutionKey(step.sceneName, "scene")],
+        workflowStepPipeline(getScene(step.sceneName)?.task, step.allowedAgents),
+      ),
     });
 
     outputs.push(output);

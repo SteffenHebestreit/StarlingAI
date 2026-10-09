@@ -9,6 +9,7 @@ import { initMcpServers, shutdownMcpServers } from "./mcp/registry.js";
 import { stopManagedChannels, syncAllChannels } from "./channels/runtime.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
+import { flushSessionStore } from "./agent/session.js";
 import { startSwarmBus, stopSwarmBus } from "./swarm/bus.js";
 import { startAutonomousBidding, stopAutonomousBidding } from "./swarm/bidding.js";
 import { startEventLoopMonitor, stopEventLoopMonitor } from "./observability/event-loop-monitor.js";
@@ -87,6 +88,8 @@ export async function main() {
     await shutdownSceneJobStore();
     stopAllCronJobs();
     await flushAuditLog();
+    // Session-store writes are coalesced (agent/session.ts): land the last window before exiting.
+    await flushSessionStore();
     process.exit(0);
   };
 

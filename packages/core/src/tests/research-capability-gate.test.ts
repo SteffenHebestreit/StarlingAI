@@ -8,7 +8,7 @@ import {
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
 } from "../tools/sub-agent.js";
-import { reorderByResearchCapability } from "../tools/agent-routing.js";
+import { reorderByResearchCapability, agentCfgGathersDirectly } from "../tools/agent-routing.js";
 import type { AgentRoutingCandidate } from "../tools/agent-routing.js";
 
 /**
@@ -67,9 +67,11 @@ describe("research capability gate", () => {
 
   it("flags general web-research tasks that lack the SOURCE-SENSITIVE marker (audit 3ef67aef)", () => {
     // The exact shape that was fabricated by a web-incapable agent: a research/search
-    // verb + external web nouns (URL, price, platforms, providers). De-lex: the gate is
-    // English-internal — a non-English delegation task is boundary-translated first, so
-    // these are the English (translated) equivalents of the original German 3ef67aef case.
+    // verb + external web nouns (URL, price, platforms, providers). De-lex: this shape is
+    // English-only, so these are English equivalents of the original German 3ef67aef case.
+    // Nothing translates a German task first (orchestration.normalizeDelegationToEnglish is
+    // off by default); a German research step reaches the gate through its turn trigger
+    // instead, which plan-step-evidence-gate.test.ts covers.
     expect(taskRequiresExternalResearch(
       "Research the best available learning sources and platforms for the iSAQB CPSA-F exam. Search for providers. For each source give: name, URL, price.",
     )).toBe(true);
@@ -268,5 +270,144 @@ describe("explicit-delegation execution guard (research-redirect false positive)
   it("returns false when the task needs no execution capability, so it never widens the redirect", () => {
     expect(explicitAgentsCoverTaskExecution(["computer_use_agent"], "research the best providers online with pricing", lookup)).toBe(false);
     expect(explicitAgentsCoverTaskExecution([], loginTask, lookup)).toBe(false);
+  });
+
+  it("does not count views of the open tab as browser interaction (vision_browser_analyst cannot log in)", () => {
+    const withTabReader = (name: string) => name === "vision_browser_analyst"
+      ? { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"] }
+      : lookup(name);
+    expect(explicitAgentsCoverTaskExecution(["vision_browser_analyst"], loginTask, withTabReader)).toBe(false);
+    expect(filterCandidatesByExecutionCapability(["vision_browser_analyst", "browser_agent"], loginTask, withTabReader).kept).toEqual(["browser_agent"]);
+  });
+});
+
+/**
+ * The ranking key is DIRECT gathering, not "can delegate" (live session 00b3675d,
+ * 2026-09-07). paper_author is a writer whose own description says it drafts "from an
+ * already-collected evidence ledger" and is "distinct from researcher" — but its tool
+ * list holds `delegate_to_agent`, so `agentCfgIsResearchCapable` credited it via
+ * COORDINATION_TOOL_NAMES and it topped `search_agents` on four consecutive
+ * source-sensitive delegations (topResultScore 0.845-0.866). The model named no agent on
+ * any of them; the runtime injects the top result (four `tool_call_recovered` rows,
+ * reason "reuse_search_agents_top_result"), so the RANKING is the router. Its sub-sessions
+ * made 0 web_search and 0 web_fetch calls — and on three of the four, 0 delegate_to_agent
+ * calls too — yet each reported delegationOutcome "success": three pricing reports written
+ * from model memory, one of which denied that a vendor the user personally subscribes to
+ * has subscription plans at all.
+ *
+ * The fix is one argument at the ranking site. The VETO stays `agentCfgIsResearchCapable`,
+ * so a coordinator handed a genuine multi-area mission is still allowed to fan it out —
+ * that is the last block below, and it is the reason the redirect in sub-agent.ts was left
+ * alone.
+ */
+describe("direct-gathering ranking key (session 00b3675d)", () => {
+  // Deployed shapes, verbatim from workspace/agents/*.jsonc.
+  const paperAuthor = { tools: [
+    "search_agents", "delegate_to_agent", "read_shared_facts", "read_file", "write_file",
+    "edit_file", "generate_document", "generate_pdf", "generate_docx", "regex_test", "datetime_arithmetic",
+  ] };
+  const researcher = { tools: ["web_search", "web_fetch", "url_inspect"] };
+  const missionCoordinator = { tools: ["delegate_to_agent", "parallel_delegate", "run_task_graph"] };
+
+  it("does not credit a writer that merely holds delegate_to_agent", () => {
+    expect(agentCfgGathersDirectly(paperAuthor)).toBe(false);
+    expect(agentCfgIsResearchCapable(paperAuthor)).toBe(true); // the defect, as shipped
+  });
+
+  it("credits agents that reach the web themselves, and no one else", () => {
+    expect(agentCfgGathersDirectly(researcher)).toBe(true);
+    expect(agentCfgGathersDirectly({ tools: ["web_search", "browser_navigate", "browser_snapshot"] })).toBe(true);
+    expect(agentCfgGathersDirectly(missionCoordinator)).toBe(false);
+    // Same url_inspect carve-out as the clause above it: probing a known URL is not gathering.
+    expect(agentCfgGathersDirectly({ tools: ["url_inspect", "read_file", "share_finding"] })).toBe(false);
+  });
+
+  it("never blocks tool-inheritors or unknown/ephemeral agents", () => {
+    expect(agentCfgGathersDirectly({})).toBe(true);
+    expect(agentCfgGathersDirectly(undefined)).toBe(true);
+  });
+
+  it("demotes the writer below the researcher — the T1 ranking, replayed", () => {
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const gathers = (name: string) => name === "researcher";
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("paper_author"), c("researcher"), c("content_writer")], true, gathers,
+    );
+    expect(results.map((r) => r.name)).toEqual(["researcher", "paper_author", "content_writer"]);
+    expect(needsFallback).toBe(false);
+  });
+
+  it("flags needsFallback when the ranking is writers and coordinators only — T2/T4/T5", () => {
+    // The researcher was not in those three rankings at all, which is why demotion alone
+    // could not have saved them: the caller has to PREPEND the specialist.
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const gathers = (name: string) => name === "researcher";
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("paper_author"), c("content_writer"), c("mission_coordinator")], true, gathers,
+    );
+    expect(needsFallback).toBe(true);
+    expect(results.map((r) => r.name)).toEqual(["paper_author", "content_writer", "mission_coordinator"]);
+  });
+
+  it("leaves the redirect VETO wide, so a coordinator keeps its multi-area mission", () => {
+    // sub-agent.ts's redirect governs EXPLICIT delegations too. Narrowing it to direct
+    // gathering would hijack `delegate_to_agent(mission_coordinator)` on a research-flavoured
+    // mission and hand it to a single researcher. Only the ranking key moved.
+    expect(agentCfgIsResearchCapable(missionCoordinator)).toBe(true);
+    expect(agentCfgIsResearchCapable({ tools: ["delegate_to_agent", "swarm_delegate"] })).toBe(true);
+  });
+});
+
+/**
+ * A view of the open browser tab is not gathering (E2E 2026-10-08: 79dd29e0, 3c91cb68, c172d755).
+ * vision_browser_analyst holds browser_snapshot and browser_screenshot and nothing that opens a
+ * page. The browser_ prefix counted both as gathering, so the agent passed every research check,
+ * routing ranked it above browser_agent and researcher for "die URL … abrufen", and it read
+ * whatever page an earlier session had left in the shared tab. A browser tool that drives the
+ * page still counts.
+ */
+describe("browser tab views are not gathering", () => {
+  // Deployed tool lists, verbatim from workspace/agents/20-primary-agents.jsonc and 10-core-agents.jsonc.
+  const visionBrowserAnalyst = { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"] };
+  const browserAgent = { tools: [
+    "web_search", "list_knowledge_bases", "search_knowledge_base", "get_site_credentials", "site_fill_credentials",
+    "browser_navigate", "browser_click", "browser_type", "browser_snapshot", "browser_screenshot", "browser_select_option",
+    "browser_wait_for", "request_human_assist", "read_shared_facts", "share_finding", "write_file", "edit_file",
+  ] };
+  const researcher = { tools: ["web_search", "web_fetch", "url_inspect", "read_shared_facts", "share_finding"] };
+  const imageSourcer = { tools: ["web_search", "web_fetch", "fetch_image", "url_inspect", "browser_navigate", "browser_screenshot", "analyze_image"] };
+
+  it("does not count a snapshot or screenshot of the open tab as gathering, in either naming", () => {
+    for (const view of [
+      "browser_snapshot", "browser_screenshot", "browser_take_screenshot",
+      "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
+    ]) {
+      expect(isWebGatheringToolName(view)).toBe(false);
+    }
+    for (const driver of ["browser_navigate", "browser_click", "browser_type", "mcp__playwright__browser_navigate", "mcp__playwright__browser_click"]) {
+      expect(isWebGatheringToolName(driver)).toBe(true);
+    }
+  });
+
+  it("takes vision_browser_analyst out of the research checks and leaves browser_agent and researcher in", () => {
+    expect(agentCfgIsResearchCapable(visionBrowserAnalyst)).toBe(false);
+    expect(agentCfgGathersDirectly(visionBrowserAnalyst)).toBe(false);
+    for (const gatherer of [browserAgent, researcher, imageSourcer]) {
+      expect(agentCfgIsResearchCapable(gatherer)).toBe(true);
+      expect(agentCfgGathersDirectly(gatherer)).toBe(true);
+    }
+  });
+
+  it("ranks browser_agent and researcher above it for a research query, as routing scored them live (79dd29e0)", () => {
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const cfgs: Record<string, { tools: string[] }> = { vision_browser_analyst: visionBrowserAnalyst, browser_agent: browserAgent, researcher };
+    const gathers = (name: string) => agentCfgGathersDirectly(cfgs[name]);
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("vision_browser_analyst"), c("browser_agent"), c("researcher")], true, gathers,
+    );
+    expect(results.map((r) => r.name)).toEqual(["browser_agent", "researcher", "vision_browser_analyst"]);
+    expect(needsFallback).toBe(false);
+    // Alone, it no longer satisfies a research query: the caller prepends the researcher.
+    expect(reorderByResearchCapability([c("vision_browser_analyst")], true, gathers).needsFallback).toBe(true);
   });
 });

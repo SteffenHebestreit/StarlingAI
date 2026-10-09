@@ -29,6 +29,11 @@ export function markRuntimeComponentAttempt(name: RuntimeComponentName): void {
   });
 }
 
+/** Whether this process has started bringing a component up at least once, whatever came of it. */
+export function runtimeComponentAttempted(name: RuntimeComponentName): boolean {
+  return componentStatus.get(name)?.lastAttemptAt !== undefined;
+}
+
 export function markRuntimeComponentSuccess(
   name: RuntimeComponentName,
   details?: Record<string, unknown>,

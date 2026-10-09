@@ -26,6 +26,7 @@ import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js"
 import { stripLeadingReasoningPreamble, looksLikeTruncatedCodeDeliverable } from "./deliverable-relay.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
+import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
 
 /**
  * Result of selectCorrectiveResumeTarget — structurally compatible with the runtime
@@ -87,8 +88,22 @@ export interface CorrectiveContext {
 export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveContext): Promise<string | null> => {
   const { signal, session, userMessage, deliverableIntent, toolContext } = ctx;
   if (ctx.getQaCorrectiveBuildUsed() || signal.aborted) return null;
-  ctx.setQaCorrectiveBuildUsed(true);
   const builderAgent = deliverableIntent.builder;
+  // A scene or job step's turn may delegate only to the step's allowedAgents, and delegate_to_agent
+  // refuses any other agent it knows. The builder is picked from the request's wording, not from that
+  // scope: in the E2E run of 2026-10-09 a source_grounded_paper_packet step's corrective build went to
+  // content_writer, which the scene does not allow, and was refused after a slow round. Such a build
+  // is not delegated. No build ran, so the latch stays as it was.
+  const allowedAgents = toolContext.allowedAgents;
+  if (allowedAgents && !allowedAgents.includes(builderAgent)) {
+    logAudit("guardrail_flagged", {
+      type: "final_qa_corrective_build_out_of_scope",
+      builderAgent,
+      allowedAgents,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    return null;
+  }
+  ctx.setQaCorrectiveBuildUsed(true);
   logAudit("guardrail_flagged", {
     type: "final_qa_corrective_build_delegated",
     builderAgent,
@@ -156,6 +171,8 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     const buildResult = await executeTool("delegate_to_agent", {
       agentName: builderAgent,
       task: buildTask,
+      // The runtime knows what it asked for: a build that writes no file has missed it.
+      deliverable: "file",
       ...(buildContextWithSpec ? { context: buildContextWithSpec.slice(0, 10_000) } : {}),
       // Operator Stop means "build now from what we gathered," so this one bounded
       // build delegation runs even when the stop latch is set (audit 453a263e).
@@ -242,7 +259,7 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     "The requested artifact has just been BUILT by the build specialist and is ALREADY attached to this message as a downloadable file. "
     + `ARTIFACT FACTS (the only ground truth about what was built): ${artifactFacts}. `
     + (harvestedIncomplete ? "IMPORTANT: the file was recovered from a draft that was CUT OFF before the end — tell the user plainly that the app file is incomplete (it may not run yet) and offer to finish it. " : "")
-    + "Confirm to the user in the SAME language as their request: state that the file was created, give its path(s) and size, and summarize ONLY what the builder's own report explicitly says it implemented — do NOT advertise features (quiz, simulator, flashcards, tracking, …) that the report does not state were built, and if the artifact is small or minimal, say so plainly and offer to extend it. "
+    + `Confirm to the user ${IN_REPLY_LANGUAGE}: state that the file was created, give its path(s) and size, and summarize ONLY what the builder's own report explicitly says it implemented — do NOT advertise features (quiz, simulator, flashcards, tracking, …) that the report does not state were built, and if the artifact is small or minimal, say so plainly and offer to extend it. `
     + "Do NOT dump raw evidence and do NOT paste the file's HTML/CSS/JS code or any fenced code block — the file is attached, so inlining its code is redundant and confusing.",
   );
   // Belt-and-suspenders: the slow model sometimes ignores the no-code instruction and
@@ -278,7 +295,14 @@ export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<stri
     type: "fabricated_zero_work_reroute_delegated",
     userMessageChars: userMessage.length,
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-  ctx.onStatus?.({ phase: "guardrail", message: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.", iteration: ctx.getIterationCount() });
+  ctx.onStatus?.({
+    phase: "guardrail",
+    message: localizedFixedText({
+      de: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.",
+      en: "The previous answer was not backed by work that actually ran — passing the request to the right specialist.",
+    }),
+    iteration: ctx.getIterationCount(),
+  });
   try {
     const rerouteResult = await executeTool("delegate_to_agent", {
       task: userMessage,

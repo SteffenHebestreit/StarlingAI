@@ -208,12 +208,28 @@ export function buildInterruptedSubAgentOutput(params: {
    * its own synthesis. Without this, the parent only saw the 900-char head
    * and the rest of the delegated specialist's work was discarded. */
   primaryDelegationBody?: { content: string; bytes: number } | null;
+  /** Pre-formatted "- <path> (<n> bytes on disk)[ — INCOMPLETE: …]" lines for the
+   *  workspace files this run actually mutated (sub-agent.ts
+   *  describeMutatedWorkspaceFiles). Distinct from `artifacts`: a staged build whose
+   *  fill passes went through edit_file records NO artifact — edit_file's metadata
+   *  has no outputPath — so without these a cut-off build reported nothing at all
+   *  even though a valid skeleton and several finished subsystems were on disk. */
+  mutatedFileLines?: string[];
+  /** Applied to each recovered evidence line the output carries: the snippets of tool results
+   *  and the artifacts' text previews. Never to the runtime's own lines (the files on disk and
+   *  their byte counts, the artifact count): the run masks its own claims here. */
+  maskEvidence?: (line: string) => string;
 }): string {
   const swarmSummary = formatSwarmProgressForInterruption(params.swarmState);
   const progressLines: string[] = [];
 
   if (swarmSummary) {
     progressLines.push(swarmSummary);
+  }
+
+  if (params.mutatedFileLines && params.mutatedFileLines.length > 0) {
+    progressLines.push("Files this run wrote to the workspace (usable as-is; finish them in place rather than rebuilding):");
+    progressLines.push(...params.mutatedFileLines);
   }
 
   if (params.artifacts.length > 0) {
@@ -255,7 +271,8 @@ export function buildInterruptedSubAgentOutput(params: {
       const head = params.primaryDelegationBody.content.slice(0, 200).replace(/\s+/g, " ").trim();
       return !snippet.includes(head.slice(0, 80));
     })
-    .slice(-snippetCap);
+    .slice(-snippetCap)
+    .map((snippet) => (params.maskEvidence ? params.maskEvidence(snippet) : snippet));
   if (evidenceSnippets.length > 0) {
     progressLines.push("Recovered evidence snippets from completed tools:");
     for (const snippet of evidenceSnippets) {
@@ -438,7 +455,7 @@ export function buildArtifactCompletionOutput(params: {
 /** Strip hallucinated tool-call XML that some models emit in text output. */
 export function stripHallucinatedToolTags(text: string): string {
   let stripped = text
-    .replace(/<\|channel\>\w+\s*/g, "")
+    .replace(/<\|channel>\w+\s*/g, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
     .replace(/<function=[^>]*>[\s\S]*?<\/function>/g, "")
     .replace(/<\/tool_call>/g, "");

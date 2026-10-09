@@ -34,13 +34,15 @@ export interface MultimodalTtsConfig extends MultimodalServiceConfig {
 }
 
 export interface MultimodalImageGenerationConfig extends MultimodalServiceConfig {
-  api: "automatic1111-compatible" | "comfyui";
+  api: "automatic1111-compatible" | "comfyui" | "openai-compatible";
   model?: string;
   defaultWidth: number;
   defaultHeight: number;
   defaultSteps: number;
   defaultGuidanceScale: number;
   defaultNegativePrompt?: string;
+  /** The quality tier's own engine, when it has one. The page shows none of it but its key's fate. */
+  qualityBackend?: { baseUrl?: string; apiKey?: string; [key: string]: unknown };
 }
 
 export interface MultimodalWakeWordConfig {
@@ -192,6 +194,8 @@ export const useMultimodalStore = defineStore("multimodal", () => {
   const saving = ref(false);
   const statusLoading = ref(false);
   const error = ref("");
+  /** The config path the gateway named when it refused the last save ("files.apiKey"), if any. */
+  const errorField = ref("");
 
   function baseUrl(): string {
     return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -275,10 +279,12 @@ export const useMultimodalStore = defineStore("multimodal", () => {
     }
   }
 
-  async function save(nextConfig: MultimodalConfig): Promise<void> {
+  /** Sends a merge patch: only the keys to change, `null` to clear one (the server merges). */
+  async function save(nextConfig: Record<string, unknown>): Promise<void> {
     if (!gateway.token) return;
     saving.value = true;
     error.value = "";
+    errorField.value = "";
     try {
       const response = await window.fetch(`${baseUrl()}/api/multimodal/config`, {
         method: "PUT",
@@ -289,6 +295,9 @@ export const useMultimodalStore = defineStore("multimodal", () => {
         body: JSON.stringify(nextConfig),
       });
       if (!response.ok) {
+        // A refused key names its field, so the page can say so beside that key.
+        const refusal = await response.clone().json().catch(() => null) as { details?: { field?: unknown } } | null;
+        if (typeof refusal?.details?.field === "string") errorField.value = refusal.details.field;
         throw new Error(await parseErrorResponse(response));
       }
       const body = await response.json() as MultimodalConfig;
@@ -313,6 +322,7 @@ export const useMultimodalStore = defineStore("multimodal", () => {
     saving,
     statusLoading,
     error,
+    errorField,
     fetch,
     fetchStatus,
     save,

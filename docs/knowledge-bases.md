@@ -127,7 +127,7 @@ So a user- or session-scoped KB never leaks into another user's or conversation'
 ### Setting the scope
 
 - **Create tool** — `create_knowledge_base` takes `scope: "session" | "user" | "workspace"` (default `workspace`). The tool stamps `ownerId`/`sessionId` from the caller's context; you never pass them in the args.
-- **REST** — `POST /api/knowledge-bases` accepts `scope` and `sessionId` in the body; `ownerId` is always taken from the auth token, **never** the body. `PATCH /api/knowledge-bases/:id` changes the scope later, re-stamping ownership for the new scope and clearing the stamps that no longer apply. Session-scoped access over REST is presented via the `?sessionId=` query param on the list/detail/crawl/cancel/delete routes.
+- **REST** — `POST /api/knowledge-bases` accepts `scope` and `sessionId` in the body; `ownerId` is always taken from the auth token, **never** the body. `PATCH /api/knowledge-bases/:id` changes the scope later, re-stamping ownership for the new scope and clearing the stamps that no longer apply. Session-scoped access over REST is presented via the `?sessionId=` query param on the list/detail/crawl/cancel/delete routes. Under multi-user auth that query id counts only when it names a session the caller may use; otherwise it counts as absent, and that session's KBs read as not found. A `sessionId` in a create or update body must name such a session, or the request gets `404`.
 - **Dashboard** — the Knowledge Bases page create/edit form drives the same `POST`/`PATCH` body.
 
 Creation/update rules: `session` scope requires a `sessionId`, `user` scope requires an authenticated user (`ownerId`); either is rejected with a clear error when its identity is missing.

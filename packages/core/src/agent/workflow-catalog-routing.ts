@@ -145,7 +145,7 @@ export function buildApprovedRunCandidateGuidance(followUp: ApprovedWorkflowFoll
     "Approved workflow follow-up detected for this turn.",
     `The previous n8n_project_list result ended with RUN_CANDIDATE: ${followUp.candidateName}.`,
     "The user just approved running that exact workflow.",
-    `Call run_workflow now with name \"${followUp.workflowName}\", workflowType \"${followUp.workflowType}\", and params.workflowName \"${followUp.candidateName}\".`,
+    `Call run_workflow now with name "${followUp.workflowName}", workflowType "${followUp.workflowType}", and params.workflowName "${followUp.candidateName}".`,
     "Do NOT call search_agents, search_workflows, delegate_to_agent, parallel_delegate, or run_task_graph first.",
     "Do NOT answer in natural language before issuing that run_workflow call.",
   ].join(" ");

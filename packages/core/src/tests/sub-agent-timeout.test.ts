@@ -8,7 +8,11 @@ import { PRODUCT } from "../product/index.js";
 
 const completeMock = vi.fn();
 
-vi.mock("../providers/lmstudio.js", () => ({
+vi.mock("../providers/lmstudio.js", async (importActual) => ({
+  // Spread the real module: sub-agent.ts and its helpers import value exports
+  // (computePromptTokenBudget, DeadlineAbort, ...) from here, and a mock that
+  // replaced the whole module broke every time production code grew an export.
+  ...(await importActual<typeof import("../providers/lmstudio.js")>()),
   LMStudioProvider: class {
     async complete(messages: unknown, tools: unknown, signal?: AbortSignal) {
       return completeMock(messages, tools, signal);
@@ -29,7 +33,7 @@ describe("sub-agent turn timeouts", () => {
     await swarmMemory.resetSharedMemoryForTests();
   });
 
-  it("lets the current sub-agent LLM call finish after per-agent turnTimeoutMs elapses", async () => {
+  it("ABORTS the in-flight sub-agent LLM call when per-agent turnTimeoutMs elapses", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -47,31 +51,48 @@ describe("sub-agent turn timeouts", () => {
 
     process.env["SAI_CONFIG_PATH"] = configPath;
 
+    // The deadline used to be a boolean latch read BETWEEN iterations, so a call that
+    // never returned was never interrupted: an agent configured with turnTimeoutMs
+    // 600000 was measured running 1,069,298 ms — 78% over its own budget — because it
+    // was healthily streaming the whole time. The deadline now aborts the in-flight
+    // completion, which is what makes the wall clock a real bound now that the output
+    // token ceiling (previously the only thing that stopped a runaway) is gone.
+    let sawAbort = false;
     completeMock.mockImplementation((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
-      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      signal?.addEventListener("abort", () => {
+        sawAbort = true;
+        reject(new Error("aborted"));
+      }, { once: true });
       setTimeout(() => resolve({
         content: "Finished the current LLM run after the deadline.",
         tool_calls: [],
         usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
         finishReason: "stop",
-      }), 1100);
+      }), 5000);
     }));
 
     try {
       const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      const startedAt = Date.now();
       const result = await runSubAgentWithStats({
         agentName: "slow_agent",
         task: "Do a very slow thing.",
         parentSessionId: "parent-1",
         workspacePath: "/workspace",
       });
+      const elapsedMs = Date.now() - startedAt;
 
-      expect(result.output).toContain("Finished the current LLM run after the deadline.");
-      expect(completeMock).toHaveBeenCalledTimes(1);
+      // The discriminating assertion: the call would have resolved at 5000ms, and the
+      // deadline is 1000ms. Returning at all before 5000ms is only possible if the
+      // in-flight completion was actually cut off. Revert the abort and this hangs
+      // until the mock resolves, then fails on the content assertion below.
+      expect(sawAbort).toBe(true);
+      expect(elapsedMs).toBeLessThan(5000);
+      expect(result.output).not.toContain("Finished the current LLM run after the deadline.");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  }, 10000);
+  }, 15000);
 
   it("includes partial swarm progress in timeout output when work was already underway", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-progress-"));
@@ -299,8 +320,14 @@ describe("sub-agent turn timeouts", () => {
 
       expect(result.output).toContain("required approval expired");
       expect(approvalCallback).toHaveBeenCalledTimes(1);
-      const secondCompletionTools = completeMock.mock.calls[1]?.[1] as Array<{ name: string }> | undefined;
-      expect(secondCompletionTools?.some((tool) => tool.name === "http_request")).toBe(false);
+      // The gate is enforced at the CALL SITE (the second http_request never reached the
+      // approval callback), not by shrinking the wire list: the tool block renders ahead of
+      // the history, so a list that lost one tool re-prefilled the whole prompt (probe:
+      // 4 tokens / 0.41 s with the list intact vs 7,027 / 7.28 s with it changed).
+      const firstCompletionTools = (completeMock.mock.calls[0]?.[1] as Array<{ name: string }>).map((tool) => tool.name);
+      const secondCompletionTools = (completeMock.mock.calls[1]?.[1] as Array<{ name: string }>).map((tool) => tool.name);
+      expect(firstCompletionTools).toContain("http_request");
+      expect(secondCompletionTools).toEqual(firstCompletionTools);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -766,90 +793,17 @@ describe("sub-agent turn timeouts", () => {
   // De-lexicalized: the source-sensitive default-research-fallback rewrite is gated on the now-always-false sourceSensitiveTask flag. Removed.
 
 
-  // QUARANTINED (DEVPLAN P0): premise no longer matches the strip design. extractKeyFacts caps each
-  // finding at 600 chars and cumulativeUsefulEvidenceBytes sums those, so a single web_fetch can
-  // contribute <=600 bytes and never reach SUFFICIENT_EVIDENCE_TOOL_STRIP_BYTES (12_000, ~20 findings).
-  // Decide intended behavior: strip after one large single result, or rewrite fixture to ~20 distinct findings.
-  it.skip("removes evidence-gathering tools after a large enough useful evidence result", async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-sufficient-evidence-"));
-    const configPath = join(tempDir, "starlingai.json");
-
-    writeFileSync(configPath, JSON.stringify({
-      subAgents: {
-        research_agent: {
-          description: "Research agent with web tools",
-          systemPrompt: "Research and answer from evidence.",
-          tools: ["web_fetch", "web_search"],
-          maxIterations: 4,
-          turnTimeoutMs: 5000,
-        },
-      },
-    }), "utf8");
-
-    process.env["SAI_CONFIG_PATH"] = configPath;
-    vi.resetModules();
-
-    const { registerTool, unregisterTool } = await import("../tools/registry.js");
-    const fetchOutput = [
-      "Verified source evidence:",
-      ...Array.from({ length: 140 }, (_, index) => `Fact ${index + 1}: source-backed implementation detail with integration constraints and quality implications.`),
-    ].join("\n");
-
-    registerTool({
-      name: "web_fetch",
-      description: "Fetch a page.",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return { success: true, output: fetchOutput };
-      },
-    });
-    registerTool({
-      name: "web_search",
-      description: "Search the web.",
-      parameters: { type: "object", properties: {} },
-      async execute() {
-        return { success: true, output: "This should not be called after sufficient evidence." };
-      },
-    });
-
-    completeMock
-      .mockResolvedValueOnce({
-        content: "",
-        tool_calls: [{ id: "fetch-1", name: "web_fetch", arguments: { url: "https://example.test/mic" } }],
-        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-        finishReason: "tool_calls",
-      })
-      .mockImplementationOnce((_messages: unknown, tools: Array<{ name: string }>) => {
-        expect(tools.map((tool) => tool.name)).not.toContain("web_fetch");
-        expect(tools.map((tool) => tool.name)).not.toContain("web_search");
-        return Promise.resolve({
-          content: "Final answer from collected evidence.",
-          tool_calls: [],
-          usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
-          finishReason: "stop",
-        });
-      });
-
-    try {
-      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
-      const result = await runSubAgentWithStats({
-        agentName: "research_agent",
-        task: "Verify the microphone hardware design.",
-        parentSessionId: "parent-sufficient-evidence",
-        workspacePath: tempDir,
-      });
-
-      expect(result.output).toContain("Final answer from collected evidence.");
-      const { readAllFacts } = await import("../swarm/memory.js");
-      const facts = await readAllFacts("parent-sufficient-evidence");
-      expect(Object.values(facts).join("\n")).toContain("Verified source evidence");
-      expect(completeMock).toHaveBeenCalledTimes(2);
-    } finally {
-      unregisterTool("web_fetch");
-      unregisterTool("web_search");
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  }, 10000);
+  // DELETED, not un-skipped: "removes evidence-gathering tools after a large enough useful
+  // evidence result" asserted the OPPOSITE of the current mechanism — that the next call's
+  // `tools` array no longer contains web_fetch/web_search. Withdrawing a tool from the wire is
+  // exactly what was measured as costing a full re-prefill (prompt 7,027 / processed 7,027 /
+  // 7.28 s against 4 processed / 0.40 s with the list intact), so the strip now blocks at the
+  // call site and leaves the list alone; keeping the assertion would have pinned the defect.
+  // Its fixture premise was false too: the cap counts EXTRACTED finding bytes (extractKeyFacts
+  // caps each at 600), so one large result can never reach the 12_000 brake. The mechanism is
+  // covered on the wire in sub-agent-tool-list-stability.test.ts ("enforces the evidence cap at
+  // the call site"), which reaches the strip the way a real run does and asserts the tool never
+  // executed, the list never changed, and the row carries reason evidence_cap_enforced.
 
   it("synthesizes gathered evidence when timeout hits after tool work", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-timeout-synthesis-"));
@@ -1375,7 +1329,7 @@ describe("sub-agent turn timeouts", () => {
     }
   }, 10000);
 
-  it("records an adaptive timeout budget without creating an internal abort signal", async () => {
+  it("records an adaptive timeout budget and arms an abort signal enforcing it", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-sub-adaptive-timeout-"));
     const configPath = join(tempDir, "starlingai.json");
 
@@ -1443,8 +1397,14 @@ describe("sub-agent turn timeouts", () => {
 
       expect(result.output).toBe("done");
       expect(completeMock).toHaveBeenCalledTimes(1);
+      // An adaptive budget is still a budget, so the call must carry a signal that can
+      // enforce it — un-aborted here, because this run finished well inside it. Passing
+      // `undefined` (the old contract) is what made a turn deadline unenforceable
+      // against a completion that never returns. Agents that declare turnTimeoutMs
+      // "unbound" get `undefined`; that case is covered by the next test.
       const passedSignal = completeMock.mock.calls[0]?.[2] as AbortSignal | undefined;
-      expect(passedSignal).toBeUndefined();
+      expect(passedSignal).toBeInstanceOf(AbortSignal);
+      expect(passedSignal!.aborted).toBe(false);
       const startEvent = auditEvents.find(
         (event) => event.type === "sub_agent_started" && event.data.agentName === "adaptive_agent",
       );
@@ -2521,4 +2481,251 @@ describe("sub-agent turn timeouts", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   }, 10000);
+
+  // E2E 2026-10-07: every sandbox run of the coder failed or printed nothing, and its answer stated
+  // figures no tool had returned. The check holds on the answers a deadline or the iteration limit
+  // forces too, not only on the run's own last word: each is masked, and the run is not a success.
+  describe("figures no tool returned, on the forced synthesis paths", () => {
+    const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
+    const TASK = "Count the primes p with 100000 <= p <= 200000 with a script in the sandbox.";
+    const silentRun = {
+      success: true,
+      output: "(no output)",
+      metadata: { command: "node primes.js", exitCode: 0, sandboxed: true, programOutputChars: 0 },
+    };
+    const failedRun = {
+      success: false,
+      output: "",
+      error: "Exit code 1: Command failed: docker run --rm --network=none starlingai/sandbox:latest sh -lc node primes.js\n",
+      metadata: { sandboxed: true, exitCode: 1, programOutputChars: 0 },
+    };
+
+    const writeAgent = (prefix: string, agent: Record<string, unknown>) => {
+      const tempDir = mkdtempSync(join(tmpdir(), prefix));
+      const configPath = join(tempDir, "starlingai.json");
+      writeFileSync(configPath, JSON.stringify({
+        subAgents: {
+          prime_coder: {
+            description: "Runs a script in the sandbox",
+            systemPrompt: "Run the script in the sandbox and report what it printed.",
+            ...agent,
+          },
+        },
+      }), "utf8");
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      return tempDir;
+    };
+
+    it("masks them in the timeout synthesis of a run whose code printed nothing", async () => {
+      const tempDir = writeAgent("guardedclaw-sub-timeout-figures-", { tools: ["shell_exec"], maxIterations: 3, turnTimeoutMs: 1000 });
+      vi.useFakeTimers();
+      vi.resetModules();
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return silentRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [{ id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } }],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockImplementationOnce((_messages: unknown, _tools: unknown, signal?: AbortSignal) => new Promise((resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          setTimeout(() => resolve({
+            content: "",
+            tool_calls: [{ id: "run-2", name: "shell_exec", arguments: { command: "node primes.js --verbose" } }],
+            usage,
+            finishReason: "tool_calls",
+          }), 1100);
+        }))
+        .mockResolvedValueOnce({
+          content: "Zwischen 100000 und 200000 gibt es 8393 Primzahlen.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const resultPromise = runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-timeout-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+        await vi.advanceTimersByTimeAsync(1100);
+        const result = await resultPromise;
+
+        expect(completeMock).toHaveBeenCalledTimes(3);
+        expect(result.stats.terminalState).toBe("completed");
+        expect(result.output).toBe("Zwischen 100000 und 200000 gibt es [not observed] Primzahlen.");
+        expect(result.stats.outcome).toBe("partial");
+        expect(result.executions).toEqual({ attempted: 1, failed: 0, succeededWithOutput: 0, unobservedFigures: 1 });
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("grace_synthesis");
+      } finally {
+        unsubscribe();
+        vi.useRealTimers();
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+
+    it("masks them in the max-iterations synthesis, and the file it wrote does not make the run a success", async () => {
+      const tempDir = writeAgent("guardedclaw-sub-max-iter-figures-", { tools: ["write_file", "shell_exec"], maxIterations: 1 });
+      vi.resetModules();
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "write_file",
+        description: "Write a file",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return {
+            success: true,
+            output: "File written: generated/primes.js (460 chars)",
+            metadata: { filename: "primes.js", outputPath: "generated/primes.js", contentType: "text/javascript; charset=utf-8", previewMode: "text" },
+          };
+        },
+      });
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return failedRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [
+            { id: "write-1", name: "write_file", arguments: { path: "primes.js", content: "console.log(count)" } },
+            { id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } },
+          ],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockResolvedValueOnce({
+          content: "primes.js ist geschrieben: es gibt 8393 Primzahlen zwischen 100000 und 200000.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const result = await runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-max-iter-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+
+        expect(result.output).toBe("primes.js ist geschrieben: es gibt [not observed] Primzahlen zwischen 100000 und 200000.");
+        expect(result.stats.outcome).toBe("partial");
+        expect(result.artifacts?.some((artifact) => artifact["outputPath"] === "generated/primes.js")).toBe(true);
+        const completionEvent = auditEvents.find((event) => event.type === "sub_agent_completed" && event.data["agentName"] === "prime_coder");
+        // The written file is what made this path report success before.
+        expect(completionEvent?.data["completedFromArtifact"]).toBe(true);
+        expect(completionEvent?.data["outcome"]).toBe("partial");
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("max_iterations_synthesis");
+      } finally {
+        unsubscribe();
+        unregisterTool("write_file");
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+
+    it("masks them in the soft-deadline synthesis", async () => {
+      // The reserve before the hard deadline opens once the run is past it: turnTimeoutMs >= 60 s and
+      // a 30 s reserve at T = 60 s. Date.now is advanced by the tool itself, so no real deadline fires.
+      const tempDir = writeAgent("guardedclaw-sub-soft-deadline-figures-", { tools: ["shell_exec"], maxIterations: 6, turnTimeoutMs: 60_000 });
+      vi.resetModules();
+      const realNow = Date.now.bind(Date);
+      let clockOffset = 0;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
+
+      const { registerTool, unregisterTool } = await import("../tools/registry.js");
+      registerTool({
+        name: "shell_exec",
+        description: "Run a command in the sandbox",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          clockOffset = 40_000;
+          return silentRun;
+        },
+      });
+
+      completeMock
+        .mockResolvedValueOnce({
+          content: "",
+          tool_calls: [{ id: "run-1", name: "shell_exec", arguments: { command: "node primes.js" } }],
+          usage,
+          finishReason: "tool_calls",
+        })
+        .mockResolvedValueOnce({
+          content: "Es gibt 8393 Primzahlen zwischen 100000 und 200000.",
+          tool_calls: [],
+          usage,
+          finishReason: "stop",
+        });
+
+      const { subscribeToAudit } = await import("../audit/logger.js");
+      const auditEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+      const unsubscribe = subscribeToAudit((event) => {
+        auditEvents.push({ type: event.type, data: event.data as Record<string, unknown> });
+      });
+
+      try {
+        const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+        const result = await runSubAgentWithStats({
+          agentName: "prime_coder",
+          task: TASK,
+          parentSessionId: "parent-soft-deadline-figures",
+          workspacePath: tempDir,
+          approvalCallback: async () => true,
+        });
+
+        // The gate really opened; otherwise this would describe the run's own last word.
+        expect(auditEvents.filter((event) => event.type === "sub_agent_soft_deadline")).toHaveLength(1);
+        expect(completeMock).toHaveBeenCalledTimes(2);
+        expect(result.output).toBe("Es gibt [not observed] Primzahlen zwischen 100000 und 200000.");
+        expect(result.stats.outcome).toBe("partial");
+        const flagged = auditEvents.find((event) => event.type === "guardrail_flagged" && event.data["type"] === "sub_agent_unobserved_figures_masked");
+        expect(flagged?.data["site"]).toBe("soft_deadline_synthesis");
+      } finally {
+        unsubscribe();
+        nowSpy.mockRestore();
+        unregisterTool("shell_exec");
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 10000);
+  });
 });

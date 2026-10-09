@@ -1,0 +1,70 @@
+{
+  // The Laya decision layer (packages/core/src/decisions, schema config/schemas/decisions.ts).
+  //
+  // Laya is a small local choice model in the `laya` sidecar. It answers the swarm's yes/no and
+  // pick-one questions in milliseconds, where the incumbent is an LLM call of one to two seconds
+  // on the shared GPU. The incumbent is the LLM call or rule that decides the point today. It
+  // stays the fallback, and it is the teacher Laya is measured, and fine-tuned, against.
+  //
+  // The sidecar's address comes from SAI_LAYA_URL, which `sai start --laya` sets. Without the
+  // sidecar every point is decided by its incumbent, whatever the modes below say.
+  //
+  // "adaptive": the incumbent decides until the decision ledger (.starlingai/decisions/ledger.jsonl)
+  // shows that Laya agrees with it, per point, language and answer, at a confidence where the
+  // agreement's lower bound reaches targetAgreement over at least minSamples cases. From then on
+  // Laya decides those cases, the incumbent is not waited for, and auditRate of them still goes
+  // to the incumbent so the agreement keeps being measured.
+  //
+  // The stock checkpoint is not expected to qualify for much before it is fine-tuned on the ledger,
+  // so this starts out as shadow mode: nothing changes until the evidence says it may.
+  //
+  // To only watch: set "defaultMode": "shadow". To switch one point off: "points": { "<id>": { "mode": "off" } }.
+  // Points: fast_lane, source_sensitive, ungrounded_draft, slices_disagree, goal_met,
+  // finding_relevant (shared-fact distillation: Laya may only say "nothing relevant", which saves
+  // the extraction call) and run_drifting (the semantic progress judge, itself off by default:
+  // Laya may only say "on track"; winding a run down stays the routing tier's call).
+  // Report: `pnpm --filter @starlingai/core decisions:report`.
+  //
+  // "browser": laya-browser beside the browser agent. It clicks and selects on its own — never a
+  // form submit, a download, a new tab, an internal host, typing or finishing — and the agent's
+  // model takes every other step. Its steps run as the agent's own browser_click /
+  // browser_select_option calls (approvals and guards apply) and are marked as its in the call.
+  // Both choices of every step go to the audit (browser_step) and to
+  // .starlingai/decisions/browser-ledger.jsonl, with the page as it was read.
+  //
+  // "adaptive" acts where the comparisons with the model show it agrees at its confidence, with
+  // the settings above. "drive" acts above a fixed driveMinProbability instead — but its
+  // probabilities are not calibrated: on real pages its right and its wrong elements both came at
+  // 0.6–0.7, so 0.9 never acts and 0.6 acts wrongly about half the time. "shadow" only compares.
+  //
+  // Fine-tuning on the swarm's own cases, once the ledgers have grown (a few hundred each):
+  //   pnpm --filter @starlingai/core decisions:export
+  //   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile laya run --rm laya python -m app.train decision
+  //   (and: ... python -m app.train browser), then restart the laya service.
+  // A run replaces the served checkpoint only when it agrees with the incumbent more often on
+  // held-out cases (.starlingai/laya/<model>/runs/<run>/metrics.json says why). The gate's evidence
+  // is kept per checkpoint version, so a new one earns its handover from its own cases.
+  //
+  // "readout" (default off everywhere): the incumbent itself read by its logits — the resident
+  // model answers one option letter with thinking off, and its probabilities over the letters are
+  // the answer (packages/core/src/decisions/logit-readout.ts). "shadow" asks it beside today's call
+  // and records both in .starlingai/decisions/readout-ledger.jsonl; "on" lets it decide, but only
+  // on a point whose own Laya mode is "off" (the default below is adaptive): where Laya learns
+  // from the incumbent, the ledger cannot yet tell the readout's answers apart, so "on" runs as
+  // "shadow" there. Measure first: `pnpm --filter @starlingai/core decisions:readout` (agreement
+  // with today's answer, ECE before and after a fitted temperature, flips under a swapped option
+  // order, wall time).
+  "decisions": {
+    "defaultMode": "adaptive",
+    "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },
+    "browser": { "mode": "adaptive" },
+    // source_sensitive is decided by the readout of the resident model. decisions:readout
+    // (2026-09-28, 80 synthetic cases, both languages, gold-labelled): readout 100% vs the parsed
+    // judge 93.8%, with all 4 German misses of the parsed judge on the protected "yes"; option-order
+    // flips 0/80; ~1.1 s like the parsed call. Laya is off for this point: the fine-tuned checkpoint
+    // reached 81-90% with a protected-yes recall of 47% in English, so the gate would not hand it
+    // over, and readout "on" needs the point's Laya mode off to take effect.
+    "points": { "source_sensitive": { "mode": "off" } },
+    "readout": { "points": { "source_sensitive": "on" } }
+  }
+}

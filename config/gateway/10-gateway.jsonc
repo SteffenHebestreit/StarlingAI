@@ -22,9 +22,50 @@
       // turns. A direct answer pays a ~half-size prompt; delegation tools + the
       // honesty/core sections stay regardless. Validating routing quality here.
       "splitOrchestrationPrompt": true,
-      // Keep the orchestrator base-prompt KV prefix warm during idle so the first
-      // turn after boot / a delegating turn doesn't pay the cold prefill.
-      "promptCacheWarmKeeper": true
+      // ON since 2026-09-20, because the reason it was off has been fixed.
+      //
+      // It was turned off on 2026-09-08 with this finding: the warm-up fired
+      // complete([system: leanBase, user: "."], []) — an EMPTY tools array — at 3,439 prompt
+      // tokens, while every orchestrator turn carries the 36-tool block at ~13,700. The
+      // server renders tools at or before the system text, so the warmed prefix was not a
+      // prefix of the real one. Probed then: the real TOOLS shape took 21.83s cold, 21.46s
+      // straight after the tool-less warm, and 0.42s after one identical TOOLS call. The
+      // warm-up bought 0.4s of 21.8s. That note ended "re-enable only alongside warming the
+      // tool block too, which is what would actually have to change."
+      //
+      // agent/cache-warmer.ts now sends the orchestrator's real tool array, derived from the
+      // same getMainAssistantToolNames() the turn uses, so the two move together. Measured
+      // against the serving model with THIS deployment's real base prompt and real 36-tool
+      // block (15,508 prompt tokens), a unique marker per trial so no trial warms another:
+      //   old warmer, tool-less warm then a real turn -> 17,394 ms
+      //   FIXED warmer, tooled warm then the same turn ->     456 ms
+      //   no warm-up at all, cold                      -> 16,887 ms
+      //
+      // Note the first line: the old warmer was WORSE THAN NOTHING. It burned 7.3s of GPU
+      // and left the real turn slower than an unwarmed one, because it filled the cache with
+      // a prefix no turn shares.
+      //
+      // What to watch now that it is on: the warmer costs one background completion per idle
+      // window, which the 2026-09-08 audit measured at ~4.4s of GPU. It aborts the instant a
+      // real turn starts, so it never queues ahead of a user — but on a busy box that GPU
+      // time is not free. If first-turn TTFT does not fall to roughly a warm prefill, turn it
+      // back off rather than leaving it running.
+      "promptCacheWarmKeeper": true,
+      // Also warm the two forced orchestration heads a source-sensitive or artifact turn switches to (record_plan,
+      // then execute_plan, on lean base + orchestration module). Live probe E9, 2026-09-26, 3 of 3 reps: the two
+      // forced calls reused their heads, 2.8 s of prompt each against 12.2 / 11.7 s cold, the full head stayed
+      // cached, and they stayed warm after six 26k-token prompts in between. Cost: ~10.6 + 10.2 s of idle GPU once,
+      // ~1.5 s per head to re-warm, only while no turn runs. After a rebuild, check that the forced calls'
+      // provider_model_call rows show cacheN >= 9k; if they do not, turn this back off.
+      // With orchestration.stableToolBlock "freeze" (40-orchestration.jsonc, 2026-10-05) the forced calls send the
+      // full tool block, so this warms lean base + orchestration module + full tools instead of the two subsets.
+      "promptCacheWarmForcedHeads": true,
+      // Re-warm a sub-agent's head after a run that outgrew it 4x, so the next dispatch of that agent finds it cached.
+      // Live probe E8, 2026-09-26: an 8k head was cold after a 6x run and one head-only request made the next two new
+      // conversations warm (3 of 3), ~0.8 s of prompt against ~7 s of cold prefill saved per dispatch. After a rebuild,
+      // read the sub_agent_head_rewarm rows and cacheN on the next same-head dispatch's first call; if it stays cold, or
+      // a re-warm shows up beside a real call, turn this back off.
+      "subAgentHeadRewarm": true
     }
   },
   "gateway": {

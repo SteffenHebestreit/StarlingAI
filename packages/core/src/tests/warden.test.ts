@@ -37,6 +37,7 @@ import {
   startWarden,
   stopWarden,
   registerSessionAbortController,
+  registerWardenRunStop,
   TOOL_STORM_THRESHOLD,
   TOOL_STORM_PREDICT_THRESHOLD,
 } from "../agent/warden.js";
@@ -93,6 +94,69 @@ describe("Warden — tool storm detection", () => {
 
     expect(target.signal.aborted).toBe(true);   // the runaway session is aborted
     expect(bystander.signal.aborted).toBe(false); // an unrelated session is not
+  });
+
+  // W1, c297c5ea: a sub-agent's calls are counted under its own id, which no turn controller is
+  // registered under, so the storm stopped nothing. The run registers itself instead.
+  it("a hard tool_storm on a sub-agent's own id winds that run down, and only that run", () => {
+    const parentTurn = new AbortController();
+    registerSessionAbortController("c297c5ea-de99-4d88-a542-9f497e1c3a5d", parentTurn);
+    const runaway = vi.fn();
+    const sibling = vi.fn();
+    const runawayId = "sub:c297c5ea-de99-4d88-a542-9f497e1c3a5d:content_writer:1790386901385";
+    registerWardenRunStop(runawayId, runaway);
+    registerWardenRunStop("sub:c297c5ea-de99-4d88-a542-9f497e1c3a5d:researcher:1790386901390", sibling);
+
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: runawayId, data: {} });
+    }
+    sweepAnomaliesNow();
+
+    expect(runaway).toHaveBeenCalledTimes(1);
+    expect(runaway.mock.calls[0]![0]).toMatchObject({ alert: "tool_storm" });
+    expect(sibling).not.toHaveBeenCalled();
+    // The turn goes on: it gets the run's partial result, not an abort.
+    expect(parentTurn.signal.aborted).toBe(false);
+  });
+
+  it("a subject cut to a prefix never winds down a run", () => {
+    // tool_escape_attempt names "agent@<first 20 chars of the id>", which is the start of every
+    // run of the turn; only an exact id may reach a run.
+    const run = vi.fn();
+    registerWardenRunStop("sub:c297c5ea-de99-4d88-a542-9f497e1c3a5d:content_writer:1", run);
+    for (let i = 0; i < 3; i++) {
+      fireEvent({ type: "sub_agent_tool_blocked", sessionId: "sub:c297c5ea-de99-4d88-a542-9f497e1c3a5d:content_writer:1", data: { agentName: "content_writer", reason: "not_in_agent_tools" } });
+    }
+    const alerts = sweepAnomaliesNow();
+    expect(alerts.some((alert) => alert.type === "tool_escape_attempt" && alert.severity === "error")).toBe(true);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("reaches a run whose id holds an '@' (an MCP caller's user name is part of its parent id)", () => {
+    // Read as "agent@<id prefix>", the id was cut at the "@" and matched no run.
+    const run = vi.fn();
+    const runId = "sub:mcp:ops@example.org:3f1c9a2e-7d44-4b8e-9a51-0c6e2d8b7f10:content_writer:1790386901385";
+    registerWardenRunStop(runId, run);
+    for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) {
+      fireEvent({ type: "sub_agent_tool_call", sessionId: runId, data: {} });
+    }
+    sweepAnomaliesNow();
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]![0]).toMatchObject({ alert: "tool_storm" });
+  });
+
+  it("a deregistration removes only its own handler, and a stopped run is not stopped twice", () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const release = registerWardenRunStop("sub:s:agent:1", first);
+    registerWardenRunStop("sub:s:agent:1", second); // the id's current handler
+    release(); // a stale deregistration must not remove it
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < TOOL_STORM_THRESHOLD; i++) fireEvent({ type: "sub_agent_tool_call", sessionId: "sub:s:agent:1", data: {} });
+      sweepAnomaliesNow();
+    }
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 
   it("ignores done-phase sub-agent tool events for tool storm counting", () => {

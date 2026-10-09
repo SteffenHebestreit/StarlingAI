@@ -1,0 +1,52 @@
+// Browser automation: a catalogue spread over three pages (eval/e2e/site/produkte/seite-1..3.html,
+// 6 articles each; /produkte/ redirects to page 1). Ground truth (ENVIRONMENT.md "Catalogue"):
+// most expensive NW-2104 Werkstattwagen Eisberg 459,00 € (page 2); cheapest NW-3102 Schutzbrille
+// Klarsicht 8,90 € (page 3); 8 articles under 50 € (NW-1201, NW-1203, NW-2102, NW-3101, NW-3102,
+// NW-3103, NW-3105, NW-3106 — spread over all three pages).
+//
+// Event names verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, error}  agent/sub-agent.ts:6527 (start), :6918 (done)
+{
+  id: "core-ix-browser-catalogue-pagination",
+  title: "Browser: walk all catalogue pages and aggregate across them",
+  group: "core",
+  tags: ["browser", "site", "pagination", "aggregation"],
+  description: "No single page answers the question: the most expensive article is on page 2, the cheapest on page 3, and the eight articles under 50 € are spread over all three. Protects: following the pager (or the page URLs) to the end instead of answering from page 1, and counting correctly across pages.",
+  requires: ["model", "browser", "e2e-site"],
+  timeoutMs: 1500000,
+  steps: [
+    {
+      kind: "turn",
+      id: "aggregate-catalogue",
+      message: "Geh im Browser alle Seiten des Produktkatalogs unter http://www.nordlicht-werkzeuge.test/produkte/ durch – der Katalog hat mehrere Seiten. Welcher Artikel ist der teuerste, welcher der günstigste, und wie viele Artikel kosten weniger als 50 €?",
+      timeoutMs: 1200000,
+      expect: {
+        reply: {
+          matches: [
+            "NW-2104|Werkstattwagen",
+            "459",
+            "NW-3102|Schutzbrille",
+            "8[,.]90",
+            // The count of articles under 50 €: 8. "8,90" (a price) does not count; "18" has no boundary.
+            "\\b(8|acht)\\b(?![,.]\\d)",
+          ],
+        },
+        tools: { mustCall: ["browser_navigate"] },
+        agents: { mustRun: ["browser_agent"] },
+        events: {
+          must: [
+            // Three pages need at least three page actions (navigate to each page, or click the pager).
+            { type: "sub_agent_tool_call", where: { "data.agentName": "browser_agent", "data.tool": { in: ["browser_navigate", "browser_click"] }, "data.phase": "start" }, min: 3 },
+          ],
+          mustNot: [
+            { type: "sub_agent_tool_call", where: { "data.tool": "browser_navigate", "data.phase": "done", "data.error": { regex: "Refusing to navigate" } } },
+          ],
+        },
+        judge: {
+          rubric: "Die Antwort nennt NW-2104 (Werkstattwagen Eisberg, 459,00 €) als teuersten Artikel, NW-3102 (Schutzbrille Klarsicht, 8,90 €) als günstigsten und 8 Artikel unter 50 €, ohne Artikel oder Preise zu erfinden.",
+          minScore: 7,
+        },
+      },
+    },
+  ],
+}

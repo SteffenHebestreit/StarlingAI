@@ -1,0 +1,8 @@
+{
+  "stand": "06.10.2026, 07:30 Uhr",
+  "auftraege": [
+    { "auftrag": "NW-A-2041", "artikel": "3 × NW-1101 Akku-Schrauber NW-AS 18", "status": "versandt", "paketnummer": "NWP-7731-0042", "zustellung": "voraussichtlich 09.10.2026" },
+    { "auftrag": "NW-A-2042", "artikel": "1 × NW-2104 Werkstattwagen Eisberg", "status": "in Bearbeitung", "paketnummer": "–", "zustellung": "Speditionsavis folgt" },
+    { "auftrag": "NW-A-2043", "artikel": "20 × NW-3102 Schutzbrille Klarsicht", "status": "zugestellt", "paketnummer": "NWP-7729-0017", "zustellung": "zugestellt am 02.10.2026" }
+  ]
+}

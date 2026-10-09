@@ -1,0 +1,159 @@
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  resolveThinkingControls,
+  effortForEndpoint,
+  isRejectedReasoningEffortError,
+  noteRejectedReasoningEffort,
+  _resetRejectedReasoningEffortsForTests,
+} from "../providers/lmstudio.js";
+
+afterEach(() => _resetRejectedReasoningEffortsForTests());
+
+/**
+ * THE CONTROL HAS TO REACH THE WIRE.
+ *
+ * The routing tier was defaulted to thinking-off in 2066738, but qwen3.6 lands in the
+ * `enable_thinking` family, whose branch sent only `chat_template_kwargs.enable_thinking` and
+ * dropped `reasoningEffort` entirely. Measured 2026-09-03 against qwen/qwen3.6-35b-a3b on the
+ * deployment, judge-shaped prompt, 400-token cap:
+ *
+ *   no control              1,678 reasoning chars / 400 reasoning tokens / 6.8 s / EMPTY answer
+ *   enable_thinking:false   1,678 / 400 / 6.5 s / EMPTY answer      ← identical to no control
+ *   reasoning_effort:none       0 /   0 / 0.35 s / "YES"
+ *
+ * So the shipped switch was inert, and the verdict calls were not merely slow: reasoning consumed
+ * the whole budget and they returned nothing at all.
+ */
+describe("thinking-off reaches the wire for the enable_thinking family", () => {
+  it("sends the effort field alongside the flag when thinking is turned off", () => {
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false }))
+      .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
+  });
+
+  it("honours an explicit effort this family used to ignore", () => {
+    // What tierModelDefaults("routing") passes: both, and both must survive.
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: "none" }))
+      .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
+    expect(resolveThinkingControls("glm-4.6", { reasoningEffort: "none" }))
+      .toEqual({ reasoningEffort: "none" });
+  });
+
+  it("does not force a level upward — thinking on is the model's own default here", () => {
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: true }))
+      .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: true, reasoningEffort: "medium" }))
+      .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
+  });
+
+  it("a pinned graded effort beats the legacy toggle — and the flag is withheld, not just the level", () => {
+    // researcher and mission_coordinator pin { reasoningEffort: "medium", enableThinking: false }
+    // with the comment "explicit effort overrides the enableThinking toggle, which predates graded
+    // effort". Vetoed, the model must keep its default — which IS deliberation, what those agents
+    // asked for.
+    //
+    // THIS TEST USED TO ASSERT { chatTemplateKwargs: { enable_thinking: false } } and passed,
+    // green, while the outcome was the exact opposite of the sentence above. It asserted the wire
+    // SHAPE and justified it with "the flag is inert here" — a premise measured on LM Studio. On
+    // the llama.cpp qwen3.6 backend the swarm actually runs (bb395d5), the flag alone is a
+    // complete off-switch: 9,395 -> 0 reasoning chars on qwen, 10,392 -> 0 on qwen-27b, identical
+    // to reasoning_effort "none", with prompt_tokens moving 54 -> 56 because the chat template
+    // changes. So the veto has to withhold the flag as well, or it vetoes nothing.
+    for (const effort of ["medium", "high", "xhigh"] as const) {
+      for (const id of ["qwen/qwen3.6-35b-a3b", "lmstudio/qwen", "lmstudio/qwen-27b"]) {
+        expect(
+          resolveThinkingControls(id, { enableThinking: false, reasoningEffort: effort }),
+          `${id} @ ${effort} must put NOTHING on the wire — anything sent here turns thinking off`,
+        ).toEqual({});
+      }
+    }
+  });
+
+  it("still sends enable_thinking:true under a graded pin — that agrees with the veto", () => {
+    // Only the flag that CONTRADICTS the veto is withheld. An agent asking for thinking ON with a
+    // graded pin is not in conflict, so the flag still goes out; withholding it here would be the
+    // over-broad version of the fix.
+    for (const id of ["lmstudio/qwen", "lmstudio/qwen-27b"]) {
+      expect(resolveThinkingControls(id, { enableThinking: true, reasoningEffort: "medium" }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: true } });
+    }
+  });
+
+  it("an UNVETOED off-switch still turns thinking off, by both mechanisms", () => {
+    // The other thirteen enableThinking:false agents carry no graded pin. Nothing about them
+    // changes: they asked for thinking off and they get it.
+    for (const id of ["lmstudio/qwen", "lmstudio/qwen-27b"]) {
+      expect(resolveThinkingControls(id, { enableThinking: false }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
+    }
+  });
+
+  it("never puts a graded level on the wire for this family — it is inert, and the audit row would claim it landed", () => {
+    // Measured on qwen3.6 at max_tokens 3000 (no cap saturating the comparison): low 2,261 /
+    // medium 1,565 / xhigh 1,182 / no control 1,968 reasoning tokens, all at prompt_tokens 61 —
+    // the same spread whatever was asked, and not even ordered. prompt_tokens moves to 63 only for
+    // "none", where the chat template itself changes. A level that cannot land must not be sent:
+    // provider_model_call would record it as applied.
+    for (const effort of ["low", "medium", "xhigh"] as const) {
+      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: true, reasoningEffort: effort }).reasoningEffort)
+        .toBeUndefined();
+    }
+  });
+
+  it("a graded pin must not suppress the one control that works — the LOW effort tier reasoned hardest", () => {
+    // The low tier is { reasoningEffort: "low", enableThinking: false } and its contract is the
+    // least work that answers the question. Shipped as it was, the pin won and BOTH fields were
+    // inert, so the cheapest tier ran at the model's full default. "low" and "minimal" sit
+    // alongside the off-switch, not against it.
+    for (const effort of ["low", "none"] as const) {
+      expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", { enableThinking: false, reasoningEffort: effort }))
+        .toEqual({ chatTemplateKwargs: { enable_thinking: false }, reasoningEffort: "none" });
+    }
+  });
+
+  it("still emits nothing without a signal", () => {
+    expect(resolveThinkingControls("qwen/qwen3.6-35b-a3b", {})).toEqual({});
+  });
+
+  it("sends 'none' rather than folding it to a level that still thinks", () => {
+    // "low" measured 1,752 reasoning chars in 6.5 s on this model — folding none→low was the bug.
+    expect(resolveThinkingControls("qwen/qwen3.8-27b", { reasoningEffort: "none" }))
+      .toEqual({ reasoningEffort: "none" });
+    expect(resolveThinkingControls("qwen/qwen3.8-27b", { enableThinking: false }))
+      .toEqual({ reasoningEffort: "none" });
+  });
+});
+
+/**
+ * An older LM Studio takes only xhigh|medium|low. Sending the correct value first and stepping
+ * down once an endpoint actually refuses it keeps both backends working, and a 400 never ends a
+ * turn. The current build names its own set: "Supported values: none, minimal, low, medium,
+ * high, xhigh."
+ */
+describe("per-endpoint reasoning_effort ladder", () => {
+  const ENDPOINT = "http://10.10.0.2:1234/v1";
+
+  it("sends the requested value until the endpoint refuses it", () => {
+    expect(effortForEndpoint(ENDPOINT, "none")).toBe("none");
+    noteRejectedReasoningEffort(ENDPOINT, "none");
+    expect(effortForEndpoint(ENDPOINT, "none")).toBe("low");
+    noteRejectedReasoningEffort(ENDPOINT, "low");
+    expect(effortForEndpoint(ENDPOINT, "none")).toBeUndefined();   // degrade, never fail
+  });
+
+  it("is per endpoint — one backend's refusal does not disarm another", () => {
+    noteRejectedReasoningEffort(ENDPOINT, "none");
+    expect(effortForEndpoint("http://other:1234/v1", "none")).toBe("none");
+  });
+
+  it("does not step down a level the endpoint never refused", () => {
+    noteRejectedReasoningEffort(ENDPOINT, "none");
+    expect(effortForEndpoint(ENDPOINT, "medium")).toBe("medium");
+  });
+
+  it("recognises the rejection and nothing else", () => {
+    expect(isRejectedReasoningEffortError({ status: 400, message: "Invalid 'reasoning_effort' value: 'none'. Supported values: low, medium, xhigh." })).toBe(true);
+    expect(isRejectedReasoningEffortError({ status: 400, message: "context length exceeded" })).toBe(false);
+    expect(isRejectedReasoningEffortError({ status: 500, message: "reasoning_effort" })).toBe(false);
+    expect(isRejectedReasoningEffortError(new Error("reasoning_effort"))).toBe(false);
+  });
+});

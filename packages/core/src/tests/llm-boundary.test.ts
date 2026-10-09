@@ -140,3 +140,44 @@ describe("llm boundary transformers", () => {
     expect(result.content).toBe("Patient [PATIENT_A] ist stabil.");
   });
 });
+
+/**
+ * A LATENT CONTRACT HOLE, NOT A PRODUCTION DROP.
+ *
+ * The Proxy's complete() arm was a 3-parameter closure while the completeViaStream and stream()
+ * arms forwarded their 4th `options` argument. Nothing reaches the dropping arm today:
+ * createChatProvider builds only LMStudioProvider, AnthropicProvider or FailoverChatProvider,
+ * all three implement completeViaStream, and both call sites branch on completeViaStream first.
+ * But completeViaStream is OPTIONAL on ChatProvider — a conforming provider that implements
+ * complete() alone would have silently lost the per-call thinking controls, the max_tokens
+ * ceiling and tool_choice. Closed so the optional method cannot become load-bearing by accident.
+ *
+ * The double below implements complete() and NOTHING else on that path, and the call goes
+ * through the wrapper: a bare double would never touch the Proxy and would pass either way.
+ */
+describe("the boundary forwards per-call options on every arm", () => {
+  it("complete()-only provider: the options bag reaches it through the Proxy", async () => {
+    registerLlmBoundaryTransformer("test", redactor);
+    const seen: Array<unknown> = [];
+    const completeOnly = {
+      checkHealth: async () => ({ healthy: true }),
+      verifyToolCallSupport: async () => true,
+      isHealthy: () => true,
+      embed: async () => [],
+      complete: async (_m: LLMMessage[], _t: unknown, _s: unknown, options?: unknown) => {
+        seen.push(options);
+        return { content: "ok", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" } as LLMResponse;
+      },
+      stream: async function* () { yield { type: "done" as const }; },
+    } as unknown as ChatProvider;
+    // The hole exists precisely because this is absent.
+    expect(completeOnly.completeViaStream).toBeUndefined();
+
+    const wrapped = wrapProviderWithBoundary(completeOnly);
+    const bag = { toolChoice: "required" as const, maxTokens: 512, controls: { enableThinking: false } };
+    await wrapped.complete([{ role: "user", content: "x" }], [], undefined, bag);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(bag);
+  });
+});

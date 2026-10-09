@@ -1,6 +1,18 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as loaderModule from "../config/loader.js";
 import { getTool, type ToolHandler } from "../tools/registry.js";
 import "../tools/inline-utils.js"; // registers the Tier-0 inline tools
+
+// A name on the operator's LAN for the allowlist cases: it resolves to a private address. Every
+// other lookup is the real one.
+const { LAN_HOST, LAN_ADDRESS } = vi.hoisted(() => ({ LAN_HOST: "wiki.lan.example", LAN_ADDRESS: "172.22.0.14" }));
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns/promises")>();
+  const lookup = (hostname: string, options?: unknown) => hostname === LAN_HOST
+    ? Promise.resolve([{ address: LAN_ADDRESS, family: 4 }])
+    : actual.lookup(hostname, options as never);
+  return { ...actual, lookup };
+});
 
 function tool(name: string): ToolHandler {
   const t = getTool(name);
@@ -135,5 +147,125 @@ describe("inline-utils Tier-0 tools", () => {
 
   it("registers url_inspect", () => {
     expect(getTool("url_inspect")).toBeDefined();
+  });
+});
+
+/**
+ * url_inspect had no SSRF guard and let fetch follow redirects: it probed http://10.0.0.5/ as
+ * asked, and a public URL that redirected into the private network answered with that
+ * service's status and headers. It now checks every host it reaches with web_fetch's guard.
+ */
+describe("url_inspect goes through web_fetch's SSRF guard", () => {
+  // An IP literal: the SSRF guard needs no DNS for it.
+  const PUBLIC = "http://93.184.215.14";
+  const probe = (args: Record<string, unknown>) => tool("url_inspect").execute(args, {} as never);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * fetch on a small web of `pages` (URL -> status and headers). Like fetch, it follows redirects
+   * itself unless the caller asks for redirect "manual"; `requested` lists every URL it was asked
+   * for or followed to.
+   */
+  function web(pages: Record<string, { status: number; headers?: Record<string, string> }>) {
+    const requested: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      let url = String(input);
+      for (let hop = 0; hop <= 20; hop++) {
+        requested.push(url);
+        const page = pages[url] ?? { status: 404 };
+        const res = new Response(null, { status: page.status, headers: page.headers });
+        const location = res.headers.get("location");
+        if (init?.redirect === "manual" || !location || ![301, 302, 303, 307, 308].includes(res.status)) {
+          Object.defineProperty(res, "url", { value: url });
+          return res;
+        }
+        url = new URL(location, url).toString();
+      }
+      throw new TypeError("fetch failed");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, requested };
+  }
+
+  function allowPrivateHosts(hosts: string[]) {
+    const realConfig = loaderModule.getConfig();
+    vi.spyOn(loaderModule, "getConfig").mockReturnValue({
+      ...realConfig,
+      guardrails: { ...realConfig.guardrails, allowedPrivateHosts: hosts },
+    } as typeof realConfig);
+  }
+
+  it("refuses a private address before any request is sent", async () => {
+    const { fetchMock } = web({ "http://10.0.0.5/": { status: 200, headers: { server: "internal-admin" } } });
+
+    const r = await probe({ url: "http://10.0.0.5/" });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("Refusing to probe that URL: requesting private/internal network addresses is not allowed.");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to follow a public URL's redirect into loopback, and never requests the target", async () => {
+    const internal = "http://127.0.0.1:9000/exec?query=select%201";
+    const { requested } = web({
+      [`${PUBLIC}/go`]: { status: 302, headers: { location: internal } },
+      [internal]: { status: 200, headers: { server: "questdb", "content-type": "application/json" } },
+    });
+
+    const r = await probe({ url: `${PUBLIC}/go` });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`Refusing to follow the redirect from ${PUBLIC}/go: requesting private/internal network addresses is not allowed.`);
+    expect(r.output).not.toContain("questdb");
+    expect(requested).toEqual([`${PUBLIC}/go`]);
+  });
+
+  it("follows a public redirect chain hop by hop and reports where it ended", async () => {
+    const { requested } = web({
+      [`${PUBLIC}/alt`]: { status: 301, headers: { location: "/neu" } },
+      [`${PUBLIC}/neu`]: { status: 200, headers: { "content-type": "text/html", server: "nginx" } },
+    });
+
+    const r = await probe({ url: `${PUBLIC}/alt` });
+    expect(r.success).toBe(true);
+    expect(r.output).toBe(["200", `final: ${PUBLIC}/neu (redirected)`, "content-type: text/html", "server: nginx"].join("\n"));
+    expect(r.metadata?.["redirected"]).toBe(true);
+    expect(requested).toEqual([`${PUBLIC}/alt`, `${PUBLIC}/neu`]);
+  });
+
+  it("gives up after as many redirects as web_fetch follows", async () => {
+    const { requested } = web({
+      [`${PUBLIC}/a`]: { status: 302, headers: { location: "/b" } },
+      [`${PUBLIC}/b`]: { status: 302, headers: { location: "/a" } },
+    });
+
+    const r = await probe({ url: `${PUBLIC}/a` });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("URL probe failed: more than 5 redirects");
+    expect(requested).toHaveLength(6);
+  });
+
+  it("refuses a LAN name that resolves to a private address when it is not listed", async () => {
+    const { fetchMock } = web({ [`http://${LAN_HOST}/`]: { status: 200 } });
+
+    const r = await probe({ url: `http://${LAN_HOST}/` });
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/private\/internal network addresses is not allowed/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still probes that name, redirects included, when guardrails.allowedPrivateHosts lists it", async () => {
+    allowPrivateHosts([LAN_HOST]);
+    const { requested } = web({
+      [`http://${LAN_HOST}/`]: { status: 302, headers: { location: "/start" } },
+      [`http://${LAN_HOST}/start`]: { status: 200, headers: { "content-type": "text/html" } },
+    });
+
+    const r = await probe({ url: `http://${LAN_HOST}/` });
+    expect(r.success).toBe(true);
+    expect(r.output).toContain(`final: http://${LAN_HOST}/start (redirected)`);
+    expect(requested).toEqual([`http://${LAN_HOST}/`, `http://${LAN_HOST}/start`]);
   });
 });

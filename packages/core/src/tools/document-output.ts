@@ -291,7 +291,8 @@ registerTool({
   name: "generate_chart_html",
   description:
     "Generate and save an HTML chart report in the workspace. " +
-    "Use this for dashboards, KPI snapshots, and visual summaries that can be previewed in chat.",
+    "Use this for dashboards, KPI snapshots, and visual summaries that can be previewed in chat. " +
+    "The chart is inline SVG: one standalone HTML file with no scripts or external libraries.",
   embeddingDescription: "Generate, create a chart, graph, bar chart, line chart, pie chart, visual data report. Diagramm erstellen, Chart generieren, Datenvisualisierung, Balken-, Linien-, Tortendiagramm.",
   parameters: {
     type: "object",
@@ -570,35 +571,19 @@ function renderChartHtml(input: {
 }): string {
   const safeTitle = escapeHtml(input.title || "Chart Report");
   const safeSummary = escapeHtml(input.summary);
-  const chartConfig = JSON.stringify({
+  // The chart is drawn here, as inline SVG, rather than by a charting library in the browser.
+  // The page loaded Chart.js from a CDN, so it drew nothing offline and could not meet a brief
+  // asking for one standalone file: in the E2E html-chart run the brief said "no external
+  // framework", and chart_designer hand-wrote an SVG page with write_file instead of calling this
+  // tool. No copy of Chart.js is vendored in the repository to inline instead. The page now
+  // carries no script at all.
+  const chartSvg = renderChartSvg(input);
+  const legend = renderChartLegend(input);
+  const chartData = escapeHtmlText(JSON.stringify({
     type: input.chartType,
-    data: {
-      labels: input.labels,
-      datasets: input.series.map((entry) => ({
-        label: entry.label,
-        data: entry.data,
-        borderColor: entry.color,
-        backgroundColor: `${entry.color}33`,
-        pointBackgroundColor: entry.color,
-        borderWidth: 2,
-        tension: input.chartType === "line" ? 0.32 : undefined,
-        fill: input.chartType === "line",
-      })),
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: "#f4efe6" } },
-      },
-      scales: ["bar", "line"].includes(input.chartType)
-        ? {
-            x: { ticks: { color: "#d6c8b5" }, grid: { color: "rgba(214, 200, 181, 0.12)" } },
-            y: { ticks: { color: "#d6c8b5" }, grid: { color: "rgba(214, 200, 181, 0.12)" } },
-          }
-        : undefined,
-    },
-  }, null, 2);
+    labels: input.labels,
+    series: input.series.map((entry) => ({ label: entry.label, data: entry.data, color: entry.color })),
+  }, null, 2));
 
   const tableRows = input.labels.map((label, index) => {
     const values = input.series.map((entry) => `<td>${escapeHtml(String(entry.data[index] ?? ""))}</td>`).join("");
@@ -628,7 +613,6 @@ function renderChartHtml(input: {
     '  <meta charset="utf-8">',
     '  <meta name="viewport" content="width=device-width, initial-scale=1">',
     `  <title>${safeTitle}</title>`,
-    '  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>',
     "  <style>",
     "    :root { color-scheme: dark; --bg: #11141f; --panel: #1b2131; --ink: #f4efe6; --muted: #d6c8b5; --accent: #7dd3fc; font-family: 'Aptos', 'Segoe UI', sans-serif; }",
     "    body { margin: 0; background: radial-gradient(circle at top, #1f2840 0%, var(--bg) 58%); color: var(--ink); }",
@@ -637,9 +621,18 @@ function renderChartHtml(input: {
     "    .eyebrow { letter-spacing: 0.16em; text-transform: uppercase; font-size: 0.72rem; color: var(--accent); }",
     "    h1 { margin: 0; font-size: clamp(2rem, 4vw, 3.2rem); line-height: 1.05; }",
     "    p { margin: 0; color: var(--muted); line-height: 1.65; max-width: 72ch; }",
-    "    .grid { display: grid; gap: 24px; grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr); }",
+    "    .grid { display: grid; gap: 24px; grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr); align-items: start; }",
     "    .panel { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02)); border: 1px solid rgba(255,255,255,0.08); border-radius: 24px; padding: 22px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24); }",
-    "    .chart-wrap { position: relative; min-height: 420px; }",
+    "    .chart-wrap { position: relative; }",
+    "    .chart-svg { display: block; width: 100%; height: auto; margin: 0 auto; }",
+    "    .chart-svg text { fill: var(--muted); font-size: 12px; font-family: 'Aptos', 'Segoe UI', sans-serif; }",
+    "    .chart-svg .value { fill: var(--ink); font-size: 11px; }",
+    "    .chart-svg .slice-value { fill: #11141f; font-size: 12px; font-weight: 600; }",
+    "    .chart-svg .grid-line { stroke: rgba(214, 200, 181, 0.12); }",
+    "    .chart-svg .axis-line { stroke: rgba(214, 200, 181, 0.45); }",
+    "    .legend { list-style: none; padding: 0; margin: 16px 0 0; display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.9rem; color: var(--ink); }",
+    "    .legend li { display: inline-flex; align-items: center; gap: 8px; }",
+    "    .legend .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }",
     "    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }",
     "    th, td { padding: 0.7rem 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }",
     "    th { color: var(--muted); font-weight: 600; }",
@@ -652,7 +645,7 @@ function renderChartHtml(input: {
     "    .sources a:hover { text-decoration: underline; }",
     "    .sources span { color: var(--muted); font-size: 0.82rem; word-break: break-all; }",
     "    .config { margin-top: 20px; background: rgba(0,0,0,0.22); border-radius: 16px; padding: 14px; overflow: auto; font-size: 0.82rem; color: #c9e8ff; }",
-    "    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } .chart-wrap { min-height: 320px; } }",
+    "    @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }",
     "  </style>",
     "</head>",
     "<body>",
@@ -664,7 +657,10 @@ function renderChartHtml(input: {
     "    </section>",
     '    <section class="grid">',
     '      <article class="panel">',
-    '        <div class="chart-wrap"><canvas id="chart"></canvas></div>',
+    '        <div class="chart-wrap">',
+    chartSvg,
+    "        </div>",
+    legend,
     "      </article>",
     '      <aside class="panel">',
     "        <table>",
@@ -675,30 +671,211 @@ function renderChartHtml(input: {
     tableRows,
     "          </tbody>",
     "        </table>",
-    '        <pre class="config" aria-label="Chart configuration"></pre>',
+    `        <pre class="config" aria-label="Chart data">${chartData}</pre>`,
     sourcePanel,
     "      </aside>",
     "    </section>",
     "  </main>",
-    "  <script>",
-    `    const config = ${chartConfig};`,
-    "    document.querySelector('.config').textContent = JSON.stringify(config, null, 2);",
-    "    if (window.Chart) {",
-    "      const ctx = document.getElementById('chart');",
-    "      new window.Chart(ctx, config);",
-    "    }",
-    "  </script>",
     "</body>",
     "</html>",
     "",
   ].join("\n");
 }
 
+type ChartSeries = { label: string; data: number[]; color: string };
+type ChartDrawing = { title: string; chartType: ChartType; labels: string[]; series: ChartSeries[] };
+
+const CARTESIAN_CHART_WIDTH = 720;
+const CARTESIAN_CHART_HEIGHT = 400;
+const PIE_CHART_SIZE = 400;
+
+function renderChartSvg(input: ChartDrawing): string {
+  return input.chartType === "pie" || input.chartType === "doughnut"
+    ? renderPieChartSvg(input)
+    : renderCartesianChartSvg(input);
+}
+
+function chartSvgOpen(title: string, width: number, height: number): string {
+  return `          <svg class="chart-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="max-width: ${width}px" role="img" aria-label="${escapeHtml(title)}">`;
+}
+
+/** Bar and line charts: one value axis that always includes zero, one band per label. */
+function renderCartesianChartSvg(input: ChartDrawing): string {
+  const { labels, series } = input;
+  const axis = chartValueAxis(series.flatMap((entry) => entry.data));
+  const rotateLabels = labels.length > 8 || labels.some((label) => Array.from(label).length > 12);
+  const margin = { top: 28, right: 20, bottom: rotateLabels ? 104 : 48, left: 64 };
+  const plotRight = CARTESIAN_CHART_WIDTH - margin.right;
+  const plotBottom = CARTESIAN_CHART_HEIGHT - margin.bottom;
+  const plotWidth = plotRight - margin.left;
+  const plotHeight = plotBottom - margin.top;
+  const y = (value: number): number => margin.top + (plotHeight * (axis.max - value)) / (axis.max - axis.min);
+  const band = plotWidth / labels.length;
+  const baseline = y(0);
+  const parts: string[] = [chartSvgOpen(input.title, CARTESIAN_CHART_WIDTH, CARTESIAN_CHART_HEIGHT)];
+
+  for (const tick of axis.ticks) {
+    const tickY = svgNumber(y(tick));
+    parts.push(`            <line class="grid-line" x1="${margin.left}" y1="${tickY}" x2="${plotRight}" y2="${tickY}"/>`);
+    parts.push(`            <text x="${margin.left - 8}" y="${tickY}" text-anchor="end" dominant-baseline="middle">${escapeHtml(String(tick))}</text>`);
+  }
+
+  // Past ~24 labels they overlap whatever their angle, so only every n-th is written; each bar
+  // and point still names its own label in its tooltip.
+  const labelEvery = Math.max(1, Math.ceil(labels.length / 24));
+  labels.forEach((label, index) => {
+    if (index % labelEvery !== 0) return;
+    const x = svgNumber(margin.left + band * (index + 0.5));
+    const labelY = svgNumber(plotBottom + 18);
+    const shown = truncateChartLabel(label);
+    const tooltip = shown === label ? "" : `<title>${escapeHtml(label)}</title>`;
+    parts.push(rotateLabels
+      ? `            <text x="${x}" y="${labelY}" text-anchor="end" transform="rotate(-35 ${x} ${labelY})">${escapeHtml(shown)}${tooltip}</text>`
+      : `            <text x="${x}" y="${labelY}" text-anchor="middle">${escapeHtml(shown)}${tooltip}</text>`);
+  });
+
+  if (input.chartType === "bar") {
+    const groupWidth = Math.min(band * 0.7, series.length * 64);
+    const barWidth = groupWidth / series.length;
+    const showValues = barWidth >= 16;
+    series.forEach((entry, seriesIndex) => {
+      entry.data.forEach((value, index) => {
+        const x = margin.left + band * index + (band - groupWidth) / 2 + barWidth * seriesIndex;
+        const top = Math.min(y(value), baseline);
+        const height = Math.abs(y(value) - baseline);
+        const tooltip = escapeHtml(`${labels[index]} · ${entry.label}: ${value}`);
+        parts.push(`            <rect class="bar" x="${svgNumber(x + 1)}" y="${svgNumber(top)}" width="${svgNumber(Math.max(barWidth - 2, 1))}" height="${svgNumber(height)}" rx="2" fill="${escapeHtml(entry.color)}"><title>${tooltip}</title></rect>`);
+        if (showValues) {
+          const valueY = value >= 0 ? top - 6 : top + height + 14;
+          parts.push(`            <text class="value" x="${svgNumber(x + barWidth / 2)}" y="${svgNumber(valueY)}" text-anchor="middle">${escapeHtml(String(value))}</text>`);
+        }
+      });
+    });
+  } else {
+    const showValues = series.length === 1 && labels.length <= 20;
+    for (const entry of series) {
+      const points = entry.data.map((value, index) => ({ value, x: margin.left + band * (index + 0.5), y: y(value) }));
+      const line = points.map((point) => `${svgNumber(point.x)},${svgNumber(point.y)}`).join(" ");
+      const first = points[0]!;
+      const last = points[points.length - 1]!;
+      const color = escapeHtml(entry.color);
+      parts.push(`            <polygon points="${svgNumber(first.x)},${svgNumber(baseline)} ${line} ${svgNumber(last.x)},${svgNumber(baseline)}" fill="${color}" fill-opacity="0.12"/>`);
+      parts.push(`            <polyline class="line" points="${line}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round"/>`);
+      points.forEach((point, index) => {
+        const tooltip = escapeHtml(`${labels[index]} · ${entry.label}: ${point.value}`);
+        parts.push(`            <circle class="point" cx="${svgNumber(point.x)}" cy="${svgNumber(point.y)}" r="3.5" fill="${color}"><title>${tooltip}</title></circle>`);
+        if (showValues) {
+          parts.push(`            <text class="value" x="${svgNumber(point.x)}" y="${svgNumber(point.y - 10)}" text-anchor="middle">${escapeHtml(String(point.value))}</text>`);
+        }
+      });
+    }
+  }
+
+  parts.push(`            <line class="axis-line" x1="${margin.left}" y1="${svgNumber(baseline)}" x2="${plotRight}" y2="${svgNumber(baseline)}"/>`);
+  parts.push("          </svg>");
+  return parts.join("\n");
+}
+
+/**
+ * Pie and doughnut charts: one ring per series, outermost first, as a multi-dataset doughnut is
+ * conventionally drawn. A slice is coloured by its label, so the legend names labels. A slice
+ * cannot show a negative or zero share: those are left out of the ring and stay in the data table.
+ */
+function renderPieChartSvg(input: ChartDrawing): string {
+  const center = PIE_CHART_SIZE / 2;
+  const outer = center - 16;
+  const hole = input.chartType === "doughnut" ? outer * 0.55 : 0;
+  const ringWidth = (outer - hole) / input.series.length;
+  const parts: string[] = [chartSvgOpen(input.title, PIE_CHART_SIZE, PIE_CHART_SIZE)];
+  const start = -Math.PI / 2;
+
+  input.series.forEach((entry, ring) => {
+    const rOuter = outer - ringWidth * ring;
+    const rInner = Math.max(0, rOuter - ringWidth);
+    const shares = entry.data.map((value) => Math.max(0, value));
+    const total = shares.reduce((sum, share) => sum + share, 0);
+    if (total <= 0) {
+      parts.push(`            <path d="${svgSectorPath(center, rOuter, rInner, start, start + Math.PI * 2)}" fill="rgba(255,255,255,0.06)"><title>${escapeHtml(`${entry.label}: no positive values`)}</title></path>`);
+      return;
+    }
+    let angle = start;
+    shares.forEach((share, index) => {
+      if (share <= 0) return;
+      const sweep = (share / total) * Math.PI * 2;
+      const color = CHART_SLICE_PALETTE[index % CHART_SLICE_PALETTE.length]!;
+      const percent = Math.round((share / total) * 1000) / 10;
+      const tooltip = escapeHtml(`${input.labels[index]} · ${entry.label}: ${entry.data[index]} (${percent}%)`);
+      parts.push(`            <path class="slice" d="${svgSectorPath(center, rOuter, rInner, angle, angle + sweep)}" fill="${color}" stroke="#11141f" stroke-width="1.5"><title>${tooltip}</title></path>`);
+      if (sweep >= 0.3) {
+        const mid = angle + sweep / 2;
+        const radius = rInner > 0 ? (rOuter + rInner) / 2 : rOuter * 0.62;
+        parts.push(`            <text class="slice-value" x="${svgNumber(center + radius * Math.cos(mid))}" y="${svgNumber(center + radius * Math.sin(mid))}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(String(entry.data[index]))}</text>`);
+      }
+      angle += sweep;
+    });
+  });
+
+  parts.push("          </svg>");
+  return parts.join("\n");
+}
+
+/** An annular sector (or a pie wedge when rInner is 0) from angle a0 to a1, clockwise. */
+function svgSectorPath(center: number, rOuter: number, rInner: number, a0: number, a1: number): string {
+  // An SVG arc whose end point equals its start draws nothing, so a whole ring is two halves.
+  if (a1 - a0 >= Math.PI * 2 - 1e-9) {
+    return `${svgSectorPath(center, rOuter, rInner, a0, a0 + Math.PI)} ${svgSectorPath(center, rOuter, rInner, a0 + Math.PI, a0 + Math.PI * 2)}`;
+  }
+  const point = (radius: number, angle: number): string =>
+    `${svgNumber(center + radius * Math.cos(angle))} ${svgNumber(center + radius * Math.sin(angle))}`;
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  const arc = (radius: number, to: number, clockwise: 0 | 1): string =>
+    `A ${svgNumber(radius)} ${svgNumber(radius)} 0 ${large} ${clockwise} ${point(radius, to)}`;
+  if (rInner <= 0) return `M ${svgNumber(center)} ${svgNumber(center)} L ${point(rOuter, a0)} ${arc(rOuter, a1, 1)} Z`;
+  return `M ${point(rOuter, a0)} ${arc(rOuter, a1, 1)} L ${point(rInner, a1)} ${arc(rInner, a0, 0)} Z`;
+}
+
+function renderChartLegend(input: ChartDrawing): string {
+  const entries = input.chartType === "pie" || input.chartType === "doughnut"
+    ? input.labels.map((label, index) => ({ label, color: CHART_SLICE_PALETTE[index % CHART_SLICE_PALETTE.length]! }))
+    : input.series.map((entry) => ({ label: entry.label, color: entry.color }));
+  return [
+    '        <ul class="legend">',
+    ...entries.map((entry) => `          <li><span class="swatch" style="background: ${escapeHtml(entry.color)}"></span>${escapeHtml(entry.label)}</li>`),
+    "        </ul>",
+  ].join("\n");
+}
+
+/** A value axis over round steps that always includes zero, so bars grow from the baseline. */
+function chartValueAxis(values: number[]): { min: number; max: number; ticks: number[] } {
+  const low = Math.min(0, ...values);
+  const high = Math.max(0, ...values);
+  const span = high > low ? high - low : 1;
+  const rough = span / 5;
+  const magnitude = 10 ** Math.floor(Math.log10(rough));
+  const residual = rough / magnitude;
+  const step = (residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 2.5 ? 2.5 : residual <= 5 ? 5 : 10) * magnitude;
+  const min = Math.floor(low / step) * step;
+  const max = Math.max(Math.ceil(high / step) * step, min + step);
+  const decimals = Math.min(10, Math.max(0, 1 - Math.floor(Math.log10(step))));
+  const count = Math.round((max - min) / step);
+  const ticks = Array.from({ length: count + 1 }, (_, index) => Number((min + step * index).toFixed(decimals)) || 0);
+  return { min, max, ticks };
+}
+
+function svgNumber(value: number): string {
+  return String(Math.round(value * 100) / 100);
+}
+
+function truncateChartLabel(label: string, limit = 22): string {
+  const chars = Array.from(label);
+  return chars.length > limit ? `${chars.slice(0, limit - 1).join("")}…` : label;
+}
+
 function renderMermaidSource(input: { title: string; diagram: string; theme: MermaidTheme }): string {
   const trimmed = input.diagram.trim();
   const hasInitBlock = /^%%\{\s*init:/i.test(trimmed);
   const titleComment = input.title ? `%% ${input.title}\n` : "";
-  const themeBlock = hasInitBlock ? "" : `%%{init: { \"theme\": \"${input.theme}\" }}%%\n`;
+  const themeBlock = hasInitBlock ? "" : `%%{init: { "theme": "${input.theme}" }}%%\n`;
   return `${titleComment}${themeBlock}${ensureTrailingNewline(trimmed)}`;
 }
 
@@ -896,10 +1073,18 @@ function normalizeStringArray(value: unknown): string[] {
     : [];
 }
 
+const CHART_SERIES_PALETTE = ["#7dd3fc", "#fb7185", "#facc15", "#34d399", "#c084fc", "#f97316"];
+// Pie and doughnut slices are coloured per label, and a label count past six is common there.
+const CHART_SLICE_PALETTE = [...CHART_SERIES_PALETTE, "#60a5fa", "#f472b6", "#a3e635", "#fbbf24"];
+
+// A series colour is written into SVG fill/stroke attributes and a legend style attribute. Only
+// plain colour syntax passes: a hex value, an rgb()/hsl() of numbers, or a colour name. Anything
+// else, such as a url() that would make the page fetch something or a second CSS declaration,
+// falls back to the palette colour.
+const PLAIN_CHART_COLOR = /^(?:#[0-9a-f]{3,8}|(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)|[a-z]{3,30})$/i;
+
 function normalizeChartSeries(value: unknown): Array<{ label: string; data: number[]; color: string }> {
   if (!Array.isArray(value)) return [];
-
-  const palette = ["#7dd3fc", "#fb7185", "#facc15", "#34d399", "#c084fc", "#f97316"];
 
   return value.flatMap((entry, index) => {
     if (!entry || typeof entry !== "object") return [];
@@ -907,10 +1092,11 @@ function normalizeChartSeries(value: unknown): Array<{ label: string; data: numb
     if (!Array.isArray(record["data"])) return [];
     const numericData = (record["data"] as unknown[]).map((point) => Number(point));
     if (numericData.some((point) => !Number.isFinite(point))) return [];
+    const requestedColor = optionalString(record["color"]);
     return [{
       label: optionalString(record["label"]) || `Series ${index + 1}`,
       data: numericData,
-      color: optionalString(record["color"]) || palette[index % palette.length]!,
+      color: (PLAIN_CHART_COLOR.test(requestedColor) ? requestedColor : "") || CHART_SERIES_PALETTE[index % CHART_SERIES_PALETTE.length]!,
     }];
   });
 }
@@ -933,6 +1119,14 @@ function escapeHtml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/** Escaping for element text, where quotes are literal: the chart data reads as plain JSON. */
+function escapeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function ensureTrailingNewline(value: string): string {

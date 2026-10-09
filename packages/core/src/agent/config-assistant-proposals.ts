@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isRuntimeSubAgent } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -49,6 +50,11 @@ export interface ConversationConfigProposal {
   lesson?: string;
   appliedAt?: string;
   feedbackHistory: ConversationProposalFeedback[];
+  /** The account that asked for it: its user-scope segment, never the raw user id. Absent with one
+   *  operator, for a request with no user, and on proposals written before it existed. Under
+   *  multi-user auth the request text goes back only to that account and to an admin
+   *  (gateway/config-assistant-visibility.ts). */
+  account?: string;
 }
 
 export function listConversationConfigProposals(workspacePath: string, limit = 50): ConversationConfigProposal[] {
@@ -115,8 +121,35 @@ export function appendConversationConfigProposalFeedback(
   }));
 }
 
+/** A config path as every reader here takes it: dot-separated, each segment trimmed, empty ones dropped. */
+function pathSegments(path: string): string[] {
+  return path.split(".").map((segment) => segment.trim()).filter(Boolean);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * An object value merged into the object already at its path: it sets what it names, `null` clears
+ * a key, and what it leaves out stays. Replaced whole, a change copied from the assistant's
+ * snapshot — which shows each agent only in part — dropped every field the snapshot never showed:
+ * a `subAgents` map with one temperature changed took all 49 agents' systemPrompt and tools, and a
+ * sub-agent's `model` lost its contextWindow (final review of the leftovers, 1). Arrays and scalars
+ * still replace.
+ */
+function mergeChangeValue(existing: Record<string, unknown>, value: Record<string, unknown>): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...existing };
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === null) delete merged[key];
+    else if (isPlainRecord(entry) && isPlainRecord(merged[key])) merged[key] = mergeChangeValue(merged[key] as Record<string, unknown>, entry);
+    else merged[key] = entry;
+  }
+  return merged;
+}
+
 export function applyObjectPath(root: Record<string, unknown>, path: string, value: unknown): void {
-  const segments = path.split(".").map((segment) => segment.trim()).filter(Boolean);
+  const segments = pathSegments(path);
   if (segments.length === 0) return;
 
   let cursor: Record<string, unknown> = root;
@@ -129,7 +162,11 @@ export function applyObjectPath(root: Record<string, unknown>, path: string, val
     cursor = cursor[segment] as Record<string, unknown>;
   }
 
-  cursor[segments[segments.length - 1]!] = value;
+  const leaf = segments[segments.length - 1]!;
+  const existing = cursor[leaf];
+  if (value === null) delete cursor[leaf];
+  else if (isPlainRecord(value) && isPlainRecord(existing)) cursor[leaf] = mergeChangeValue(existing, value);
+  else cursor[leaf] = value;
 }
 
 export function applyPromptChange(root: Record<string, unknown>, change: ConversationPromptChange): void {
@@ -168,25 +205,114 @@ export function hasPromptTarget(root: { subAgents?: Record<string, unknown> }, t
 }
 
 /**
+ * The agents a proposal writes into: each prompt change's, and the one a config change's
+ * `subAgents.<name>` path names, read as applyObjectPath reads it. A change to `subAgents` itself
+ * names every agent its value holds. Naming none, it went unchecked and could write a peer's agent
+ * into the saved config, where it would outlive the peer (review of r6 leftovers, 3).
+ */
+export function proposalAgentNames(proposal: Pick<ConversationConfigProposal, "configChanges" | "promptChanges">): string[] {
+  const configAgents = proposal.configChanges.flatMap((change) => {
+    const segments = pathSegments(change.path);
+    if (segments[0] !== "subAgents") return [];
+    if (segments.length > 1) return [segments[1]!];
+    // The whole map names the agents it writes. Not the ones it leaves out: the value is merged, so
+    // it drops none, and counting those refused every whole-map change while any peer was bridged,
+    // naming an agent the change never touched (round 2 of the leftovers review, LOW 1).
+    const value = change.value;
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? Object.keys(value) : [];
+  });
+  return [...proposal.promptChanges.map((change) => change.agentName), ...configAgents].filter((name): name is string => Boolean(name));
+}
+
+/**
+ * Why a proposal may not change one of these agents, or undefined. An agent the A2A client bridged
+ * in from a peer (a runtime sub-agent, laid over the loaded config and never saved) runs on the
+ * peer, so its prompt and settings are not ours to change. Judged on the loaded config, a prompt
+ * change aimed at one passed hasPromptTarget, and Apply wrote the saved config an agent of a prompt
+ * alone, refused with an unclear "does not leave a valid config" (r5 A-security); a
+ * `subAgents.<name>` config change met the same. Asked of the loader's own record of what it laid
+ * over, not of the config on disk, so an agent deleted on disk is not called a peer's.
+ */
+export function peerAgentRefusal(names: Iterable<string | undefined>): string | undefined {
+  for (const name of names) {
+    if (name && isRuntimeSubAgent(name)) {
+      return `Agent '${name}' is bridged in from an A2A peer and runs there, so its prompt and settings are the peer's to change, not ours.`;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Only paths under the workspace zone (agents, subAgents, scenes) are mutable.
  * Everything else — providers, gateway, guardrails, channels, infrastructure,
  * multimodal, integrations, webhooks, sites, mcp, computerUse, etc. — is protected.
  * Additionally, credential-like segments are always blocked as a safety net.
+ *
+ * A segment is credential-like when its name ENDS in a credential word (apiKey, botToken,
+ * jwtSecret, secretAccessKey). Matched anywhere in the name, "token" caught maxTokens, a knob the
+ * assistant's own snapshot lists: such a proposal was shown as applyable and then refused.
  */
 const MUTABLE_TOP_LEVEL_KEYS = new Set(["agents", "subagents", "scenes"]);
+const CREDENTIAL_SEGMENT = /(?:secret|password|token|api_?key|private_?key|access_?key|credentials?)$/i;
+
+/** A field named as a credential: apiKey, botToken, jwtSecret, secretAccessKey — not maxTokens. */
+export function isCredentialFieldName(name: string): boolean {
+  return CREDENTIAL_SEGMENT.test(name);
+}
 
 export function isProtectedConfigPath(path: string): boolean {
-  const normalized = path.trim().toLowerCase();
-  if (!normalized) return true;
+  // Read as applyObjectPath reads it (pathSegments): split raw, "agents. subAgents" and
+  // "agents..subAgents" passed this check and were written as agents.subAgents all the same
+  // (final review of the leftovers, 2).
+  const segments = pathSegments(path.toLowerCase());
+  if (segments.length === 0) return true;
 
   // Credential-like segments are always blocked
-  if (/(secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials)/i.test(normalized)) {
+  if (segments.some(isCredentialFieldName)) {
     return true;
   }
 
   // Only allow changes under the mutable workspace keys
-  const topKey = normalized.split(".")[0]!;
-  return !MUTABLE_TOP_LEVEL_KEYS.has(topKey);
+  if (isMisplacedSubAgentPath(segments)) return true;
+  return !MUTABLE_TOP_LEVEL_KEYS.has(segments[0]!);
+}
+
+/**
+ * Sub-agents live at the top level. The assistant's snapshot once showed them under
+ * agents.subAgents, so it drafted changes there: applied without error, read by nothing, and the
+ * agent kept its settings (round 2 of the leftovers review, 2).
+ */
+function isMisplacedSubAgentPath(lowerSegments: string[]): boolean {
+  return lowerSegments[0] === "agents" && lowerSegments[1] === "subagents";
+}
+
+/**
+ * Why a config change is left out of a proposal and refused at apply, in words the person can act
+ * on; undefined when it may be applied. Told "a protected path", the person read a sub-agent change
+ * under the wrong path as sub-agent settings being off limits (final review of the leftovers, 4).
+ */
+export function configChangeRefusal(change: { path: string; value: unknown }): string | undefined {
+  if (isMisplacedSubAgentPath(pathSegments(change.path.toLowerCase()))) {
+    return `'${change.path}' is not where sub-agents live: their settings are at subAgents.<name>, so this change would do nothing.`;
+  }
+  if (isProtectedConfigChange(change)) return `'${change.path}' is a protected path or sets a credential.`;
+  return undefined;
+}
+
+function carriesCredentialField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(carriesCredentialField);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, entry]) => isCredentialFieldName(key) || carriesCredentialField(entry));
+}
+
+/**
+ * A change drafting leaves out and the apply route refuses — one predicate for both, so a draft
+ * never offers what Apply will refuse. It is checked again at apply because the proposals file
+ * sits in the workspace, where more than the drafter can write. And the value counts too —
+ * `subAgents.x.model` set to `{ apiKey: … }` names no credential in its path.
+ */
+export function isProtectedConfigChange(change: { path: string; value: unknown }): boolean {
+  return isProtectedConfigPath(change.path) || carriesCredentialField(change.value);
 }
 
 function readAllConversationConfigProposals(workspacePath: string): ConversationConfigProposal[] {

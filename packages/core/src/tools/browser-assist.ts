@@ -1,5 +1,7 @@
 import { registerTool } from "./registry.js";
 import { browserSessionManager } from "../agent/browser-session.js";
+import { userInputBroker } from "../agent/user-input-broker.js";
+import { MAX_USER_INPUT_TIMEOUT_MS, clampUserInputTimeoutMs } from "../agent/user-input.js";
 
 /**
  * request_human_assist — hand the live browser to a human, then resume.
@@ -40,7 +42,7 @@ registerTool({
       },
       timeoutMs: {
         type: "number",
-        description: "How long to wait for the operator, in ms. Defaults to 900000 (15 minutes).",
+        description: "How long to wait for the operator, in ms. Defaults to 900000 (15 minutes); held between 10000 and 900000.",
       },
     },
     required: ["reason"],
@@ -61,8 +63,9 @@ registerTool({
       return { success: false, output: "", error: "reason must not be empty." };
     }
     const page = typeof args["page"] === "string" && args["page"].trim() ? String(args["page"]).trim() : undefined;
-    const timeoutMs =
-      typeof args["timeoutMs"] === "number" && args["timeoutMs"] > 0 ? args["timeoutMs"] : undefined;
+    // The model picks this number, and every clock of the turn holds for as long as it says: a page
+    // the browser agent reads could talk it into days (review #29). Same bounds as ask_user.
+    const timeoutMs = clampUserInputTimeoutMs(args["timeoutMs"], MAX_USER_INPUT_TIMEOUT_MS);
 
     // Find the browser session registered for this run; if the run-start hook
     // didn't create one (e.g. a non-browser_agent caller), make one now so the
@@ -77,10 +80,20 @@ registerTool({
       });
     }
 
-    const outcome = await browserSessionManager.requestAssist(session.id, reason, {
-      ...(page ? { page } : {}),
-      ...(timeoutMs ? { timeoutMs } : {}),
-    });
+    // A person is at the browser: the run clocks hold until they are done (agent/user-input-broker.ts),
+    // or until the turn is stopped — the handoff itself waits out its own deadline.
+    const endHumanWait = userInputBroker.beginHumanWait(context.sessionId);
+    context.signal?.addEventListener("abort", endHumanWait, { once: true });
+    let outcome: Awaited<ReturnType<typeof browserSessionManager.requestAssist>>;
+    try {
+      outcome = await browserSessionManager.requestAssist(session.id, reason, {
+        ...(page ? { page } : {}),
+        timeoutMs,
+      });
+    } finally {
+      context.signal?.removeEventListener("abort", endHumanWait);
+      endHumanWait();
+    }
 
     if (outcome === "resolved") {
       return {

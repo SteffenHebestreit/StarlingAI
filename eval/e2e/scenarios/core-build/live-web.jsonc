@@ -1,0 +1,37 @@
+// Live-web research smoke: one stable, well-documented technical fact from the real web, with the
+// source URL in the reply. Needs the search backend (SearXNG) and outbound network.
+//
+// Ground truth: RFC 8259 "The JavaScript Object Notation (JSON) Data Interchange Format"
+// (IETF, December 2017, Internet Standard STD 90; obsoletes RFC 7159).
+//
+// Audit events asserted, verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, args, success}
+//     agent/sub-agent.ts:4748 (logAudit), payload :2296, phase "done" with result.success at :6918
+{
+  id: "core-build-live-web-rfc-fact",
+  title: "Live web: a stable standards fact with its source URL",
+  group: "core",
+  tags: ["live-web", "research", "smoke"],
+  description: "Routed research on the real web: which RFC currently specifies JSON (RFC 8259, STD 90 — stable since 2017). Protects: a sourced factual question runs a real web search or fetch instead of a reply from memory, and the reply names a source URL.",
+  requires: ["model", "web-search"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "ask",
+      message: "Welcher RFC spezifiziert das Datenformat JSON in der aktuell gültigen Fassung? Recherchiere es im Web und gib die URL deiner Quelle an. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          includes: ["8259"],
+          matches: ["https?://[\\w.-]+\\.[a-z]{2,}"],
+        },
+        events: {
+          must: [
+            { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_search", "web_fetch"] } } },
+          ],
+        },
+      },
+    },
+  ],
+}

@@ -50,7 +50,7 @@
         },
         "outputLanguage": {
           "description": "Language for the final packet",
-          "default": "English"
+          "default": "the language the user asked for, otherwise the language of the user's request"
         },
         "outputFormat": {
           "description": "Preferred delivery format",
@@ -86,7 +86,7 @@
       "task": "This is the FACT-RESEARCH step of a multi-step pipeline; image sourcing and building the deck/paper run as LATER steps, so do NOT source images or build anything here. Identify the SUBJECT to research from the Additional workflow context, then gather and verify the FACTUAL evidence ONLY: names, dates, figures, definitions, and authoritative source URLs for that subject. Publish each confirmed fact with its exact source URL via share_finding, and mark anything you cannot confirm from a source as unverified rather than guessing. Write findings in {{language}}.",
       "allowedAgents": ["researcher"],
       "params": {
-        "language": { "description": "Output language", "default": "the language of the user's request" }
+        "language": { "description": "Output language", "default": "the language the user asked for, otherwise the language of the user's request" }
       }
     },
     "deck_images": {
@@ -104,7 +104,7 @@
       "allowedAgents": ["content_writer"],
       "params": {
         "outputDir": { "description": "Workspace folder to build into (the paper, deck and images all live under generated/<outputDir>/)", "default": "presentation" },
-        "language": { "description": "Output language", "default": "the language of the user's request" }
+        "language": { "description": "Output language", "default": "the language the user asked for, otherwise the language of the user's request" }
       }
     },
     "deck_slides": {
@@ -115,7 +115,7 @@
       "params": {
         "outputDir": { "description": "Workspace folder to build into (deck at generated/<outputDir>/index.html, images at generated/<outputDir>/images)", "default": "presentation" },
         "slideCount": { "description": "How many slides the deck should have", "default": "about 10 slides" },
-        "language": { "description": "Output language", "default": "the language of the user's request" }
+        "language": { "description": "Output language", "default": "the language the user asked for, otherwise the language of the user's request" }
       }
     },
     "validate_image": {

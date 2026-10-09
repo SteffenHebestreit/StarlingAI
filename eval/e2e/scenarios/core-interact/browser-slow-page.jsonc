@@ -1,0 +1,41 @@
+// Browser automation: a page the server streams at ~300 bytes/s, about 7 s in all (nginx limit_rate,
+// eval/e2e/env/nginx.conf; eval/e2e/site/langsam.html). Ground truth (ENVIRONMENT.md "Slow page"):
+// portal maintenance every first Tuesday of the month 02:00–04:00; last outage 14.09.2026,
+// 10:15–11:40, ticket NW-ST-0193.
+//
+// Event names verified against packages/core/src:
+//   sub_agent_tool_call {tool, phase, error}  agent/sub-agent.ts:6918 (done), payload agent/sub-agent.ts:2296
+{
+  id: "core-ix-browser-slow-page",
+  title: "Browser: read a page that takes about 7 seconds to arrive",
+  group: "core",
+  tags: ["browser", "site", "slow"],
+  description: "browser_navigate must wait the page out instead of giving up or answering from a half-loaded document. The maintenance window and the outage ticket are only on this page. Protects: navigation and evidence capture on slow responses (timeouts set too tight, a premature snapshot of a partial page).",
+  requires: ["model", "browser", "e2e-site"],
+  timeoutMs: 1200000,
+  steps: [
+    {
+      kind: "turn",
+      id: "read-slow-page",
+      message: "Öffne im Browser http://www.nordlicht-werkzeuge.test/langsam.html – die Seite antwortet absichtlich langsam, das dauert einige Sekunden. Wann ist das Wartungsfenster des Kundenportals, und wann war die letzte Störung? Nenne auch die Ticketnummer.",
+      timeoutMs: 900000,
+      expect: {
+        reply: {
+          includes: ["NW-ST-0193"],
+          matches: [
+            "Dienstag|Tuesday",
+            "0?2[:.]00|\\b2 Uhr|\\b2\\s?(–|-|bis)\\s?4",
+            "14\\.\\s?0?9\\.\\s?2026|14\\.\\s*September|2026-09-14|September\\s+14",
+          ],
+        },
+        tools: { mustCall: ["browser_navigate"] },
+        agents: { mustRun: ["browser_agent"] },
+        events: {
+          mustNot: [
+            { type: "sub_agent_tool_call", where: { "data.tool": "browser_navigate", "data.phase": "done", "data.error": { regex: "Refusing to navigate" } } },
+          ],
+        },
+      },
+    },
+  ],
+}

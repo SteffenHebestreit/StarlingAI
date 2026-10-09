@@ -10,7 +10,12 @@
  * per-session slot (NOT the shared-facts hash) so the raw JSON never leaks into
  * human-facing context.
  */
-import { writeTurnPlan, readTurnPlan, clearTurnPlan } from "../swarm/memory.js";
+import { writeTurnPlan, readTurnPlan, clearTurnPlan, PLAN_VALUE_MAX } from "../swarm/memory.js";
+import { readDelegationDeliverable, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
+import { rootSessionOf } from "./session-ids.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("turn-plan");
 
 export type TurnPlanStepKind = "reuse" | "delegate" | "direct";
 export type TurnRiskTier = "low" | "high";
@@ -25,10 +30,57 @@ export interface TurnPlanStep {
   kind: TurnPlanStepKind;
   /** Target agent for a delegate step (optional). */
   agent?: string;
+  /**
+   * Scene or job name for a `reuse` step.
+   *
+   * The mirror of `agent` above, and what makes a reuse step DISPATCHABLE rather than a note
+   * to self: "run an existing workflow" cannot be executed by anything that does not know
+   * which one. Optional, because a plan may legitimately name the workflow only in prose —
+   * the executor then reports the step as one the orchestrator has to run itself.
+   */
+  workflow?: string;
+  /**
+   * Tool to run for a `direct` step, and the arguments to run it with.
+   *
+   * The third leg. `agent` makes a delegate step dispatchable and `workflow` makes a reuse step
+   * dispatchable; this makes a direct step dispatchable, so one plan can chain tools, agents and
+   * workflows in a single dependency order instead of the orchestrator hand-carrying the tool
+   * calls between the delegations. Optional, because a direct step is often reasoning rather than
+   * a call ("decide the framing") — without a tool it stays the orchestrator's own work.
+   *
+   * Args are literal: a tool takes structured arguments, so unlike a delegate step there is no
+   * prose slot to carry an upstream result into. A step that genuinely needs a previous step's
+   * OUTPUT as input belongs to the agent that can read it.
+   */
+  tool?: string;
+  toolArgs?: Record<string, unknown>;
   /** Steps sharing a parallelGroup may run concurrently (independent work). */
   parallelGroup?: number;
   /** Ids of steps that must complete first. */
   dependsOn?: string[];
+  /**
+   * What a delegate step must hand back (DelegationDeliverable): passed to delegate_to_agent by
+   * execute_plan, so a plan's build step is judged as one and its research step is not. The step's
+   * task carries the turn's OBJECTIVE, so a verb test over it read every step of a build plan as
+   * the build.
+   */
+  deliverable?: DelegationDeliverable;
+}
+
+/** What became of one step. `pending` steps have not been attempted this turn. */
+export type TurnPlanStepStatus = "pending" | "running" | "done" | "failed" | "manual";
+
+export interface TurnPlanStepOutcome {
+  id: string;
+  status: TurnPlanStepStatus;
+  /** Short note: the failure, or why the step is the orchestrator's to run. */
+  detail?: string;
+  /**
+   * What the step produced, clipped. Persisted because the executor's whole purpose is to hand
+   * these back: without it a resumed call reports a step as `done` while the work it produced is
+   * gone, and the orchestrator is told to synthesize an answer from results it cannot see.
+   */
+  result?: string;
 }
 
 export interface TurnPlan {
@@ -40,25 +92,24 @@ export interface TurnPlan {
   /** True when the planned fan-out is wide (more parallel work than the caps). */
   wide: boolean;
   createdAt: string;
+  /**
+   * What actually happened to each step, written by the plan executor.
+   *
+   * Without this the only record of execution is a COUNT of delegation tool calls, which cannot
+   * say which step ran, cannot see a `reuse` step at all, and cannot tell a step the
+   * orchestrator did itself from one nobody did. Present only once the executor has run.
+   */
+  outcomes?: TurnPlanStepOutcome[];
 }
 
 const MAX_STEPS = 12;
+/** Cap on one step's serialized toolArgs — see the note where it is applied. */
+const MAX_TOOL_ARGS_CHARS = 4_000;
 const MAX_CRITERIA = 12;
 const MAX_STRING = 600;
 
 function rootSessionId(sessionId: string): string {
-  // Strip `sub:` nesting hops to reach the orchestrator's root session, where
-  // the plan lives (mirrors deriveRootSessionId in sub-agent.ts).
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function clampString(value: unknown, fallback = ""): string {
@@ -92,7 +143,7 @@ function unwrapPlanEnvelope(raw: Record<string, unknown>): Record<string, unknow
     // into a warden stop. Coerce the string into the objective so the turn records
     // a minimal plan and proceeds. Sibling keys (e.g. riskTier) are preserved.
     if (typeof inner === "string" && inner.trim()) {
-      return { ...raw, objective: inner.replace(/^\s*objective\s*[:\-]\s*/i, "").trim() };
+      return { ...raw, objective: inner.replace(/^\s*objective\s*[:-]\s*/i, "").trim() };
     }
   }
   return raw;
@@ -155,17 +206,58 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     const kindRaw = clampString(obj["kind"] ?? obj["tag"]).toLowerCase();
     const kind: TurnPlanStepKind = kindRaw === "reuse" || kindRaw === "direct" ? kindRaw : "delegate";
     const step: TurnPlanStep = {
-      id: clampString(obj["id"]) || `s${steps.length + 1}`,
+      // Deliberately provisional — uniqueness is settled in one pass after the loop, because
+      // `s${steps.length + 1}` cannot see an explicit id the model gives a LATER step.
+      id: clampString(obj["id"]),
       description,
       kind,
     };
     const agent = clampString(obj["agent"] ?? obj["agentName"] ?? obj["agent_name"]);
     if (agent) step.agent = agent;
+    const workflow = clampString(obj["workflow"] ?? obj["workflowName"] ?? obj["scene"] ?? obj["job"]);
+    if (workflow) step.workflow = workflow;
+    const tool = clampString(obj["tool"] ?? obj["toolName"] ?? obj["tool_name"]);
+    if (tool) step.tool = tool;
+    const toolArgs = obj["toolArgs"] ?? obj["tool_args"] ?? obj["args"] ?? obj["arguments"];
+    if (toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)) {
+      // Every other field here is clamped; this one was not, and it is the one the model fills with
+      // free content (a report body for write_file, say). The plan is stored in a capped slot, so an
+      // unclamped field is how a plan becomes too large to store — and a plan too large to store is
+      // a plan that silently does not exist.
+      const serialized = JSON.stringify(toolArgs);
+      if (serialized.length <= MAX_TOOL_ARGS_CHARS) step.toolArgs = toolArgs as Record<string, unknown>;
+      else step.description = `${step.description} [toolArgs omitted: ${serialized.length} chars exceeds the ${MAX_TOOL_ARGS_CHARS}-char limit — the step will be handed back to you]`;
+    }
     const group = obj["parallelGroup"] ?? obj["parallel_group"];
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
     const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);
     if (deps.length > 0) step.dependsOn = deps;
+    const deliverable = readDelegationDeliverable(obj["deliverable"]);
+    if (deliverable) step.deliverable = deliverable;
     steps.push(step);
+  }
+
+  // EVERY CONSUMER KEYS A STEP BY ITS ID — the scheduler's status map, the dependsOn edges, the
+  // per-step outcomes. Two steps sharing one id therefore collapse into one: the first to run
+  // marks the id `done`, the second is skipped as already-settled, and the plan reports both as
+  // completed while one of them never ran. Reachable without the model repeating an id at all —
+  // it need only leave one step's id blank and name a later step "s1".
+  const usedIds = new Set<string>();
+  // Explicit ids are reserved FIRST, across the whole plan: a dependsOn edge naming "s1" has to
+  // keep pointing at the step the model called "s1", even when an earlier step left its own id
+  // blank and would otherwise have been minted into that name. A repeated explicit id is cleared
+  // here and re-minted below — first occurrence keeps it.
+  for (const step of steps) {
+    if (!step.id) continue;
+    if (usedIds.has(step.id)) step.id = "";
+    else usedIds.add(step.id);
+  }
+  let nextAutoId = 1;
+  for (const step of steps) {
+    if (step.id) continue;
+    while (usedIds.has(`s${nextAutoId}`)) nextAutoId += 1;
+    step.id = `s${nextAutoId}`;
+    usedIds.add(step.id);
   }
 
   // Accept snake_case aliases for the multi-word keys. Local models routinely emit
@@ -198,8 +290,107 @@ export function countParallelWidth(steps: TurnPlanStep[]): number {
   return maxGroup;
 }
 
+/** A copy whose per-step results are clipped to `budget`, or dropped entirely at 0. */
+function withResultBudget(plan: TurnPlan, budget: number): TurnPlan {
+  const outcomes = (plan.outcomes ?? []).map((outcome) => {
+    if (!outcome.result) return outcome;
+    if (budget <= 0) {
+      const stripped: TurnPlanStepOutcome = { id: outcome.id, status: outcome.status };
+      if (outcome.detail) stripped.detail = outcome.detail;
+      return stripped;
+    }
+    if (outcome.result.length <= budget) return outcome;
+    // Marked, like every other truncation here: a resumed call reads this back as the step's whole
+    // result, so an unmarked cut presents a mid-sentence fragment as the complete finding.
+    return { ...outcome, result: `${outcome.result.slice(0, budget)}\n…(clipped)` };
+  });
+  return { ...plan, outcomes };
+}
+
+/**
+ * A copy with the step arguments removed — and with the tools removed alongside them.
+ *
+ * Dropping `toolArgs` alone leaves a step that still NAMES a tool, and the executor would then
+ * dispatch that tool with an empty argument object: write_file with no path, an http_request with
+ * no url. A step whose arguments could not be stored is a step the orchestrator has to run itself,
+ * so it is handed back as one.
+ */
+function withoutToolArgs(plan: TurnPlan): TurnPlan {
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => (step.toolArgs === undefined && step.tool === undefined ? step : {
+      ...step,
+      tool: undefined,
+      toolArgs: undefined,
+      description: `${step.description} [arguments too large to store — run this step yourself]`,
+    })),
+  };
+}
+
+/**
+ * Serialize the plan so that it FITS.
+ *
+ * The store caps the value with a hard slice and the reader JSON.parses what comes back, so a plan
+ * one character over the limit does not come back truncated — it does not come back AT ALL, and a
+ * turn in the middle of its own plan is told that no plan was ever recorded. Step results made that
+ * easy to reach: they are the only unbounded thing in a plan, and also exactly what a resumed call
+ * needs. So they are what gets shed, largest-affordable budget first, and the plan itself survives.
+ */
+function serializePlanWithinStoreBudget(plan: TurnPlan): string {
+  let json = JSON.stringify(plan);
+  if (json.length <= PLAN_VALUE_MAX) return json;
+
+  for (const budget of [1_000, 400, 120, 0]) {
+    json = JSON.stringify(withResultBudget(plan, budget));
+    if (json.length <= PLAN_VALUE_MAX) return json;
+  }
+  // Still over with every result gone. Shed the step arguments next — bulky, and re-derivable from
+  // the step description — and only then the outcomes, which are the expensive thing to lose: a
+  // resumed call seeds its statuses from them, so dropping them re-dispatches every completed step
+  // with a fresh delegate budget, and a plan that overflows every time can never finish.
+  // CUMULATIVE: built on the results-already-shed copy, not on the original. Rebuilding from `plan`
+  // put every full result back, so a plan that would have fitted with results AND arguments shed
+  // instead fell through to having its whole execution record deleted.
+  const argless = withoutToolArgs(withResultBudget(plan, 0));
+  json = JSON.stringify(argless);
+  if (json.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: json.length }, "Turn plan too large for the store — dropped step toolArgs");
+    return json;
+  }
+  // Statuses only — id + status is about thirty bytes a step, and it is the difference between a
+  // resumed call continuing and re-dispatching every completed step with a fresh budget. Losing the
+  // detail and the result text is a degraded record; losing the statuses is a re-run.
+  const statusesOnly = {
+    ...argless,
+    outcomes: (argless.outcomes ?? []).map((outcome) => ({ id: outcome.id, status: outcome.status })),
+  };
+  const statusJson = JSON.stringify(statusesOnly);
+  if (statusJson.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: statusJson.length }, "Turn plan too large for the store — kept step statuses only");
+    return statusJson;
+  }
+  const bare = JSON.stringify({ ...argless, outcomes: [] as TurnPlanStepOutcome[] });
+  if (bare.length <= PLAN_VALUE_MAX) {
+    log.warn({ chars: bare.length }, "Turn plan too large for the store — dropped step outcomes");
+    return bare;
+  }
+  // MEASURED, always. Returning an oversized string here is not a degraded write, it is a DELETED
+  // plan: the store slices mid-JSON and every later read parses nothing and answers null. A
+  // normalized plan cannot get this far — MAX_STEPS descriptions clamped to 600 fit the cap with
+  // room to spare — so this guards a plan built in code rather than recorded by the model, and
+  // exists so that no path out of this function can return something the store will destroy.
+  const trimmed = { ...argless, outcomes: [] as TurnPlanStepOutcome[], steps: [...argless.steps] };
+  while (trimmed.steps.length > 1 && JSON.stringify(trimmed).length > PLAN_VALUE_MAX) trimmed.steps.pop();
+  const trimmedJson = JSON.stringify(trimmed);
+  log.error(
+    { chars: bare.length, limit: PLAN_VALUE_MAX, keptSteps: trimmed.steps.length, ofSteps: plan.steps.length },
+    "Turn plan exceeds the store even without outcomes — stored a truncated step list",
+  );
+  return trimmedJson.length <= PLAN_VALUE_MAX ? trimmedJson : JSON.stringify({ ...trimmed, steps: [] });
+}
+
 export async function persistTurnPlan(sessionId: string, plan: TurnPlan): Promise<void> {
-  await writeTurnPlan(rootSessionId(sessionId), JSON.stringify(plan));
+  await writeTurnPlan(rootSessionId(sessionId), serializePlanWithinStoreBudget(plan));
 }
 
 export async function loadTurnPlan(sessionId: string): Promise<TurnPlan | null> {
@@ -286,7 +477,31 @@ export interface PlanContinuationDecision {
  */
 export function decidePlanContinuation(input: PlanContinuationInput): PlanContinuationDecision {
   const { plan, executedDelegations, delegationCap, lastDelegationSucceeded, enabled } = input;
-  const total = plan?.steps.length ?? 0;
+  // WHAT ACTUALLY RAN, when anything knows. execute_plan records a per-step outcome, so the
+  // question "is the plan finished" has a real answer: no step still waiting to be dispatched.
+  // Counting is the fallback for a plan the orchestrator executed by hand.
+  const outcomes = plan?.outcomes;
+  if (plan && outcomes && outcomes.length > 0) {
+    // DONE MEANS DONE. Counting `failed` here made the [CONTINUE PLAN] directive tell the model it
+    // had finished work that had in fact failed.
+    const settled = outcomes.filter((o) => o.status === "done").length;
+    const outstanding = outcomes.some((o) => o.status === "pending" || o.status === "manual");
+    // The same single-deliverable exemption the counting branch has: a plan with one dispatchable
+    // step is finished when that step is, and nudging it onward only re-delegates the same work.
+    const dispatchable = plan.steps.filter((step) => step.kind !== "direct").length;
+    if (!enabled || !lastDelegationSucceeded || !outstanding || dispatchable < 2) {
+      return { continue: false, done: settled, total: outcomes.length };
+    }
+    if (executedDelegations >= delegationCap) return { continue: false, done: settled, total: outcomes.length };
+    return { continue: true, done: settled, total: outcomes.length };
+  }
+  // COUNT ONLY WHAT THE COUNTER COUNTS. `executedDelegations` comes from the turn's delegation
+  // tally, which counts delegate_to_agent / parallel_delegate / run_task_graph / swarm_delegate /
+  // create_ephemeral_agent — and run_workflow, which a `reuse` step uses. It does NOT count a
+  // `direct` step, which is the orchestrator's own tool call. Measuring those against ALL steps
+  // made a completed mixed plan read as unfinished and pushed the orchestrator to keep
+  // delegating past the end of its own plan.
+  const total = plan?.steps.filter((step) => step.kind !== "direct").length ?? 0;
   const noContinue: PlanContinuationDecision = { continue: false, done: executedDelegations, total };
   if (!enabled || !plan || !lastDelegationSucceeded) return noContinue;
   if (total < 2) return noContinue;                          // single-deliverable plan → synthesize as before

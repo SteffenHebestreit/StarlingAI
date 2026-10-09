@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
+import { isProtectedConfigPath } from "./config-assistant-proposals.js";
+import { canReadRecord, recordReader } from "../runtime/user-scope.js";
+import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -26,6 +29,12 @@ export interface FlowMemoryEntry {
   outcome: FlowMemoryOutcome;
   lesson?: string;
   tags: string[];
+  /** The account whose request this was: its user-scope segment, never the raw user id. Absent
+   *  with one operator, for a request with no user, and on entries written before it existed.
+   *  Under multi-user auth the request text goes back only to that account and to an admin
+   *  (gateway/config-assistant-visibility.ts), and an agent-scope search shows the entry only to
+   *  that account (memory/service.ts). */
+  account?: string;
 }
 
 export interface FlowMemoryMatch extends FlowMemoryEntry {
@@ -53,6 +62,7 @@ export function appendFlowMemoryEntry(
     outcome: entry.outcome,
     lesson: entry.lesson?.trim().slice(0, 800) || undefined,
     tags: normalizeList(entry.tags, MAX_TAGS, 48),
+    ...(entry.account ? { account: entry.account } : {}),
   };
 
   try {
@@ -100,7 +110,18 @@ export function searchFlowMemory(
     outcomes?: FlowMemoryOutcome[];
   } = {},
 ): FlowMemoryMatch[] {
-  const entries = readFlowMemoryEntries(workspacePath, 200);
+  // Under multi-user auth, the caller's own entries only, chosen before anything is scored: the file
+  // holds every account's config-assistant requests, summaries and lessons, and this guidance goes
+  // into the caller's prompt. The whole file is read either way (readFlowMemoryEntries), so the last
+  // 200 are the caller's, however busy the other accounts are. A request with no user gets none.
+  // The file is at the deployment root, where its writers append it. There the root a run is given
+  // is the account's own directory, where no entry is ever written, so an agent's learned flow
+  // guidance came back empty for every chat session (found in review, 2026-10-08); it is read from
+  // the deployment root behind it. With one operator, from the root given, as before.
+  const reader = recordReader();
+  const entries = reader.all
+    ? readFlowMemoryEntries(workspacePath, 200)
+    : readFlowMemoryEntries(deploymentWorkspaceRoot(workspacePath), Number.MAX_SAFE_INTEGER).filter((entry) => canReadRecord(reader, entry.account)).slice(-200);
   if (entries.length === 0) return [];
 
   const normalizedQuery = query.trim();
@@ -154,7 +175,11 @@ export function formatFlowMemoryGuidance(
       : entry.outcome === "partial"
         ? "Watch"
         : "Prefer";
-    const actions = entry.actions.length > 0 ? ` Actions: ${entry.actions.join("; ")}.` : "";
+    // Not a path drafting now refuses: a proposal applied under agents.subAgents.* was recorded as
+    // applied, and "Prefer … set agents.subAgents…" steered the assistant back to a path that does
+    // nothing (final review of the leftovers, 5).
+    const usable = entry.actions.filter((action) => !(action.startsWith("set ") && isProtectedConfigPath(action.slice(4))));
+    const actions = usable.length > 0 ? ` Actions: ${usable.join("; ")}.` : "";
     const lesson = entry.lesson ? ` Lesson: ${entry.lesson}.` : "";
     const agentHint = entry.targetAgent ? ` [target=${entry.targetAgent}]` : "";
     return `- ${label}${agentHint}: ${entry.summary}.${actions}${lesson}`;

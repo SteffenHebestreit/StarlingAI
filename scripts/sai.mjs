@@ -13,12 +13,13 @@
  *   sai health                             Check service health endpoints
  *   sai dev [gateway|web]                  Start development mode
  */
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
 
 const BOLD = "\x1b[1m";
@@ -153,6 +154,7 @@ async function cmdStart() {
       pentest:           { type: "boolean", default: false },
       "computer-desktop":{ type: "boolean", default: false },
       rag:               { type: "boolean", default: false },
+      laya:              { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
     strict: false,
@@ -164,6 +166,7 @@ async function cmdStart() {
   const pentest     = values.pentest || values.all;
   const desktop     = values["computer-desktop"] || values.all;
   const ragFlag     = values.rag || values.all;
+  const layaFlag    = values.laya || values.all;
 
   hdr(`${PRODUCT.name} — Starting up`);
 
@@ -208,22 +211,32 @@ async function cmdStart() {
   // default so a plain start works on any machine (the reranker reserves an NVIDIA
   // GPU). Opt in with `sai start --rag` or persist SAI_ENABLE_RAG=1 in .env.
   const wantRag = ragFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_RAG || "");
+  // The Laya decision sidecar (docker/laya) behind the `laya` profile, OFF by default: it downloads
+  // ~2 GB of checkpoints and wants the GPU. Opt in with `sai start --laya` or SAI_ENABLE_LAYA=1 in .env.
+  // Running it is what tells the gateway where it is (SAI_LAYA_URL), so the decision layer is
+  // inert exactly when the sidecar is not there.
+  const wantLaya = layaFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_LAYA || "");
+  if (wantLaya) process.env.SAI_LAYA_URL = process.env.SAI_LAYA_URL || "http://laya:8080";
   const profileArgs = [];
   if (pentest) profileArgs.push("--profile", "pentest");
   if (desktop) profileArgs.push("--profile", "computer-desktop");
+  if (wantLaya) profileArgs.push("--profile", "laya");
+  // The reranker and the Laya sidecar only get the GPU when a host NVIDIA GPU is present
+  // (or forced via SAI_GPU=1). Otherwise they run on CPU. SAI_GPU=0 forces CPU.
+  const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
+  const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
+  const useGpu = (wantRag || wantLaya) && (gpuForced || (!gpuOff && hasNvidiaGpu()));
+  if (useGpu) composeFiles.push("-f", "docker-compose.gpu.yml");
   if (wantRag) {
     profileArgs.push("--profile", "rag");
-    // The reranker only gets the GPU when a host NVIDIA GPU is present (or forced
-    // via SAI_GPU=1). Otherwise it runs on CPU. SAI_GPU=0 forces CPU.
-    const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
-    const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
-    const useGpu = gpuForced || (!gpuOff && hasNvidiaGpu());
-    if (useGpu) {
-      composeFiles.push("-f", "docker-compose.gpu.yml");
-      ok("RAG enabled (engram + reranker) — GPU detected, reranker on GPU");
-    } else {
-      ok("RAG enabled (engram + reranker) — no GPU, reranker on CPU");
-    }
+    ok(useGpu
+      ? "RAG enabled (engram + reranker) — GPU detected, reranker on GPU"
+      : "RAG enabled (engram + reranker) — no GPU, reranker on CPU");
+  }
+  if (wantLaya) {
+    ok(useGpu
+      ? "Laya decision sidecar enabled — GPU detected, decisions in milliseconds"
+      : "Laya decision sidecar enabled — no GPU, it runs on CPU (tens to hundreds of ms per decision)");
   }
 
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
@@ -242,6 +255,12 @@ async function cmdStart() {
     wipeUploadedFiles();
     ok("Clean slate: DB volumes, flat-file memory + audit log, and uploaded files removed (credentials preserved).");
   }
+
+  // HEAD and whether the tree has uncommitted changes, as SAI_BUILD_SHA / SAI_BUILD_DIRTY for the
+  // compose build args that label the gateway image (scripts/build-provenance.mjs). The e2e harness
+  // compares the running image's revision with the commit it tests: twice (2026-09-05, 2026-10-06)
+  // the stack ran an image older than the code under test.
+  stampBuildRevision(process.env, gitOutput);
 
   // Build images
   if (wantBuild) {
@@ -388,7 +407,13 @@ async function cmdStop() {
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag"];
+  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya"];
+  // The e2e test services (`pnpm e2e:env up`) run in this project on the stack's networks;
+  // `down` has to remove them too, or it cannot remove those networks.
+  if (existsSync("docker-compose.e2e.yml")) {
+    composeFiles.push("-f", "docker-compose.e2e.yml");
+    allProfiles.push("--profile", "e2e");
+  }
 
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
@@ -583,6 +608,9 @@ ${BOLD}Commands:${RESET}
     --rag                              Include document-RAG stack (engram + reranker);
                                        uses the GPU when one is present, else CPU.
                                        Persist with SAI_ENABLE_RAG=1 in .env
+    --laya                             Include the Laya decision sidecar (fast local
+                                       decisions; GPU when present). Persist with
+                                       SAI_ENABLE_LAYA=1 in .env
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --all                              Include all remaining optional services
@@ -637,6 +665,12 @@ function ensureDockerDaemon() {
 function hasNvidiaGpu() {
   try { execSync("nvidia-smi -L", { stdio: "ignore" }); return true; }
   catch { return false; }
+}
+
+/** git's trimmed output in the repo root, or null when git failed or is missing. */
+function gitOutput(args) {
+  try { return execFileSync("git", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true }).trim(); }
+  catch { return null; }
 }
 
 function loadDotEnv() {

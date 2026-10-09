@@ -207,6 +207,106 @@ describe("runtime turn guidance", () => {
     expect(extractAssistantName("wie bist du drauf?")).toBeUndefined();
   });
 
+  // Verified 2026-10-05: each of these renamed the assistant PERMANENTLY (the extractor runs on
+  // every turn and its result is persisted). Only an unframed naming statement may persist.
+  describe("persists only an unambiguous naming statement (2026-10-05)", () => {
+    it("does not read 'call you <Day> about …' as a rename — the name must end its clause", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("I will call you Monday about the contract.")).toBeUndefined();
+      expect(extractAssistantName("I'll call you Friday at 10 to go through it.")).toBeUndefined();
+      // A real name with more clause after it is a call to that person.
+      expect(extractAssistantName("I'll call you Mike later about the invoice.")).toBeUndefined();
+      // Lowercase time words were only let through because the apostrophe of "I'll" counted
+      // as a quote around the name.
+      expect(extractAssistantName("I'll call you tomorrow.")).toBeUndefined();
+      // The rename forms keep working, including a lasting-scope tail.
+      expect(extractAssistantName("I'll call you Sky.")).toBe("Sky");
+      expect(extractAssistantName("I'll call you Luna from now on")).toBe("Luna");
+    });
+
+    it("does not read a QUESTION as a rename", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("Heißt du Claude?")).toBeUndefined();
+      expect(extractAssistantName("Your name is Ember?")).toBeUndefined();
+      expect(extractAssistantName("Is it true that your name is Ember?")).toBeUndefined();
+      // German verb-first is a yes/no question even without its question mark.
+      expect(extractAssistantName("Heißt du Claude")).toBeUndefined();
+      // A question next to a real statement does not hide the statement.
+      expect(extractAssistantName("Heißt du Claude? Nein — ab jetzt heißt du Luna.")).toBe("Luna");
+    });
+
+    it("does not read a story/role-play frame or quoted speech as a rename", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("In der Geschichte heißt du Robin, und du bist ein Ritter.")).toBeUndefined();
+      expect(extractAssistantName("In this story your name is Ember and you guard the gate.")).toBeUndefined();
+      expect(extractAssistantName("Mein Freund meinte, du heißt Claude.")).toBeUndefined();
+      expect(extractAssistantName('Der Satz "Ab jetzt heißt du Luna" ist ein Beispiel.')).toBeUndefined();
+      expect(extractAssistantName('„Ab jetzt heißt du Luna", sagte die Figur im Hörspiel.')).toBeUndefined();
+      // Unframed leads stay statements: temporal scope, a short vocative, the speaker.
+      expect(extractAssistantName("Hey Claude, ab jetzt heißt du Luna.")).toBe("Luna");
+      expect(extractAssistantName("Von jetzt an heißt du Luna")).toBe("Luna");
+      expect(extractAssistantName("From now on, your name is Ember.")).toBe("Ember");
+    });
+  });
+
+  // Adversarial review 2026-10-05 of the fix above: it dropped renames HEAD kept and still missed
+  // some misfires. Every case is a closed class or a structural position, never a topic word.
+  describe("naming statements vs. tags, leads and frames (review 2026-10-05)", () => {
+    it("an AGREEMENT tag after a comma closes a statement; a CONFIRMATION tag asks — unless scoped", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("Ab jetzt heißt du Max, okay?")).toBe("Max");
+      expect(extractAssistantName("Ab jetzt heißt du Max, einverstanden?")).toBe("Max");
+      expect(extractAssistantName("Your name is Nova, got it?")).toBe("Nova");
+      expect(extractAssistantName("I'll call you Jarvis, okay?")).toBe("Jarvis");
+      expect(extractAssistantName("I will call you Jarvis from now on, ok?")).toBe("Jarvis");
+      expect(extractAssistantName("Ab jetzt heißt du Max, oder?")).toBe("Max"); // scoped
+      // Without a lasting scope a confirmation tag asks whether a belief is true.
+      expect(extractAssistantName("Your name is Claude, right?")).toBeUndefined();
+      expect(extractAssistantName("Your name is Claude, isn't it")).toBeUndefined();
+    });
+
+    it("a lead segment closed by : , – — may hold anything but a frame", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("Übrigens: ab jetzt heißt du Max.")).toBe("Max");
+      expect(extractAssistantName("Noch was: dein Name ist Lea.")).toBe("Lea");
+      expect(extractAssistantName("Danke! Und noch etwas: Du heißt ab jetzt Max.")).toBe("Max");
+      expect(extractAssistantName("By the way, your name is Nova now.")).toBe("Nova");
+      expect(extractAssistantName("Thanks so much, from now on your name is Nova.")).toBe("Nova");
+      expect(extractAssistantName("Perfekt – ab jetzt heißt du Max.")).toBe("Max");
+      expect(extractAssistantName("Hallo mein lieber Assistent, ab jetzt heißt du Max.")).toBe("Max");
+      expect(extractAssistantName("I've decided: your name is Nova.")).toBe("Nova");
+      // Reported speech and fiction frames stay out.
+      expect(extractAssistantName("Mein Freund meint, dein Name ist Claude")).toBeUndefined();
+      expect(extractAssistantName("Rollenspiel: Du heißt Robin.")).toBeUndefined();
+    });
+
+    it("the words directly before the naming clause are temporal scope, glue or the speaker's decision", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("Ab morgen heißt du Max")).toBe("Max");
+      expect(extractAssistantName("I have decided your name is Nova.")).toBe("Nova");
+      expect(extractAssistantName("Na gut, dann heißt du ab jetzt Max.")).toBe("Max");
+      expect(extractAssistantName("I know your name is Claude")).toBeUndefined();
+    });
+
+    it("weekdays, months and time words after 'call you' are a phone call unless quoted", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("I'll call you Monday.")).toBeUndefined();
+      expect(extractAssistantName("Ok, I'll call you Friday")).toBeUndefined();
+      expect(extractAssistantName("I'll call you Tuesday, ok?")).toBeUndefined();
+      expect(extractAssistantName('I\'ll call you "Friday" from now on')).toBe("Friday");
+      // Emoji and emoticons after the name are not a clause tail.
+      expect(extractAssistantName("I'll call you Jarvis 🙂")).toBe("Jarvis");
+    });
+
+    it("a story or game set up in an EARLIER sentence scopes the name too", async () => {
+      const { extractAssistantName } = await import("../agent/intent-classifier.js");
+      expect(extractAssistantName("Write a story. Your name is Robin and you are a knight.")).toBeUndefined();
+      expect(extractAssistantName("Let's play a game. Your name is Robin, a knight.")).toBeUndefined();
+      expect(extractAssistantName("Schreib eine Geschichte. Du heißt Robin und bist ein Ritter.")).toBeUndefined();
+      expect(extractAssistantName("Let's change your name. Your name is Nova.")).toBe("Nova");
+    });
+  });
+
   it("fires inline-analytical for pasted code with explanation request", () => {
     const guidance = buildDynamicTurnGuidance(`Hier ist mein Python-Skript:\n\n\`\`\`python\ndef process(items):\n    result = []\n    for item in items:\n        if item.value > threshold:\n            result.append(transform(item))\n    return sorted(result, key=lambda x: x.priority)\n\nclass Processor:\n    def __init__(self, config):\n        self.config = config\n\`\`\`\n\nWas macht dieser Code und wie kann ich ihn verbessern?`);
 
@@ -236,9 +336,25 @@ describe("runtime turn guidance", () => {
 
   it("instructs the model to reply in the user's own language (no German default)", () => {
     // De-lex: the German-default guesser was deleted; language is decided by the LLM from
-    // the user's latest message. The per-turn instruction just echoes that rule.
-    expect(buildLanguageInstructionForTurn("Can you help me debug this issue?")).toContain("Reply in the same language");
-    expect(buildLanguageInstructionForTurn("Kannst du mir beim Debuggen helfen?")).toContain("Reply in the same language");
+    // the user's latest message. The per-turn instruction quotes it and names the rule.
+    for (const message of ["Can you help me debug this issue?", "Kannst du mir beim Debuggen helfen?"]) {
+      const instruction = buildLanguageInstructionForTurn(message);
+      expect(instruction).toContain(JSON.stringify(message));
+      expect(instruction).toContain("otherwise in the language of that message");
+    }
+  });
+
+  it("puts a language the user asked for ahead of the message's own language", () => {
+    // The bug: "Reply in the same language as that message" was the one instruction quoting the
+    // message, so it outranked "answer in English" written in German. The requested language
+    // must come FIRST and the message's language only as the fallback.
+    const instruction = buildLanguageInstructionForTurn("Erkläre mir auf Englisch, wie ein Transformer funktioniert.");
+    const asked = instruction.indexOf("the language the user asked for");
+    const mirror = instruction.indexOf("otherwise in the language of that message");
+    expect(asked).toBeGreaterThan(-1);
+    expect(mirror).toBeGreaterThan(asked);
+    expect(instruction).toContain("standing instruction earlier");
+    expect(instruction).not.toContain("Reply in the same language as that message");
   });
 
   it("enforces the documented per-turn cap for orchestration-heavy tools", () => {
@@ -952,5 +1068,94 @@ describe("runtime turn guidance", () => {
     const d2 = classifyPostOrchestrationDisposition(failureResult);
     expect(d1).toBe("failure");
     expect(d2).toBe("failure");
+  });
+});
+
+describe("buildModelVisibleToolResult — execute_plan", () => {
+  // What the tool RETURNS is not what the model sees. Without a branch, execute_plan's report fell
+  // through to the 600-char fallback, which also collapses newlines: the orchestrator got the
+  // roll-call plus a fragment of the first step and was told to write the answer from results it
+  // could not see. A direct or reuse step's output has no other channel — those run as nested calls
+  // inside the tool and never become tool messages of their own.
+  const report = [
+    "Plan: 2/2 step(s) completed.",
+    "COMPLETED:\n  - s1 (direct) look up the prices\n  - s2 (delegate) write it up",
+    `RESULTS — write the final answer from these:\n\n[s1] look up the prices\n${"PRICE ".repeat(200)}\n\n[s2] write it up\n${"DRAFT ".repeat(200)}`,
+    "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.",
+  ].join("\n\n");
+
+  it("keeps both steps' results and the closing instruction", () => {
+    const visible = buildModelVisibleToolResult("execute_plan", report, { planExecution: true });
+    expect(visible).toContain("PRICE");
+    expect(visible).toContain("DRAFT");
+    expect(visible).toContain("Synthesize the final answer");
+    expect(visible).toContain("\n");          // the fallback collapses every newline
+  });
+});
+
+describe("collapsed history — what the answer-writing iteration can still see", () => {
+  // The prompt for the iteration that writes the answer is built from getCollapsedHistory(), which
+  // replaces each tool result with a snippet. At the default 500 chars execute_plan's report lost
+  // every step's evidence AND the instruction to synthesize from it — so fixing the model-visible
+  // formatting alone changed nothing for the iteration that actually matters.
+  it("keeps a plan's report long enough to answer from", async () => {
+    const { AgentSession } = await import("../agent/session.js");
+    const session = new AgentSession({ sessionId: "collapsed-history-test", channel: "test" });
+    const report = `Plan: 2/2 step(s) completed.\n\nRESULTS — write the final answer from these:\n\n[s1] ${"PRICE ".repeat(300)}\n\n[s2] ${"DRAFT ".repeat(300)}\n\nEvery step has run. Synthesize the final answer from the results above.`;
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "c1", type: "function", function: { name: "execute_plan", arguments: "{}" } }],
+    } as never);
+    session.addMessage({ role: "tool", tool_call_id: "c1", content: report } as never);
+
+    const collapsed = JSON.stringify(session.getCollapsedHistory());
+    expect(collapsed).toContain("DRAFT");                        // the LAST step's evidence
+    expect(collapsed).toContain("Synthesize the final answer");  // and the instruction
+  });
+});
+
+describe("classifyPostOrchestrationDisposition — a plan that executed", () => {
+  // execute_plan dispatches the delegations and workflows whose result shapes this classifier
+  // recognizes, one level down, so its OWN result carries none of their markers. Unrecognized, an
+  // iteration whose only call was execute_plan classified as "none" — skipping the entire
+  // post-orchestration block, including the plan-driven continuation written for that very path.
+  const planResult = (metadata: Record<string, unknown>) => ([{
+    role: "tool" as const,
+    content: "Plan: 2/2 step(s) completed.",
+    tool_call_id: "t1",
+    metadata: { planExecution: true, ...metadata },
+  }]);
+
+  it("is orchestration, not nothing", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 0, manual: 0, pending: 0 })))
+      .toBe("synthesize");
+  });
+
+  it("is a failure when a step failed, so the honesty backstop arms", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 1, manual: 0, pending: 0 })))
+      .toBe("failure");
+  });
+
+  it("is not hijacked by a step result that happens to say \"please confirm\"", () => {
+    // The report embeds every step's output verbatim, and the ask_user cue is a text sniff over the
+    // whole tool result — so a researcher writing "please confirm the figures with the vendor" would
+    // have turned the entire turn into a clarification request. A genuine mid-plan question blocks
+    // in the ask_user tool itself.
+    const withCue = [{
+      role: "tool" as const,
+      content: `Plan: 1/1 step(s) completed.
+
+RESULTS:
+[s1] Which one did you mean? Please confirm.`,
+      tool_call_id: "t1",
+      metadata: { planExecution: true, failed: 0, manual: 0, pending: 0 },
+    }];
+    expect(classifyPostOrchestrationDisposition(withCue)).toBe("synthesize");
+  });
+
+  it("continues while the orchestrator still owes a step", () => {
+    expect(classifyPostOrchestrationDisposition(planResult({ failed: 0, manual: 1, pending: 1 })))
+      .toBe("continue");
   });
 });

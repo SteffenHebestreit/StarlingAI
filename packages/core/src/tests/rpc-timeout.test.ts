@@ -108,6 +108,64 @@ describe("rpc timeout cleanup", () => {
     }
   });
 
+  it("does NOT archive a turn that is still producing — the watchdog defers to liveness", async () => {
+    // Session e95eec63 was cut at 31 minutes on this exact path. agui.ts had already been
+    // taught to defer to a producing turn; rpc.ts had not, and rpc.ts is what the dashboard
+    // uses. 18 of those 31 minutes were one orchestrator completion, so nothing the turn was
+    // doing reached a watchdog that only measured elapsed time.
+    vi.useFakeTimers();
+
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-rpc-live-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "t".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    vi.doMock("../agent/runtime.js", () => ({
+      // A turn that keeps streaming past its budget and never resolves, exactly as a long
+      // build does. Each beat is the signal the watchdog must read.
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        const onChunk = opts["onChunk"] as ((t: string) => void) | undefined;
+        for (let i = 0; i < 40; i++) {
+          onChunk?.(`chunk ${i}`);
+          await new Promise((r) => setTimeout(r, 10_000));
+        }
+        return new Promise(() => {});
+      }),
+      buildTimeoutDeliveryMessage: vi.fn(() => ({ response: "timed out", recoveredAssistantText: false })),
+    }));
+
+    const sent: Array<Record<string, unknown>> = [];
+    const ws = { readyState: 1, send(payload: string) { sent.push(JSON.parse(payload) as Record<string, unknown>); } };
+
+    try {
+      const [{ RpcConnection }, session] = await Promise.all([
+        import("../gateway/rpc.js"),
+        import("../agent/session.js"),
+      ]);
+      const active = session.createSession({ channel: "webchat" });
+      const connection = new RpcConnection(ws as never);
+
+      await connection.handleMessage(JSON.stringify({
+        id: "req-live", method: "chat.send",
+        params: { sessionId: active.id, requestId: "turn-live", message: "build it" },
+      }));
+
+      // Well past budget + grace. A turn beating every 10 s must still be alive.
+      await vi.advanceTimersByTimeAsync(30_000 + TURN_TIMEOUT_SYNTHESIS_GRACE_MS + 60_000);
+
+      expect(session.getSessionRecord(active.id)?.isArchived(), "a producing turn must not be archived").toBe(false);
+      const timeoutEvent = sent.find((event) => {
+        const d = event["data"] as Record<string, unknown> | undefined;
+        return event["type"] === "status" && d?.["requestId"] === "turn-live" && d["finishReason"] === "timeout";
+      });
+      expect(timeoutEvent, "no timeout should have been delivered").toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("caps --iter 0 to 200 and --timeout 0 to 7200s for safety", async () => {
     vi.useFakeTimers();
 

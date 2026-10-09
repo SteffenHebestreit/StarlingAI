@@ -1,0 +1,47 @@
+// A synthetic Markdown attachment (eval/e2e/fixtures/core-interact/protokoll-lagerbesprechung.md) and a
+// question only that file answers.
+//
+// How attachments reach the turn (packages/core/src): the harness stores the file through
+// POST /api/multimodal/persist-attachment and sends it with chat.send like the web client; the turn's
+// document-RAG phase auto-ingests it into engram (session scope) and, as a small document, inlines its
+// full text as [DOCUMENT CONTEXT] (retrieval/document-rag.ts:508-615, retrieval.documentRag
+// autoIngestAttachments + inlineSmallDocuments). Without engram that phase does nothing (:518), hence
+// requires "engram".
+//
+// Ground truth (the fixture): stocktaking in warehouse Westmark on 14.11.2026; minimum stock of NW-3104
+// raised from 60 to 75. Distractors in the same file: 01.10.2026, 01.11.2026, 05.11.2026, and 60 — which
+// is also NW-3104's minimum stock on the fixture site's lager.html, so an answer taken from the web says 60.
+//
+// Event names verified against packages/core/src:
+//   document_rag_ingest {ingested, failed}  agent/turn-prepare.ts:292
+{
+  id: "core-ix-attachment-markdown-facts",
+  title: "Attachment: answer from an attached Markdown file, not from the web",
+  group: "core",
+  tags: ["attachments", "rag", "smoke"],
+  description: "Attaches a synthetic meeting protocol and asks for two facts that exist only in it. The attachment must be ingested (document_rag_ingest with ingested >= 1, none failed) and the answer must carry 14.11.2026 and 75, with no web search for internal content. Protects: the attachment path upload -> auto-ingest -> inline document context, and that an attached file is not silently ignored.",
+  requires: ["model", "engram"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "ask-attachment",
+      message: "Im Anhang ist das Protokoll unserer letzten Lagerbesprechung. An welchem Tag findet die Inventur im Lager Westmark statt, und auf welchen Wert wird der Mindestbestand für den Akku-Pack NW-3104 angehoben?",
+      attachments: ["core-interact/protokoll-lagerbesprechung.md"],
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          matches: [
+            "14\\.\\s?11\\.|14\\.\\s*November|2026-11-14|November\\s+14",
+            "\\b75\\b",
+          ],
+        },
+        tools: { mustNotCall: ["web_search"] },
+        events: {
+          must: [{ type: "document_rag_ingest", where: { "data.ingested": { gte: 1 } } }],
+          mustNot: [{ type: "document_rag_ingest", where: { "data.failed": { gte: 1 } } }],
+        },
+      },
+    },
+  ],
+}

@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
+import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
 /** True when a filesystem path exists (stat succeeds), false otherwise. */
 export async function pathExists(target: string): Promise<boolean> {
@@ -39,6 +40,84 @@ export const GENERATED_SUBDIR = "generated";
 export const UPLOADS_SUBDIR = "uploads";
 
 /**
+ * THE WORKING ROOT FOR THE AMBIENT USER: `<shared>/users/<segment>`, or the shared root when
+ * there is nobody to partition by (auth off, or an unattended run).
+ *
+ * This is the boundary the in-process partition could not be. A path resolver can refuse a
+ * path; it cannot stop a sandboxed `shell_exec` from reading a sibling directory, because the
+ * container is handed a mount, not a resolver. Giving each user their own ROOT makes the mount
+ * itself the boundary: bind that directory and there is no sibling to reach, and `..` is
+ * already refused by the workspace-escape check.
+ *
+ * CONFIG AND PLATFORM STATE STAY AT THE SHARED ROOT. The config zones (agents/, jobs/, scenes/,
+ * tools/) describe the deployment, are authored through validated tools, and are swept by the
+ * config loader — they are not one person's work. Same for the ledgers under the state dir. The
+ * two maintenance agents that edit those zones run with workspaceAccess "full" and keep the
+ * shared root; everyone else gets their own.
+ *
+ * IDEMPOTENT: a root that already is this user's comes back unchanged. A session persists the
+ * root this returns and hands it back here on every restore (AgentSession.fromRecord), and a
+ * workflow run passes the caller's root together with the caller's id. Each pass nested it one
+ * level deeper, <shared>/users/<seg>/users/<seg> after a single gateway restart, and nothing of
+ * the user's (their memory, their files) is in there. The user's own segment is stripped first,
+ * however often it repeats, so a session persisted with the extra levels comes back right too.
+ */
+export function userWorkspaceRoot(sharedRoot: string, userId?: string): string {
+  const segment = activeUserScopeSegment(userId);
+  if (!segment) return sharedRoot;
+  let root = resolve(sharedRoot);
+  while (basename(root) === segment && basename(dirname(root)) === USERS_SUBDIR) root = dirname(dirname(root));
+  return resolve(root, USERS_SUBDIR, segment);
+}
+
+/**
+ * The DEPLOYMENT root behind any execution root — the inverse of the above.
+ *
+ * The ledgers that describe the deployment rather than a person (the agent outcomes ledger, the
+ * promoted-agents catalog) live at the shared root, as the note above says. Code that holds only
+ * its own execution root would otherwise read one account's slice of them and find nothing, which
+ * is silent: an agent's lessons simply stop appearing. Callers that can reach config should just
+ * use `getConfig().workspacePath`; this is for the ones that legitimately stay parameterized
+ * because their other reads ARE per-user.
+ *
+ * Anything that is not a per-user root is returned unchanged.
+ */
+export function deploymentWorkspaceRoot(workspacePath: string): string {
+  const parent = dirname(workspacePath);
+  return basename(parent) === USERS_SUBDIR ? dirname(parent) : workspacePath;
+}
+
+/**
+ * THE ARTIFACT ZONE IS ONE DIRECTORY SHARED BY EVERY TURN THE DEPLOYMENT HAS EVER RUN.
+ *
+ * That is fine for a single operator and wrong the moment two accounts use the same gateway:
+ * one user's half-finished build is evidence to another user's resume detection, one user's
+ * corrective-build gate fires on another user's broken page, and every artifact is readable by
+ * anyone with a token. Durable user memory, the user-model and personality already partition
+ * per account (runtime/user-scope.ts); this is the same rule applied to the working zone.
+ *
+ * Workspace-relative, because that is what every caller here deals in: `generated` when there
+ * is no user to partition by — auth off, or an unattended run — and `generated/users/<segment>`
+ * when there is. The segment comes from the same single rule as every other user-scoped store,
+ * so a store and an artifact can never disagree about which bucket a user has.
+ *
+ * The TOP segment stays `generated` either way, which is what keeps the zone-membership tests
+ * below (and the config loader's non-config-zone sweep) correct without knowing about any of
+ * this.
+ */
+export function generatedZoneRel(): string {
+  // Plain, always. The user segment lives in the ROOT now (userWorkspaceRoot above) — applying
+  // it here as well would produce <root>/users/<seg>/generated/users/<seg>.
+  return GENERATED_SUBDIR;
+}
+
+/** The absolute artifact zone for the ambient user. */
+export function generatedZoneDir(workspacePath: string): string {
+  return resolve(workspacePath, generatedZoneRel());
+}
+
+
+/**
  * Swarm-invented dynamic tools (JSON bundles managed by tools/dynamic-tools.ts).
  * Lives in the workspace next to the other self-authored zones (agents/, jobs/,
  * scenes/) so the swarm's own creations are inspectable and versionable in one
@@ -58,7 +137,49 @@ export const NON_CONFIG_WORKSPACE_ZONES: ReadonlySet<string> = new Set([
   GENERATED_SUBDIR,
   UPLOADS_SUBDIR,
   SWARM_TOOLS_SUBDIR,
+  // Each signed-in user's working root (userWorkspaceRoot) holds that user's own generated/,
+  // uploads/ and state dir — one level down, where the depth-0 zone check above never looked,
+  // so an agent-written users/<id>/generated/data.json merged into the live config.
+  USERS_SUBDIR,
 ]);
+
+/**
+ * Top-level directories of the CONFIG tree (config/) that hold another service's own files, not
+ * gateway config. config/mail/ is the mail-service's accounts file, which it reads itself: swept as
+ * a shard it put the real mail account list into the compiled starlingai.json as a top-level
+ * `accounts` key (2026-10-07), where nothing reads it, and a malformed edit refused the config load.
+ */
+export const NON_CONFIG_BASE_ZONES: ReadonlySet<string> = new Set(["mail"]);
+
+/**
+ * Whether a config-shard sweep skips this directory: one of `zones` at the top (the workspace's
+ * working zones by default; NON_CONFIG_BASE_ZONES for the config tree), or a hidden directory at
+ * any depth. Hidden directories hold state, never shards — the state dir under the workspace keeps
+ * a JSON file per long-running task (checkpoints/), and one half-written file there was read as a
+ * base shard, which refuses to boot on a parse error.
+ */
+export function isNonConfigShardDirectory(
+  name: string,
+  depth: number,
+  zones: ReadonlySet<string> = NON_CONFIG_WORKSPACE_ZONES,
+): boolean {
+  return name.startsWith(".") || (depth === 0 && zones.has(name));
+}
+
+/**
+ * Shard merge order: code-point order on the "/"-joined path relative to the swept directory —
+ * the order `sai config build` (scripts/config-shards.mjs) uses, so the compiled config and the
+ * loaded one merge alike on every OS. localeCompare would weigh case and punctuation by locale,
+ * and Windows separators sort apart from "/".
+ */
+export function compareShardPaths(directory: string): (left: string, right: string) => number {
+  const sortKey = (path: string) => relative(directory, path).split(sep).join("/");
+  return (left, right) => {
+    const a = sortKey(left);
+    const b = sortKey(right);
+    return a < b ? -1 : a > b ? 1 : 0;
+  };
+}
 
 /**
  * Workspace zones a scope-confined ("generated") agent sees verbatim. Everything
@@ -80,7 +201,13 @@ function stripVirtualWorkspacePrefix(inputPath: string): string {
   return inputPath.trim();
 }
 
-export function resolvePathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+/**
+ * A workspace path exactly as named: the boundary check of resolvePathWithinWorkspace without its
+ * zone re-root. For the one caller that needs what a sandbox sees: a container is handed the whole
+ * working root at /workspace, whatever the agent's zone, so a script a scope-confined agent's shell
+ * left at the root is there and nowhere under generated/.
+ */
+export function resolveLiteralWorkspacePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
   const candidatePath = stripVirtualWorkspacePrefix(inputPath);
   const resolvedPath = isAbsolute(candidatePath)
     ? resolve(candidatePath)
@@ -89,7 +216,12 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
   if (rel.startsWith("..") || rel === "..") {
     throw new Error("Path escapes workspace boundary");
   }
-  const relativePath = rel === "" ? "." : rel.replace(/\\/g, "/");
+  return { resolved: resolvedPath, relativePath: rel === "" ? "." : rel.replace(/\\/g, "/") };
+}
+
+export function resolvePathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const literal = resolveLiteralWorkspacePath(inputPath, workspacePath);
+  const relativePath = literal.relativePath;
 
   // Zone enforcement for scope-confined executions (set per-agent via
   // ToolContext.workspaceScope → AsyncLocalStorage). Re-rooting (instead of
@@ -104,7 +236,7 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
     }
   }
 
-  return { resolved: resolvedPath, relativePath };
+  return literal;
 }
 
 /**
@@ -128,9 +260,13 @@ export function resolveWorkspaceWritePath(inputPath: string, workspacePath: stri
   if (currentWorkspaceScope() === "full") {
     return within;
   }
+  // `within` has already been partitioned by the resolver above, so a path under the zone is
+  // this user's by construction — a path naming another user's partition threw before reaching
+  // here rather than being silently accepted as an already-rooted write.
   if (within.relativePath === GENERATED_SUBDIR || within.relativePath.startsWith(`${GENERATED_SUBDIR}/`)) {
     return within;
   }
-  const rel = within.relativePath === "." ? GENERATED_SUBDIR : `${GENERATED_SUBDIR}/${within.relativePath}`;
+  const zoneRel = generatedZoneRel();
+  const rel = within.relativePath === "." ? zoneRel : `${zoneRel}/${within.relativePath}`;
   return { resolved: resolve(workspacePath, rel), relativePath: rel };
 }

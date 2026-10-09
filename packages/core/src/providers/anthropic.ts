@@ -29,33 +29,269 @@ import { childLogger } from "../logger.js";
 import type { ModelConfig } from "../config/schema.js";
 import {
   computeOpenAICompatibleRequestTimeoutMs,
+  computeOutputTokenBudget,
+  estimatePromptTokensForRequest,
+  isDeadlineAbort,
+  isReasoningBurn,
+  isReasoningBurnAbort,
+  PROMPT_ESTIMATE_CHARS_PER_TOKEN,
   ProviderHardTimeoutError,
+  ReasoningBurnAbort,
+  resolveStreamTotalCapMs,
+  salvageToolCallArguments,
   type ChatProvider,
+  type CompletionCallOptions,
   type LLMMessage,
   type LLMResponse,
   type LLMToolDef,
   type OpenAICompatibleProviderRuntimeSnapshot,
+  type StreamCallOptions,
   type StreamChunk,
+  type StreamProgress,
 } from "./lmstudio.js";
+// Content sampler — the decision is "is this circling", not "is this long".
+import { REASONING_LOOP_WINDOW_CHARS, REASONING_SAMPLE_INTERVAL_CHARS, REASONING_DRIFT_SUSTAINED_SAMPLES, detectReasoningLoop, detectReasoningDrift, deriveTaskAnchors } from "../agent/progress-verifier.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
 import { logAudit } from "../audit/logger.js";
+import { currentCallAttribution } from "../runtime/request-context.js";
 
 const log = childLogger("provider:anthropic");
 
 export const ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com";
 
+export interface AnthropicModelChoice {
+  id: string;
+  label: string;
+  /** May be empty when the API reports neither token count — render accordingly. */
+  hint: string;
+  /** Anthropic's own max_tokens for this id, when the listing reported one. */
+  maxOutputTokens?: number;
+}
+
 /**
- * Curated current-model choices for the dashboard picker. Static on purpose:
- * subscription OAuth tokens are inference-scoped and may not be allowed to
- * call /v1/models, so a live listing can't be relied on. The dashboard also
- * accepts a free-text model id for anything not listed here.
+ * FALLBACK model choices for the dashboard picker — used when the live listing
+ * is unavailable, not as the primary source.
+ *
+ * This list was the only source until it went stale (it still offered Sonnet 4.6
+ * as "the default" months after Opus 5 and Sonnet 5 shipped), which is the
+ * failure mode any hand-maintained model list has: nothing about it breaks, it
+ * just quietly stops describing reality. fetchAnthropicModelChoices() asks
+ * Anthropic instead; this list is what answers when that call cannot be made.
+ *
+ * It still has to exist, because the reason the list was static is real:
+ * subscription OAuth tokens are inference-scoped and may not be permitted to
+ * call /v1/models. The dashboard also accepts a free-text model id, so neither
+ * path can strand a user on an id we have not heard of.
  */
-export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<{ id: string; label: string; hint: string }> = [
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Best speed/intelligence balance (default)" },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Most capable Opus — long-horizon agentic work" },
-  { id: "claude-fable-5", label: "Claude Fable 5", hint: "Most powerful tier — highest cost" },
+export const ANTHROPIC_MODEL_CHOICES: ReadonlyArray<AnthropicModelChoice> = [
+  { id: "claude-opus-5", label: "Claude Opus 5", hint: "Most capable Opus — long-horizon agentic work" },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Best speed/intelligence balance" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", hint: "Most powerful tier — highest cost" },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest and most cost-effective" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8", hint: "Previous-generation Opus" },
+  // Retained because providers.anthropic.defaultModel still falls back to this id:
+  // dropping it would leave the picker resolving the active model to "custom".
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", hint: "Previous-generation Sonnet" },
 ];
+
+const MODEL_LIST_PAGE_SIZE = 100;
+/**
+ * Anthropic serves a few dozen models; 20 pages of 100 is far past any real
+ * catalogue and exists only so a non-advancing cursor terminates.
+ */
+const MAX_MODEL_LIST_PAGES = 20;
+
+/**
+ * Output ceilings learned from a live listing, keyed by exact model id.
+ *
+ * ANTHROPIC_MODEL_OUTPUT_LIMITS below is a hand-maintained PREFIX table whose
+ * miss case is 8,192 — and a too-low ceiling silently truncates an answer. That
+ * was tolerable while the dashboard offered six curated ids that all had an
+ * entry. It stopped being tolerable the moment the picker started offering
+ * whatever Anthropic lists: this change is what made the miss case reachable
+ * through the UI, so it also has to close it. The API reports each model's real
+ * `max_tokens`, so when a listing has run we use that number instead of guessing
+ * from a prefix.
+ *
+ * Process-local, like the route's catalogue cache: it is an optimisation over a
+ * guess, never a source of truth to persist.
+ */
+const learnedOutputLimits = new Map<string, number>();
+
+/** Record Anthropic's own output ceiling for a model id. Exported for tests. */
+export function rememberAnthropicOutputLimit(modelId: string, maxOutputTokens: number): void {
+  if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) learnedOutputLimits.set(modelId, maxOutputTokens);
+}
+
+/** Drop every learned ceiling. Exported for tests; also used when a credential changes. */
+export function forgetAnthropicOutputLimits(): void {
+  learnedOutputLimits.clear();
+}
+
+/** "1M" / "200K" / "8192" — token counts as the picker should show them. */
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}K`;
+  return String(tokens);
+}
+
+/**
+ * Ask Anthropic which models this credential can actually use.
+ *
+ * GET /v1/models is GA and needs no beta header. It returns newest-first, so the
+ * order is taken as-is rather than re-sorted — release order is what the picker
+ * wants and the API is the authority on it.
+ *
+ * An EMPTY list counts as a failure, not as "no models available": a blank
+ * picker is indistinguishable from a broken one for the user, and falling back
+ * to the curated list at least offers something selectable. Every other error
+ * (403 on an inference-scoped OAuth token, network, timeout) propagates to the
+ * caller, which decides whether to fall back — this function does not swallow it
+ * and silently hand back the static list under a "live" label.
+ */
+export async function fetchAnthropicModelChoices(opts: {
+  credential: string;
+  baseUrl?: string;
+  oauthMode?: boolean;
+  timeoutMs?: number;
+}): Promise<AnthropicModelChoice[]> {
+  const oauthMode = opts.oauthMode ?? isAnthropicOAuthCredential(opts.credential);
+  const client = new Anthropic({
+    baseURL: opts.baseUrl || ANTHROPIC_DEFAULT_BASE_URL,
+    // Same null-slotting as the provider constructor: passing both a key and a
+    // token is rejected by the API, and an unset slot would otherwise be filled
+    // from the environment.
+    apiKey: oauthMode ? null : opts.credential,
+    authToken: oauthMode ? opts.credential : null,
+    timeout: opts.timeoutMs ?? 15_000,
+    maxRetries: 1,
+    ...(oauthMode ? { defaultHeaders: { "anthropic-beta": OAUTH_BETA_HEADER } } : {}),
+  });
+
+  const choices: AnthropicModelChoice[] = [];
+  const deadline = Date.now() + (opts.timeoutMs ?? 15_000) * 2;
+  let pages = 0;
+
+  // Iterate PAGES, not items. The item-level async iterator would paginate too,
+  // but it hides the page boundary, and the bound that matters here is a page
+  // count: `timeout` is per HTTP ATTEMPT, not per listing, so an upstream that
+  // keeps answering has_more:true with a cursor it never advances would spin
+  // forever inside a request the route cannot abort. Counting items instead
+  // would make the bound depend on page size and let a one-item-per-page stall
+  // run for thousands of round trips before tripping.
+  const first = await client.models.list({ limit: MODEL_LIST_PAGE_SIZE });
+  for await (const page of first.iterPages()) {
+    pages += 1;
+    if (pages > MAX_MODEL_LIST_PAGES || Date.now() > deadline) {
+      throw new Error(`Anthropic model listing did not terminate within ${MAX_MODEL_LIST_PAGES} pages`);
+    }
+    for (const model of page.getPaginatedItems()) {
+      const parts: string[] = [];
+      if (model.max_input_tokens) parts.push(`${formatTokenCount(model.max_input_tokens)} context`);
+      if (model.max_tokens) parts.push(`${formatTokenCount(model.max_tokens)} output`);
+      choices.push({
+        id: model.id,
+        label: model.display_name || model.id,
+        hint: parts.join(" · "),
+        ...(model.max_tokens ? { maxOutputTokens: model.max_tokens } : {}),
+      });
+      // Anthropic's own ceiling for this id, which beats any prefix guess. See
+      // rememberAnthropicOutputLimit for why this matters after this change.
+      if (model.max_tokens) rememberAnthropicOutputLimit(model.id, model.max_tokens);
+    }
+  }
+  if (choices.length === 0) throw new Error("Anthropic returned an empty model list");
+  return choices;
+}
+/**
+ * Anthropic's REAL per-model output ceiling.
+ *
+ * On the OpenAI-compatible wire max_tokens is only a slice of the shared context
+ * window, so the derived budget can safely be "whatever the window has left".
+ * The Messages API is different: it rejects (400 invalid_request_error) a request
+ * whose max_tokens exceeds the model's own output limit, so the derived budget
+ * must be clamped by this as well as by the window.
+ *
+ * Longest matching prefix wins, so a dated/suffixed id resolves to its family.
+ * An id that matches nothing falls back to ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS:
+ * under-asking truncates one answer, over-asking fails the request outright, so
+ * the unknown case biases low (declare `maxTokens` in config to raise it for a
+ * model not listed here). Exported for tests.
+ */
+export const ANTHROPIC_MODEL_OUTPUT_LIMITS: ReadonlyArray<{ prefix: string; maxOutputTokens: number }> = [
+  { prefix: "claude-fable-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-mythos-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-sonnet-5", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-8", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-7", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-6", maxOutputTokens: 128_000 },
+  { prefix: "claude-sonnet-4-6", maxOutputTokens: 128_000 },
+  { prefix: "claude-opus-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-sonnet-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-sonnet-4-0", maxOutputTokens: 64_000 },
+  { prefix: "claude-haiku-4-5", maxOutputTokens: 64_000 },
+  { prefix: "claude-opus-4-1", maxOutputTokens: 32_000 },
+  { prefix: "claude-opus-4-0", maxOutputTokens: 32_000 },
+];
+/** Conservative ceiling for a model id this build has never heard of. */
+export const ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS = 8_192;
+
+/**
+ * Extra ceiling for the NON-STREAMING path only.
+ *
+ * The Messages API refuses a non-streaming request whose max_tokens implies a
+ * generation past its ~10-minute single-request cap ("… is the maximum allowed
+ * number of output tokens for <model> with non-streaming requests. Please
+ * consider streaming…"), and this provider's own complete() hard timeout is 10
+ * minutes as well — so a budget derived from the whole context window would turn
+ * an unreachable ceiling into a hard 400. The streaming paths
+ * (stream/completeViaStream) carry the full derived budget; only the one-shot
+ * complete() is clamped, and even clamped it is 4x the 4096 it used to send.
+ */
+export const ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS = 16_384;
+
+/**
+ * PER-MODEL non-streaming ceilings, where the API is stricter than the blanket number above.
+ *
+ * The blanket 16,384 is not a ceiling the API agrees with everywhere: for the opus-4 families
+ * the Messages API refuses any non-streaming request over 8,192 ("8192 is the maximum allowed
+ * number of output tokens for claude-opus-4-1 with non-streaming requests"). That is a 400 with
+ * no retry — isRetryableProviderError declines a non-429 4xx and failover matches none of the
+ * words in the message — so every judge, rescue and synthesis call on such a model would hard
+ * fail. The SDK ships this table and guards it client-side, but only when no client timeout is
+ * configured, and this provider always sets one.
+ *
+ * Longest matching prefix wins, as with the streaming table above.
+ */
+const ANTHROPIC_NONSTREAMING_MODEL_LIMITS: ReadonlyArray<{ prefix: string; maxOutputTokens: number }> = [
+  { prefix: "claude-opus-4-1", maxOutputTokens: 8_192 },
+  { prefix: "claude-opus-4-0", maxOutputTokens: 8_192 },
+];
+
+/** The non-streaming ceiling for `modelId`: the per-model one where the API states one. */
+export function resolveAnthropicNonStreamingMaxOutputTokens(modelId: string): number {
+  let best: { prefix: string; maxOutputTokens: number } | undefined;
+  for (const entry of ANTHROPIC_NONSTREAMING_MODEL_LIMITS) {
+    if (!modelId.startsWith(entry.prefix)) continue;
+    if (!best || entry.prefix.length > best.prefix.length) best = entry;
+  }
+  return Math.min(ANTHROPIC_NONSTREAMING_MAX_OUTPUT_TOKENS, best?.maxOutputTokens ?? Number.MAX_SAFE_INTEGER);
+}
+
+/** The output ceiling Anthropic itself enforces for `modelId`. Exported for tests. */
+export function resolveAnthropicMaxOutputTokens(modelId: string): number {
+  // Anthropic's own number for this exact id wins over any prefix guess.
+  const learned = learnedOutputLimits.get(modelId);
+  if (learned !== undefined) return learned;
+  let best: { prefix: string; maxOutputTokens: number } | undefined;
+  for (const entry of ANTHROPIC_MODEL_OUTPUT_LIMITS) {
+    if (!modelId.startsWith(entry.prefix)) continue;
+    if (!best || entry.prefix.length > best.prefix.length) best = entry;
+  }
+  return best?.maxOutputTokens ?? ANTHROPIC_FALLBACK_MAX_OUTPUT_TOKENS;
+}
+
 const OAUTH_BETA_HEADER = "oauth-2025-04-20";
 /**
  * Subscription OAuth tokens are scoped to Claude Code, and the Messages API
@@ -352,6 +588,21 @@ function toAnthropicToolChoice(
   }
 }
 
+/**
+ * `finishReason` for a FAILED attempt's audit row, on the same split the OpenAI-compatible
+ * provider's abort branch records: anything that STOPPED an otherwise-working generation — the
+ * caller's deadline or cancel, the inactivity stall, the total-budget cap, the reasoning-burn
+ * guard — is "aborted"; a transport or API failure is "error". The distinction is the one an
+ * analysis needs, because an aborted call's duration is a measurement of patience while an
+ * errored one's is a measurement of the failure.
+ */
+function auditFinishReasonForFailure(err: unknown, aborted: boolean): "aborted" | "error" {
+  if (aborted || isReasoningBurnAbort(err) || isDeadlineAbort(err)) return "aborted";
+  // The SDK surfaces a caller abort as a DOMException named "AbortError" (see the laundering
+  // note in the OpenAI-compatible provider) — it carries none of the identities above.
+  return (err as { name?: unknown } | undefined)?.name === "AbortError" ? "aborted" : "error";
+}
+
 export class AnthropicProvider implements ChatProvider {
   private client: Anthropic;
   private modelConfig: ModelConfig;
@@ -363,6 +614,8 @@ export class AnthropicProvider implements ChatProvider {
   private lastHealthCheck = 0;
   private configuredMaxRetries: number;
   private requestTimeoutMs: number;
+  /** Per-agent total-stream backstop, resolved from the ModelConfig (see resolveStreamTotalCapMs). */
+  private readonly maxStreamTotalMs: number;
   private loadedModel?: string;
   private lastError?: string;
   private requestCount = 0;
@@ -386,6 +639,9 @@ export class AnthropicProvider implements ChatProvider {
     this.promptCaching = options.promptCaching ?? true;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
     this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs ?? 120_000);
+    // Per-agent, off the ModelConfig — same seam and same rationale as the OpenAI-
+    // compatible provider (providers/lmstudio.ts resolveStreamTotalCapMs).
+    this.maxStreamTotalMs = resolveStreamTotalCapMs(modelConfig);
     // Pass the unused credential slot as null so the SDK does not pick up a
     // conflicting ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the
     // environment (sending both headers is rejected by the API).
@@ -484,35 +740,37 @@ export class AnthropicProvider implements ChatProvider {
   // Same wall-clock guard as LMStudioProvider: the SDK timeout has been seen
   // not to fire when a connection is held open without data, so every attempt
   // gets a setTimeout-based abort we control. Hard timeouts are terminal.
+  //
+  // SIGNAL LIFETIME — composed with AbortSignal.any, and the only cleanup is the
+  // timer. See the long note on LMStudioProvider.withHardTimeout: unhooking a
+  // hand-rolled parent listener in `finally` severs the caller's abort the instant
+  // the stream OPENS, because that is when `fn` resolves on the streaming path.
+  // A composite signal has no un-hook step to get wrong.
   private async withHardTimeout<T>(
     parentSignal: AbortSignal | undefined,
     timeoutMs: number,
     fn: (combinedSignal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const ac = new AbortController();
-    let parentListener: (() => void) | undefined;
+    const timeoutAc = new AbortController();
     let timedOut = false;
-
-    if (parentSignal?.aborted) {
-      ac.abort(parentSignal.reason);
-    } else if (parentSignal) {
-      parentListener = () => ac.abort(parentSignal.reason);
-      parentSignal.addEventListener("abort", parentListener, { once: true });
-    }
 
     const timer = setTimeout(() => {
       timedOut = true;
-      ac.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
+      timeoutAc.abort(new Error(`LLM call exceeded hard timeout of ${timeoutMs}ms`));
     }, timeoutMs);
 
+    const combined = parentSignal
+      ? AbortSignal.any([parentSignal, timeoutAc.signal])
+      : timeoutAc.signal;
+
     try {
-      return await fn(ac.signal);
+      return await fn(combined);
     } catch (err) {
       if (timedOut && !parentSignal?.aborted) throw new ProviderHardTimeoutError(timeoutMs);
       throw err;
     } finally {
+      // ONLY the timer — never the caller's link to what the open phase produced.
       clearTimeout(timer);
-      if (parentListener && parentSignal) parentSignal.removeEventListener("abort", parentListener);
     }
   }
 
@@ -521,7 +779,55 @@ export class AnthropicProvider implements ChatProvider {
     return true;
   }
 
-  private buildRequestBase(messages: LLMMessage[], tools: LLMToolDef[], toolChoice?: "auto" | "required" | "none") {
+  /**
+   * Per-request completion budget, derived the same way the OpenAI-compatible
+   * providers derive theirs: what the context window has left after the prompt,
+   * minus a reserve — then clamped by the model's real output ceiling.
+   *
+   * The previous `modelConfig.maxTokens ?? 4096` turned into a silent 4x CUT the
+   * moment the per-agent maxTokens pins were removed: no preset in the repo
+   * declares one, so every agent resolved to `undefined` and every Claude call
+   * was pinned at 4096 — below the 16384 the builder agents used to carry, on
+   * exactly the agents whose shard comments recorded truncation audits.
+   *
+   * A declared maxTokens is still honoured, but only as a CEILING on top of the
+   * derived budget (the contract computeOutputTokenBudget already implements).
+   *
+   * The window used is the CONFIGURED one, not Claude's own (which is far larger
+   * on current models). That is deliberate: one ModelConfig is shared across every
+   * endpoint of a failover chain, so the configured window is the number the
+   * session trimmer also budgets against. It under-uses Claude rather than
+   * over-committing, and the model ceiling above is what actually keeps the
+   * request legal.
+   */
+  private resolveMaxTokens(
+    messages: readonly LLMMessage[],
+    tools: readonly LLMToolDef[],
+    mode: "complete" | "stream",
+    perCallCeiling?: number,
+  ): number {
+    const modelId = parseModelId(this.modelConfig.primary);
+    const ceilings = [resolveAnthropicMaxOutputTokens(modelId)];
+    if (mode === "complete") ceilings.push(resolveAnthropicNonStreamingMaxOutputTokens(modelId));
+    if (this.modelConfig.maxTokens !== undefined) ceilings.push(this.modelConfig.maxTokens);
+    // A caller's ceiling for THIS call only — one more ceiling, never a raise.
+    if (typeof perCallCeiling === "number" && Number.isFinite(perCallCeiling) && perCallCeiling > 0) {
+      ceilings.push(Math.floor(perCallCeiling));
+    }
+    return computeOutputTokenBudget({
+      contextWindow: this.modelConfig.contextWindow,
+      estimatedPromptTokens: estimatePromptTokensForRequest(messages, tools),
+      declaredMaxTokens: Math.min(...ceilings),
+    });
+  }
+
+  private buildRequestBase(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    mode: "complete" | "stream",
+    toolChoice?: "auto" | "required" | "none",
+    perCallMaxTokens?: number,
+  ) {
     const modelId = parseModelId(this.modelConfig.primary);
     const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
     let anthropicTools = toAnthropicTools(tools);
@@ -567,7 +873,7 @@ export class AnthropicProvider implements ChatProvider {
       modelId,
       params: {
         model: modelId,
-        max_tokens: this.modelConfig.maxTokens ?? 4096,
+        max_tokens: this.resolveMaxTokens(messages, tools, mode, perCallMaxTokens),
         ...(systemParam ? { system: systemParam } : {}),
         messages: anthropicMessages,
         ...(anthropicTools.length > 0
@@ -629,8 +935,60 @@ export class AnthropicProvider implements ChatProvider {
     return true;
   }
 
-  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
-    const { modelId, params } = this.buildRequestBase(messages, tools);
+  /**
+   * One audit row per model call ATTEMPT — success or failure — the same field set as
+   * LMStudioProvider.auditModelCall so the audit analysis reads both providers alike. This
+   * provider emitted NO such rows: four Claude sub-agent runs and two Claude-orchestrated turns
+   * (2026-09-13) were absent from every per-call figure. `controls` mirrors the
+   * OpenAI-compatible row's keys; the thinking ones are null because this provider sends no
+   * thinking parameter (see the file header).
+   *
+   * Both failure paths write one too. Emitting only on the normal return is the survivor bias
+   * the September audit diagnosed in the openai SDK's laundered aborts: the calls that matter
+   * to a duration or reasoning percentile are precisely the ones that ran long and were cut,
+   * and a percentile computed over the survivors reads them as absent rather than as slow.
+   * LMStudioProvider.streamOnce has recorded its abort path this way all along; this matches it.
+   */
+  private auditModelCall(input: {
+    modelId: string;
+    mode: "complete" | "stream";
+    startedAt: number;
+    firstTokenAt?: number;
+    usage: { promptTokens: number; completionTokens: number } | undefined;
+    finishReason: string | undefined;
+    toolCount: number;
+    messageCount: number;
+    /** Thinking characters captured by the stream parser; null where no parser runs (complete()). */
+    reasoningChars: number | null;
+  }): void {
+    const now = Date.now();
+    // See the lmstudio emitter: ambient attribution so the row joins to its turn/agent.
+    const attribution = currentCallAttribution();
+    logAudit("provider_model_call", {
+      ...attribution.data,
+      model: input.modelId,
+      mode: input.mode,
+      durationMs: now - input.startedAt,
+      ...(input.firstTokenAt !== undefined ? { ttftMs: input.firstTokenAt - input.startedAt } : {}),
+      promptTokens: input.usage?.promptTokens ?? null,
+      completionTokens: input.usage?.completionTokens ?? null,
+      // The Messages API reports no reasoning split in usage.
+      reasoningTokens: null,
+      reasoningChars: input.reasoningChars,
+      finishReason: input.finishReason ?? null,
+      toolCount: input.toolCount,
+      messageCount: input.messageCount,
+      controls: {
+        reasoningEffort: null,
+        enableThinking: null,
+        cachePrompt: this.promptCaching,
+      },
+    }, { ...attribution.opts, severity: "info" });
+  }
+
+  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
+    // options.controls is a documented no-op here: this provider sends no thinking parameter (file header).
+    const { modelId, params } = this.buildRequestBase(messages, tools, "complete", options?.toolChoice, options?.maxTokens);
 
     let attempt = 0;
     const maxAttempts = this.configuredMaxRetries + 1;
@@ -663,6 +1021,16 @@ export class AnthropicProvider implements ChatProvider {
         const promptTokens = (usage.input_tokens ?? 0)
           + (usage.cache_read_input_tokens ?? 0)
           + (usage.cache_creation_input_tokens ?? 0);
+        this.auditModelCall({
+          modelId,
+          mode: "complete",
+          startedAt,
+          usage: { promptTokens, completionTokens: usage.output_tokens ?? 0 },
+          finishReason: mapStopReason(response.stop_reason),
+          toolCount: tools.length,
+          messageCount: messages.length,
+          reasoningChars: null,
+        });
         return {
           content: content.trim().length > 0 ? content : null,
           tool_calls: toolCalls,
@@ -672,10 +1040,25 @@ export class AnthropicProvider implements ChatProvider {
             totalTokens: promptTokens + (usage.output_tokens ?? 0),
           },
           finishReason: mapStopReason(response.stop_reason),
+          // Mirrors the OpenAI-compatible complete(): "length" alone is ambiguous
+          // downstream, so state that the OUTPUT BUDGET is what cut this response.
+          ...(response.stop_reason === "max_tokens" ? { truncatedBy: "output_budget" as const } : {}),
         };
       } catch (err: unknown) {
         endProviderCall(callId);
         this.recordRequestFailure(startedAt, err);
+        // How long the failed attempt ran is exactly what a postmortem needs; no usage came
+        // back, and there is no stream parser on this path, so those stay null.
+        this.auditModelCall({
+          modelId,
+          mode: "complete",
+          startedAt,
+          usage: undefined,
+          finishReason: auditFinishReasonForFailure(err, signal?.aborted === true),
+          toolCount: tools.length,
+          messageCount: messages.length,
+          reasoningChars: null,
+        });
         if (err instanceof ProviderHardTimeoutError) {
           log.error({ attempt, timeoutMs: err.timeoutMs, model: modelId }, "Anthropic completion hit hard timeout — not retrying");
           throw err;
@@ -702,46 +1085,135 @@ export class AnthropicProvider implements ChatProvider {
 
   /** Same contract as LMStudioProvider.completeViaStream — a complete()-shaped
    *  result accumulated from the streaming endpoint, giving the activity
-   *  monitor live token progress and the per-chunk inactivity abort. */
-  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+   *  monitor live token progress and the per-chunk inactivity abort, and the
+   *  same partial-result salvage on a stream that dies after producing work. */
+  async completeViaStream(
+    messages: LLMMessage[],
+    tools: LLMToolDef[],
+    signal?: AbortSignal,
+    options?: CompletionCallOptions,
+  ): Promise<LLMResponse> {
     let content = "";
     const reasoningParts: string[] = [];
     const toolBuffers = new Map<string, { id: string; name: string; args: string }>();
     const toolOrder: string[] = [];
     let finishReason = "stop";
-    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let truncatedBy: LLMResponse["truncatedBy"];
+    let usage: { promptTokens: number; completionTokens: number; totalTokens: number; estimated?: boolean } =
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-    for await (const chunk of this.stream(messages, tools, signal)) {
-      switch (chunk.type) {
-        case "text_delta":
-          content += chunk.content ?? "";
-          break;
-        case "reasoning_delta":
-          if (chunk.content) reasoningParts.push(chunk.content);
-          break;
-        case "tool_call_start": {
-          const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
-          if (!toolBuffers.has(id)) {
-            toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
-            toolOrder.push(id);
+    try {
+      // guardReasoningBurn is armed on this path only — it is the one with the salvage.
+      for await (const chunk of this.stream(messages, tools, signal, { ...options, guardReasoningBurn: true })) {
+        // Second consumer-side abort check (stream() has the first) — the last
+        // loop between the transport and the caller. Throws into the catch below,
+        // where the existing operator-vs-deadline classification decides.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
+        switch (chunk.type) {
+          case "text_delta":
+            content += chunk.content ?? "";
+            break;
+          case "reasoning_delta":
+            if (chunk.content) reasoningParts.push(chunk.content);
+            break;
+          case "tool_call_start": {
+            const id = chunk.toolCallId ?? `tc_${toolOrder.length}`;
+            if (!toolBuffers.has(id)) {
+              toolBuffers.set(id, { id, name: chunk.toolName ?? "", args: "" });
+              toolOrder.push(id);
+            }
+            break;
           }
-          break;
+          case "tool_call_delta": {
+            const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
+            if (buf) buf.args += chunk.argumentsDelta ?? "";
+            break;
+          }
+          case "done":
+            finishReason = chunk.finishReason ?? finishReason;
+            // The provider's OWN "length" (stop_reason max_tokens) — distinct from
+            // the fabricated one the salvage path below sets.
+            if (finishReason === "length") truncatedBy = "output_budget";
+            if (chunk.usage) usage = chunk.usage;
+            break;
         }
-        case "tool_call_delta": {
-          const buf = chunk.toolCallId ? toolBuffers.get(chunk.toolCallId) : undefined;
-          if (buf) buf.args += chunk.argumentsDelta ?? "";
-          break;
-        }
-        case "done":
-          finishReason = chunk.finishReason ?? finishReason;
-          if (chunk.usage) usage = chunk.usage;
-          break;
       }
+    } catch (err) {
+      // SALVAGE — identical semantics to LMStudioProvider.completeViaStream. Without
+      // it the DeadlineAbort design ("the run hit its own budget, so whatever the
+      // model already produced is still wanted") simply did not hold on this
+      // provider: a deadline crossing threw away every token Anthropic had already
+      // streamed AND billed, and the caller's usage accounting never saw them.
+      // An OPERATOR cancel is still not a salvage case — the user asked for it to
+      // stop, so that abort propagates untouched.
+      // A mid-stream BURN abort salvages on the same grounds as a deadline (see the
+      // OpenAI-compatible provider): the provider stopped it, the operator did not.
+      const burned = isReasoningBurnAbort(err);
+      const operatorCancelled = signal?.aborted === true && !isDeadlineAbort(signal.reason);
+      const salvageable = content.trim().length > 0 || toolOrder.length > 0 || reasoningParts.length > 0;
+      if (!salvageable || operatorCancelled) throw err;
+      log.warn({
+        err: err instanceof Error ? err.message : String(err),
+        model: parseModelId(this.modelConfig.primary),
+        contentChars: content.length,
+        toolCalls: toolOrder.length,
+        reasoningChars: reasoningParts.join("").length,
+        reasoningBurn: burned,
+      }, "Anthropic stream failed after producing content — salvaging the partial result instead of failing the turn");
+      // Usage only reaches us on the final `done` chunk, which a cut stream never
+      // emits — so a salvaged run reported completionTokens: 0. Both stall detectors
+      // read "did completionTokens increase?" as progress, and the cost aggregator
+      // would under-report output Anthropic already billed. Estimate it, and say so
+      // via truncatedBy.
+      //
+      // THE PROMPT SIDE IS MISSING FOR THE SAME REASON. `usage` is only ever assigned on that
+      // final chunk, so a cut stream reported promptTokens 0 as well — and this is the only
+      // PRICED provider, so a salvaged turn under-reported its cost by the whole prompt, which
+      // is usually the larger half. The LM Studio salvage beside it estimates both and flags
+      // the record; this now matches.
+      if (usage.completionTokens === 0 || usage.promptTokens === 0) {
+        const producedChars = content.length
+          + reasoningParts.join("").length
+          + toolOrder.reduce((sum, id) => sum + (toolBuffers.get(id)?.args.length ?? 0), 0);
+        const estimated = usage.completionTokens > 0
+          ? usage.completionTokens
+          : Math.ceil(producedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN);
+        const promptTokens = usage.promptTokens > 0
+          ? usage.promptTokens
+          : estimatePromptTokensForRequest(messages, tools);
+        usage = {
+          promptTokens,
+          completionTokens: estimated,
+          totalTokens: promptTokens + estimated,
+          estimated: true,
+        };
+      }
+      truncatedBy = burned ? "reasoning_burn" : isDeadlineAbort(signal?.reason) ? "deadline" : "transport";
+      finishReason = "length";
     }
 
     const tool_calls = toolOrder.map((id) => {
       const buf = toolBuffers.get(id)!;
-      return { id: buf.id, name: buf.name, arguments: parseToolArguments(buf.args) };
+      let args: Record<string, unknown>;
+      if (!buf.args.trim()) {
+        args = {};
+      } else {
+        // Tolerant parse: a salvaged stream cuts the argument JSON mid-object, and
+        // parseToolArguments would silently return {} — an empty-args tool call the
+        // caller cannot tell from a genuinely argument-less one.
+        const salvaged = salvageToolCallArguments(buf.args);
+        if (salvaged) {
+          args = salvaged;
+        } else {
+          log.warn({ toolName: buf.name, rawArgs: buf.args.slice(0, 200) }, "Failed to parse streamed Anthropic tool call arguments");
+          args = { _parse_error: true, _raw: buf.args };
+        }
+      }
+      return { id: buf.id, name: buf.name, arguments: args };
     });
 
     const reasoning = reasoningParts.join("").trim();
@@ -751,6 +1223,7 @@ export class AnthropicProvider implements ChatProvider {
       tool_calls,
       usage,
       finishReason,
+      ...(truncatedBy ? { truncatedBy } : {}),
     };
   }
 
@@ -758,23 +1231,22 @@ export class AnthropicProvider implements ChatProvider {
     messages: LLMMessage[],
     tools: LLMToolDef[],
     signal?: AbortSignal,
-    options?: { toolChoice?: "auto" | "required" | "none" },
+    options?: StreamCallOptions,
   ): AsyncGenerator<StreamChunk> {
-    const { modelId, params } = this.buildRequestBase(messages, tools, options?.toolChoice);
+    // options.controls is a documented no-op here as well — see complete().
+    const { modelId, params } = this.buildRequestBase(messages, tools, "stream", options?.toolChoice, options?.maxTokens);
 
+    // streamAc carries the provider-side aborts (total-budget cap, inactivity
+    // stall), composed ONCE with the caller's signal. The composite is what the
+    // SDK holds, and it stays linked for the whole life of the stream — see the
+    // note on withHardTimeout for what the hand-rolled listener pair broke.
     const streamAc = new AbortController();
-    let streamParentListener: (() => void) | undefined;
-    if (signal?.aborted) {
-      streamAc.abort(signal.reason);
-    } else if (signal) {
-      streamParentListener = () => streamAc.abort(signal.reason);
-      signal.addEventListener("abort", streamParentListener, { once: true });
-    }
+    const streamSignal = signal ? AbortSignal.any([signal, streamAc.signal]) : streamAc.signal;
 
     // Open the stream with the same bounded retry/backoff as complete(). The 429
     // (and 529) happens at open time, before any chunk; previously this threw with
     // ZERO retry, so concurrent sub-agents hitting a rate limit all failed at once.
-    const openStream = () => this.withHardTimeout(streamAc.signal, this.requestTimeoutMs + 5000, async (s) =>
+    const openStream = () => this.withHardTimeout(streamSignal, this.requestTimeoutMs + 5000, async (s) =>
       this.client.messages.create({ ...params, stream: true }, await this.requestOptions(s)),
     );
     let stream: Awaited<ReturnType<typeof openStream>>;
@@ -802,6 +1274,7 @@ export class AnthropicProvider implements ChatProvider {
     let promptTokens = 0;
     let outputTokens = 0;
     let collectedStopReason: string | undefined;
+    let firstChunkAt: number | undefined;
     const startedAt = Date.now();
     const callId = beginProviderCall({ model: modelId, mode: "stream" });
 
@@ -814,8 +1287,69 @@ export class AnthropicProvider implements ChatProvider {
     };
     armInactivity();
 
+    // TOTAL wall-clock BACKSTOP for a caller that passes NO signal, separate from the
+    // inactivity guard above, which measures SILENCE and re-arms on every chunk — so it
+    // can never stop a model that keeps emitting. This path had no total bound at all.
+    //
+    // The `signal === undefined` guard on the check below is what keeps it to that stated
+    // scope. It used to run unconditionally, which made it the last wall clock able to
+    // override an operator's unbounded grant: the grant suspends the sub-agent deadline
+    // and the runtime turn deadline, and this fired regardless. Every delegated call
+    // arrives with a composed signal (agent/runtime.ts always pushes wardenAbort;
+    // sub-agent.ts's composeLlmSignal passes it through even for an "unbound" agent), so
+    // this branch is now reached only by the out-of-turn callers it was written for.
+    const streamStartedAt = Date.now();
+    const totalCapMs = this.maxStreamTotalMs;
+
+    // Live per-chunk reading of this generation — one object, mutated in place. Same
+    // contract as the OpenAI-compatible provider's (see StreamProgress).
+    // reasoningLoopDetected stays false here: this provider is the OBSERVATION path only —
+    // it does not arm the mid-stream abort, so no sampler runs and nothing may latch it.
+    const progress: StreamProgress = { reasoningChars: 0, contentChars: 0, toolCallStarted: false, reasoningLoopDetected: false, reasoningRepeatRatio: 0, reasoningDriftDetected: false, reasoningAnchorCoverage: 1 };
+    const taskAnchors = deriveTaskAnchors(String(messages.find((m) => m.role === "user")?.content ?? ""));
+    let consecutiveDriftSamples = 0;
+    // Same content sampler as the OpenAI-compatible provider, for the same reason: the
+    // decision is "is this circling", not "is this long", and a guard wired into one
+    // provider and not the other is a guard that silently does not exist on half the fleet.
+    let reasoningTail = "";
+    let charsSinceLoopSample = 0;
+    const sampleReasoningForLoop = (delta: string): void => {
+      if (progress.reasoningLoopDetected || !options?.guardReasoningBurn) return;
+      reasoningTail = (reasoningTail + delta).slice(-REASONING_LOOP_WINDOW_CHARS);
+      charsSinceLoopSample += delta.length;
+      if (charsSinceLoopSample < REASONING_SAMPLE_INTERVAL_CHARS) return;
+      charsSinceLoopSample = 0;
+      const drift = detectReasoningDrift(taskAnchors, reasoningTail);
+      progress.reasoningAnchorCoverage = Math.min(progress.reasoningAnchorCoverage, drift.coverage);
+      consecutiveDriftSamples = drift.drifting ? consecutiveDriftSamples + 1 : 0;
+      if (consecutiveDriftSamples >= REASONING_DRIFT_SUSTAINED_SAMPLES) progress.reasoningDriftDetected = true;
+      const verdict = detectReasoningLoop(reasoningTail);
+      progress.reasoningRepeatRatio = Math.max(progress.reasoningRepeatRatio, verdict.repeatRatio);
+      if (verdict.looping) progress.reasoningLoopDetected = true;
+    };
+
     try {
       for await (const event of stream) {
+        firstChunkAt ??= Date.now();
+        // BELT AND BRACES over the composed signal above — same rationale and same
+        // classification as the OpenAI-compatible provider: re-throwing the
+        // signal's own reason lets completeViaStream salvage a DeadlineAbort and
+        // propagate an operator cancel.
+        if (signal?.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new Error(`LLM stream aborted by the caller: ${String(signal.reason)}`);
+        }
+        if (signal === undefined && Date.now() - streamStartedAt > totalCapMs) {
+          // THROW, do not break: a break would leave the try normally, record a
+          // SUCCESS, and report the guillotined generation as a clean stop.
+          const capErr = new Error(
+            `LLM stream exceeded its total budget of ${Math.round(totalCapMs / 1000)}s while still producing output `
+            + "— the model is generating without converging (most often a runaway reasoning block)",
+          );
+          streamAc.abort(capErr);
+          throw capErr;
+        }
         armInactivity();
         switch (event.type) {
           case "message_start": {
@@ -829,6 +1363,7 @@ export class AnthropicProvider implements ChatProvider {
             if (event.content_block.type === "tool_use") {
               recordProviderToken(callId);
               toolBlockIds.set(event.index, event.content_block.id);
+              progress.toolCallStarted = true;
               yield { type: "tool_call_start", toolCallId: event.content_block.id, toolName: event.content_block.name };
             }
             break;
@@ -836,8 +1371,10 @@ export class AnthropicProvider implements ChatProvider {
           case "content_block_delta": {
             recordProviderToken(callId);
             if (event.delta.type === "text_delta") {
+              progress.contentChars += event.delta.text.length;
               yield { type: "text_delta", content: event.delta.text };
             } else if (event.delta.type === "thinking_delta") {
+              progress.reasoningChars += event.delta.thinking.length; sampleReasoningForLoop(event.delta.thinking);
               yield { type: "reasoning_delta", content: event.delta.thinking };
             } else if (event.delta.type === "input_json_delta") {
               const toolCallId = toolBlockIds.get(event.index);
@@ -855,18 +1392,69 @@ export class AnthropicProvider implements ChatProvider {
           default:
             break;
         }
+
+        // Per-chunk observation + the mid-stream burn abort. Identical policy and
+        // identical rationale to the OpenAI-compatible provider: the supervisor cannot
+        // see inside a call that has not returned, the operator's unbounded grant is
+        // read lazily so a grant answered mid-generation still wins, and the throw (not
+        // a break) routes through completeViaStream's salvage.
+        options?.onProgress?.(progress);
+        // The grant waives LENGTH, not pathology — same split as the OpenAI-compatible path.
+        if (
+          options?.guardReasoningBurn
+          && isReasoningBurn(progress)
+          && (progress.reasoningLoopDetected || !(options.isUnbounded?.() ?? false))
+        ) {
+          const burnErr = new ReasoningBurnAbort(progress.reasoningChars, progress.contentChars);
+          log.warn(
+            { model: modelId, reasoningChars: progress.reasoningChars, contentChars: progress.contentChars, elapsedMs: Date.now() - streamStartedAt },
+            "Aborting an in-flight generation that is burning reasoning with nothing behind it",
+          );
+          streamAc.abort(burnErr);
+          throw burnErr;
+        }
       }
     } catch (err) {
       this.recordRequestFailure(startedAt, err);
+      // The row goes out BEFORE the rethrow, with the truth in finishReason and the tokens and
+      // thinking characters seen so far — the reasoning-burn abort in particular is a call whose
+      // whole significance is how much reasoning it produced, and dropping it left the burn
+      // invisible to the very percentiles that would size it.
+      this.auditModelCall({
+        modelId,
+        mode: "stream",
+        startedAt,
+        ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+        usage: { promptTokens, completionTokens: outputTokens },
+        finishReason: auditFinishReasonForFailure(err, signal?.aborted === true || streamAc.signal.aborted),
+        toolCount: tools.length,
+        messageCount: messages.length,
+        reasoningChars: progress.reasoningChars,
+      });
+      // Rethrown untouched: the caller classifies a burn on the error's identity, which
+      // the generic wrap below would erase.
+      if (isReasoningBurnAbort(err)) throw err;
       log.error({ err, model: modelId }, "Anthropic streaming failed");
       throw new Error(`Anthropic stream failed (model: ${modelId}): ${String(err)}`);
     } finally {
       endProviderCall(callId);
       if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
-      if (streamParentListener && signal) signal.removeEventListener("abort", streamParentListener);
+      // No listener to unhook: streamSignal is an AbortSignal.any composite.
     }
 
     this.recordRequestSuccess(startedAt);
+    this.auditModelCall({
+      modelId,
+      mode: "stream",
+      startedAt,
+      ...(firstChunkAt !== undefined ? { firstTokenAt: firstChunkAt } : {}),
+      usage: { promptTokens, completionTokens: outputTokens },
+      finishReason: mapStopReason(collectedStopReason),
+      toolCount: tools.length,
+      messageCount: messages.length,
+      // Every thinking_delta the parser routed to reasoning_delta — the burn guard's counter.
+      reasoningChars: progress.reasoningChars,
+    });
     yield {
       type: "done",
       finishReason: mapStopReason(collectedStopReason),

@@ -15,6 +15,9 @@ coverage/
 # Runtime secrets and credentials
 starlingai.json
 config/mail/accounts.json
+# Overlay accounts the running mail-service re-reads (e.g. the e2e eval mailbox that
+# `pnpm e2e:env up` drops here) — same status as accounts.json.
+config/mail/accounts.d/
 # Local, machine-specific config overrides. A `*.local.jsonc` shard is loaded by the
 # config globber AFTER its numbered sibling (30-auth.jsonc < 30-auth.local.jsonc), so it
 # overrides — put deployment-specific secrets (e.g. a private OIDC issuer/clientId, dev
@@ -62,6 +65,11 @@ workspace/runtime/runtime.overrides.json
 # workspace/presentation/. None of it is source — keep it out of the repo.
 workspace/generated/
 workspace/presentation/
+# Per-user workspace roots (tools/workspace-path.ts userWorkspaceRoot): each account's own
+# generated/ and uploads/ live under workspace/users/<segment>/. Same reasoning as the two lines
+# above — none of it is source — and the rules above do not reach it, because the zone name is no
+# longer the top segment.
+workspace/users/
 
 # Document-RAG uploads: files attached in chat or uploaded to the user/workspace
 # library, plus the .registry.json manifest. Runtime user data embedded into
@@ -99,3 +107,12 @@ packages/*/package-lock.json
 # only this machine runs). Same convention as config/**/*.local.jsonc: loaded after
 # the numbered sibling, never committed.
 workspace/**/*.local.jsonc
+
+# Per-deployment routing eval cases — they name YOUR catalog and carry your own queries.
+# The committed starting point is live-cases.example.jsonl.
+eval/routing/live-cases.jsonl
+
+# End-to-end harness: the eval accounts' plaintext passwords (`pnpm e2e:setup` writes
+# eval/e2e/.credentials.local.json; their hashes go to config/gateway/31-e2e.local.jsonc, covered above).
+eval/e2e/**/*.local.json
+eval/e2e/**/*.local.jsonc

@@ -46,7 +46,7 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | `GET` | `/readyz` | returns readiness, active-session count, deployment-mode dependencies, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled); clustered modes return `503` when Redis or PostgreSQL is unavailable |
 | `GET` | `/api/status` | authenticated summary of uptime and active sessions |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
-| `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity); 503 if any subsystem is unavailable |
+| `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity, and a sandbox canary: a `docker run` through shell_exec must hand back what it printed on stdout and on stderr, else `degraded`, never 503; a verdict serves 5 minutes, carries `checkedAt` and `ageMs` (its age on the gateway's clock), and is not re-measured while a turn is running); 503 if any subsystem is unavailable |
 | `GET` | `/api/observability/recovery-nets` | authenticated firing counts per orchestration recovery net (which autopilots actually fire) |
 
 ## REST Endpoints
@@ -131,7 +131,7 @@ the required Claude Code system identity as the first system block on each call.
 | --- | --- | --- |
 | `GET` | `/api/agents` | list configured sub-agents |
 | `GET` | `/api/agents/resolve` | route a natural-language query |
-| `PATCH` | `/api/agents/:name/model` | hot-patch allowed model fields |
+| `PATCH` | `/api/agents/:name/model` | set allowed model fields, saved to the config overlay; `null` clears one, and so does an empty `primary` |
 | `GET` | `/api/agents/outcomes` | aggregate agent outcome statistics |
 
 `GET /api/agents/resolve` query parameters:
@@ -384,7 +384,7 @@ The audit-only Markdown export is the lighter-weight companion. It keeps the ses
 
 Named corpora crawled from documentation sites into the engram document store, then queried by agents with citations — see [Knowledge Bases](knowledge-bases.md) for the crawler, storage, and retrieval model. All routes require a Bearer token; the mutating routes (`POST`, `PATCH`, `DELETE`) are **operator-only** via the route policy. Crawls run in the background — the create/crawl routes return immediately and clients poll `GET` for the progress persisted in the KB record.
 
-Each KB has a **visibility scope** (`workspace` default, or `user`/`session` — see [Scope](knowledge-bases.md#scope)). The list and every `:id` route are **access-filtered** to the caller: workspace KBs are visible to all, user KBs to their owner (`ownerId`, taken from the token), and session KBs to the conversation that presents the owning `sessionId`. Pass `?sessionId=<id>` as a query param on the list/detail/lifecycle routes to act on session-scoped KBs. A KB the caller cannot access returns `404` (the same shape as a missing one — no existence disclosure).
+Each KB has a **visibility scope** (`workspace` default, or `user`/`session` — see [Scope](knowledge-bases.md#scope)). The list and every `:id` route are **access-filtered** to the caller: workspace KBs are visible to all, user KBs to their owner (`ownerId`, taken from the token), and session KBs to the conversation that presents the owning `sessionId`. Pass `?sessionId=<id>` as a query param on the list/detail/lifecycle routes to act on session-scoped KBs. A KB the caller cannot access returns `404` (the same shape as a missing one — no existence disclosure). Under multi-user auth a `?sessionId=` counts only when it names a session the caller may use, as on `/api/sessions/:sessionId`. Another account's session, or an id no session has any more, counts as no `sessionId`: the caller gets the KBs it may see, and that session's KBs read as not found. A `sessionId` in a `POST`/`PATCH` body, the session a KB is put in, must be one the caller may use, or the request gets `404` with `Session not found`. The `/api/documents` routes follow the same rule: their `?sessionId=` counts only when the caller may use it, and an upload into a session the caller may not use gets that `404`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -521,7 +521,7 @@ Supported RPC methods:
 
 | Method | Params |
 | --- | --- |
-| `gateway.status` | none |
+| `gateway.status` | `{ requestId? }` |
 | `session.create` | `{ channel, userId?, workspacePath? }` |
 | `session.end` | `{ sessionId? }` |
 | `session.get` | `{ sessionId?, limit?, beforeMessageId? }` |
@@ -529,15 +529,47 @@ Supported RPC methods:
 | `session.archive` | `{ sessionId? }` |
 | `session.delete` | `{ sessionId? }` |
 | `session.reset` | `{ sessionId? }` |
-| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec? }` |
+| `session.rewind` | `{ sessionId?, historyIndex }` |
+| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` |
 | `scenes.list` | none |
 | `approval.respond` | `{ approvalId, approved }` |
+| `input.respond` | `{ inputId, answer }` |
+| `userInput.respond` | `{ inputId, answer }` |
+| `userInput.hold` | `{ inputId }` |
+| `userInput.preview` | `{ inputId, candidateId }` |
 | `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort? }` |
+| `chat.cancel` | `{ requestId }` |
 | `audit.subscribe` | none |
+
+`gateway.status` with a `requestId` adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
-`session.updateSettings` persists per-session controls: `effort` (`low|medium|high|max`, or `null`/`"default"` to clear → inherit the global default) and `turnTimeoutSec` (independent time-limit override; `0` = unlimited, `null`/`""` to clear). It returns `{ settings }`. The active effort tier bundles the orchestration/latency/reasoning knobs into a profile (see the Effort tiers section of the README); the global default lives at `effort.default` and is editable via `GET`/`PUT /api/effort/config`.
+`--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
+
+`chat.send` answers once the turn has started; the turn itself reports through the events below. The reply:
+
+```json
+{
+  "accepted": true,
+  "requestId": "req-7f4",
+  "unreadSteering": [
+    { "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }
+  ]
+}
+```
+
+- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
+- `unreadSteering` is present only when this start retired steering messages that earlier turns of the session never read (see [Mid-turn steering](#mid-turn-steering)), and only for the session owner or an admin. It has the same shape as in `session.get`. The web stops a turn with `chat.cancel` and only then sends the next message; a stopped turn that finished unwinding in between would otherwise have its leftovers dropped by this start without anyone seeing them.
+- A turn already running on the session is superseded, whichever connection started it: it is aborted and reports its own leftovers on its own final `status`. The new turn runs alone on the history.
+- A `requestId` that a running turn still uses is refused with the RPC error `requestId <id> is already in use by a running turn`, before anything is sent under it.
+- A `requestId` must be 1 to 64 characters of `A-Za-z0-9_-`, as every history message of the turn is saved with it. Any other is refused with the RPC error `requestId must be 1 to 64 characters of A-Za-z0-9_-`, and no turn starts. Without one, the gateway picks one.
+
+`chat.cancel` stops a turn by its request id and answers `{ cancelled, requestId, known }`. It reaches any turn in a session the caller may stop (its owner or an admin, as for `POST /api/sessions/:sessionId/stop`), not only a turn this connection started: a reloaded page still follows its turn by request id. `cancelled` says whether this call stopped the turn. `known` says whether this process runs the turn or ended it within the last ten minutes (at most 1,000 ended turns are remembered), for a caller who may stop it. `cancelled: false, known: true` means the turn was already stopped or is over; only `known: false` calls for stopping the session some other way. A Stop also settles the turn's open questions at once.
+
+`session.rewind` truncates the raw session history before `historyIndex`: entries `0 … historyIndex-1` stay. It answers `{ rewound: true, historyIndex }`. An index at or past the end removes nothing. A negative or non-integer index is an RPC error. It drops the session's `unreadSteering` only when it actually removed something.
+
+`session.updateSettings` persists per-session controls: `effort` (`low|medium|high|max`, or `null`/`"default"` to clear → inherit the global default), `turnTimeoutSec` (independent time-limit override; `0` = unlimited, `null`/`""` to clear) and `imageSettingsPrompt` (`"auto"`: `generate_image` stops asking for render settings in this chat; `"ask"`, `null`, `""` or `"default"`: it asks, the default; anything else is an RPC error). It returns `{ settings }` in the shape `session.get` shows, with the defaults filled in. The active effort tier bundles the orchestration/latency/reasoning knobs into a profile (see the Effort tiers section of the README); the global default lives at `effort.default` and is editable via `GET`/`PUT /api/effort/config`.
 
 `session.list` returns session summaries for both active and archived sessions. `session.get` supports optional transcript paging with `limit` and `beforeMessageId`. When `limit` is omitted, the full transcript is returned. With `limit`, the response returns the newest page before the optional cursor.
 
@@ -561,16 +593,37 @@ Supported RPC methods:
       "id": "session:0",
       "role": "user",
       "content": "hello",
-      "timestamp": "2026-03-15T11:00:01.000Z"
+      "timestamp": "2026-03-15T11:00:01.000Z",
+      "requestId": "req-7f4"
     }
   ],
   "totalMessages": 8,
   "nextBeforeMessageId": "session:0",
-  "settings": { "effort": "medium" }
+  "settings": { "effort": "medium", "imageSettingsPrompt": "ask" },
+  "activeTurn": true,
+  "activeTurnRequestId": "req-7f4",
+  "activeTurnStartedAt": 1790153205322,
+  "openUserInputs": [],
+  "unreadSteering": [
+    { "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }
+  ],
+  "serverNow": 1790153290114
 }
 ```
 
-`settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`); `effort` falls back to the global `effort.default` when the session has none set.
+`settings` carries the per-session effort tier (and any `turnTimeoutSecOverride`) and `imageSettingsPrompt`; `effort` falls back to the global `effort.default` when the session has none set, and `imageSettingsPrompt` to `"ask"`.
+
+A transcript entry of a turn started by `chat.send` carries that turn's `requestId`: its opening message, every assistant entry, and each message sent into it while it ran (`midTurn: true`), which names the turn that read it. The id is saved with the history, so it survives a restart. Entries of other turns (AG-UI, jobs, channels) and of history saved before the field existed have none. Assistant entries of two different turns are never merged into one, so a stopped turn that writes after its replacement has started keeps its own entry.
+
+The rest lets a page reloaded mid-turn, or a second tab, pick the turn up:
+
+- `activeTurn` is `true` while any turn holds the session, including one started over AG-UI and one that was stopped and is still unwinding.
+- `activeTurnRequestId` and `activeTurnStartedAt` (epoch ms) name the running turn when it is a WebSocket turn of this process that has not been stopped. The page can steer it or stop it with `chat.cancel`; a `chat.send` it makes anyway supersedes it.
+- `openUserInputs` lists the session's open structured questions (see [Structured user input](#structured-user-input)) that the caller may answer, each in the `agent.user_input_needed` shape. It is `[]` for anyone else.
+- `unreadSteering` is present only when it is not empty, and only for the session owner or an admin, since these are the person's own words. It lists steering messages that finished turns never read and whose final `status` found the connection that started them gone, each naming that turn as `requestId`. They are kept for at most an hour. The next `chat.send` of the session hands them back and retires them, and a reset, a delete or a rewind that removes something drops them. A turn still running then does not add the messages queued before it (see [Mid-turn steering](#mid-turn-steering)).
+- `serverNow` is the gateway clock (epoch ms) at the answer. The `expiresAt` deadlines of `openUserInputs` are server times, and the page needs the skew to count them down.
+
+For the owner or an admin, `session.get` also subscribes the connection to the session's `agent.user_input_needed`, `agent.user_input_resolved` and `agent.unread_steering` events. A turn's other events go only to the connection that started it.
 
 `session.end` remains accepted for backward compatibility and now archives the session instead of deleting it. Use `session.delete` to permanently remove stored session state.
 
@@ -586,6 +639,11 @@ During `chat.send`, the gateway emits streamed events:
 | `agent.tool_done` | tool name and truncated result |
 | `agent.swarm` | live swarm state snapshot |
 | `agent.approval_needed` | approval id, tool name, and args |
+| `agent.input_needed` | an `ask_user` question: `{ requestId, inputId, question, choices, timeoutMs, expiresAt }`, answered with `input.respond` |
+| `agent.steering_consumed` | the turn read queued steering messages (see [Mid-turn steering](#mid-turn-steering)) |
+| `agent.user_input_needed` | a structured question from a tool (see [Structured user input](#structured-user-input)) |
+| `agent.user_input_resolved` | that question was answered, expired or settled |
+| `agent.unread_steering` | a finished turn's unread steering messages, pushed to the session's open pages |
 | `audit.event` | only after `audit.subscribe` |
 
 Final `status` payloads can include:
@@ -597,8 +655,80 @@ Final `status` payloads can include:
 - `swarmState`
 - `performance`
 - `error`
+- `unconsumedSteering`: `[{ id, text }]`, the steering messages the turn never read
+- `finishReason`: `"timeout"` on the answer delivered for a turn that ran out of time
 
-When a turn times out, the gateway now emits an error message that explicitly says the session was archived.
+When a turn exceeds its time limit, the gateway parks the session (the next message continues it) and delivers the best answer it can recover as `status: "ok"` with `finishReason: "timeout"`. When it cannot recover one, it sends an `error` status saying the session is parked.
+
+`input.respond` answers `{ ok: true }`, or `{ ok: false, errors: [{ "field": "inputId", "message": "expired" }] }` when this connection has no such open question, for example because it timed out. `ask_user` questions belong to the connection that started the turn. They are settled with an empty answer when the turn is stopped or times out, or when that connection closes.
+
+### Mid-turn steering
+
+A message sent while a turn runs is folded into that turn at its next safe point instead of starting a new one. It is sent with `POST /api/sessions/:sessionId/steer` and a body of `{ message, clientMessageId?, requestId? }`. The reply `{ steered, active, id? }` says whether the message was queued. `id` is the `clientMessageId` when that has the accepted shape (8 to 64 of `A-Za-z0-9_-`), and a server id otherwise. A retry with the same id is queued once.
+
+`requestId` names the `chat.send` turn the message was typed into, and only that turn takes it. When another turn holds the session, or none does, nothing is queued and the reply (HTTP 200) is:
+
+```json
+{
+  "steered": false,
+  "active": true,
+  "activeTurnRequestId": "req-7f4",
+  "replaced": true,
+  "replacedBy": "req-7f4",
+  "error": "The turn this was typed into has ended."
+}
+```
+
+`active` says whether any turn holds the session, and `activeTurnRequestId` names the running turn as `session.get` does. `replaced` says another turn took the session from the turn the message was typed into, and `replacedBy` names it when it was a `chat.send` turn, for example a send from another tab (a job or an AG-UI turn has no id to name, so it gives `replaced` alone). Both are absent when that turn simply ended, and both stay set after the replacing turn has ended too, so a client can tell a replaced turn from an ended one when `active` is `false`. Both are kept per session: request ids are the client's, and one session's id never names another session's turn. The server remembers the last 1,000 replacements across all sessions; past that, an older replaced turn reads as one that ended. A turn that was stopped and is still unwinding still takes a message that names it, though `session.get` no longer names that turn; what it does not read comes back on its final `status`. Without `requestId`, the message goes to whichever turn holds the session.
+
+When the turn reads queued messages, the connection that started it gets:
+
+```json
+{
+  "type": "agent.steering_consumed",
+  "data": {
+    "requestId": "req-7f3",
+    "iteration": 2,
+    "at": "2026-09-24T10:15:02.114Z",
+    "discardedDraft": false,
+    "messages": [{ "id": "steer-blue-01", "text": "make it blue" }],
+    "segmentText": "Found three candidates, checking prices next."
+  }
+}
+```
+
+`segmentText` is the text the transcript keeps for the part of the answer before this cut, or `""` when that part wrote none. Like the transcript, it passes over an entry another turn wrote, such as the late write of a turn this one replaced. A live view splits the answer there, so it matches what a reload shows.
+
+Messages the turn never read ride its final `status` as `unconsumedSteering`, and the client sends them on as the next turn. When that status cannot be delivered because the connection that started the turn is gone, the session keeps them. `session.get` lists them as `unreadSteering`, the next `chat.send` reply hands them back, and they are pushed at once to the session's open connections:
+
+```json
+{
+  "type": "agent.unread_steering",
+  "data": {
+    "sessionId": "...",
+    "messages": [{ "id": "steer-blue-01", "text": "make it blue", "requestId": "req-7f3" }]
+  }
+}
+```
+
+The push covers a stopped turn that is slow to notice its Stop and finishes unwinding after the next `chat.send` has started. Neither `session.get` nor that send's reply saw its leftovers then. It reaches the connections that loaded the session with `session.get` or started an interactive (not `--auto`) turn on it, and only those of the session owner or an admin (anyone's, for a session with no owner). Each message names, as `requestId`, the turn that ended without reading it. One message can arrive by more than one of these routes, so clients drop repeats by `id`.
+
+A reset, a delete or a rewind that removes something does not stop a running turn, and leaves what it has queued alone: the turn still folds those messages in, and its final `status` still lists the ones it did not read, for the connection that started it. When that status cannot be delivered, the session neither keeps nor pushes a message queued before the reset, delete or rewind, as the history it belongs to is gone. The rule is per message: one steered into the turn afterwards is kept and pushed like any other.
+
+### Structured user input
+
+A tool at any depth, including a specialist several delegations down, can ask the person behind an interactive turn (not `--auto`) a question with a typed answer. The question belongs to the turn, not to the socket. It stays open across a reload until its own deadline, and any connection of the session owner or an admin can answer it. The turn's end, a Stop, a supersede or the watchdog settle it. While it is open, the turn's clocks hold, the gateway watchdog included, and the waited time is credited back.
+
+- `agent.user_input_needed`: `{ requestId, sessionId, inputId, kind, title, toolCallId?, sourceAgent?, payload, timeoutMs, expiresAt }`. `kind` picks the card the client renders, for example `image_settings`, and `payload` is that card's JSON. `session.get` lists the open ones as `openUserInputs`.
+- `agent.user_input_resolved`: `{ requestId, sessionId, inputId, outcome, reason?, summary? }`.
+  - `outcome` is `configured`, `auto` or `cancelled`.
+  - `reason` is one of `user`, `timeout`, `session_preference`, `no_channel`, `turn_aborted`, `user_skipped` or `disconnected_expired`.
+- `userInput.respond` `{ inputId, answer }` answers `{ ok: true }` or `{ ok: false, errors: [{ field, message }] }`.
+  - A rejected answer leaves the question open to be corrected.
+  - `answer` is JSON. It is size-capped (64 KiB by default; the asking tool sets its own cap) and passes the input guardrail before the tool's own validator.
+  - An unknown or expired `inputId`, and one the caller may not answer, both get `[{ "field": "inputId", "message": "expired" }]`.
+- `userInput.hold` `{ inputId }` answers `{ expiresAt }` when the person opens the full form. The deadline moves to the question's configure window from now, never past the first window plus one configure window. Otherwise it fails with the RPC error `User input request not found or expired`.
+- `userInput.preview` `{ inputId, candidateId }` answers `{ dataUrl, width, height }`, a full-size view of something the payload offered, resolved by the asking tool itself. Otherwise it fails with the RPC error `Preview not available`.
 
 ## AG-UI Streaming
 
@@ -615,6 +745,8 @@ Body:
 ```json
 { "sessionId": "...", "message": "Summarise the quarterly report" }
 ```
+
+`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
 
 It emits the same logical event types used by the WebSocket flow.
 
@@ -671,10 +803,14 @@ Request:
   "params": {
     "task": "Summarise the following text",
     "context": "optional extra context",
-    "sessionId": "optional-parent-session"
+    "sessionId": "optional-session-id"
   }
 }
 ```
+
+`sessionId` names the session the run works in: the run reads and writes that session's shared facts, peer messages and checkpoints. Leave it out and the run gets a new session of its own. With auth off the id is used as given, so it can name a chat session. Under multi-user auth (`auth.enabled`) it names a session in the caller's own namespace instead, derived from the caller's account and the id: the same id from the same account reaches the same session on this route and on `tasks/send` at `/a2a/v1`, and it never joins an existing chat session, the caller's own included. The response does not carry the session id.
+
+Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`.
 
 Response:
 
@@ -690,3 +826,11 @@ Response:
 ```
 
 Calling any other method returns `-32601` with `Method not found — use tasks/send`.
+
+### Public A2A surface
+
+`POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`, and a `tasks/send` task runs as the account the token names, with the workspace root and memory that account's chat runs have. A caller with the shared bearer or an OIDC peer's token is no account of this deployment, and its task runs in the shared workspace root. Under multi-user auth a `tasks/send` `sessionId` that is not a string gets the JSON-RPC error `-32602`.
+
+## MCP server
+
+`/mcp` serves the MCP streamable HTTP transport when `mcp.expose.enabled` and `mcp.expose.http.enabled` are set. With `mcp.expose.http.requireAuth` (the default) it takes a gateway token, in the `Authorization` header or a `?token=` query parameter. Under multi-user auth the token's account is looked up on every request, as on `/api`: a token whose account has been removed gets `401`, and a caller has the role its account has now, not the one the token was signed with. Calls run as that account, with the workspace root and memory its chat runs have. An `mcp-session-id` is served only to the account that opened the session; any other caller gets `404` with `Unknown MCP session`, the reply an unknown id gets. With `requireAuth` off every caller is anonymous, with the operator role, and its calls run in the shared workspace root.

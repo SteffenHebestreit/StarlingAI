@@ -14,9 +14,10 @@
  * - a trailing `/*` matches any remainder (including nothing)
  * - `method` restricts to one HTTP verb; omitted = all verbs
  *
- * Policies LIST allowed role names explicitly (no rank inheritance): rank
- * comparisons are wrong for sibling roles like a medical fork's `patient`
- * vs `viewer`. Listing is also what reviewers can audit at a glance.
+ * Policies LIST allowed role names explicitly: rank comparisons are wrong for
+ * sibling roles like a medical fork's `patient` vs `viewer`. Listing is also
+ * what reviewers can audit at a glance. The one inheritance is the built-in
+ * chain viewer < operator < admin (policyAdmitsRole below).
  *
  * Routes without a matching policy are untouched — they keep whatever auth
  * checks they implement themselves (the upstream default).
@@ -66,6 +67,26 @@ function matches(policy: RegisteredPolicy, method: string, path: string): boolea
     if (pattern !== actual) return false;
   }
   return pathSegments.length === patternSegments.length;
+}
+
+/** The built-in roles, lowest first — the chain auth.ts ranks them in (BUILTIN_ROLE_RANKS). */
+const BUILTIN_ROLE_CHAIN: readonly string[] = ["viewer", "operator", "admin"];
+
+/**
+ * Whether a policy lets a role through. A listed name admits exactly that role, and among the
+ * BUILT-IN roles a listed one also admits every higher built-in: the built-ins are a strict chain
+ * everywhere else (userHasRole), and matching them exactly refused an admin the operator-only
+ * knowledge-base routes ("Requires role: operator", 2026-10-06). Extension roles never inherit,
+ * which keeps sibling roles (a fork's `patient` beside `viewer`) apart as the listing intends.
+ */
+export function policyAdmitsRole(policy: Pick<RoutePolicy, "roles">, role: string): boolean {
+  if (policy.roles.includes(role)) return true;
+  const rank = BUILTIN_ROLE_CHAIN.indexOf(role);
+  if (rank < 0) return false;
+  return policy.roles.some((listed) => {
+    const listedRank = BUILTIN_ROLE_CHAIN.indexOf(listed);
+    return listedRank >= 0 && listedRank <= rank;
+  });
 }
 
 /** First matching policy for a request, or null when the route is unpoliced. */

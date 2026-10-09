@@ -19,7 +19,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveHostWorkspacePath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -208,9 +208,10 @@ export function buildServeRunArgs(app: ServedApp, hostAppDir: string): string[] 
   ];
 }
 
-function defaultStartCommand(entry: string, internalPort: number): string {
+function defaultStartCommand(entry: string): string {
   // Install deps when a manifest is present, then start. The app MUST bind
-  // 0.0.0.0:$PORT (we pass PORT) so the gateway can reach it by container name.
+  // 0.0.0.0:$PORT — PORT reaches the container through its environment, not through
+  // this command, which is why the port is not a parameter here.
   const safeEntry = entry.replace(/[^\w./-]/g, "");
   return `if [ -f package.json ]; then npm install --no-audit --no-fund --loglevel=error || exit 1; fi; `
     + `if [ -f package.json ] && grep -q '"start"' package.json; then exec npm start; else exec node ${safeEntry || "server.js"}; fi`;
@@ -264,7 +265,7 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
   const entry = String(args["entry"] ?? "server.js");
   const command = (typeof args["command"] === "string" && args["command"].trim())
     ? String(args["command"]).trim()
-    : defaultStartCommand(entry, internalPort);
+    : defaultStartCommand(entry);
 
   const app: ServedApp = {
     id,
@@ -282,7 +283,10 @@ async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promis
   };
   apps.set(id, app);
 
-  const hostAppDir = `${resolveDockerWorkspaceMountSource(ctx.workspacePath).replace(/[/\\]+$/, "")}/${root}`;
+  const hostAppDir = resolveHostWorkspacePath(ctx.workspacePath, root);
+  if (!hostAppDir) {
+    return { success: false, output: "", error: "serve_app needs a host workspace path to bind; this deployment mounts the workspace as a named volume, which cannot be bound by subdirectory." };
+  }
   logAudit("serve_app_started", { id, container: app.containerName, root, network: app.network, image: app.image }, { sessionId: ctx.sessionId, severity: "warn" });
 
   const serveRunArgs = buildServeRunArgs(app, hostAppDir);

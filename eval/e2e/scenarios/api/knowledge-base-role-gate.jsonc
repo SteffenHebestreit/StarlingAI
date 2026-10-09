@@ -1,0 +1,71 @@
+// GROUP "api" — knowledge-base mutations are operator-only; reads stay open.
+//
+// gateway/knowledge-base-routes.ts:18-24 registers route policies (POST/PATCH/DELETE
+// /api/knowledge-bases[/:id], crawl, cancel → roles ["operator"]); the route-policy gate in
+// gateway/index.ts:163-171 runs before every /api handler and answers a viewer
+// 403 {"error":"Requires role: operator"}. GET /api/knowledge-bases is open to every authenticated
+// caller (knowledge-base-routes.ts:39). POST answers 201 {id, crawlStarted} (:129), DELETE answers
+// 200 {id, removed: true, ...} (:211), a missing or inaccessible id 404 "Knowledge base not found".
+//
+// The knowledge base is synthetic, user-scoped (owner: eval, so callerCanAccessKb hides it from
+// eval-viewer, retrieval/knowledge-bases.ts:194), never crawled (crawlNow: false) and deleted again.
+// The first step removes a leftover of an earlier attempt that stopped half-way (404 when none).
+// No model is needed.
+{
+  id: "api-knowledge-base-create-role-gate",
+  title: "Only an operator may create or delete a knowledge base; a viewer gets 403 Requires role",
+  group: "api",
+  tags: ["api", "rbac", "knowledge-base", "smoke"],
+  description: "Guards the operator-only route policies of the knowledge-base API: the viewer's POST and DELETE are refused with 403 \"Requires role\" and create nothing, while the operator creates (201), reads and deletes (200) the same synthetic, user-scoped, uncrawled knowledge base. Also checks the viewer may still list knowledge bases and cannot open the operator's user-scoped one.",
+  requires: ["gateway"],
+  identity: "eval",
+  timeoutMs: 120000,
+  steps: [
+    { kind: "http", id: "cleanup-leftover", method: "DELETE", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: [200, 404] } },
+    {
+      kind: "http",
+      id: "viewer-create-refused",
+      as: "eval-viewer",
+      method: "POST",
+      path: "/api/knowledge-bases",
+      body: {
+        id: "e2e-api-role-gate-kb",
+        name: "E2E Rollenprüfung (synthetisch)",
+        description: "Synthetic knowledge base of the e2e api scenario; never crawled, deleted at the end.",
+        seedUrls: ["http://www.nordlicht-werkzeuge.test/"],
+        scope: "user",
+        crawlNow: false,
+        maxPages: 1,
+        maxDepth: 0,
+      },
+      expect: { status: 403, bodyIncludes: ["Requires role"] },
+    },
+    // The refused request created nothing.
+    { kind: "http", id: "nothing-created", method: "GET", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 404, bodyIncludes: ["Knowledge base not found"] } },
+    // Reads are not role-gated.
+    { kind: "http", id: "viewer-may-list", as: "eval-viewer", method: "GET", path: "/api/knowledge-bases", expect: { status: 200, bodyIncludes: ["\"knowledgeBases\""] } },
+    {
+      kind: "http",
+      id: "operator-create",
+      method: "POST",
+      path: "/api/knowledge-bases",
+      body: {
+        id: "e2e-api-role-gate-kb",
+        name: "E2E Rollenprüfung (synthetisch)",
+        description: "Synthetic knowledge base of the e2e api scenario; never crawled, deleted at the end.",
+        seedUrls: ["http://www.nordlicht-werkzeuge.test/"],
+        scope: "user",
+        crawlNow: false,
+        maxPages: 1,
+        maxDepth: 0,
+      },
+      expect: { status: 201, bodyIncludes: ["\"id\":\"e2e-api-role-gate-kb\"", "\"crawlStarted\":false"] },
+    },
+    { kind: "http", id: "operator-reads", method: "GET", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 200, bodyIncludes: ["e2e-api-role-gate-kb"] } },
+    // User-scoped: invisible to another user.
+    { kind: "http", id: "viewer-cannot-open", as: "eval-viewer", method: "GET", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 404, bodyIncludes: ["Knowledge base not found"] } },
+    { kind: "http", id: "viewer-delete-refused", as: "eval-viewer", method: "DELETE", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 403, bodyIncludes: ["Requires role"] } },
+    { kind: "http", id: "operator-delete", method: "DELETE", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 200, bodyIncludes: ["\"removed\":true"] } },
+    { kind: "http", id: "gone", method: "GET", path: "/api/knowledge-bases/e2e-api-role-gate-kb", expect: { status: 404 } },
+  ],
+}

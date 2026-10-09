@@ -1,0 +1,23 @@
+// The synthetic e2e mailbox, served by GreenMail (service e2e-mail in docker-compose.e2e.yml).
+//
+// `pnpm e2e:env up` copies this file to config/mail/accounts.d/e2e.json5 — the mail-service's
+// overlay directory, which it re-reads while running — and `pnpm e2e:env down` deletes the copy.
+// config/mail/accounts.json, the operator's own accounts, is never read or written.
+//
+// Nothing here is real: e2e.test is a reserved test domain, and the password only opens the
+// in-memory GreenMail test mailbox, which never relays a message anywhere.
+{
+  accounts: [
+    {
+      id: "eval",
+      address: "eval@e2e.test",
+      displayName: "E2E Eval (test mailbox)",
+      // Only the local eval identity may use this mailbox.
+      allowedUsers: ["eval"],
+      imap: { host: "e2e-mail", port: 3143, secure: false, user: "eval@e2e.test", pass: "e2e-test-mailbox" },
+      smtp: { host: "e2e-mail", port: 3025, secure: false, user: "eval@e2e.test", pass: "e2e-test-mailbox", from: "E2E Eval <eval@e2e.test>" },
+    },
+  ],
+  // The eval identities see only accounts bound to them: never the operator's shared accounts.
+  isolatedUsers: ["eval", "eval-viewer"],
+}

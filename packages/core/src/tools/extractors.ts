@@ -11,7 +11,7 @@ import { extname } from "node:path";
 import JSON5 from "json5";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { resolvePathWithinWorkspace } from "./workspace-path.js";
+import { guardPath } from "./filesystem.js";
 import { assertFileSizeWithin, truncateOutput } from "./io-limits.js";
 
 const log = childLogger("tool:extractors");
@@ -31,6 +31,17 @@ async function callExistingTool(name: string, args: Record<string, unknown>, ctx
 function fail(message: string): ToolResult {
   return { success: false, output: "", error: message };
 }
+
+/**
+ * The file an extractor may read: inside the workspace AND not a protected path. These tools
+ * resolved only the workspace boundary, so `.starlingai/…`, `.git/…` or a dotenv file came back
+ * through them though read_file refuses each one.
+ */
+function resolveReadable(path: string, ctx: ToolContext): string | null {
+  const guarded = guardPath(path, ctx.workspacePath);
+  return guarded.safe ? guarded.resolved : null;
+}
+const NOT_READABLE = "path must resolve inside the workspace and not to a protected file";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // extract_notebook — .ipynb → Markdown with code, output, and image refs
@@ -65,12 +76,8 @@ registerTool({
     if (!path) return fail("path is required");
     if (extname(path).toLowerCase() !== ".ipynb") return fail("path must end in .ipynb");
 
-    let resolved: string;
-    try {
-      ({ resolved } = resolvePathWithinWorkspace(path, ctx.workspacePath));
-    } catch {
-      return fail("path must resolve inside the workspace");
-    }
+    const resolved = resolveReadable(path, ctx);
+    if (!resolved) return fail(NOT_READABLE);
 
     let raw: string;
     try {
@@ -176,7 +183,7 @@ function quoteText(text: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// extract_email — .eml or single-message .mbox → headers + body + attachments
+// extract_email — .eml, or one message (by index) of an .mbox → headers + body + attachments
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ParsedEmail {
@@ -189,7 +196,7 @@ interface ParsedEmail {
 registerTool({
   name: "extract_email",
   description:
-    "Parse an .eml file (single message) or a single message inside an .mbox into structured headers, plain-text body (preferred), HTML body fallback, and a listing of attachments. Read-only. Quoted-printable and base64 transfer encodings are decoded.",
+    "Parse an .eml file (single message) or one message of an .mbox (choose it with index; the answer says how many the file holds) into structured headers, plain-text body (preferred), HTML body fallback, and a listing of attachments. Read-only. Quoted-printable and base64 transfer encodings are decoded.",
   embeddingDescription:
     "email eml mbox parse extract headers from to subject body attachments inbox archive forensics read",
   parameters: {
@@ -200,6 +207,10 @@ registerTool({
         type: "boolean",
         description: "If true, return every header. If false (default), only the common subset (From, To, Cc, Bcc, Subject, Date, Message-ID, Reply-To, In-Reply-To, References).",
       },
+      index: {
+        type: "number",
+        description: "For an .mbox: which message to read, 1-based (default 1). The answer says how many the file holds.",
+      },
     },
     required: ["path"],
   },
@@ -209,12 +220,8 @@ registerTool({
     const ext = extname(path).toLowerCase();
     if (ext !== ".eml" && ext !== ".mbox") return fail("path must end in .eml or .mbox");
 
-    let resolved: string;
-    try {
-      ({ resolved } = resolvePathWithinWorkspace(path, ctx.workspacePath));
-    } catch {
-      return fail("path must resolve inside the workspace");
-    }
+    const resolved = resolveReadable(path, ctx);
+    if (!resolved) return fail(NOT_READABLE);
 
     let raw: string;
     try {
@@ -224,7 +231,19 @@ registerTool({
       return fail(`Failed to read email: ${String(err)}`);
     }
 
-    const messageRaw = ext === ".mbox" ? extractFirstMboxMessage(raw) : raw;
+    // An .mbox holds many messages. Only the first was ever returned, with nothing saying there were
+    // more — an inbox of 400 read as one email. The answer now says which message of how many it is,
+    // and `index` reads any other.
+    const mboxMessages = ext === ".mbox" ? splitMbox(raw) : null;
+    const index = Math.floor(Number(args["index"] ?? 1));
+    if (mboxMessages && (!Number.isFinite(index) || index < 1 || index > mboxMessages.length)) {
+      return fail(`index must be between 1 and ${mboxMessages.length} — ${path} holds ${mboxMessages.length} message(s).`);
+    }
+    const messageRaw = mboxMessages ? mboxMessages[index - 1]! : raw;
+    const position = mboxMessages
+      ? `Message ${index} of ${mboxMessages.length} in ${path}`
+        + (mboxMessages.length > 1 ? ` — pass index (1-${mboxMessages.length}) to read another.` : ".")
+      : "";
     let parsed: ParsedEmail;
     try {
       parsed = parseEmail(messageRaw);
@@ -241,7 +260,7 @@ registerTool({
       (parsed.headers[h] ?? []).map((value) => `${formatHeaderName(h)}: ${value.trim()}`),
     );
 
-    const sections: string[] = [headerLines.join("\n")];
+    const sections: string[] = [...(position ? [position] : []), headerLines.join("\n")];
     if (parsed.bodyText.trim()) {
       sections.push(`---\n\n${parsed.bodyText.trim()}`);
     } else if (parsed.bodyHtml.trim()) {
@@ -265,20 +284,27 @@ registerTool({
         date: parsed.headers["date"]?.[0],
         attachmentCount: parsed.attachments.length,
         bodyKind: parsed.bodyText.trim() ? "text" : (parsed.bodyHtml.trim() ? "html-stripped" : "empty"),
+        ...(mboxMessages ? { messageIndex: index, messageCount: mboxMessages.length } : {}),
       },
     };
   },
 });
 
-function extractFirstMboxMessage(raw: string): string {
-  // mbox separator is "\nFrom " at start of line. The first message starts at the first "From "
-  // line. Strip everything before it, then find the next separator and cut there.
-  const start = raw.match(/^From .+\n/m);
-  const startIdx = start?.index ?? 0;
-  const after = raw.slice(startIdx);
-  const stripped = after.replace(/^From .+\n/, "");
-  const next = stripped.search(/\n\nFrom .+\n/);
-  return next === -1 ? stripped : stripped.slice(0, next);
+/**
+ * The messages of an mbox, in order. A `From ` line opens a message at the first such line and,
+ * after that, only when a blank line precedes it — anywhere else it is body text. Text before the
+ * first separator is not a message; a file with no separator is one message.
+ */
+function splitMbox(raw: string): string[] {
+  const text = raw.replace(/\r\n/g, "\n");
+  const separators: Array<{ lineStart: number; bodyStart: number }> = [];
+  const re = /^From [^\n]*(?:\n|$)/gm;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    if (separators.length > 0 && !(m.index >= 2 && text[m.index - 2] === "\n")) continue;
+    separators.push({ lineStart: m.index, bodyStart: m.index + m[0].length });
+  }
+  if (separators.length === 0) return [text];
+  return separators.map((s, i) => text.slice(s.bodyStart, separators[i + 1]?.lineStart ?? text.length).replace(/\n+$/, ""));
 }
 
 function parseEmail(raw: string): ParsedEmail {
@@ -503,7 +529,7 @@ registerTool({
       path: { type: "string", description: "Workspace-relative .ics path." },
       includePast: {
         type: "boolean",
-        description: "Include events whose end-time is before now. Defaults to true.",
+        description: "Include events that are over — for a recurring series, whose LAST occurrence is over. Defaults to true.",
       },
     },
     required: ["path"],
@@ -513,12 +539,8 @@ registerTool({
     if (!path) return fail("path is required");
     if (extname(path).toLowerCase() !== ".ics") return fail("path must end in .ics");
 
-    let resolved: string;
-    try {
-      ({ resolved } = resolvePathWithinWorkspace(path, ctx.workspacePath));
-    } catch {
-      return fail("path must resolve inside the workspace");
-    }
+    const resolved = resolveReadable(path, ctx);
+    if (!resolved) return fail(NOT_READABLE);
 
     let raw: string;
     try {
@@ -531,21 +553,31 @@ registerTool({
     const events = parseIcs(raw);
     const includePast = args["includePast"] !== false;
     const now = Date.now();
+    // A recurring series is past only when its LAST occurrence is. It was judged by its first:
+    // a weekly stand-up that began last year was dropped as "past" while it still met every week.
     const filtered = includePast
       ? events
       : events.filter((evt) => {
-          const endTs = parseIcsTime(evt.end || evt.start);
+          const endTs = evt.rrule ? seriesEndTs(evt) : parseIcsTime(evt.end || evt.start);
           return endTs === null || endTs >= now;
         });
+    const skippedPast = events.length - filtered.length;
+    const recurring = filtered.filter((evt) => evt.rrule).length;
+    // The counts lead the answer: skippedPastCount lived only in metadata, which the model never sees.
+    const counts = `${filtered.length} of ${events.length} event(s) shown`
+      + (recurring > 0 ? `; ${recurring} recurring series, each listed once with its first occurrence and its rrule` : "")
+      + (skippedPast > 0 ? `; ${skippedPast} past event(s) not shown — pass includePast: true to include them` : "")
+      + ".";
 
     return {
       success: true,
-      output: truncateOutput(JSON.stringify(filtered, null, 2), undefined, "Calendar"),
+      output: truncateOutput(`${counts}\n\n${JSON.stringify(filtered, null, 2)}`, undefined, "Calendar"),
       metadata: {
         path,
         eventCount: filtered.length,
         totalEventCount: events.length,
-        skippedPastCount: events.length - filtered.length,
+        skippedPastCount: skippedPast,
+        recurringCount: recurring,
       },
     };
   },
@@ -618,6 +650,44 @@ function unescapeIcsText(value: string): string {
     .replace(/\\,/g, ",")
     .replace(/\\;/g, ";")
     .replace(/\\\\/g, "\\");
+}
+
+const FIXED_PERIOD_MS: Record<string, number> = {
+  SECONDLY: 1_000, MINUTELY: 60_000, HOURLY: 3_600_000, DAILY: 86_400_000, WEEKLY: 604_800_000,
+};
+
+/**
+ * When a recurring series' last occurrence ends — or null when it never ends or that cannot be
+ * worked out from UNTIL / COUNT·INTERVAL·FREQ alone (a BY* rule changes how many occurrences fit a
+ * period). Null keeps the series: an ongoing meeting dropped as past is the error this guards.
+ */
+function seriesEndTs(evt: CalendarEvent): number | null {
+  const parts = new Map(evt.rrule.split(";").map((part): [string, string] => {
+    const eq = part.indexOf("=");
+    return eq < 0 ? [part.toUpperCase(), ""] : [part.slice(0, eq).toUpperCase(), part.slice(eq + 1)];
+  }));
+  const start = parseIcsTime(evt.start);
+  const end = parseIcsTime(evt.end);
+  const duration = start !== null && end !== null ? Math.max(0, end - start) : 0;
+  const until = parts.get("UNTIL");
+  if (until) {
+    const untilTs = parseIcsTime(until);
+    return untilTs === null ? null : untilTs + duration;
+  }
+  const count = Number(parts.get("COUNT"));
+  if (!Number.isInteger(count) || count < 1 || start === null) return null;
+  if ([...parts.keys()].some((key) => key.startsWith("BY"))) return null;
+  const steps = (count - 1) * Math.max(1, Math.floor(Number(parts.get("INTERVAL"))) || 1);
+  const freq = (parts.get("FREQ") ?? "").toUpperCase();
+  const period = FIXED_PERIOD_MS[freq];
+  if (period !== undefined) return start + steps * period + duration;
+  if (freq === "MONTHLY" || freq === "YEARLY") {
+    const last = new Date(start);
+    if (freq === "MONTHLY") last.setUTCMonth(last.getUTCMonth() + steps);
+    else last.setUTCFullYear(last.getUTCFullYear() + steps);
+    return last.getTime() + duration;
+  }
+  return null;
 }
 
 function parseIcsTime(value: string): number | null {

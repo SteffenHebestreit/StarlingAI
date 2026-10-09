@@ -22,11 +22,76 @@ import {
   clearStoredTokenSet,
   loadStoredTokenSet,
 } from "../providers/anthropic-oauth.js";
-import { ANTHROPIC_MODEL_CHOICES } from "../providers/anthropic.js";
+import {
+  ANTHROPIC_MODEL_CHOICES,
+  fetchAnthropicModelChoices,
+  forgetAnthropicOutputLimits,
+  isAnthropicOAuthCredential,
+  type AnthropicModelChoice,
+} from "../providers/anthropic.js";
+import { resolveProviderEndpointForModel } from "../providers/index.js";
+import { getValidAccessToken } from "../providers/anthropic-oauth.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("gateway:model-preset");
+
+/**
+ * Last successful LIVE listing, if any. Process-local and deliberately not
+ * persisted: a restart re-asks Anthropic rather than serving a catalogue from a
+ * previous deployment, which is the staleness this whole path exists to fix.
+ *
+ * The GET serves this when present so opening the dashboard does not spend an
+ * upstream call per visit; the explicit refresh always bypasses it.
+ */
+let liveModelChoices: { choices: AnthropicModelChoice[]; refreshedAt: string } | null = null;
+
+/**
+ * Whether this process has already attempted a listing, successfully or not.
+ *
+ * Without this the feature would be a MANUAL button and nothing more: the cache
+ * has exactly one writer, so every gateway boot would serve the hand-maintained
+ * fallback until a human happened to click Refresh. That is not removing the
+ * staleness, only adding an escape hatch for it. The first GET therefore warms
+ * the catalogue itself.
+ *
+ * The flag is what stops that becoming an upstream call per dashboard visit when
+ * listing is not permitted at all: an inference-scoped subscription token 403s
+ * here and would do so every single time. One attempt per process, then the
+ * button is the retry.
+ */
+let listingAttempted = false;
+
+/** Forget the catalogue. Called wherever the credential behind it can change. */
+function invalidateLiveModelChoices(): void {
+  liveModelChoices = null;
+  listingAttempted = false;
+  // The learned output ceilings came from the same listing and are scoped to the
+  // same entitlements, so they go with it.
+  forgetAnthropicOutputLimits();
+}
+
+/**
+ * Resolve the credential the Claude provider itself would use, so the listing is
+ * scoped to exactly the models the swarm can actually call. A connected
+ * subscription is read through getValidAccessToken (refreshing if due) rather
+ * than off the stored snapshot, which may be expired.
+ */
+async function resolveAnthropicListingCredential(): Promise<{ credential: string; baseUrl: string; oauthMode: boolean } | null> {
+  const config = getConfig();
+  const model = config.providers.anthropic?.defaultModel ?? "claude-sonnet-4-6";
+  const endpoint = resolveProviderEndpointForModel(`anthropic/${model}`, {}, config);
+  const stored = loadStoredTokenSet();
+  const managedOAuth = stored !== null && endpoint.apiKey === stored.accessToken;
+  const credential = managedOAuth ? (await getValidAccessToken()) ?? "" : endpoint.apiKey;
+  if (!credential) return null;
+  // OR the sniff in rather than trusting `managedOAuth` alone: a manually pasted
+  // providers.anthropic.authToken is a subscription token that this browser flow
+  // knows nothing about, and an explicit `false` here would bypass the prefix
+  // check and send it as x-api-key, which the API rejects.
+  const oauthMode = managedOAuth || isAnthropicOAuthCredential(credential);
+  return { credential, baseUrl: endpoint.baseUrl, oauthMode };
+}
 
 export function registerModelPresetRoutes(app: Hono): void {
   // ── Model presets: the dashboard "Local ⇄ Claude" switch ───────────────────
@@ -161,6 +226,9 @@ export function registerModelPresetRoutes(app: Hono): void {
     try {
       const tokenSet = await exchangeAuthorizationCode(body.code, body.state, body.verifier);
       storeTokenSet(tokenSet);
+      // A different account has different entitlements; the cached catalogue
+      // belongs to whoever was connected before.
+      invalidateLiveModelChoices();
       logAudit("anthropic_oauth_connected", { expiresAt: new Date(tokenSet.expiresAt).toISOString() });
       return c.json({ connected: true, expiresAt: new Date(tokenSet.expiresAt).toISOString() });
     } catch (err) {
@@ -177,10 +245,75 @@ export function registerModelPresetRoutes(app: Hono): void {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     const config = getConfig();
+    // The first read of the process warms the catalogue, so the picker is live
+    // by default rather than only after someone finds the Refresh button.
+    // Failures are quiet here: the built-in list is a complete answer, and the
+    // user did not ask for a refresh, they opened a dialog.
+    if (!listingAttempted) {
+      listingAttempted = true;
+      try {
+        const resolved = await resolveAnthropicListingCredential();
+        if (resolved) {
+          const choices = await fetchAnthropicModelChoices(resolved);
+          liveModelChoices = { choices, refreshedAt: new Date().toISOString() };
+        }
+      } catch (err) {
+        log.debug({ err }, "Initial Anthropic model listing failed - serving the built-in list");
+      }
+    }
     return c.json({
       model: config.providers.anthropic?.defaultModel ?? "claude-sonnet-4-6",
-      choices: ANTHROPIC_MODEL_CHOICES,
+      choices: liveModelChoices?.choices ?? ANTHROPIC_MODEL_CHOICES,
+      source: liveModelChoices ? "live" : "builtin",
+      refreshedAt: liveModelChoices?.refreshedAt ?? null,
     });
+  });
+
+  // Re-ask Anthropic which models this credential can use. POST, not GET,
+  // because it spends an upstream call — the plain GET stays free.
+  app.post("/api/models/anthropic/model/refresh", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+
+    const resolved = await resolveAnthropicListingCredential();
+    if (!resolved) {
+      // No credential is not an error the user can act on by retrying. A
+      // catalogue already fetched stays on screen rather than being discarded,
+      // the same choice the error path below makes and for the same reason.
+      return c.json({
+        choices: liveModelChoices?.choices ?? ANTHROPIC_MODEL_CHOICES,
+        source: liveModelChoices ? "live" : "builtin",
+        refreshedAt: liveModelChoices?.refreshedAt ?? null,
+        warning: "No Anthropic credential configured — connect a subscription or set an API key.",
+      });
+    }
+
+    try {
+      const choices = await fetchAnthropicModelChoices(resolved);
+      liveModelChoices = { choices, refreshedAt: new Date().toISOString() };
+      listingAttempted = true;
+      logAudit("anthropic_models_refreshed", { count: choices.length, oauthMode: resolved.oauthMode });
+      return c.json({ choices, source: "live", refreshedAt: liveModelChoices.refreshedAt });
+    } catch (err) {
+      // The documented reason this list was static: inference-scoped subscription
+      // tokens may not be permitted to call /v1/models. Say so rather than
+      // failing the request — the built-in list plus free-text entry still works.
+      const message = err instanceof Error ? err.message : String(err);
+      const cached = liveModelChoices;
+      log.warn({ err }, "Anthropic model listing failed");
+      // The warning has to describe what is actually on screen. Saying "showing
+      // the built-in list" while returning source:"live" with a cached catalogue
+      // told the user the opposite of what the same response rendered.
+      return c.json({
+        choices: cached?.choices ?? ANTHROPIC_MODEL_CHOICES,
+        source: cached ? "live" : "builtin",
+        refreshedAt: cached?.refreshedAt ?? null,
+        ...(cached ? { stale: true } : {}),
+        warning: cached
+          ? `Could not refresh from Anthropic (${message}). Still showing the list fetched earlier, which may be out of date.`
+          : `Could not list models from Anthropic (${message}). Showing the built-in list; any model id can still be typed in.`,
+      });
+    }
   });
 
   app.post("/api/models/anthropic/model", async (c) => {
@@ -210,7 +343,7 @@ export function registerModelPresetRoutes(app: Hono): void {
     const active = getActiveModelPreset(updated);
     return c.json({
       model,
-      choices: ANTHROPIC_MODEL_CHOICES,
+      choices: liveModelChoices?.choices ?? ANTHROPIC_MODEL_CHOICES,
       // Refresh payload for the preset pill (tooltip/active primary may change).
       active: active?.name ?? null,
       activePrimary: active?.preset.primary ?? null,
@@ -226,6 +359,10 @@ export function registerModelPresetRoutes(app: Hono): void {
     // swarm doesn't strand on an unauthenticated cloud model.
     const wasActive = getActiveModelPreset(getConfig());
     clearStoredTokenSet();
+    // The catalogue was scoped to the credential that just went away;
+    // continuing to serve it as source:"live" is exactly the dressed-up
+    // staleness this path exists to remove.
+    invalidateLiveModelChoices();
     if (wasActive?.name === "claude") {
       updateConfig((raw) => {
         const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};

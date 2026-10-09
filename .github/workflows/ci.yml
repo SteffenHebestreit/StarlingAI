@@ -6,15 +6,20 @@ on:
   pull_request:
     branches: [main, develop]
 
-# Cancel superseded runs on the same ref to save minutes.
+# Cancel superseded runs, but only on pull requests: a newer push to the same PR makes
+# the older run worthless. A push to main/develop is the only record of that commit's
+# state, so it gets a group of its own (run_id) — sharing the ref's group would let
+# GitHub cancel it as in-progress or drop it as a superseded pending run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
     name: typecheck · test · build
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to a new image on GitHub's schedule
+    # (Ubuntu 26 from 2026-10-19), which would change the toolchain under an unchanged commit.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     # Real Redis for the two-process coordination integration tests (DST-102).
     # REDIS_URL is deliberately NOT set job-wide: unit tests stay hermetic on the
@@ -30,21 +35,33 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # pnpm must be installed before setup-node so the pnpm cache works.
       # Version is read from the root package.json "packageManager" field.
+      # v5, not v6: v5 is v4 on the node24 runtime and nothing else, while v6 bootstraps
+      # pnpm 11 and then switches to the pinned version, which has open regressions for
+      # repos pinned to pnpm 10 (pnpm/action-setup#227, #231, #268).
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Routing labels against the TRACKED shards only. The generated label files
+      # (workspace/*/59-routing.generated.jsonc) have no generator in the repo, and the
+      # catalog tests read the compiled starlingai.json, which on a developer machine also
+      # merges gitignored *.local.jsonc shards. This step fails on a label for an entry no
+      # tracked shard defines, a stale sourceHash, or an entry with no label, exactly as a
+      # clean checkout would see them. Needs no build, so it runs first and fails fast.
+      - name: Routing taxonomy (tracked shards)
+        run: pnpm routing:taxonomy-check
 
       # Security gate: fail on any HIGH or CRITICAL advisory in PRODUCTION deps.
       # --prod ignores dev-only tooling noise; the bar is deliberately "high" so
@@ -62,10 +79,20 @@ jobs:
 
       # Lint gate (eslint flat config). Scoped to core + mail-service prod TS;
       # errors are the bug classes (floating/misused promises, unused imports,
-      # empty blocks, constant conditions). Warnings (dead locals, escapes) are
-      # tracked but non-blocking for now.
+      # empty blocks, constant conditions). Warnings (dead locals, escapes) block
+      # too: `pnpm lint` runs eslint --max-warnings 0, so one new warning fails it.
       - name: Lint
         run: pnpm lint
+
+      # Config-validity gate: the compiled starlingai.json must build cleanly
+      # from config/ + workspace/ (catches schema drift and bad model ids before
+      # they reach a container). DEVPLAN P1 will extend this into a drift diff.
+      #
+      # Runs BEFORE the tests because the compiled catalog is an INPUT to them: the
+      # routing-taxonomy gate asserts that every shipped agent/scene/job carries a
+      # valid, non-stale label, which it can only do against the built config.
+      - name: Config builds cleanly
+        run: pnpm config:build
 
       # pnpm -r test runs each package's vitest from ITS OWN directory. This
       # matters: the core tests resolve config relative to packages/core, so
@@ -86,22 +113,28 @@ jobs:
       # scopes against REAL Redis — exactly one winner per round, fenced takeover,
       # stale-owner rejection. REDIS_URL is scoped to this step only so every
       # other test keeps exercising the hermetic in-process path.
+      # SAI_TEST_LIVE=1 is what lets REDIS_URL through: without it the suite-wide setup
+      # (src/tests/vitest.setup.ts) deletes service URLs before any test runs, and this
+      # test would skip itself as "no REDIS_URL" while the step stayed green.
       - name: Two-process lease integration (real Redis)
         env:
           REDIS_URL: redis://localhost:6379
+          SAI_TEST_LIVE: "1"
         run: pnpm --filter @starlingai/core exec vitest run src/tests/task-lease.redis.integration.test.ts
 
       # EVL-402: the PR-deterministic scenario packs (race/crash/budget/evidence/
       # side-effect/quality-gates) publish one UnifiedEvalReport per pack so PR,
       # nightly, and weekly results are directly comparable. The tests themselves
       # already ran in the coverage gate; this step is the comparable-publishing
-      # contract, and the Redis-integration pack reuses the service container.
+      # contract, and the Redis-integration pack reuses the service container
+      # (SAI_TEST_LIVE=1 for the same reason as the step above: the packs run vitest).
       - name: Scenario packs (deterministic, unified envelopes)
         env:
           REDIS_URL: redis://localhost:6379
+          SAI_TEST_LIVE: "1"
         run: pnpm packs:evaluate
       - name: Upload pack envelopes
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: eval-pack-envelopes
@@ -117,11 +150,6 @@ jobs:
       - name: Package artifact security check
         run: pnpm security:pack
 
-      # Config-validity gate: the compiled starlingai.json must build cleanly
-      # from config/ + workspace/ (catches schema drift and bad model ids before
-      # they reach a container). DEVPLAN P1 will extend this into a drift diff.
-      - name: Config builds cleanly
-        run: pnpm config:build
 
       # The compiled config must be available and every public schema field must
       # have a production read site; this catches inert flags before docs or operators advertise them.
@@ -143,13 +171,13 @@ jobs:
   # `verify`. Rules + allowlist live in .gitleaks.toml at the repo root.
   secret-scan:
     name: secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

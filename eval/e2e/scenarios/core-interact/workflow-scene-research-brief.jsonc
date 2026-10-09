@@ -1,0 +1,66 @@
+// A scene run end to end from a chat turn: run_workflow -> scene "verified_research_brief"
+// (starlingai.json scenes; allowedAgents document_intake, researcher, evidence_analyst, source_verifier,
+// summarizer, qa_guard). The research target is the fixture site's home page.
+//
+// Ground truth (ENVIRONMENT.md / site/index.html): founded 1987, 146 employees, 18 articles in six
+// categories, three warehouses Nordhafen, Südtal, Westmark.
+//
+// Event names verified against packages/core/src:
+//   tool_call_requested {tool, args}  agent/runtime.ts:4234 — run_workflow args {name, workflowType?, params?,
+//                                     context?} (tools/workflow-catalog.ts:1448-1474)
+//   sub_agent_started {agentName}     agent/sub-agent.ts:2950 — agents.*
+//
+// How it runs (tools/workflow-catalog.ts, runSceneInline): the scene's task names several of its
+// agents, so it is not bootstrapped by its first one (since 0694693; before that, document_intake ran
+// alone). It runs as an orchestrator turn of its own in a session "workflow:<chat>:verified_research_brief:
+// <uuid>" on channel "workflow", with the scene's allowedAgents. In the E2E run of 2026-10-08 that turn
+// still had the catalog tools: it searched for this scene, tried to run it again, and ran deck_research
+// in place of its agents. It now has no search_workflows and no run_workflow (6d51fde) and is not held
+// to a catalog search (34a1db8), so nothing turns its delegations away from the scene's own agents:
+// researcher, then evidence_analyst, source_verifier or summarizer. A turn that gives up with no
+// specialist's result reports the scene blocked (d1b1f3d). agents.mustNotRun document_intake still
+// guards the old bootstrap: there is no attachment. A second agent after researcher was not model
+// variance: in the next run researcher returned, the runtime required synthesis and forbade another
+// delegation, and the turn wrote the brief itself. The step's turn now keeps going through the agents
+// the task names after the furthest one that has returned (agent/workflow-step-pipeline.ts), so
+// document_intake, passed over once researcher ran, is not offered again. mustRunAny follows the
+// scene's task.
+{
+  id: "core-ix-workflow-scene-research-brief",
+  title: "Workflow: run the verified_research_brief scene on the fixture site",
+  group: "core",
+  tags: ["workflow", "scene", "site"],
+  description: "Asks for the verified_research_brief workflow on the fictional company's website. The turn must call run_workflow for that scene, the scene's research agents must run (researcher, then at least one of evidence_analyst / source_verifier / summarizer), and document_intake must not run — there is no attachment. The brief must carry the home page's facts. Protects: scene dispatch from chat, the scene's agent scope, and grounded research on a reachable site.",
+  requires: ["model", "e2e-site"],
+  timeoutMs: 2400000,
+  steps: [
+    {
+      kind: "turn",
+      id: "run-scene",
+      message: "Nutze den Workflow „verified_research_brief“: Erstelle ein kurzes, faktengeprüftes Briefing über die fiktive Firma Nordlicht Werkzeuge GmbH, ausschließlich auf Basis ihrer Website http://www.nordlicht-werkzeuge.test/ – Gründungsjahr, Zahl der Mitarbeitenden, Lagerstandorte und Umfang des Sortiments, jeweils mit der Quellseite. --auto",
+      timeoutMs: 2100000,
+      expect: {
+        reply: {
+          // "18 Artikel", not the "18" of the product name "NW-AS 18" on the same page.
+          matches: ["\\b1987\\b", "\\b146\\b", "Nordhafen", "Südtal", "Westmark", "\\b18\\s+(Artikel|Produkt|article|product)"],
+        },
+        tools: { mustCall: ["run_workflow"] },
+        events: {
+          must: [
+            // `where` regexes take no flags: the name is matched with its casing/separator variants.
+            { type: "tool_call_requested", where: { "data.tool": "run_workflow", "data.args.name": { regex: "[Vv]erified[_ -]?[Rr]esearch[_ -]?[Bb]rief" } } },
+          ],
+        },
+        agents: {
+          mustRun: ["researcher"],
+          mustRunAny: ["evidence_analyst", "source_verifier", "summarizer"],
+          mustNotRun: ["document_intake"],
+        },
+        judge: {
+          rubric: "Das Briefing nennt Gründungsjahr 1987, 146 Mitarbeitende, die drei Lager Nordhafen, Südtal und Westmark sowie 18 Artikel (in sechs Kategorien), gibt die Website bzw. ihre Seiten als Quelle an und erfindet keine weiteren Fakten.",
+          minScore: 7,
+        },
+      },
+    },
+  ],
+}

@@ -1,0 +1,70 @@
+// GROUP "new" — a source-sensitive question (a current price) is answered from the site, not from
+// memory.
+//
+// The price exists only on the fixture site: NW-3106 Bit-Sortiment Aurora is a special offer at
+// 24,90 € instead of 32,90 €, stated on catalogue page 3 only (eval/e2e/ENVIRONMENT.md). A model
+// cannot know it from memory. Caveat: 24,90 € is also the monthly Profi maintenance plan on
+// /preise.html, and a substring check cannot tell the two apart — so the reply check is paired with
+// a specialist's fetch of the site, which at least proves the figure came from the site. The
+// attribution itself is left to the judge rubric (runs only with E2E_JUDGE_URL/E2E_JUDGE_MODEL set,
+// otherwise reported as skipped, never failed).
+//
+// Events asserted, emitters verified in packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase: "start", toolCallId, args} agent/sub-agent.ts:6527
+//     (payload agent/sub-agent.ts:2296) — web_fetch and browser_navigate both take `url`.
+//   guardrail_flagged {type: "source_sensitive_final_answer_without_evidence_blocked"}
+//                                                     agent/turn-finalize-guards.ts:353-354
+//   guardrail_flagged {type: "unverified_source_sensitive_answer_caveated"}
+//                                                     agent/turn-finalize-guards.ts:374-375
+//     — the two backstops for a source-sensitive answer shipped without evidence; neither may fire.
+// The orchestrator runs orchestration_only (no web tools of its own), so the fetch is a specialist's.
+{
+  id: "new-source-sensitive-site-price",
+  title: "A current price is researched on the fixture site and answered exactly (24,90 €)",
+  group: "new",
+  tags: ["source-sensitive", "site", "slow"],
+  description: "Guards research-before-answer for source-sensitive questions: the special-offer price of NW-3106 (24,90 €, catalogue page 3 only) must come back exactly, a research-capable specialist must have fetched the fixture site, and neither evidence backstop (answer blocked, unverified caveat) may fire.",
+  requires: ["model", "e2e-site"],
+  identity: "eval",
+  timeoutMs: 1200000,
+  steps: [
+    {
+      kind: "turn",
+      id: "current-price",
+      message: "Was kostet das Bit-Sortiment Aurora (NW-3106) aktuell bei der Nordlicht Werkzeuge GmbH? Bitte prüfe den Preis auf http://www.nordlicht-werkzeuge.test/ nach. --auto",
+      effort: "medium",
+      timeoutMs: 900000,
+      expect: {
+        status: "ok",
+        reply: {
+          includesAny: ["24,90", "24.90"],
+          minChars: 10,
+        },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.phase": "start",
+                "data.tool": { in: ["web_fetch", "browser_navigate"] },
+                "data.args.url": { regex: "nordlicht-werkzeuge\\.test" },
+              },
+              min: 1,
+            },
+          ],
+          mustNot: [
+            {
+              type: "guardrail_flagged",
+              where: { "data.type": { in: ["source_sensitive_final_answer_without_evidence_blocked", "unverified_source_sensitive_answer_caveated"] } },
+            },
+          ],
+        },
+        agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+        judge: {
+          rubric: "Die Antwort nennt 24,90 € als aktuellen Preis des Bit-Sortiments Aurora (NW-3106), ein Sonderangebot statt regulär 32,90 €. Sie gibt nicht 32,90 € als aktuellen Preis an und verwechselt den Artikel nicht mit dem Wartungsvertrag Profi (ebenfalls 24,90 € pro Monat).",
+          minScore: 7,
+        },
+      },
+    },
+  ],
+}

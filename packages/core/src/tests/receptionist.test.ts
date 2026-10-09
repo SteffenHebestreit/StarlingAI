@@ -149,6 +149,16 @@ describe("receptionist — source-sensitivity in the micro-call prompt", () => {
       expect(languageIsUndetermined(determined)).toBe(false);
     }
   });
+
+  it("languageIsUndetermined: counts the characters of a script written without spaces as words", () => {
+    // Split at spaces, a Chinese or Japanese sentence was one word and got the bare-greeting directive.
+    for (const sentence of ["如何在冬天储存电池？", "今日のニュースは？", "你今天过得怎么样？"]) {
+      expect(languageIsUndetermined(sentence)).toBe(false);
+      expect(String(buildReceptionistMessages(sentence, { defaultLanguage: "German" })[0]!.content)).not.toContain("Reply in GERMAN");
+    }
+    // Two characters stay as bare as two short words.
+    for (const bare of ["你好", "谢谢"]) expect(languageIsUndetermined(bare)).toBe(true);
+  });
 });
 
 describe("receptionist — micro-call", () => {
@@ -189,10 +199,12 @@ describe("receptionist — micro-call", () => {
   });
 
   it("redacts a leaked secret and escalates on empty/over-long/throw", async () => {
-    const leaked = "Sure! Your key is sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD by the way.";
+    // Made-up keys are assembled at run time: as literals they are secret-scanner hits (GitHub, 2026-09-29).
+    const fakeKey = ["sk", "abcdefghijklmnopqrstuvwxyz1234567890ABCD"].join("-");
+    const leaked = `Sure! Your key is ${fakeKey} by the way.`;
     const red = await runReceptionist("hi", { complete: async () => leaked });
     expect(red.handled).toBe(true);
-    expect(red.response).not.toContain("sk-abcdefghijklmnopqrstuvwxyz1234567890ABCD");
+    expect(red.response).not.toContain(fakeKey);
     expect(red.response).toContain("[REDACTED");
 
     expect((await runReceptionist("hi", { complete: async () => "" })).handled).toBe(false);
@@ -218,5 +230,49 @@ describe("receptionist — memory capsule", () => {
     expect(capsule).toContain("freelance software engineer");
     expect(capsule).not.toContain("ephemeral scratch");
     expect(capsule.length).toBeLessThanOrEqual(420);
+  });
+
+  it("names each fact's subject, so a bare value still says what it is", () => {
+    // Found by the E2E suite (2026-10-07): the capsule carried "- Polarstern-Rooibos", and asked for
+    // the favourite tea in a new session the model had nothing to connect it to.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    storeWorkspaceMemoryRecord(ws, { key: "favorite_tea", subject: "Lieblingsteesorte", content: "Polarstern-Rooibos", kind: "preference" });
+    storeWorkspaceMemoryRecord(ws, { key: "editor", subject: "Editor", content: "Editor of choice is Helix.", kind: "preference" });
+
+    const capsule = buildMemoryCapsule(ws, 400);
+    expect(capsule).toContain("- Lieblingsteesorte: Polarstern-Rooibos");
+    // A content that already names its subject is not prefixed twice.
+    expect(capsule).toContain("- Editor of choice is Helix.");
+  });
+
+  it("keeps the whole value when the subject is long, and shortens the subject instead", () => {
+    // A subject has no length cap (memory_promote copies an outcome's task text), and the line was
+    // cut after the subject was prepended: this one left "… and live tracking: Us" and no value.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    const value = "Use Kurierdienst Nord: 39 EUR, insured to 500 EUR, cut-off 14:00.";
+    storeWorkspaceMemoryRecord(ws, {
+      key: "courier_choice",
+      subject: "Research the three cheapest same-day courier options from Hamburg Altona to Lübeck for a 4 kg parcel with insurance, pickup before noon, and live tracking",
+      content: value,
+      kind: "decision",
+    });
+
+    const line = buildMemoryCapsule(ws, 600);
+    expect(line).toContain(`…: ${value}`);
+    expect(line.startsWith("- Research the three cheapest same-day courier options")).toBe(true);
+    expect(line.length).toBeLessThanOrEqual(160);
+  });
+
+  it("leaves the subject out when the value fills the line", () => {
+    // A value that fills the line on its own is shown the way it was before subjects were added: cut
+    // at the line cap, so the room goes to the value rather than to its label.
+    const ws = mkdtempSync(join(tmpdir(), "recept-mem-"));
+    dirs.push(ws);
+    const value = `Ship every parcel with Kurierdienst Nord ${"and keep the insurance receipt ".repeat(5)}`.trim();
+    storeWorkspaceMemoryRecord(ws, { key: "courier_rule", subject: "Courier rule", content: value, kind: "decision" });
+
+    expect(buildMemoryCapsule(ws, 600)).toBe(`- ${value}`.slice(0, 160));
   });
 });

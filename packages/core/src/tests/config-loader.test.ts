@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PRODUCT } from "../product/index.js";
+import type { SubAgentConfig } from "../config/schema.js";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import JSON5 from "json5";
+import { loadWorkspaceAgents } from "./support/workspace-shards.js";
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -13,16 +15,8 @@ function wait(ms: number): Promise<void> {
 // research-analysis, authoring-content, engineering, …). These tests assert prompt/tool
 // CONTENT, not file layout, so merge every *.jsonc subAgents map rather than hardcoding a file.
 function loadWorkspaceSubAgents(): Record<string, { systemPrompt?: string; tools?: string[] }> {
-  const dir = resolve(process.cwd(), "../../workspace/agents");
-  const merged: Record<string, { systemPrompt?: string; tools?: string[] }> = {};
-  for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".jsonc")) continue;
-    const raw = JSON5.parse(readFileSync(join(dir, file), "utf8")) as {
-      subAgents?: Record<string, { systemPrompt?: string; tools?: string[] }>;
-    };
-    Object.assign(merged, raw.subAgents ?? {});
-  }
-  return merged;
+  // Per-ENTRY merge — see support/workspace-shards.ts.
+  return loadWorkspaceAgents<{ systemPrompt?: string; tools?: string[] }>();
 }
 
 describe("config loader mutable overlay", () => {
@@ -646,6 +640,47 @@ describe("config loader mutable overlay", () => {
     }
   });
 
+  // The A2A client lays each peer skill over the loaded config as a sub-agent. Every save reloads,
+  // and the reload dropped them until the next card refresh (r4 A-security #3). They are not config,
+  // so a preview (what a save is judged on) and the compiled artifact the bidder reads stay without.
+  it("lays a runtime sub-agent back over each reload, and keeps it out of the preview and the compiled artifact", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-runtime-agent-"));
+    const configDir = join(tempDir, "starling_config");
+    mkdirSync(join(configDir, "agents"), { recursive: true });
+    writeFileSync(join(configDir, "agents", "10-coder.json"), JSON.stringify({ subAgents: { coder: { description: "Writes code." } } }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const peer = { description: "[A2A:peer] A peer's skill.", tools: ["a2a__peer__skill"] } as unknown as SubAgentConfig;
+      configLoader.setRuntimeSubAgent("a2a__peer__skill", peer);
+      const updated = configLoader.updateConfig((raw) => {
+        (raw["subAgents"] as Record<string, Record<string, unknown>>)["coder"]!["description"] = "Writes tests.";
+      });
+      expect(updated.subAgents["coder"]?.description).toBe("Writes tests.");
+      expect(updated.subAgents["a2a__peer__skill"]).toBe(peer);
+      // Told apart from a saved agent without a read of the disk, and still after the reload (review
+      // of r6 leftovers, 2).
+      expect(configLoader.isRuntimeSubAgent("a2a__peer__skill")).toBe(true);
+      expect(configLoader.isRuntimeSubAgent("coder")).toBe(false);
+      expect(configLoader.previewConfigUpdate(() => {}).subAgents["a2a__peer__skill"]).toBeUndefined();
+      const compiled = readFileSync(join(tempDir, PRODUCT.configFileName), "utf8");
+      expect(compiled).toContain("Writes tests.");
+      expect(compiled).not.toContain("a2a__peer__skill");
+
+      configLoader.deleteRuntimeSubAgent("a2a__peer__skill");
+      expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+      expect(configLoader.isRuntimeSubAgent("a2a__peer__skill")).toBe(false);
+      configLoader.resetConfigForTests();
+      expect(configLoader.getConfig().subAgents["a2a__peer__skill"]).toBeUndefined();
+    } finally {
+      configLoader.resetConfigForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("ships a pentest coordinator prompt that forbids false start claims", () => {
     const rootConfigPath = resolve(process.cwd(), "../../starlingai.example.json");
     const raw = JSON5.parse(readFileSync(rootConfigPath, "utf8")) as {
@@ -865,6 +900,85 @@ describe("config loader mutable overlay", () => {
       expect(config.subAgents["zone_probe"]).toBeDefined();
       expect(config.subAgents["evil_generated"]).toBeUndefined();
       expect(config.subAgents["evil_upload"]).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // config/mail/ is the mail-service's own accounts file. Swept as a shard, the real account list
+  // landed in the compiled config as a top-level `accounts` key, and a malformed edit refused the load.
+  it("does not sweep the mail-service's files under config/mail into the config merge", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-mail-zone-"));
+    const configDir = join(tempDir, "config");
+    const workspaceDir = join(tempDir, "workspace");
+    mkdirSync(join(configDir, "gateway"), { recursive: true });
+    writeFileSync(join(configDir, "gateway", "10-gateway.json"), JSON.stringify({ gateway: { port: 8765 } }), "utf8");
+    mkdirSync(join(configDir, "mail"), { recursive: true });
+    writeFileSync(join(configDir, "mail", "accounts.json"), JSON.stringify({
+      accounts: [{ id: "synthetic", imap: { host: "imap.example.test" } }],
+      gateway: { port: 9999 },
+    }), "utf8");
+    writeFileSync(join(configDir, "mail", "half-edited.json"), "{ \"accounts\": [", "utf8");
+    mkdirSync(join(workspaceDir, "agents"), { recursive: true });
+    writeFileSync(join(workspaceDir, "agents", "10-test.jsonc"), JSON.stringify({
+      subAgents: { zone_probe: { description: "legitimate config-zone agent" } },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    process.env["SAI_WORKSPACE_CONFIG_PATH"] = workspaceDir;
+    vi.resetModules();
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.gateway.port).toBe(8765);
+      expect(config.subAgents["zone_probe"]).toBeDefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // A signed-in user's working root is users/<id>/, so their generated/ sits one level below the
+  // depth-0 zone check; and the state dir keeps a JSON file per long-running task. Both were
+  // swept as base shards: an agent's data.json reconfigured the swarm, and a half-written
+  // checkpoint (a base shard that does not parse) refused the whole load.
+  it("does not sweep a user's working root or hidden state dirs into the config merge", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-config-user-zones-"));
+    const configDir = join(tempDir, "config");
+    const workspaceDir = join(tempDir, "workspace");
+
+    mkdirSync(join(configDir, "gateway"), { recursive: true });
+    writeFileSync(join(configDir, "gateway", "10-gateway.json"), JSON.stringify({
+      gateway: { port: 8765 },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "agents"), { recursive: true });
+    writeFileSync(join(workspaceDir, "agents", "10-test.jsonc"), JSON.stringify({
+      subAgents: { zone_probe: { description: "legitimate config-zone agent" } },
+    }), "utf8");
+
+    mkdirSync(join(workspaceDir, "users", "alice-1", "generated"), { recursive: true });
+    writeFileSync(join(workspaceDir, "users", "alice-1", "generated", "data.json"), JSON.stringify({
+      gateway: { port: 9999 },
+      subAgents: { evil_user_generated: { description: "agent-planted in a user's root" } },
+    }), "utf8");
+    mkdirSync(join(workspaceDir, "users", "alice-1", ".starlingai", "memory"), { recursive: true });
+    writeFileSync(join(workspaceDir, "users", "alice-1", ".starlingai", "memory", "m1.json"), JSON.stringify({
+      id: "m1", content: "a private note",
+    }), "utf8");
+    mkdirSync(join(workspaceDir, ".starlingai", "checkpoints"), { recursive: true });
+    writeFileSync(join(workspaceDir, ".starlingai", "checkpoints", "task-1.json"), "{\"taskId\": \"task-1\", \"sta", "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configDir;
+    process.env["SAI_WORKSPACE_CONFIG_PATH"] = workspaceDir;
+    vi.resetModules();
+
+    const configLoader = await import("../config/loader.js");
+
+    try {
+      const config = configLoader.loadConfig();
+      expect(config.gateway.port).toBe(8765);
+      expect(config.subAgents["zone_probe"]).toBeDefined();
+      expect(config.subAgents["evil_user_generated"]).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

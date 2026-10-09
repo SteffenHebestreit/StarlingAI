@@ -397,6 +397,12 @@ export interface FederationStreamProgress {
   kind: string;
   iteration: number;
   toolName?: string;
+  /**
+   * Pairs a tool_start with its tool_done. Without it both ends fall back to
+   * agent:tool:iteration, which two same-tool calls in one iteration share — so the caller's
+   * UI resolves the wrong call, or leaves one showing as running.
+   */
+  toolCallId?: string;
   summary?: string;
 }
 

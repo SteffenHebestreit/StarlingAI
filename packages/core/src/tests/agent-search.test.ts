@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildAgentIndex,
+  buildAgentTokenIdf,
   buildAgentSearchDocument,
   inferAgentSearchKeywords,
   resetEmbeddingSearchStateForTests,
@@ -309,6 +310,9 @@ describe("search_agents tool", () => {
         },
       },
       subAgents,
+      // An unavailable index admits nobody, which is the trigger for the restatement rescue
+      // (default on) — a triage call to the unmocked chat provider at host.docker.internal.
+      orchestration: { routingRestatementRescue: false },
     }), "utf8");
 
     process.env["SAI_CONFIG_PATH"] = configPath;
@@ -1392,6 +1396,77 @@ describe("circuit breaker", () => {
   });
 });
 
+describe("shortenOverspecifiedRoutingQuery keeps the informative half of a DELEGATED task", () => {
+  // Session e95eec63. A WireGuard question was shortened to "Answer user's question: they
+  // want" and routed to prompt_optimizer — a PROMPT-review agent — at 0.793, logged as high
+  // confidence. The fragment was not a bad match for that agent; it was an accurate match for
+  // boilerplate, because every word of the actual subject had been dropped before routing.
+  //
+  // The old rule kept the LEADING five distinctive tokens, on the stated assumption that they
+  // "tend to capture the user's primary domain". True of a query a user typed; false of a
+  // delegated task, which always opens with framing and carries its subject downstream.
+  const DELEGATED_TASK = "Answer the user's question: they want to configure a second WireGuard "
+    + "peer on the V-Server so they can reach their Raspberry Pi cluster from outside via the "
+    + "existing tunnel. They pasted their current config and want a detailed tutorial.";
+
+  // A catalog whose agents talk about answering user questions — which every real catalog
+  // does, and which is exactly why those words discriminate nothing.
+  const CORPUS = buildAgentTokenIdf([
+    ["prompt_optimizer", {
+      description: "Reviews prompts and answers questions about what the user wants to change.",
+      capabilities: ["prompt review", "answer quality"], tags: ["prompt", "question", "answer"],
+    }],
+    ["researcher", {
+      description: "Answers a user question with sourced research and detailed findings.",
+      capabilities: ["research"], tags: ["question", "answer", "detailed"],
+    }],
+    ["shell_agent", {
+      description: "Runs commands on servers and inspects running processes.",
+      capabilities: ["server operations"], tags: ["shell", "server"],
+    }],
+  ] as never);
+
+  it("drops the instruction wrapper and keeps the subject", () => {
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, CORPUS);
+    expect(result).not.toBeNull();
+    const lower = result!.toLowerCase();
+
+    // The subject survives...
+    expect(lower).toContain("wireguard");
+    // ...and the boilerplate the old rule kept does not.
+    expect(lower).not.toContain("answer");
+    expect(lower).not.toContain("question");
+  });
+
+  it("still caps the query and returns it in reading order", () => {
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, CORPUS);
+    expect(result!.split(/\s+/).length).toBeLessThanOrEqual(5);
+    // Winners are re-sorted into document order so the query still reads as a phrase for the
+    // embedding search rather than as a reversed bag of words.
+    const lower = result!.toLowerCase();
+    if (lower.includes("wireguard") && lower.includes("peer")) {
+      expect(lower.indexOf("wireguard")).toBeLessThan(lower.indexOf("peer"));
+    }
+  });
+
+  it("keeps the SUBJECT when the corpus cannot discriminate, not the framing", () => {
+    // Nothing indexed: every token scores the same absent-token maximum, so the sort collapses
+    // to its tie-break — and this is not a hypothetical. Measured against the REAL 49-agent
+    // catalog, "want", "know", "wireguard", "raspberry" and "tunnel" all tie at that maximum,
+    // because no agent description happens to contain any of them. With ties breaking toward
+    // document order the shortener returned "want know how configure second" and dropped every
+    // domain noun — the exact defect the rarity ranking was added to fix, restored through its
+    // own fallback. A delegated task opens with framing and carries its subject downstream, so
+    // the later token wins a tie.
+    const result = shortenOverspecifiedRoutingQuery(DELEGATED_TASK, new Map());
+    expect(result).not.toBeNull();
+    const lower = result!.toLowerCase();
+    expect(lower).not.toContain("answer");
+    expect(lower).not.toContain("question");
+    expect(lower).toContain("wireguard");
+  });
+});
+
 describe("shortenOverspecifiedRoutingQuery", () => {
   // Regression: audit session 0a93078b (May 2026).  Coordinator emitted
   // a 13-word query that fragmented the embedding similarity and matched
@@ -1404,6 +1479,9 @@ describe("shortenOverspecifiedRoutingQuery", () => {
     );
     expect(result).not.toBeNull();
     expect(result!.split(/\s+/).length).toBeLessThanOrEqual(5);
+    // No instruction wrapper to strip and no corpus opinion to rank by, so this keeps the
+    // leading distinctive tokens exactly as before: the fix changes where the shortener starts
+    // READING, and a user-typed query starts at its own subject already.
     expect(result).toContain("hardware");
   });
 

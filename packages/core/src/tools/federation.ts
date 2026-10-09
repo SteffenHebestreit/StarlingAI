@@ -177,6 +177,8 @@ registerTool({
             kind: event.kind as "started" | "thinking" | "tool_start" | "tool_done" | "completed",
             iteration: event.iteration,
             toolName: event.toolName,
+            // Namespaced by peer: two peers can mint the same local id.
+            ...(event.toolCallId ? { toolCallId: `${peerId}:${event.toolCallId}` } : {}),
             summary: event.summary,
             metadata: { federated: true, peerId },
           });

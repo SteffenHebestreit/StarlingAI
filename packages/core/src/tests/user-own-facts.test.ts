@@ -113,3 +113,26 @@ describe("renderUserProfileEvidence", () => {
     expect(out).toMatch(/found NOTHING/i);
   });
 });
+
+/**
+ * "found NOTHING on file … you may now state plainly that you have no stored information" is a
+ * claim about the store. A search that matched nothing proves it only when the user has no stored
+ * records at all and the search could match by meaning.
+ */
+describe("renderUserProfileEvidence — an unmatched search is not an empty profile", () => {
+  it("keeps the truly-empty wording when no user records exist and the semantic check ran", () => {
+    expect(renderUserProfileEvidence([], [], { memoryOnFile: { userRecords: 0, semanticRan: true } })).toMatch(/found NOTHING/);
+  });
+
+  it("does not claim an empty profile when the user has records that did not match", () => {
+    const out = renderUserProfileEvidence([], [], { memoryOnFile: { userRecords: 2, semanticRan: true } });
+    expect(out).not.toMatch(/found NOTHING/);
+    expect(out).toContain("The user DOES have 2 stored memory record(s)");
+  });
+
+  it("does not claim an empty profile when semantic search was unavailable", () => {
+    const out = renderUserProfileEvidence([], [], { memoryOnFile: { userRecords: 0, semanticRan: false } });
+    expect(out).not.toMatch(/found NOTHING/);
+    expect(out).toContain("semantic search was unavailable");
+  });
+});

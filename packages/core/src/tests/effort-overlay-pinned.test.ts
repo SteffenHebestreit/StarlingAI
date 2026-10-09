@@ -32,8 +32,7 @@ describe("applyEffortModelOverlay — a pinned agent effort is an opt-out", () =
   });
 
   it("still lets the dial set effort for an agent that did NOT pin one", () => {
-    const r = applyEffortModelOverlay(mk({}), MAX);
-    expect(r.reasoningEffort).toBe("high");
+    expect(applyEffortModelOverlay(mk({}), MAX).reasoningEffort).toBe("high");
   });
 
   it("keeps honouring the enableThinking opt-out", () => {
@@ -45,5 +44,40 @@ describe("applyEffortModelOverlay — a pinned agent effort is an opt-out", () =
   it("raises the budget regardless of either opt-out", () => {
     expect(applyEffortModelOverlay(mk({ reasoningEffort: "low" }), MAX).maxTokens).toBe(32_768);
     expect(applyEffortModelOverlay(mk({ enableThinking: false }), MAX).maxTokens).toBe(32_768);
+  });
+
+  it("RAISES a pin but never INVENTS one", () => {
+    // maxTokens is optional now: an agent that declares none runs on the budget the
+    // provider derives from the context window (computeOutputTokenBudget). The old
+    // Math.max(maxTokens ?? 0, subAgentMaxTokens) pinned such an agent right back to a
+    // fixed 32_768 — the very ceiling the config change removed, re-applied by the dial.
+    expect(applyEffortModelOverlay(mk({ maxTokens: undefined }), MAX).maxTokens).toBeUndefined();
+  });
+});
+
+describe("applyEffortModelOverlay — the dial passes its rung through unclamped", () => {
+  // A clamp folding high/xhigh down to medium briefly lived here, on the theory that the
+  // top rung caused backend_coder to emit 97,714 characters of reasoning, call ZERO tools
+  // and fail at 36 minutes. Measurement refuted it: across four cap-hits on qwen3.8-27b the
+  // reasoning volume was independent of the rung — content_writer sat on the LOWEST rung LM
+  // Studio accepts and burned the MOST (59,508 chars) — and completionTokens equalled
+  // maxTokens EXACTLY every time. The model was being TRUNCATED mid-thought by a shared
+  // reasoning+content budget, not over-thinking because of the rung. The fix is the derived
+  // output budget; clamping here only made max effort silently not-max.
+  it("hands a sub-agent the dial's top rung unchanged", () => {
+    expect(applyEffortModelOverlay(mk({}), MAX).reasoningEffort).toBe("high");
+    expect(applyEffortModelOverlay(mk({}), { ...MAX, reasoningEffort: "xhigh" }).reasoningEffort).toBe("xhigh");
+  });
+
+  it("passes a lower dial value through too", () => {
+    expect(applyEffortModelOverlay(mk({}), { ...MAX, reasoningEffort: "low" }).reasoningEffort).toBe("low");
+  });
+
+  it("still lets an agent PIN the top rung for itself", () => {
+    expect(applyEffortModelOverlay(mk({ reasoningEffort: "xhigh" }), MAX).reasoningEffort).toBe("xhigh");
+  });
+
+  it("still raises the token budget — only reasoning is clamped", () => {
+    expect(applyEffortModelOverlay(mk({}), MAX).maxTokens).toBe(32_768);
   });
 });

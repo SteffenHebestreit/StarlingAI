@@ -8,6 +8,8 @@
  */
 
 import { getAllSessions, type AgentSession } from "./session.js";
+import { getConfig } from "../config/loader.js";
+import { currentUserId } from "../runtime/request-context.js";
 
 const STOPWORDS = new Set<string>([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how",
@@ -36,6 +38,31 @@ export interface SearchSessionsOptions {
   excludeSessionId?: string;
   includeArchived?: boolean;
   minMessages?: number;
+  /**
+   * The user the results are FOR. Under multi-user auth only that user's own sessions are
+   * searched (see sessionVisibilityFilter). Defaults to the ambient request user, so a caller
+   * that forgets to pass it is still scoped rather than handed every account's history.
+   */
+  requestingUserId?: string | undefined;
+}
+
+/**
+ * Which past sessions a search made for `requestingUserId` may return.
+ *
+ * Security finding S2 (2026-10-05): search_sessions and recall_context's sessions section
+ * searched EVERY session in the process, so one authenticated user's question pulled snippets of
+ * other users' conversations into their own context. The rule now:
+ *   - Auth off (one operator): every session, exactly as before.
+ *   - Auth on: only sessions this user owns. A session with NO owner (auth-off history, channel
+ *     sessions) is not shown either: the session routes let a caller open an unowned session it
+ *     names, but a keyword search would push its contents to every account unasked. A search
+ *     with no requesting user (an unattended run) sees none. No admin exemption: an admin's
+ *     recall quietly mixing other users' chats into the admin's answers is the same leak.
+ */
+export function sessionVisibilityFilter(requestingUserId: string | undefined): (sessionUserId: string | undefined) => boolean {
+  if (getConfig().auth?.enabled !== true) return () => true;
+  if (!requestingUserId?.trim()) return () => false;
+  return (sessionUserId) => sessionUserId === requestingUserId;
 }
 
 export function searchSessions(query: string, opts: SearchSessionsOptions = {}): SessionSearchResult[] {
@@ -45,10 +72,12 @@ export function searchSessions(query: string, opts: SearchSessionsOptions = {}):
   const limit = Math.max(1, Math.min(20, opts.limit ?? 5));
   const minMessages = opts.minMessages ?? 2;
   const includeArchived = opts.includeArchived ?? true;
+  const visible = sessionVisibilityFilter(opts.requestingUserId ?? currentUserId());
 
   const results: SessionSearchResult[] = [];
   for (const session of getAllSessions({ includeArchived })) {
     if (opts.excludeSessionId && session.id === opts.excludeSessionId) continue;
+    if (!visible(session.userId)) continue;
 
     const messages = extractMessages(session);
     if (messages.length < minMessages) continue;

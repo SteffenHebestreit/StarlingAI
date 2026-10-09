@@ -9,18 +9,26 @@
  */
 
 import { getConfig } from "../config/loader.js";
-import { buildAgentTokenIdf, isEmbeddingAvailable, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { buildAgentTokenIdf, isEmbeddingAvailable, routingTokenRarity, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import type { SubAgentConfig } from "../config/schema.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMultiplier, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
 import { rerankCandidates } from "../retrieval/reranker.js";
+import { logAudit } from "../audit/logger.js";
+import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
+import { WORKSPACE_MUTATION_TASK_RE } from "./delegation-artifact-classification.js";
+import { isCompileTimeMappedTool } from "../guardrails/tool-tiers.js";
+import { getTool } from "./registry.js";
+import { isToolDisabled } from "./groups.js";
+import { runtimeComponentAttempted } from "../runtime/status.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
  * actually used (rerank mode).  Semantic similarity scores are normalized
  * narrowly around 0.5–0.95, so the cutoff sits high.
  */
-const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
+export const SEMANTIC_AGENT_ROUTING_MIN_SCORE = 0.72;
 
 /**
  * Minimum score for a candidate to qualify when only keyword scoring is
@@ -70,10 +78,20 @@ export interface AgentRoutingResolution {
   gated: boolean;
   /** Agents excluded because their circuit breaker is open (too many recent failures). */
   trippedAgents: string[];
+  /** Agents excluded because no tool they declare is usable here (agentCfgHasNoUsableTools). Absent when there were none. */
+  toollessAgents?: string[];
   /** True when every result is only "low" confidence — consider ephemeral agent or user clarification. */
   allLowConfidence: boolean;
   /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
   excludedAgents?: string[];
+  /**
+   * Best EMBEDDING matches that fell under the 0.72 admission floor, highest first.
+   *
+   * Telemetry only — nothing branches on it. Sub-floor semantic scores are zeroed before
+   * ranking, so without this a query where every agent scored 0.71 logs identically to one
+   * where nothing matched at all: resultCount 0, weakCount 0, gated false.
+   */
+  nearMisses: Array<{ name: string; score: number }>;
   /** Why semantic search could not run even though an embedding model is configured. */
   semanticUnavailableReason?: string;
 }
@@ -82,6 +100,73 @@ export interface RoutingSelectionReason {
   confidence: "high" | "medium" | "low";
   matchedTerms: string[];
   score: number;
+}
+
+/**
+ * Which code path asked for this routing decision. `search_agents`/`list_agents` are the
+ * model-facing discovery tools; `discovery_prefetch` is the up-front capsule; `delegation`
+ * is an un-named delegate_to_agent/swarm_delegate resolving its own target; `bidding` is
+ * the swarm bid path.
+ */
+export type RoutingSurface =
+  | "search_agents"
+  | "list_agents"
+  | "discovery_prefetch"
+  | "delegation"
+  | "bidding"
+  | "shadow";
+
+/**
+ * Emit one `agent_routing_evaluated` row for a routing decision.
+ *
+ * Every routing path funnels through resolveAgentRouting, but only the two model-facing
+ * search tools ever logged a row — and in fourteen days of production those tools were
+ * called zero times, so the routing scores, the share of decisions that hit the floor and
+ * the chosen agents were all unobservable while routing ran on every escalated turn. The
+ * shape is the search_agents row plus `surface`, the scored top-5 and the elapsed time, so
+ * one query answers "what did routing see, and what did it do" for every surface.
+ */
+export function logRoutingEvaluated(input: {
+  surface: RoutingSurface;
+  query: string;
+  resolution: AgentRoutingResolution;
+  elapsedMs?: number;
+  sessionId?: string;
+  extra?: Record<string, unknown>;
+}): void {
+  const { resolution } = input;
+  const scored = [...resolution.results, ...resolution.weakCandidates]
+    .slice(0, 5)
+    .map((candidate) => ({
+      name: candidate.name,
+      score: Number(candidate.score.toFixed(4)),
+      confidence: candidate.confidence,
+      admitted: resolution.results.some((r) => r.name === candidate.name),
+    }));
+  logAudit("agent_routing_evaluated", {
+    surface: input.surface,
+    // The query is the routing input; it is the user's text or a derived task, so it
+    // rides through the same audit sanitizer as every other free-form field.
+    query: input.query.slice(0, 500),
+    minConfidence: resolution.minConfidence,
+    mode: resolution.mode,
+    ...(resolution.semanticUnavailableReason ? { semanticUnavailableReason: resolution.semanticUnavailableReason } : {}),
+    resultCount: resolution.results.length,
+    weakCount: resolution.weakCandidates.length,
+    // Empty when something was admitted. Non-empty with resultCount 0 is the shape worth
+    // alerting on: agents matched, the absolute gate rejected them.
+    nearMisses: resolution.nearMisses,
+    gated: resolution.gated,
+    allLowConfidence: resolution.allLowConfidence,
+    trippedAgents: resolution.trippedAgents,
+    ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
+    excludedAgents: resolution.excludedAgents ?? [],
+    topResult: resolution.results[0]?.name ?? null,
+    topScore: resolution.results[0]?.score ?? null,
+    scored,
+    ...(input.elapsedMs !== undefined ? { elapsedMs: input.elapsedMs } : {}),
+    ...(input.extra ?? {}),
+  }, { ...(input.sessionId ? { sessionId: input.sessionId } : {}), channel: "agent-routing" });
 }
 
 export function computeHybridRoutingScore(
@@ -163,6 +248,52 @@ export function isCircuitOpen(agentName: string, workspacePath: string): boolean
   return failures / recent.length > CIRCUIT_FAILURE_THRESHOLD;
 }
 
+/** The swarm's own bookkeeping tools, which any agent may hold. They do none of an agent's work. */
+const SWARM_BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set(["read_shared_facts", "share_finding"]);
+
+/**
+ * Whether this process cannot offer a tool an agent declares. A registered tool is usable. An
+ * unregistered one is not when nothing but runtime state could register it: a name with no
+ * compile-time tier, which is a bridged MCP tool (mcp__<server>__<tool>, registered only while its
+ * server is connected), an A2A or self-developed tool, or a name no process can register at all;
+ * or a tool config disables, which registerTool skips. A built-in tool that is merely unregistered
+ * stays usable: its module registers it on import, and a process that routes without importing
+ * every tool module (a CLI, a test) would otherwise find no agent.
+ *
+ * A bridged MCP tool is judged the same way only once this process has connected its MCP servers
+ * (syncMcpServers marks the attempt before it connects any). A process that never does, such as
+ * routing:canary, routing:eval or the pre-router bench, has none of them registered whatever state
+ * the servers are in: it left process_memory_keeper out of every ranking on a machine whose config
+ * includes it, and scored the eval cases that expect it as misses.
+ */
+function declaredToolIsUnusable(toolName: string): boolean {
+  if (getTool(toolName)) return false;
+  if (isToolDisabled(toolName)) return true;
+  if (isCompileTimeMappedTool(toolName)) return false;
+  if (toolName.startsWith("mcp__")) return runtimeComponentAttempted("mcp");
+  return true;
+}
+
+/**
+ * Whether an agent is left with no tool to do its work: it declares tools beyond the swarm's
+ * bookkeeping pair, and every one of them is unusable here (declaredToolIsUnusable). On the E2E run
+ * of 2026-10-08 the processmem MCP server was unreachable, so process_memory_keeper's ten
+ * mcp__processmem__ tools were never registered and a sub-agent run silently keeps only registered
+ * tools. Routing still offered it as the only match for "Schreibe die Textdatei …"; it ran with
+ * read_shared_facts and share_finding, called share_finding, reported success, and the file was
+ * never written. An agent that declares no tools beyond the pair, or inherits the full set, is not
+ * this: it never depended on one.
+ */
+export function agentCfgHasNoUsableTools(cfg: { tools?: string[] } | undefined): boolean {
+  const domainTools = agentCfgDomainTools(cfg);
+  return domainTools.length > 0 && domainTools.every(declaredToolIsUnusable);
+}
+
+/** The tools an agent declares beyond the swarm's bookkeeping pair: the ones it does its work with. */
+export function agentCfgDomainTools(cfg: { tools?: string[] } | undefined): string[] {
+  return (cfg?.tools ?? []).filter((toolName) => !SWARM_BOOKKEEPING_TOOL_NAMES.has(toolName));
+}
+
 /**
  * Returns a small reputation boost/penalty based on recent agent outcomes.
  * Range: approximately [-0.125, +0.125]. Returns 0 when no history exists.
@@ -195,6 +326,29 @@ const ROUTING_QUERY_FILLER = new Set<string>([
   "via", "etc",
 ]);
 
+/**
+ * Remove the instruction wrapper a DELEGATED task opens with.
+ *
+ * "Answer the user's question: …", "Build a WORKING app for: …", "Investigate whether: …" —
+ * a delegation states its mode first and its subject after, and the subject is the only half
+ * that tells one agent from another. Ranking could not remove it: measured against the real
+ * 49-agent catalog the framing words and the domain nouns score the SAME absent-token rarity,
+ * so the ranking fell through to document order and kept the wrapper. Cutting it structurally
+ * is what makes the ranking behind it mean anything.
+ *
+ * Deliberately narrow: a colon inside the opening clause only, with substantial text after it.
+ * A user-typed query rarely opens that way, and one that does ("error: cannot find module")
+ * loses only its label.
+ */
+export function stripDelegationFraming(query: string): string {
+  const colon = query.indexOf(":");
+  if (colon < 0) return query;
+  const head = query.slice(0, colon);
+  if (head.split(/\s+/).filter(Boolean).length > 8) return query;   // not an opening clause
+  const rest = query.slice(colon + 1).trim();
+  return rest.split(/\s+/).filter(Boolean).length >= 6 ? rest : query;
+}
+
 /** Count meaningful content words in a routing query.  Used to detect
  *  over-specified queries that fragment the embedding similarity. */
 export function countRoutingQueryContentTokens(query: string): number {
@@ -224,18 +378,64 @@ export function countRoutingQueryContentTokens(query: string): number {
  * Returns null when the query is already short enough that shortening
  * wouldn't change behavior.
  */
-export function shortenOverspecifiedRoutingQuery(query: string): string | null {
-  const tokens = query.split(/\s+/).filter(Boolean);
+export function shortenOverspecifiedRoutingQuery(
+  query: string,
+  /** Corpus rarity to rank by. Defaults to the live agent catalog; injected in tests. */
+  corpusIdf?: Map<string, number>,
+): string | null {
+  const tokens = stripDelegationFraming(query).split(/\s+/).filter(Boolean);
   if (tokens.length <= 6) return null;
 
-  const distinctive: string[] = [];
+  const candidates: string[] = [];
   for (const token of tokens) {
     const lower = token.toLowerCase();
     if (lower.length < 3) continue;
     if (ROUTING_QUERY_STOP_WORDS.has(lower)) continue;
     if (ROUTING_QUERY_FILLER.has(lower)) continue;
-    distinctive.push(token);
-    if (distinctive.length >= 5) break;
+    candidates.push(token);
+  }
+  if (candidates.length === 0) return null;
+
+  // KEEP THE INFORMATIVE TOKENS, NOT THE FIRST ONES.
+  //
+  // This used to take the leading five, on the stated assumption that they "tend to capture
+  // the user's primary domain". That holds for a query a user typed. It is false for a
+  // DELEGATED task, which always opens with framing — "Answer the user's question: they
+  // want to…", "Build a…", "Investigate whether…" — and carries its subject downstream.
+  //
+  // Session e95eec63 is what the assumption cost: a WireGuard question shortened to
+  // "Answer user's question: they want", which routed to prompt_optimizer — a PROMPT-review
+  // agent — at 0.793, logged as high confidence. The fragment was not a bad match for that
+  // agent; it was an accurate match for boilerplate, because every word of the actual
+  // subject had been discarded before routing began.
+  //
+  // Rarity across the agent corpus answers the question position was standing in for: a word
+  // in most agent descriptions tells them apart from nothing. The winners are re-sorted into
+  // reading order so the shortened query still parses as a phrase for the embedding search
+  // rather than a bag of words.
+  //
+  // RARITY ONLY RANKS WHERE THE CORPUS HAS AN OPINION, and for the query this exists to fix it
+  // has none: measured against the real 49-agent catalog, "want", "know", "wireguard",
+  // "raspberry" and "tunnel" ALL score the absent-token maximum, because no agent description
+  // happens to contain any of them. The sort then falls through to its tie-break — document
+  // order — which is the leading-tokens rule this replaced. That is why the FRAMING is removed
+  // before ranking rather than ranked against (see stripDelegationFraming above): with the
+  // wrapper gone, document order lands on the subject instead of on "answer the user's
+  // question". Ties keep document order so the result still reads as a phrase.
+  const idf = corpusIdf ?? buildAgentTokenIdf(routableAgentEntries());
+  const ranked = candidates
+    .map((token, index) => ({ token, index, rarity: routingTokenRarity(token, idf) }))
+    .sort((a, b) => (b.rarity - a.rarity) || (a.index - b.index))
+    .slice(0, 5)
+    .sort((a, b) => a.index - b.index);
+
+  const seen = new Set<string>();
+  const distinctive: string[] = [];
+  for (const entry of ranked) {
+    const key = entry.token.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    distinctive.push(entry.token);
   }
 
   if (distinctive.length === 0) return null;
@@ -243,6 +443,14 @@ export function shortenOverspecifiedRoutingQuery(query: string): string | null {
   // Don't return a "shortened" query that's actually the same as the input.
   if (shortened === query.trim()) return null;
   return shortened;
+}
+
+/** Catalog the router can actually pick from: configured sub-agents plus promoted ones. */
+function routableAgentEntries(): Array<[string, SubAgentConfig]> {
+  const config = getConfig();
+  const promoted = Object.entries(readPromotedAgents(config.workspacePath))
+    .filter((entry): entry is [string, SubAgentConfig] => Boolean(entry[1]));
+  return [...Object.entries(config.subAgents), ...promoted];
 }
 
 export async function resolveAgentRouting(
@@ -286,6 +494,16 @@ export async function resolveAgentRouting(
     entries = entries.filter(([name]) => !trippedAgents.includes(name));
   }
 
+  // Filter out agents left with no usable tool (agentCfgHasNoUsableTools), such as one whose MCP
+  // server is unreachable: routed, it runs with only the bookkeeping tools and reports success.
+  const toollessAgents: string[] = entries
+    .filter(([, cfg]) => agentCfgHasNoUsableTools(cfg))
+    .map(([name]) => name);
+  if (toollessAgents.length > 0) {
+    entries = entries.filter(([name]) => !toollessAgents.includes(name));
+  }
+  const toollessField = toollessAgents.length > 0 ? { toollessAgents } : {};
+
   const semanticScores = new Map<string, number>();
   let usedSemanticSearch = false;
   let semanticSearchAttempted = false;
@@ -294,7 +512,7 @@ export async function resolveAgentRouting(
     try {
       semanticSearchAttempted = true;
       const provider = getEmbeddingProvider();
-      const results = await searchByEmbedding(raw, provider, 8);
+      const results = await searchByEmbedding(raw, provider, 8, opts?.allowedAgents ? { allowedAgents: opts.allowedAgents } : {});
       for (const result of results) {
         if (opts?.allowedAgents && !opts.allowedAgents.includes(result.agentName)) continue;
         semanticScores.set(result.agentName, Math.max(0, (result.score + 1) / 2));
@@ -312,8 +530,10 @@ export async function resolveAgentRouting(
       mode: "semantic_unavailable",
       results: [],
       weakCandidates: [],
+      nearMisses: [],
       gated: true,
       trippedAgents,
+      ...toollessField,
       allLowConfidence: false,
       excludedAgents: opts?.excludeAgents,
       semanticUnavailableReason: semanticSearchAttempted
@@ -380,7 +600,50 @@ export async function resolveAgentRouting(
     })),
   );
 
-  if (rerankScores) {
+  // The rerank blend RE-ORDERS the admitted set. It does not decide admission.
+  //
+  // It used to do both, and that was a scale error with a provable consequence. The TEI path
+  // min-max normalises the model's logits (retrieval/reranker.ts), which throws away their
+  // absolute meaning and substitutes the candidate's RANK within the shortlist: the worst
+  // candidate always receives exactly 0 and the best always exactly 1. Feeding a rank
+  // position into `combinedScore * 0.7 + rerankScore * 0.3` and then comparing the result
+  // against the fixed 0.72 floor meant:
+  //
+  //   - the reranker's LAST choice scored at most 0.7 * 1.0 = 0.70 and was therefore
+  //     rejected unconditionally, however well it matched — a perfect 1.0 embedding match
+  //     still fell under the gate;
+  //   - the reranker's FIRST choice scored at least 0.72 * 0.7 + 0.3 = 0.804 and was
+  //     admitted unconditionally, however poorly;
+  //   - and because the embedding term only varies across [0.72, 1.0] after its own floor
+  //     while the rerank term is stretched across the full [0, 1], the nominal 70/30 blend
+  //     behaved closer to 30/70 in the reranker's favour.
+  //
+  // ONE LIVE CONSEQUENCE, deliberate. `agents.ephemeralGeneration.skillMatchThreshold`
+  // compares the REPORTED score, and min-max guaranteed the reranker's top pick at least
+  // 0.72 * 0.7 + 0.3 = 0.804 — so any threshold set between 0.72 and 0.804 was bypassed
+  // unconditionally, whatever the match was actually worth. That is the same score-inflation
+  // failure `shouldPreferCatalogAgent` was written to stop; read its comment. Reporting the
+  // pre-blend score restores the threshold's ability to discriminate, so a deployment pinning
+  // 0.75 will now spawn an ephemeral agent for matches in 0.72-0.75 that used to be handed to
+  // the catalog. That is the configured behaviour finally taking effect, not a new rule.
+  //
+  // So admission is decided by the embedding score, which is what the 0.72 floor was
+  // calibrated for and which computeHybridRoutingScore has already gated once. The blend is
+  // kept as the SORT KEY, so the reranker still does the job it is good at — ordering
+  // near-equals — without deciding who is in the room. The reported score stays the
+  // pre-blend one, so `results` carry the quantity the floor and `confidenceLabel` agree on.
+  if (rerankScores && getConfig().retrieval.reranker.blendMode !== "admission") {
+    ranked = ranked
+      .map((result) => {
+        const rerankScore = rerankScores.get(result.name);
+        return rerankScore === undefined
+          ? { ...result, rankKey: result.combinedScore }
+          : { ...result, rankKey: Math.max(0, Math.min(1, result.combinedScore * 0.7 + rerankScore * 0.3)) };
+      })
+      .sort((a, b) => (b.rankKey - a.rankKey) || compareRoutingResults(a, b));
+  } else if (rerankScores) {
+    // Legacy: the blend decides admission too. Kept behind `blendMode: "admission"` so a
+    // deployment that has tuned around the old numbers can pin them deliberately.
     ranked = ranked
       .map((result) => {
         const rerankScore = rerankScores.get(result.name);
@@ -391,9 +654,40 @@ export async function resolveAgentRouting(
         };
       })
       .sort(compareRoutingResults);
+  } else {
+    ranked = ranked.sort(compareRoutingResults);
   }
 
-  ranked = ranked.sort(compareRoutingResults).slice(0, 5);
+  ranked = ranked.slice(0, 5);
+
+  // The best EMBEDDING scores that never reached `ranked`, kept purely as telemetry.
+  //
+  // computeHybridRoutingScore turns any sub-floor semantic score into a hard 0 and the
+  // ranking then filters `> 0`, so a query where every agent scored 0.71 against a 0.72 gate
+  // is indistinguishable in the logs from a query where nothing scored at all. Both report
+  // resultCount 0, weakCount 0, gated false. That is precisely the shape of the e1151d8
+  // incident — 49 agents at 0.7059 against a 0.72 floor — and of a German paraphrase landing
+  // a few hundredths under a gate its English twin clears.
+  //
+  // Nothing downstream reads this: results, weakCandidates and the branch logic are all
+  // unchanged. It exists so the near miss is visible before anyone has to guess.
+  // Only when the ranking came back EMPTY. The field exists to explain a turn that got
+  // nothing, not to annotate healthy ones: almost every successful query also has agents
+  // sitting under the gate, and listing them would put three names on every audit row while
+  // saying nothing anyone would act on.
+  //
+  // Restricted to agents this pass was actually ALLOWED to route to. `semanticScores` comes
+  // from searchByEmbedding, which honours `allowedAgents` but knows nothing about the
+  // `excludeAgents` set or the circuit breaker — both of which `entries` was filtered by
+  // above. Without this the field can name a coordinator excluding itself, or an agent whose
+  // breaker is open after repeated failures, and `surfaceRoutingNearMisses` would then invite
+  // the model to delegate to exactly the agent the router refused to offer.
+  const eligible = new Set(entries.map(([name]) => name));
+  const nearMisses = ranked.length > 0 ? [] : [...semanticScores.entries()]
+    .filter(([name, score]) => eligible.has(name) && score > 0 && score < SEMANTIC_AGENT_ROUTING_MIN_SCORE)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([name, score]) => ({ name, score: Number(score.toFixed(4)) }));
 
   const gated = ranked.filter((result) => result.combinedScore >= minScore);
   const weakCandidates = ranked
@@ -412,8 +706,10 @@ export async function resolveAgentRouting(
     mode: usedSemanticSearch ? "hybrid" : "keyword",
     results: resolvedResults,
     weakCandidates,
+    nearMisses,
     gated: ranked.length > 0 && gated.length === 0,
     trippedAgents,
+    ...toollessField,
     allLowConfidence,
     excludedAgents: opts?.excludeAgents ? [...opts.excludeAgents] : undefined,
   };
@@ -454,6 +750,16 @@ export function isWebReachingToolName(toolName: string): boolean {
 }
 
 /**
+ * Browser tools that only look at the page the shared browser tab already shows, in both the
+ * gateway's own names and the bridged Playwright server's. None of them opens a URL, so they
+ * read whatever page the last navigation left there, which may be another session's.
+ */
+const BROWSER_TAB_VIEW_TOOL_NAMES = new Set<string>([
+  "browser_snapshot", "browser_screenshot", "browser_take_screenshot",
+  "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
+]);
+
+/**
  * True for a tool that can GATHER fresh external evidence (search + fetch page
  * content + drive a browser). This is the narrower cousin of isWebReachingToolName:
  * it excludes url_inspect, which only probes a URL you already have (headers,
@@ -461,9 +767,16 @@ export function isWebReachingToolName(toolName: string): boolean {
  * only "web" tool is url_inspect cannot do PRIMARY research — evidence_analyst
  * (url_inspect only, no web_search/web_fetch) was wrongly classed research-capable
  * and dead-looped url_inspect on a 404 after being handed a gather task (audit 687a224b).
+ *
+ * It excludes the browser tab views (BROWSER_TAB_VIEW_TOOL_NAMES) for the same reason. The
+ * browser_ prefix credited them, so vision_browser_analyst, which holds only browser_snapshot
+ * and browser_screenshot, counted as a gatherer. Routing gave it "die URL … abrufen" steps
+ * ahead of browser_agent and researcher, and it snapshotted a tab an earlier session had left on
+ * another page nine times, then answered from that page (E2E 2026-10-08, 79dd29e0, 3c91cb68,
+ * c172d755). A browser tool that drives the page (browser_navigate, browser_click, …) still counts.
  */
 export function isWebGatheringToolName(toolName: string): boolean {
-  if (toolName === "url_inspect") return false;
+  if (toolName === "url_inspect" || BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName)) return false;
   return isWebReachingToolName(toolName);
 }
 
@@ -471,7 +784,8 @@ export function isWebGatheringToolName(toolName: string): boolean {
  * Pure capability check against an agent's tool list. Research-capable means it can
  * GATHER from the web directly (web_search/web_fetch/browser_*) or is a coordinator
  * that can delegate to one that does. url_inspect alone does NOT qualify (it only
- * probes a known URL, cannot search/fetch). An undefined tool list means "inherit all
+ * probes a known URL, cannot search/fetch), and neither do browser tab views alone
+ * (browser_snapshot/browser_screenshot read the open page, cannot open one). An undefined tool list means "inherit all
  * tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
  */
 export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined): boolean {
@@ -488,6 +802,40 @@ export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined)
 export function agentIsResearchCapable(agentName: string): boolean {
   const config = getConfig();
   return agentCfgIsResearchCapable(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
+}
+
+/**
+ * Whether an agent gathers external evidence ITSELF, rather than merely being able
+ * to hand the task to something that does. The same distinction `isWebGatheringToolName`
+ * already draws one clause up — it excludes url_inspect because probing a known URL is
+ * not primary research — applied to the coordination clause, which never got it.
+ *
+ * The coordination clause is right for a coordinator and wrong for a WRITER that happens
+ * to hold `delegate_to_agent`. Of the 48 agents this repo configures, 14 pass
+ * `agentCfgIsResearchCapable` but only 8 gather directly; of the six credited on
+ * coordination alone, four are coordinators and two are WRITERS — meeting_briefing_agent,
+ * and paper_author, whose own description says it drafts "from an already-collected
+ * evidence ledger" and is "distinct from researcher". Session 00b3675d handed it four consecutive
+ * source-sensitive delegations at high confidence (topResultScore 0.845-0.866) and its
+ * sub-sessions made 0 web_search, 0 web_fetch and, on three of the four, 0
+ * delegate_to_agent calls: three pricing reports written from model memory, each
+ * reporting delegationOutcome "success". One told the user Anthropic has no
+ * subscription plans minutes after the user said they hold one.
+ *
+ * Used ONLY as the RANKING key (see preferResearchCapableCandidates). The veto that
+ * decides whether a delegation is redirected stays `agentCfgIsResearchCapable`, so a
+ * coordinator asked to run a multi-area mission is still allowed to fan it out.
+ */
+export function agentCfgGathersDirectly(cfg: { tools?: string[] } | undefined): boolean {
+  if (!cfg) return true;
+  if (!cfg.tools) return true; // inherits the full tool set
+  return cfg.tools.some(isWebGatheringToolName);
+}
+
+/** Config-backed {@link agentCfgGathersDirectly}. */
+export function agentGathersDirectly(agentName: string): boolean {
+  const config = getConfig();
+  return agentCfgGathersDirectly(config.subAgents[agentName] ?? readPromotedAgents(config.workspacePath)[agentName]);
 }
 
 /**
@@ -523,12 +871,16 @@ const SEARCH_ONLINE_TASK_RE = /\b(search online|search the web|web search|look (
 // present, and a workspace/code marker (function, file, symbol, codebase) vetoes it so
 // internal "find/search" tasks (code_analyst's territory) are never misrouted.
 //
-// English-internal (de-lexicalized): these carry no per-language entries. The structural
-// "SOURCE-SENSITIVE DELEGATION" marker (checked first in the function below) stays the PRIMARY
-// signal and is language-independent, so it still fires for any language; this verb+noun shape
-// is the English-only fallback. NOTE: the boundary-translation layer that would render a
-// non-English task to English before this fallback is NOT YET IMPLEMENTED — until it lands, a
-// non-English task relies on the structural marker alone (the verb+noun fallback won't fire).
+// English-internal (de-lexicalized): these carry no per-language entries, so this shape fires for
+// English task text only. The structural "SOURCE-SENSITIVE DELEGATION" marker checked first in the
+// function below is language-independent, but nothing puts it on the orchestrator's own
+// delegations any more: its injector needs the sourceSensitive guidance flag the de-lex hard-wired
+// off, and the boundary translation that would hand this shape English is off by default
+// (orchestration.normalizeDelegationToEnglish). A plan step written in German therefore never
+// matched here, and web_coder ran a "die Website … abrufen" step it cannot do (E2E 2026-10-07,
+// 2f31f387). A non-English research step now reaches the research gate through its TURN TRIGGER
+// (executeDelegationWithFallback in tools/sub-agent.ts): the up-front judge's verdict and the named
+// agent's routing taxonomy, no words at all.
 const WEB_RESEARCH_VERB_RE = /\b(?:research|investigat\w+|searche?s?|find|look\s*up|gather|compare|recommend)\b/i;
 // External web nouns now also cover PRODUCT/MODEL/TOOL SELECTION research — "find the
 // best image MODEL", "compare GPUs", "research the top framework". The field of real
@@ -541,12 +893,12 @@ const EXTERNAL_WEB_NOUN_RE = /\b(?:url|urls|link|links|website|websites|online|p
 const WORKSPACE_CODE_MARKER_RE = /\b(?:codebase|workspace|repository|repo|source\s*code|functions?|methods?|files?|symbols?|class(?:es)?|modules?)\b/i;
 
 /**
- * Whether a delegation task requires fresh external evidence. The authoritative
- * signal is the runtime-injected "SOURCE-SENSITIVE DELEGATION" wrapper (the
- * orchestrator adds it when the turn was classified source-sensitive); we also
- * catch explicit "search online / validate" phrasing and the vetted research
- * patterns. When true, the chosen agent MUST be research-capable — this is a
- * correctness invariant, not a routing preference.
+ * Whether a delegation task requires fresh external evidence, read from the task's text: the
+ * "SOURCE-SENSITIVE DELEGATION" wrapper (rarely injected since the de-lex — see the note above),
+ * explicit "search online / validate" phrasing and the vetted research patterns. When true, the
+ * chosen agent MUST be research-capable — this is a correctness invariant, not a routing
+ * preference. The research gate has a second, language-independent trigger that does not read
+ * the text (the turn trigger in executeDelegationWithFallback).
  */
 export function taskRequiresExternalResearch(task: string): boolean {
   const t = task ?? "";
@@ -564,15 +916,111 @@ export function taskRequiresExternalResearch(task: string): boolean {
 
 /** First configured, research-capable, not-yet-attempted coordinator/specialist
  *  to fall back to when routing produced only research-incapable candidates. */
-export function pickResearchFallbackAgent(attempted: string[]): string | undefined {
+export function pickResearchFallbackAgent(attempted: string[], canDispatch?: (name: string) => boolean): string | undefined {
   const config = getConfig();
   const promoted = readPromotedAgents(config.workspacePath);
   // Prefer the direct web specialist over a coordinator: a single research task
   // does not need a coordinator-of-coordinator hop (the ~20-min web_task_coordinator
   // → researcher loop, session 44ea5c21). Coordinators are the last resort.
   return ["researcher", "browser_agent", "web_task_coordinator", "mission_coordinator"].find(
-    (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name),
+    (name) => (config.subAgents[name] || promoted[name]) && agentIsResearchCapable(name) && !attempted.includes(name)
+      && (!canDispatch || canDispatch(name)),
   );
+}
+
+type CapabilityBearing = (TaxonomyBearing & { tools?: string[] }) | undefined;
+
+/** Surfaces of the routing taxonomy that stay inside the deployment. Every other surface — the
+ *  open network, a browser, a desktop host, remote infrastructure, the user's own channels — reaches
+ *  a source outside the workspace. */
+const WORKSPACE_SURFACES: ReadonlySet<string> = new Set(["workspace", "local_sandbox", "swarm_internal"]);
+
+/**
+ * Whether an agent's one way outside the workspace is the page the shared browser tab already
+ * shows: it holds nothing that gathers or delegates (agentCfgIsResearchCapable, which does not
+ * count a snapshot or screenshot of the open tab), and the browser is the only outside surface its
+ * routing taxonomy names. It can read a page but not open one, so it reads whatever the last
+ * navigation left there. On a turn nothing has gathered for yet, that is another turn's page: on
+ * the E2E run of 2026-10-08 (c172d755) a plan named vision_browser_analyst for both of its site
+ * steps, and it read dokumentation.html, which another session had opened, and reported a
+ * headcount and two page visits it never made.
+ */
+export function agentCfgOnlyReadsOpenBrowserTab(cfg: CapabilityBearing): boolean {
+  if (!cfg || agentCfgIsResearchCapable(cfg)) return false;
+  const outside = (resolveRoutingTaxonomy(cfg)?.surface ?? []).filter((surface) => !WORKSPACE_SURFACES.has(surface));
+  return outside.length > 0 && outside.every((surface) => surface === "browser");
+}
+
+/**
+ * Whether an agent drives the shared browser: it holds a browser tool that opens a page or acts on
+ * one (browser_navigate, browser_click, the bridged Playwright server's), not only a view of the
+ * open tab (BROWSER_TAB_VIEW_TOOL_NAMES). After such an agent has run, the tab shows a page it
+ * opened. An agent that inherits the full tool set is not counted: nothing says it opened one.
+ */
+export function agentCfgDrivesSharedBrowser(cfg: { tools?: readonly string[] } | undefined): boolean {
+  return (cfg?.tools ?? []).some((toolName) => (toolName.startsWith("browser_") || toolName.startsWith("mcp__playwright__browser_"))
+    && !BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName));
+}
+
+/**
+ * Whether an agent can reach anything outside the workspace: it can gather or delegate (the
+ * research gate's own veto, agentCfgIsResearchCapable), or its routing taxonomy names a surface
+ * outside the workspace — a mailbox, a calendar, a desktop, remote infrastructure. Read from the
+ * taxonomy rather than from tool names, because that is where the catalog already records it
+ * (`surface` is derived from the tool list and linted for staleness). An agent with no taxonomy,
+ * or an empty surface list, is treated as reaching out: the turn trigger never touches what it
+ * cannot classify. An agent that only reads the open browser tab (agentCfgOnlyReadsOpenBrowserTab)
+ * does not reach out: the page it reads is one another agent opened.
+ */
+export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean {
+  if (!cfg || agentCfgIsResearchCapable(cfg)) return true;
+  // A promoted agent is read from its JSON file without the schema's defaults, so a hand-written
+  // routing block can lack `surface` altogether: unclassifiable, not a crash on the delegation path.
+  const surfaces = resolveRoutingTaxonomy(cfg)?.surface ?? [];
+  if (surfaces.length === 0) return true;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return false;
+  return surfaces.some((surface) => !WORKSPACE_SURFACES.has(surface));
+}
+
+/**
+ * Whether an agent works only from the text it is handed: confined to the workspace, and its
+ * taxonomy's input is text alone. A builder, writer or generator (web_coder, content_writer,
+ * image_creator). An agent that reads a codebase, an uploaded file or a data table has a source of
+ * its own and is not this — its step may well be about that source. An agent that only reads the
+ * open browser tab is this too, whatever its input: the page is handed to it the way text is, by
+ * whichever agent opened it, and with nothing gathered yet it has nothing to read.
+ */
+export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean {
+  if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return true;
+  const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
+  return inputs.length > 0 && inputs.every((input) => input === "text" || input === "none");
+}
+
+/**
+ * The member of a batch of delegations — a plan's delegate steps, parallel slices, task-graph
+ * nodes — that may become the turn's evidence gather point when the turn needs outside facts: the
+ * first one, in the order given, naming an agent that works only from handed text. -1 when any member
+ * could reach outside the workspace itself (it names such an agent, names none, or names an
+ * unknown one): the batch has then already decided where its evidence comes from, and every member
+ * keeps the agent it names. A member naming none or an unknown one is routed, and the router holds
+ * its pick to the same turn trigger (executeDelegationWithFallback, Step 1). The order given has to
+ * be the order the members run in: a plan and a task graph run by their dependsOn edges, so they ask
+ * once for the whole batch (is there a gather point at all) and then again for each round they
+ * dispatch, which picks the first one that runs.
+ */
+export function evidenceGatherPoint(
+  agentNames: ReadonlyArray<string | undefined>,
+  lookup: (name: string) => CapabilityBearing,
+): number {
+  if (agentNames.some((name) => !name || agentCfgReachesOutsideWorkspace(lookup(name)))) return -1;
+  return agentNames.findIndex((name) => agentCfgWorksOnlyFromHandedText(lookup(name!)));
+}
+
+/** Config-backed lookup for the two predicates above (configured or promoted agent). */
+export function lookupAgentCapabilities(name: string): CapabilityBearing {
+  const config = getConfig();
+  return config.subAgents[name] ?? readPromotedAgents(config.workspacePath)[name];
 }
 
 /**
@@ -621,7 +1069,18 @@ export function preferResearchCapableCandidates(
   const { results: reordered, needsFallback } = reorderByResearchCapability(
     results,
     taskRequiresExternalResearch(query),
-    agentIsResearchCapable,
+    // Rank on who gathers DIRECTLY, not on who could delegate. A coordinator that can
+    // reach a researcher is still a legitimate pick — it just does not outrank the
+    // researcher for a research query, which is the same preference
+    // pickResearchFallbackAgent already documents ("a single research task does not
+    // need a coordinator-of-coordinator hop"). This is the layer that decides: the
+    // model named no agent on any of session 00b3675d's four delegations; the runtime
+    // injects search_agents' topResult (four tool_call_recovered rows,
+    // reason "reuse_search_agents_top_result"), so the ranking IS the router.
+    // Ordering only — reorderByResearchCapability returns the list untouched when the
+    // set is empty, all-capable, or the query is not research, and needsFallback below
+    // PREPENDS the specialist rather than removing anyone.
+    agentGathersDirectly,
   );
   if (!needsFallback) return reordered;
   const fallbackName = pickResearchFallbackAgent([]);
@@ -629,6 +1088,137 @@ export function preferResearchCapableCandidates(
   // Score just above the strong-match threshold (0.72): confident capability match.
   const fallbackCandidate = buildConfiguredAgentCandidate(fallbackName, 0.75);
   return fallbackCandidate ? [fallbackCandidate, ...reordered] : reordered;
+}
+
+// ── Output-format producer ranking (search_agents) ──────────────────────────
+// The same topic-over-intent bias as the research reorder above, for a request to MAKE a file of
+// a given format. A file format is often the most specific word in such a request, and the agent
+// whose catalog names that format most strongly can be the one that READS it. In E2E session
+// fa8bb08b ("Erstelle ein Word-Dokument (.docx) …") search_agents ranked document_intake first for
+// both of the orchestrator's queries ("generate Word document .docx file create document artifact",
+// 0.852, high) and told the model "NEXT ACTION: Call delegate_to_agent(document_intake) NOW".
+// document_intake extracts uploaded files and holds no .docx writer: it wrote a python-docx script it
+// could not run, then HTML, then an .rtf write_file refused, and the turn delivered no document.
+// paper_author (#2, 0.850) and content_writer (#5, 0.822) both hold generate_docx. The routing
+// catalog alone did not reorder those five; nothing in routing asked who can make the format.
+
+/** The file formats a request can ask to have made, named by their extension. */
+export type OutputFileFormat = "docx" | "pptx" | "xlsx" | "pdf";
+
+/**
+ * The tools that write each format from content the agent supplies. A tool that only changes a
+ * file of that format someone already handed over (pdf_fill fills a given PDF form) is not one:
+ * the ranking below applies only while no such file is in play, so it would have nothing to change.
+ */
+const OUTPUT_FORMAT_PRODUCER_TOOLS: Record<OutputFileFormat, readonly string[]> = {
+  docx: ["generate_docx"],
+  pptx: ["generate_pptx"],
+  xlsx: ["spreadsheet_write"],
+  pdf: ["generate_pdf", "render_pdf"],
+};
+
+const OUTPUT_FORMAT_CONTENT_TYPES: Record<OutputFileFormat, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pdf: "application/pdf",
+};
+
+/**
+ * A bare extension, which names a FORMAT: ".docx" in "Word-Dokument (.docx)" or ".docx file". An
+ * extension on a file name ("thesis.pdf", "kosten.xlsx") names a FILE, and every such mention among
+ * the 553 queries in eval/routing and eval/intent is one the user already has: "Read my thesis draft
+ * (thesis.pdf) …", "Mach aus meinem Bericht (bericht.docx) eine Präsentation".
+ */
+const OUTPUT_EXTENSION_RE = /(?<![\p{L}\p{N}_.-])\.(docx|pptx|xlsx|pdf)(?![\p{L}\p{N}_])/giu;
+
+/** A tool that runs code in the workspace sandbox, which can write any of these formats with a library. */
+function isWorkspaceCodeRunnerToolName(toolName: string): boolean {
+  return toolName === "shell_exec"
+    || toolName === "run_script"
+    || toolName.startsWith("mcp__code_sandbox__")
+    || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(toolName);
+}
+
+/** A file the user handed over, as the session records it (SessionTranscriptAttachment). */
+export interface FileInPlay {
+  filename?: string;
+  relativePath?: string;
+  contentType?: string;
+}
+
+function formatOfFileInPlay(file: FileInPlay): OutputFileFormat | undefined {
+  for (const format of Object.keys(OUTPUT_FORMAT_PRODUCER_TOOLS) as OutputFileFormat[]) {
+    const extension = `.${format}`;
+    if (file.filename?.toLowerCase().endsWith(extension) || file.relativePath?.toLowerCase().endsWith(extension)) return format;
+    if (file.contentType?.toLowerCase().split(";")[0]?.trim() === OUTPUT_FORMAT_CONTENT_TYPES[format]) return format;
+  }
+  return undefined;
+}
+
+/**
+ * The file formats a routing query asks to have MADE: a bare extension the query names
+ * (language-independent), in a query that asks for a deliverable (WORKSPACE_MUTATION_TASK_RE, the
+ * same test the routing-time artifact gate applies), for which no file of that format is in play.
+ * A format the user handed over is the INPUT ("summarise the attached report (.pdf) and write a
+ * .docx"), so the agent that reads it keeps its place. Empty for a research query: there the
+ * research reorder decides, because the evidence is gathered first and the file is made after
+ * (a writer ranked over the researcher wrote pricing reports from memory, session 00b3675d).
+ */
+export function requestedOutputFormats(query: string, filesInPlay: readonly FileInPlay[]): OutputFileFormat[] {
+  const text = (query ?? "").trim();
+  if (!text || !WORKSPACE_MUTATION_TASK_RE.test(text) || taskRequiresExternalResearch(text)) return [];
+  const named = new Set<OutputFileFormat>();
+  for (const match of text.matchAll(OUTPUT_EXTENSION_RE)) named.add(match[1]!.toLowerCase() as OutputFileFormat);
+  if (named.size === 0) return [];
+  const inPlay = new Set(filesInPlay.map(formatOfFileInPlay).filter((format) => format !== undefined));
+  return [...named].filter((format) => !inPlay.has(format));
+}
+
+/**
+ * Whether an agent can write every one of `formats` itself: it holds each format's producer tool,
+ * or a tool that runs code in the sandbox. An agent with no tool list inherits the full set and
+ * can. An agent with no config is not credited: this decides whether the router may point at it
+ * imperatively, and an agent it cannot read is not one it can vouch for.
+ */
+export function agentCfgProducesFormats(cfg: { tools?: string[] } | undefined, formats: readonly OutputFileFormat[]): boolean {
+  if (!cfg) return false;
+  if (!cfg.tools) return true; // inherits the full tool set
+  const tools = cfg.tools;
+  if (tools.some(isWorkspaceCodeRunnerToolName)) return true;
+  return formats.every((format) => OUTPUT_FORMAT_PRODUCER_TOOLS[format].some((tool) => tools.includes(tool)));
+}
+
+/**
+ * Pure reorder: candidates that can make the requested formats first, each group in its original
+ * order. Never drops a candidate. An empty set, or one where all or none can, is returned as is.
+ */
+export function reorderByFormatProducer(
+  results: AgentRoutingCandidate[],
+  canProduce: (name: string) => boolean,
+): AgentRoutingCandidate[] {
+  if (results.length === 0) return results;
+  const capable = results.filter((candidate) => canProduce(candidate.name));
+  if (capable.length === 0 || capable.length === results.length) return results;
+  return [...capable, ...results.filter((candidate) => !canProduce(candidate.name))];
+}
+
+/**
+ * Apply {@link reorderByFormatProducer} against the live config for the formats `query` asks to
+ * have made. `topCanProduce` says whether the candidate now first can make them; the caller points
+ * at it imperatively only then. A query that asks for no format returns its results untouched and
+ * `topCanProduce` true, so nothing downstream changes.
+ */
+export function preferFormatProducingCandidates(
+  results: AgentRoutingCandidate[],
+  query: string,
+  filesInPlay: readonly FileInPlay[],
+): { results: AgentRoutingCandidate[]; formats: OutputFileFormat[]; topCanProduce: boolean } {
+  const formats = requestedOutputFormats(query, filesInPlay);
+  if (formats.length === 0) return { results, formats, topCanProduce: true };
+  const canProduce = (name: string): boolean => agentCfgProducesFormats(lookupAgentCapabilities(name), formats);
+  const reordered = reorderByFormatProducer(results, canProduce);
+  return { results: reordered, formats, topCanProduce: reordered[0] !== undefined && canProduce(reordered[0].name) };
 }
 
 // ── General capability-aware routing/bidding gate ───────────────────────────
@@ -670,7 +1260,10 @@ function agentSatisfiesExecutionCapability(cfg: { tools?: string[] } | undefined
     case "code_exec":
       return tools.some((t) => t.startsWith("mcp__code_sandbox__") || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(t));
     case "browser_interaction":
-      return tools.some((t) => t.startsWith("browser_") || t === "site_fill_credentials" || t.startsWith("computer_"));
+      // A view of the open tab (BROWSER_TAB_VIEW_TOOL_NAMES) cannot click, type or submit anything:
+      // vision_browser_analyst, which holds only views, passed here on their browser_ prefix.
+      return tools.some((t) => (t.startsWith("browser_") && !BROWSER_TAB_VIEW_TOOL_NAMES.has(t))
+        || t === "site_fill_credentials" || t.startsWith("computer_"));
   }
 }
 

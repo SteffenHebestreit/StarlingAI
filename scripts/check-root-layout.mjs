@@ -17,6 +17,8 @@ const allowedFiles = new Set([
   ".mcp.json",
   "CONTRIBUTING.md",
   "docker-compose.computer.yml",
+  // Test services of the e2e evaluation suite (profile "e2e", run by `pnpm e2e:env`).
+  "docker-compose.e2e.yml",
   "docker-compose.gpu.yml",
   "docker-compose.model-servers.yml",
   "docker-compose.ollama.yml",

@@ -38,12 +38,15 @@
       <span v-if="hasLiveContent && !modelValue" class="sp-handle__dot" aria-hidden="true" />
     </button>
 
-    <!-- The drawer panel -->
+    <!-- The drawer panel. Closed, it is only moved off-screen (so it can slide), which left its
+         tabs, step rows and previews in the tab order and in front of screen readers: inert
+         takes all of it out until the panel is open again. -->
     <div
       class="sp-panel"
       :class="{ 'sp-panel--open': modelValue }"
       role="complementary"
       aria-label="Live context and artifacts"
+      :inert="!modelValue"
     >
       <!-- Header with tabs + close -->
       <div class="sp-header">
@@ -57,6 +60,17 @@
           >
             Live
             <span v-if="hasLiveContent" class="sp-tab__dot" aria-hidden="true" />
+          </button>
+          <button
+            class="sp-tab"
+            :class="{ 'sp-tab--active': activeTab === 'steps' }"
+            :disabled="(stepCount ?? 0) === 0"
+            role="tab"
+            :aria-selected="activeTab === 'steps'"
+            @click="activeTab = 'steps'"
+          >
+            Steps
+            <span v-if="(stepCount ?? 0) > 0" class="sp-tab__badge">{{ stepCount }}</span>
           </button>
           <button
             class="sp-tab"
@@ -95,6 +109,17 @@
           </slot>
         </div>
 
+        <!-- Steps tab — the execution detail for ONE message, handed in by the chat page -->
+        <div v-show="activeTab === 'steps'" class="sp-tab-pane">
+          <slot name="steps">
+            <div class="sp-empty">
+              <div class="sp-empty__icon" aria-hidden="true">≡</div>
+              <p class="sp-empty__title">No step detail</p>
+              <p class="sp-empty__hint">Open the details link on an answer to see what each step did.</p>
+            </div>
+          </slot>
+        </div>
+
         <!-- Artifacts tab -->
         <div v-show="activeTab === 'artifacts'" class="sp-tab-pane">
           <slot name="artifacts">
@@ -111,7 +136,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+
+type PanelTab = "live" | "steps" | "artifacts";
 
 const props = defineProps<{
   /** Whether the panel is currently open */
@@ -120,15 +148,35 @@ const props = defineProps<{
   hasLiveContent?: boolean;
   /** Number of previewable artifacts in the current session */
   artifactCount?: number;
+  /** Number of execution steps currently handed to the Steps tab (0 disables it) */
+  stepCount?: number;
+  /**
+   * Lets a caller open the panel ON a chosen tab — a message bubble asking to show ITS steps
+   * needs the panel to land there rather than on whatever was last viewed. Kept as a plain
+   * prop watched into local state rather than a v-model, so existing call sites that only
+   * pass `modelValue` keep working untouched.
+   */
+  requestedTab?: PanelTab | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "update:modelValue": [value: boolean];
 }>();
 
-const activeTab = ref<"live" | "artifacts">("live");
+const activeTab = ref<PanelTab>("live");
 
-const hasContent = computed(() => props.hasLiveContent || (props.artifactCount ?? 0) > 0);
+useEscapeToClose(() => props.modelValue, () => emit("update:modelValue", false));
+
+watch(() => props.requestedTab, (tab) => { if (tab) activeTab.value = tab; });
+
+// If the steps tab is showing and its content goes away (a new turn clears the selection),
+// fall back rather than stranding the reader on an empty pane they cannot leave by reading.
+watch(() => props.stepCount ?? 0, (count) => {
+  if (count === 0 && activeTab.value === "steps") activeTab.value = "live";
+});
+
+const hasContent = computed(() =>
+  props.hasLiveContent || (props.artifactCount ?? 0) > 0 || (props.stepCount ?? 0) > 0);
 </script>
 
 <style scoped>

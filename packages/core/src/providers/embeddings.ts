@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { PRODUCT } from "../product/index.js";
+import { getEmbeddingGateStats } from "./embedding-gate.js";
 
 const log = childLogger("embeddings");
 
@@ -253,6 +254,49 @@ export function buildAgentTokenIdf(agents: Array<[string, SubAgentConfig]>): Map
   for (const [t, n] of df) idf.set(t, Math.log(1 + (docCount - n + 0.5) / (n + 0.5)));
   return idf;
 }
+
+/**
+ * How much routing signal one raw query token carries, judged against the agent corpus.
+ *
+ * IDF over the catalog answers the question a router actually has: does this word tell the
+ * agents apart? "answer", "user", "question", "want" appear across most agent descriptions
+ * and discriminate nothing; "wireguard", "raspberry", "pfsense" appear in few or none and
+ * are the whole signal.
+ *
+ * A token the catalog never mentions scores HIGHEST rather than zero. It contributes nothing
+ * to lexical matching, but this feeds a SEMANTIC search, where the embedding model knows what
+ * WireGuard is whether or not an agent description happens to say the word — and a domain
+ * noun no agent lists is exactly the part of a task worth keeping.
+ *
+ * Tokens are normalized the same way the corpus was, so lookups line up; a compound scores as
+ * its rarest part, so "V-Server" is not dragged down to the rarity of "server" alone.
+ *
+ * ABSENT FROM THE CORPUS IS NOT THE SAME AS UNKNOWN TO THE CORPUS. The IDF map is built from
+ * tokenizeSearchText, which STRIPS the stop words — so "how", "please", "what" are guaranteed
+ * missing from it and were collecting the maximum rarity, tying with the domain nouns and then
+ * winning the tie-break on position. Asking the corpus tokenizer whether it would have kept the
+ * word at all separates the two cases with the list the corpus itself uses, rather than a
+ * second list of words to maintain.
+ */
+export function routingTokenRarity(token: string, idf: Map<string, number>): number {
+  const parts = normalizeSearchText(token).split(" ").filter((p) => p.length >= 2);
+  if (parts.length === 0) return 0;
+  let best = 0;
+  for (const part of parts) {
+    const known = idf.get(part);
+    const score = known ?? (tokenizeSearchText(part).length === 0 ? 0 : UNKNOWN_TOKEN_RARITY);
+    if (score > best) best = score;
+  }
+  return best;
+}
+
+/**
+ * Rarity assigned to a token absent from every agent description. Above any value
+ * buildAgentTokenIdf can produce — its rarest possible token (present in exactly one agent
+ * out of a realistic catalog) sits near 3.5, and the absent-token limit of the same formula
+ * is ~4.6 — so "never mentioned" ranks above "mentioned once" without being unbounded.
+ */
+const UNKNOWN_TOKEN_RARITY = 10;
 
 export function scoreAgentKeywordMatch(
   query: string,
@@ -528,27 +572,58 @@ async function _buildAgentIndexInner(
     }
   }
 
-  // ── Embed changed agents one at a time and save incremental progress ──────
-  // Sending all texts in a single HTTP call causes LM Studio to queue hundreds
-  // of embedding computations at once. When the request eventually times out,
-  // the retry sends another full batch while LM Studio is still working on the
-  // first — queue grows unboundedly. Processing one-at-a-time ensures LM
-  // Studio's queue never exceeds 1 entry from this code path, and partial
-  // progress is saved after every agent so retries only redo what's missing.
+  // ── Embed changed agents in bounded chunks, saving progress after each ─────
+  //
+  // NOT one big request. Sending every text in a single HTTP call makes the server queue
+  // hundreds of computations at once; when that request times out the retry sends another
+  // full batch while the first is still running, and the queue grows without bound.
+  //
+  // NOT one at a time either, which is what this did before. The server serves several
+  // requests concurrently — sixteen slots on the deployment this was measured against, where
+  // throughput rises from 365 texts/s at concurrency 4 to 375 at 8 — and a strictly
+  // sequential build used exactly one of them. Rebuilding a 49-agent catalog took 49 round
+  // trips in series for no reason.
+  //
+  // So: separate requests, run in chunks the size of the global embedding ceiling. The
+  // ceiling is enforced inside provider.embed regardless, and chunking here on the same
+  // number gives two things the gate alone would not: a natural point to persist incremental
+  // progress without racing concurrent writers, and a bound on how much work is discarded
+  // when the server goes away mid-build.
+  const chunkSize = Math.max(1, getEmbeddingGateStats().limit);
   let failed = false;
-  for (const { name, doc } of toEmbed) {
-    try {
-      const [vec] = await provider.embed([doc], embeddingModel);
-      if (vec) {
-        updatedCache[name] = { hash: currentDocs.get(name)!.hash, vector: float32ToBase64(vec) };
-        // Persist incremental progress so a retry starts from where we left off
-        saveEmbeddingCache(embeddingModel, updatedCache);
+  for (let offset = 0; offset < toEmbed.length && !failed; offset += chunkSize) {
+    const chunk = toEmbed.slice(offset, offset + chunkSize);
+    const outcomes = await Promise.all(chunk.map(async ({ name, doc }) => {
+      try {
+        const [vec] = await provider.embed([doc], embeddingModel);
+        return { name, vec, err: null as unknown };
+      } catch (err) {
+        return { name, vec: undefined, err };
       }
-    } catch (err) {
-      recordEmbeddingFailure(err, name);
-      log.warn({ err, agent: name, model: embeddingModel }, "Failed to embed agent — will retry remaining agents");
+    }));
+
+    // Record every success in the chunk BEFORE reporting the failure: the other requests in
+    // the chunk already completed and paying for them twice on the retry is pure waste.
+    for (const outcome of outcomes) {
+      if (outcome.vec) {
+        updatedCache[outcome.name] = {
+          hash: currentDocs.get(outcome.name)!.hash,
+          vector: float32ToBase64(outcome.vec),
+        };
+      }
+    }
+    // One write per chunk, after the chunk has settled — concurrent writers would interleave
+    // whole-object writes and lose entries.
+    saveEmbeddingCache(embeddingModel, updatedCache);
+
+    const firstFailure = outcomes.find((outcome) => outcome.err);
+    if (firstFailure) {
+      recordEmbeddingFailure(firstFailure.err, firstFailure.name);
+      log.warn(
+        { err: firstFailure.err, agent: firstFailure.name, model: embeddingModel, chunkSize },
+        "Failed to embed agent — will retry remaining agents",
+      );
       failed = true;
-      break;
     }
   }
 
@@ -614,11 +689,16 @@ export async function buildAgentIndex(
 export async function searchByEmbedding(
   query: string,
   provider: LMStudioProvider,
-  topN = 5
+  topN = 5,
+  opts: { allowedAgents?: readonly string[] } = {},
 ): Promise<EmbeddingSearchResult[]> {
   if (!_available || _index.length === 0) return [];
 
-  const cacheKey = buildEmbeddingQueryCacheKey(query, topN);
+  // The caller's allowed set is applied BEFORE the top-N cut. Applied after it (as every caller
+  // did), a scene or restricted turn whose agents ranked ninth and lower got no semantic
+  // candidates at all and fell back to keyword routing, silently.
+  const allowed = opts.allowedAgents ? new Set(opts.allowedAgents) : null;
+  const cacheKey = buildEmbeddingQueryCacheKey(query, topN, allowed);
   const cached = readCachedEmbeddingQuery(cacheKey);
   if (cached) {
     return cached;
@@ -628,6 +708,7 @@ export async function searchByEmbedding(
     const queryVector = await getOrComputeQueryEmbedding(query, provider, _embeddingModel);
     if (!queryVector) return [];
     const results = _index
+      .filter(entry => !allowed || allowed.has(entry.agentName))
       .map(entry => ({ agentName: entry.agentName, description: entry.description, score: cosineSimilarity(queryVector, entry.vector) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, topN);
@@ -667,6 +748,20 @@ export function getEmbeddingSearchStatus(): EmbeddingSearchStatus {
 export async function computeQueryEmbedding(text: string): Promise<Float32Array | null> {
   if (!_available || !_lastProvider || !_embeddingModel) return null;
   return getOrComputeQueryEmbedding(text, _lastProvider, _embeddingModel);
+}
+
+/**
+ * The same embedding, for a SEARCH QUERY being matched against a bare-embedded passage corpus.
+ * This is the only path that gets the Qwen3 instruct prefix — see wrapEmbeddingQueryForModel
+ * for why the distinction is not cosmetic.
+ *
+ * Use it when the corpus is prose that ANSWERS the query (durable memory records, the pgvector
+ * document store). Do NOT use it to embed corpus text, to compare two queries with each other,
+ * or to rank structured capability metadata such as agent or tool descriptions.
+ */
+export async function computeRetrievalQueryEmbedding(text: string): Promise<Float32Array | null> {
+  if (!_available || !_lastProvider || !_embeddingModel) return null;
+  return getOrComputeQueryEmbedding(text, _lastProvider, _embeddingModel, true);
 }
 
 /**
@@ -718,22 +813,70 @@ export async function computeTextEmbeddings(texts: string[]): Promise<Array<Floa
   return results;
 }
 
+/**
+ * Qwen3-Embedding IS ASYMMETRIC, and we were using it symmetrically.
+ *
+ * The model card specifies that a QUERY carries an instruction and a DOCUMENT does not:
+ *
+ *   Instruct: {task description}
+ *   Query: {query}
+ *
+ * Corpus text is embedded bare. Qwen reports ~1-5% MTEB retrieval loss when the instruction is
+ * omitted, and the asymmetry is the point — instructing both sides, or neither, throws away the
+ * separation the model was trained to produce. Every call in this repo went through
+ * `provider.embed(text)` with no distinction, so queries and documents were embedded identically.
+ *
+ * OPT-IN, and that is the whole point. An earlier version applied this inside
+ * getOrComputeQueryEmbedding on the grounds that it "is the query path". It is not: the same
+ * function embeds CORPUS text at vector-store.ts vectorUpsert/vectorUpsertMany and at
+ * trajectory-cache.ts, so the unconditional version prefixed documents with the query
+ * instruction — precisely the re-symmetrisation this note warns about, one call away.
+ *
+ * Measured on the serving cluster, corpus bare in both arms:
+ *   query -> passage (memory records, document store)   separation 0.1798 -> 0.2345, 6/6 rank-1
+ *   query -> agent capability blob (agent routing)      0.6923 -> 0.4126 on the weather query;
+ *                                                        threshold clears 2/8 -> 0/8
+ * So it belongs on exactly the case its instruction string names — retrieving PASSAGES that
+ * answer a query — and nowhere else. Structured capability metadata is not a passage, and
+ * agent routing gates on an ABSOLUTE score, which the prefix shifts down across the board.
+ *
+ * Reach it through computeRetrievalQueryEmbedding. Everything else keeps computeQueryEmbedding
+ * and stays bare, including both sides of a query-to-query comparison such as the trajectory
+ * cache. The flag is part of the cache key, so the two forms cannot collide.
+ *
+ * Gated on the model actually being a Qwen3 embedding model: the format is that family's
+ * convention, and prepending it to a model that was not trained on it is just noise in the input.
+ */
+const QWEN3_EMBED_INSTRUCTION =
+  "Given a web search query, retrieve relevant passages that answer the query";
+
+export function wrapEmbeddingQueryForModel(text: string, model: string): string {
+  if (!/qwen\d*[-.]?\d*-?embedding/i.test(model)) return text;
+  return `Instruct: ${QWEN3_EMBED_INSTRUCTION}\nQuery: ${text}`;
+}
+
 async function getOrComputeQueryEmbedding(
   text: string,
   provider: LMStudioProvider,
   model: string,
+  asRetrievalQuery = false,
 ): Promise<Float32Array | null> {
+  const prepared = asRetrievalQuery ? wrapEmbeddingQueryForModel(text, model) : text;
   const normalized = normalizeSearchText(text);
   if (!normalized) {
     try {
-      const [vec] = await provider.embed([text], model);
+      const [vec] = await provider.embed([prepared], model);
       return isDegenerateVector(vec) ? null : vec!;
     } catch (err) {
       recordEmbeddingFailure(err);
       return null;
     }
   }
-  const cacheKey = `${model}::${normalized}`;
+  // The flag is PART OF THE KEY. It stopped being safe to key on raw text alone the moment the
+  // wrapper became conditional: the same string embedded bare (corpus, agent routing) and
+  // wrapped (passage retrieval) produces two different vectors, and a shared key would hand one
+  // caller the other's — silently, with a plausible-looking similarity score.
+  const cacheKey = `${model}::${asRetrievalQuery ? "q" : "raw"}::${normalized}`;
   const cached = _queryVectorCache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= QUERY_VECTOR_CACHE_TTL_MS) {
     return cached.vector;
@@ -743,7 +886,7 @@ async function getOrComputeQueryEmbedding(
   if (inflight) return inflight;
   const promise = (async () => {
     try {
-      const [vec] = await provider.embed([text], model);
+      const [vec] = await provider.embed([prepared], model);
       if (isDegenerateVector(vec)) return null; // miss, not a poisoned cache entry
       _queryVectorCache.set(cacheKey, { storedAt: Date.now(), vector: vec! });
       if (_queryVectorCache.size > QUERY_VECTOR_CACHE_MAX_ENTRIES) {
@@ -798,8 +941,10 @@ function scheduleEmbeddingRetry(): void {
   log.info({ model: _embeddingModel, retryInMs: delay }, "Scheduled embedding index rebuild retry");
 }
 
-function buildEmbeddingQueryCacheKey(query: string, topN: number): string {
-  return `${_embeddingModel}::${topN}::${normalizeSearchText(query)}`;
+function buildEmbeddingQueryCacheKey(query: string, topN: number, allowed: ReadonlySet<string> | null = null): string {
+  // The scope is part of the key: a scoped query must not be served the unscoped top-N.
+  const scope = allowed ? [...allowed].sort().join(",") : "*";
+  return `${_embeddingModel}::${topN}::${scope}::${normalizeSearchText(query)}`;
 }
 
 function readCachedEmbeddingQuery(cacheKey: string): EmbeddingSearchResult[] | null {

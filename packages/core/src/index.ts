@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, watchConfig, getConfig } from "./config/loader.js";
 import { buildAgentIndex } from "./providers/embeddings.js";
+import { withPromotedAgents } from "./agent/promoted-agents.js";
 import { getEmbeddingProvider, initProviders } from "./providers/index.js";
 import { initPostgresAudit } from "./audit/postgres.js";
 import { flushAuditLog } from "./audit/logger.js";
@@ -25,7 +26,7 @@ import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./obs
 import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { initSceneJobStore, shutdownSceneJobStore } from "./agent/jobs.js";
 import { startSceneJobWorker, stopSceneJobWorker } from "./agent/scene-worker.js";
-import { initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
+import { flushSessionStore, initSessionRedis, startSessionPruner, stopSessionPruner } from "./agent/session.js";
 import { startCacheWarmer, stopCacheWarmer } from "./agent/cache-warmer.js";
 import { closeSessionRedis } from "./agent/session-redis.js";
 import { syncConfiguredJobTriggers } from "./runtime/job-triggers.js";
@@ -208,6 +209,14 @@ export async function main() {
     log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
   }
 
+  // Load the language detector before the first turn (~80 ms, ~30 MB), so the first turn's
+  // status lines, banners and spoken summary name the right language instead of the default.
+  // Never throws; a failure only means those fall back to the configured default language.
+  {
+    const { warmTextLanguageDetector } = await import("./agent/text-language.js");
+    await warmTextLanguageDetector();
+  }
+
   // Start the event-loop lag monitor before the gateway accepts traffic so any
   // main-thread stall (the real "gateway went unhealthy during a long local-model
   // call" cause) is measured and audited from the first request.
@@ -329,7 +338,7 @@ export async function main() {
         if (!changedSections.includes("providers") && !changedSections.includes("_initial") && (changedSections.includes("agents") || changedSections.includes("subAgents"))) {
           const embeddingModel = newConfig.agents.defaults.model.embeddingModel;
           if (embeddingModel) {
-            buildAgentIndex(newConfig.subAgents ?? {}, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+            buildAgentIndex(withPromotedAgents(newConfig.subAgents ?? {}, newConfig.workspacePath), getEmbeddingProvider(), embeddingModel).catch(() => undefined);
           }
         }
         if (["providers", "agents", "subAgents", "retrieval", "guardrails", "multimodal", "_initial"].some((section) => changedSections.includes(section))) {
@@ -352,6 +361,10 @@ export async function main() {
         }
         if (changedSections.includes("channels") || changedSections.includes("_initial")) {
           await syncAllChannels();
+        }
+        {
+          const { syncA2AClientWithConfig } = await import("./a2a/client.js");
+          await syncA2AClientWithConfig(changedSections);
         }
         markRuntimeComponentSuccess("config_reload", { model: newConfig.agents.defaults.model.primary, changedSections });
       } catch (err) {
@@ -431,6 +444,9 @@ export async function main() {
       disposeAllPluginWorkers();
     } catch { /* best-effort */ }
     await flushAuditLog();
+    // Session-store writes are coalesced (one per 250 ms, agent/session.ts): write the last window,
+    // and queue its Redis mirror, before the Redis connection closes.
+    await flushSessionStore();
     await closeSessionRedis();
     try {
       const { closeRedis } = await import("./guardrails/redis-client.js");

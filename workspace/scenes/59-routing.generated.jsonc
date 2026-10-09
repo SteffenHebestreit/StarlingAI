@@ -1,0 +1,576 @@
+// GENERATED ROUTING TAXONOMY — do not hand-edit.
+//
+// Seed labels for the IDCM routing taxonomy on all 23 scenes: L1 execution mode x L2
+// capability domain, plus the orthogonal facets (deliverable, completes, inputModality,
+// riskTier, executionShape, surface). See docs/intent-routing-redesign.md.
+//
+// PROVENANCE: two taxonomies were derived independently — one top-down from the research
+// consensus, one bottom-up by clustering this catalog — and merged with a written reason per
+// disagreement. They agreed on L1 for 43 of 49 agents and 65 of 88 entries before the merge.
+// An entry whose labeledBy carries "medium/low confidence" is a straddle the merge could have
+// defended either way: a seed to be settled by eval, never a verdict.
+//
+// TO OVERRIDE one entry, set its AUTHORED `routing` block in the primary shard — authored always
+// wins over `routingGenerated`, so this file can be regenerated without losing the override.
+//
+// sourceHash covers the text that DEFINES the entry: description/capabilities/tags/tools for an
+// agent, and additionally task/allowedAgents, which is where a scene's behaviour actually lives.
+// A mismatch means the catalog moved after labelling and the label may be stale.
+{
+  "scenes": {
+    "apply_jobs": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "device_control"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [],
+        "riskTier": "mutating_external",
+        "executionShape": "workflow",
+        "surface": [
+          "browser"
+        ],
+        "oneLiner": "Browser-assisted freelance application submission (browser_agent); the only scene with webhookKey+approvalChannel+humanInLoopSteps (credential fill). Not used by any job.",
+        "sourceHash": "f99d190e51eff812",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "capture_capability": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "swarm_meta"
+        ],
+        "deliverable": [
+          "config_change"
+        ],
+        "completes": [
+          "config_change"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "swarm_internal"
+        ],
+        "oneLiner": "Captures a built+verified capability as durable machinery via swarm_maintainer. Only scene using swarm_maintainer; step 3 of co_develop_capability.",
+        "sourceHash": "c1cd1937f5542e26",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "code_review": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Merge-readiness report over recent changes (diff_reviewer/code_analyst/qa_guard).",
+        "sourceHash": "1029ccafc2041bc2",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "competitive_analysis": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Decision-oriented comparison brief across competitors; dominant work = research+comparison -> GATHER.",
+        "sourceHash": "d28b4dea337f85db",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "content_creation": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Research+draft audience-ready content (blog/newsletter/copy/docs).",
+        "sourceHash": "6dd542eada2bce3b",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "data_pipeline_review": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "data"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Inspects files OR live DB for quality/completeness/anomalies -> data-quality report; GATHER (analysis/findings); could read as VERIFY. Only scene using sql_specialist. Used by 2 jobs.",
+        "sourceHash": "9c998bcb77fd5afc",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "deck_images": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "image"
+        ],
+        "completes": [
+          "image"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Step 2 (image_sourcer only): source+verify+locally save real free-license images.",
+        "sourceHash": "e5cbf4e50b9ab041",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "deck_paper": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring",
+          "media"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Step 3; builds the cited paper from ONLY already-verified facts+images (expectArtifact).",
+        "sourceHash": "f98081ac0ed1aeff",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "deck_research": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "evidence"
+        ],
+        "completes": [
+          "evidence"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Step 1 of the deck pipeline (researcher only); scope-fenced in prose (facts only, no images/build).",
+        "sourceHash": "c1d0b1ccf1ee1aa5",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "deck_slides": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring",
+          "media"
+        ],
+        "deliverable": [
+          "deck"
+        ],
+        "completes": [
+          "deck"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Step 4; builds the reveal.js deck + speaker notes from verified facts+images (expectArtifact).",
+        "sourceHash": "8dd6893aaae9aac2",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "deep_research": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Source-backed dossier; internally drives mission_coordinator (the one scene that is an orchestrator) but exposed as one research workflow; user intent = GATHER. Used by 3 jobs.",
+        "sourceHash": "972471e0394def5a",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "incident_response": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "infra_ops"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "remote_infra"
+        ],
+        "oneLiner": "Read-only triage + root-cause -> internal incident summary; the work is diagnosis (findings), the summary is a thin wrapper -> GATHER. Only scene using ops_triage+log_analyst.",
+        "sourceHash": "f84b1cd1168e90b8",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "meeting_briefing_packet": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Meeting brief/handoff from attached material + prior findings; includes policy_compliance_reviewer. Not used by any job.",
+        "sourceHash": "20477264df763b86",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "multi_channel_broadcast": {
+      "routingGenerated": {
+        "mode": "ACT",
+        "domain": [
+          "comms"
+        ],
+        "deliverable": [
+          "message"
+        ],
+        "completes": [
+          "message"
+        ],
+        "inputModality": [],
+        "riskTier": "external_send",
+        "executionShape": "workflow",
+        "surface": [
+          "user_channel"
+        ],
+        "oneLiner": "The universal send-it-out tail scene (9 jobs); its whole purpose IS the send, so ACT/comms (unlike the jobs that only END in it).",
+        "sourceHash": "7c75c8dbd5b8c2fe",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "onboarding_packet": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Structured onboarding packet for a topic/project/new hire.",
+        "sourceHash": "629c08cc5313dfcb",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "profile_fit_assessment": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Assesses the USER's own CV vs a role -> structured fit deliverable; grounds on injected [USER PROFILE], do NOT re-fetch. PRODUCE(deliverable) vs VERIFY(assess-fit) straddle. Not used by any job.",
+        "sourceHash": "ad26b8ac9cf01581",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "release_notes_draft": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "software",
+          "authoring"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Drafts release notes from repo history (git_developer reads history, content_writer drafts) -- the deliverable is the authored notes.",
+        "sourceHash": "5df4850cdc250da8",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "reviewed_deliverable": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "cross_domain"
+        ],
+        "deliverable": [
+          "none"
+        ],
+        "completes": [],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Builds ANY deliverable (content OR code) then runs a reviewer panel with one bounded revision; domain-agnostic -> cross_domain; deliverable variable (prose_doc or code). Largest allowedAgents list...",
+        "sourceHash": "ed7e9903066b7188",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "security_audit": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "DESK research on advisories/CVEs -> risk digest (researcher/evidence_analyst); NOT the offensive pentest swarm. L2=research only -- security is the TOPIC, kept off L2 to prevent mis-routing 'do a s...",
+        "sourceHash": "c45c57071f4e90cc",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "source_backed_paper": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "authoring",
+          "research"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "reversible_write",
+        "executionShape": "workflow",
+        "surface": [
+          "workspace"
+        ],
+        "oneLiner": "Evidence-grounded paper/report with verified citations -- a composed authored artifact. Used by 3 jobs.",
+        "sourceHash": "1082ea6c42f8d0dc",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "validate_image": {
+      "routingGenerated": {
+        "mode": "VERIFY",
+        "domain": [
+          "media"
+        ],
+        "deliverable": [
+          "verdict"
+        ],
+        "completes": [
+          "verdict"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Per-URL VERIFIED/REJECTED/UNVERIFIED verdicts; strict 'never web_search or invent' protocol. Not used by any job.",
+        "sourceHash": "e1bf696daf54f4ad",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "verified_app_build": {
+      "routingGenerated": {
+        "mode": "PRODUCE",
+        "domain": [
+          "software"
+        ],
+        "deliverable": [
+          "running_app"
+        ],
+        "completes": [
+          "running_app"
+        ],
+        "inputModality": [],
+        "riskTier": "sandbox_exec",
+        "executionShape": "workflow",
+        "surface": [
+          "local_sandbox"
+        ],
+        "oneLiner": "Builds a runnable app and PROVES it works by executing it (expectArtifact). PRODUCE(running_app) -- the deliverable is the app, execution is QA (consistent with backend_coder); risk_tier=sandbox_ex...",
+        "sourceHash": "da1bea5afdba202a",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
+        "labeledAt": "2026-09-19"
+      }
+    },
+    "verified_research_brief": {
+      "routingGenerated": {
+        "mode": "GATHER",
+        "domain": [
+          "research"
+        ],
+        "deliverable": [
+          "prose_doc"
+        ],
+        "completes": [
+          "prose_doc"
+        ],
+        "inputModality": [],
+        "riskTier": "read_only",
+        "executionShape": "workflow",
+        "surface": [
+          "external_network"
+        ],
+        "oneLiner": "Concise fact-checked findings brief with named sources+uncertainties; dominant work = acquire+verify (thin authoring wrapper) -> GATHER per rule 11. Not used by any job.",
+        "sourceHash": "a8c96d71bd457eea",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated) — medium confidence",
+        "labeledAt": "2026-09-19"
+      }
+    }
+  }
+}

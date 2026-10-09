@@ -10,7 +10,9 @@
  * Kept off the cheap /healthz liveness probe so the Docker healthcheck stays
  * fast and never flaps on a degraded-but-live subsystem.
  */
+import { randomBytes } from "node:crypto";
 import { childLogger } from "../logger.js";
+import type { ToolHandler } from "../tools/registry.js";
 import { getEventLoopLagSnapshot, DEFAULT_WARN_MS, DEFAULT_SEVERE_MS, type EventLoopLagSnapshot } from "./event-loop-monitor.js";
 import { getProviderActivitySnapshot, type ProviderActivitySnapshot } from "./provider-activity-monitor.js";
 import { isEmbeddingAvailable, computeQueryEmbedding } from "../providers/embeddings.js";
@@ -21,6 +23,7 @@ import { getTelemetryWriteHealth } from "./telemetry.js";
 import { getAuditWriteStatus } from "../audit/logger.js";
 import { browserSessionManager } from "../agent/browser-session.js";
 import { engramConfigured, engramHealth } from "../retrieval/engram.js";
+import { layaConfigured, layaHealth } from "../decisions/laya-client.js";
 
 const log = childLogger("health-checks");
 
@@ -30,6 +33,17 @@ export interface SubsystemCheck {
   name: string;
   status: CheckStatus;
   detail?: string;
+  /**
+   * When a check that serves a cached verdict measured it (ISO time). Absent on the checks that
+   * probe on every call, and on a canary that has not measured anything (checkSandbox).
+   */
+  checkedAt?: string;
+  /**
+   * How old that verdict was when served, in ms on the gateway's own clock; present whenever
+   * checkedAt is. A reader that bounds the age reads this, not checkedAt against its own clock: the
+   * gateway's VM clock can drift from the host's (WSL2 after sleep).
+   */
+  ageMs?: number;
 }
 
 export interface SubsystemHealth {
@@ -242,6 +256,22 @@ async function checkEngram(): Promise<SubsystemCheck> {
 }
 
 /**
+ * The Laya decision sidecar, when configured. Optional like engram: every decision point falls back to its
+ * incumbent without it, so an unreachable sidecar is `degraded`, never `unavailable`. A sidecar that fell back to
+ * the CPU after a CUDA error answers ~10x slower and reports that in its own status.
+ */
+async function checkLaya(): Promise<SubsystemCheck> {
+  if (!layaConfigured()) return { name: "laya", status: "ok", detail: "not configured (decision layer off)" };
+  const health = await layaHealth();
+  if (!health) return { name: "laya", status: "degraded", detail: "configured but unreachable — incumbents decide" };
+  const models = (health["models"] ?? {}) as Record<string, { loaded?: boolean; device?: string | null; error?: string }>;
+  const detail = Object.entries(models)
+    .map(([name, model]) => `${name}: ${model.error ? "error" : model.loaded ? model.device ?? "loaded" : "loading"}`)
+    .join(", ");
+  return { name: "laya", status: health["status"] === "ok" || health["status"] === "loading" ? "ok" : "degraded", detail: detail || String(health["status"]) };
+}
+
+/**
  * Primary chat-model reachability. The #1 first-run confusion is a stack that
  * boots "healthy" while the model endpoint (a local LM Studio / Ollama the user
  * hasn't started yet) is unreachable — so every turn fails with an empty answer
@@ -286,6 +316,164 @@ async function checkPrimaryModel(): Promise<SubsystemCheck> {
   }
 }
 
+// ── Sandbox canary ────────────────────────────────────────────────────────────
+//
+// From July until 9f7e61f the docker-socket proxy dropped the output of every attached `docker
+// run`. shell_exec and run_script answered "(no output)" for every command, nothing checked the
+// sandbox (this route had no check for it, and the E2E harness assumed it up), and the coder of
+// session 3c0c5ce1 (2026-10-07) could not tell a dead channel from a silent script: it spent seven
+// calls on it and then made its figures up. The canary runs a command through shell_exec's own
+// docker run, socket proxy included, and requires what it printed on stdout and on stderr back.
+
+/** How long one canary verdict serves. A run starts a container, and the dashboard polls this route every 30 s. */
+export const SANDBOX_CANARY_TTL_MS = 5 * 60_000;
+
+/** The session the canary's shell_exec call logs under. */
+const SANDBOX_CANARY_SESSION = "health:sandbox-canary";
+
+export interface SandboxCanaryProbe {
+  /** The fixed shell command; it contains neither value below. */
+  command: string;
+  /** What the command prints on stdout. */
+  stdout: string;
+  /** What the command prints on stderr. */
+  stderr: string;
+}
+
+/**
+ * A fresh probe: one random value per stream. Each is printed from two halves, so the command line
+ * never holds a value it must hand back: Node's "Command failed: docker run …" error repeats the
+ * whole command line, and a command echoed back must not pass for its output.
+ *
+ * The two printfs are joined with &&, not ';'. shell_exec runs a command behind `mkdir -p
+ * '/workspace' && cd '/workspace' &&`, and ';' binds looser than &&: when the sandbox could not use
+ * its workdir, the stderr printf still ran and the run exited 0, so the canary reported lost stdout
+ * and pointed at the docker-socket-proxy while every real command failed on that prefix.
+ */
+export function sandboxCanaryProbe(): SandboxCanaryProbe {
+  const out = randomBytes(8).toString("hex");
+  const err = randomBytes(8).toString("hex");
+  return {
+    command: `printf '%s-%s\\n' sai-canary-out ${out} && printf '%s-%s\\n' sai-canary-err ${err} >&2`,
+    stdout: `sai-canary-out-${out}`,
+    stderr: `sai-canary-err-${err}`,
+  };
+}
+
+/**
+ * Pure classifier for one canary run, from what shell_exec handed back (stdout and stderr joined).
+ * ok takes a docker run that succeeded and both values back. A workdir the sandbox cannot use fails
+ * the run in the shell's own words (the printfs follow shell_exec's prefix through &&). Both values
+ * back mean every part of the command ran and the shell exited 0, so a failed run with both values
+ * back lost the exit status on the way, and shell_exec would call every command failed: that is not
+ * ok either. A run that succeeded without the values lost its output: degraded, naming the stream.
+ *
+ * Never `unavailable`, like engram and Laya above: a broken sandbox stops the tools that run code,
+ * not the gateway, and a checkout with no Docker at all must not turn this route to 503.
+ */
+export function classifySandboxCanary(
+  probe: SandboxCanaryProbe,
+  result: { success: boolean; output?: string; error?: string },
+  elapsedMs: number,
+): SubsystemCheck {
+  if (!result.success) {
+    return { name: "sandbox", status: "degraded", detail: `docker run failed: ${describeSandboxFailure(result.error)}` };
+  }
+  const output = result.output ?? "";
+  const stdoutBack = output.includes(probe.stdout);
+  const stderrBack = output.includes(probe.stderr);
+  if (stdoutBack && stderrBack) {
+    return { name: "sandbox", status: "ok", detail: `a docker run through shell_exec handed back stdout and stderr (${elapsedMs} ms)` };
+  }
+  if (!stdoutBack && !stderrBack) {
+    return {
+      name: "sandbox",
+      status: "degraded",
+      detail: "output lost: docker run exited 0, but neither stdout nor stderr came back, so shell_exec and run_script answer \"(no output)\" to every command (check the docker-socket-proxy)",
+    };
+  }
+  const lost = stdoutBack ? "stderr" : "stdout";
+  return {
+    name: "sandbox",
+    status: "degraded",
+    detail: `output lost: docker run exited 0, but its ${lost} never came back, so shell_exec and run_script miss what a command prints there (check the docker-socket-proxy)`,
+  };
+}
+
+/** A failed canary run's error on one line, without the docker command line Node's message repeats. */
+function describeSandboxFailure(error: string | undefined): string {
+  const text = (error ?? "").replace(/Command failed: [^\n]*\n?/, "").replace(/:\s*$/, "").trim();
+  return text ? summarize(text) : "no error message";
+}
+
+let sandboxCanary: { at: number; check: SubsystemCheck } | null = null;
+let sandboxCanaryRun: Promise<SubsystemCheck> | null = null;
+
+/** One canary run through the registered shell_exec handler. Never rejects: the route awaits it beside every other check. */
+async function runSandboxCanary(shell: ToolHandler): Promise<SubsystemCheck> {
+  try {
+    const probe = sandboxCanaryProbe();
+    const started = Date.now();
+    const { getConfig } = await import("../config/loader.js");
+    // The handler itself, not executeTool: an internal probe with a fixed command and no caller
+    // input, so it never waits on the per-call approval shell_exec asks of a turn's calls.
+    const result = await shell.execute({ command: probe.command }, { sessionId: SANDBOX_CANARY_SESSION, workspacePath: getConfig().workspacePath });
+    return classifySandboxCanary(probe, result, Date.now() - started);
+  } catch (err) {
+    return { name: "sandbox", status: "degraded", detail: `the canary could not run: ${summarize(err)}` };
+  }
+}
+
+/**
+ * The sandbox canary as a subsystem check. A verdict serves SANDBOX_CANARY_TTL_MS, and callers that
+ * arrive while a run is in flight share it. While a turn is running it starts no container: it
+ * reports the last verdict with its age, or "not checked yet" before the first one. Every verdict
+ * it serves carries ageMs, as a gateway that is never idle (a turn that never ends, several users,
+ * an E2E run at --concurrency 2) serves its last one for as long as that lasts, and the E2E harness
+ * takes one only up to an age it bounds (e2e/services.ts).
+ */
+export async function checkSandbox(): Promise<SubsystemCheck> {
+  let shell: ToolHandler | undefined;
+  let turnsRunning: number;
+  try {
+    const [{ getTool }, { orchestratorTurnsRunning }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../agent/cache-warmer.js"),
+    ]);
+    shell = getTool("shell_exec");
+    turnsRunning = orchestratorTurnsRunning();
+  } catch (err) {
+    return { name: "sandbox", status: "degraded", detail: `the canary could not load: ${summarize(err)}` };
+  }
+  // Nothing below awaits before a run is registered, so callers that arrive together share one run.
+  if (!shell) return { name: "sandbox", status: "ok", detail: "not configured (shell_exec is disabled by config)" };
+  const ageMs = sandboxCanary ? Date.now() - sandboxCanary.at : Infinity;
+  if (sandboxCanary && ageMs < SANDBOX_CANARY_TTL_MS) return { ...sandboxCanary.check, ageMs };
+  if (sandboxCanaryRun) return sandboxCanaryRun;
+  if (turnsRunning > 0) {
+    if (!sandboxCanary) {
+      return { name: "sandbox", status: "ok", detail: "not checked yet: the canary starts no container while a turn is running" };
+    }
+    const last = sandboxCanary.check;
+    return { ...last, ageMs, detail: `${last.detail ?? ""} (measured ${Math.round(ageMs / 60_000)} min ago; not re-run while a turn is running)` };
+  }
+  const run = runSandboxCanary(shell).then((measured) => {
+    const at = Date.now();
+    const check = { ...measured, checkedAt: new Date(at).toISOString() };
+    sandboxCanary = { at, check };
+    sandboxCanaryRun = null;
+    return { ...check, ageMs: 0 };
+  });
+  sandboxCanaryRun = run;
+  return run;
+}
+
+/** Forget the last canary verdict and any run in flight (tests). */
+export function resetSandboxCanaryForTests(): void {
+  sandboxCanary = null;
+  sandboxCanaryRun = null;
+}
+
 /** Run all subsystem probes in parallel and aggregate. */
 export async function runSubsystemChecks(): Promise<SubsystemHealth> {
   const checks = await Promise.all([
@@ -299,6 +487,8 @@ export async function runSubsystemChecks(): Promise<SubsystemHealth> {
     Promise.resolve(checkAudit()),
     checkBrowserVnc(),
     checkEngram(),
+    checkLaya(),
+    checkSandbox(),
   ]);
   const healthy = checks.every((c) => c.status !== "unavailable");
   const degraded = checks.some((c) => c.status === "degraded");

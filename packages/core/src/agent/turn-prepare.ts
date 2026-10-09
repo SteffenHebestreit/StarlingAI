@@ -15,7 +15,7 @@
  * runtime.ts's main loop both use it); runtime.ts imports it back from here — a
  * one-directional edge, no cycle.
  */
-import { tryReceptionistFastLane } from "./receptionist.js";
+import { tryReceptionistFastLaneDetailed } from "./receptionist.js";
 import { checkInput } from "../guardrails/input.js";
 import { moderateInputText } from "../guardrails/moderation.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
@@ -29,6 +29,7 @@ import { buildDynamicTurnGuidance, extractAssistantName } from "./intent-classif
 import { buildProfileBiasedQuery } from "./user-profile-prefetch.js";
 import { timedPhase, type TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
+import { lastAssistantReplyText } from "./reply-language.js";
 
 const log = childLogger("agent:runtime");
 
@@ -201,8 +202,28 @@ export async function prepareReceptionistFastLane(args: {
 }): Promise<TurnOutput | null> {
   const { eligible, userMessage, signal, opts, session, guardrailEvents, turnStartedAt } = args;
   if (!eligible) return null;
-  const fastLane = await timedPhase("receptionistFastLane", () => tryReceptionistFastLane(userMessage, signal).catch(() => null));
-  if (!fastLane) return null;
+  // The user's message is already recorded, so this is the reply before it: the language anchor
+  // for a message that carries none of its own.
+  const previousReply = lastAssistantReplyText(session.getHistory());
+  const fastLane = await timedPhase("receptionistFastLane", () =>
+    tryReceptionistFastLaneDetailed(userMessage, signal, {
+      ...(previousReply ? { previousReply } : {}),
+      sessionId: session.id,
+      workspacePath: session.getWorkspacePath(),
+    }).catch(
+      (): { handled: false; escalateReason: string } => ({ handled: false, escalateReason: "error" }),
+    ),
+  );
+  if (!fastLane.handled) {
+    // A miss is the interesting case: the lane hit 0 of 5 live turns and the cause was
+    // discarded here, so "did the fast lane even run?" was unanswerable from the audit.
+    logAudit("message_received", { fastLane: false, escalateReason: fastLane.escalateReason }, {
+      sessionId: session.id,
+      channel: session.channel,
+      userId: session.userId,
+    });
+    return null;
+  }
   session.addMessage({ role: "assistant", content: fastLane.response });
   opts.onChunk?.(fastLane.response);
   logAudit("message_received", { fastLane: true, length: fastLane.response.length }, {

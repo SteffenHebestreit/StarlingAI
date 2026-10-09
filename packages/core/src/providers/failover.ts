@@ -1,6 +1,6 @@
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
-import { type ChatProvider, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamChunk } from "./lmstudio.js";
+import { type ChatProvider, type CompletionCallOptions, type LLMMessage, type LLMResponse, type LLMToolDef, type OpenAICompatibleProviderRuntimeSnapshot, type StreamCallOptions, type StreamChunk } from "./lmstudio.js";
 
 const log = childLogger("provider:failover");
 
@@ -147,14 +147,18 @@ export class FailoverChatProvider implements ChatProvider {
     return false;
   }
 
-  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal): Promise<LLMResponse> {
+  async complete(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
     const attempts: string[] = [];
     const candidates = this.availableBindings();
 
     for (let index = 0; index < candidates.length; index += 1) {
       const binding = candidates[index]!;
       try {
-        const response = await binding.provider.complete(messages, tools, signal);
+        // `options` forwarded for the same reason completeViaStream forwards it: the
+        // per-call thinking-off, max_tokens ceiling and tool_choice would otherwise be
+        // silently dropped on every multi-binding deployment — and the Claude preset
+        // makes every deployment multi-binding.
+        const response = await binding.provider.complete(messages, tools, signal, options);
         this.markSuccess(binding, "complete");
         return response;
       } catch (error) {
@@ -177,7 +181,64 @@ export class FailoverChatProvider implements ChatProvider {
     throw new Error(`All configured providers failed: ${attempts.join(" | ")}`);
   }
 
-  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: { toolChoice?: "auto" | "required" | "none" }): AsyncGenerator<StreamChunk> {
+  /**
+   * The streaming-accumulated variant of complete(), forwarded through the same
+   * failover chain.
+   *
+   * It has to exist here. The interface declares it OPTIONAL and callers probe for
+   * it (`provider.completeViaStream?.(...)`), so an unimplemented method on this
+   * wrapper silently downgraded every multi-binding deployment to `complete()` —
+   * which has no partial-result salvage, never sets `truncatedBy`, and gives the
+   * activity monitor no live token progress. The moment a preset supplies a
+   * fallback distinct from the primary (the Claude preset does, by default) the
+   * chain becomes a FailoverChatProvider and the whole deadline-salvage design
+   * stopped applying.
+   *
+   * A binding whose provider lacks the method still falls back to its own
+   * complete(), so mixed chains behave exactly as they did before.
+   *
+   * `options` is forwarded to the binding. It carries the per-chunk observation hook
+   * and the operator's unbounded grant, so dropping it here would disarm the
+   * mid-stream burn guard on exactly the multi-binding deployments this method exists
+   * to un-break. The complete() fallback gets the same bag: it has no mid-stream to
+   * observe, but the per-call controls and max_tokens ceiling apply there too.
+   */
+  async completeViaStream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: CompletionCallOptions): Promise<LLMResponse> {
+    const attempts: string[] = [];
+    const candidates = this.availableBindings();
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const binding = candidates[index]!;
+      try {
+        const response = binding.provider.completeViaStream
+          ? await binding.provider.completeViaStream(messages, tools, signal, options)
+          : await binding.provider.complete(messages, tools, signal, options);
+        this.markSuccess(binding, "complete");
+        return response;
+      } catch (error) {
+        const transient = isTransientProviderError(error);
+        attempts.push(`${binding.endpoint.priority}:${binding.endpoint.baseUrl} => ${errorText(error)}`);
+        this.markFailure(binding, error, transient);
+
+        // `signal?.aborted` covers both an operator cancel and a wall-clock deadline:
+        // in either case the caller's budget is already spent, so re-running the whole
+        // completion on the next endpoint would burn a second budget for nothing.
+        if (!transient || index === candidates.length - 1 || signal?.aborted) {
+          throw error instanceof Error
+            ? error
+            : new Error(`Provider request failed: ${String(error)}`);
+        }
+
+        const next = candidates[index + 1]!;
+        this.logFailover(binding, next, error, "complete");
+        await new Promise(r => setTimeout(r, FAILOVER_BACKOFF_BASE_MS * Math.pow(2, index)));
+      }
+    }
+
+    throw new Error(`All configured providers failed: ${attempts.join(" | ")}`);
+  }
+
+  async *stream(messages: LLMMessage[], tools: LLMToolDef[], signal?: AbortSignal, options?: StreamCallOptions): AsyncGenerator<StreamChunk> {
     const candidates = this.availableBindings();
     const attempts: string[] = [];
 

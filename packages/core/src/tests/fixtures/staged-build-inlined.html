@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<!--
+  The same deliverable, finished: styles.css and game.js carried inline, no slots left.
+  Reconstructed to the shape of the correct 24,646-char bundle, and deliberately loaded
+  with every legitimate construct the completeness rule must NOT fire on — prose "TODO",
+  a <pre> code sample containing comment markers, screaming-case banners, an annotation
+  comment, and identifiers that merely START with a stub word (PARTICLES, PARTITION).
+  TODO: swap the local high-score stub for the real service before launch.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asteroid Belt</title>
+<style>
+/* ===== PART 1: LAYOUT ===== */
+:root {
+  --bg: #0b0d17;
+  --fg: #e8ecff;
+  --accent: #5ad1ff;
+  --danger: #ff5a5a;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+#stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+canvas {
+  background: radial-gradient(circle at 50% 40%, #16203c 0%, #05070f 100%);
+  border: 1px solid rgba(90, 209, 255, 0.35);
+  border-radius: 8px;
+  max-width: 100%;
+  max-height: 100%;
+}
+/* PARTICLES */
+.spark { color: var(--accent); }
+#hud {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 8px rgba(90, 209, 255, 0.6);
+}
+#hud .label { opacity: 0.6; margin-right: 6px; }
+#hud .value { color: var(--accent); }
+#overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(5, 7, 15, 0.72);
+}
+#overlay.hidden { display: none; }
+#overlay h1 { margin: 0; font-size: 2.4rem; }
+#overlay p { margin: 0; opacity: 0.8; }
+#notes {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  max-width: 320px;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+#notes pre {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  padding: 8px;
+  overflow-x: auto;
+}
+button {
+  padding: 10px 22px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { background: rgba(90, 209, 255, 0.12); }
+.dead { color: var(--danger); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game" width="960" height="600"></canvas>
+  <div id="hud">
+    <span class="label">SCORE</span><span class="value" id="score">0</span>
+    <span class="label">LIVES</span><span class="value" id="lives">3</span>
+  </div>
+  <div id="notes">
+    <p>Roadmap: TODO — power-ups, richer PARTICLES, and a boss wave.</p>
+    <p>Extending the game is a matter of adding a spawner:</p>
+    <pre>
+function spawnBoss(wave) {
+  // TODO
+  /* PLACEHOLDER */
+  return null;
+}
+    </pre>
+  </div>
+  <div id="overlay">
+    <h1>Asteroid Belt</h1>
+    <p>Arrow keys to steer, space to fire.</p>
+    <button id="start">Start</button>
+  </div>
+</div>
+<script>
+/* ===== PART 1: STATE ===== */
+// Persisted under HIGH_SCORE_TODO_KEY until the score service exists; see the note above.
+const HIGH_SCORE_TODO_KEY = "asteroid-belt.high-score";
+const DOCS_URL = "https://example.invalid/asteroid-belt/manual";
+const PARTICLE_COUNT = 24;
+const PARTITION_SIZE = 64;
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const livesEl = document.getElementById("lives");
+const overlay = document.getElementById("overlay");
+const startBtn = document.getElementById("start");
+
+const keys = new Set();
+const state = {
+  running: false,
+  score: 0,
+  lives: 3,
+  ship: { x: 480, y: 300, angle: 0, vx: 0, vy: 0 },
+  bullets: [],
+  rocks: [],
+  sparks: [],
+  wave: 1,
+  lastFrame: 0,
+};
+
+function reset() {
+  state.score = 0;
+  state.lives = 3;
+  state.wave = 1;
+  state.bullets = [];
+  state.sparks = [];
+  state.ship = { x: canvas.width / 2, y: canvas.height / 2, angle: 0, vx: 0, vy: 0 };
+  spawnWave(6);
+  render();
+}
+
+function spawnWave(count) {
+  state.rocks = [];
+  for (let i = 0; i < count; i++) {
+    const edge = Math.random() * Math.PI * 2;
+    state.rocks.push({
+      x: canvas.width / 2 + Math.cos(edge) * 420,
+      y: canvas.height / 2 + Math.sin(edge) * 320,
+      vx: (Math.random() - 0.5) * 1.6,
+      vy: (Math.random() - 0.5) * 1.6,
+      r: 28 + Math.random() * 18,
+      spin: (Math.random() - 0.5) * 0.02,
+      angle: 0,
+    });
+  }
+}
+
+/* ===== PART 2: INPUT ===== */
+window.addEventListener("keydown", (event) => {
+  keys.add(event.key);
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) event.preventDefault();
+});
+window.addEventListener("keyup", (event) => keys.delete(event.key));
+startBtn.addEventListener("click", () => {
+  overlay.classList.add("hidden");
+  state.running = true;
+  reset();
+  requestAnimationFrame(loop);
+});
+// TODO: throttle the resize handler when the tab is hidden — it is cheap but wasteful.
+window.addEventListener("resize", () => render());
+
+/* ===== PART 3: SIMULATION ===== */
+function wrap(entity) {
+  if (entity.x < 0) entity.x += canvas.width;
+  if (entity.x > canvas.width) entity.x -= canvas.width;
+  if (entity.y < 0) entity.y += canvas.height;
+  if (entity.y > canvas.height) entity.y -= canvas.height;
+}
+
+function step(dt) {
+  const ship = state.ship;
+  if (keys.has("ArrowLeft")) ship.angle -= 0.06 * dt;
+  if (keys.has("ArrowRight")) ship.angle += 0.06 * dt;
+  if (keys.has("ArrowUp")) {
+    ship.vx += Math.cos(ship.angle) * 0.12 * dt;
+    ship.vy += Math.sin(ship.angle) * 0.12 * dt;
+  }
+  ship.vx *= 0.99;
+  ship.vy *= 0.99;
+  ship.x += ship.vx * dt;
+  ship.y += ship.vy * dt;
+  wrap(ship);
+
+  if (keys.has(" ") && state.bullets.length < 8) {
+    keys.delete(" ");
+    state.bullets.push({
+      x: ship.x + Math.cos(ship.angle) * 16,
+      y: ship.y + Math.sin(ship.angle) * 16,
+      vx: Math.cos(ship.angle) * 6,
+      vy: Math.sin(ship.angle) * 6,
+      life: 70,
+    });
+  }
+
+  for (const bullet of state.bullets) {
+    bullet.x += bullet.vx * dt;
+    bullet.y += bullet.vy * dt;
+    bullet.life -= dt;
+    wrap(bullet);
+  }
+  state.bullets = state.bullets.filter((bullet) => bullet.life > 0);
+
+  for (const rock of state.rocks) {
+    rock.x += rock.vx * dt;
+    rock.y += rock.vy * dt;
+    rock.angle += rock.spin * dt;
+    wrap(rock);
+  }
+
+  for (const spark of state.sparks) {
+    spark.x += spark.vx * dt;
+    spark.y += spark.vy * dt;
+    spark.life -= dt;
+  }
+  state.sparks = state.sparks.filter((spark) => spark.life > 0);
+
+  collide();
+
+  if (state.rocks.length === 0) {
+    state.wave += 1;
+    spawnWave(5 + state.wave);
+  }
+}
+
+function burst(x, y) {
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
+    state.sparks.push({ x, y, vx: Math.cos(angle) * 2, vy: Math.sin(angle) * 2, life: 24 });
+  }
+}
+
+function collide() {
+  for (let r = state.rocks.length - 1; r >= 0; r--) {
+    const rock = state.rocks[r];
+    for (let b = state.bullets.length - 1; b >= 0; b--) {
+      const bullet = state.bullets[b];
+      if (Math.hypot(rock.x - bullet.x, rock.y - bullet.y) < rock.r) {
+        state.bullets.splice(b, 1);
+        state.rocks.splice(r, 1);
+        state.score += 25;
+        burst(rock.x, rock.y);
+        if (rock.r > 18) {
+          for (let s = 0; s < 2; s++) {
+            state.rocks.push({ ...rock, r: rock.r / 2, vx: -rock.vy, vy: rock.vx, spin: -rock.spin });
+          }
+        }
+        break;
+      }
+    }
+    const ship = state.ship;
+    if (rock && Math.hypot(rock.x - ship.x, rock.y - ship.y) < rock.r + 10) {
+      state.lives -= 1;
+      burst(ship.x, ship.y);
+      ship.x = canvas.width / 2;
+      ship.y = canvas.height / 2;
+      ship.vx = 0;
+      ship.vy = 0;
+      if (state.lives <= 0) gameOver();
+    }
+  }
+}
+
+function gameOver() {
+  state.running = false;
+  const best = Math.max(state.score, Number(localStorage.getItem(HIGH_SCORE_TODO_KEY) ?? 0));
+  localStorage.setItem(HIGH_SCORE_TODO_KEY, String(best));
+  overlay.classList.remove("hidden");
+  overlay.querySelector("h1").textContent = "Game over — " + state.score;
+  overlay.querySelector("p").textContent = "Best " + best + ". Manual: " + DOCS_URL;
+}
+
+/* ===== PART 4: RENDERING ===== */
+function drawShip(ship) {
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+  ctx.rotate(ship.angle);
+  ctx.strokeStyle = "#5ad1ff";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(16, 0);
+  ctx.lineTo(-10, 9);
+  ctx.lineTo(-5, 0);
+  ctx.lineTo(-10, -9);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRock(rock) {
+  ctx.save();
+  ctx.translate(rock.x, rock.y);
+  ctx.rotate(rock.angle);
+  ctx.strokeStyle = "#8fa2d8";
+  ctx.beginPath();
+  for (let i = 0; i < 9; i++) {
+    const angle = (i / 9) * Math.PI * 2;
+    const radius = rock.r * (0.82 + ((i * PARTITION_SIZE) % 17) / 60);
+    ctx[i === 0 ? "moveTo" : "lineTo"](Math.cos(angle) * radius, Math.sin(angle) * radius);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (const rock of state.rocks) drawRock(rock);
+  for (const bullet of state.bullets) {
+    ctx.fillStyle = "#e8ecff";
+    ctx.fillRect(bullet.x - 1.5, bullet.y - 1.5, 3, 3);
+  }
+  for (const spark of state.sparks) {
+    ctx.fillStyle = "rgba(90, 209, 255, " + (spark.life / 24).toFixed(2) + ")";
+    ctx.fillRect(spark.x, spark.y, 2, 2);
+  }
+  drawShip(state.ship);
+  scoreEl.textContent = String(state.score);
+  livesEl.textContent = String(state.lives);
+}
+
+function loop(timestamp) {
+  if (!state.running) return;
+  const dt = Math.min(3, (timestamp - state.lastFrame) / 16.67 || 1);
+  state.lastFrame = timestamp;
+  step(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+reset();
+</script>
+</body>
+</html>

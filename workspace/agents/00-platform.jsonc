@@ -6,8 +6,43 @@
     },
     "defaults": {
       "model": {
-        "primary": "lmstudio/qwen/qwen3.8-27b",
-        "fallback": "lmstudio/qwen/qwen3.8-27b",
+        // Qwen3.6-35B-A3B (MoE, 3B active, Q4 GGUF) on the dual Strix Halo box, fronted by
+        // llama-swap at 192.168.12.11:8080 (SAI_PRIMARY_MODEL_URL). The model id carries NO
+        // vendor segment: llama-swap routes on the bare id and answers "no router for
+        // requested model" for `deepseek/...` or `qwen/...`. `corsair/<id>` is the OTHER
+        // STATION's local id — a second instance, NOT an alias. This comment shipped claiming the
+        // opposite ("shares the prefix cache"); the probe behind that claim was ordering-
+        // confounded, because the `qwen-27b` SELECTOR ran first and landed on the same station,
+        // so the warmth came from the selector, not from corsair. Re-measured with a prefix
+        // neither had seen: corsair/qwen3.6-27b cold 31.15 s / 7,504 tok, then qwen3.6-27b on the
+        // SAME prefix cold again, 24.11 s / 7,504 tok. Two caches, two machines.
+        //
+        // DEEPSEEK-V4-FLASH IS GONE from the station, which is why this moved. Measured
+        // 2026-09-09 over an identical 5,933-token prefix:
+        //                    prefill cold   warm     generation    8k-token burn
+        //   qwen3.6-35b-a3b       9.8 s     0.33 s   60 tok/s          132 s
+        //   qwen3.6-27b (dense)  26.7 s     0.99 s   22 tok/s          361 s
+        //   deepseek (removed)   41.0 s     0.44 s   13.4 tok/s        598 s
+        // Every failure this wave was MECHANICAL — reasoning burns, cold prefill, a routing
+        // threshold — so the default is the fast MoE and the dense 27b is spent only where
+        // depth is the bottleneck (see the DEPTH TIER pins in the agent shards).
+        //
+        // THE FALLBACK IS A DIFFERENT MODEL ON PURPOSE. It pointed at the primary, which is
+        // no fallback at all: when the station dropped deepseek, both halves died together.
+        //
+        // Both ids land in detectThinkingFamily's `enable_thinking` branch — QWEN_EFFORT_VERSION_RE
+        // is /qwen-?3\.(?:[89]|\d{2,})/ and matches 3.8+ only — so the two tiers take the same
+        // controls. That also means the fifteen agents declaring `enableThinking: false` now
+        // actually stop thinking: on deepseek that flag was deliberately never sent, because
+        // `thinking: false` corrupted its output.
+        // THE ID IS A SELECTOR, NOT A STATION. `qwen` and `qwen-27b` are llama-swap
+        // selectors that fill evox2 to 4 concurrent requests and then spill the rest to
+        // corsair over USB4; `qwen3.6-35b-a3b` and `corsair/qwen3.6-35b-a3b` address ONE
+        // machine each. Pinning a station forfeits the second GPU: 106.6 tok/s against
+        // 188.8 aggregate at the measured 8-concurrent sweet spot. Two stations give
+        // 1.77x rather than 2x — the peer proxy hop costs the difference.
+        "primary": "lmstudio/qwen",
+        "fallback": "lmstudio/qwen-27b",
         // Qwen 3.8 replaced the on/off enable_thinking toggle with graded
         // reasoning_effort (none|low|medium|xhigh), and enable_thinking is IGNORED by
         // its template — measured on this server 2026-08-15, enable_thinking:false
@@ -25,18 +60,59 @@
         // its own and reads these defaults directly, so leaving it out silently ran
         // the orchestrator with thinking disabled — the opposite of the intent here.
         "enableThinking": true,
-        // The model serves 262144 and is loaded at full context; 32768 was sized for
-        // the previous 35B. Half the window leaves generous prefill headroom.
-        "contextWindow": 131072,
-        // temperature/topP are deliberately UNSET so the provider applies Qwen's
-        // published per-mode sampling (recommendedQwenSampling): 1.0/0.95 for
-        // thinking, 0.7/0.80 for reasoning_effort "none". Pinning topP here defeats
-        // that entirely — the fallback is gated on `topP === undefined`, so a value
-        // in defaults propagates to every agent and the non-thinking ones run
-        // thinking-mode sampling. Agents that genuinely need a fixed temperature
-        // still set it themselves.
+        // SIZED TO THE PRIMARY, and read from the server rather than assumed.
+        // llama.cpp splits `-c` across `-np` slots, so the per-slot window is what a
+        // request actually gets. Read off /props on 2026-09-08:
+        //   qwen3.6-35b-a3b   -np 4  -> 131,072 per slot  (the primary and the routing tier)
+        //   qwen3.6-27b       -np 2  ->  65,536 per slot  (the depth tier / fallback)
+        // 65536 is DELIBERATELY below the primary's slot: it is the 27b's exact ceiling, so one
+        // number is safe for both, and under-declaring only costs headroom. Over-declaring is
+        // what is not harmless — the
+        // trimmers size the prompt against it, and llama.cpp drops the FRONT of an
+        // oversized prompt, which is the system message.
+        //
+        // ModelConfigSchema's `tiers` overrides the model NAME only — context window is
+        // inherited — so this one number serves both. It is sized to the primary because
+        // that is where the large prompts run. The old 8,192-per-slot squeeze is gone, and with
+        // it the per-agent `contextWindow: 8192` pins it forced — those capped the prompt budget
+        // at 4,096 tokens against a slot that now holds 131,072.
+        "contextWindow": 65536,
+        // A SINGLE CALL'S OUTPUT BUDGET, STATED — because unstated means "the rest of the
+        // window". computeOutputTokenBudget derives max_tokens from contextWindow minus the
+        // prompt when maxTokens is absent, and no agent declared one: the orchestrator call in
+        // session 40dbcb5f was issued with max_tokens 106,912. At this box's measured decode
+        // rate that is 19-27 MINUTES of permitted generation, which is precisely how long that
+        // call ran before the client gave up. The model was not misbehaving; it had been told
+        // it could write 107k tokens.
+        //
+        // 32,000 is sized off what generation here actually costs, not off the window:
+        //   largest completion in 279 audited calls   6,838 tokens (128.8 s, finishReason stop)
+        //   second largest                            2,923
+        //   worst legitimate case this repo documents ~18,000 (a ~30 KB single-file artifact at
+        //     ~9K tokens plus a reasoning block "routinely as much again" — stream-budget.ts)
+        // So it clips nothing observed and nothing documented, and it is a BUDGET rather than a
+        // clock: a contended GPU takes longer for the same answer instead of having it cut off.
+        //
+        // It is not a guillotine either. finishReason "length" routes into
+        // continueLengthLimitedResponse (MAX_LENGTH_CONTINUATION_ATTEMPTS = 2), so a legitimately
+        // long answer is stitched across up to three calls while a runaway is re-decided twice
+        // instead of streaming unchecked to the end of the context window.
+        // Re-derived at the CURRENT decode rate, because a token budget is only a
+        // time bound once you know tok/s. Measured 2026-09-08 after the server was
+        // reconfigured: deepseek-v4-flash 13.6 tok/s, qwen3.6-35b-a3b 106.7 aggregate
+        // across its 4 slots. At 13.6 tok/s the previous 32,000 was a THIRTY-NINE MINUTE
+        // single call — worse than the 19-minute incident that prompted the cap. 8,000
+        // still clears the largest completion ever recorded here (6,838 tokens, in 279
+        // audited calls) and bounds a runaway to ~10 minutes instead of 39, while
+        // continueLengthLimitedResponse (2 retries) still stitches a legitimately long
+        // answer across three calls.
+        "maxTokens": 8000,
+        // temperature/topP are deliberately UNSET. On Qwen the provider decides per call
+        // (resolveSamplingForCall): thinking ON always gets the model card's sampling and
+        // an agent's temperature pin is IGNORED (one warning — low temperature with
+        // thinking on loops); thinking OFF honours the agent's pin; an explicit topP
+        // switches all of this off. Non-Qwen: the pin, else 0.3.
         "repeatPenalty": 1.05,
-        "maxTokens": 4096,
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
         // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").
         "promptCache": true,
@@ -48,7 +124,7 @@
         // model instead and make it cheap with reasoning_effort "none" (measured: 0
         // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen/qwen3.8-27b"
+          "routing": "lmstudio/qwen"
         }
       }
     },

@@ -40,6 +40,10 @@ async function runGitInSandbox(
     "--pids-limit=64",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
+    // DELIBERATELY THE REPO, not the workspace: these tools run git, and the repository is the
+    // mount source itself. The two agents that hold them (swarm_maintainer, git_developer) are
+    // the workspaceAccess:"full" pair, which also keeps the shared workspace root — so this is
+    // the one sandbox that is not narrowed to a single account's directory.
     "-v", `${workspaceMountSource}:/workspace`,
     "-w", workdir,
     SANDBOX_IMAGE,

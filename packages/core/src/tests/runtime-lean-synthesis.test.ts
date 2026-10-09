@@ -23,8 +23,10 @@ describe("buildLeanSynthesisPrompt", () => {
     // Anti-truncation (incl. the German term the base prompt guards against).
     expect(lower).toContain("abgeschnitten");
     expect(lower).toMatch(/truncat|cut off/);
-    // Language mirroring + output format.
-    expect(lower).toContain("user's language");
+    // The reply-language rule (a requested language first, then mirroring) + output format. This is
+    // the only system prompt the call has, so it carries the whole rule, not "the user's language".
+    expect(lower).toContain("reply language: answer in the language the user asked for");
+    expect(lower).toContain("the language of the user's latest message");
     expect(lower).toContain("markdown");
 
     // Genuinely lean — the whole point (well under the ~24.7K monolith).
@@ -80,5 +82,38 @@ describe("buildSynthesisRequiredDirective", () => {
     const d = buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"], partialEvidence: true });
     expect(d).toContain("attached to this message as files");
     expect(d).not.toContain("did NOT complete");
+  });
+
+  // E2E 2026-10-07: the coder's script was attached, so the artifact branch told the orchestrator
+  // "The orchestration is COMPLETE … state what was completed" over figures nothing had computed.
+  it("a run that masked figures no tool returned gets an honest directive, ahead of the artifact one", () => {
+    const line = "7 code executions, none completed with output (4 failed, 3 printed nothing); "
+      + "2 figures in the run's account appear in no tool result and are masked as [not observed]";
+    const d = buildSynthesisRequiredDirective({
+      artifactPaths: ["generated/primes.js"],
+      partialEvidence: true,
+      unobservedRuns: [{ agent: "coder", line, files: ["generated/primes.js"] }],
+    });
+    expect(d.startsWith("[SYNTHESIS REQUIRED]")).toBe(true);
+    expect(d).toContain("The delegated run of coder stated figures that no tool returned");
+    expect(d).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+    expect(d).not.toContain("other deliverables");
+    expect(d).toContain(line);
+    expect(d).toContain("[not observed]");
+    expect(d).toContain("Do NOT delegate again");
+    expect(d).not.toContain("is COMPLETE");
+    expect(d.toLowerCase()).not.toContain("copy the exact names");
+    expect(d).not.toContain("did NOT complete");
+    // Another agent's file of the same turn is a deliverable, not the masked run's unrun output.
+    const mixed = buildSynthesisRequiredDirective({
+      artifactPaths: ["generated/primes.js", "generated/report.html"],
+      unobservedRuns: [{ agent: "coder", line, files: ["generated/primes.js"] }],
+    });
+    expect(mixed).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
+    expect(mixed).toContain("The turn's other deliverables are attached to this message as files (generated/report.html)");
+    // No files, no files clause; no masked run, the directive it was.
+    expect(buildSynthesisRequiredDirective({ unobservedRuns: [{ agent: "coder", line }] })).not.toContain("name the files");
+    expect(buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"], unobservedRuns: [] }))
+      .toBe(buildSynthesisRequiredDirective({ artifactPaths: ["deck.html"] }));
   });
 });

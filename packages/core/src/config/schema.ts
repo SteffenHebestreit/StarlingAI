@@ -44,6 +44,8 @@ export {
 export type { DocumentRagConfig, RetrievalSearchConfig } from "./schemas/retrieval.js";
 export { OrchestrationSchema } from "./schemas/orchestration.js";
 export type { OrchestrationConfig } from "./schemas/orchestration.js";
+export { DecisionModeSchema, DecisionPointSettingsSchema, DecisionsSchema } from "./schemas/decisions.js";
+export type { DecisionMode, DecisionsConfig } from "./schemas/decisions.js";
 export {
   EFFORT_TIERS,
   EffortTierSchema,
@@ -59,6 +61,7 @@ import { RetrievalSchema } from "./schemas/retrieval.js";
 import { RenderSchema } from "./schemas/render.js";
 import { OrchestrationSchema } from "./schemas/orchestration.js";
 import { EffortSchema } from "./schemas/effort.js";
+import { DecisionsSchema } from "./schemas/decisions.js";
 
 export const LMStudioProviderSchema = z.object({
   baseUrl: z.string().url().default("http://host.docker.internal:1234/v1"),
@@ -112,9 +115,56 @@ export const ModelConfigSchema = z.object({
   baseUrl: z.string().url().optional(),
   /** Override the provider's apiKey for this specific model endpoint. Falls back to the provider's configured apiKey when omitted. */
   apiKey: z.string().optional(),
-  contextWindow: z.number().int().min(2048).max(131072).default(32768),
-  temperature: z.number().min(0).max(2).default(0.3),
-  maxTokens: z.number().int().min(256).max(16384).default(4096),
+  /** Context window the model is SERVED with. This is the only budget that is
+   *  really scarce: prompt and completion share it. Raised from max(131072)
+   *  because the configured value was already pinned at the schema maximum while
+   *  the box serves 262144, i.e. half the real window was unreachable from config. */
+  contextWindow: z.number().int().min(2048).max(1_048_576).default(32768),
+  /** OPTIONAL. Unset means "the provider decides": Qwen gets its model card's per-mode
+   *  sampling, anything else 0.3 (providers/lmstudio.ts DEFAULT_TEMPERATURE). The
+   *  former `.default(0.3)` made every agent look pinned, so the provider could not tell
+   *  a deliberate 0.2 from the default and discarded both on Qwen. A value set here is a
+   *  PIN: honoured with thinking off, refused (one warning) with thinking on — Qwen's model
+   *  cards document repetition loops at low temperature in thinking mode. */
+  temperature: z.number().min(0).max(2).optional(),
+  /** OPTIONAL hard pin on completion tokens.
+   *
+   *  Leave it UNSET. When unset the provider derives the budget per request as
+   *  contextWindow − estimated prompt − reserve (providers/lmstudio.ts,
+   *  computeOutputTokenBudget), which is the only number that is actually
+   *  meaningful: max_tokens on the OpenAI-compatible wire is a SHARED
+   *  reasoning+content budget, so a fixed value truncates mid-`<think>` and the
+   *  model never reaches the point of emitting a tool call (measured:
+   *  completionTokens == maxTokens EXACTLY, 0 tool calls, 46k-59k reasoning chars).
+   *
+   *  When set it is honoured as a CEILING (min with the derived budget), for the
+   *  rare case of deliberately capping spend on a priced cloud model. The
+   *  remaining .max() is a sanity bound against a typo, not a policy. */
+  maxTokens: z.number().int().min(256).max(1_048_576).optional(),
+  /** OPTIONAL per-agent ceiling on a SINGLE streaming call (ms).
+   *
+   *  Unset → the provider's 20-minute default (providers/lmstudio.ts
+   *  MAX_STREAM_TOTAL_MS). The sub-agent runner sets it automatically: an agent
+   *  holding a whole-file EMITTER tool (generate_document / generate_website /
+   *  generate_presentation / generate_docx / generate_pptx / generate_pdf /
+   *  render_pdf) gets BUILDER_MAX_STREAM_TOTAL_MS (45 min), because at the measured
+   *  ~16.8 tok/s a ~30 KB artifact is ~9K tokens to emit plus the reasoning that
+   *  precedes it — ~26 minutes for ONE legitimate pass. Holding write_file/edit_file
+   *  does NOT qualify: 39 of the 49 shipped agents hold them, mostly to take notes.
+   *  The runner also floors the cap above the agent's own turnTimeoutMs and above the
+   *  deadline the run resolved, so the turn DEADLINE — which salvages and then
+   *  resynthesizes — reaches the stream before this cap, which only salvages.
+   *
+   *  That ordering holds where a deadline EXISTS (it does not on a max-effort or
+   *  "unbound" run) and where MAX_STREAM_TOTAL_CEILING_MS does not clip the floor
+   *  (a turn budget above ~59 minutes does). See resolveAgentStreamCapMs.
+   *
+   *  Set it here to pin an agent explicitly — the intended route for an agent whose
+   *  deliverable is a large file written through bare write_file, which no tool grant
+   *  can distinguish from note-taking. The value is clamped into
+   *  [60_000, MAX_STREAM_TOTAL_CEILING_MS] by the provider. This is a BACKSTOP for
+   *  a call with no deadline signal, never the primary bound. */
+  maxStreamTotalMs: z.number().int().min(60_000).max(3_600_000).optional(),
   topP: z.number().min(0).max(1).optional(),
   topK: z.number().int().min(1).max(200).optional(),
   minP: z.number().min(0).max(1).optional(),
@@ -170,6 +220,30 @@ export const ModelConfigSchema = z.object({
    *     `promptCache: false` to disable.
    *  Optional so inline ModelConfig literals don't all have to set it. */
   promptCache: z.boolean().optional(),
+  /** OPTIONAL, off when unset. Starts a FORCED tool call (tool_choice "required") inside the
+   *  call: the OpenAI-compatible provider appends a trailing assistant message holding the
+   *  opening of the model's tool-call syntax, and the server continues it. The only format is
+   *  "qwen-xml", the Qwen3-Coder XML syntax Qwen3.5/3.6 use on llama.cpp (`<tool_call>` then
+   *  `<function=`). Only callers that ask for it get it (CompletionCallOptions.prefillToolCall;
+   *  today the orchestrator's forced calls), so every other request is unchanged.
+   *
+   *  Why: on the deployed llama.cpp (b11015), "required" only keeps the turn from ENDING until a
+   *  call is complete, and prose before the call is allowed. A model that wants to answer itself
+   *  writes until max_tokens with no call (forced_tool_call_burned_budget: 13,263 characters on
+   *  2026-10-07). Prefilled, the call came 24 times in 24 against 10 in 24 on the same prompt,
+   *  streamed and not, thinking on or off. A continuation closes the think block, so a prefilled
+   *  call does not deliberate first.
+   *
+   *  Set it only on a model whose endpoints (primary, fallback and cloudFallback share this
+   *  config) all serve that syntax through llama.cpp's Qwen3-Coder handler with
+   *  --prefill-assistant (on by default): the opener must be a valid start of the server's
+   *  tool-call grammar. A model preset that replaces the model (activeModelPreset) drops it,
+   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. A
+   *  prefilled request answered with an HTTP 4xx about the request is retried once without the
+   *  prefill, and only when that retry is served is the endpoint remembered and its forced calls
+   *  sent without one; a context overflow is not taken for a refusal. Qwen3's JSON tool-call
+   *  syntax needs a different opener and is not covered. The Anthropic provider ignores it. */
+  toolCallPrefill: z.enum(["qwen-xml"]).optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as
@@ -201,8 +275,12 @@ export const ModelPresetSchema = z.object({
   primary: z.string().max(200),
   /** Explicit fallback; defaults to the regular configured primary. */
   fallback: z.string().max(200).optional(),
-  maxTokens: z.number().int().min(256).max(16384).optional(),
-  contextWindow: z.number().int().min(2048).max(131072).optional(),
+  /** Independent second cap: providers/index.ts overwrites the resolved
+   *  ModelConfig unconditionally, so a preset ceiling here re-imposes itself on
+   *  every agent (modelPresetScope defaults to "all"). Kept in step with
+   *  ModelConfigSchema above. */
+  maxTokens: z.number().int().min(256).max(1_048_576).optional(),
+  contextWindow: z.number().int().min(2048).max(1_048_576).optional(),
 });
 export type ModelPreset = z.infer<typeof ModelPresetSchema>;
 
@@ -216,6 +294,11 @@ export const RateLimitSchema = z.object({
 export const MainAssistantConfigSchema = z.object({
   toolMode: z.enum(["hybrid", "orchestration_only", "delegate_only"]).default("orchestration_only"),
   customInstructions: z.string().trim().min(1).max(16000).optional(),
+  // The reply language when nothing else decides it: the user asked for no language and their
+  // message has none of its own ("hi", an emoji), and the conversation has not established one.
+  // An English name ("German", "English", "French"). The full precedence lives in
+  // agent/reply-language.ts; this is its last step.
+  defaultLanguage: z.string().trim().min(2).max(40).default("German"),
   // When true (default), the model's own routing decision is trusted: a
   // freshness signal stays advisory instead of forcing delegation; false
   // restores the strict enforcement. The flag is read at runtime
@@ -767,11 +850,94 @@ export const AgentComputeProfileSchema = z.object({
   gpuTier: z.enum(["none", "low", "medium", "high", "any"]).default("none"),
 }).optional();
 
+// ─── Routing taxonomy (IDCM) ──────────────────────────────────────────────────
+// One structured block shared by agents, scenes and jobs so all three compete in a
+// single retrieval pass and can be compared on the same axes.
+//
+// L1 is the EXECUTION MODE — what the request asks the swarm to DO — and L2 is the
+// CAPABILITY DOMAIN of the work required, never the topic of the request. Keeping those
+// axes apart is the fix for the failure ADR-009 records: "research the best image model"
+// embeds near its SUBJECT and ranked the image GENERATOR above the researcher, because a
+// single description vector carries no intent axis at all. Here it is GATHER/research, and
+// "image" is only the topic.
+//
+// The facets are orthogonal and are used as retrieval boosts and capability/approval
+// filters — never as tree branches. `completes` is the fit-check bit similarity cannot
+// carry: which deliverables this entry finishes ALONE, which is what "one agent can do
+// this whole task" means.
+
+/** What the request asks the swarm to DO. `converse` is classifier-only: no catalog entry
+ *  carries it — it is the never-empty abstain target for a direct answer. */
+export const RoutingModeSchema = z.enum(["GATHER", "PRODUCE", "ACT", "VERIFY", "ORCHESTRATE"]);
+
+/** The domain of the WORK required. `cross_domain` is a catalog-only sentinel for
+ *  domain-agnostic coordinators/reviewers; a request classifier never emits it. */
+export const RoutingDomainSchema = z.enum([
+  "research", "software", "authoring", "data", "media", "device_control",
+  "comms", "infra_ops", "security", "swarm_meta", "cross_domain",
+]);
+
+export const RoutingDeliverableSchema = z.enum([
+  "evidence", "prose_doc", "deck", "website", "code", "running_app", "chart", "diagram",
+  "image", "data_table", "plan", "verdict", "message", "config_change", "none",
+]);
+
+export const RoutingInputModalitySchema = z.enum([
+  "text", "url", "file_upload", "structured_data", "image", "codebase", "live_system", "none",
+]);
+
+/** MAXIMUM external impact the entry can reach — an approval signal and a routing filter,
+ *  never a routing branch. `sandbox_exec` is load-bearing: it records that an entry runs
+ *  code without that making it an ACT (nothing external changes). */
+export const RoutingRiskTierSchema = z.enum([
+  "read_only", "sandbox_exec", "reversible_write", "external_send", "mutating_external",
+]);
+
+/** The fit-vs-coordinate decision made explicit. */
+export const RoutingExecutionShapeSchema = z.enum([
+  "single_tool", "single_agent", "workflow", "needs_coordination",
+]);
+
+export const RoutingSurfaceSchema = z.enum([
+  "local_sandbox", "workspace", "external_network", "browser",
+  "desktop_host", "remote_infra", "user_channel", "swarm_internal",
+]);
+
+export const RoutingTaxonomySchema = z.object({
+  mode: RoutingModeSchema,
+  /** One primary domain; a second only when a distinct secondary domain is materially used. */
+  domain: z.array(RoutingDomainSchema).min(1).max(2),
+  deliverable: z.array(RoutingDeliverableSchema).default([]),
+  /** Deliverables this entry finishes ALONE — the single-agent fit check. */
+  completes: z.array(RoutingDeliverableSchema).default([]),
+  inputModality: z.array(RoutingInputModalitySchema).default([]),
+  riskTier: RoutingRiskTierSchema,
+  executionShape: RoutingExecutionShapeSchema,
+  surface: z.array(RoutingSurfaceSchema).default([]),
+});
+export type RoutingTaxonomy = z.infer<typeof RoutingTaxonomySchema>;
+
+/** Generated labels carry provenance so a stale label is detectable rather than silent. */
+export const RoutingTaxonomyGeneratedSchema = RoutingTaxonomySchema.extend({
+  /** One line: what this entry does, when to use it, and when NOT to. */
+  oneLiner: z.string().max(200).optional(),
+  /** Hash of the catalog text the labels were derived from; a mismatch means stale. */
+  sourceHash: z.string().optional(),
+  labeledBy: z.string().optional(),
+  labeledAt: z.string().optional(),
+});
+
 export const SubAgentConfigSchema = z.object({
   description: z.string(),                          // shown to orchestrator LLM
   capabilities: z.array(z.string()).default([]),   // explicit routing keywords, e.g. ["browser", "forms"]
   tags: z.array(z.string()).default([]),           // lightweight product/category tags for discovery
-  /** Product domain grouping — research | coding | browser | data | communication | workflow | reliability */
+  /** AUTHORED routing taxonomy. Always wins over `routingGenerated`. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
+  /** Product domain grouping — legacy free string, superseded by `routing.domain`.
+   *  NOTE: this is z.string(), NOT an enum — the previous comment claimed an enum the code
+   *  never enforced, and one live value ("desktop") was outside the claimed set. */
   domain: z.string().optional(),
   role: z.enum(["coordinator", "specialist", "reviewer", "generator", "supervisor", "planner"]).optional(),
   model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
@@ -1096,6 +1262,21 @@ export const GuardrailsSchema = z.object({
     maxChars: z.number().int().min(256).max(32000).default(6000),
     blockOn: z.enum(["unsafe", "controversial_or_unsafe"]).default("unsafe"),
   }).default({}),
+  /**
+   * Exact host names the SSRF guard lets through although they RESOLVE to a private
+   * (RFC 1918 / unique-local) address: a local fixture service, such as the e2e test site
+   * that `pnpm e2e:env up` lists here in a gitignored shard. Exact names, compared without
+   * case: no wildcards, ports or IP literals. It never opens a host the guard refuses by
+   * NAME (localhost, *.internal, the cloud-metadata names), nor a name that resolves to a
+   * loopback, link-local (incl. 169.254.169.254) or unspecified address. Applies to every
+   * caller of the shared guard (web_fetch, fetch_image, http_request, the browser tools,
+   * the knowledge-base crawler). Empty = no exemption.
+   */
+  allowedPrivateHosts: z.array(z.string().regex(
+    // Dot-separated DNS labels whose last label holds a letter, so an IPv4 literal never matches.
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*(?=[a-z0-9-]*[a-z])[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i,
+    "must be an exact DNS host name (no IP literal, wildcard, port or scheme)",
+  )).default([]),
 });
 
 // ─── Scenes ───────────────────────────────────────────────────────────────────
@@ -1140,6 +1321,12 @@ export type WorkflowCatalogTriggers = z.infer<typeof WorkflowCatalogTriggersSche
 export const SceneConfigSchema = z.object({
   description: z.string(),                     // shown when listing scenes
   task: z.string().min(1),                     // the prompt injected into the session
+  /** AUTHORED routing taxonomy (executionShape is always "workflow" for a scene). Scenes
+   *  carry no tags field and 0 of 23 declare triggers, so today they have NO mechanical
+   *  routing signal at all — this is it. Always wins over `routingGenerated`. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
   params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
@@ -1207,6 +1394,12 @@ export const JobTriggerSchema = z.discriminatedUnion("type", [
 
 export const JobConfigSchema = z.object({
   description: z.string(),
+  /** AUTHORED routing taxonomy (executionShape "workflow"). A job's L1 is its TERMINAL
+   *  content step's L1: a broadcast tail is a delivery mechanism, captured by
+   *  riskTier=external_send, not a reason to classify a research pipeline as ACT. */
+  routing: RoutingTaxonomySchema.optional(),
+  /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
+  routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
   params: z.record(SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),
@@ -1645,12 +1838,48 @@ export const ConfigSchema = z.object({
        * orchestrator's stable base system prompt into the model server's KV cache
        * (cache_prompt) on boot and a short idle window after each turn, so the next
        * real turn reuses the prefix instead of paying the cold prefill. Aborts the
-       * instant a real turn starts; strictly best-effort, never slows a turn.
+       * instant a real turn starts; best-effort, but an abort is not free: the server
+       * drops the aborted prompt and the next call ran ~1 s slower (live probe E5).
        * Default off (A/B the first-token latency). See agent/cache-warmer.ts.
        */
       promptCacheWarmKeeper: z.boolean().default(false),
       /** Idle window (ms) after a turn before the warm-keeper re-warms the prefix. */
       promptCacheWarmIdleMs: z.number().int().min(1_000).max(120_000).default(4_000),
+      /**
+       * Warm the heads a FORCED orchestration iteration sends, too (needs
+       * promptCacheWarmKeeper). A turn that must orchestrate before answering sends a
+       * subset of the tool block on its forced calls — record_plan offered while no plan
+       * exists, execute_plan once one does — so its first two forced calls met two heads
+       * the warm-keeper never warmed: c297c5ea paid 12.8 s and 12.7 s to first token, and
+       * live probe E7 prices a switch to a cold subset at 8.3 s. When true, the warm-keeper
+       * queues both subsets on lean base + orchestration module after the full head,
+       * derived through the same filterForcedOrchestrationTools the turn uses. That covers
+       * artifact turns (they carry the module); a plain question the upfront source judge
+       * forces carries none and stays cold until its variant is warmed too. Default off:
+       * each head costs 8-12 s of GPU cold and 2-5 s to re-warm after every turn, may push
+       * sub-agent prefixes out of the host cache, and widens the window in which a user's
+       * message meets an in-flight warm-up. Turn on only after latency-probe E9 passes.
+       */
+      promptCacheWarmForcedHeads: z.boolean().default(false),
+      /**
+       * Re-warm a sub-agent's head after a long run on it, so the next dispatch of that agent
+       * does not start cold. Live probe E8 (2026-09-26): a new conversation on content_writer's
+       * 8,041-token head was warm after a previous run on the head grew to 1.5x or 3x of it and
+       * cold after 6x — llama-server skips a cached entry the new prompt shares under a quarter
+       * of — and in c297c5ea every content_writer re-dispatch paid 9-22 s of cold prefill after
+       * ~5x runs. One finished head-only request (the head, a one-character user turn, max_tokens
+       * 1) made the next two new conversations warm in 3 of 3 for ~0.8 s of prompt. When true, an
+       * in-process run on a prompt-caching OpenAI-compatible provider whose last loop call was
+       * more than 4x its head sends that request as it ends, and a new dispatch of the same agent
+       * with the same head in the same conversation waits for it (until it has been out 8 s)
+       * before its first call: a prewarm still in flight when the real call starts costs +5.1 s
+       * (probe E6). For the same reason a run sends none while such a dispatch is on its way to
+       * its first call. It does not help parallel dispatches (one prewarm served 0 of 3
+       * concurrent ones in E8).
+       * Default off: each re-warm is up to ~3.6 s of wall on the model server's queue. Check with
+       * latency-probe E8. See agent/sub-agent-head-rewarm.ts.
+       */
+      subAgentHeadRewarm: z.boolean().default(false),
       /**
        * Max chars of a single delegated agent's result that the orchestrator
        * relays verbatim. Long deliverables (guides, reports) above this are
@@ -1674,6 +1903,23 @@ export const ConfigSchema = z.object({
        * eval-validated behavior).
        */
       softRoutingEnforcement: z.boolean().default(false),
+      /**
+       * Sub-agent loop brake. Two deterministic rules, no model call:
+       *  - the 4th identical call since the last successful write (after one execution and
+       *    two cached replays), while the earlier answer is still verbatim in the
+       *    conversation, is refused instead of replayed; an iteration of refusals is a blocked one, so the
+       *    existing two-in-a-row stop ends the run with its synthesis (progress-verifier.ts
+       *    classifyCallReplay);
+       *  - the progress supervisor counts NEW results rather than successful calls, and a
+       *    stall of STALL_LIMIT windows that each issued 5+ calls is wound down as "looping"
+       *    even when the run has written files (BUSY_WINDOW_MIN_ATTEMPTED_CALLS).
+       * Motivated by run c297c5ea: four content_writer runs re-issued the same greps for
+       * 587-1,215 s each, three of them to the 199-iteration limit, while the cached-result note
+       * went out 545 times. `pnpm loops:replay` replays both rules over any audit log. Default ON
+       * as a bug-class fix; false restores the pre-brake behaviour of both rules exactly (cached
+       * replays forever, successful calls as progress, no busy arm). See agent/sub-agent.ts.
+       */
+      loopBrake: z.boolean().default(true),
     }).default({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
@@ -1702,6 +1948,8 @@ export const ConfigSchema = z.object({
   guardrails: GuardrailsSchema.default({}),
   multimodal: MultimodalSchema.default({}),
   retrieval: RetrievalSchema.default({}),
+  /** The Laya decision layer: fast local answers to the swarm's yes/no and pick-one questions. */
+  decisions: DecisionsSchema.default({}),
   render: RenderSchema,
   mcp: McpConfigSchema.default({}),
   sites: SitesSchema.default({}),

@@ -10,6 +10,8 @@
  * both the introductory context and any trailing summary / footer are preserved.
  */
 
+import { LINK_SECTION_RE } from "./page-links.js";
+
 /** Maximum characters allowed per single tool result before truncation kicks in. */
 export const MAX_TOOL_RESULT_CHARS = 32_768;
 
@@ -62,6 +64,9 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
     .replace(/\*\*Web Search Results for:\*\*[^\n]*\n?/g, "")
     // Web fetch / browser content header
     .replace(/\*\*Content from:\*\*[^\n]*\n?/g, "")
+    // web_fetch's list of the page's links: navigation for the agent that fetched it, never a
+    // fact for its siblings (the same reason the /url and bare-URL lines go below).
+    .replace(LINK_SECTION_RE, "")
     // Full "### Page state" section including the YAML accessibility tree.
     // The snapshot is a DOM ref tree ([ref=eN], [cursor=pointer], etc.) —
     // pure navigation scaffolding with no synthesis value. Strip everything
@@ -69,6 +74,12 @@ export function extractKeyFacts(text: string, toolName: string, maxChars = 600):
     .replace(/#{1,4}\s*Page state[\s\S]*?(?=\n#{1,4}\s|\n\n[A-Z#]|$)/m, "")
     // Also catch inline Page Snapshot yaml blocks not preceded by the header
     .replace(/-\s+Page Snapshot:\s*`yaml[\s\S]*?`/g, "")
+    // Playwright MCP 1.61 shape: "### Snapshot" with the yaml tree or a link to its file, the
+    // "### Ran Playwright code" block, and a bare "### Page" header over the URL/title lines.
+    .replace(/#{1,4}[ \t]*Snapshot[ \t]*\n```[\s\S]*?```/g, "")
+    .replace(/#{1,4}[ \t]*Snapshot[ \t]*\n-[ \t]*\[Snapshot\]\([^)\n]*\)[^\n]*/g, "")
+    .replace(/#{1,4}[ \t]*Ran Playwright code[ \t]*\n```[\s\S]*?```/g, "")
+    .replace(/^#{1,4}[ \t]*Page[ \t]*$\n?/gm, "")
     // Individual page-state metadata lines
     .replace(/^-\s+Page (?:URL|Title|Status|State|Snapshot):[^\n]*\n?/gm, "")
     // YAML accessibility tree lines (the DOM ref noise from browser_snapshot fallback)

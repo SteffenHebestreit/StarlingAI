@@ -18,6 +18,7 @@ import type { SwarmState } from "../tools/registry.js";
 import type { EffortTier } from "../config/schema.js";
 import type { AgentSession, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
+import type { UserInputChannel } from "./user-input.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import type { TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { TurnQualityScorecard } from "./turn-scorecard.js";
@@ -26,6 +27,13 @@ export interface RunTurnOptions {
   session: AgentSession;
   userMessage: string;
   userDisplayContent?: string;
+  /**
+   * What a person actually typed to open this turn, carried verbatim to the specialists it
+   * delegates to. Set only by the chat entry points: a scene or job template in `userMessage` must
+   * never be presented to a specialist as the user's words, so a caller that leaves this unset
+   * gets no such block at all.
+   */
+  userWords?: string;
   userAttachments?: SessionTranscriptAttachment[];
   onChunk?: (text: string) => void;
   /** Live chain-of-thought tokens for the main assistant turn. Streams ahead
@@ -33,6 +41,10 @@ export interface RunTurnOptions {
    * once the first answer token arrives. */
   onReasoning?: (text: string) => void;
   onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
+  /** Mid-turn messages the loop just folded into the turn, with the time of the history message
+   *  that carries them. Called before the "steering" status, so a client can split the running
+   *  answer there first. */
+  onSteeringConsumed?: (event: { messages: Array<{ id: string; text: string }>; iteration: number; at: string }) => void;
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
   onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
@@ -48,8 +60,21 @@ export interface RunTurnOptions {
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
+  /** Steering token of a turn the gateway armed before calling runTurn (turn-steering.ts), so
+   *  messages sent while the turn starts up are kept. Unset: the turn opens its own. */
+  steeringToken?: string;
+  /** The chat.send request id of this turn. Every history message the turn writes carries it, so
+   *  each transcript entry names its turn (RequestContext.chatRequestId). Unset for a turn no
+   *  chat.send started, a nested one included: its messages carry none. */
+  requestId?: string;
+  /** The chat a structured user-input request from this turn reaches (agent/user-input-broker.ts).
+   *  Unset: a nested turn inherits its caller's; a top-level one has nobody to ask. */
+  userInput?: UserInputChannel;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
+  /** The agent the user directed this turn to (`--agent NAME`; allowedAgents narrows to it too). The
+   *  turn delegates to it before it answers. */
+  directiveAgent?: string;
   /** Tool names that must pause for human approval this turn (enforced unconditionally) */
   humanInLoopSteps?: string[];
   /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
@@ -60,6 +85,13 @@ export interface RunTurnOptions {
   _toolDevSessionId?: string;
   /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
   _workflowExecutionStack?: string[];
+  /** The turn runs a step of a workflow that is already running (tools/workflow-catalog.ts), so
+   *  search_workflows and run_workflow are left out of its tools. Internal. */
+  _withoutWorkflowCatalog?: boolean;
+  /** The agents the step's task names, in its order (agent/workflow-step-pipeline.ts). The turn goes
+   *  without agent and skill discovery, and while some of them have not run, a delegation that
+   *  returned keeps the turn going instead of ending it. Internal. */
+  _workflowStepPipeline?: string[];
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */
@@ -79,4 +111,7 @@ export interface TurnOutput {
   performance?: TurnPerformanceMetrics;
   /** Canonical v2 quality payload emitted once as the terminal turn_scorecard audit event. */
   qualityScorecard?: TurnQualityScorecard;
+  /** Mid-turn messages queued after the loop's last drain. Never folded in late; the client sends
+   *  them on as the next turn. */
+  unconsumedSteering?: Array<{ id: string; text: string }>;
 }

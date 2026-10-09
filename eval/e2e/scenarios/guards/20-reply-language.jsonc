@@ -1,0 +1,80 @@
+// GUARDS: the reply language. The rule (packages/core/src/agent/reply-language.ts) is: a language
+// the user asked for first, otherwise the language of the user's latest message. These turns ask
+// for no language, so the reply must be in the language the question is written in. That includes a
+// German question about an English text, where the reply must not switch to the quoted text's
+// language. reply.language counts function words (assertions.ts detectReplyLanguage: at least 3
+// markers and a 60 % majority), so each turn asks for a few full sentences.
+[
+  {
+    id: "guards-language-german-question",
+    title: "A German question gets a German answer",
+    group: "guards",
+    tags: ["smoke", "language"],
+    description: "Rule 2 of agent/reply-language.ts: with no requested language, the reply is in the language of the latest message.",
+    requires: ["model"],
+    timeoutMs: 420000,
+    steps: [
+      {
+        kind: "turn",
+        id: "german",
+        message: "Wie lagere ich die Akkus meiner Elektrowerkzeuge im Winter am besten? Bitte in drei kurzen Sätzen.",
+        timeoutMs: 300000,
+        expect: {
+          reply: {
+            language: "de",
+            includesAny: ["Akku", "Lager", "Temperatur", "Ladezustand", "geladen", "trocken"],
+            minChars: 100,
+          },
+        },
+      },
+    ],
+  },
+  {
+    id: "guards-language-english-question",
+    title: "An English question gets an English answer",
+    group: "guards",
+    tags: ["smoke", "language"],
+    description: "Rule 2 of agent/reply-language.ts: an English message gets an English reply even though the configured default language (agents.mainAssistant.defaultLanguage) is German.",
+    requires: ["model"],
+    timeoutMs: 420000,
+    steps: [
+      {
+        kind: "turn",
+        id: "english",
+        message: "How should I store the batteries of my power tools over the winter? Three short sentences, please.",
+        timeoutMs: 300000,
+        expect: {
+          reply: {
+            language: "en",
+            includesAny: ["batter", "storage", "store", "temperature", "charge", "dry"],
+            minChars: 100,
+          },
+        },
+      },
+    ],
+  },
+  {
+    id: "guards-language-german-question-english-text",
+    title: "A German question about an English text gets a German answer",
+    group: "guards",
+    tags: ["smoke", "language"],
+    description: "Most of the message is an English quote, but the question around it is German and asks for no language. The reply must be German, and it must render the quote's fact in German (30 Minuten), not repeat the English sentence.",
+    requires: ["model"],
+    timeoutMs: 420000,
+    steps: [
+      {
+        kind: "turn",
+        id: "german-about-english",
+        message: "Ein Kunde hat mir diesen Hinweis aus einer englischen Bedienungsanleitung weitergeleitet. Was muss er beim Laden beachten? Bitte kurz in eigenen Worten: \"Before first use, charge the battery pack completely. Do not expose the charger to rain or moisture. If the LED flashes red, let the battery cool down for at least 30 minutes before you charge it again.\"",
+        timeoutMs: 300000,
+        expect: {
+          reply: {
+            language: "de",
+            includesAny: ["30 Minuten", "dreißig Minuten", "halbe Stunde"],
+            minChars: 100,
+          },
+        },
+      },
+    ],
+  },
+]

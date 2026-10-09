@@ -118,7 +118,7 @@ export function stopPluginWatcher(): void {
  * fresh registration wins.
  */
 async function resyncPlugins(dir: string): Promise<void> {
-  let entries: string[] = [];
+  let entries: string[];
   try { entries = readdirSync(dir); } catch { return; }
 
   const onDisk = new Set<string>();

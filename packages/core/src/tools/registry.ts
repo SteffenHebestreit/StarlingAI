@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
+import type { TurnUserWords } from "../agent/delegation-user-words.js";
+import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
-import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
+import { runWithRequestContext, currentUserId, currentRequestContext } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 import { getConfig } from "../config/loader.js";
@@ -157,6 +159,14 @@ export interface ToolContext {
   workspaceScope?: "full" | "generated";
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
+  /**
+   * Put a structured question to the person behind this turn (agent/user-input.ts) and wait for
+   * the answer. ALWAYS resolves, never throws: where nobody can be asked (a channel, a scene,
+   * federation, --auto) it answers "auto" / "no_channel" at once, so a tool keeps its old behaviour
+   * there. Bound at the orchestrator and at every in-process sub-agent; a tool whose registration
+   * sets its own timeoutMs must not ask, since that race does not pause for a person.
+   */
+  requestUserInput?: <T>(request: UserInputRequest<T>) => Promise<UserInputOutcome<T>>;
   onSubAgentProgress?: (event: {
     agentName: string;
     kind: "started" | "thinking" | "tool_start" | "tool_done" | "completed" | "reasoning";
@@ -184,6 +194,52 @@ export interface ToolContext {
    */
   allowedTools?: string[];
   /**
+   * Tools the caller could pull into this turn with load_tool — the lean catalog withholds them
+   * from the initial grant, so `allowedTools` alone understates the caller's real reach. Set from
+   * the turn's EFFECTIVE tool mode, which the runtime narrows per turn, so it never widens a turn
+   * the runtime deliberately restricted.
+   */
+  loadableTools?: string[];
+  /**
+   * How many times the turn has already called a tool. A tool that dispatches other tools reads
+   * this so its own budget continues the turn's rather than starting a second one; the turn loop
+   * cannot see the nested calls to count them itself.
+   */
+  getTurnToolCallCount?: (toolName: string) => number;
+  /**
+   * The names of every tool call in the model response the current call belongs to, set by the
+   * orchestrator's turn loop once per response. A tool that would act on the response's behalf
+   * reads it to make sure no sibling call is already doing that work: record_plan folds the plan's
+   * execution into its own call (orchestration.planRoundFold) only when it was the response's ONLY
+   * call. Undefined (a sub-agent, a direct invocation) means "unknown" and such a tool does not act.
+   */
+  responseToolCalls?: readonly string[];
+  /**
+   * Set by the orchestrator's turn loop once per response: the tail asked for a plan before acting
+   * (the multi-domain plan-first nudge, with no correction pending), and the turn, this response
+   * included, has only searched. A routing tool that would tell the model to delegate now names the
+   * agent for the plan's delegate steps instead, so its result does not contradict the nudge.
+   * Undefined or false (a sub-agent, a direct invocation, any other turn) leaves the pointer as it was.
+   */
+  planFirstPending?: boolean;
+  /**
+   * This turn's document excerpts ([DOCUMENT CONTEXT]), for the one delegation the runtime
+   * dispatches itself on a turn the user directed to an agent (agent/directive-agent.ts). The turn
+   * loop sets it for that call alone and clears it when the call returns; delegate_to_agent hands it
+   * to the agent before the call's own context. It travels here and not in the call's arguments,
+   * because the arguments are kept (the session history, the audit, the transcript) while the note
+   * the excerpts come from is pruned at the next turn, so that a document does not outlive the turn
+   * it was attached to.
+   */
+  delegationDocuments?: string;
+  /**
+   * The agent the user directed this turn to (`--agent`, RunTurnOptions.directiveAgent), set by the
+   * runtime on such a turn only. A delegation naming that agent is served by signature reuse only
+   * from that agent's own earlier run (tools/sub-agent.ts): served another agent's result for the
+   * same task, the named agent never ran.
+   */
+  directiveAgent?: string;
+  /**
    * Tool names that MUST pause for human approval regardless of tier defaults.
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */
@@ -207,10 +263,37 @@ export interface ToolContext {
   /** Optional live callback whenever swarm state changes during a turn. */
   onSwarmState?: (state: SwarmState) => void;
   /**
+   * What the user typed this turn, handed to every specialist the turn delegates to (and to theirs)
+   * beside the orchestrator's task. One object for the whole turn: mid-turn messages are pushed
+   * into it, so a delegation dispatched after one arrived carries it too. Unset outside a turn.
+   */
+  turnUserWords?: TurnUserWords;
+  /**
+   * The up-front judge's verdict that answering this turn needs outside facts
+   * (orchestration.upfrontSourceSensitiveClassifier), set by the runtime on the orchestrator's own
+   * turn only — never on a workflow step (nested, or a queued scene or job on the scene worker), a
+   * directed (`--agent`) turn or a specialist's context.
+   * One object per turn, shared by reference with every context spread from the orchestrator's.
+   * `outsideEngaged` names the first agent this turn that can reach outside the workspace — one
+   * dispatched or redirected to, an ephemeral agent, or a workflow run (`workflow:<name>`); once
+   * it is set the research gate's turn trigger stays off.
+   */
+  turnEvidence?: { required: true; outsideEngaged?: string };
+  /**
+   * Internal: this delegation is a member of a plan / parallel batch / task graph and is not that
+   * batch's evidence gather point, so the research gate's turn trigger does not apply to it.
+   */
+  _turnGatherExempt?: boolean;
+  /**
    * Abort signal from the parent turn — propagated to sub-agent delegations.
    * When aborted, delegation loops exit early and return a cancellation error.
    */
   signal?: AbortSignal;
+  /**
+   * When the current turn began (epoch ms). Lets a tool tell this turn's state from a previous
+   * turn's leftovers — the turn-plan slot, for one, outlives the turn that recorded it.
+   */
+  turnStartedAt?: number;
   /**
    * Per-turn agent invocation counters for loop enforcement.
    * Tracks how many times each agent has been called this turn.
@@ -245,6 +328,9 @@ export interface ToolContext {
    * Internal. Undefined when the turn has no timeout (unlimited / max effort).
    */
   _turnDeadlineMs?: number;
+  /** The same deadline as it stands NOW, after every credit (a human wait moves it the moment the
+   *  wait ends). A delegation reads this; a function, so a spread copy of the context stays live. */
+  _liveTurnDeadlineMs?: () => number | undefined;
   /**
    * Per-turn per-path overwrite tracker for the write_file regeneration nudge
    * (orchestration.detectWriteChurnOverwrite). Keyed by workspace-relative path;
@@ -254,6 +340,14 @@ export interface ToolContext {
    * tool calls (same ToolContext), like _turnAgentCounts.
    */
   _turnWriteChurnTracker?: Map<string, { count: number }>;
+  /**
+   * The turn's delegated runs that the loop brake acted on or the warden stopped
+   * (agent/delegation-loop-notes.ts). One array per turn, shared by reference with every nested
+   * delegation like _turnAgentCounts, so a loop two levels down reaches the frame, a re-dispatch,
+   * the artifact gate and the turn oversight. Internal — created by the runtime, or lazily by the
+   * first delegation.
+   */
+  _turnLoopRuns?: import("../agent/delegation-loop-notes.js").TurnLoopRecord[];
 }
 
 export interface ToolResult {
@@ -270,6 +364,13 @@ export interface ToolResult {
    * provably happened before dispatch (DNS, connection refused, validation).
    */
   dispatchUncertain?: boolean;
+  /**
+   * Set by a FAILING tool that turned the request away before doing anything — an invalid request
+   * it asks to have reissued, corrected. The runtime does not count such a call against the tool's
+   * per-turn allowance, once per tool and turn: under a cap of one the corrected call was itself
+   * turned away as over the limit.
+   */
+  rejectedBeforeEffect?: boolean;
 }
 
 const _registry = new Map<string, ToolHandler>();
@@ -377,11 +478,16 @@ async function _getToolEmbedding(h: ToolHandler): Promise<Float32Array | null> {
  * Non-destructive — tools with unavailable embeddings retain their input
  * order at the tail. Tie-breaks prefer lower `costHint` / `latencyHint`.
  * When embeddings are unavailable the input list is returned unchanged.
+ *
+ * `report.ranked` is set when the order is the full ranking — the query embedded and every
+ * registered tool's embedding was available — so a caller can tell it from a fallback (input order,
+ * or failed tools pushed to the tail) and keep only a real ranking (agent/sub-agent-tool-order.ts).
  */
 export async function rerankToolsForTask(
   defs: LLMToolDef[],
   task: string,
   minTools = 1,
+  report?: { ranked?: boolean },
 ): Promise<LLMToolDef[]> {
   // Skip the rerank embedding for small toolsets — they fit the model's attention and don't
   // need semantic ordering (B24, orchestration.toolRerankMinTools). minTools=1 preserves the
@@ -391,12 +497,16 @@ export async function rerankToolsForTask(
   const queryVec = await computeQueryEmbedding(task);
   if (!queryVec) return defs;
 
+  let embeddingMissing = false;
   const scored = await Promise.all(
     defs.map(async (def, idx) => {
       const handler = _registry.get(def.name);
       if (!handler) return { def, score: -Infinity, idx };
       const vec = await _getToolEmbedding(handler);
-      if (!vec) return { def, score: -Infinity, idx };
+      if (!vec) {
+        embeddingMissing = true;
+        return { def, score: -Infinity, idx };
+      }
       const sim = cosineSimilarity(queryVec, vec);
       const costAdj = HINT_WEIGHT[handler.costHint ?? "medium"];
       const latAdj = HINT_WEIGHT[handler.latencyHint ?? "medium"];
@@ -408,6 +518,7 @@ export async function rerankToolsForTask(
     if (b.score !== a.score) return b.score - a.score;
     return a.idx - b.idx;
   });
+  if (report && !embeddingMissing) report.ranked = true;
   return scored.map(s => s.def);
 }
 
@@ -631,7 +742,9 @@ export function _resetUnknownEffectsForTests(): void {
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
-  context: ToolContext
+  context: ToolContext,
+  /** The model's id for this call, made ambient for the handler (currentRequestContext). */
+  meta?: { toolCallId?: string },
 ): Promise<ToolResult> {
   const def = getToolTier(name);
 
@@ -777,10 +890,22 @@ export async function executeTool(
           // identity forwarding, workspace-path zone enforcement) without threading
           // them through every call signature.
           return await runWithRequestContext(
-            // Fall back to the ambient turn userId so a delegated sub-agent whose
-            // ToolContext didn't thread userId still resolves per-user stores to
-            // the owning user (never clobber the turn's userId to undefined).
-            { userId: context.userId ?? currentUserId(), workspaceScope: context.workspaceScope },
+            {
+              // Spread the ambient store FIRST so attribution (sessionId / agentName /
+              // callSite) and a sweep's pre-resolved userScopeSegment survive the tool
+              // boundary. Rebuilding the context from two fields dropped them, so any
+              // model call issued inside a tool handler produced a NULL-session
+              // provider row — the exact gap the attribution was added to close.
+              ...(currentRequestContext() ?? {}),
+              // Fall back to the ambient turn userId so a delegated sub-agent whose
+              // ToolContext didn't thread userId still resolves per-user stores to
+              // the owning user (never clobber the turn's userId to undefined).
+              userId: context.userId ?? currentUserId(),
+              workspaceScope: context.workspaceScope,
+              // Always this call's own id (or none): an inherited one would pin a question raised
+              // by a nested run's call to the call that started that run.
+              toolCallId: meta?.toolCallId,
+            },
             () => handler.execute(args, context),
           );
         } catch (err) {

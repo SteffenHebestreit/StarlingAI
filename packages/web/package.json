@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "check": "vue-tsc --noEmit",
+    "test": "vitest run",
     "lint": "node -e \"console.log('@starlingai/web is out of eslint scope (.vue needs vue-eslint-parser) — see ignores in eslint.config.mjs. Type checking runs via pnpm check.')\""
   },
   "dependencies": {
@@ -23,7 +24,7 @@
     "mermaid": "^11.16.0",
     "pinia": "^2.3.1",
     "three": "^0.176.0",
-    "vue": "^3.5.39",
+    "vue": "^3.5.42",
     "vue-router": "^4.6.4"
   },
   "devDependencies": {
@@ -37,6 +38,7 @@
     "typescript": "^5.9.3",
     "vite": "^6.4.3",
     "vite-plugin-pwa": "^1.3.0",
+    "vitest": "3.2.6",
     "vue-tsc": "^2.2.12",
     "workbox-window": "^7.4.1"
   }

@@ -1,14 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { logAudit } from "../audit/logger.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
-import { archiveSession, createSession } from "../agent/session.js";
+import { archiveSession, createSession, type AgentSession, type SessionHistoryMessage } from "../agent/session.js";
+import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
+import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+import { buildWorkflowExecutionKey } from "../agent/workflow-execution-key.js";
+import { firstMentionOfAgent, workflowStepPipeline } from "../agent/workflow-step-pipeline.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
-import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
+import { runTurn, collectTurnArtifactAttachments, classifyPostOrchestrationDisposition } from "../agent/runtime.js";
+import type { TurnOutput } from "../agent/turn-types.js";
 import { getConfig } from "../config/loader.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { registerTool, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { currentUserId } from "../runtime/request-context.js";
 
 type WorkflowType = "scene" | "job";
 
@@ -30,10 +36,6 @@ interface WorkflowSearchCandidate {
   semanticScore: number;
   combinedScore: number;
   matchedTerms: string[];
-}
-
-function buildWorkflowExecutionKey(name: string, workflowType: WorkflowType): string {
-  return `${workflowType}:${name}`;
 }
 
 const COORDINATOR_BOOTSTRAP_TOOL_NAMES = new Set([
@@ -601,11 +603,24 @@ function resolveSceneBootstrapAgent(
   if (match?.[1]) {
     const agentName = match[1].trim();
     const allowed = !(allowedAgents?.length && !allowedAgents.includes(agentName));
-    if (allowed && getConfig().subAgents[agentName]) return agentName;
+    // A leaf agent runs the scene alone only when the task gives the work to it alone. A task
+    // that names other allowed agents is a multi-agent plan, and a leaf cannot delegate: "Use
+    // document_intake first when the request starts from attached material, researcher for …"
+    // ran document_intake alone — no web or delegation tools — for every research brief, and
+    // code_review, security_audit and release_notes_draft dropped all but their first agent.
+    // Those go through the orchestrated path below with the scene's allowed agents.
+    if (allowed && getConfig().subAgents[agentName] && !taskNamesOtherAgents(scene.task, agentName, allowedAgents)) {
+      return agentName;
+    }
   }
 
   // No explicit "use X" lead — but a single-leaf-agent scene still runs that agent directly.
   return resolveSingleStepLeafAgent(allowedAgents);
+}
+
+/** Whether `task` names an allowed agent other than `leadAgent` as a whole identifier. */
+function taskNamesOtherAgents(task: string, leadAgent: string, allowedAgents: string[] | undefined): boolean {
+  return (allowedAgents ?? []).some((agent) => agent !== leadAgent && firstMentionOfAgent(task, agent) !== -1);
 }
 
 function stripCoordinatorBootstrapInstruction(task: string, agentName: string): string {
@@ -882,12 +897,100 @@ function resolveWorkflowReference(name: string, workflowType: WorkflowType | "au
   };
 }
 
+type FanOutExecutionRecords = ReturnType<typeof createFanOutExecutionRecords>;
+/** What run_workflow hands back about the code the workflow's runs executed (agent/delegated-run-record.ts). */
+type WorkflowExecutions = ReturnType<FanOutExecutionRecords["metadata"]>;
+
+/**
+ * Adds the record of every delegation the workflow's own orchestrator turns made. They ran in the
+ * workflow's session, which is archived when it ends, so the parent turn reads none of their tool
+ * messages: a coder's masked figures inside a workflow reached the turn as "Workflow … completed"
+ * with no record, and the turn's honest directive never fired. Returns the tool messages it read.
+ */
+function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession, recorded?: WeakSet<object>): SessionHistoryMessage[] {
+  const read: SessionHistoryMessage[] = [];
+  for (const message of session.getHistory()) {
+    if (message.role !== "tool" || !message.metadata || recorded?.has(message)) continue;
+    recorded?.add(message);
+    into.add(message.metadata);
+    read.push(message);
+  }
+  return read;
+}
+
+/**
+ * The finish reasons with which a turn stops its own orchestration (agent/runtime.ts): the warden
+ * after delegations failed back to back, every tool call of several iterations refused, or the
+ * iteration cap. Its answer is then a forced synthesis of whatever the turn had.
+ */
+const ORCHESTRATION_GIVE_UP_FINISH_REASONS: ReadonlySet<string> = new Set([
+  "delegation_failures_terminal",
+  "all_tool_calls_blocked",
+  "max_tool_iterations",
+]);
+
+/**
+ * A scene's or job step's orchestrated turn that gave up, and whose delegations brought no
+ * specialist's result back, did none of the step's work. Each delegation is read as the turn itself
+ * read it (classifyPostOrchestrationDisposition): only one it would synthesize from or continue on
+ * counts. Such a turn still returned blocked:false, with its forced synthesis as the answer, and the
+ * step was reported completed: in the E2E run of source_grounded_paper_packet no specialist ran
+ * anywhere and run_workflow came back "completed" (2026-10-08). A turn that ended any other way, or
+ * brought one result back, is read as before.
+ */
+function stepTurnRanNoSpecialist(
+  result: TurnOutput,
+  toolMessages: readonly SessionHistoryMessage[],
+  audit: { sessionId: string; workflow: string; step?: string },
+): boolean {
+  const finishReason = result.qualityScorecard?.finishReason ?? result.performance?.finishReason;
+  if (!finishReason || !ORCHESTRATION_GIVE_UP_FINISH_REASONS.has(finishReason)) return false;
+  const delivered = toolMessages.some((message) => {
+    const disposition = classifyPostOrchestrationDisposition([message]);
+    return disposition === "synthesize" || disposition === "continue";
+  });
+  if (delivered) return false;
+  logAudit("guardrail_flagged", {
+    type: "workflow_step_ran_no_specialist",
+    workflow: audit.workflow,
+    ...(audit.step ? { step: audit.step } : {}),
+    finishReason,
+  }, { sessionId: audit.sessionId, severity: "warn" });
+  return true;
+}
+
+/** What a job step whose run masked figures says, under its answer, in place of a result. */
+const MASKED_STEP_NOTE = `_(This step's run stated figures no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} and were not computed.)_`;
+
+/** A run's result as its delegation's metadata, for the fan-out record: a coordinator's masked runs
+ *  go up as they are, each with its own files. */
+function runExecutionMetadata(
+  agentName: string,
+  run: { executions?: unknown; artifacts?: unknown[]; maskedRuns?: unknown[] },
+): Record<string, unknown> {
+  return { agentName, specialistExecutions: run.executions, artifacts: run.artifacts, maskedRuns: run.maskedRuns };
+}
+
+/**
+ * A QA attempt the job did not adopt, for the fan-out record: the code it executed still counts, but
+ * what it stated reaches nobody, so nothing it masked is reported. In review the first attempt of an
+ * expectArtifact step masked its figures, the re-attempt saved primes.js and printed the count and
+ * was adopted, and the job still handed back the discarded attempt as a run that masked figures:
+ * the turn was told the values were not computed while its evidence carried the computed ones.
+ */
+function discardedAttemptMetadata(agentName: string, run: { executions?: unknown }): Record<string, unknown> {
+  const record = readExecutionRecord(run.executions);
+  if (!record) return { agentName };
+  const { unobservedFigures: _stated, ...executed } = record;
+  return { agentName, specialistExecutions: executed };
+}
+
 async function runSceneInline(
   scene: SceneSummary,
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string; artifacts?: Array<Record<string, unknown>> }> {
+): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; bootstrapAgent?: string; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
   const mergedParams = mergeSceneParams(scene, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(scene.task, mergedParams, workflowContext, ctx.swarmState?.objective);
   const task = appendWorkflowContext(applyTemplate(scene.task, mergedParams), enrichedWorkflowContext);
@@ -912,10 +1015,18 @@ async function runSceneInline(
   const workflowTaskId = `workflow:scene:${scene.name}`;
   ensureWorkflowSwarmState(ctx, task, workflowTaskId, scene.name);
 
+    // THE RUN BELONGS TO WHOEVER ASKED FOR IT. A hardcoded synthetic owner here does not just
+    // mislabel the session: agent/runtime.ts wraps the ENTIRE turn in this userId, so every
+    // per-user store the workflow touches — durable memory, the user-model, personality, and
+    // any per-user path — resolved to a `workflow:<name>` bucket instead of the caller's. The
+    // scene-trigger route already states the correct rule (gateway/index.ts: the caller's
+    // username so per-user resources "resolve exactly as if they ran the scene from chat",
+    // with the synthetic identity only as the no-caller fallback), and scene-worker.ts honours
+    // whatever the enqueuer set. This is the one path that was not following it.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${scene.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: `workflow:${scene.name}`,
+    userId: ctx.userId ?? currentUserId() ?? `workflow:${scene.name}`,
     workspacePath: ctx.workspacePath,
   });
 
@@ -955,10 +1066,15 @@ async function runSceneInline(
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
+        _turnLoopRuns: ctx._turnLoopRuns,
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: workflowExecutionStack,
         inlineConfig: bootstrapConfig,
+        // The person's words reach a workflow's agents as they reach any delegated specialist:
+        // they carry the language the deliverable must be written in, which the scene's own
+        // task (English, written by its author) cannot.
+        ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
       });
 
       const bootstrapResponse = bootstrapRun.output.trim() || `Workflow bootstrap delegation to ${bootstrapAgent} produced no output.`;
@@ -979,6 +1095,8 @@ async function runSceneInline(
         bootstrapBlocked ? "blocked" : "completed",
         finalBootstrapResponse,
       );
+      const bootstrapExecutions = createFanOutExecutionRecords();
+      bootstrapExecutions.add(runExecutionMetadata(bootstrapAgent, bootstrapRun));
 
       return {
         response: finalBootstrapResponse,
@@ -989,9 +1107,13 @@ async function runSceneInline(
         // collector finds nothing — thread the agent's own collected artifacts (e.g.
         // the built deck/paper, saved images) so the parent surfaces downloads.
         artifacts: bootstrapRun.artifacts,
+        executions: bootstrapExecutions.metadata(),
       };
     }
 
+    // The agents the scene's task names, in its order, from the task as its author wrote it: the turn
+    // keeps going while some of them have not run (agent/workflow-step-pipeline.ts).
+    const pipeline = workflowStepPipeline(scene.task, allowedAgents);
     const result = await runTurn({
       session,
       userMessage: task,
@@ -1000,9 +1122,17 @@ async function runSceneInline(
       allowedAgents,
       humanInLoopSteps: mergedHumanInLoopSteps,
       autoApprove: ctx.autoApprove,
+      // The nested turn inherits the parent's channel to the user, so ask_user works inside a
+      // workflow step — and the unattended fallback (keyed on autoApprove) never fires while a
+      // person is present.
+      inputCallback: ctx.inputCallback,
       maxIterationsOverride: ctx.maxIterationsOverride,
       turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       _workflowExecutionStack: workflowExecutionStack,
+      // The scene is already selected and its task names its agents: the step's turn gets no
+      // catalog to search it in or to start it, or another scene, from (agent/runtime.ts).
+      _withoutWorkflowCatalog: true,
+      ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
       onSubAgentProgress: ctx.onSubAgentProgress,
       onComputerAction: ctx.onComputerAction,
       onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1010,7 +1140,11 @@ async function runSceneInline(
       onSwarmState: ctx.onSwarmState,
     });
 
-    const resultBlocked = result.blocked || workflowOutputIsBlocked(result.response);
+    const sceneExecutions = createFanOutExecutionRecords();
+    const sceneToolMessages = addSessionExecutions(sceneExecutions, session);
+    const resultBlocked = result.blocked
+      || workflowOutputIsBlocked(result.response)
+      || stepTurnRanNoSpecialist(result, sceneToolMessages, { sessionId: ctx.sessionId, workflow: scene.name });
     finalizeWorkflowSwarmState(
       ctx,
       workflowTaskId,
@@ -1030,6 +1164,7 @@ async function runSceneInline(
       blocked: resultBlocked,
       toolCallsExecuted: result.toolCallsExecuted,
       artifacts: collectTurnArtifactAttachments(session),
+      executions: sceneExecutions.metadata(),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1045,7 +1180,7 @@ async function runJobInline(
   params: Record<string, string>,
   workflowContext: string | undefined,
   ctx: ToolContext,
-): Promise<{ response: string; blocked: boolean; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>> }> {
+): Promise<{ response: string; blocked: boolean; blockedByMaskedFigures?: true; toolCallsExecuted: number; executedSteps: number; artifacts?: Array<Record<string, unknown>>; executions: WorkflowExecutions }> {
   const steps = resolveJobSteps(job, params);
   const enrichedWorkflowContext = buildWorkflowParamContext(job.description || job.name, params, workflowContext, ctx.swarmState?.objective);
   const workflowTaskId = `workflow:job:${job.name}`;
@@ -1054,17 +1189,27 @@ async function runJobInline(
     ...(ctx._workflowExecutionStack ?? []),
     buildWorkflowExecutionKey(job.name, "job"),
   ];
+  // Same rule as the scene path above: the caller owns the run, the synthetic identity is
+  // only the fallback for a trigger with no user behind it.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${job.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: `workflow:${job.name}`,
+    userId: ctx.userId ?? currentUserId() ?? `workflow:${job.name}`,
     workspacePath: ctx.workspacePath,
   });
 
   try {
     const sections: string[] = [];
     const directStepArtifacts: Array<Record<string, unknown>> = [];
+    const jobExecutions = createFanOutExecutionRecords();
+    // The tool messages of the job's session already in its record. A step's orchestrator turn
+    // leaves its delegations there; they are read right after that turn, before the next step's
+    // turn can compact them out of the history.
+    const recordedToolMessages = new WeakSet<object>();
     let blocked = false;
+    // The step that stopped the job was stopped only because its run masked figures: the turn
+    // reads the job's failure as that run's (agent/runtime.ts, tools/plan-executor.ts).
+    let blockedByMaskedFigures = false;
     let toolCallsExecuted = 0;
     let executedSteps = 0;
 
@@ -1089,6 +1234,12 @@ async function runJobInline(
           agents: allowedAgents,
         }, { sessionId: ctx.sessionId, severity: "info" });
       }
+      // The step runs its own scene, so that scene is on the stack its agents see, as a scene run
+      // on its own puts itself there (runSceneInline). With only the job there, the step of
+      // source_grounded_paper_packet ran its own scene, source_backed_paper, nested inside itself
+      // (E2E 2026-10-08). The step's turn no longer has run_workflow, but a coordinator it delegates
+      // to keeps one (mission_coordinator), and the recursion check reads this stack.
+      const stepExecutionStack = [...workflowExecutionStack, buildWorkflowExecutionKey(step.sceneName, "scene")];
 
       // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)
       // to EVERY step, not just the first. Later steps otherwise never learn the subject:
@@ -1105,6 +1256,7 @@ async function runJobInline(
       const directAgent = resolveSingleStepLeafAgent(allowedAgents);
       let stepResponse: string;
       let stepBlocked: boolean;
+      let stepMaskedFigures = false;
       if (directAgent) {
         const directIntro = `You are the "${directAgent}" specialist running ONE scoped step of a pipeline. Carry out this step's work YOURSELF with your own tools — you have no sub-agents and must not try to delegate.\n\n`;
         const directOpts = {
@@ -1123,12 +1275,15 @@ async function runJobInline(
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
           swarmState: ctx.swarmState,
           onSwarmState: ctx.onSwarmState,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
+          // Same as the scene bootstrap: the step's task is the job author's, not the person's.
+          ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
         };
         const producedArtifact = (r: { artifacts?: unknown[] }): boolean => Array.isArray(r.artifacts) && r.artifacts.length > 0;
 
         let run = await runSubAgentWithStats({ ...directOpts, task: `${directIntro}${stepTask}` });
         toolCallsExecuted += run.stats.toolCount;
+        let discarded: typeof run | undefined;
 
         // QA deliverable check: a step that MUST persist an output file but produced none
         // gets ONE corrective re-attempt with the failure folded in. A clean retry that
@@ -1140,8 +1295,17 @@ async function runJobInline(
           const correctiveTask = `${directIntro}${stepTask}\n\n[QA RE-ATTEMPT] Your previous attempt did NOT persist the required output file — no artifact was saved. Produce it now and make sure the artifact tool call SUCCEEDS before you stop: pass every array argument as a real JSON array (e.g. slides=[{…}], bullets=[…]) — never a quoted string; use only allowed enum values (an invalid theme is ignored, not rejected); embed any images as Markdown ![alt](images/<file>). Do not paste the file contents into your reply.`;
           const retry = await runSubAgentWithStats({ ...directOpts, task: correctiveTask });
           toolCallsExecuted += retry.stats.toolCount;
-          if (producedArtifact(retry)) run = retry; // adopt the attempt that produced the file
+          if (producedArtifact(retry)) { // adopt the attempt that produced the file
+            discarded = run;
+            run = retry;
+          } else {
+            discarded = retry;
+          }
         }
+        // Recorded once the step's run is settled: the adopted attempt as it ran, the other one
+        // for the code it executed only (discardedAttemptMetadata).
+        jobExecutions.add(runExecutionMetadata(directAgent, run));
+        if (discarded) jobExecutions.add(discardedAttemptMetadata(directAgent, discarded));
 
         stepResponse = run.output.trim() || `Step '${step.label}' produced no output.`;
         stepBlocked = run.stats.outcome === "failure" || workflowOutputIsBlocked(stepResponse);
@@ -1152,7 +1316,18 @@ async function runJobInline(
           stepBlocked = true;
           stepResponse = `${stepResponse}\n\n_(This step was required to produce an output file but none was saved.)_`.trim();
         }
+        // Nor is a step whose run stated figures no tool returned: the next step would build on
+        // the masked text as its input, as a plan's dependent step did in review (see
+        // tools/plan-executor.ts). The job stops there and says why.
+        if (unbackedFiguresMasked(run.executions)) {
+          stepMaskedFigures = !stepBlocked;
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
+        }
       } else {
+        // As in runSceneInline, from the step's scene as its author wrote it: step.task has the job's
+        // parameters filled in.
+        const pipeline = workflowStepPipeline(getScene(step.sceneName)?.task, allowedAgents);
         const result = await runTurn({
           session,
           userMessage: stepTask,
@@ -1161,9 +1336,13 @@ async function runJobInline(
           allowedAgents,
           humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
           autoApprove: ctx.autoApprove,
+          inputCallback: ctx.inputCallback,
           maxIterationsOverride: ctx.maxIterationsOverride,
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
+          // As in runSceneInline: the step's turn runs the step, it does not look for a workflow.
+          _withoutWorkflowCatalog: true,
+          ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
           onSubAgentProgress: ctx.onSubAgentProgress,
           onComputerAction: ctx.onComputerAction,
           onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1173,6 +1352,21 @@ async function runJobInline(
         stepResponse = result.response.trim();
         stepBlocked = result.blocked || workflowOutputIsBlocked(result.response);
         toolCallsExecuted += result.toolCallsExecuted;
+        // The delegations this step's turn made, and whether one of them masked figures. In review
+        // only the end of the job read the session, and only for the record: a step whose turn had
+        // delegated to a coder that masked its figures did not stop the job, and the next step ran
+        // on its answer, as the next step after a direct one no longer does (above).
+        const stepRuns = createFanOutExecutionRecords();
+        const stepToolMessages = addSessionExecutions(stepRuns, session, recordedToolMessages);
+        const stepRecord = stepRuns.metadata();
+        jobExecutions.add({ ...stepRecord });
+        // A step whose turn gave up with no specialist's result did not do its work: the job stops here.
+        stepBlocked ||= stepTurnRanNoSpecialist(result, stepToolMessages, { sessionId: ctx.sessionId, workflow: job.name, step: step.label });
+        if (stepRecord.maskedRuns) {
+          stepMaskedFigures = !stepBlocked;
+          stepBlocked = true;
+          stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
+        }
       }
 
       sections.push(`## ${step.label}\n\n${stepResponse}`.trim());
@@ -1180,6 +1374,7 @@ async function runJobInline(
 
       if (stepBlocked) {
         blocked = true;
+        blockedByMaskedFigures = stepMaskedFigures;
         break;
       }
     }
@@ -1209,9 +1404,11 @@ async function runJobInline(
     return {
       response,
       blocked,
+      ...(blockedByMaskedFigures ? { blockedByMaskedFigures: true as const } : {}),
       toolCallsExecuted,
       executedSteps,
       artifacts,
+      executions: jobExecutions.metadata(),
     };
   } finally {
     const workflowTask = ctx.swarmState?.tasks[workflowTaskId];
@@ -1422,6 +1619,135 @@ registerTool({
   },
 });
 
+/**
+ * What run_workflow runs for a reference: the scene or job it resolves to, or the answer it gives
+ * instead of running anything — an ambiguous or unknown name, a workflow already running in this
+ * execution stack, a job naming scenes the config lacks. Both callers read it here, so what
+ * execute_plan predicts about a plan's reuse step (workflowReferenceRuns) is what run_workflow does.
+ */
+function selectWorkflowToRun(
+  name: string,
+  workflowType: WorkflowType | "auto",
+  ctx: ToolContext,
+): { scene: SceneSummary | null; job: JobSummary | null; refusal?: undefined } | { refusal: ToolResult } {
+  const { scene, job, ambiguousMatches, suggestedMatches } = resolveWorkflowReference(name, workflowType);
+
+  if (workflowType === "auto" && scene && job) {
+    return {
+      refusal: {
+        success: false,
+        output: "",
+        error: `Workflow name '${name}' is ambiguous. Specify workflowType='scene' or workflowType='job'.`,
+        metadata: {
+          workflowMatches: buildWorkflowMatchMetadata(rankWorkflowReferenceCandidates(name, workflowType)),
+        },
+      },
+    };
+  }
+
+  if (!scene && !job) {
+    if (ambiguousMatches && ambiguousMatches.length > 1) {
+      const workflowMatches = buildWorkflowMatchMetadata(
+        (suggestedMatches ?? []).filter((candidate) => ambiguousMatches.some((entry) => (
+          entry.name === candidate.entry.name && entry.workflowType === candidate.entry.workflowType
+        ))),
+      );
+      return {
+        refusal: {
+          success: false,
+          output: "",
+          error: `Workflow name '${name}' is ambiguous. Matching workflows: ${ambiguousMatches.map((entry) => `${entry.name} [${entry.workflowType}]`).join(", ")}.`,
+          metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
+        },
+      };
+    }
+
+    const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
+    // GRACEFUL, NOT AN ERROR (user directive: "not finding a workflow should not lead
+    // to an error"). A missing workflow is a routing miss, not a system failure —
+    // returning success:false tripped the whole failure cascade (tool_call_failed, the
+    // stop/new-session intervention, [DELEGATION FAILED], warden failure count) and on
+    // the slow local model that pushed it to fabricate a full answer instead of routing
+    // on (audit bd3d60dc). Return SUCCESS with routing guidance so the model simply
+    // delegates; the runtime keys on workflowNotFound to skip the "completed" framing.
+    const closest = workflowMatches.length > 0
+      ? ` Closest saved workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
+      : "";
+    return {
+      refusal: {
+        success: true,
+        output: `No saved workflow matches "${name}" — this is NOT an error, there is simply no reusable workflow for this request.${closest} Do NOT invent another workflow name or call run_workflow again. If one of the listed workflows CLEARLY matches the request, run that exact name; otherwise delegate to mission_coordinator (or answer the user directly).`,
+        metadata: { workflowNotFound: true, ...(workflowMatches.length > 0 ? { workflowMatches } : {}) },
+      },
+    };
+  }
+
+  const selectedWorkflowType = scene ? "scene" : "job";
+  const selectedWorkflowName = scene?.name ?? job!.name;
+  const selectedWorkflowKey = buildWorkflowExecutionKey(selectedWorkflowName, selectedWorkflowType);
+  if (ctx._workflowExecutionStack?.includes(selectedWorkflowKey)) {
+    const error = `Workflow ${selectedWorkflowName} [${selectedWorkflowType}] is already running in this execution stack. Do not re-enter the same workflow from inside itself.`;
+    return {
+      refusal: {
+        success: false,
+        output: error,
+        error,
+        metadata: {
+          workflowName: selectedWorkflowName,
+          workflowType: selectedWorkflowType,
+          blocked: true,
+          recursiveWorkflow: true,
+        },
+      },
+    };
+  }
+
+  // Pre-validate that every scene referenced by the resolved job actually
+  // exists.  resolveJobSteps throws "Job step references unknown scene: X"
+  // when a scene is missing — without this guard, the throw bubbles up the
+  // tool dispatcher and (until the executeTool try/catch was added) killed
+  // the turn silently with no tool_call_failed event.  Surface the missing
+  // names directly so the user knows which scenes to add to scenes: {}.
+  if (job) {
+    const missingScenes = job.steps
+      .map((step) => step.scene)
+      .filter((sceneName, index, arr) => arr.indexOf(sceneName) === index)
+      .filter((sceneName) => !getScene(sceneName));
+    if (missingScenes.length > 0) {
+      return {
+        refusal: {
+          success: false,
+          output: "",
+          error:
+            `Workflow '${job.name}' [job] references ${missingScenes.length === 1 ? "a scene" : "scenes"} that ${missingScenes.length === 1 ? "is" : "are"} not defined in the current config: ${missingScenes.map((s) => `'${s}'`).join(", ")}. `
+            + "Add the missing scene(s) to your starlingai.json under `scenes: { ... }`, or remove the job from your config. "
+            + "Without the underlying scene definitions, the job cannot resolve its steps to executable tasks.",
+          metadata: {
+            workflowName: job.name,
+            workflowType: "job",
+            blocked: true,
+            missingScenes,
+            stepCount: job.steps.length,
+          },
+        },
+      };
+    }
+  }
+
+  return { scene, job };
+}
+
+/**
+ * Whether run_workflow, called the way a plan's reuse step calls it (a name, workflowType auto),
+ * would run a workflow rather than answer with a refusal or a routing miss. execute_plan asks before
+ * a plan runs on a turn the up-front judge flagged: a reuse step that will run a workflow is the
+ * plan's own way of reaching outside the workspace, and one that will not must not count as one.
+ */
+export function workflowReferenceRuns(reference: string, ctx: ToolContext): boolean {
+  const name = reference.trim();
+  return name.length > 0 && selectWorkflowToRun(name, "auto", ctx).refusal === undefined;
+}
+
 registerTool({
   name: "run_workflow",
   description: "Execute a reusable workflow catalog entry inline. Scenes run as one scoped turn, and jobs run their resolved steps in sequence inside a temporary workflow session.",
@@ -1461,98 +1787,18 @@ registerTool({
     const params = normalizeStringMap(args["params"]);
     const workflowContext = typeof args["context"] === "string" ? String(args["context"]) : undefined;
 
-    const { scene, job, ambiguousMatches, suggestedMatches } = resolveWorkflowReference(name, workflowType);
-
-    if (workflowType === "auto" && scene && job) {
-      return {
-        success: false,
-        output: "",
-        error: `Workflow name '${name}' is ambiguous. Specify workflowType='scene' or workflowType='job'.`,
-        metadata: {
-          workflowMatches: buildWorkflowMatchMetadata(rankWorkflowReferenceCandidates(name, workflowType)),
-        },
-      };
-    }
-
-    if (!scene && !job) {
-      if (ambiguousMatches && ambiguousMatches.length > 1) {
-        const workflowMatches = buildWorkflowMatchMetadata(
-          (suggestedMatches ?? []).filter((candidate) => ambiguousMatches.some((entry) => (
-            entry.name === candidate.entry.name && entry.workflowType === candidate.entry.workflowType
-          ))),
-        );
-        return {
-          success: false,
-          output: "",
-          error: `Workflow name '${name}' is ambiguous. Matching workflows: ${ambiguousMatches.map((entry) => `${entry.name} [${entry.workflowType}]`).join(", ")}.`,
-          metadata: workflowMatches.length > 0 ? { workflowMatches } : undefined,
-        };
-      }
-
-      const workflowMatches = buildWorkflowMatchMetadata(suggestedMatches ?? []);
-      // GRACEFUL, NOT AN ERROR (user directive: "not finding a workflow should not lead
-      // to an error"). A missing workflow is a routing miss, not a system failure —
-      // returning success:false tripped the whole failure cascade (tool_call_failed, the
-      // stop/new-session intervention, [DELEGATION FAILED], warden failure count) and on
-      // the slow local model that pushed it to fabricate a full answer instead of routing
-      // on (audit bd3d60dc). Return SUCCESS with routing guidance so the model simply
-      // delegates; the runtime keys on workflowNotFound to skip the "completed" framing.
-      const closest = workflowMatches.length > 0
-        ? ` Closest saved workflows: ${workflowMatches.map((match) => `${match.name} [${match.workflowType}]`).join(", ")}.`
-        : "";
-      return {
-        success: true,
-        output: `No saved workflow matches "${name}" — this is NOT an error, there is simply no reusable workflow for this request.${closest} Do NOT invent another workflow name or call run_workflow again. If one of the listed workflows CLEARLY matches the request, run that exact name; otherwise delegate to mission_coordinator (or answer the user directly).`,
-        metadata: { workflowNotFound: true, ...(workflowMatches.length > 0 ? { workflowMatches } : {}) },
-      };
-    }
-
-    const selectedWorkflowType = scene ? "scene" : "job";
+    const selection = selectWorkflowToRun(name, workflowType, ctx);
+    if (selection.refusal) return selection.refusal;
+    const { scene, job } = selection;
     const selectedWorkflowName = scene?.name ?? job!.name;
-    const selectedWorkflowKey = buildWorkflowExecutionKey(selectedWorkflowName, selectedWorkflowType);
-    if (ctx._workflowExecutionStack?.includes(selectedWorkflowKey)) {
-      const error = `Workflow ${selectedWorkflowName} [${selectedWorkflowType}] is already running in this execution stack. Do not re-enter the same workflow from inside itself.`;
-      return {
-        success: false,
-        output: error,
-        error,
-        metadata: {
-          workflowName: selectedWorkflowName,
-          workflowType: selectedWorkflowType,
-          blocked: true,
-          recursiveWorkflow: true,
-        },
-      };
-    }
 
-    // Pre-validate that every scene referenced by the resolved job actually
-    // exists.  resolveJobSteps throws "Job step references unknown scene: X"
-    // when a scene is missing — without this guard, the throw bubbles up the
-    // tool dispatcher and (until the executeTool try/catch was added) killed
-    // the turn silently with no tool_call_failed event.  Surface the missing
-    // names directly so the user knows which scenes to add to scenes: {}.
-    if (job) {
-      const missingScenes = job.steps
-        .map((step) => step.scene)
-        .filter((sceneName, index, arr) => arr.indexOf(sceneName) === index)
-        .filter((sceneName) => !getScene(sceneName));
-      if (missingScenes.length > 0) {
-        return {
-          success: false,
-          output: "",
-          error:
-            `Workflow '${job.name}' [job] references ${missingScenes.length === 1 ? "a scene" : "scenes"} that ${missingScenes.length === 1 ? "is" : "are"} not defined in the current config: ${missingScenes.map((s) => `'${s}'`).join(", ")}. `
-            + "Add the missing scene(s) to your starlingai.json under `scenes: { ... }`, or remove the job from your config. "
-            + "Without the underlying scene definitions, the job cannot resolve its steps to executable tasks.",
-          metadata: {
-            workflowName: job.name,
-            workflowType: "job",
-            blocked: true,
-            missingScenes,
-            stepCount: job.steps.length,
-          },
-        };
-      }
+    // A workflow's agents may reach outside the workspace, and what a scene's own turn or a job's
+    // steps share lands in the workflow's session, not in this one. So the workflow claims the
+    // turn's outside source here (ToolContext.turnEvidence), as a plan's reuse step does:
+    // otherwise the research gate's turn trigger, finding no facts in this session, would send a
+    // builder delegated after the workflow off to gather what the workflow just gathered.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) {
+      ctx.turnEvidence.outsideEngaged = `workflow:${selectedWorkflowName}`;
     }
 
     if (scene) {
@@ -1572,6 +1818,8 @@ registerTool({
           // Propagate scene-built artifacts (deck/images/paper) so the parent turn
           // surfaces them as clickable downloads and the auto-build doesn't re-fire.
           ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
+          // And the record of the code its runs executed (agent/delegated-run-record.ts).
+          ...result.executions,
         },
       };
     }
@@ -1586,12 +1834,14 @@ registerTool({
         workflowName: job!.name,
         workflowType: "job",
         blocked: result.blocked,
+        ...(result.blockedByMaskedFigures ? { blockedByMaskedFigures: true } : {}),
         toolCallsExecuted: result.toolCallsExecuted,
         stepCount: job!.steps.length,
         executedSteps: result.executedSteps,
         // Propagate the build step's artifacts so the parent turn surfaces downloads
         // and the auto-build doesn't re-fire (see runJobInline).
         ...(result.artifacts && result.artifacts.length > 0 ? { artifacts: result.artifacts } : {}),
+        ...result.executions,
       },
     };
   },

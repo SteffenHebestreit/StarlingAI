@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { taskGraphResultIsFailure } from "../agent/runtime.js";
-import { extendDeadlineForDelegationWait, DELEGATION_WAIT_CEILING_MS } from "../agent/delegation-budget.js";
+import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs, DELEGATION_WAIT_CEILING_MS } from "../agent/delegation-budget.js";
 import { clampSubAgentTimeoutToRemaining } from "../agent/sub-agent.js";
 import { shouldWarnLowEffortBigPlan } from "../tools/turn-plan-tool.js";
 import { runWithEffortContext, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
@@ -97,5 +97,42 @@ describe("D4 — shouldWarnLowEffortBigPlan (upfront doomed-plan advisory)", () 
     expect(shouldWarnLowEffortBigPlan("high", "high", 4)).toBe(false);  // enough budget
     expect(shouldWarnLowEffortBigPlan("medium", "high", 4)).toBe(false);
     expect(shouldWarnLowEffortBigPlan(undefined, "high", 4)).toBe(false);
+  });
+});
+
+/**
+ * D5 SHIPPED INERT ON BOTH GATEWAY SURFACES.
+ *
+ * The extension above is only as good as the ceiling handed to it, and both gateway clocks
+ * passed the BARE allowance (`armedAt + DELEGATION_WAIT_CEILING_MS + grace`) instead of the
+ * budget plus the allowance. At the shipped gateway.turnTimeoutMs — 1,800,000, the same number
+ * as the ceiling constant — that expression IS the deadline, so max(D, min(D+w, D)) === D and
+ * a turn that spent 25 of its 31 minutes blocked on one child (run d5747607) was guillotined
+ * exactly as if the exclusion did not exist.
+ */
+describe("D5 — the ceiling that goes with the deadline", () => {
+  const GRACE = 65_000;                       // TURN_TIMEOUT_SYNTHESIS_GRACE_MS, both surfaces
+  const SHIPPED_TURN_TIMEOUT_MS = 1_800_000;  // config/gateway/10-gateway.jsonc
+  const ARMED_AT = 5_000_000;
+  const deadline = ARMED_AT + SHIPPED_TURN_TIMEOUT_MS + GRACE;
+
+  it("leaves room to extend even when the budget equals the ceiling constant", () => {
+    const ceiling = resolveDelegationWaitCeilingMs(ARMED_AT, SHIPPED_TURN_TIMEOUT_MS, GRACE);
+    expect(ceiling).toBeGreaterThan(deadline);
+    // 25 minutes blocked on one child.
+    expect(extendDeadlineForDelegationWait(deadline, 1_500_000, ceiling)).toBe(deadline + 1_500_000);
+  });
+
+  it("pins the shape that shipped as the no-op it was", () => {
+    const inertCeiling = ARMED_AT + DELEGATION_WAIT_CEILING_MS + GRACE;   // what agui.ts/rpc.ts had
+    expect(inertCeiling).toBe(deadline);
+    expect(extendDeadlineForDelegationWait(deadline, 1_500_000, inertCeiling)).toBe(deadline);
+  });
+
+  it("still bounds a turn that waits on children forever", () => {
+    const ceiling = resolveDelegationWaitCeilingMs(ARMED_AT, SHIPPED_TURN_TIMEOUT_MS, GRACE);
+    expect(extendDeadlineForDelegationWait(deadline, 99_000_000, ceiling)).toBe(ceiling);
+    // Never immortal: budget + one allowance + grace, and not a millisecond more.
+    expect(ceiling - ARMED_AT).toBe(SHIPPED_TURN_TIMEOUT_MS + DELEGATION_WAIT_CEILING_MS + GRACE);
   });
 });

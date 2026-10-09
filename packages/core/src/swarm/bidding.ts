@@ -134,9 +134,14 @@ async function emitAutonomousBids(event: SwarmEvent): Promise<void> {
           allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
         });
 
+        // NOT re-sorted by score. `resolution.results` already arrives in the router's rank
+        // order, which under the default blendMode carries the reranker's ordering while the
+        // reported score is the pre-blend embedding value. Sorting by that score again threw
+        // the rerank ordering away — invisibly, because before the reported score WAS the
+        // blended one and the re-sort happened to reproduce the order it had just received.
+        // Admitted candidates stay ahead of weak ones, which is the order that matters here.
         const candidates = [...resolution.results, ...resolution.weakCandidates]
           .filter(candidate => !excludedAgents.has(candidate.name))
-          .sort((left, right) => right.score - left.score)
           .slice(0, MAX_BIDS_PER_TASK);
 
         for (const candidate of candidates) {

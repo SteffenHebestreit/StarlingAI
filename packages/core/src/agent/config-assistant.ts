@@ -1,6 +1,6 @@
 import JSON5 from "json5";
 import { z } from "zod";
-import { getConfig } from "../config/loader.js";
+import { getConfig, isRuntimeSubAgent } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 import type { ModelConfig } from "../config/schema.js";
@@ -8,7 +8,10 @@ import {
   type ConversationConfigChange,
   type ConversationPromptChange,
   MAIN_ASSISTANT_PROMPT_TARGET,
-  isProtectedConfigPath,
+  isCredentialFieldName,
+  configChangeRefusal,
+  peerAgentRefusal,
+  proposalAgentNames,
 } from "./config-assistant-proposals.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
 
@@ -122,9 +125,16 @@ function parseDraftResponse(raw: string, targetAgent?: string): ConfigAssistantD
   const validations = [...source.validations];
   const configChanges = dedupeConfigChanges(source.configChanges)
     .filter((change) => {
-      if (!isProtectedConfigPath(change.path)) return true;
-      validations.push(`Manual step required: protected path '${change.path}' was excluded from the applyable proposal.`);
-      return false;
+      // The apply route's own predicates (path AND value, and the agent it writes into), so what is
+      // offered here is what applies.
+      const refusal = configChangeRefusal(change);
+      if (refusal) {
+        validations.push(`Manual step required: ${refusal} It was excluded from the applyable proposal.`);
+        return false;
+      }
+      const peerAgent = peerAgentRefusal(proposalAgentNames({ configChanges: [change], promptChanges: [] }));
+      if (peerAgent) validations.push(`Excluded '${change.path}': ${peerAgent}`);
+      return !peerAgent;
     });
 
   const availableAgents = new Set([MAIN_ASSISTANT_PROMPT_TARGET, ...Object.keys(getConfig().subAgents ?? {})]);
@@ -134,7 +144,9 @@ function parseDraftResponse(raw: string, targetAgent?: string): ConfigAssistantD
         validations.push(`Prompt proposal ignored: agent '${change.agentName}' does not exist in config.`);
         return false;
       }
-      return true;
+      const peerAgent = peerAgentRefusal([change.agentName]);
+      if (peerAgent) validations.push(`Prompt proposal ignored: ${peerAgent}`);
+      return !peerAgent;
     });
 
   if (targetAgent && source.promptChanges.length === 0 && source.configChanges.length === 0) {
@@ -160,8 +172,11 @@ function selectAssistantAgent(mode: "setup" | "enhancement" | "prompt", targetAg
 
 function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, unknown> {
   const config = getConfig();
+  // Without any agent bridged in from an A2A peer: drafting leaves out every change aimed at one,
+  // so shown one, the assistant drafted changes that could never be offered (review of r6
+  // leftovers, 4).
   const subAgents = Object.fromEntries(
-    Object.entries(config.subAgents ?? {}).map(([name, agent]) => [
+    Object.entries(config.subAgents ?? {}).filter(([name]) => !isRuntimeSubAgent(name)).map(([name, agent]) => [
       name,
       {
         description: agent.description,
@@ -196,8 +211,11 @@ function buildSafeConfigurationSnapshot(targetAgent?: string): Record<string, un
           embeddingModel: config.agents.defaults.model.embeddingModel,
         },
       },
-      subAgents,
     },
+    // At the top level, where the config keeps them: shown under `agents`, the assistant drafted
+    // `agents.subAgents.*` changes that applied without error and changed nothing (round 2 of the
+    // leftovers review, 2).
+    subAgents,
     retrieval: config.retrieval,
     multimodal: {
       maxUploadBytes: config.multimodal.maxUploadBytes,
@@ -355,7 +373,11 @@ function redactSensitive(value: unknown): unknown {
 
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (/(secret|password|token|apikey|api_key|privatekey|private_key|credential|credentials|headers)/i.test(key)) {
+    // A credential field by the predicate drafting and Apply share, anchored to the end of the
+    // name, and a header map, whose credentials go by names of their own (Authorization). Matched
+    // anywhere in the name, "token" hid maxTokens, a knob the assistant may propose, from the
+    // very snapshot it drafts from (r3 A-security #5).
+    if (isCredentialFieldName(key) || /headers/i.test(key)) {
       continue;
     }
     output[key] = redactSensitive(entry);

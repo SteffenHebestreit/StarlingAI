@@ -74,7 +74,11 @@ describe("scoped capability tokens vs session tokens", () => {
     const auth = await freshAuth();
     expect(await auth.verifyScopedToken("not-a-jwt", "luna-media")).toBeNull();
     const media = await auth.createToken("alice", { scope: "luna-media", sid: "rec_1" }, "1h");
-    const tampered = media.slice(0, -2) + "xx";
+    // Flip the signature's FIRST character: it carries six signature bits. The last one carries
+    // only two (a 32-byte HMAC is 43 base64url chars), so swapping the tail for "xx" left the
+    // signature unchanged about once in 1,250 runs and the "tampered" token verified.
+    const [header, payload, signature] = media.split(".");
+    const tampered = `${header}.${payload}.${signature!.startsWith("A") ? "B" : "A"}${signature!.slice(1)}`;
     expect(await auth.verifyScopedToken(tampered, "luna-media")).toBeNull();
     expect(await auth.verifyToken(tampered)).toBeNull();
   });

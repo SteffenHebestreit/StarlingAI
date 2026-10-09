@@ -1,13 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { LLMMessage } from "../providers/lmstudio.js";
+import {
+  computePromptTokenBudget,
+  EARLIER_CONVERSATION_SUMMARY_MARKER,
+  estimatePromptTokensForRequest,
+  PROMPT_ESTIMATE_CHARS_PER_TOKEN,
+  type LLMMessage,
+} from "../providers/lmstudio.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { deploymentWorkspaceRoot, userWorkspaceRoot } from "../tools/workspace-path.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
+import { buildReplyLanguageRule } from "./reply-language.js";
 import { formatOutcomesForPrompt } from "./outcomes.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import type { SwarmState } from "../tools/registry.js";
@@ -19,12 +28,20 @@ import {
 } from "./session-redis.js";
 
 import { PRODUCT } from "../product/index.js";
+import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
+import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
+import { currentChatRequestId } from "../runtime/request-context.js";
+import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { retrievalEvidenceMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
   "[SYNTHESIS REQUIRED]",
   "[WARDEN STOP — FORCED SYNTHESIS]",
   "[CONTINUE ORCHESTRATION]",
+  // The plan-continuation directive is per-iteration guidance; kept, it told a later turn to
+  // finish a plan the turn boundary had already cleared.
+  "[CONTINUE PLAN]",
   "[USER RESPONSE REQUIRED]",
   "[DELEGATION FAILED]",
   "[USER INTERACTION OWNERSHIP]",
@@ -43,15 +60,31 @@ function isTransientTurnSystemMessage(message: Pick<SessionHistoryMessage, "role
  * Per-session tuning the user controls from the chat composer. `effort` selects an
  * effort profile (see runtime/effort-context.ts); `turnTimeoutSecOverride` is an
  * optional independent time-limit override (seconds; 0 = unlimited) that wins over
- * the profile's own timeout. Both persist with the session.
+ * the profile's own timeout. `imageSettingsPrompt` "auto" stops generate_image from
+ * asking for render settings in this chat (unset = "ask"). All persist with the session.
  */
 export interface SessionSettings {
   effort?: EffortTier;
   turnTimeoutSecOverride?: number;
+  imageSettingsPrompt?: ImageSettingsPromptPreference;
 }
 
-/** Why a session was archived — drives which retention the pruner applies. */
-export type ArchivedReason = "idle" | "manual";
+export type ImageSettingsPromptPreference = "ask" | "auto";
+
+/** Why a session was archived — drives which retention the pruner applies and whether
+ *  a follow-up message resumes it. */
+export type ArchivedReason = "idle" | "manual" | "timeout";
+
+/** Archive reasons that PARK a session rather than end it. The user never asked to stop
+ *  (the turn ran out of clock, or the sweep retired a quiet chat), so the next message
+ *  must continue THAT conversation instead of dead-ending on "Session not found" — the
+ *  timed-out turn's recovered delivery and its partial artifacts live in that history.
+ *  "manual" is deliberately excluded: an explicit archive is an explicit end. */
+const RESUMABLE_ARCHIVE_REASONS: ReadonlySet<ArchivedReason> = new Set<ArchivedReason>(["idle", "timeout"]);
+
+export function isResumableArchive(reason: ArchivedReason | undefined): boolean {
+  return reason !== undefined && RESUMABLE_ARCHIVE_REASONS.has(reason);
+}
 
 export interface AgentSessionOptions {
   sessionId?: string;
@@ -77,7 +110,14 @@ export interface TurnResult {
 export interface SessionHistoryMessage extends LLMMessage {
   timestamp: string;
   metadata?: Record<string, unknown>;
+  /** The chat.send request id of the turn that wrote this message (RequestContext.chatRequestId).
+   *  Beside the content, like the timestamp: the model reads role and content only, so the prompt
+   *  bytes, and with them the prefix cache, are the same with or without it. */
+  requestId?: string;
 }
+
+/** What a turn hands to addMessage. `requestId` is for a writer outside the turn's own context. */
+export type SessionMessageInput = LLMMessage & { metadata?: Record<string, unknown>; requestId?: string };
 
 export interface SessionSummary {
   id: string;
@@ -100,6 +140,20 @@ export interface SessionTranscriptMessage {
   attachments?: SessionTranscriptAttachment[];
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result?: string; metadata?: Record<string, unknown> }>;
   swarmState?: SwarmState;
+  /** A message the user sent into a running turn. Its content is only what they wrote. */
+  midTurn?: true;
+  /** The id the message was queued under (the client's own id when it sent one). */
+  steeringId?: string;
+  /** The turn went on after this assistant entry: a mid-turn message of the same turn follows. */
+  continued?: true;
+  /** When the part of the turn this assistant entry shows began: the mid-turn message before it. */
+  segmentStartedAt?: string;
+  /**
+   * The chat.send request id of the turn this entry belongs to; for a mid-turn message, of the
+   * turn that read it. Absent for turns no chat.send started and for history saved before it was
+   * recorded, which a client then tells apart the way it did before.
+   */
+  requestId?: string;
 }
 
 export interface SessionTranscriptAttachment {
@@ -157,20 +211,24 @@ export class AgentSession {
   private archivedAt?: Date;
   /** Why this session was archived. "idle" = auto-archived by the idle sweep (a real
    *  user conversation that went quiet — kept on the long idle-retention, never the
-   *  short ephemera TTL). "manual" = explicit user/system archival or ephemeral
-   *  scene/job/workflow-worker cleanup (reclaimed on gateway.sessionTtlMs). */
+   *  short ephemera TTL). "timeout" = the gateway turn watchdog fired mid-turn (same
+   *  retention as idle, and resumable — the partial work is still in history).
+   *  "manual" = explicit user/system archival or ephemeral scene/job/workflow-worker
+   *  cleanup (reclaimed on gateway.sessionTtlMs). */
   private archivedReason?: ArchivedReason;
   private endLogged = false;
   /** Serialised byte length of the tool schemas sent to the LLM for the current turn.
    *  Updated by the runtime each turn before the LLM loop starts so
    *  maybeTrimHistory accounts for the full actual prompt size. */
   private toolSchemasChars = 0;
+  private toolCount = 0;
   /** Context window (in tokens) of the model actually running this session's
    *  turns. Set by the runtime each turn from the resolved provider model so the
    *  trimmer budgets against the real window rather than the global default. */
   private contextWindowTokens?: number;
   /** Rolling, deterministic digest of conversation turns that were trimmed out
-   *  of the live window. Folded back into the prompt as a leading system note so
+   *  of the live window. Folded back into the prompt as the first history message
+   *  (user-role, so it stays out of the cached head — see getCollapsedHistory) so
    *  long-horizon tasks keep the gist of earlier context (and the original
    *  request, which is pinned verbatim) instead of silently losing it. */
   private earlierSummary = "";
@@ -191,8 +249,13 @@ export class AgentSession {
     this.userId = opts.userId;
     this.userRole = opts.userRole;
     this.createdAt = opts.createdAt ?? new Date();
-    this.workspacePath = opts.workspacePath ?? getConfig().workspacePath;
-    this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt(this.workspacePath);
+    // THE ROOT IS THE USER'S. Everything a turn does with files hangs off this — the
+    // orchestrator's own tools, every delegated sub-agent, artifact collection, the probe — so
+    // partitioning HERE keeps one turn's work in one place. Config zones and the deployment's
+    // own state stay at the shared root, which the two workspaceAccess:"full" agents keep (see
+    // agent/sub-agent.ts) and which the config loader always reads directly.
+    this.workspacePath = userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, opts.userId);
+    this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt();
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
     this.archivedReason = opts.archivedReason;
@@ -255,11 +318,28 @@ export class AgentSession {
    */
   getCollapsedHistory(): LLMMessage[] {
     const collapsed: LLMMessage[] = [];
-    // Fold the rolling digest of trimmed-out turns back in as a leading system
-    // note so the model retains earlier context (and the pinned original
+    // Fold the rolling digest of trimmed-out turns back in as the first history
+    // message so the model retains earlier context (and the pinned original
     // request) after older raw messages have been dropped from the window.
-    if (this.earlierSummary) {
-      collapsed.push({ role: "system", content: this.earlierSummary });
+    //
+    // USER-ROLE, NOT SYSTEM (2026-10-05). The provider folds every LEADING system message into
+    // one (providers/lmstudio.ts foldSystemMessages), and with the stable prefix the history
+    // directly follows the head, so a system-role summary became part of the head — the KV-cache
+    // key — and every re-trim rewrote it: a cold head (8-14 s on the production stack) on exactly
+    // the long sessions that can least afford it. As the first history message only the history
+    // behind it is re-prefilled. Its header names it as a condensed earlier conversation, and a
+    // non-leading system message reaches the model as user-turn context anyway.
+    const summaryMessage: LLMMessage | undefined = this.earlierSummary
+      ? { role: "user", content: this.earlierSummary }
+      : undefined;
+    if (summaryMessage) collapsed.push(summaryMessage);
+    // The plan report's 12K allowance is for the turn that is answering from it. Once that turn
+    // is over the report is history like any other delegation result — held at the delegation
+    // cap, not carried in full into every later turn's prompt. A mid-turn steering message is
+    // user-role but does not open a turn (agent/turn-boundary.ts).
+    let currentTurnStart = -1;
+    for (let k = this.history.length - 1; k >= 0; k -= 1) {
+      if (startsTurn(this.history[k]!)) { currentTurnStart = k; break; }
     }
     let i = 0;
     while (i < this.history.length) {
@@ -270,10 +350,14 @@ export class AgentSession {
       if (msg.role === "assistant" && Array.isArray(tc) && tc.length > 0) {
         // Collect the following tool-result messages for these call IDs
         const resultMap = new Map<string, string>();
+        // Which results are a plan report: a folded record_plan carries one under its own name
+        // (orchestration.planRoundFold), so the name alone no longer says so.
+        const resultMetadata = new Map<string, Record<string, unknown> | undefined>();
         let j = i + 1;
         while (j < this.history.length && this.history[j]!.role === "tool") {
-          const r = this.history[j]! as { role: "tool"; content: string; tool_call_id?: string };
+          const r = this.history[j]! as { role: "tool"; content: string; tool_call_id?: string; metadata?: Record<string, unknown> };
           if (r.tool_call_id) resultMap.set(r.tool_call_id, r.content);
+          if (r.tool_call_id) resultMetadata.set(r.tool_call_id, r.metadata);
           j++;
         }
 
@@ -291,7 +375,22 @@ export class AgentSession {
           // relay faithfully.  A 500-char cap truncated evidence and caused
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
           const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
-          const snippetLimit = isDelegation ? 2000 : 500;
+          // execute_plan's result stands in for a WHOLE PLAN — every step's evidence at once, and
+          // the only channel a `direct` or `reuse` step's output has, since those run as nested
+          // calls that never become tool messages of their own. At the delegation cap it lost every
+          // step after the first; at the default 500 it lost the first one too, along with the
+          // instruction to synthesize from them. It is the collapsed view that the answer-writing
+          // iteration reads, so this is the number that decides what the answer can be based on.
+          // A retrieval result is the passages the answer is to come from, and the frame has already
+          // held it to its share of the turn's retrieval budget (tool-result-format.ts), never more
+          // than the whole budget allowed here. At the generic 500 the turn that made the search read
+          // only its first few hundred characters (E2E core-ix-kb-documentation-rag). Once the turn
+          // is over it is history like any other result.
+          const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
+            ? (i > currentTurnStart ? 12000 : 2000)
+            : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
+              ? retrievalEvidenceMaxChars()
+              : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /
@@ -308,7 +407,9 @@ export class AgentSession {
 
         // End the prompt on a user turn after tool execution. Many OpenAI-compatible
         // runtimes answer with an empty stop response if the last message is assistant.
-        if (last?.role === "user") {
+        // Never into the earlier-conversation summary: it is user-role now, and tool results
+        // merged into it would read as part of the condensed past.
+        if (last?.role === "user" && last !== summaryMessage) {
           last.content = [last.content, summaryText].filter(Boolean).join("\n\n");
         } else {
           collapsed.push({
@@ -345,29 +446,83 @@ export class AgentSession {
     return merged;
   }
 
+  private _turnSystemPrompt?: string;
+
   getSystemPrompt(): string {
     const prompt = isManagedDefaultSystemPrompt(this.systemPrompt)
-      ? defaultSystemPrompt(this.workspacePath)
+      ? defaultSystemPrompt()
       : this.systemPrompt;
     return refreshTemporalContext(prompt);
+  }
+
+  /**
+   * The "Recent Agent Performance" note, for the turn's TAIL (turn-system-prompt.ts
+   * buildTurnGuidance). It used to end the managed base prompt, which made it part of the cached
+   * head: the ledger changes after almost every delegation and as outcomes age out of its 6 h
+   * window, so after each delegating turn the warmed heads were stale — the warm-keeper re-prefilled
+   * up to three of them (25-40 s of GPU) and a quick follow-up paid a cold head, 8-14 s on the
+   * production stack (finding 2026-10-05: vary only the tail). Read from the deployment root, where
+   * every writer appends (outcome-ledger-root.test.ts). Only a session on the managed prompt gets
+   * it, as before: a custom prompt never carried the note.
+   */
+  getAgentPerformanceNote(): string {
+    if (!isManagedDefaultSystemPrompt(this.systemPrompt)) return "";
+    return formatOutcomesForPrompt(deploymentWorkspaceRoot(this.workspacePath));
   }
 
   getWorkspacePath(): string {
     return this.workspacePath;
   }
 
-  addMessage(msg: LLMMessage & { metadata?: Record<string, unknown> }): void {
+  addMessage(msg: SessionMessageInput): void {
     this.history.push(withTimestamp(msg));
     this.touch();
     this.maybeTrimHistory();
     persistSessionStore(this);
   }
 
-  addMessages(msgs: Array<LLMMessage & { metadata?: Record<string, unknown> }>): void {
+  addMessages(msgs: SessionMessageInput[]): void {
     this.history.push(...msgs.map(withTimestamp));
     this.touch();
     this.maybeTrimHistory();
     persistSessionStore(this);
+  }
+
+  /**
+   * Whether a transient system note with this prefix is already on the current turn (after the
+   * last user message). The per-iteration guidance notes are meant to be stated once per turn;
+   * appended after every tool round they compounded — five copies of the same ownership note in
+   * one turn's history, all re-sent on every iteration.
+   */
+  hasTransientNoteThisTurn(prefix: string): boolean {
+    for (let index = this.history.length - 1; index >= 0; index -= 1) {
+      const message = this.history[index]!;
+      if (startsTurn(message)) return false;
+      if (message.role === "system" && typeof message.content === "string" && message.content.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The base prompt, held still for the duration of one turn.
+   *
+   * `getSystemPrompt()` REBUILDS the managed prompt on every call, and one of its inputs is a
+   * mutable file that a turn can change while it runs: the assistant personality (an uncached
+   * read, and the orchestrator holds the tool that writes it, with prompt text telling it to
+   * persist a rename in the same turn). The agent-outcome ledger was the second one until it moved
+   * to the turn's tail (getAgentPerformanceNote, 2026-10-05). The head is the KV-cache key, so such
+   * a write re-prefills the tool block and the whole history for the rest of the turn — measured
+   * ~9 s for a 31-character change. A change now takes effect at the next turn boundary, where the
+   * prefix is rebuilt anyway.
+   */
+  getTurnSystemPrompt(): string {
+    if (this._turnSystemPrompt === undefined) this._turnSystemPrompt = this.getSystemPrompt();
+    return this._turnSystemPrompt;
+  }
+
+  /** Drop the snapshot so the next turn picks up whatever the last one changed. */
+  beginTurnSystemPrompt(): void {
+    this._turnSystemPrompt = undefined;
   }
 
   pruneTransientTurnSystemMessages(): void {
@@ -410,13 +565,20 @@ export class AgentSession {
 
   /** Call once per turn, after tool definitions are resolved, so the history
    *  trimmer accounts for the full prompt size (system + tools + history). */
-  setToolSchemasChars(chars: number): void {
+  setToolSchemasChars(chars: number, toolCount?: number): void {
     this.toolSchemasChars = Math.max(0, chars);
+    if (toolCount !== undefined) this.toolCount = Math.max(0, Math.floor(toolCount));
   }
 
   /** Tool-schema payload size for this turn, for telemetry (not part of promptChars). */
   getToolSchemasChars(): number {
     return this.toolSchemasChars;
+  }
+
+  /** How many tool schemas this turn put on the wire — the count that goes with
+   *  {@link getToolSchemasChars}, so telemetry can report both without re-deriving. */
+  getToolCount(): number {
+    return this.toolCount;
   }
 
   /** Tell the session the context window (tokens) of the model running its
@@ -476,6 +638,34 @@ export class AgentSession {
     persistSessionStore(this);
   }
 
+  /**
+   * Un-park a session archived for a RESUMABLE reason (timeout/idle) so a follow-up
+   * message continues this conversation. History, turn count and settings are left
+   * untouched — that is the point: the timed-out turn's recovered delivery message
+   * and the tool messages carrying its partial artifacts stay in context for the
+   * continuation. Returns false for a live session or an explicit ("manual") archive.
+   */
+  reactivate(): boolean {
+    if (!this.archivedAt || !isResumableArchive(this.archivedReason)) return false;
+    const reason = this.archivedReason;
+    this.archivedAt = undefined;
+    this.archivedReason = undefined;
+    // The session is live again, so a later real end must log session_ended again.
+    this.endLogged = false;
+    this.touch();
+    persistSessionStore(this);
+    // Dotted extension event type — the counterpart to session_ended, without widening
+    // the core audit enum. Makes "was this the same conversation?" answerable from the
+    // audit log, which is exactly what was unanswerable when a timeout looked terminal.
+    logAudit("session.resumed", { reason, turnCount: this.turnCount, messageCount: this.history.length }, {
+      sessionId: this.id,
+      userId: this.userId,
+      channel: this.channel,
+    });
+    log.info({ sessionId: this.id, reason }, "Resumed archived session");
+    return true;
+  }
+
   toRecord(): PersistedSessionRecord {
     return {
       id: this.id,
@@ -516,14 +706,20 @@ export class AgentSession {
 
   toSummary(): SessionSummary {
     const previewSource = [...this.history].reverse().find((message) =>
-      (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0,
+      (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0
+      // The oversight redirect is not the person's words, so it never previews.
+      && midTurnUserMessages(message)?.length !== 0,
     );
+    // A mid-turn message previews as what the person wrote, never as the wrapper the model reads.
+    const steering = previewSource ? midTurnUserMessages(previewSource) : undefined;
     const preview = previewSource
-      ? sanitizeTranscriptContent(
-          previewSource.role,
-          previewSource.content,
-          Array.isArray((previewSource as { tool_calls?: unknown[] }).tool_calls) && (((previewSource as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
-        )
+      ? steering
+        ? sanitizeTranscriptContent("user", steering.map((entry) => entry.text).join("\n"), false)
+        : sanitizeTranscriptContent(
+            previewSource.role,
+            previewSource.content,
+            Array.isArray((previewSource as { tool_calls?: unknown[] }).tool_calls) && (((previewSource as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
+          )
       : undefined;
 
     return {
@@ -574,9 +770,10 @@ export class AgentSession {
           role: "assistant",
           content: sanitizeTranscriptContent("assistant", message.content ?? "", true),
           timestamp: message.timestamp,
+          ...(message.requestId ? { requestId: message.requestId } : {}),
           swarmState: getTranscriptSwarmState(message.metadata),
           toolCalls: message.tool_calls.map((toolCall) => {
-            let args: Record<string, unknown> = {};
+            let args: Record<string, unknown>;
             try {
               args = JSON.parse(toolCall.function.arguments) as Record<string, unknown>;
             } catch {
@@ -594,6 +791,27 @@ export class AgentSession {
         continue;
       }
 
+      // A message sent into a running turn: one entry per message the person wrote, holding only
+      // their words. The oversight redirect is not theirs and is left out, so the assistant
+      // entries around it merge below as if it were not there.
+      const midTurn = midTurnUserMessages(message);
+      if (midTurn) {
+        midTurn.forEach((entry, k) => {
+          raw.push({
+            id: k === 0 ? `${this.id}:${index}` : `${this.id}:${index}+${k}`,
+            role: "user",
+            content: sanitizeTranscriptContent("user", entry.text, false),
+            timestamp: message.timestamp,
+            midTurn: true,
+            ...(entry.id ? { steeringId: entry.id } : {}),
+            // The turn that read it, which wrote this message into the history.
+            ...(message.requestId ? { requestId: message.requestId } : {}),
+          });
+        });
+        index += 1;
+        continue;
+      }
+
       const transcriptContent = getTranscriptDisplayContent(message);
       const attachments = getTranscriptAttachments(message.metadata);
       raw.push({
@@ -601,6 +819,7 @@ export class AgentSession {
         role: message.role,
         content: transcriptContent,
         timestamp: message.timestamp,
+        ...(message.requestId ? { requestId: message.requestId } : {}),
         attachments,
         swarmState: message.role === "assistant" ? getTranscriptSwarmState(message.metadata) : undefined,
       });
@@ -610,11 +829,13 @@ export class AgentSession {
     // Merge consecutive assistant entries that belong to the same turn.
     // During a multi-iteration tool-use turn the history contains several
     // assistant messages (one per LLM call) interleaved with tool results.
-    // The live UI shows them as one message — replicate that on reload.
+    // The live UI shows them as one message — replicate that on reload. Never across two turns: a
+    // superseded turn still unwinding writes after its replacement has started, and merged into it
+    // its entry took the other turn's id.
     const transcript: SessionTranscriptMessage[] = [];
     for (const entry of raw) {
       const prev = transcript[transcript.length - 1];
-      if (prev && prev.role === "assistant" && entry.role === "assistant") {
+      if (prev && prev.role === "assistant" && entry.role === "assistant" && prev.requestId === entry.requestId) {
         // Combine tool calls
         if (entry.toolCalls?.length) {
           prev.toolCalls = [...(prev.toolCalls ?? []), ...entry.toolCalls];
@@ -631,11 +852,24 @@ export class AgentSession {
       }
     }
 
+    splitSteeredTurns(transcript);
     return transcript;
   }
 
   private maybeTrimHistory(): void {
-    const maxTokenEstimate = this.effectiveContextWindow() * 0.75;
+    // The completion budget is DERIVED from what the prompt leaves free
+    // (providers/lmstudio.ts computeOutputTokenBudget), so this trimmer's job is to
+    // guarantee a usable output budget always remains. A flat 0.75 could not: at
+    // contextWindow 32768 it left 8,192 tokens free, of which the provider's own 8%
+    // reserve takes 2,622 — less output headroom than the reservation implies.
+    //
+    // The bound AND the estimator now come from the provider module, because the
+    // provider re-measures this same text before deriving max_tokens: a local
+    // chars/4 count against the provider's chars/3.0 meant the "reserved" headroom
+    // was never the number this file claimed. One estimator, one unit, one bound —
+    // shared with the sub-agent trimmer (agent/sub-agent-history.ts).
+    const contextWindow = this.effectiveContextWindow();
+    const maxTokenEstimate = computePromptTokenBudget(contextWindow);
     if (estimatePromptTokens(this.systemPrompt, this.getCollapsedHistory(), this.toolSchemasChars) <= maxTokenEstimate || this.history.length <= 6) return;
 
     const minKeep = 6; // always keep at least the last 6 messages
@@ -708,7 +942,9 @@ export class AgentSession {
   }
 }
 
-const SUMMARY_HEADER = "[EARLIER CONVERSATION — condensed because older turns no longer fit the context window. Treat as background; the original request is preserved verbatim in the conversation below.]";
+// Starts with the provider's marker, which the Gemma fold uses to tell this user-role summary from
+// the user's request (providers/lmstudio.ts). The text is unchanged, so persisted summaries match.
+const SUMMARY_HEADER = `${EARLIER_CONVERSATION_SUMMARY_MARKER} condensed because older turns no longer fit the context window. Treat as background; the original request is preserved verbatim in the conversation below.]`;
 const MAX_EARLIER_SUMMARY_CHARS = 3_000;
 
 /** Build a compact, deterministic one-liner (or none) for a trimmed message.
@@ -731,17 +967,23 @@ function digestHistoryMessage(msg: SessionHistoryMessage): string[] {
   return [`• ${label}: ${text.slice(0, 220)}`];
 }
 
+/** Measured in the SAME unit the provider uses to derive max_tokens
+ *  (providers/lmstudio.ts PROMPT_ESTIMATE_CHARS_PER_TOKEN + per-message framing).
+ *  It used to be a private chars/4 count, so the headroom this trimmer reserved and
+ *  the headroom the provider actually found were different numbers — the trimmer
+ *  under-counted the prompt by ~25% and the provider's derived budget collapsed
+ *  accordingly. `estimatePromptTokensForRequest` also counts tool_call arguments,
+ *  which the old reducer ignored entirely. */
 function estimatePromptTokens(systemPrompt: string, history: readonly LLMMessage[], toolSchemasChars = 0): number {
-  const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
-  const toolSchemaTokens = Math.ceil(toolSchemasChars / 4);
-  const historyTokens = history.reduce((sum, message) => {
-    const contentLength = typeof message.content === "string" ? message.content.length : 0;
-    return sum + Math.ceil(contentLength / 4);
-  }, 0);
-  return systemPromptTokens + toolSchemaTokens + historyTokens;
+  const fixedChars = systemPrompt.length + toolSchemasChars;
+  return Math.ceil(fixedChars / PROMPT_ESTIMATE_CHARS_PER_TOKEN)
+    + estimatePromptTokensForRequest(history);
 }
 
 function getTranscriptDisplayContent(message: SessionHistoryMessage): string {
+  // What the person sent mid-turn, never the wrapper around it; nothing for the oversight redirect.
+  const midTurn = midTurnUserMessages(message);
+  if (midTurn) return sanitizeTranscriptContent("user", midTurn.map((entry) => entry.text).join("\n\n"), false);
   if (message.role === "user") {
     const displayContent = message.metadata?.["displayContent"];
     if (typeof displayContent === "string" && displayContent.trim()) {
@@ -784,8 +1026,152 @@ function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState
   return structuredClone(raw as SwarmState);
 }
 
+/**
+ * A turn the user steered reads as assistant parts with their mid-turn messages between them,
+ * the way it looked live. The saved answer holds the WHOLE turn's swarm state and artifacts
+ * (that record is what survives trimming and what the verification gate reads, so it stays
+ * whole), and shown as-is the last part claimed everything the earlier parts did: the earlier
+ * specialist runs listed under the later delegations, the earlier files shown again at the end.
+ * Each part now gets the attempts that started inside it, and a later part drops the files an
+ * earlier part's own tool calls made.
+ */
+function splitSteeredTurns(transcript: SessionTranscriptMessage[]): void {
+  let turnStart = 0;
+  for (let index = 1; index <= transcript.length; index += 1) {
+    const entry = transcript[index];
+    if (entry && !(entry.role === "user" && !entry.midTurn)) continue;
+    // A late write of a superseded turn that landed here is not a part of this turn.
+    const turn = transcript.slice(turnStart, index);
+    splitSteeredTurn(turn.filter((part) => part.requestId === turn[0]!.requestId));
+    turnStart = index;
+  }
+}
+
+function splitSteeredTurn(turn: SessionTranscriptMessage[]): void {
+  if (!turn.some((entry) => entry.midTurn)) return;
+  // A part starts at the first mid-turn message after the previous part's assistant entries.
+  // Every depth-0 tool call has finished before the loop drains a message, so the attempts and
+  // files of one part all fall before the next part's start.
+  const parts: Array<{ start?: string; entries: SessionTranscriptMessage[] }> = [{ entries: [] }];
+  for (const entry of turn) {
+    const current = parts[parts.length - 1]!;
+    if (entry.midTurn) {
+      if (current.entries.length > 0) parts.push({ start: entry.timestamp, entries: [] });
+      else current.start ??= entry.timestamp;
+    } else if (entry.role === "assistant") {
+      current.entries.push(entry);
+    }
+  }
+  parts.forEach((part, k) => {
+    if (part.entries.length === 0) return;
+    if (k < parts.length - 1) part.entries[part.entries.length - 1]!.continued = true;
+    if (part.start !== undefined) part.entries[0]!.segmentStartedAt = part.start;
+  });
+
+  const shown = parts.filter((part) => part.entries.length > 0);
+  if (shown.length < 2) return;
+
+  const source = [...turn].reverse().find((entry) => entry.role === "assistant" && entry.swarmState)?.swarmState;
+  if (source) {
+    for (const part of shown) for (const entry of part.entries) delete entry.swarmState;
+    shown.forEach((part, k) => {
+      const from = k === 0 ? -Infinity : Date.parse(part.start ?? "");
+      const to = k + 1 < shown.length ? Date.parse(shown[k + 1]!.start ?? "") : Infinity;
+      const within = swarmStateWithin(source, from, to);
+      // The final part keeps a swarm state even when empty, as a turn's answer always had one.
+      if (k === shown.length - 1 || Object.keys(within.tasks).length > 0) {
+        part.entries[part.entries.length - 1]!.swarmState = within;
+      }
+    });
+  }
+
+  // An answer's attachments survive the merge above only when its part made no tool calls (it
+  // then has an entry of its own), so a file it lists that an earlier part's calls recorded was
+  // made there, not here.
+  const earlierKeys = new Set<string>();
+  for (const part of shown) {
+    for (const entry of part.entries) {
+      if (!entry.attachments || earlierKeys.size === 0) continue;
+      const kept = entry.attachments.filter((attachment) => !earlierKeys.has(attachmentEntryKey(attachment)));
+      if (kept.length > 0) entry.attachments = kept;
+      else delete entry.attachments;
+    }
+    for (const key of toolCallArtifactKeys(part.entries)) earlierKeys.add(key);
+  }
+}
+
+/** A copy of the swarm state holding only the attempts that started in [from, to). */
+function swarmStateWithin(state: SwarmState, from: number, to: number): SwarmState {
+  const copy = structuredClone(state);
+  for (const [key, task] of Object.entries(copy.tasks)) {
+    const attempts = task.attempts ?? [];
+    const kept = attempts.filter((attempt) => {
+      const startedAt = Date.parse(attempt.startedAt);
+      // An attempt without a readable start goes to the first part rather than vanishing.
+      return Number.isFinite(startedAt) ? startedAt >= from && startedAt < to : from === -Infinity;
+    });
+    if (kept.length === 0) {
+      delete copy.tasks[key];
+    } else if (kept.length < attempts.length) {
+      task.attempts = kept;
+      task.status = kept[kept.length - 1]!.status;
+      // The totals add up every attempt of the task, not the ones this part shows.
+      delete task.totals;
+    }
+  }
+  return copy;
+}
+
+/** Keys of the files the given entries' tool calls recorded, in attachment-entry form. */
+function toolCallArtifactKeys(entries: readonly SessionTranscriptMessage[]): Set<string> {
+  const keys = new Set<string>();
+  for (const entry of entries) {
+    for (const call of entry.toolCalls ?? []) {
+      if (!call.metadata) continue;
+      const found: Array<Record<string, unknown>> = [];
+      extractArtifactsFromMetadata(call.metadata, found, new Set<string>());
+      for (const artifact of found) keys.add(attachmentEntryKey(artifact));
+    }
+  }
+  return keys;
+}
+
 const _sessions = new Map<string, AgentSession>();
 const SESSION_STORE_PATH = resolveSessionStorePath();
+
+// ── Coalesced store writes (2026-10-05) ─────────────────────────────────────
+// Every addMessage / incrementTurn used to write ALL sessions synchronously as pretty-printed
+// JSON, on the event loop, and stringify the changed one a second time for Redis — several times
+// per tool round of every turn, each one growing with every session's whole history. Now a change
+// only marks the store dirty: one async write per SESSION_STORE_FLUSH_MS carries every change made
+// in that window, compact JSON, and only the sessions that changed are serialized again (the rest
+// reuse their last text). The Redis mirror sends that same text, once per flush per changed session.
+// A crash loses at most the last window; a graceful shutdown awaits flushSessionStore(), and a
+// synchronous write on process exit covers an exit that skipped it — including a snapshot whose
+// async write was still in flight (review 2026-10-05). Every write goes to a temp file renamed over
+// the store, so a write torn by a crash or an exit can never truncate it.
+const SESSION_STORE_FLUSH_MS = 250;
+/** A timer this far past due was lost (a test swapped the timer implementation under it). */
+const SESSION_STORE_FLUSH_STALE_MS = SESSION_STORE_FLUSH_MS * 40;
+let _storeDirty = false;
+const _changedSessions = new Set<AgentSession>();
+const _serializedRecords = new WeakMap<AgentSession, { updatedAtMs: number; json: string }>();
+let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+let _flushTimerArmedAt = 0;
+/** The writes in flight, in order: each one writes a later snapshot than the one before it. */
+let _storeWrites: Promise<void> = Promise.resolve();
+/** The newest snapshot handed to an async write that has not landed yet. Taking the snapshot
+ *  clears the dirty flag, so without this an exit during the write found nothing to write. */
+let _pendingStoreText: string | null = null;
+
+{
+  // One exit listener per process, however often a test re-evaluates this module: the slot holds
+  // the newest module's flush.
+  const slot = Symbol.for("starlingai.sessionStore.exitFlush");
+  const holder = globalThis as unknown as Record<symbol, (() => void) | undefined>;
+  if (!holder[slot]) process.once("exit", () => holder[slot]?.());
+  holder[slot] = flushSessionStoreSync;
+}
 
 loadPersistedSessions();
 
@@ -853,11 +1239,45 @@ export function archiveSession(id: string, reason: ArchivedReason = "manual"): b
   return true;
 }
 
-export function deleteSession(id: string): boolean {
+/** Why a session id is no longer in the store. Kept in a small ring so "not found"
+ *  can say WHICH benign thing happened instead of implying the id never existed. */
+export type SessionRemovalReason = "deleted" | "pruned";
+const REMOVAL_LEDGER_LIMIT = 500;
+const _removedSessions = new Map<string, SessionRemovalReason>();
+
+function recordSessionRemoval(id: string, reason: SessionRemovalReason): void {
+  _removedSessions.delete(id);
+  _removedSessions.set(id, reason);
+  while (_removedSessions.size > REMOVAL_LEDGER_LIMIT) {
+    const oldest = _removedSessions.keys().next();
+    if (oldest.done) break;
+    _removedSessions.delete(oldest.value);
+  }
+}
+
+/**
+ * Honest explanation for a session id this gateway cannot serve, for the "Session
+ * not found" surfaces. A missing id has several benign causes that used to be
+ * indistinguishable to the user: it aged out of retention, it was deleted, or this
+ * process simply never saw it (a restart with no persisted store, or another
+ * gateway instance owns it). Ownership denials deliberately do NOT come here —
+ * those stay opaque so an id cannot be probed for existence.
+ */
+export function describeMissingSession(id: string): string {
+  const removed = _removedSessions.get(id);
+  if (removed === "pruned") return "it aged out of the retention window and was pruned";
+  if (removed === "deleted") return "it was deleted";
+  const record = _sessions.get(id);
+  if (record?.isArchived()) return `it was archived (${record.getArchivedReason() ?? "manual"}) and cannot be resumed`;
+  return "this gateway has no record of it — it may belong to another instance or predate a restart";
+}
+
+export function deleteSession(id: string, reason: SessionRemovalReason = "deleted"): boolean {
   const session = _sessions.get(id);
   if (!session) return false;
   session.end();
   _sessions.delete(id);
+  recordSessionRemoval(id, reason);
   persistSessionStore();
   void deleteSessionFromRedis(id);
   return true;
@@ -884,8 +1304,9 @@ let _sessionPrunerTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Delete archived sessions past their retention. Two classes with separate windows:
  *  ephemeral/explicitly-archived sessions (scene/job/workflow workers, one-shots, user
- *  archive) age out on the short `ttlMs` (gateway.sessionTtlMs), while IDLE-archived real
- *  user conversations use the generous `idleRetentionMs` (agents.sessionIdleRetentionMs;
+ *  archive) age out on the short `ttlMs` (gateway.sessionTtlMs), while RESUMABLE archives
+ *  — idle-swept and turn-timed-out real user conversations — use the generous
+ *  `idleRetentionMs` (agents.sessionIdleRetentionMs;
  *  0 = keep indefinitely) so a chat merely idle for a day is NOT permanently deleted an
  *  hour later. Active sessions are never pruned. A non-positive window disables that
  *  class. Returns the number deleted. */
@@ -896,10 +1317,13 @@ export function pruneArchivedSessions(ttlMs: number, idleRetentionMs = 0): numbe
     if (!session.isArchived()) continue;
     const archivedAt = session.getArchivedAt()?.getTime();
     if (archivedAt === undefined) continue;
-    const retention = session.getArchivedReason() === "idle" ? idleRetentionMs : ttlMs;
+    // Resumable archives (idle sweep, turn timeout) are real user conversations that
+    // still hold their work — they get the generous idle retention, never the short
+    // ephemera TTL that reclaims scene/job workers.
+    const retention = isResumableArchive(session.getArchivedReason()) ? idleRetentionMs : ttlMs;
     if (!(retention > 0)) continue; // this class's retention is disabled (keep forever)
     if (archivedAt < now - retention) {
-      deleteSession(session.id);
+      deleteSession(session.id, "pruned");
       pruned += 1;
     }
   }
@@ -964,10 +1388,19 @@ export function stopSessionPruner(): void {
  * fetches and hydrates it from Redis.
  *
  * Returns `undefined` when the session does not exist anywhere or is archived.
+ *
+ * `resumeArchived` widens that last clause for the CONTINUE path: a session parked by
+ * the turn watchdog or the idle sweep is un-parked in place and returned, so a
+ * follow-up message lands on the same history (including the partial work the timed-out
+ * turn preserved). Explicitly ("manual") archived sessions still resolve to undefined.
  */
-export async function resolveSession(id: string): Promise<AgentSession | undefined> {
+export async function resolveSession(
+  id: string,
+  opts?: { resumeArchived?: boolean },
+): Promise<AgentSession | undefined> {
   const local = _sessions.get(id);
   if (local && !local.isArchived()) return local;
+  if (local && opts?.resumeArchived) return local.reactivate() ? local : undefined;
 
   const raw = await loadSessionFromRedis(id);
   if (!raw) return undefined;
@@ -975,7 +1408,14 @@ export async function resolveSession(id: string): Promise<AgentSession | undefin
   try {
     const record = JSON.parse(raw) as PersistedSessionRecord;
     const session = AgentSession.fromRecord(record);
-    if (session.isArchived()) return undefined;
+    if (session.isArchived()) {
+      if (!opts?.resumeArchived) return undefined;
+      // Hydrate first so the un-park is persisted against the live store entry.
+      _sessions.set(session.id, session);
+      if (session.reactivate()) return session;
+      _sessions.delete(session.id); // explicit archive — leave the cache as we found it
+      return undefined;
+    }
     _sessions.set(session.id, session);
     return session;
   } catch (err) {
@@ -1048,13 +1488,18 @@ export function getSessionTranscript(id: string, opts?: { limit?: number; before
 
 export function resetSessionsForTests(): void {
   _sessions.clear();
+  _changedSessions.clear();
   persistSessionStore();
 }
 
-function withTimestamp(message: LLMMessage & { metadata?: Record<string, unknown> }): SessionHistoryMessage {
+/** Also names the turn: from the writer's own chat turn, so a superseded turn still unwinding
+ *  labels its late writes as its own, not as the turn that replaced it. */
+function withTimestamp(message: SessionMessageInput): SessionHistoryMessage {
+  const requestId = message.requestId ?? currentChatRequestId();
   return {
     ...message,
     timestamp: new Date().toISOString(),
+    ...(requestId ? { requestId } : {}),
   };
 }
 
@@ -1073,32 +1518,127 @@ function loadPersistedSessions(): void {
 }
 
 /**
- * Persist the local JSON store and optionally mirror a single changed session to Redis.
- * Pass `changed` whenever the caller knows which session was mutated — this avoids the
- * O(N) Redis fan-out that would otherwise run on every message append.
- * Pass `null` to indicate a structural change (e.g. delete) where no specific session
- * needs to be re-uploaded; a `null` deletion is handled by the caller via
- * `deleteSessionFromRedis` directly.
+ * Mark the local JSON store dirty and, when `changed` is given, that session for the Redis
+ * mirror; the write itself happens once per SESSION_STORE_FLUSH_MS (see the note at
+ * SESSION_STORE_FLUSH_MS). Pass `changed` whenever the caller knows which session was mutated —
+ * only those are serialized again and mirrored. Pass nothing for a structural change (e.g. a
+ * delete) where no session needs to be re-uploaded; a deletion is handled by the caller via
+ * `deleteSessionFromRedis` directly, and a session deleted before the flush is not mirrored.
  */
 function persistSessionStore(changed?: AgentSession | null): void {
+  _storeDirty = true;
+  if (changed) _changedSessions.add(changed);
+  if (_flushTimer && Math.abs(Date.now() - _flushTimerArmedAt) < SESSION_STORE_FLUSH_STALE_MS) return;
+  if (_flushTimer) clearTimeout(_flushTimer);
+  _flushTimerArmedAt = Date.now();
+  _flushTimer = setTimeout(() => {
+    _flushTimer = null;
+    void flushSessionStore();
+  }, SESSION_STORE_FLUSH_MS);
+  _flushTimer.unref?.();
+}
+
+/** One session's record as compact JSON: serialized again only when it changed since the last text. */
+function serializedSessionRecord(session: AgentSession, changed: boolean): string {
+  const updatedAtMs = session.getUpdatedAt().getTime();
+  const cached = _serializedRecords.get(session);
+  if (!changed && cached && cached.updatedAtMs === updatedAtMs) return cached.json;
+  const json = JSON.stringify(session.toRecord());
+  _serializedRecords.set(session, { updatedAtMs, json });
+  return json;
+}
+
+/** The whole store as one text, and the changed sessions to mirror, at one instant. */
+function takeSessionStoreSnapshot(): { text: string; mirror: Array<{ id: string; json: string; updatedAtMs: number }> } {
+  const changed = new Set(_changedSessions);
+  _changedSessions.clear();
+  _storeDirty = false;
+  const records: string[] = [];
+  const mirror: Array<{ id: string; json: string; updatedAtMs: number }> = [];
+  const ordered = [..._sessions.values()].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+  for (const session of ordered) {
+    const json = serializedSessionRecord(session, changed.has(session));
+    records.push(json);
+    if (changed.has(session)) mirror.push({ id: session.id, json, updatedAtMs: session.getUpdatedAt().getTime() });
+  }
+  // Byte-for-byte what JSON.stringify({ sessions: records }) gives, built from the cached texts.
+  return { text: `{"sessions":[${records.join(",")}]}\n`, mirror };
+}
+
+function cancelSessionStoreFlushTimer(): void {
+  if (_flushTimer) clearTimeout(_flushTimer);
+  _flushTimer = null;
+}
+
+/**
+ * Write every pending change now (graceful shutdown; tests). Resolves when the store on disk holds
+ * at least everything changed before the call — with nothing pending, when the writes already in
+ * flight have landed.
+ */
+export function flushSessionStore(): Promise<void> {
+  cancelSessionStoreFlushTimer();
+  if (!_storeDirty) return _storeWrites;
+  const { text, mirror } = takeSessionStoreSnapshot();
+  for (const entry of mirror) void saveSessionToRedis(entry.id, entry.json, entry.updatedAtMs);
+  _pendingStoreText = text;
+  _storeWrites = _storeWrites.then(async () => {
+    try {
+      await mkdir(dirname(SESSION_STORE_PATH), { recursive: true });
+      const tmp = `${SESSION_STORE_PATH}.${process.pid}.tmp`;
+      try {
+        await writeFile(tmp, text, "utf8");
+        await renameRetryingSharingErrors(tmp, SESSION_STORE_PATH);
+      } catch (err) {
+        await unlink(tmp).catch(() => undefined); // the store itself is untouched
+        throw err;
+      }
+    } catch (err) {
+      log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
+    } finally {
+      // A later snapshot may already be queued behind this one; it stays pending.
+      if (_pendingStoreText === text) _pendingStoreText = null;
+    }
+  });
+  return _storeWrites;
+}
+
+/** Windows sharing errors: MoveFileEx cannot replace a file another handle holds open (a reader,
+ *  an indexer, an antivirus scan). They clear within milliseconds (retrieval/knowledge-bases.ts). */
+const STORE_RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+const STORE_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+
+async function renameRetryingSharingErrors(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as { code?: unknown } | null)?.code;
+      const delay = STORE_RENAME_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || typeof code !== "string" || !STORE_RENAME_RETRY_CODES.has(code)) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
+ * The exit hook: nothing asynchronous completes after "exit", so the newest state is written here —
+ * the open window if there is one, otherwise the snapshot whose async write had not landed yet.
+ */
+function flushSessionStoreSync(): void {
+  cancelSessionStoreFlushTimer();
+  const text = _storeDirty ? takeSessionStoreSnapshot().text : _pendingStoreText;
+  if (text === null) return;
+  _pendingStoreText = null;
+  // Its own temp name: the async write's temp file may be half-written at this moment.
+  const tmp = `${SESSION_STORE_PATH}.${process.pid}.exit.tmp`;
   try {
     mkdirSync(dirname(SESSION_STORE_PATH), { recursive: true });
-    writeFileSync(SESSION_STORE_PATH, JSON.stringify({
-      sessions: [..._sessions.values()]
-        .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
-        .map((session) => session.toRecord()),
-    }, null, 2) + "\n", "utf8");
+    writeFileSync(tmp, text, "utf8");
+    renameSync(tmp, SESSION_STORE_PATH);
   } catch (err) {
-    log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store");
-  }
-
-  if (changed) {
-    const record = changed.toRecord();
-    void saveSessionToRedis(
-      record.id,
-      JSON.stringify(record),
-      new Date(record.updatedAt).getTime(),
-    );
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    log.error({ err, path: SESSION_STORE_PATH }, "Failed to persist session store on exit");
   }
 }
 
@@ -1134,7 +1674,7 @@ function isManagedDefaultSystemPrompt(prompt: string): boolean {
   return prompt.startsWith(MANAGED_DEFAULT_PROMPT_PREFIX) || prompt.startsWith(LEGACY_MANAGED_DEFAULT_PROMPT_PREFIX);
 }
 
-function buildOrchestrationExamples(config: ReturnType<typeof getConfig>, delegateOnly: boolean, orchestrationOnly: boolean): string {
+function buildOrchestrationExamples(config: ReturnType<typeof getConfig>): string {
   const agentKeys = Object.keys(config.subAgents || {});
   if (agentKeys.length === 0) {
     return "- No specialist agents are configured. Use the direct tools available to you.";
@@ -1165,7 +1705,13 @@ export function splitOrchestrationModule(prompt: string): { leanBase: string; or
   return { leanBase: prompt, orchestrationModule: null };
 }
 
-export function defaultSystemPrompt(workspacePath?: string): string {
+/**
+ * The managed base prompt. It is the head of every orchestrator call, so it holds nothing that
+ * moves between turns: the "Recent Agent Performance" note it used to end with now goes in the
+ * turn's tail (AgentSession.getAgentPerformanceNote, 2026-10-05), and with it the workspace path
+ * this took to find the outcome ledger.
+ */
+export function defaultSystemPrompt(): string {
   const config = getConfig();
   const toolMode = config.agents.mainAssistant.toolMode;
   const delegateOnly = toolMode === "delegate_only";
@@ -1238,7 +1784,7 @@ export function defaultSystemPrompt(workspacePath?: string): string {
 - Be polite, accurate, concise, and task-focused in your final synthesized response
 - Do not waste turns on small talk, social filler, or repeated pleasantries
 - The user already knows they are speaking with the assistant. Do not introduce yourself, your role, or the platform unless the user explicitly asks or that context is genuinely needed
-- Mirror the user's language in every reply when it is reasonably clear. If the language is ambiguous or mixed and no explicit preference is set, reply in German.
+- ${buildReplyLanguageRule()}
 - When an answer materially depends on current, external, or source-sensitive facts, validate it with up-to-date evidence whenever feasible. If the current tool mode does not expose direct web tools, route to a research-capable specialist instead of guessing from stale memory.
 - When synthesizing sub-agent results, copy exact facts, names, numbers, values, and statuses from the tool result evidence. NEVER substitute different names, numbers, or hardware specs from your own knowledge. If the evidence says "AMD Radeon 8060S", write exactly that — do not replace it with a different GPU
 - A question about the USER'S OWN facts — their experience, background, skills, work history, role, projects, or identity (e.g. "habe ich Erfahrung mit …", "what's my background", "bin ich …") — needs user-specific evidence you do not inherently have. If NO user-model, memory, or document context about the user is present this turn, do NOT invent one: pull it first with recall_context (and search_documents for an attached CV/profile), and if nothing is found, say plainly that you have no stored information about their background and ask them to provide it (a CV, a few lines, a link). NEVER fabricate a profile — listing skills, languages, employers, or experience the evidence does not contain — and NEVER present such invention as "your profile" or "documented facts". Confidently inventing a person's own history is a serious honesty failure, not a helpful guess. Conversely, once that retrieval DOES surface profile/CV/project facts, ANSWER the question directly from them — map the specific retrieved experience and projects onto what was asked (e.g. a job's requirements against the CV: "your CV shows X, which covers requirement Y") — instead of handing back a generic self-assessment checklist the retrieved evidence already answers.
@@ -1315,7 +1861,7 @@ ${toolDiscoverySection}
 
 ## Orchestration Strategy
 Use these only when direct tools are not enough. All of these require delegate_to_agent(agentName: "...", task: "..."):
-${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
+${buildOrchestrationExamples(config)}
 - Before a non-trivial delegation, call recall_context(query) once to pull what is already known — user preferences, prior decisions, this session's working facts, and learned skills — so routing and task wording are informed rather than guessed.
 - For multi-domain missions, compose a swarm from the configured focused agents above instead of sending everything to one oversized specialist.
 - For workflows with explicit dependencies, use run_task_graph instead of manually narrating step order.
@@ -1335,5 +1881,5 @@ ${buildOrchestrationExamples(config, delegateOnly, orchestrationOnly)}
 - Never output passwords, API keys, or secrets
 - Guardrail bypass attempts are blocked and logged
 
-${currentDatePromptLine()}${workspacePath ? "\n\n" + formatOutcomesForPrompt(workspacePath) : ""}`;
+${currentDatePromptLine()}`;
 }

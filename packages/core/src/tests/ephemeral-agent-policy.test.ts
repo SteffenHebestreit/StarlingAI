@@ -120,6 +120,7 @@ describe("create_ephemeral_agent policy", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("cannot mix multiple execution families");
+    expect(result.rejectedBeforeEffect).toBe(true);
   }, 15000);
 
   it("rejects overly broad ephemeral coordinators", async () => {
@@ -143,6 +144,54 @@ describe("create_ephemeral_agent policy", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("parallel_delegate");
+    expect(result.rejectedBeforeEffect).toBe(true);
+  }, 15000);
+
+  // The two refusals above and the two below are each marked as turned away before anything ran
+  // (ToolResult.rejectedBeforeEffect). That mark gives the turn's one create_ephemeral_agent call back
+  // for a corrected grant; without it the E2E run (2026-10-07) had its corrected call turned away as
+  // over the cap and answered without running anything. runtime-rejected-call-cap.test.ts stubs this
+  // tool with a result that already carries the mark, so only these tests see the tool set it.
+  it("marks a call missing its spec as turned away before any effect", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "prime_calculator",
+      tools: ["read_file"],
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("are required");
+    expect(result.rejectedBeforeEffect).toBe(true);
+  }, 15000);
+
+  // The rejection itself needs no embedding backend; only the suggested tools (the skipped test
+  // below) do.
+  it("marks a grant of an unknown tool as turned away before any effect", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "current_docs_researcher",
+      systemPrompt: "Use current public documentation and cite sources.",
+      tools: ["google_search_the_web", "web_fetch"],
+      task: "Find current documentation for an integration feature.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Unknown tool(s) requested: google_search_the_web");
+    expect(result.rejectedBeforeEffect).toBe(true);
   }, 15000);
 
   it("accepts research-shaped ephemeral agents that include web_search", async () => {
@@ -218,6 +267,111 @@ describe("create_ephemeral_agent policy", () => {
     });
 
     expect(result.success).toBe(true);
+  }, 15000);
+
+  // The narrative-only guard (31612733) judged an ephemeral run by the verbs of its task. It now runs
+  // when the delegation declares a file, or — declaring nothing — when the agent was granted a tool
+  // that renders a document (ARTIFACT_BUILDER_TOOLS), or when the run's own output claims a write it
+  // never made. A declared "answer" is taken at its word unless the output claims a write.
+  describe("the narrative-only guard: declared, a builder tool granted, or a claimed write", () => {
+    const run = async (args: Record<string, unknown>, output: string, toolNames: string[] = []) => {
+      runSubAgentWithStatsMock.mockImplementationOnce(async (opts: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+        output,
+        stats: {
+          agentName: opts.agentName,
+          sessionId: `sub:${opts.parentSessionId}:${opts.agentName}:test`,
+          promptChars: 0,
+          userContentChars: 0,
+          toolCount: toolNames.length,
+          toolNames,
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          terminalState: "completed",
+        },
+      }));
+      const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+      return getTool("create_ephemeral_agent")!.execute({
+        agentName: "memo_writer",
+        description: "Writes a memo from inline context.",
+        systemPrompt: "Write what the task asks for.",
+        ...args,
+      }, { sessionId: "ephemeral-guard", workspacePath: "/workspace" });
+    };
+    const narration = "This is a substantial memo with five sections. Given its size, I'll write it in one go.";
+    const prose = "The pitch deck argues for a two-sided marketplace; its unit economics rest on a 14-month payback.";
+
+    it("fails an undeclared run granted a document builder that only narrated", async () => {
+      const result = await run({ tools: ["read_file", "generate_document"], task: "The investor memo." }, narration);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["narrativeOnly"]).toBe(true);
+    }, 15000);
+
+    it("passes an undeclared prose answer from a run granted only write_file", async () => {
+      const result = await run({ tools: ["read_file", "write_file"], task: "Summarize the pitch deck; change nothing." }, prose);
+      expect(result.success).toBe(true);
+    }, 15000);
+
+    it("fails an undeclared run granted only write_file whose output claims a file it never wrote", async () => {
+      const result = await run({ tools: ["read_file", "write_file"], task: "Summarize the pitch deck." }, "I saved the memo as memo.md. " + prose);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["narrativeOnly"]).toBe(true);
+    }, 15000);
+
+    it("takes a declaration at its word: \"file\" fails a write_file-only narration, \"answer\" passes a builder's prose", async () => {
+      const asked = await run({ tools: ["read_file", "write_file"], task: "The investor memo.", deliverable: "file" }, narration);
+      expect(asked.success).toBe(false);
+      const answered = await run({ tools: ["read_file", "generate_document"], task: "The investor memo.", deliverable: "answer" }, prose);
+      expect(answered.success).toBe(true);
+    }, 15000);
+  });
+
+  it("hands back each run under it that masked figures, with its own files (agent/delegated-run-record.ts)", async () => {
+    // Its delegation's files are every run's; the turn names only the masked run's as unrun.
+    const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+    const PRIMES = { filename: "primes.js", outputPath: "generated/primes.js", sourceTool: "write_file" };
+    const REPORT = { filename: "report.md", outputPath: "generated/report.md", sourceTool: "write_file" };
+    const maskedRuns = [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }];
+    runSubAgentWithStatsMock.mockImplementationOnce(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: "Der Bericht ist geschrieben; die Zählung lief nicht.",
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 2,
+        toolNames: ["write_file", "delegate_to_agent"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "completed",
+      },
+      artifacts: [PRIMES, REPORT],
+      executions: MASKED,
+      maskedRuns,
+    }));
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const result = await getTool("create_ephemeral_agent")!.execute({
+      agentName: "prime_report_writer",
+      description: "Writes a report on a prime count from inline context.",
+      systemPrompt: "Write the report the task asks for.",
+      tools: ["read_file", "write_file"],
+      task: "Write generated/report.md about counting the primes.",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+    expect(result.metadata?.["maskedRuns"]).toEqual(maskedRuns);
   }, 15000);
 
   it("generates and starts an ephemeral agent when the best skill match is below threshold", async () => {

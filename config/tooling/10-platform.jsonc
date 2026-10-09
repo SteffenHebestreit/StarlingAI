@@ -132,7 +132,8 @@
   },
   "computerUse": {
     "enabled": true,
-    "visionModel": "lmstudio/qwen/qwen3.8-27b",
+    // The SELECTOR, not a station-local id — see config/multimodal/10-multimodal.jsonc.
+    "visionModel": "lmstudio/qwen",
     "adapters": {
       "local_vscode": {
         "codePath": "code"

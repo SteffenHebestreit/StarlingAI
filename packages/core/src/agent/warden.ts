@@ -41,6 +41,7 @@ import { childLogger } from "../logger.js";
 import { buildWardenIntervention, type InterventionNotice } from "./interventions.js";
 import { computerSessionManager } from "./computer-session.js";
 import { startToolDevWarden, stopToolDevWarden } from "./tool-dev-warden.js";
+import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 
 const log = childLogger("agent:warden");
 
@@ -193,15 +194,56 @@ export function registerSessionAbortController(sessionId: string, controller: Ab
 
 /**
  * Remove the abort controller registration when a turn completes.
- * Called in the runTurn() finally block.
+ * Called in the runTurn() finally block. With `controller`, only if it is still the registered one:
+ * a superseded turn unwinds after its replacement registered, and deleting by session id removed
+ * the NEW turn's controller, so a Stop, a distributed cancel or a Warden abort missed it (review of
+ * round 1, B #4).
  */
-export function deregisterSessionAbortController(sessionId: string): void {
+export function deregisterSessionAbortController(sessionId: string, controller?: AbortController): void {
+  if (controller && _sessionAbortControllers.get(sessionId) !== controller) return;
   _sessionAbortControllers.delete(sessionId);
 }
 
 export function isSessionTurnActive(sessionId: string): boolean {
   const controller = _sessionAbortControllers.get(sessionId);
   return Boolean(controller && !controller.signal.aborted);
+}
+
+// ── Sub-agent run stop registry ───────────────────────────────────────────────
+// A sub-agent run counts its tool calls under its OWN session id (sub:<parent>:<agent>:<ts>),
+// so a tool_storm names the run, not the turn. The turn registry above never held such an id,
+// and its prefix match runs the other way (a stored turn id that starts with the subject), so the
+// kill switch reached nothing: in c297c5ea five session_emergency_stopped alerts on content_writer
+// runs (01:49:35 and 01:53:35, 02:01:05 and 02:04:35, 02:39:35) stopped none of them, and each ran
+// on for another 2-6 minutes. A running sub-agent registers here instead. Its handler winds the
+// run down the way the progress supervisor does, so the next iteration hands back what the run
+// has; the turn and the run's siblings go on.
+
+/** What the warden tells a run it stops. */
+export interface WardenRunStop {
+  alert: WardenAlert["type"];
+  detail: string;
+}
+
+/** run session id → the run's wind-down. */
+const _runStopHandlers = new Map<string, (stop: WardenRunStop) => void>();
+
+/**
+ * Register a running sub-agent under its own session id for the warden's emergency stop. Returns
+ * the deregistration, which removes only this handler (a later run cannot reuse the id, but a
+ * handler must never outlive the run that registered it).
+ */
+export function registerWardenRunStop(runSessionId: string, onStop: (stop: WardenRunStop) => void): () => void {
+  _runStopHandlers.set(runSessionId, onStop);
+  return () => {
+    if (_runStopHandlers.get(runSessionId) === onStop) _runStopHandlers.delete(runSessionId);
+  };
+}
+
+/** Whether a run is registered for the emergency stop (for tests: a handler that outlived its run
+ *  would keep the run's whole closure, its history included, alive for the life of the process). */
+export function isWardenRunStopRegistered(runSessionId: string): boolean {
+  return _runStopHandlers.has(runSessionId);
 }
 
 /**
@@ -323,12 +365,17 @@ export function startWarden(): void {
     }
 
     // ── Blocked tool accumulation (escape attempts) ──────────────────────────
-    // "evidence_cap_enforced" blocks are normal synthesis enforcement — the
-    // agent's evidence-gathering tools were stripped once sufficient evidence
-    // was collected. Do NOT count these toward the escape-attempt threshold;
-    // they are false positives and would pollute the circuit-breaker log.
+    // Only a call to a tool the agent never held ("not_in_agent_tools") is an escape
+    // attempt. Every reason in RUN_INTERNAL_WITHDRAWAL_REASONS is the runtime taking a
+    // tool away mid-run — evidence cap reached, approval gate unresolved, search backend
+    // degraded, delegations cascade-failed — and those rows exist only BECAUSE the
+    // withdrawn tool deliberately stays on the wire (dropping it re-prefills the whole
+    // prompt: 7,027 tokens / 7.28 s versus 0.40 s warm, measured in sub-agent.ts). The
+    // model retrying a tool the runtime just withdrew is not probing the sandbox, so
+    // counting it here would answer the prefix-stability fix with an error alert, a
+    // synthetic failure outcome against a healthy agent, and a possible session abort.
     if (event.type === "sub_agent_tool_blocked" && event.sessionId
-        && event.data["reason"] !== "evidence_cap_enforced") {
+        && !isRunInternalWithdrawalReason(event.data["reason"])) {
       const agentName = String(event.data["agentName"] ?? "unknown");
       const existing = _blockedAttempts.get(event.sessionId);
       _blockedAttempts.set(event.sessionId, {
@@ -607,6 +654,7 @@ export function resetWardenForTests(): void {
   _toolStormImminentCooldown.clear();
   _agentMessageImminentCooldown.clear();
   _sessionAbortControllers.clear();
+  _runStopHandlers.clear();
   _degradedSessions.clear();
   _alertRing.length = 0;
   _alertsEmitted = 0;
@@ -1057,6 +1105,27 @@ function maybeAbortSession(alert: WardenAlert): void {
   if (!["tool_storm", "tool_escape_attempt", "computer_credential_prompt_loop", "computer_clipboard_exfiltration"].includes(alert.type)) return;
 
   const sessionId = extractSessionIdFromSubject(alert.subject);
+
+  // A running sub-agent named by its full session id (see registerWardenRunStop). Exact match
+  // only: a subject cut to a prefix ("agent@<first 20 chars>") would match every run of the turn.
+  // The whole subject is tried first: tool_storm names the run's id verbatim, and that id can hold
+  // an "@" (an MCP caller's user name is part of its parent id, "sub:mcp:<user>:<uuid>:..."), which
+  // extractSessionIdFromSubject would cut at, so the stop reached nothing again.
+  const runKey = _runStopHandlers.has(alert.subject) ? alert.subject : sessionId;
+  const stopRun = runKey ? _runStopHandlers.get(runKey) : undefined;
+  if (runKey && stopRun) {
+    _runStopHandlers.delete(runKey);
+    try {
+      stopRun({ alert: alert.type, detail: alert.detail });
+      log.warn(
+        { sessionId: runKey.slice(0, 60), alertType: alert.type },
+        "Warden wound down a running sub-agent due to anomaly",
+      );
+    } catch (err) {
+      log.warn({ err, alertType: alert.type }, "Warden run stop handler threw");
+    }
+    return;
+  }
   if (!sessionId) return;
 
   // Scan the registry: the stored key is the full sessionId but the subject may be a prefix

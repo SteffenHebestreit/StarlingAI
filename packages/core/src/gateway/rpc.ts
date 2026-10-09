@@ -4,26 +4,31 @@
  */
 import type WebSocket from "ws";
 import { randomUUID } from "node:crypto";
+import { subAgentProgressStatus } from "./sub-agent-progress-status.js";
 import {
   archiveSession,
   createSession,
   deleteSession,
+  describeMissingSession,
   getSession,
   getSessionRecord,
   getSessionTranscript,
   resolveSession,
   listSessions,
 } from "../agent/session.js";
-import type { SessionTranscriptAttachment, SessionSummary } from "../agent/session.js";
-import { roleRank } from "./auth.js";
+import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
+import { normalizeRole, roleRank } from "./auth.js";
+import { callerMayUseSession } from "./session-route-access.js";
+import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
-import { DELEGATION_WAIT_CEILING_MS, extendDeadlineForDelegationWait } from "../agent/delegation-budget.js";
+import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit, logAudit } from "../audit/logger.js";
+import { rootSessionOf } from "../agent/session-ids.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
@@ -31,8 +36,148 @@ import { computerSessionManager } from "../agent/computer-session.js";
 import { subscribeToNotifications } from "../runtime/notifications.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
+import { longRunningGenerationManager } from "../agent/long-running-generation.js";
+import { turnSteeringManager, unconsumedSteeringOf, type SteeringMessage } from "../agent/turn-steering.js";
+import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits, userInputBroker, type UserInputCaller } from "../agent/user-input-broker.js";
+import { clampUserInputTimeoutMs } from "../agent/user-input.js";
+import { typedUserWords } from "../agent/delegation-user-words.js";
+import { isKnownAgentName } from "../agent/directive-agent.js";
+import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
+
+/**
+ * How often the gateway turn watchdog re-checks a turn it has suspended for an operator
+ * unbounded grant. Re-arming rather than cancelling means the watchdog comes back if the
+ * grant is ever cleared, so a grant cannot silently disarm the turn deadline forever.
+ */
+const GRANTED_TURN_RECHECK_MS = 60_000;
+/** How long a quiet turn may sit before the gateway watchdog stops deferring to it. */
+const TURN_LIVENESS_RECHECK_MS = 300_000;
+/** Absolute ceiling, so a turn that chatters without finishing cannot defer forever. */
+const MAX_GATEWAY_TURN_MS = 86_400_000;
 
 const log = childLogger("gateway:rpc");
+
+/**
+ * Every chat turn this process is running, by request id, whichever connection started it — and
+ * the newest one of each session. A connection's own maps die with its socket while its turns run
+ * on (close() keeps them for recovery), so a reloaded page or a second tab could not stop the turn,
+ * could not tell which turn was running, and its next message started a second turn beside the
+ * first on one history (review #2, #7, #15, #38).
+ */
+interface LiveChatTurn {
+  requestId: string;
+  sessionId: string;
+  startedAt: number;
+  /** Aborted once the turn is stopped, superseded or timed out; it may still be unwinding. */
+  signal: AbortSignal;
+  /** Stop it as chat.cancel on its own connection does; false when it was already stopped. */
+  abort: () => boolean;
+}
+const liveChatTurns = new Map<string, LiveChatTurn>();
+const liveChatTurnBySession = new Map<string, string>();
+
+/**
+ * A client's chat.send request id is taken only in this shape: the web's ids, UUIDs and the like.
+ * The id is saved on every history message the turn writes, and with no limit a client could have
+ * any string stored again and again (turn-ids review, INFO 3).
+ */
+const CHAT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Turns that ended here lately, by request id, so a Stop that arrives just after can say "that turn
+ * is over" rather than "no such turn". The web stops a turn it followed after a reload by its session
+ * when chat.cancel does not know it; told nothing more than `cancelled: false`, it also did that for
+ * a turn that had just finished, and the session route stopped the turn that had replaced it (review
+ * of round 1, B #3).
+ */
+const ENDED_TURN_MEMORY_MS = 10 * 60_000;
+const MAX_ENDED_TURNS = 1_000;
+const endedChatTurns = new Map<string, { sessionId: string; endedAt: number }>();
+
+function rememberEndedChatTurn(requestId: string, sessionId: string): void {
+  const now = Date.now();
+  for (const [id, ended] of endedChatTurns) {
+    if (now - ended.endedAt <= ENDED_TURN_MEMORY_MS && endedChatTurns.size < MAX_ENDED_TURNS) break;
+    endedChatTurns.delete(id);
+  }
+  endedChatTurns.delete(requestId);
+  endedChatTurns.set(requestId, { sessionId, endedAt: now });
+}
+
+/** The session of a turn that is running here or ended here lately. */
+function knownChatTurnSession(requestId: string): string | undefined {
+  const live = liveChatTurns.get(requestId);
+  if (live) return live.sessionId;
+  const ended = endedChatTurns.get(requestId);
+  return ended && Date.now() - ended.endedAt <= ENDED_TURN_MEMORY_MS ? ended.sessionId : undefined;
+}
+
+/** The session's running turn; one already stopped and still unwinding does not count. */
+function liveChatTurnOf(sessionId: string): LiveChatTurn | undefined {
+  const requestId = liveChatTurnBySession.get(sessionId);
+  const turn = requestId ? liveChatTurns.get(requestId) : undefined;
+  return turn && !turn.signal.aborted ? turn : undefined;
+}
+
+export interface SteerReply {
+  steered: boolean;
+  active: boolean;
+  id?: string;
+  activeTurnRequestId?: string;
+  /** On a refusal: another turn took the session from the one the message was typed into. */
+  replaced?: true;
+  /** With replaced: that turn's chat.send id, when a chat turn took it. */
+  replacedBy?: string;
+  error?: string;
+}
+
+/**
+ * Queue a message sent into a running turn (POST /api/sessions/:sessionId/steer). With the request
+ * id of the turn it was typed into, only that turn takes it: a page still showing a turn another
+ * tab had replaced steered the replacement, so its message belonged to a turn the page never ran
+ * and stayed "Queued" there. The refusal names the running turn the way session.get does, so the
+ * page can follow that one instead, and the turn that replaced the typed-into one, if one did: with
+ * no turn running, a page could not tell a replaced turn from one that ended, and sent the message
+ * on by itself as a new turn (turn-ids review, LOW 2).
+ */
+export function steerChatTurn(sessionId: string, message: string, clientMessageId?: string, requestId?: string): SteerReply {
+  const queued = turnSteeringManager.enqueue(sessionId, message, clientMessageId, requestId);
+  if (!queued.otherTurn) return { steered: queued.queued, active: queued.active, ...(queued.id ? { id: queued.id } : {}) };
+  const live = liveChatTurnOf(sessionId);
+  return {
+    steered: false,
+    active: queued.active || live !== undefined,
+    ...(live ? { activeTurnRequestId: live.requestId } : {}),
+    ...(queued.replaced ? { replaced: true as const } : {}),
+    ...(queued.replacedBy ? { replacedBy: queued.replacedBy } : {}),
+    error: "The turn this was typed into has ended.",
+  };
+}
+
+/** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
+ *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
+function owningChatSessionId(sessionId: string): string {
+  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
+}
+
+/**
+ * The text the transcript will show for the part of the turn before a steering cut: the merged
+ * assistant entry just ahead of the messages that cut it, or "" when that part wrote none. The
+ * client used to take it from its own stream buffer, which holds only an unvalidated iteration-0
+ * draft — often empty while the saved part has text, sometimes a draft a guard threw away that no
+ * reload shows (review #9). An entry another turn wrote is passed over, as the transcript's own
+ * split does: a turn this one replaced, still unwinding, can write just ahead of the cut, and its
+ * words showed as this turn's (turn-ids review, LOW 1).
+ */
+function steeringSegmentText(transcript: readonly SessionTranscriptMessage[], consumedIds: ReadonlySet<string>, requestId: string): string {
+  const passOver = (entry: SessionTranscriptMessage): boolean =>
+    (entry.midTurn === true && consumedIds.has(entry.steeringId ?? ""))
+    || (entry.requestId !== undefined && entry.requestId !== requestId);
+  let index = transcript.length - 1;
+  while (index >= 0 && passOver(transcript[index]!)) index -= 1;
+  const before = transcript[index];
+  return before?.role === "assistant" ? before.content : "";
+}
 
 function formatApprovalTimeout(timeoutMs: number): string {
   if (timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000} min`;
@@ -60,6 +205,9 @@ export type RpcMethod =
   | "jobs.list"
   | "approval.respond"
   | "input.respond"
+  | "userInput.respond"
+  | "userInput.hold"
+  | "userInput.preview"
   | "computer.list_sessions"
   | "computer.emergency_stop"
   | "computer.heartbeat"
@@ -179,9 +327,14 @@ function parseOverrideFlags(message: string): { clean: string; flags: OverrideFl
   const iterMatch = clean.match(/--iter\s+(\d+)\b/);
   if (iterMatch) {
     const parsedIterations = parseInt(iterMatch[1]!, 10);
+    // An operator who types --iter 80 gets 80. The old Math.min(50, …) silently returned
+    // 50 and reported nothing, which is the same class of defect as the unbounded grant an
+    // enclosing timer ignored: an explicit human number overridden in silence. 200 stays as
+    // the runaway backstop (and is what --iter 0 already meant), so a typo still cannot
+    // spin forever.
     flags.maxIterationsOverride = parsedIterations === 0
       ? 200
-      : Math.max(1, Math.min(50, parsedIterations));
+      : Math.max(1, Math.min(200, parsedIterations));
     clean = clean.replace(/\s*--iter\s+\d+\b/, "");
   }
 
@@ -291,14 +444,13 @@ export class RpcConnection {
   private auditUnsubscribe: (() => void) | null = null;
   private notificationsUnsubscribe: (() => void) | null = null;
   private abortControllers = new Map<string, AbortController>();
-  private sessionTurnRequestIds = new Map<string, string>();
   private pendingApprovals = new Map<string, PendingApproval>();
   private pendingInputRequests = new Map<string, PendingInputRequest>();
   /** Authenticated user for this connection (JWT subject), set at WS connect.
    *  Sessions are attributed to this so document-RAG user scope + per-user RBAC
    *  match the same identity uploads use. Undefined only if the token had no sub. */
   private readonly connUserId: string | undefined;
-  /** Authenticated role (JWT `role` claim); operators may manage any session. */
+  /** Authenticated role (JWT `role` claim); admins may manage any session. */
   private readonly connRole: string | undefined;
 
   constructor(ws: WebSocket, connUserId?: string, connRole?: string) {
@@ -314,16 +466,20 @@ export class RpcConnection {
     log.info({ connId: this.connId }, "RPC connection established");
   }
 
-  /** Operators (instance admins) may access any session. */
+  /**
+   * Admins may access any session. By role RANK of admin, not operator: operator is the role every
+   * account gets by default, so an operator exemption exempted everyone, and any user could read,
+   * drive, rewind or delete another user's session. The HTTP session routes draw the same line.
+   */
   private isSessionAdmin(): boolean {
-    return !!this.connRole && roleRank(this.connRole) >= roleRank("operator");
+    return !!this.connRole && roleRank(this.connRole) >= roleRank("admin");
   }
 
   /**
    * Whether this connection may read/mutate the given session. Enforced so one
    * authenticated user cannot get/delete/archive/reset/rewind/resume another
    * user's (or another connection's) session by id. No-ops for auth-off / no-sub
-   * connections (no identity to enforce) and for operators; unknown/unowned
+   * connections (no identity to enforce) and for admins; unknown/unowned
    * sessions fall through to each handler's normal not-found path.
    */
   private canAccessSession(sid: string): boolean {
@@ -333,7 +489,65 @@ export class RpcConnection {
     return rec.userId === this.connUserId;
   }
 
-  /** Session list scoped to what this connection may see (own + unowned; all for operators). */
+  /**
+   * Who this connection is to the user-input broker: the same admin line as session access, since
+   * answering a question in someone else's running turn puts words in their mouth.
+   */
+  private userInputCaller(): UserInputCaller {
+    return {
+      ...(this.connUserId ? { userId: this.connUserId } : {}),
+      isAdmin: this.isSessionAdmin(),
+    };
+  }
+
+  /**
+   * May this connection stop a turn it did not start? The HTTP /stop route's owner-or-admin line
+   * (callerMayUseSession) and this connection's own session access, whichever is stricter.
+   */
+  private mayStopTurnIn(sessionId: string): boolean {
+    const caller = this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
+    return this.canAccessSession(sessionId) && callerMayUseSession(caller, sessionId);
+  }
+
+  /**
+   * May this connection see an audit event? The stream carried every user's tool calls, arguments
+   * and all, and their session ids, to any authenticated socket, viewers included (review #27).
+   * Admins and connections without an identity see everything; anyone else the events of sessions
+   * they may access — a specialist's or a workflow's session counting as its chat's — and events
+   * with no session that are their own.
+   */
+  private mayWatchAuditEvent(event: AuditEvent): boolean {
+    if (!this.connUserId || this.isSessionAdmin()) return true;
+    if (!event.sessionId) return event.userId !== undefined && event.userId === this.connUserId;
+    const owner = getSessionRecord(owningChatSessionId(event.sessionId));
+    return owner !== undefined && (owner.userId === undefined || owner.userId === this.connUserId);
+  }
+
+  /** Settings as a session shows them: its own choices over the defaults. session.get and
+   *  session.updateSettings answer with the same shape, or a reply without the default effort
+   *  reset the web's effort chip to "medium" (review #5). */
+  private sessionSettingsView(settings: object): Record<string, unknown> {
+    return { effort: getConfig().effort?.default ?? "medium", imageSettingsPrompt: "ask", ...settings };
+  }
+
+  /** Settle what a turn left waiting on this connection — approvals and ask_user questions — so the
+   *  tool parked on one unblocks now and its hold on the clocks ends with the turn. */
+  private settleTurnPrompts(requestId: string): void {
+    for (const [id, pending] of this.pendingApprovals) {
+      if (pending.requestId !== requestId) continue;
+      clearTimeout(pending.timeout);
+      this.pendingApprovals.delete(id);
+      pending.resolve(false);
+    }
+    for (const [id, pending] of this.pendingInputRequests) {
+      if (pending.requestId !== requestId) continue;
+      clearTimeout(pending.timeout);
+      this.pendingInputRequests.delete(id);
+      pending.resolve("");
+    }
+  }
+
+  /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
     const all = listSessions({ includeArchived: true });
     if (!this.connUserId || this.isSessionAdmin()) return all;
@@ -369,11 +583,16 @@ export class RpcConnection {
         const requestId = typeof params["requestId"] === "string" && params["requestId"].trim()
           ? String(params["requestId"])
           : undefined;
+        // Any live turn of a session this connection may use, not only one it started: the page
+        // that probes after a reconnect is asking about the turn it followed before it.
+        const live = requestId ? liveChatTurns.get(requestId) : undefined;
+        const activeTurn = requestId !== undefined
+          && (this.abortControllers.has(requestId) || (live !== undefined && !live.signal.aborted && this.canAccessSession(live.sessionId)));
         return {
           status: "running",
           sessions: listSessions().length,
           uptime: process.uptime(),
-          ...(requestId ? { requestId, activeTurn: this.abortControllers.has(requestId) } : {}),
+          ...(requestId ? { requestId, activeTurn } : {}),
         };
       }
 
@@ -428,6 +647,8 @@ export class RpcConnection {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
         if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const deleted = deleteSession(sid);
+        // What its turns left unread goes with the chat (review of round 2, B #4).
+        turnSteeringManager.dropUnread(sid);
         if (this.activeSessionId === sid) this.activeSessionId = null;
         return { deleted, sessionId: sid };
       }
@@ -449,9 +670,29 @@ export class RpcConnection {
         // Surface per-session effort/time-limit settings so the composer can hydrate
         // its controls; fall back to the configured default tier when unset.
         const settings = getSessionRecord(sid)?.getSettings() ?? {};
+        // A reloaded page gets the questions still waiting for it, and from now on the events of
+        // new ones and of steering a turn leaves unread: the turn's other events stay bound to the
+        // socket that started it.
+        const caller = this.userInputCaller();
+        const mayAnswer = userInputBroker.canAnswerFor(sid, caller);
+        if (mayAnswer) userInputBroker.attachSink(sid, this.connId, (event) => this.sendEvent(event), caller);
+        const liveTurn = liveChatTurnOf(sid);
+        const unreadSteering = mayAnswer ? turnSteeringManager.unreadOf(sid) : [];
         return {
           ...transcript,
-          settings: { effort: getConfig().effort?.default ?? "medium", ...settings },
+          settings: this.sessionSettingsView(settings),
+          // A page reloaded mid-turn, or a second tab, learns the turn is still running — and which
+          // turn, and since when — so it can steer or stop that turn. A chat.send it makes anyway
+          // supersedes the running turn rather than starting a second one beside it.
+          activeTurn: turnSteeringManager.isTurnActive(sid) || liveTurn !== undefined,
+          ...(liveTurn ? { activeTurnRequestId: liveTurn.requestId, activeTurnStartedAt: liveTurn.startedAt } : {}),
+          openUserInputs: mayAnswer ? userInputBroker.listOpen(sid, caller) : [],
+          // Messages a finished turn never read, whose final status went to a socket that was gone.
+          // Only the owner's (or an admin's): they are the person's own words.
+          ...(unreadSteering.length > 0 ? { unreadSteering } : {}),
+          // This clock, when it answered: a question first seen in openUserInputs after a reload
+          // carries server deadlines, and the page needs the skew to count them down.
+          serverNow: Date.now(),
         };
       }
 
@@ -463,7 +704,7 @@ export class RpcConnection {
         if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         const session = getSessionRecord(sid);
         if (!session) throw new Error(`Session not found: ${sid}`);
-        const patch: { effort?: EffortTier; turnTimeoutSecOverride?: number } = {};
+        const patch: { effort?: EffortTier; turnTimeoutSecOverride?: number; imageSettingsPrompt?: "auto" } = {};
         if ("effort" in params) {
           // null / "" / "default" clears the override (reset to the global default).
           const raw = params["effort"];
@@ -477,14 +718,24 @@ export class RpcConnection {
             ? undefined
             : Math.max(0, Math.min(86_400, Number(raw) || 0));
         }
+        if ("imageSettingsPrompt" in params) {
+          // "ask" is the default, so it is stored as no setting at all, like a cleared effort.
+          const raw = params["imageSettingsPrompt"];
+          if (raw === "auto") patch.imageSettingsPrompt = "auto";
+          else if (raw == null || raw === "" || raw === "ask" || raw === "default") patch.imageSettingsPrompt = undefined;
+          else throw new Error('imageSettingsPrompt must be "ask" or "auto"');
+        }
         const updated = session.setSettings(patch);
-        return { settings: updated };
+        return { settings: this.sessionSettingsView(updated) };
       }
 
       case "session.reset": {
         const sid = String(params["sessionId"] ?? this.activeSessionId ?? "");
         if (sid && !this.canAccessSession(sid)) throw new Error(`Session not found: ${sid}`);
         getSessionRecord(sid)?.reset();
+        // Left in place, the old turns' unread messages came back into the emptied chat with every
+        // session.get, as undelivered, with a Resend (review of round 2, B #4).
+        turnSteeringManager.dropUnread(sid);
         return { reset: true };
       }
 
@@ -497,7 +748,11 @@ export class RpcConnection {
         }
         const session = getSessionRecord(sid);
         if (!session) throw new Error(`Session not found: ${sid}`);
+        const lengthBefore = session.getHistory().length;
         session.rewindBeforeIndex(historyIndex);
+        // They sat at the end of the history this cut off. An index at or past the end cuts
+        // nothing, and must not throw away what the person typed (review of round 3, B #2).
+        if (session.getHistory().length !== lengthBefore) turnSteeringManager.dropUnread(sid);
         return { rewound: true, historyIndex };
       }
 
@@ -529,23 +784,56 @@ export class RpcConnection {
         const inputId = String(params["inputId"] ?? "");
         const answer = String(params["answer"] ?? "");
         const pendingInput = this.pendingInputRequests.get(inputId);
-        if (pendingInput) {
-          clearTimeout(pendingInput.timeout);
-          this.pendingInputRequests.delete(inputId);
-          pendingInput.resolve(answer);
-        }
+        // An answer to a question that already timed out used to report ok and vanish, and the
+        // person believed they had been heard.
+        if (!pendingInput) return { ok: false, errors: [{ field: "inputId", message: "expired" }] };
+        clearTimeout(pendingInput.timeout);
+        this.pendingInputRequests.delete(inputId);
+        pendingInput.resolve(answer);
         return { ok: true };
+      }
+
+      // Structured questions from tools at any depth (agent/user-input-broker.ts). Not scoped to
+      // this connection: a reloaded page or a second tab of the session owner answers too.
+      case "userInput.respond": {
+        return userInputBroker.respond(String(params["inputId"] ?? ""), params["answer"], this.userInputCaller());
+      }
+
+      case "userInput.hold": {
+        const held = userInputBroker.hold(String(params["inputId"] ?? ""), this.userInputCaller());
+        if (!held) throw new Error("User input request not found or expired");
+        return held;
+      }
+
+      case "userInput.preview": {
+        const preview = await userInputBroker.preview(
+          String(params["inputId"] ?? ""),
+          String(params["candidateId"] ?? ""),
+          this.userInputCaller(),
+        );
+        if (!preview) throw new Error("Preview not available");
+        return preview;
       }
 
       case "chat.send": {
         const sessionId = String(params["sessionId"] ?? this.activeSessionId ?? "");
-        // Don't let a caller drive a turn on another user's existing session
-        // (a not-yet-created session id falls through — it will be owned by them).
+        // Don't let a caller drive a turn on another user's existing session. An id with no
+        // session behind it passes here and is refused below, where resolveSession finds nothing:
+        // chat.send never creates a session under a client's id (session.create mints the id), so
+        // it cannot adopt the id of a run that has no record, as an A2A run's (a2a-in:<user>:<id>).
+        // Stays the BARE message: an ownership denial must not describe the session's
+        // fate, or the id becomes probeable for existence.
         if (sessionId && !this.canAccessSession(sessionId)) throw new Error(`Session not found: ${sessionId}`);
         let message = String(params["message"] ?? "");
         const displayContent = typeof params["displayContent"] === "string" ? String(params["displayContent"]).trim() : undefined;
         const userAttachments = normalizeChatAttachmentMetadata(params["attachments"]);
         const requestId = String(params["requestId"] ?? randomUUID());
+        if (!CHAT_REQUEST_ID_RE.test(requestId)) throw new Error("requestId must be 1 to 64 characters of A-Za-z0-9_-");
+        // The client picks the id, and the turn registry, the Stop and the turn's questions are all
+        // keyed by it: a second turn under a live id took the entry over, so the first could no
+        // longer be stopped from a reloaded page and its own tab's Stop hit the other turn (review
+        // of round 1, B #6). Refused before anything is sent under that id.
+        if (liveChatTurns.has(requestId)) throw new Error(`requestId ${requestId} is already in use by a running turn`);
         const enableThinkingRaw = params["enableThinking"];
         const enableThinking: boolean | undefined =
           enableThinkingRaw === true || enableThinkingRaw === "true" ? true :
@@ -639,7 +927,10 @@ export class RpcConnection {
             const queued = await createJob({
               sceneName: jobName,
               definitionType: "job",
-              userId: `job:${jobName}`,
+              // As the signed-in user, like the REST route: their run, listed, read and cancelled as
+              // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
+              // connection with no user runs it as the job itself.
+              userId: this.connUserId ?? `job:${jobName}`,
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });
@@ -660,6 +951,22 @@ export class RpcConnection {
             this.sendEvent({ type: "status", data: { status: "error", requestId, error: err instanceof Error ? err.message : String(err) } });
             return { accepted: false, requestId };
           }
+        }
+
+        // --agent names an agent this deployment has. The name was taken as typed: a typo, or an
+        // agent an evaluation still pins after it was renamed, was forced and dispatched, no agent of
+        // that name could be routed to, and an architect-built ephemeral agent answered in its place
+        // with nothing said (review of 0b5089e/a3773aa, 2026-10-08).
+        if (overrideFlags.forceAgent && !isKnownAgentName(overrideFlags.forceAgent)) {
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "blocked",
+              requestId,
+              response: `There is no agent named ${JSON.stringify(overrideFlags.forceAgent)} (--agent). Check the name, or send the message without --agent to let the assistant choose.`,
+            },
+          });
+          return { accepted: false, requestId };
         }
 
         const runMatch = message.match(/^\/run\s+(\S+)(?:\s+(.*))?$/s);
@@ -697,31 +1004,119 @@ export class RpcConnection {
         }
 
         if (!sessionId) throw new Error("No active session — call session.create first");
-        const session = getSession(sessionId) ?? await resolveSession(sessionId);
-        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        // resumeArchived: a turn the watchdog timed out is PARKED, not ended — the
+        // recovered delivery and that turn's partial artifacts are still in its history,
+        // so "continue" must land on the same session instead of dead-ending. Explicit
+        // ("manual") archives stay unresumable and fall through to the not-found path,
+        // which now names WHICH benign cause applies (pruned / deleted / unknown here).
+        const session = getSession(sessionId) ?? await resolveSession(sessionId, { resumeArchived: true });
+        if (!session) throw new Error(`Session not found: ${sessionId} — ${describeMissingSession(sessionId)}`);
 
-        const supersededRequestId = this.sessionTurnRequestIds.get(session.id);
-        if (supersededRequestId && supersededRequestId !== requestId) {
-          this.abortControllers.get(supersededRequestId)?.abort();
-        }
+        // A turn already running on this session is superseded, whichever connection started it.
+        // Only this connection's own turn used to be: after a reload or from a second tab, a send
+        // started a second turn beside the first, both writing one history, and the new turn took
+        // the old one's steering. The old turn now ends as a supersede and reports its leftovers.
+        const superseded = liveChatTurnOf(session.id);
+        if (superseded && superseded.requestId !== requestId) superseded.abort();
 
         const ac = new AbortController();
+        const turnStartedAt = Date.now();
         this.abortControllers.set(requestId, ac);
-        this.sessionTurnRequestIds.set(session.id, requestId);
+        const liveTurn: LiveChatTurn = {
+          requestId,
+          sessionId: session.id,
+          startedAt: turnStartedAt,
+          signal: ac.signal,
+          abort: () => {
+            if (ac.signal.aborted) return false;
+            ac.abort();
+            this.abortControllers.delete(requestId);
+            // Stop means stop: an open question closes now, not when the aborted turn unwinds, and
+            // a tool that asks after this hears "cancelled".
+            userInputBroker.closeTurn(requestId, "aborted");
+            this.settleTurnPrompts(requestId);
+            return true;
+          },
+        };
+        liveChatTurns.set(requestId, liveTurn);
+        liveChatTurnBySession.set(session.id, requestId);
+        // Steering opens here, not when the runtime is through its start-up awaits: a message
+        // sent in that gap found no turn, and the client's fallback send cancelled the turn it
+        // was meant for.
+        const steeringToken = randomUUID();
+        const retiredUnread = turnSteeringManager.armTurn(session.id, steeringToken, requestId);
+        const closeSteering = () => turnSteeringManager.closeTurn(session.id, steeringToken).map(({ id, text }) => ({ id, text }));
+        // Tools of this turn may ask the person structured questions, at any depth; --auto has
+        // nobody to ask. The questions go to this socket and to any tab that loads the session.
+        const interactiveTurn = !overrideFlags.autoApprove;
+        if (interactiveTurn) {
+          userInputBroker.openTurn(requestId, session.id, session.userId);
+          userInputBroker.attachSink(session.id, this.connId, (event) => this.sendEvent(event), this.userInputCaller());
+        }
 
         let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
         let timedOut = false;
         let completed = false;
+        // Last sign of life from this turn — its own text, its reasoning, or any delegate's
+        // progress. The watchdog below consults it instead of deciding on elapsed time alone.
+        let lastTurnActivityAt = 0;
+        const noteTurnActivity = (): void => { lastTurnActivityAt = Date.now(); };
+        // When the watchdog fires next, so a credit below never pulls it EARLIER than a liveness
+        // re-check it already scheduled.
+        let watchdogFiresAt = 0;
+        const armWatchdog = (delayMs: number): void => {
+          if (timeoutHandle) clearTimeout(timeoutHandle);
+          watchdogFiresAt = Date.now() + delayMs;
+          timeoutHandle = setTimeout(endTimedOutSession, delayMs);
+        };
+        // The person answering a question this turn asked is not the turn's time: the watchdog
+        // holds while they do, and the deadline moves by the wait's length when they are done.
+        // The runtime credits its own deadline the same way and leaves these minutes out of the
+        // delegation wait it reports below, so they are counted once. The liveness beat moves
+        // with it: left where it was, the first check after a long answer read the whole wait as
+        // silence and timed out a turn that was producing right up to its question (review #13).
+        const humanWaits = trackHumanWaits(session.id, (waitedMs) => {
+          if (lastTurnActivityAt > 0) lastTurnActivityAt = Math.min(Date.now(), lastTurnActivityAt + waitedMs);
+          if (gatewayDeadlineMs <= 0 || timedOut || completed) return;
+          gatewayDeadlineMs = Math.min(gatewayDeadlineMs + waitedMs, turnStartedAt + MAX_GATEWAY_TURN_MS);
+          if (gatewayDeadlineMs > watchdogFiresAt) armWatchdog(gatewayDeadlineMs - Date.now());
+        }, { turnId: requestId });
 
         const cleanupTurn = () => {
           if (timeoutHandle) {
             clearTimeout(timeoutHandle);
             timeoutHandle = null;
           }
+          humanWaits.dispose();
+          // Questions still open when the turn ends have nobody left to act on the answer.
+          userInputBroker.closeTurn(requestId, timedOut ? "aborted" : "ended");
           this.abortControllers.delete(requestId);
-          if (this.sessionTurnRequestIds.get(session.id) === requestId) {
-            this.sessionTurnRequestIds.delete(session.id);
+          if (liveChatTurns.get(requestId) === liveTurn) {
+            liveChatTurns.delete(requestId);
+            if (liveChatTurnBySession.get(session.id) === requestId) liveChatTurnBySession.delete(session.id);
+            rememberEndedChatTurn(requestId, session.id);
           }
+        };
+        // The turn's final status goes to the socket that started it, with the steering it never
+        // read. After a reload that socket is gone, and those messages stayed "Queued" on the page
+        // that sent them; the session keeps them for session.get instead (review of round 1, B #5).
+        // They also go at once to the session's open pages, in session.get's shape: a stopped turn
+        // slow to notice its abort unwinds after the next send has started, which session.get and
+        // that send's reply both missed, so they surfaced a whole turn late (review of round 3, B #1).
+        const sendFinalStatus = (data: Record<string, unknown>, leftovers: readonly SteeringMessage[] = []): void => {
+          const delivered = this.sendEvent({ type: "status", data: leftovers.length > 0 ? { ...data, unconsumedSteering: leftovers } : data });
+          if (delivered || leftovers.length === 0) return;
+          // Only what was typed into the chat as it is now: a stopped turn slow to unwind pushed what
+          // predated a reset, rewind or delete into the emptied chat right after it was dropped
+          // (review of round 4, B #2). Decided per message, so what was steered into the turn after
+          // the drop is still kept and pushed (round 5, B #1); the delivered status above lists both,
+          // to the page that sent them (turn-ids review, R1).
+          const kept = turnSteeringManager.keepUnread(session.id, requestId, leftovers);
+          if (kept.length === 0) return;
+          userInputBroker.emitToOwner(session.id, {
+            type: "agent.unread_steering",
+            data: { sessionId: session.id, messages: kept.map(({ id, text }) => ({ id, text, requestId })) },
+          });
         };
 
         // --agent flag overrides sceneAllowedAgents (narrows to a single agent)
@@ -731,6 +1126,50 @@ export class RpcConnection {
 
         const endTimedOutSession = () => {
           if (timedOut || completed) return;
+          // The operator's unbounded grant suspends this watchdog. It is the timer that
+          // actually killed run 3959f3ac: the dock promised "let it finish naturally" at
+          // 07:35:24 and this fired at 07:54:36 anyway (turn_timeout_recovered, timeoutMs
+          // 1800000), because the grant reached the sub-agent's own deadline and nothing
+          // else. A grant honoured by some enclosing bounds and not others is the same bug
+          // as a grant honoured by none. Re-arm rather than cancel, so the watchdog resumes
+          // if the grant is ever cleared.
+          if (longRunningGenerationManager.isTurnUnbounded(sessionId)) {
+            log.info(
+              { sessionId, requestId },
+              "Gateway turn watchdog suspended — this turn holds an operator unbounded grant",
+            );
+            armWatchdog(GRANTED_TURN_RECHECK_MS);
+            return;
+          }
+          // Held, but never past the absolute ceiling: request_human_assist's wait length came from
+          // the model, and this branch re-armed forever where the liveness branch stops (review #29).
+          if (humanWaits.isWaiting() && Date.now() - turnStartedAt < MAX_GATEWAY_TURN_MS) {
+            log.info({ sessionId, requestId }, "Gateway turn watchdog held — the turn is waiting on the person or on work they approved");
+            armWatchdog(HUMAN_WAIT_RECHECK_MS);
+            return;
+          }
+          // THE SAME CLOCK, ON THE OTHER SURFACE.
+          //
+          // agui.ts got this deferral; this did not, and this is the path the dashboard
+          // actually uses — so session e95eec63 was cut at 31 minutes by the one gateway
+          // watchdog that still decided on elapsed time alone, having spent 18 of those
+          // minutes inside a single orchestrator completion. Fixing one surface and not its
+          // twin has been the recurring shape of this whole area: the heartbeat, the
+          // delegation-wait clock and the sub-agent event stream each landed on AG-UI first
+          // and had to be chased onto RPC afterwards.
+          //
+          // A turn that produced something within the recheck window is alive and the
+          // watchdog re-arms; one that has gone quiet stops deferring on the very next
+          // check, and the absolute ceiling still bounds a turn that chatters forever.
+          const sinceActivityMs = lastTurnActivityAt > 0 ? Date.now() - lastTurnActivityAt : Infinity;
+          if (sinceActivityMs < TURN_LIVENESS_RECHECK_MS && Date.now() - turnStartedAt < MAX_GATEWAY_TURN_MS) {
+            log.info(
+              { sessionId, requestId, sinceActivityMs },
+              "Gateway turn watchdog deferred — the turn is still producing",
+            );
+            armWatchdog(TURN_LIVENESS_RECHECK_MS);
+            return;
+          }
           timedOut = true;
           ac.abort();
           cleanupTurn();
@@ -739,19 +1178,11 @@ export class RpcConnection {
           // runtime await parked in the tool layer unblocks. Mirrors close()'s
           // resolve(false)/resolve("") sweep; scoped to this requestId so a
           // concurrent turn's prompts on the same connection are untouched.
-          for (const [id, pending] of this.pendingApprovals) {
-            if (pending.requestId !== requestId) continue;
-            clearTimeout(pending.timeout);
-            this.pendingApprovals.delete(id);
-            pending.resolve(false);
-          }
-          for (const [id, pending] of this.pendingInputRequests) {
-            if (pending.requestId !== requestId) continue;
-            clearTimeout(pending.timeout);
-            this.pendingInputRequests.delete(id);
-            pending.resolve("");
-          }
-          if (this.activeSessionId === session.id) this.activeSessionId = null;
+          this.settleTurnPrompts(requestId);
+          // NOTE: activeSessionId is deliberately left pointing at this session. The
+          // timeout parks it rather than ending it, so a follow-up with no explicit
+          // sessionId ("continue") must still resolve here instead of failing with
+          // "No active session"; chat.send un-parks it on arrival.
           // Never dead-end into an empty bubble (audit b6f8336e, 0dc158ad turn 2):
           // the hard timeout aborts the runtime before synthesis, so recover the
           // best-available content from the session and deliver THAT instead of a
@@ -764,9 +1195,15 @@ export class RpcConnection {
             log.warn({ err, sessionId: session.id }, "Timeout best-available recovery failed");
           }
           if (delivery?.response) {
-            try { session.addMessage({ role: "assistant", content: delivery.response }); } catch { /* archive anyway */ }
+            // Named here: this timer does not run inside the turn, whose writes are named for it.
+            try { session.addMessage({ role: "assistant", content: delivery.response, requestId }); } catch { /* archive anyway */ }
           }
-          archiveSession(session.id);
+          // "timeout", not the default "manual": this parks the session (dropped from the
+          // hot set, consolidated, kept on the long retention) while leaving it resumable,
+          // so the follow-up message continues the turn's preserved partial work.
+          archiveSession(session.id, "timeout");
+          // The runtime is still unwinding and would hand these back to a status nobody sends.
+          const unconsumedSteering = closeSteering();
           if (delivery?.response) {
             logAudit("turn_timeout_recovered", {
               requestId,
@@ -775,19 +1212,13 @@ export class RpcConnection {
               timeoutMs: effectiveTurnTimeoutMs,
               effortTier,
             }, { sessionId: session.id, severity: "warn" });
-            this.sendEvent({
-              type: "status",
-              data: { status: "ok", requestId, response: delivery.response, finishReason: "timeout" },
-            });
+            sendFinalStatus({ status: "ok", requestId, response: delivery.response, finishReason: "timeout" }, unconsumedSteering);
           } else {
-            this.sendEvent({
-              type: "status",
-              data: {
-                status: "error",
-                requestId,
-                error: `Turn exceeded the timeout window and did not finish synthesis. Session archived.`,
-              },
-            });
+            sendFinalStatus({
+              status: "error",
+              requestId,
+              error: `Turn exceeded the timeout window and did not finish synthesis. The session is parked — send another message to continue it.`,
+            }, unconsumedSteering);
           }
         };
 
@@ -797,17 +1228,19 @@ export class RpcConnection {
         // at the same absolute ceiling (+ synthesis grace so the runtime aborts + synthesizes first).
         let gatewayDeadlineMs = 0;
         let gatewayDeadlineCeilingMs = 0;
+        // Same correction as agui.ts / runtime.ts: the ceiling is the turn budget PLUS the
+        // delegation-wait allowance. With the bare allowance it equalled the deadline at the
+        // shipped config, so this surface's D5 extension was a no-op too.
         if (effectiveTurnTimeoutMs > 0) {
           const armedAt = Date.now();
           gatewayDeadlineMs = armedAt + effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
-          gatewayDeadlineCeilingMs = armedAt + DELEGATION_WAIT_CEILING_MS + TURN_TIMEOUT_SYNTHESIS_GRACE_MS;
-          timeoutHandle = setTimeout(endTimedOutSession, effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+          gatewayDeadlineCeilingMs = resolveDelegationWaitCeilingMs(armedAt, effectiveTurnTimeoutMs, TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
+          armWatchdog(effectiveTurnTimeoutMs + TURN_TIMEOUT_SYNTHESIS_GRACE_MS);
         }
         const extendGatewayDeadline = (ms: number): void => {
           if (gatewayDeadlineMs <= 0 || timedOut || completed || ms <= 0) return;
           gatewayDeadlineMs = extendDeadlineForDelegationWait(gatewayDeadlineMs, ms, gatewayDeadlineCeilingMs);
-          if (timeoutHandle) clearTimeout(timeoutHandle);
-          timeoutHandle = setTimeout(endTimedOutSession, Math.max(0, gatewayDeadlineMs - Date.now()));
+          armWatchdog(Math.max(0, gatewayDeadlineMs - Date.now()));
         };
 
         if (
@@ -827,13 +1260,24 @@ export class RpcConnection {
           log.info({ requestId, flags: flagSummary }, "Inline overrides active");
         }
 
-        runTurn({
+        // The turn runs under this request id (RequestContext.turnId), so the watchdog's tracker above
+        // and every wait of the run name the same turn — an --auto turn too, which has no question
+        // channel to carry one (review of round 1, B #7).
+        runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: requestId }, () => runTurn({
           session,
           userMessage: message,
           userDisplayContent: displayContent,
+          // What the person typed. `message` can carry inlined image analysis (the web chat's typed
+          // text is displayContent then), and after /run it is the scene's template, which is not
+          // the user's words at all. The flags come out of the typed text as they came out of the
+          // message, below the attachment line (typedUserWords).
+          userWords: runMatch
+            ? undefined
+            : typedUserWords(message, displayContent, (typed) => parseOverrideFlags(typed).clean),
           userAttachments,
           signal: ac.signal,
           allowedAgents: effectiveAllowedAgents,
+          ...(overrideFlags.forceAgent ? { directiveAgent: overrideFlags.forceAgent } : {}),
           humanInLoopSteps,
           autoApprove: overrideFlags.autoApprove,
           maxIterationsOverride: overrideFlags.maxIterationsOverride,
@@ -844,14 +1288,38 @@ export class RpcConnection {
           effortTier,
           // D5: keep the gateway hard-timeout in lockstep with the runtime's delegation-wait exclusion.
           onDelegationWaitMs: extendGatewayDeadline,
+          steeringToken,
+          // Every history message the turn writes names it, so a reload can tell this turn's
+          // entries apart from another tab's with the same words.
+          requestId,
+          ...(interactiveTurn ? { userInput: { rootSessionId: session.id, turnId: requestId, mode: "interactive" as const } } : {}),
           onChunk: (text) => {
+            noteTurnActivity();
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
           },
           onReasoning: (text) => {
+            noteTurnActivity();
             this.sendEvent({ type: "agent.reasoning", data: { requestId, text } });
           },
           onStatus: (status) => {
             this.sendEvent({ type: "status", data: { requestId, status: status.phase, message: status.message, iteration: status.iteration } });
+          },
+          // The texts ride along so a tab that did not send them can still show them. The runtime
+          // never throws away a written draft to fold a message in, hence discardedDraft is false.
+          // segmentText is what the transcript keeps for the part before this cut, read from the
+          // transcript itself (the messages are already in history), so live and reload agree.
+          onSteeringConsumed: ({ messages, iteration, at }) => {
+            noteTurnActivity();
+            let segmentText = "";
+            try {
+              segmentText = steeringSegmentText(session.toTranscript(), new Set(messages.map((message) => message.id)), requestId);
+            } catch (err) {
+              log.warn({ err, sessionId: session.id }, "Steering segment text unavailable");
+            }
+            this.sendEvent({
+              type: "agent.steering_consumed",
+              data: { requestId, iteration, at, discardedDraft: false, messages, segmentText },
+            });
           },
           onToolCall: (toolCallId, name, args) => {
             this.sendEvent({ type: "agent.tool_start", data: { requestId, toolCallId, name, args } });
@@ -869,6 +1337,7 @@ export class RpcConnection {
             });
           },
           onSubAgentProgress: (event) => {
+            noteTurnActivity();
             if (event.kind === "reasoning" && event.reasoning) {
               this.sendEvent({
                 type: "agent.reasoning",
@@ -893,6 +1362,17 @@ export class RpcConnection {
                   sourceAgent: event.agentName,
                   delegated: true,
                 },
+              });
+              return;
+            }
+
+            // A specialist's start and finish are status, not tool events: without them the pill
+            // froze on the orchestrator's last phase for the minutes a specialist ran tool-less.
+            const lifecycle = subAgentProgressStatus(event);
+            if (lifecycle) {
+              this.sendEvent({
+                type: "status",
+                data: { requestId, status: lifecycle.phase, message: lifecycle.message, iteration: lifecycle.iteration, sourceAgent: event.agentName, delegated: true },
               });
               return;
             }
@@ -948,9 +1428,13 @@ export class RpcConnection {
               this.pendingApprovals.set(approvalId, { requestId, resolve, reject, timeout });
             });
           },
-          inputCallback: async (question, choices, timeoutMs = 120_000) => {
+          inputCallback: async (question, choices, requestedTimeoutMs) => {
             const inputId = randomUUID();
-            this.sendEvent({ type: "agent.input_needed", data: { requestId, inputId, question, choices } });
+            // The deadline travels with the question, as it does for approvals, so the card can
+            // count down and close itself instead of outliving the wait.
+            const timeoutMs = clampUserInputTimeoutMs(requestedTimeoutMs);
+            const expiresAt = new Date(Date.now() + timeoutMs).toISOString();
+            this.sendEvent({ type: "agent.input_needed", data: { requestId, inputId, question, choices, timeoutMs, expiresAt } });
 
             return new Promise<string>((resolve) => {
               const timeout = setTimeout(() => {
@@ -961,46 +1445,63 @@ export class RpcConnection {
               this.pendingInputRequests.set(inputId, { requestId, resolve, timeout });
             });
           },
-        }).then(output => {
+        })).then(output => {
           if (timedOut || completed) return;
           completed = true;
           cleanupTurn();
-          this.sendEvent({
-            type: "status",
-            data: {
-              status: output.blocked ? "blocked" : "ok",
-              requestId,
-              response: output.response,
-              toolCallsExecuted: output.toolCallsExecuted,
-              guardrailEvents: output.guardrailEvents,
-              usage: output.usage,
-              swarmState: output.swarmState,
-              performance: output.performance,
-            },
-          });
+          // What was queued after the last drain rides along: the client sends it on as the next turn.
+          sendFinalStatus({
+            status: output.blocked ? "blocked" : "ok",
+            requestId,
+            response: output.response,
+            toolCallsExecuted: output.toolCallsExecuted,
+            guardrailEvents: output.guardrailEvents,
+            usage: output.usage,
+            swarmState: output.swarmState,
+            performance: output.performance,
+          }, output.unconsumedSteering ?? []);
         }).catch(err => {
           if (timedOut || completed) return;
           completed = true;
           cleanupTurn();
-          this.sendEvent({ type: "status", data: { status: "error", requestId, error: String(err) } });
+          // The runtime records what it never drained on the error it throws; a turn that failed
+          // before it got going left them in the queue this call armed.
+          sendFinalStatus({ status: "error", requestId, error: String(err) }, [...unconsumedSteeringOf(err), ...closeSteering()]);
         });
 
-        return { accepted: true, requestId };
+        // What earlier turns left unread and this start retired goes back to the page that sent it,
+        // in session.get's shape. The web stops its own turn with chat.cancel before it sends, and a
+        // turn that unwound in between had its leftovers kept for the session and dropped by this
+        // start at once, shown to nobody (review of round 2, B #5). Only the owner's (or an
+        // admin's), as in session.get.
+        const unreadSteering = retiredUnread.length > 0 && userInputBroker.canAnswerFor(session.id, this.userInputCaller())
+          ? retiredUnread
+          : [];
+        return { accepted: true, requestId, ...(unreadSteering.length > 0 ? { unreadSteering } : {}) };
       }
 
       case "chat.cancel": {
         const requestId = String(params["requestId"] ?? "");
-        const ac = this.abortControllers.get(requestId);
-        if (ac) {
-          ac.abort();
-          this.abortControllers.delete(requestId);
-        }
-        return { cancelled: Boolean(ac), requestId };
+        // Not only this connection's own turns. After a reconnect the page still follows the turn
+        // by its request id, but the new socket held no controller for it: Stop aborted nothing,
+        // left the open question to run out into a render, and the page said "cancelled" (review
+        // #15/#39). A turn another connection started is stopped the same way, for a caller the
+        // HTTP /stop route would let stop it. `cancelled` says whether this call stopped a turn.
+        // `known` says whether this process runs the turn or ran it lately, for a caller who may stop
+        // it: `cancelled: false` alone read the same for a turn that had just ended as for one held
+        // by another instance, and a session-wide Stop sent for the first stopped the turn after it
+        // (review of round 1, B #3). Only an unknown turn may be stopped some other way.
+        const live = liveChatTurns.get(requestId);
+        const sessionOf = knownChatTurnSession(requestId);
+        const known = sessionOf !== undefined && (this.abortControllers.has(requestId) || this.mayStopTurnIn(sessionOf));
+        const cancelled = known && live !== undefined && live.abort();
+        return { cancelled, requestId, known };
       }
 
       case "audit.subscribe": {
         if (this.auditUnsubscribe) this.auditUnsubscribe();
         this.auditUnsubscribe = subscribeToAudit(event => {
+          if (!this.mayWatchAuditEvent(event)) return;
           this.sendEvent({ type: "audit.event", data: event });
         });
         return { subscribed: true };
@@ -1100,24 +1601,30 @@ export class RpcConnection {
       pending.resolve("");
     }
     this.pendingInputRequests.clear();
+    // Structured questions outlive the socket: they stay open until their own deadline, for a
+    // reloaded page or another tab to answer (session.get lists them).
+    userInputBroker.detachSink(this.connId);
     log.info({ connId: this.connId }, "RPC connection closed");
   }
 
-  private sendEvent(event: GatewayEvent): void {
-    this.sendRaw({ ...event });
+  /** True when the event was handed to an open socket. */
+  private sendEvent(event: GatewayEvent): boolean {
+    return this.sendRaw({ ...event });
   }
 
   private sendResponse(res: RpcResponse): void {
     this.sendRaw({ type: "rpc.response", ...res });
   }
 
-  private sendRaw(data: unknown): void {
+  private sendRaw(data: unknown): boolean {
     if (this.ws.readyState === 1 /* OPEN */) {
       try {
         this.ws.send(JSON.stringify(data));
+        return true;
       } catch (err) {
         log.error({ err }, "Failed to send WS message");
       }
     }
+    return false;
   }
 }

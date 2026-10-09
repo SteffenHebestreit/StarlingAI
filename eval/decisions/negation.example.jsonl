@@ -1,0 +1,54 @@
+// Negation minimal pairs for fast_lane and source_sensitive — SYNTHETIC and hand-labelled by the rules of
+// eval/decisions/README.md (gold follows the point's definition, not the words). Two cases share a "pair" id and differ
+// by where a negation sits (German nicht/kein/nichts, English not/no/don't): where it changes what is asked, the gold
+// labels differ ("flip" pairs); where it does not, they are the same ("control" pairs). Laya's checkpoints are known
+// to read past a negation (upstream #377: "please do NOT cancel" -> cancel_account 0.9998): a flip pair it answers
+// the same way twice is one it did not read.
+//
+// Not part of the gate replay or the projection: the bench reports these pairs on their own.
+// Run: pnpm --filter @starlingai/core decisions:bench --negation
+
+{"id": "fl-neg-de-01a", "point": "fast_lane", "language": "de", "state": {"message": "Ich brauche keine Hilfe, wollte nur hallo sagen."}, "gold": "small_talk", "pair": "fl-neg-de-01", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-01b", "point": "fast_lane", "language": "de", "state": {"message": "Ich brauche Hilfe, wollte nicht nur hallo sagen."}, "gold": "task", "pair": "fl-neg-de-01", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-02a", "point": "fast_lane", "language": "de", "state": {"message": "Du musst heute nichts für mich erledigen, danke!"}, "gold": "small_talk", "pair": "fl-neg-de-02", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-02b", "point": "fast_lane", "language": "de", "state": {"message": "Du musst heute noch etwas für mich erledigen, danke!"}, "gold": "task", "pair": "fl-neg-de-02", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-03a", "point": "fast_lane", "language": "de", "state": {"message": "Schreib mir nichts, ich wollte nur danke sagen."}, "gold": "small_talk", "pair": "fl-neg-de-03", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-03b", "point": "fast_lane", "language": "de", "state": {"message": "Schreib mir etwas, ich wollte nicht nur danke sagen."}, "gold": "task", "pair": "fl-neg-de-03", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-de-04a", "point": "fast_lane", "language": "de", "state": {"message": "Nicht vergessen: danke für deine Hilfe gestern!"}, "gold": "small_talk", "pair": "fl-neg-de-04", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-de-04b", "point": "fast_lane", "language": "de", "state": {"message": "Danke für deine Hilfe gestern!"}, "gold": "small_talk", "pair": "fl-neg-de-04", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-de-05a", "point": "fast_lane", "language": "de", "state": {"message": "Rechne 12 mal 12, nicht 12 plus 12."}, "gold": "task", "pair": "fl-neg-de-05", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-de-05b", "point": "fast_lane", "language": "de", "state": {"message": "Rechne 12 mal 12."}, "gold": "task", "pair": "fl-neg-de-05", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-en-01a", "point": "fast_lane", "language": "en", "state": {"message": "I don't need any help, just wanted to say hi."}, "gold": "small_talk", "pair": "fl-neg-en-01", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-01b", "point": "fast_lane", "language": "en", "state": {"message": "I need some help, not just to say hi."}, "gold": "task", "pair": "fl-neg-en-01", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-02a", "point": "fast_lane", "language": "en", "state": {"message": "You don't have to do anything for me today, thanks!"}, "gold": "small_talk", "pair": "fl-neg-en-02", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-02b", "point": "fast_lane", "language": "en", "state": {"message": "You have to do something for me today, thanks!"}, "gold": "task", "pair": "fl-neg-en-02", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-03a", "point": "fast_lane", "language": "en", "state": {"message": "Don't write me anything, I only wanted to say thanks."}, "gold": "small_talk", "pair": "fl-neg-en-03", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-03b", "point": "fast_lane", "language": "en", "state": {"message": "Write me something, I didn't only want to say thanks."}, "gold": "task", "pair": "fl-neg-en-03", "tags": ["negation-pair", "flip"]}
+{"id": "fl-neg-en-04a", "point": "fast_lane", "language": "en", "state": {"message": "No worries, and thanks again for yesterday!"}, "gold": "small_talk", "pair": "fl-neg-en-04", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-en-04b", "point": "fast_lane", "language": "en", "state": {"message": "Thanks again for yesterday!"}, "gold": "small_talk", "pair": "fl-neg-en-04", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-en-05a", "point": "fast_lane", "language": "en", "state": {"message": "Convert 5 miles to kilometres, not metres."}, "gold": "task", "pair": "fl-neg-en-05", "tags": ["negation-pair", "control"]}
+{"id": "fl-neg-en-05b", "point": "fast_lane", "language": "en", "state": {"message": "Convert 5 miles to kilometres."}, "gold": "task", "pair": "fl-neg-en-05", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-de-01a", "point": "source_sensitive", "language": "de", "state": {"message": "Nicht den aktuellen Leitzins, nur was ein Leitzins ist."}, "gold": "no", "pair": "ss-neg-de-01", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-01b", "point": "source_sensitive", "language": "de", "state": {"message": "Den aktuellen Leitzins, nicht nur was ein Leitzins ist."}, "gold": "yes", "pair": "ss-neg-de-01", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-02a", "point": "source_sensitive", "language": "de", "state": {"message": "Nicht für ein bestimmtes Land, allgemein: wie funktioniert ein Pfandsystem?"}, "gold": "no", "pair": "ss-neg-de-02", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-02b", "point": "source_sensitive", "language": "de", "state": {"message": "Für Deutschland, nicht allgemein: wie funktioniert das Pfandsystem?"}, "gold": "yes", "pair": "ss-neg-de-02", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-03a", "point": "source_sensitive", "language": "de", "state": {"message": "Ich brauche keine aktuellen Preise, erklär nur, wie ein Stromtarif aufgebaut ist."}, "gold": "no", "pair": "ss-neg-de-03", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-03b", "point": "source_sensitive", "language": "de", "state": {"message": "Ich brauche die aktuellen Preise, nicht nur, wie ein Stromtarif aufgebaut ist."}, "gold": "yes", "pair": "ss-neg-de-03", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-04a", "point": "source_sensitive", "language": "de", "state": {"message": "Kein bestimmtes Modell, allgemein: worauf achte ich beim Kauf eines E-Bikes?"}, "gold": "no", "pair": "ss-neg-de-04", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-04b", "point": "source_sensitive", "language": "de", "state": {"message": "Ein bestimmtes Modell, nicht allgemein: welches E-Bike ist gerade das beste?"}, "gold": "yes", "pair": "ss-neg-de-04", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-de-05a", "point": "source_sensitive", "language": "de", "state": {"message": "Schau nichts nach, sag nur: wie hoch ist die Mehrwertsteuer in Österreich?"}, "gold": "yes", "pair": "ss-neg-de-05", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-de-05b", "point": "source_sensitive", "language": "de", "state": {"message": "Schau nach: wie hoch ist die Mehrwertsteuer in Österreich?"}, "gold": "yes", "pair": "ss-neg-de-05", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-de-06a", "point": "source_sensitive", "language": "de", "state": {"message": "Such nicht im Internet, erklär einfach: was ist Rekursion?"}, "gold": "no", "pair": "ss-neg-de-06", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-de-06b", "point": "source_sensitive", "language": "de", "state": {"message": "Such im Internet und erklär: was ist Rekursion?"}, "gold": "no", "pair": "ss-neg-de-06", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-en-01a", "point": "source_sensitive", "language": "en", "state": {"message": "Not the current base rate, just what a base rate is."}, "gold": "no", "pair": "ss-neg-en-01", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-01b", "point": "source_sensitive", "language": "en", "state": {"message": "The current base rate, not just what a base rate is."}, "gold": "yes", "pair": "ss-neg-en-01", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-02a", "point": "source_sensitive", "language": "en", "state": {"message": "Not for any particular country, in general: how does a deposit return scheme work?"}, "gold": "no", "pair": "ss-neg-en-02", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-02b", "point": "source_sensitive", "language": "en", "state": {"message": "For Germany, not in general: how does the deposit return scheme work?"}, "gold": "yes", "pair": "ss-neg-en-02", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-03a", "point": "source_sensitive", "language": "en", "state": {"message": "I don't need today's prices, just explain how an electricity tariff is structured."}, "gold": "no", "pair": "ss-neg-en-03", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-03b", "point": "source_sensitive", "language": "en", "state": {"message": "I need today's prices, not just how an electricity tariff is structured."}, "gold": "yes", "pair": "ss-neg-en-03", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-04a", "point": "source_sensitive", "language": "en", "state": {"message": "No specific brand, in general: what should I look for in running shoes?"}, "gold": "no", "pair": "ss-neg-en-04", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-04b", "point": "source_sensitive", "language": "en", "state": {"message": "A specific brand, not general advice: which running shoe is the best right now?"}, "gold": "yes", "pair": "ss-neg-en-04", "tags": ["negation-pair", "flip"]}
+{"id": "ss-neg-en-05a", "point": "source_sensitive", "language": "en", "state": {"message": "Don't look it up, just tell me: what is the VAT rate in Austria?"}, "gold": "yes", "pair": "ss-neg-en-05", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-en-05b", "point": "source_sensitive", "language": "en", "state": {"message": "Look it up: what is the VAT rate in Austria?"}, "gold": "yes", "pair": "ss-neg-en-05", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-en-06a", "point": "source_sensitive", "language": "en", "state": {"message": "Don't search the web, just explain: what is recursion?"}, "gold": "no", "pair": "ss-neg-en-06", "tags": ["negation-pair", "control"]}
+{"id": "ss-neg-en-06b", "point": "source_sensitive", "language": "en", "state": {"message": "Search the web and explain: what is recursion?"}, "gold": "no", "pair": "ss-neg-en-06", "tags": ["negation-pair", "control"]}

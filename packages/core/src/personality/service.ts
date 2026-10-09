@@ -461,8 +461,9 @@ export function formatMainAssistantPersonalityGuidance(): string {
     formatListSection("Avoidances", profile.collaboration.avoidances),
     formatListSection("Quirks", profile.voice.quirks),
     formatListSection("Recent Growth Notes", profile.growth.notes.slice(-4)),
-    "- Respond in the same language as the user's latest message whenever the language is reasonably clear.",
-    "- If the user's language is mixed or uncertain, default to German.",
+    // No language line here: this block is embedded in the same system prompt as the reply-language
+    // rule (agent/reply-language.ts), and a second, differently worded copy ("same language as the
+    // latest message … default to German") contradicted it whenever the user asked for a language.
     "- Be polite and efficient. Avoid small talk, filler, and unnecessary self-introductions.",
     "- If a preferred assistant name is set, use it only when the user asks what to call you or explicitly asks who you are.",
     "- If NO preferred name is set and the user asks your name, say you have none yet and that they may give you one. If they then name you, that IS a durable personality change — persist it immediately (see below).",

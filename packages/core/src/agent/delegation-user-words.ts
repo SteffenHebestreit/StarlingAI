@@ -1,0 +1,150 @@
+/**
+ * The user's own words, carried to a delegated specialist next to the orchestrator's task.
+ *
+ * A specialist starts from `task` and `context`, and both are the orchestrator's paraphrase. When
+ * the paraphrase leaves out an explicit constraint, nothing downstream can recover it: in session
+ * f4ebf47b the user wrote "nicht den fast-tier", the delegated task said nothing about the tier,
+ * and image_creator rendered on the fast tier again. The specialist's own tool guidance ("choose
+ * 'quality' ONLY when the user explicitly asked") depends on words it could not see.
+ *
+ * So the words a person actually typed this turn ride along, bounded and never translated, and
+ * stay OUT of `task`: routing, the reuse signature, the language normalizer and the audit preview
+ * all key on `task`, and none of them should change because of this.
+ */
+import { defangFramingMarkers } from "../guardrails/framing-markers.js";
+import { SPECIALIST_REPLY_LANGUAGE_INSTRUCTION } from "./reply-language.js";
+
+/** What the user typed this turn: the message that opened it, then anything added while it ran. */
+export interface TurnUserWords {
+  opening: string;
+  midTurn: string[];
+}
+
+/** Long pastes keep their head and tail; the middle is the part least likely to hold the ask. */
+const OPENING_MAX_CHARS = 1_200;
+const MID_TURN_MAX_CHARS = 400;
+/** Only the latest additions: an older one has usually been superseded by a newer one. */
+const MID_TURN_MAX_ENTRIES = 3;
+
+// Deliberately NOT "Original user request:". runtime-utils.ts reads that phrase as a delegation
+// task echoed back into an answer, and this block is a different thing.
+const LABEL = "[USER'S OWN WORDS — this turn, verbatim, untranslated]";
+// The language sentence is here because this block is the only place a specialist sees what the
+// user actually wrote. Its task is the orchestrator's paraphrase and is often English, and a
+// specialist that mirrored its task delivered an English page to a German speaker.
+const GUIDANCE =
+  "The task above is the orchestrator's summary. Your assignment is still the task; use these words to honour any "
+  + "explicit instruction or constraint the user stated that applies to your part (e.g. a model, quality tier, format, "
+  + "language, something to avoid). Where the summary and the user's words disagree on such a constraint, follow the "
+  + `user's words. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION} Do not repeat this block.`;
+/** When the task already quotes the user's words, only the language instruction is still missing. */
+const LANGUAGE_ONLY_LABEL = "[REPLY LANGUAGE]";
+const LANGUAGE_ONLY_GUIDANCE =
+  `The user's own words are quoted in the task or context above. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION}`;
+
+function clipMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const head = Math.round((maxChars * 2) / 3);
+  const tail = maxChars - head;
+  return `${text.slice(0, head)}…(${text.length - head - tail} chars omitted)…${text.slice(text.length - tail)}`;
+}
+
+function normalizeForContainment(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * The line the web chat (and the E2E runner, which sends what it sends) puts first in the bubble
+ * text of a message with attachments: "📎 " and the file names. It is in no message.
+ */
+const ATTACHMENT_LINE = /^📎[^\n]*(?:\n|$)/u;
+
+/**
+ * The words specialists are told the user typed, from a chat entry point that received the typed
+ * text separately from the message (the web chat's displayContent). That field is supplied by the
+ * client and the input guardrail and moderation run on the message alone, so the typed text is
+ * trusted only when the checked message contains it; otherwise the checked message is used.
+ *
+ * With attachments the bubble text starts with the attachment line, and the message carries each
+ * picture's analysis ahead of the typed text instead. Read as a whole the bubble text was in no
+ * message, so the whole message, the analysis a vision model wrote included, was taken for the
+ * user's words: a specialist told to write in the language of the user's own words read an English
+ * description as what a German speaker wrote. The words are what follows that line, and none when
+ * nothing follows it.
+ *
+ * `withoutFlags` takes the entry point's inline flags (--auto, --effort, …) out of the typed text,
+ * as they were taken out of the message. It runs on the text after the attachment line: run on the
+ * whole bubble text, a flag typed first took the line break in front of it, the typed words joined
+ * the attachment line, and the turn got no words of the person's at all.
+ */
+export function typedUserWords(
+  checkedMessage: string,
+  typed: string | undefined,
+  withoutFlags: (text: string) => string = (text) => text,
+): string {
+  const text = typed?.trim() ?? "";
+  if (!text) return checkedMessage;
+  const attachmentLine = ATTACHMENT_LINE.exec(text)?.[0];
+  if (!attachmentLine) {
+    const words = withoutFlags(text).trim();
+    return words && checkedMessage.includes(words) ? words : checkedMessage;
+  }
+  const afterAttachments = withoutFlags(text.slice(attachmentLine.length)).trim();
+  return checkedMessage.includes(afterAttachments) ? afterAttachments : checkedMessage;
+}
+
+/**
+ * The user's words as lines another prompt can quote: clipped, framing markers defanged, mid-turn
+ * additions marked. `isNew` drops a part the reader already has; by default only empty parts go.
+ * Shared, so every prompt that quotes the user bounds and defangs the words the same way.
+ */
+export function userWordsLines(
+  words: TurnUserWords | undefined,
+  isNew: (part: string) => boolean = (part) => part.length > 0,
+): string[] {
+  if (!words) return [];
+  const opening = words.opening.trim();
+  const lines: string[] = [];
+  if (isNew(opening)) lines.push(defangFramingMarkers(clipMiddle(opening, OPENING_MAX_CHARS)));
+  for (const entry of words.midTurn.slice(-MID_TURN_MAX_ENTRIES)) {
+    const trimmed = entry.trim();
+    if (isNew(trimmed)) lines.push(`(added mid-turn) ${defangFramingMarkers(clipMiddle(trimmed, MID_TURN_MAX_CHARS))}`);
+  }
+  return lines;
+}
+
+/**
+ * The block appended to a specialist's first message, or "" when there is nothing to add.
+ *
+ * A part the task or context already quotes is dropped, so a task that embeds the request itself
+ * (the source-sensitive frames do) does not carry it twice. `alreadyCarried` is what the
+ * specialist will see anyway: its task and its context. When everything is already carried, the
+ * reply-language instruction still is not, so that alone is added.
+ */
+export function renderUserWordsBlock(words: TurnUserWords | undefined, alreadyCarried: string): string {
+  if (!words) return "";
+  const carried = normalizeForContainment(alreadyCarried);
+  const lines = userWordsLines(words, (part) => {
+    const normalized = normalizeForContainment(part);
+    return normalized.length > 0 && !carried.includes(normalized);
+  });
+  if (lines.length === 0) {
+    const anyWords = userWordsLines(words).length > 0;
+    return anyWords ? `\n\n${LANGUAGE_ONLY_LABEL} ${LANGUAGE_ONLY_GUIDANCE}` : "";
+  }
+  return `\n\n${LABEL}\n${GUIDANCE}\n${lines.join("\n")}`;
+}
+
+/**
+ * The block for one specialist run. An A2A bridge agent forwards its task to another instance, so
+ * the user's words are kept off it: they never leave this instance unless someone sends them.
+ */
+export function userWordsBlockForRun(
+  agentDomain: string | undefined,
+  words: TurnUserWords | undefined,
+  task: string,
+  context: string | undefined,
+): string {
+  if (agentDomain === "a2a") return "";
+  return renderUserWordsBlock(words, `${task}\n${context ?? ""}`);
+}

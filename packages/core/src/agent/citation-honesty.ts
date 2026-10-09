@@ -1,3 +1,7 @@
+import { IN_REPLY_LANGUAGE, defaultReplyLanguage } from "./reply-language.js";
+import { detectTextLanguage } from "./text-language.js";
+import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
+
 // isBroadSourceSensitiveAdvisoryRequest (a bilingual product/BOM/wiring/quality keyword scorer)
 // was DELETED in the de-lexicalization: it was a per-language keyword table and its only caller
 // (hasRecentSparseSourceSensitiveMemoryReuse) sat behind the always-false sourceSensitive gate.
@@ -17,20 +21,63 @@ export function looksLikeTransparentIncompleteReport(text: string): boolean {
  *    the model fabricated an analog mic's interface as I2S). This is the central
  *    "never made-up facts" rule applied at the exact point that induced the fabrication;
  *  - otherwise → the standard "synthesise from the grounded evidence" directive.
+ *
+ * A delegated run that masked figures no tool had returned (`unobservedRuns`, from its run record)
+ * outranks all three. Its script is usually attached, so the artifact shape told the orchestrator
+ * "The orchestration is COMPLETE … state what was completed" over a computation that never ran
+ * (E2E 2026-10-07: primes.js written, seven sandbox runs failed or printed nothing). Only the
+ * files those runs wrote are named as written but not run; the turn's other files are still its
+ * deliverables. In review, a report content_writer had finished was named as the coder's unrun
+ * output, and nothing said it was attached.
  */
+/** A delegated run whose account stated figures no tool returned: its run-record line and the files
+ *  it wrote, as its delegation recorded them. */
+export interface UnobservedRun {
+  agent: string;
+  line: string;
+  files?: readonly string[];
+}
+
+function describeUnobservedRuns(unobservedRuns: readonly UnobservedRun[]): { agents: string; lines: string; runFiles: string[]; filesClause: string } {
+  const agents = [...new Set(unobservedRuns.map((run) => run.agent))].join(", ");
+  const lines = unobservedRuns.length === 1
+    ? unobservedRuns[0]!.line
+    : unobservedRuns.map((run) => `${run.agent}: ${run.line}`).join("; ");
+  const runFiles = [...new Set(unobservedRuns.flatMap((run) => run.files ?? []))].filter(Boolean);
+  const filesClause = runFiles.length > 0
+    ? `name the files it wrote (${runFiles.slice(0, 12).join(", ")}) as written but not run successfully, `
+    : "";
+  return { agents, lines, runFiles, filesClause };
+}
+
 export function buildSynthesisRequiredDirective(opts: {
   artifactPaths?: readonly string[];
   partialEvidence?: boolean;
+  /** Delegated runs whose account stated figures no tool returned: each with its run-record line
+   *  and the files that run wrote, as its delegation recorded them. */
+  unobservedRuns?: readonly UnobservedRun[];
 }): string {
   const artifactPaths = (opts.artifactPaths ?? []).filter(Boolean);
+  const unobservedRuns = opts.unobservedRuns ?? [];
+  if (unobservedRuns.length > 0) {
+    const { agents, lines, runFiles, filesClause } = describeUnobservedRuns(unobservedRuns);
+    const otherFiles = artifactPaths.filter((path) => !runFiles.includes(path));
+    const deliverables = otherFiles.length > 0
+      ? ` The turn's other deliverables are attached to this message as files (${otherFiles.slice(0, 12).join(", ")}): list each with a one-line description.`
+      : "";
+    return `[SYNTHESIS REQUIRED] The delegated run of ${agents} stated figures that no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} (${lines}). `
+      + `Write the final answer ${IN_REPLY_LANGUAGE}: say what was run and how it failed (from the run record above, in plain words), `
+      + `${filesClause}and say plainly that the masked values were not computed.${deliverables} `
+      + "Do NOT state, estimate or round any value that only running the code could produce. Do NOT delegate again.";
+  }
   if (artifactPaths.length > 0) {
     return "[SYNTHESIS REQUIRED] The orchestration is COMPLETE and its deliverables are attached to this message as files ("
       + artifactPaths.slice(0, 12).join(", ")
-      + "). Write a SHORT final answer in the user's language: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.";
+      + `). Write a SHORT final answer ${IN_REPLY_LANGUAGE}: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.`;
   }
   if (opts.partialEvidence) {
     return "[SYNTHESIS REQUIRED] The research for this turn did NOT complete — the evidence above is PARTIAL and is probably missing the specifics the request needs. "
-      + "Write the most useful answer you honestly can in the user's language, but follow the quality rule strictly: state a concrete fact — a spec, interface, rating, dimension, price, part number, model name, URL, or figure — as confirmed ONLY if it appears verbatim in the evidence above. "
+      + `Write the most useful answer you honestly can ${IN_REPLY_LANGUAGE}, but follow the quality rule strictly: state a concrete fact — a spec, interface, rating, dimension, price, part number, model name, URL, or figure — as confirmed ONLY if it appears verbatim in the evidence above. `
       + "For anything NOT in that evidence, including details you believe you already know, do NOT present it as verified: either omit it, or clearly mark it as UNVERIFIED and say it must be checked against the official datasheet/source. "
       + "Never invent a value to fill a gap. A shorter answer that cleanly separates confirmed facts from unverified suggestions is BETTER than a complete-looking one that fabricates specifics. Do NOT delegate again.";
   }
@@ -40,11 +87,34 @@ export function buildSynthesisRequiredDirective(opts: {
     + "Copy the exact names, numbers, values, task states, and statuses from the evidence into your answer.";
 }
 
-/** Lightweight German detection to localize the unverified-answer caveat. */
-export function answerLooksGerman(text: string): boolean {
-  const t = text.toLowerCase();
-  if (/[äöüß]/.test(t)) return true;
-  return /\b(ich|und|der|die|das|nicht|mit|für|oder|eine?|brauche|möchte|wie|was|kann|mir|dein|deine|ist|sind)\b/.test(t);
+/**
+ * The same account of the runs that masked figures, for a turn in which another delegation failed
+ * as well (agent/runtime.ts). That failure keeps the turn on its failure path, which may still try
+ * another strategy, so this note neither ends the orchestration nor forbids delegating: it rides on
+ * the failure directive and says what the masked runs did not compute, whatever the turn writes
+ * next.
+ */
+export function buildUnobservedRunsNote(unobservedRuns: readonly UnobservedRun[]): string {
+  const { agents, lines, filesClause } = describeUnobservedRuns(unobservedRuns);
+  return `The delegated run of ${agents} also stated figures that no tool returned; they are masked as ${UNOBSERVED_FIGURE_MARKER} (${lines}). `
+    + `Whatever you write next: ${filesClause}say plainly that the masked values were not computed, `
+    + "and do NOT state, estimate or round any value that only running the code could produce.";
+}
+
+/**
+ * Should a banner on this answer lead with German? The ANSWER decides, because it is written in
+ * the reply language, which is not always the language the user wrote in: a German request for
+ * an English answer gets an English answer, and its banner must lead in English too. The user's
+ * message is consulted only when the answer itself cannot be called.
+ *
+ * This replaced a list of German words that also matched English ("it was", "the die"), so an
+ * ordinary English answer got a German-first banner. text-language.ts explains the detector. When
+ * neither text can be called (or the detector is not loaded yet), the configured default decides.
+ */
+export function bannerLeadsInGerman(answer: string, userMessage = ""): boolean {
+  const detected = detectTextLanguage(answer) ?? detectTextLanguage(userMessage);
+  if (detected) return detected.code === "de";
+  return defaultReplyLanguage().trim().toLowerCase() === "german";
 }
 
 /**
@@ -59,7 +129,7 @@ export function prependUnverifiedSourceCaveat(answer: string, userMessage: strin
   if (answer.includes("NICHT mit aktuellen Online-Quellen") || answer.includes("NOT verified against live web sources")) {
     return answer;
   }
-  const german = answerLooksGerman(userMessage) || answerLooksGerman(answer);
+  const german = bannerLeadsInGerman(answer, userMessage);
   const caveat = german
     ? "> ⚠️ **Ungeprüft:** Diese Antwort beruht auf allgemeinem Wissen und wurde NICHT mit aktuellen Online-Quellen verifiziert. Behandle konkrete Teilenummern, Spezifikationen, Preise und Herstellerangaben als unbestätigte Annahmen, die vor dem Verlass darauf noch zu prüfen sind."
     : "> ⚠️ **Unverified:** This answer is based on general knowledge and was NOT verified against live web sources. Treat specific part numbers, specifications, prices, and manufacturer claims as unconfirmed assumptions to verify before relying on them.";
@@ -87,7 +157,7 @@ export function prependTurnIncompleteCaveat(text: string): string {
   if (text.includes("did not finish normally")) {
     return text;
   }
-  const german = answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text);
   const de =
     "> ⚠️ **Dieser Durchlauf wurde nicht vollständig abgeschlossen** — der Inhalt unten ist ein "
     + "UNVOLLSTÄNDIGER Entwurf aus nicht abgeschlossener Arbeit und wurde NICHT gegen Quellen verifiziert. "
@@ -108,7 +178,7 @@ export function prependTurnIncompleteCaveat(text: string): string {
  * Caveat for a QA-gate PASS that carried no verifiable evidence (orchestration.qaEvidenceRequired).
  * Unlike prependTurnIncompleteCaveat, the run DID finish normally — the honest gap is only that the
  * reviewer could not ground its PASS in a concrete tool-result/artifact fact, so the answer must not
- * be presented as QA-confirmed. Same structural bilingual shape (language chosen by answerLooksGerman,
+ * be presented as QA-confirmed. Same structural bilingual shape (language chosen by bannerLeadsInGerman,
  * both languages emitted so a third-language reader still gets it) and sentinel-phrase dedup. Pure.
  */
 export function prependUnverifiedQaCaveat(text: string): string {
@@ -119,7 +189,7 @@ export function prependUnverifiedQaCaveat(text: string): string {
   if (text.includes("did NOT confirm this answer against concrete evidence")) {
     return text;
   }
-  const german = answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text);
   const de =
     "> ⚠️ **Nicht verifiziert** — die Qualitätsprüfung hat diese Antwort NICHT gegen konkrete Nachweise "
     + "(Tool-Ergebnisse, Artefakte) bestätigt. Behandle konkrete Angaben (Daten, Zahlen, Quellen) als unbestätigt.";
@@ -165,6 +235,55 @@ export function stripFabricatedCitations(text: string): string {
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/**
+ * One form for a cited URL and a URL a tool returned, so the two can be compared: the punctuation
+ * and markdown emphasis an answer puts after a bare URL are dropped, and so are the fragment and a
+ * trailing slash; scheme and host case and percent-encoding are those of the URL parser. A scheme,
+ * host, path or query that differs is a different URL. Pure.
+ */
+export function normalizeCitationUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/[>.,;:!?'"*_]+$/, "");
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
+ * stripFabricatedCitations for a turn that did retrieve some pages, but not by any of the means the
+ * citation guard counts as research: a knowledge-base read. Each cited URL that is one of
+ * `sourceUrls` (compared by normalizeCitationUrl) is kept as written; every other one is stripped
+ * as stripFabricatedCitations strips it. With nothing stripped the text comes back unchanged, so
+ * the caller can tell an answer that cites only its sources from one that also invents a link.
+ * Pure.
+ */
+export function stripCitationsOutside(text: string, sourceUrls: Iterable<string>): { text: string; stripped: number } {
+  const sources = new Set([...sourceUrls].map(normalizeCitationUrl));
+  const isSource = (url: string) => sources.has(normalizeCitationUrl(url));
+  let stripped = 0;
+  // The same two passes as stripFabricatedCitations. The bare pass also meets the URL inside a link
+  // the first pass kept, and keeps it for the same reason.
+  const out = text
+    .replace(/\[([^\]]+)\]\(\s*(https?:\/\/[^)]*)\)/gi, (link: string, label: string, target: string) => {
+      if (isSource(target.trim().split(/\s/)[0] ?? "")) return link;
+      stripped += 1;
+      return label;
+    })
+    .replace(/\bhttps?:\/\/[^\s)\]]+/gi, (url: string) => {
+      if (isSource(url)) return url;
+      stripped += 1;
+      return "";
+    });
+  if (stripped === 0) return { text, stripped };
+  return {
+    text: out.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim(),
+    stripped,
+  };
 }
 
 /**
@@ -302,7 +421,7 @@ export function prependUrlNotFetchedCaveat(text: string, userMessage = ""): stri
   ) {
     return text;
   }
-  const german = answerLooksGerman(userMessage) || answerLooksGerman(text);
+  const german = bannerLeadsInGerman(text, userMessage);
   const de =
     "> ⚠️ **Die verlinkte Seite wurde in diesem Durchlauf NICHT abgerufen** — alle darauf bezogenen "
     + "Angaben sind daher ungeprüft und möglicherweise erfunden. Bitte lass mich die Seite tatsächlich "
@@ -310,7 +429,7 @@ export function prependUrlNotFetchedCaveat(text: string, userMessage = ""): stri
   const en =
     "> ⚠️ **The linked page was NOT fetched this turn** — any details attributed to it are unverified and "
     + "may be fabricated. Ask me to fetch it for a grounded answer.";
-  // Bilingual, but lead with the user's language; the secondary line is parenthesized+italic.
+  // Bilingual, but lead with the answer's language; the secondary line is parenthesized+italic.
   const caveat = german
     ? `${de}\n> _(${en.replace(/^> /, "")})_`
     : `${en}\n> _(${de.replace(/^> /, "")})_`;

@@ -451,6 +451,63 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  it("run_workflow hands the person's own words to the workflow's agents", async () => {
+    // The scene's task is its author's English; the words are the only place its agents can see
+    // the language the deliverable is for ("auf Englisch", or simply that the person wrote German).
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare protocols in one grounded paper.",
+          task: "Use mission_coordinator first. Research each protocol, then draft one paper.",
+          allowedAgents: ["mission_coordinator", "researcher", "paper_author"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["search_agents", "delegate_to_agent", "parallel_delegate", "run_task_graph"], maxIterations: 6 },
+        researcher: { description: "Finds official sources.", tools: ["web_search", "web_fetch"], maxIterations: 6 },
+        paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runSubAgentWithStatsMock = vi.fn(async () => ({
+      output: "done",
+      stats: {
+        agentName: "mission_coordinator",
+        sessionId: "sub:workflow-scene:mission_coordinator:test",
+        promptChars: 0,
+        userContentChars: 0,
+        toolCount: 1,
+        toolNames: ["delegate_to_agent"],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 6,
+        model: "lmstudio/qwen/qwen3.5-9b",
+        capabilities: ["coordination"],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentWithStatsMock }));
+
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/workflow-catalog.js")]);
+    const turnUserWords = { opening: "Schreib mir das Paper bitte auf Englisch.", midTurn: [] };
+    try {
+      const result = await getTool("run_workflow")!.execute(
+        { name: "protocol_comparison_paper", workflowType: "scene" },
+        { sessionId: "workflow-scene", workspacePath: "/workspace", allowedAgents: ["mission_coordinator", "researcher", "paper_author"], turnUserWords },
+      );
+      expect(result.success).toBe(true);
+      const bootstrapCall = (runSubAgentWithStatsMock.mock.calls as any[])[0]?.[0] as Record<string, any> | undefined;
+      expect(bootstrapCall?.turnUserWords).toBe(turnUserWords);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("run_workflow bootstraps coordinator-first scenes through a stripped inline coordinator", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {
@@ -651,6 +708,83 @@ describe("workflow catalog tools", () => {
         "run_task_graph",
       ]);
       expect(bootstrapCall?.context).toContain("Do NOT call search_workflows or run_workflow");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // A scene whose task gives the work to several agents is a multi-agent plan. Its "Use X first …"
+  // or "Use X to …" lead named only the first, and a leaf agent cannot delegate, so the scene ran
+  // that agent alone: every verified_research_brief went to document_intake (no web tools), and
+  // code_review / security_audit / release_notes_draft dropped all but their first agent.
+  it("run_workflow orchestrates a scene whose task names several leaf agents instead of running the first alone", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        research_brief: {
+          description: "Fact-checked brief.",
+          task: "Use document_intake first when the request starts from attached material, researcher for broad source discovery, and summarizer for the final brief.",
+          allowedAgents: ["document_intake", "researcher", "summarizer"],
+        },
+        advisory_digest: {
+          description: "Advisory digest.",
+          task: "Use researcher to gather current advisories, and summarizer to write the digest.",
+          allowedAgents: ["researcher", "summarizer"],
+        },
+      },
+      subAgents: {
+        document_intake: { description: "Extracts attachments.", tools: ["extract_file_content"], maxIterations: 4 },
+        researcher: { description: "Finds sources.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
+        summarizer: { description: "Summarizes outputs.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const runTurnMock = vi.fn(async (opts: { userMessage: string; allowedAgents?: string[] }) => ({
+      response: `handled: ${opts.userMessage}`,
+      toolCallsExecuted: 1,
+      guardrailEvents: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      blocked: false,
+    }));
+    // A leaf running the scene alone answers like any run; the assertions below say it must not.
+    const runSubAgentWithStatsMock = vi.fn(async (opts: { agentName: string }) => ({
+      output: `${opts.agentName} handled the whole scene.`,
+      stats: {
+        agentName: opts.agentName, sessionId: `sub:workflow:${opts.agentName}:test`, promptChars: 0, userContentChars: 0,
+        toolCount: 1, toolNames: ["write_file"], iterations: 1, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4, model: "lmstudio/qwen/qwen3.5-9b", capabilities: [], outcome: "success", terminalState: "completed",
+      },
+    }));
+    vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
+      runTurn: runTurnMock,
+    }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: runSubAgentWithStatsMock,
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/workflow-catalog.js"),
+    ]);
+
+    try {
+      const tool = getTool("run_workflow");
+      expect(tool).toBeDefined();
+      for (const name of ["research_brief", "advisory_digest"]) {
+        runTurnMock.mockClear();
+        const result = await tool!.execute(
+          { name, workflowType: "scene" },
+          { sessionId: `workflow-${name}`, workspacePath: "/workspace" },
+        );
+        expect(result.success, name).toBe(true);
+        expect(runTurnMock, name).toHaveBeenCalledTimes(1);
+      }
+      // No leaf agent ran a scene on its own.
+      expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -1534,14 +1668,344 @@ describe("workflow catalog tools", () => {
         agentName: "researcher",
         task: expect.stringContaining("Keep the comparison source-grounded."),
         allowedAgents: ["researcher"],
-        _workflowExecutionStack: ["job:source_grounded_paper_packet"],
+        // Each step's own scene is on its stack, under the job (E2E 2026-10-08).
+        _workflowExecutionStack: ["job:source_grounded_paper_packet", "scene:collect_evidence"],
       }));
       expect(runSubAgentMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
         agentName: "paper_author",
         task: expect.stringContaining("Draft the comparison for MCP vs A2A"),
         allowedAgents: ["paper_author"],
-        _workflowExecutionStack: ["job:source_grounded_paper_packet"],
+        _workflowExecutionStack: ["job:source_grounded_paper_packet", "scene:draft_paper"],
       }));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * A workflow's runs hand their records up (E2E 2026-10-07 class). In review run_workflow dropped
+ * them: a coder whose sandbox failed and whose figures came back masked inside a workflow reached
+ * the turn as "Workflow … completed" with no record, so neither the coordinator's own figure check
+ * nor the turn's honest directive fired, and a job's next step built on the masked text.
+ */
+describe("run_workflow and the code its runs executed", () => {
+  const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };
+  const PRIMES = { filename: "primes.js", outputPath: "generated/primes.js", sourceTool: "write_file" };
+  const config = () => writeTempConfig({
+    agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+    scenes: {
+      prime_report: {
+        description: "Count the primes and write them up.",
+        task: "Count the primes between 100000 and 200000 and write a short report.",
+        allowedAgents: ["coder", "content_writer"],
+      },
+      count_primes: { description: "Count the primes.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder"] },
+      explain_count: { description: "Explain the count.", task: "Explain the count of primes.", allowedAgents: ["content_writer"] },
+    },
+    jobs: {
+      prime_packet: {
+        description: "Count the primes, then explain the count.",
+        steps: [
+          { scene: "count_primes", label: "Count" },
+          { scene: "explain_count", label: "Explain" },
+        ],
+      },
+    },
+    subAgents: {
+      coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+      content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+    },
+  });
+  const subAgentRun = (agentName: string, executions?: Record<string, unknown>) => ({
+    output: agentName === "coder" ? "Es gibt [not observed] Primzahlen." : "Der Bericht erklärt die Zählung.",
+    stats: { outcome: executions?.["unobservedFigures"] ? "partial" : "success", toolCount: 1, iterations: 1, toolNames: [] },
+    artifacts: agentName === "coder" ? [PRIMES] : [],
+    ...(executions ? { executions } : {}),
+  });
+  const runWorkflow = async (name: string, workflowType: string) => {
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/workflow-catalog.js")]);
+    return getTool("run_workflow")!.execute({ name, workflowType }, { sessionId: "workflow-records", workspacePath: "/workspace" });
+  };
+
+  it("a scene's orchestrator turn: the records its delegations left in the workflow's session", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({
+      collectTurnArtifactAttachments: () => [],
+      runTurn: vi.fn(async (opts: { session: { addMessages(messages: unknown[]): void } }) => {
+        opts.session.addMessages([{
+          role: "tool",
+          tool_call_id: "d1",
+          content: "Delegated result from coder — PARTIAL PROGRESS.",
+          metadata: { agentName: "coder", specialistExecutions: MASKED, artifacts: [PRIMES] },
+        }]);
+        return { response: "Die Zahlen konnten nicht berechnet werden.", toolCallsExecuted: 1, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_report", "scene");
+
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a scene's bootstrap coordinator: the record its run added up", async () => {
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        prime_mission: {
+          description: "Count the primes as a mission.",
+          task: "Use mission_coordinator first. It should have the primes between 100000 and 200000 counted and summed.",
+          allowedAgents: ["mission_coordinator", "coder"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["delegate_to_agent", "parallel_delegate"], maxIterations: 6 },
+        coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+      },
+    });
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: vi.fn(async () => ({
+        output: "Der Coder hat primes.js geschrieben; es gibt [not observed] Primzahlen.",
+        stats: { outcome: "partial", toolCount: 2, iterations: 2, toolNames: ["delegate_to_agent", "parallel_delegate"] },
+        artifacts: [PRIMES],
+        executions: MASKED,
+      })),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_mission", "scene");
+
+      expect(result.metadata?.["bootstrapAgent"]).toBe("mission_coordinator");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "mission_coordinator", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a scene's bootstrap coordinator that names the runs under it: they go up as they are", async () => {
+    // The coordinator's files are every run's: its writer's finished report is not the coder's.
+    const REPORT = { filename: "report.html", outputPath: "generated/report.html", sourceTool: "write_file" };
+    const { tempDir, configPath } = writeTempConfig({
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        prime_mission: {
+          description: "Count the primes as a mission.",
+          task: "Use mission_coordinator first. It should have the primes between 100000 and 200000 counted and a report written.",
+          allowedAgents: ["mission_coordinator", "coder", "content_writer"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["delegate_to_agent", "parallel_delegate"], maxIterations: 6 },
+        coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+        content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+      },
+    });
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({
+      runSubAgentWithStats: vi.fn(async () => ({
+        output: "Der Bericht ist fertig; die Zählung lief nicht: es gibt [not observed] Primzahlen.",
+        stats: { outcome: "partial", toolCount: 1, iterations: 2, toolNames: ["parallel_delegate"] },
+        artifacts: [PRIMES, REPORT],
+        executions: MASKED,
+        maskedRuns: [{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }],
+      })),
+    }));
+
+    try {
+      const result = await runWorkflow("prime_mission", "scene");
+
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+      expect(result.metadata?.["artifacts"]).toEqual([PRIMES, REPORT]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a job's step whose run masked figures stops the job, and its record goes up", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const runSubAgentMock = vi.fn(async (opts: { agentName: string }) => subAgentRun(opts.agentName, opts.agentName === "coder" ? MASKED : undefined));
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+
+    try {
+      const result = await runWorkflow("prime_packet", "job");
+
+      // The explaining step never ran on the masked count.
+      expect(runSubAgentMock.mock.calls.map((c) => (c[0] as { agentName: string }).agentName)).toEqual(["coder"]);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["blocked"]).toBe(true);
+      // Stopped by the masked figures and nothing else: the turn reads the failure as that run's.
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
+      expect(result.output).toContain("they are masked as [not observed] and were not computed");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  describe("a job's orchestrator step", () => {
+    // A step with several agents runs an orchestrator turn in the job's session, and its
+    // delegations' records are tool messages there. In review only the end of the job read them:
+    // a step whose turn delegated to a coder that masked its figures did not stop the job, and
+    // nothing failed when that read was removed.
+    const PRINTED = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const delegation = (executions: Record<string, unknown>) => ({
+      role: "tool",
+      tool_call_id: "d1",
+      content: "Delegated result from coder.",
+      metadata: { agentName: "coder", specialistExecutions: executions, artifacts: [PRIMES] },
+    });
+    type StepSession = { addMessages(messages: unknown[]): void; rewindBeforeIndex(index: number): void };
+    const runOrchestratedJob = async (stepTurns: Array<(session: StepSession) => void>) => {
+      const { tempDir, configPath } = writeTempConfig({
+        agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+        scenes: {
+          count_and_report: { description: "Count the primes and report.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder", "content_writer"] },
+          explain_count: { description: "Explain the count.", task: "Explain the count of primes.", allowedAgents: ["coder", "content_writer"] },
+        },
+        jobs: {
+          prime_packet: {
+            description: "Count the primes, then explain the count.",
+            steps: [{ scene: "count_and_report", label: "Count" }, { scene: "explain_count", label: "Explain" }],
+          },
+        },
+        subAgents: {
+          coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 },
+          content_writer: { description: "Writes reports.", tools: ["write_file"], maxIterations: 4 },
+        },
+      });
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      vi.resetModules();
+      let turn = 0;
+      const runTurnMock = vi.fn(async (opts: { session: StepSession }) => {
+        stepTurns[turn]?.(opts.session);
+        turn += 1;
+        return { response: `Schritt ${turn} beantwortet.`, toolCallsExecuted: 1, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      });
+      vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: runTurnMock }));
+      try {
+        return { result: await runWorkflow("prime_packet", "job"), runTurnMock };
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it("whose turn delegated to a coder that masked its figures stops the job, and the record goes up", async () => {
+      const { result, runTurnMock } = await runOrchestratedJob([(session) => session.addMessages([delegation(MASKED)])]);
+
+      expect(runTurnMock).toHaveBeenCalledTimes(1);
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
+      expect(result.output).toContain("they are masked as [not observed] and were not computed");
+      expect(result.metadata?.["specialistExecutions"]).toEqual(MASKED);
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    });
+
+    it("whose record the next step's turn compacts out of the session still counts", async () => {
+      const { result, runTurnMock } = await runOrchestratedJob([
+        (session) => session.addMessages([delegation(PRINTED)]),
+        (session) => session.rewindBeforeIndex(0),
+      ]);
+
+      expect(runTurnMock).toHaveBeenCalledTimes(2);
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual(PRINTED);
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
+    });
+  });
+
+  describe("a step's QA re-attempt", () => {
+    // A step that must save a file and saved none runs once more; one of the two attempts is the
+    // step's run. In review the discarded first attempt, which had masked its figures, was handed
+    // back as a run that masked figures while the adopted re-attempt had computed them.
+    const PRINTED = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const attempts = {
+      masked: { output: "Es gibt [not observed] Primzahlen.", stats: { outcome: "partial", toolCount: 1, iterations: 1, toolNames: [] }, artifacts: [], executions: MASKED },
+      printed: { output: "primes.js gab aus: Es gibt 8392 Primzahlen.", stats: { outcome: "success", toolCount: 2, iterations: 2, toolNames: [] }, artifacts: [PRIMES], executions: PRINTED },
+      maskedWithFile: { output: "Es gibt [not observed] Primzahlen.", stats: { outcome: "partial", toolCount: 2, iterations: 2, toolNames: [] }, artifacts: [PRIMES], executions: MASKED },
+    };
+    const runQaJob = async (first: object, second: object) => {
+      const { tempDir, configPath } = writeTempConfig({
+        agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+        scenes: {
+          count_primes: { description: "Count the primes.", task: "Count the primes between 100000 and 200000.", allowedAgents: ["coder"], expectArtifact: true },
+        },
+        jobs: { prime_file: { description: "Count the primes into a file.", steps: [{ scene: "count_primes", label: "Count" }] } },
+        subAgents: { coder: { description: "Writes and runs code.", tools: ["write_file", "shell_exec"], maxIterations: 4 } },
+      });
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      vi.resetModules();
+      const runSubAgentMock = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+      vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+      vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+      try {
+        const result = await runWorkflow("prime_file", "job");
+        expect(runSubAgentMock).toHaveBeenCalledTimes(2);
+        return result;
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    };
+
+    it("adopted with computed figures: the discarded attempt's code counts, its masked figures are not reported", async () => {
+      const result = await runQaJob(attempts.masked, attempts.printed);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("Es gibt 8392 Primzahlen.");
+      expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 1, succeededWithOutput: 1 });
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
+    });
+
+    it("adopted with masked figures: the job stops, and the adopted attempt is the run reported", async () => {
+      const result = await runQaJob(attempts.masked, attempts.maskedWithFile);
+
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.metadata?.["blockedByMaskedFigures"]).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual({ attempted: 2, failed: 2, succeededWithOutput: 0, unobservedFigures: 2 });
+      expect(result.metadata?.["maskedRuns"]).toEqual([{ agentName: "coder", executions: MASKED, artifacts: [PRIMES] }]);
+    });
+
+    it("still without its file: the job stops for that as well, so the stop is not the masked figures' alone", async () => {
+      const result = await runQaJob(attempts.masked, attempts.masked);
+
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.output).toContain("none was saved");
+      expect(result.metadata).not.toHaveProperty("blockedByMaskedFigures");
+    });
+  });
+
+  it("control: a job whose coder's script printed runs on, with its record summed", async () => {
+    const { tempDir, configPath } = config();
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const printed = { attempted: 1, failed: 0, succeededWithOutput: 1 };
+    const runSubAgentMock = vi.fn(async (opts: { agentName: string }) => subAgentRun(opts.agentName, opts.agentName === "coder" ? printed : undefined));
+    vi.doMock("../agent/runtime.js", () => ({ collectTurnArtifactAttachments: () => [], runTurn: vi.fn() }));
+    vi.doMock("../agent/sub-agent.js", () => ({ runSubAgentWithStats: runSubAgentMock }));
+
+    try {
+      const result = await runWorkflow("prime_packet", "job");
+
+      expect(runSubAgentMock).toHaveBeenCalledTimes(2);
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["specialistExecutions"]).toEqual(printed);
+      expect(result.metadata).not.toHaveProperty("maskedRuns");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

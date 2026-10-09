@@ -1,0 +1,81 @@
+// GROUP "new" — delegation routing stays bounded on a fan-out turn (commit c13c211).
+//
+// Regression: session ffe08297 (2026-10-06) hung for hours. A routed delegation's top candidate was at
+// its per-agent cap, was skipped without an attempt, and re-routing excluded only ATTEMPTED agents, so
+// the same agent came back every round: ~750 routing passes a minute, 26,000+ routing rows. Now a
+// passed-over candidate is excluded from every later pass, and a delegation stops after 32 rounds
+// (tools/sub-agent.ts MAX_ROUTING_ROUNDS_PER_DELEGATION) with delegation_routing_rounds_exhausted.
+// The backstop must never be needed on a healthy turn, and the routing rows of a turn stay few.
+//
+// The request fans three independent site lookups out to specialists. Three lookups is also the
+// shape that pushes one agent toward its per-turn cap — the condition ffe08297 looped on.
+//
+// Events asserted, emitters verified in packages/core/src:
+//   delegation_routing_rounds_exhausted {taskTitle, rounds, attemptedAgents, skippedAgents}
+//                                                         tools/sub-agent.ts:1338
+//   agent_routing_evaluated — every surface:  tools/agent-routing.ts:138 (logRoutingEvaluated, called by
+//     agent/discovery-prefetch.ts:104 and tools/sub-agent.ts:905/920), tools/sub-agent.ts:3383/3431/3497
+//     (search_agents), tools/ephemeral-agent-factory.ts:689 (ephemeral tool selection)
+//   sub_agent_started {agentName, ...}                   agent/sub-agent.ts:2951 (stage variant :2734 excluded)
+// A healthy routed turn logs a handful of routing rows (the real 4-turn sample in
+// tests/fixtures/latency-audit-sample.jsonl has 5 in all); 50 per turn is generous, and the runaway
+// produced hundreds a minute.
+//
+// Ground truth (eval/e2e/ENVIRONMENT.md): below minimum stock NW-1103, NW-1203 (0 everywhere < 20),
+// NW-2104, NW-2106; 30 × NW-3102 = 267,00 € − 8 % = 245,64 €, shipping free; E22 = "Motor blockiert".
+// The reply checks are lenient alternations: the point of this scenario is the routing bound.
+//
+// NOT COVERED — loop-aware delegation (orchestration.loopAwareDelegation, item 7 of the brief):
+// no deterministic trigger exists from a chat message plus harness actions.
+//   - A run counts as looped only when the loop brake refuses the 4th identical call since the last
+//     file write (agent/sub-agent.ts:6797, via "refuse"), the busy-stall supervisor winds it down
+//     (agent/sub-agent.ts:4901, via "busy_stall"), or the warden stops it. The iteration cap does not
+//     count, so `--iter 1` (sub_agent_max_iterations) records no loop.
+//   - All three need the MODEL to repeat itself; the fixture site has no page that makes a model
+//     re-issue the same call, and the cached-replay notes are written to stop exactly that.
+//   - delegation_prior_loop_noted (tools/sub-agent.ts:2017) also needs a SECOND dispatch of the same
+//     agent in the same turn — which loop-aware delegation's frame tells the orchestrator not to do.
+// A scenario built on that would measure the model's willingness to loop, not the feature. Unit
+// coverage: tests/delegation-loop-notes.test.ts, delegation-loop-frame.test.ts,
+// delegation-loop-consequences.test.ts, delegation-loop-record-nesting.test.ts.
+{
+  id: "new-delegation-routing-bounded-fanout",
+  title: "A turn that fans out to several specialists keeps routing bounded and never exhausts its routing rounds",
+  group: "new",
+  tags: ["routing", "delegation", "site", "slow"],
+  description: "Guards c13c211 (session ffe08297: a routed delegation re-routed to a capped agent ~750 times a minute and hung the turn for hours). On a three-way fan-out over the fixture site: no delegation_routing_rounds_exhausted, at most 50 agent_routing_evaluated rows, 2 to 16 specialist runs, and the answer still carries the three results.",
+  requires: ["model", "e2e-site"],
+  identity: "eval",
+  timeoutMs: 1500000,
+  steps: [
+    {
+      kind: "turn",
+      id: "three-way-fanout",
+      message: "Für einen Lagerbericht der Nordlicht Werkzeuge GmbH (http://www.nordlicht-werkzeuge.test/) brauche ich drei unabhängige Teilergebnisse. Verteile sie auf passende Spezialisten und lass sie parallel arbeiten:\n1. Welche Artikel liegen laut /lager.html mit ihrem Gesamtbestand unter dem Mindestbestand?\n2. Was kosten 30 Stück NW-3102 inklusive Mengenrabatt und Versand laut /preise.html und dem Produktkatalog?\n3. Was bedeutet der Fehlercode E22 laut /dokumentation.html?\nFasse die drei Ergebnisse danach in einer kurzen Übersicht zusammen. --auto",
+      effort: "medium",
+      timeoutMs: 1200000,
+      expect: {
+        status: "ok",
+        reply: {
+          matches: [
+            // Below minimum stock: NW-1203 sits at 0 in all three warehouses.
+            "NW-?\\s?1203|Wasserwaage",
+            // 30 × NW-3102: 267,00 € before, 245,64 € after the 8 % volume discount.
+            "245[,.]64|267[,.]00",
+            // E22 = motor blocked.
+            "blockiert|blocked|stalled|jammed",
+          ],
+          minChars: 80,
+        },
+        events: {
+          must: [
+            { type: "agent_routing_evaluated", min: 0, max: 50 },
+            { type: "sub_agent_started", where: { "data.stage": { exists: false } }, min: 2, max: 16 },
+          ],
+          mustNot: [{ type: "delegation_routing_rounds_exhausted" }],
+        },
+        agents: { mustRunAny: ["researcher", "browser_agent", "source_verifier", "summarizer"] },
+      },
+    },
+  ],
+}

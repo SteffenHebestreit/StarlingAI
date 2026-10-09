@@ -4,10 +4,50 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { GENERATED_SUBDIR, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
+import { buildArtifactTextPreview } from "./artifact-preview.js";
 
 const log = childLogger("tool:filesystem");
-const MAX_FILE_SIZE = 1024 * 1024; // 1MB read limit
+/**
+ * Largest text file read_file, edit_file and a grep_files aimed at one file open. It was 1 MB, and the swarm's
+ * own generators write past that: generate_presentation inlines a deck's local images as data: URIs so the deck
+ * is self-contained, and ten photos made index.html 3.9 MB (run c297c5ea). The content_writer that had built the
+ * deck could neither read nor edit it, grep_files skipped it and answered "No matches", and the agent spent 20
+ * minutes and 300 iterations looking. Reading or rewriting 16 MB takes milliseconds; what a big file must not do
+ * is flood the context, which the head+tail and windowed reads and clipLine prevent.
+ */
+export const MAX_TEXT_FILE_BYTES = 16 * 1024 * 1024;
+
+/** Longest line a read shows whole. One line of a generated file can be megabytes — an inlined image — which
+ *  shown whole fills the context and tells the model nothing. */
+export const MAX_SHOWN_LINE_CHARS = 2_000;
+
+/** `line` whole when it is at most `max` long, else the `max` chars around `focus` with what was left out counted. */
+export function clipLine(line: string, focus = 0, max = MAX_SHOWN_LINE_CHARS): string {
+  if (line.length <= max) return line;
+  const start = Math.max(0, Math.min(focus - Math.floor(max / 2), line.length - max));
+  const end = start + max;
+  return `${start > 0 ? `[${start} chars not shown]` : ""}${line.slice(start, end)}${end < line.length ? `[${line.length - end} chars not shown]` : ""}`;
+}
+/**
+ * Bound on an UNWINDOWED read — `read_file(path)` with neither offset nor limit.
+ *
+ * The only cap a read result used to meet was MAX_TOOL_RESULT_CHARS (32_768, applied in
+ * agent/sub-agent.ts), so anything under 32 KB entered the conversation whole and — the
+ * history being re-sent every iteration — was re-prefilled on every subsequent one. Run
+ * 3959f3ac paid that: a single 25_929-char read (≈8_643 tokens at 3.0 chars/token) slid
+ * under the cap and then rode along for ~10 more iterations, ≈28% of the final prompt.
+ *
+ * 16 KB (≈5_400 tokens) returns the overwhelming majority of source, config and doc
+ * files whole — this is not a behaviour change for the common read — while capping the
+ * pathological one at roughly one third of what it used to cost per iteration. Above it
+ * the caller gets head+tail, not head alone: the reason an agent re-reads a file it just
+ * built is usually to confirm the END of it still closes.
+ */
+const MAX_UNWINDOWED_READ_CHARS = 16_000;
+const UNWINDOWED_HEAD_CHARS = 12_000;
+const UNWINDOWED_TAIL_CHARS = 4_000;
 // Text-based formats agents can read and write directly.
 const ALLOWED_EXTENSIONS = new Set([
   ".txt", ".md", ".json", ".jsonc", ".jsonl", ".yaml", ".yml", ".toml", ".env.example",
@@ -83,12 +123,27 @@ const MIME_TYPES: Record<string, string> = {
 // env_file, and git operations use git COMMANDS, not raw object reads, so nothing
 // legitimate is lost. `.env.example` is the shipped public template — allowed.
 const SENSITIVE_READ_PATTERNS: RegExp[] = [
-  /^\.env(\..+)?$/,             // .env, .env.local, .env.production, …
   /(^|\/)\.starlingai(\/|$)/,   // credential store, jwt secret, audit log, durable memory
   /(^|\/)\.git(\/|$)/,          // VCS internals (objects, refs, hooks, config)
   /(^|\/)credentials\.enc$/,
   /(^|\/)\.jwt_secret$/,
 ];
+
+// Dotenv files at ANY depth and under any name shape (security finding S1, 2026-10-05).
+// The pattern used to be root-only `^\.env(\..+)?$`, so `prod.env`, `docker/staging.env` and
+// `packages/x/.env` were ordinary readable files — workspace_search returned the contents of
+// ".env" and "prod.env" for a canary key. `.env.example` (the public template) stays readable
+// wherever it sits, but only when nothing else on the list matches: `.git/.env.example` is still
+// VCS internals.
+const DOTENV_PATTERNS: RegExp[] = [
+  /(^|\/)\.env([-_.].+|~)?$/,   // .env, .env.local, .env-local, .env_prod, .env~, sub/.env.production, …
+  /(^|\/)\.envrc$/,             // direnv: exports secrets into the shell
+  // prod.env, docker/staging.env, and their editor/backup copies. Only backup suffixes: a source
+  // file such as jest.env.js is code, not a dotenv file.
+  /(^|\/)[^/]+\.env(\.(bak|old|orig|backup|save|swp|tmp)|~)?$/,
+];
+// Public templates, wherever they sit: .env.example/.sample/.template/.dist, example.env, sample.env.
+const DOTENV_TEMPLATE = /(^|\/)(\.env\.(example|sample|template|dist)|(example|sample|template)\.env)$/;
 
 /** True when a workspace-relative path points at a secret / VCS-internal file.
  *  Matched case-INSENSITIVELY: the repo is bind-mounted from Windows/macOS hosts whose
@@ -96,11 +151,14 @@ const SENSITIVE_READ_PATTERNS: RegExp[] = [
  *  a case-sensitive denylist would wave it straight through. */
 export function isSensitiveWorkspacePath(relativePath: string): boolean {
   const rel = relativePath.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-  if (rel === ".env.example") return false; // public template
-  return SENSITIVE_READ_PATTERNS.some((re) => re.test(rel));
+  // NTFS alternate data streams: `.env::$DATA` opens `.env` itself on a Windows host.
+  if (process.platform === "win32" && rel.includes(":")) return true;
+  if (SENSITIVE_READ_PATTERNS.some((re) => re.test(rel))) return true;
+  if (DOTENV_TEMPLATE.test(rel)) return false; // public template
+  return DOTENV_PATTERNS.some((re) => re.test(rel));
 }
 
-function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
+export function guardPath(path: string, workspacePath: string): { safe: boolean; resolved: string } {
   try {
     const { resolved } = resolvePathWithinWorkspace(path, workspacePath);
     // Refuse secrets / VCS internals — on the lexical path AND, when the target exists,
@@ -138,9 +196,42 @@ function guardWritePath(path: string, workspacePath: string): { safe: boolean; r
   }
 }
 
+/** `budget` chars off one end of `content`, snapped to a line boundary when one falls
+ *  inside the slice. A minified bundle or a single-line JSON has no boundary to snap to,
+ *  so the raw slice stands rather than returning nothing. */
+function sliceAtLineBoundary(content: string, budget: number, end: "head" | "tail"): string {
+  if (end === "head") {
+    const raw = content.slice(0, budget);
+    const cut = raw.lastIndexOf("\n");
+    return cut > 0 ? raw.slice(0, cut) : raw;
+  }
+  const raw = content.slice(content.length - budget);
+  const cut = raw.indexOf("\n");
+  return cut >= 0 && cut < raw.length - 1 ? raw.slice(cut + 1) : raw;
+}
+
+function countLines(text: string): number {
+  return text.split("\n").length;
+}
+
+/**
+ * The line read_file and edit_file add when the file they were asked for does not exist.
+ *
+ * In the E2E guards scenario the coder was told to change generated/e2e-guards/sommeraktion.html
+ * and not to create a new file. read_file reported the file missing, and glob_files and
+ * list_files confirmed it. The coder then wrote the file with write_file, and the reply had to
+ * admit that it had gone against the instruction. A missing file is where that choice gets made,
+ * so the result says it there. edit_file says it too: it is the tool for changing a file, so a
+ * run that goes to it first meets the missing file there. It sits on its own line after
+ * "File not found: <path>", so the first line, which audit rows and failure lists keep, is
+ * unchanged.
+ */
+export const MISSING_FILE_IS_NOT_A_CHANGE =
+  "Creating this file is a different action from changing it: if your task is to change it, report it as missing instead of creating it.";
+
 registerTool({
   name: "read_file",
-  description: "Read the contents of a file within the workspace directory.",
+  description: "Read the contents of a file within the workspace directory. A file over ~16 KB comes back as head+tail — pass offset/limit to read any other window of it.",
   embeddingDescription: "Open, view, inspect, or load a file. Read source code, markdown, JSON, YAML, CSV, text. Datei lesen, öffnen, einsehen, anzeigen, laden. Inhalt einer Datei abrufen.",
   costHint: "low",
   latencyHint: "low",
@@ -163,15 +254,19 @@ registerTool({
       return { success: false, output: "", error: "Path escapes workspace boundary" };
     }
     if (!existsSync(resolved)) {
-      return { success: false, output: "", error: `File not found: ${path}` };
+      return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
     }
 
     const stat = statSync(resolved);
     if (stat.isDirectory()) {
       return { success: false, output: "", error: "Path is a directory, use list_files instead" };
     }
-    if (stat.size > MAX_FILE_SIZE) {
-      return { success: false, output: "", error: `File too large (${stat.size} bytes > ${MAX_FILE_SIZE} limit)` };
+    if (stat.size > MAX_TEXT_FILE_BYTES) {
+      return {
+        success: false,
+        output: "",
+        error: `File too large to read (${stat.size} bytes > ${MAX_TEXT_FILE_BYTES} limit). Find the lines you need with grep_files, passing this file as path.`,
+      };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -189,7 +284,7 @@ registerTool({
         const start = (offset ?? 1) - 1;
         const end = limit !== undefined ? start + limit : lines.length;
         const window = lines.slice(start, end);
-        const shown = window.map((l, i) => `${start + i + 1}\t${l}`).join("\n");
+        const shown = window.map((l, i) => `${start + i + 1}\t${clipLine(l)}`).join("\n");
         return {
           success: true,
           output: shown,
@@ -202,10 +297,33 @@ registerTool({
           },
         };
       }
+      const totalLines = content.split("\n").length;
+      // Unwindowed read of a large file: the caller did not ask for a window, but the
+      // whole file would be re-prefilled on every later iteration of that agent's turn.
+      // Hand back head+tail and say exactly how to get the middle.
+      if (content.length > MAX_UNWINDOWED_READ_CHARS) {
+        const head = sliceAtLineBoundary(content, UNWINDOWED_HEAD_CHARS, "head");
+        const tail = sliceAtLineBoundary(content, UNWINDOWED_TAIL_CHARS, "tail");
+        const firstTailLine = totalLines - countLines(tail) + 1;
+        const lastHeadLine = countLines(head);
+        return {
+          success: true,
+          output: `${head}\n\n[read_file returned a window: ${content.length} chars total, `
+            + `showing lines 1-${lastHeadLine} and ${firstTailLine}-${totalLines}. `
+            + `Call read_file again with offset/limit to see the elided middle.]\n\n${tail}`,
+          metadata: {
+            path, size: stat.size, ext, totalLines,
+            firstLine: 1,
+            lastLine: totalLines,
+            truncated: true,
+            returnedChars: head.length + tail.length,
+          },
+        };
+      }
       return {
         success: true,
         output: content,
-        metadata: { path, size: stat.size, ext, totalLines: content.split("\n").length },
+        metadata: { path, size: stat.size, ext, totalLines },
       };
     } catch (err) {
       log.error({ err, path }, "read_file failed");
@@ -239,20 +357,49 @@ registerTool({
     if (!existsSync(resolved)) {
       // A scope-confined agent listing its still-empty working zone (generated/
       // only exists after the first write): report an empty zone, not an error.
-      if (resolved === resolve(ctx.workspacePath, GENERATED_SUBDIR)) {
+      if (resolved === generatedZoneDir(ctx.workspacePath)) {
         return { success: true, output: "(empty — no files generated yet; create files with write_file)", metadata: { path, count: 0 } };
       }
       return { success: false, output: "", error: `Path not found: ${path}` };
     }
 
-    const entries = listDir(resolved, recursive ? 3 : 0);
+    // A FILE path answered "(empty directory — no files yet…)": readdir threw on it, the catch
+    // swallowed that, and the caller was told an existing file's directory was empty.
+    let rootStat;
+    try { rootStat = statSync(resolved); }
+    catch (err) { return { success: false, output: "", error: `Could not read ${path}: ${errorCode(err)}` }; }
+    if (!rootStat.isDirectory()) {
+      return {
+        success: true,
+        output: `${path} is a file (${rootStat.size} bytes), not a directory — use read_file to read it.`,
+        metadata: { path, count: 0, isFile: true, size: rootStat.size },
+      };
+    }
+
+    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0 };
+    let entries: string[];
+    try {
+      entries = listDir(resolved, recursive ? LIST_RECURSIVE_DEPTH : 0, recursive, listHintPrefix(path), notes);
+    } catch (err) {
+      return { success: false, output: "", error: `Could not list ${path}: ${errorCode(err)}` };
+    }
+    const footer = [
+      notes.unreadable > 0 ? `${notes.unreadable} entr${notes.unreadable === 1 ? "y" : "ies"} could not be read — marked "unreadable" above.` : "",
+      notes.cutByDepth > 0 ? `${notes.cutByDepth} director${notes.cutByDepth === 1 ? "y was" : "ies were"} not expanded: the recursive listing stops ${LIST_RECURSIVE_DEPTH} levels down — call list_files on the path shown to see inside.` : "",
+    ].filter(Boolean).join("\n");
     // An empty-string output reads as "something went wrong" to the model — it
     // retries the same listing over and over (audit a438ef4a: 5 identical
     // list_files calls on an empty working zone). Say "empty" explicitly.
     return {
       success: true,
-      output: entries.length > 0 ? entries.join("\n") : "(empty directory — no files yet; create files with write_file)",
-      metadata: { path, count: entries.length },
+      output: (entries.length > 0 ? entries.join("\n") : "(empty directory — no files yet; create files with write_file)")
+        + (footer ? `\n\n${footer}` : ""),
+      metadata: {
+        path,
+        count: entries.length,
+        ...(notes.unreadable > 0 ? { unreadable: notes.unreadable } : {}),
+        ...(notes.cutByDepth > 0 ? { cutByDepth: notes.cutByDepth } : {}),
+      },
     };
   },
 });
@@ -359,6 +506,48 @@ export function commonPrefixLength(a: string, b: string): number {
   return i;
 }
 
+/**
+ * Would this overwrite REPLACE FINISHED WORK WITH PLACEHOLDERS?
+ *
+ * Run 2dc5832c is why this exists. web_coder spent 13 iterations filling six of eight
+ * UNFINISHED_STUB subsystems with real code via edit_file; the orchestrator then
+ * re-delegated, and the next run answered with ONE write_file carrying a fresh 4,037-byte
+ * skeleton holding all eight markers again. Every filled subsystem was destroyed in a
+ * single call, and the file that reached the user threw on its first line.
+ *
+ * The rule is the narrowest one that catches it: an overwrite may not RAISE the number of
+ * unfilled markers in a file THAT IS STILL BEING BUILT. Fewer is progress, equal is a harmless
+ * re-skeleton of a skeleton, more is work being thrown away. It reads one literal — the same
+ * token the staged-build directive tells the model to write and artifactFileLooksTruncated
+ * greps back off disk — so the prompt half and the mechanical half still agree on one string.
+ *
+ * A FINISHED FILE (zero markers) IS A DIFFERENT CASE and is deliberately NOT blocked. The
+ * staged-build directive, now default-on, orders a skeleton as the FIRST tool call of any
+ * large build — so "rebuild this from scratch, differently" over a completed artifact hit this
+ * guard and was refused, with a message telling the model to edit marker lines that do not
+ * exist in that file, on a run holding no delete tool. Nothing was being interrupted there:
+ * the file was done, and replacing a done file is what a rebuild IS. It is reported instead of
+ * refused, so the deliberate rebuild proceeds and an accidental one is still visible.
+ *
+ * Unlike the churn nudge above this BLOCKS, because here refusing the write is what
+ * preserves the work rather than what risks it. edit_file remains available and is the
+ * correct tool for the job the model was attempting.
+ */
+export function evaluateStubRegression(
+  existing: string,
+  content: string,
+): { regressed: boolean; replacesFinished: boolean; existingStubs: number; newStubs: number } {
+  const count = (text: string): number => text.split(UNFINISHED_STUB_MARKER).length - 1;
+  const existingStubs = count(existing);
+  const newStubs = count(content);
+  return {
+    regressed: existingStubs > 0 && newStubs > existingStubs,
+    replacesFinished: existingStubs === 0 && newStubs > 0,
+    existingStubs,
+    newStubs,
+  };
+}
+
 /** Pure write-churn decision for the regeneration nudge (orchestration.detectWriteChurnOverwrite).
  *  A file rebuilt from the top after a completion-limit cut-off reproduces its opening identically,
  *  so a substantial (≥500-byte) file whose OVERWRITE shares ≥90% of the first 2 KB is a regeneration,
@@ -458,6 +647,47 @@ registerTool({
     // 2 KB; no content/topic heuristics) and attach a SOFT append nudge. Computed BEFORE the write (the old
     // content is about to be replaced); a full replacement with different content diverges early and is
     // never flagged. Never blocks the write — work is preserved.
+    // BLOCK an overwrite that would replace finished work with placeholders (run 2dc5832c:
+    // six filled subsystems destroyed by one skeleton write). Checked before the write, and
+    // before the churn nudge, because a stub regression is never a nudge-and-continue case —
+    // the whole point is that the bytes on disk are worth more than the bytes in the call.
+    if (mode === "overwrite" && fileExists) {
+      try {
+        const previous = readFileSync(resolved, "utf-8");
+        const regression = evaluateStubRegression(previous, content);
+        if (regression.replacesFinished) {
+          // Allowed, but never silent: this is the shape of a deliberate rebuild AND the shape
+          // of a clobber that arrives one iteration too late to be distinguished from one.
+          logAudit("guardrail_flagged", {
+            type: "write_file_skeleton_over_finished_file",
+            path: relativePath,
+            newStubs: regression.newStubs,
+            existingChars: previous.length,
+            newChars: content.length,
+          }, { sessionId: ctx.sessionId, severity: "info" });
+        }
+        if (regression.regressed) {
+          logAudit("guardrail_flagged", {
+            type: "write_file_stub_regression_blocked",
+            path: relativePath,
+            existingStubs: regression.existingStubs,
+            newStubs: regression.newStubs,
+            existingChars: previous.length,
+            newChars: content.length,
+          }, { sessionId: ctx.sessionId, severity: "warn" });
+          return {
+            success: false,
+            output: "",
+            error: `Refusing to overwrite '${relativePath}': the file on disk has ${regression.existingStubs} `
+              + `unfinished ${UNFINISHED_STUB_MARKER} marker(s) and your replacement has ${regression.newStubs}. `
+              + `That would DESTROY work already on disk and hand back a less complete file. Do not re-emit this `
+              + `file from the top. Read it, then replace ONE ${UNFINISHED_STUB_MARKER} line at a time with `
+              + `edit_file, using that line as old_string.`,
+          };
+        }
+      } catch { /* read failure — fall through; never block a write on an unreadable file */ }
+    }
+
     let churnNudge = "";
     if (mode === "overwrite" && fileExists && getConfig().orchestration?.detectWriteChurnOverwrite === true) {
       try {
@@ -547,11 +777,11 @@ registerTool({
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
-    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };
+    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
 
     const stat = statSync(resolved);
-    if (stat.size > MAX_FILE_SIZE) {
-      return { success: false, output: "", error: `File too large (${stat.size} bytes > ${MAX_FILE_SIZE} limit)` };
+    if (stat.size > MAX_TEXT_FILE_BYTES) {
+      return { success: false, output: "", error: `File too large to edit (${stat.size} bytes > ${MAX_TEXT_FILE_BYTES} limit)` };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -562,7 +792,29 @@ registerTool({
     try {
       const content = readFileSync(resolved, "utf-8");
       if (!content.includes(oldStr)) {
-        return { success: false, output: "", error: "old_string not found in file" };
+        // "old_string not found in file" is true and useless: it tells the caller the edit
+        // missed but not what to aim at instead. During a staged build the overwhelmingly
+        // common cause is targeting a marker that an earlier iteration already filled — the
+        // model lost track of its own progress — and recovering from the bare message costs
+        // a grep_files round trip, which on a 14-iteration budget is real headroom spent on
+        // rediscovering something the file already knows.
+        //
+        // So when the miss was aimed at a stub marker, answer the question the caller is
+        // actually asking: which markers are still there. Naming them lets the next call
+        // land instead of hunting.
+        const missedAStub = oldStr.includes(UNFINISHED_STUB_MARKER);
+        const remaining = missedAStub
+          ? content.split("\n")
+              .filter(line => line.includes(UNFINISHED_STUB_MARKER))
+              .map(line => line.trim())
+              .map(line => clipLine(line, line.indexOf(UNFINISHED_STUB_MARKER)))
+              .slice(0, 20)
+          : [];
+        const hint = !missedAStub ? ""
+          : remaining.length > 0
+            ? ` This file still holds ${remaining.length} unfilled marker(s) — target one of these exactly: ${remaining.join(" | ")}`
+            : ` No ${UNFINISHED_STUB_MARKER} markers remain in this file; every subsystem is already filled.`;
+        return { success: false, output: "", error: `old_string not found in file.${hint}` };
       }
       // Count first. `String.replace` with a string pattern rewrites only the FIRST
       // match, and this reported `replacements: 1` unconditionally — so an ambiguous
@@ -667,20 +919,72 @@ registerTool({
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function listDir(dir: string, depth: number): string[] {
+/** How many levels below the listed directory a recursive list_files descends. */
+const LIST_RECURSIVE_DEPTH = 3;
+
+interface ListDirNotes { unreadable: number; cutByDepth: number }
+
+/** The error's code (EACCES, ENOENT, …) when it has one, else its message. */
+function errorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : err instanceof Error ? err.message : String(err);
+}
+
+/** The caller's own path, as the prefix of a path a follow-up list_files call can take. */
+function listHintPrefix(path: string): string {
+  const trimmed = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  return trimmed === "" || trimmed === "." ? "" : trimmed;
+}
+
+/**
+ * One directory of a listing, every entry accounted for. The try used to wrap the whole loop,
+ * so ONE entry whose stat failed (a broken symlink, a permission error) ended the listing: that
+ * entry and every one after it vanished, and the caller saw a shorter directory than the one on
+ * disk. Now such an entry is listed as unreadable and the loop goes on. A directory the depth
+ * limit stops at is marked with how much lies below it, so a recursive listing never presents a
+ * cut-off subtree as an empty one. Throws only when `dir` itself cannot be read and `isRoot`.
+ */
+function listDir(dir: string, depth: number, recursive: boolean, relDir: string, notes: ListDirNotes, isRoot = true): string[] {
   const entries: string[] = [];
+  let names: string[];
   try {
-    for (const name of readdirSync(dir)) {
-      const full = resolve(dir, name);
-      const stat = statSync(full);
-      const prefix = stat.isDirectory() ? "/" : "";
-      entries.push(`${name}${prefix}`);
-      if (depth > 0 && stat.isDirectory()) {
-        const children = listDir(full, depth - 1).map(c => `  ${c}`);
-        entries.push(...children);
+    names = readdirSync(dir);
+  } catch (err) {
+    if (isRoot) throw err;
+    notes.unreadable++;
+    return [`(unreadable directory: ${errorCode(err)})`];
+  }
+  for (const name of names) {
+    const full = resolve(dir, name);
+    const rel = relDir ? `${relDir}/${name}` : name;
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch (err) {
+      notes.unreadable++;
+      entries.push(`${name} (unreadable: ${errorCode(err)})`);
+      continue;
+    }
+    if (!stat.isDirectory()) {
+      entries.push(name);
+      continue;
+    }
+    if (depth > 0) {
+      entries.push(`${name}/`);
+      entries.push(...listDir(full, depth - 1, recursive, rel, notes, false).map(c => `  ${c}`));
+      continue;
+    }
+    if (recursive) {
+      let below = 0;
+      try { below = readdirSync(full).length; } catch { /* listing it directly reports why */ }
+      if (below > 0) {
+        notes.cutByDepth++;
+        entries.push(`${name}/ (${below} entr${below === 1 ? "y" : "ies"} below the depth limit — list_files path="${rel}")`);
+        continue;
       }
     }
-  } catch { /* ignore permission errors */ }
+    entries.push(`${name}/`);
+  }
   return entries;
 }
 
@@ -703,12 +1007,6 @@ function inferArtifactPreviewMode(contentType: string): "image" | "html" | "pdf"
   if (contentType.startsWith("text/") || contentType.includes("yaml") || contentType.includes("xml") || contentType.includes("mermaid")) return "text";
   // Office docs, archives and other binary formats → trigger browser download
   return "download";
-}
-
-function buildArtifactTextPreview(content: string): string | undefined {
-  const compact = content.replace(/\s+/g, " ").trim();
-  if (!compact) return undefined;
-  return compact.length > 1_200 ? `${compact.slice(0, 1_197)}...` : compact;
 }
 
 function safeEntryCount(dir: string): number {

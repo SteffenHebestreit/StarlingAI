@@ -8,30 +8,35 @@
  * memory_search — full-text substring search across keys, content, and tags
  */
 import { randomUUID } from "node:crypto";
+import { rootSessionOf } from "../agent/session-ids.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { appendOutcome, readRecentOutcomes } from "../agent/outcomes.js";
-import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts } from "../swarm/memory.js";
+import { appendOutcome } from "../agent/outcomes.js";
+import { currentOutcomeRun, currentUserId } from "../runtime/request-context.js";
+import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { logAudit } from "../audit/logger.js";
 import { isAgentMessagingSuppressed } from "../agent/warden.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
 import { getConfig } from "../config/loader.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { getSession } from "../agent/session.js";
 import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
   promoteMemoryRecords,
-  searchMemoryRecords,
+  searchableMemoryScopes,
+  searchMemoryRecordsWithStatus,
   storeUserMemoryRecord,
   storeWorkspaceMemoryRecord,
   type DurableMemoryScope,
   type MemoryKind,
   type MemoryScope,
+  type PromoteMemoryResult,
 } from "../memory/service.js";
 import { computeMemoryCurationReport } from "../memory/steward.js";
 import {
@@ -112,16 +117,7 @@ const EVIDENCE_VALIDATION_STATUSES = new Set(["unverified", "tentative", "valida
  * (audit session b4fba9c4, May 2026).
  */
 export function deriveSharedSessionId(sessionId: string): string {
-  let current = sessionId;
-  while (current.startsWith("sub:")) {
-    const inner = current.slice("sub:".length);
-    const lastColon = inner.lastIndexOf(":");
-    if (lastColon === -1) return inner;
-    const secondLastColon = inner.lastIndexOf(":", lastColon - 1);
-    if (secondLastColon === -1) return inner;
-    current = inner.slice(0, secondLastColon);
-  }
-  return current;
+  return rootSessionOf(sessionId);
 }
 
 function deriveAgentName(sessionId: string): string {
@@ -131,11 +127,14 @@ function deriveAgentName(sessionId: string): string {
 
 /**
  * C13: Tokenize text for near-duplicate detection in share_finding.
- * Returns a Set of lowercase word-level tokens (length ≥ 3).
+ * Returns a Set of lowercase word-level tokens: length ≥ 3, or any length when
+ * the token holds a digit. "Q2" vs "Q3" or "0.6%" vs "0.4%" can be the whole
+ * difference between two facts, and dropping short tokens scored such a pair
+ * as identical.
  */
 function tokenizeForDedup(text: string): Set<string> {
-  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]{3,}/g) ?? [];
-  return new Set(tokens);
+  const tokens = text.toLowerCase().match(/[a-z0-9äöüß]+/g) ?? [];
+  return new Set(tokens.filter((t) => t.length >= 3 || /\d/.test(t)));
 }
 
 /**
@@ -146,6 +145,11 @@ function tokenOverlapScore(newTokens: Set<string>, existingValue: string): numbe
   if (newTokens.size === 0) return 0;
   const existingTokens = tokenizeForDedup(existingValue);
   if (existingTokens.size === 0) return 0;
+  // A different number is a different fact, however long the sentence around it. Jaccard
+  // alone let a 90-character finding that changed one figure score above the threshold and be
+  // dropped as a duplicate, so the older figure stayed the only one recorded.
+  const numbers = (tokens: Set<string>): string => [...tokens].filter((t) => /\d/.test(t)).sort().join(" ");
+  if (numbers(newTokens) !== numbers(existingTokens)) return 0;
   let intersection = 0;
   for (const token of newTokens) {
     if (existingTokens.has(token)) intersection++;
@@ -387,21 +391,38 @@ function formatSharedFindingValue(value: string, metadata: SharedFindingMetadata
   return lines.join("\n");
 }
 
+const USER_SCOPE_REFUSED = "not stored: scope 'user' keeps a memory for the account it belongs to, and this request has no account. The workspace scope is read by every account.";
+
 /** The durable 'user' scope holds cross-workspace personal preferences, so it
  *  needs an authenticated owner. In single-user/token mode (ctx.userId is
  *  undefined) a user-scope write would land in a shared anonymous bucket that
  *  outlives the session and is shared across channels (audit a7b11454: a
  *  token-mode webchat preference stored as user:user) — fall back to
- *  workspace scope instead and surface the downgrade in the tool output. */
+ *  workspace scope instead and surface the downgrade in the tool output.
+ *  Under multi-user auth that workspace is the shared root, whose memories every account reads, and
+ *  requests with no user still reach these tools there (an MCP or federation run, an A2A caller on
+ *  a shared bearer), so a memory someone asked to keep as their own reached every account (found in
+ *  review, 2026-10-08). There a request with no account at all, on the tool call or around it, is
+ *  refused instead; one whose account rides only the request context falls back as before, to that
+ *  account's own part of the workspace. A config that cannot be read counts as multi-user. */
 function resolveDurableWriteScope(
   requested: DurableMemoryScope,
   ctx: ToolContext,
-): { scope: DurableMemoryScope; downgraded: boolean } {
-  if (requested === "user" && !ctx.userId) return { scope: "workspace", downgraded: true };
+): { scope: DurableMemoryScope; downgraded: boolean } | { refused: string } {
+  if (requested === "user" && !ctx.userId) {
+    let multiUser = true;
+    try {
+      multiUser = getConfig().auth?.enabled === true;
+    } catch { /* fail closed */ }
+    if (multiUser && !currentUserId()) return { refused: USER_SCOPE_REFUSED };
+    return { scope: "workspace", downgraded: true };
+  }
   return { scope: requested, downgraded: false };
 }
 
 const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: no authenticated user on this session)";
+
+const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are searchable only by the account they were recorded for, and this request has no account: the agent scope was not searched.";
 
 registerTool({
   name: "memory_store",
@@ -456,7 +477,9 @@ registerTool({
     if (!key) return { success: false, output: "", error: "key is required" };
     if (!content) return { success: false, output: "", error: "content is required" };
     if (requestedScope !== "workspace" && requestedScope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
-    const { scope, downgraded } = resolveDurableWriteScope(requestedScope, ctx);
+    const resolved = resolveDurableWriteScope(requestedScope, ctx);
+    if ("refused" in resolved) return { success: false, output: "", error: resolved.refused };
+    const { scope, downgraded } = resolved;
 
     try {
       const entry = (scope === "user" ? storeUserMemoryRecord : storeWorkspaceMemoryRecord)(ctx.workspacePath, {
@@ -492,7 +515,7 @@ registerTool({
   name: "memory_search",
   description:
     "Search memory across user-global, workspace, session-shared facts, and agent lessons/flow memory. " +
-    "Matches against subject, content, tags, and memory kind. " +
+    "Matches words of the query against subject, content, tags, key and memory kind, and by meaning when semantic search is available. " +
     "Returns up to `limit` results (default 10).",
   embeddingDescription: "Search, recall, look up saved notes, remembered facts, past lessons. Erinnerungen suchen, Notizen finden, was wurde gespeichert, Gedächtnis abfragen. Retrieve long-term memory.",
   parameters: {
@@ -500,7 +523,7 @@ registerTool({
     properties: {
       query: {
         type: "string",
-        description: "Search term — matched as a case-insensitive substring",
+        description: "Search term — matched word by word (inflections and compound parts included), and by meaning when semantic search is available",
       },
       limit: {
         type: "number",
@@ -538,28 +561,57 @@ registerTool({
     if (!query) return { success: false, output: "", error: "query is required" };
 
     try {
-      const results = await searchMemoryRecords(ctx.workspacePath, query, {
+      // Under multi-user auth the agent scope shows the caller's own lessons only, and with no user
+      // in the request it is not searched, asked for or not (memory/service.ts
+      // searchableMemoryScopes). The metadata then names the scopes searched, and a request that
+      // named the agent scope is told it was left out, so an empty answer is not read as "no
+      // lessons stored".
+      const searchable = searchableMemoryScopes(scopes);
+      const agentWithheld = !searchable.includes("agent") && (!scopes?.length || scopes.includes("agent"));
+      const agentNote = agentWithheld && scopes?.includes("agent") ? AGENT_SCOPE_NOT_SEARCHED_NOTE : "";
+      if (agentWithheld && searchable.length === 0) {
+        return { success: true, output: `No memories found matching '${query}'.\n${agentNote}`, metadata: { count: 0, scopes: [], semanticRan: true } };
+      }
+      const search = await searchMemoryRecordsWithStatus(ctx.workspacePath, query, {
         limit,
-        scopes,
+        scopes: agentWithheld ? searchable : scopes,
         kinds,
         sessionId: deriveSharedSessionId(ctx.sessionId),
         targetAgent,
       });
+      const results = search.records;
+      const unmatched = new Set(search.unmatchedIds);
+      // Without the semantic check a paraphrase cannot match ("Wann fährt die Fähre ab" against
+      // "The island sailing leaves at 07:40"), so neither an empty answer nor the order of what is
+      // shown says anything about what is stored — and the answer has to say so.
+      const lexicalOnly = search.semanticRan
+        ? ""
+        : "Lexical only — semantic search unavailable; entries marked (no word match) were not matched against the query, and a missing memory is not evidence that nothing is stored.";
+      const uncompared = search.notComparedSemantically > 0
+        ? `${search.notComparedSemantically} stored record(s) without a word match were not compared by meaning — narrow scopes or kinds to include them.`
+        : "";
+      const notes = [lexicalOnly, uncompared, agentNote].filter(Boolean).join("\n");
+      const metadata = {
+        count: results.length,
+        scopes: agentWithheld ? searchable : scopes ?? ["workspace", "user", "session", "agent"],
+        semanticRan: search.semanticRan,
+        ...(unmatched.size > 0 ? { unmatched: unmatched.size } : {}),
+      };
 
       if (results.length === 0) {
-        return { success: true, output: `No memories found matching '${query}'.`, metadata: { count: 0 } };
+        return { success: true, output: `No memories found matching '${query}'.${notes ? `\n${notes}` : ""}`, metadata };
       }
 
       const formatted = results
         .map((r) =>
-          `**[${r.scope}/${r.kind}] ${r.subject}**${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
+          `**[${r.scope}/${r.kind}] ${r.subject}**${unmatched.has(r.id) ? " (no word match)" : ""}${r.tags.length ? ` [${r.tags.join(", ")}]` : ""} _(${r.updatedAt.slice(0, 10)})_\n${r.content.substring(0, 500)}${r.content.length > 500 ? "…" : ""}`
         )
         .join("\n\n---\n\n");
 
       return {
         success: true,
-        output: `Found ${results.length} memory entry(ies) for '${query}':\n\n${formatted}`,
-        metadata: { count: results.length, scopes: scopes ?? ["workspace", "user", "session", "agent"] },
+        output: `Found ${results.length} memory entry(ies) for '${query}':${notes ? `\n${notes}` : ""}\n\n${formatted}`,
+        metadata,
       };
     } catch (err) {
       log.error({ err, query }, "memory_search failed");
@@ -734,9 +786,8 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "").trim();
     const limit = Math.min(20, Math.max(1, Number(args["limit"] ?? 5)));
-    const scopes = Array.isArray(args["scopes"])
-      ? args["scopes"].map(String).filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent")
-      : undefined;
+    const requestedScopes = Array.isArray(args["scopes"]) ? args["scopes"].map(String) : undefined;
+    const scopes = requestedScopes?.filter((value): value is MemoryScope => value === "workspace" || value === "session" || value === "agent");
     const kind = String(args["kind"] ?? "").trim().toLowerCase() as MemoryKind | "";
     const targetAgent = String(args["targetAgent"] ?? "").trim() || undefined;
     const requestedDestinationScope = String(args["destinationScope"] ?? "workspace").trim().toLowerCase() as DurableMemoryScope | "";
@@ -745,21 +796,27 @@ registerTool({
     if (requestedDestinationScope !== "workspace" && requestedDestinationScope !== "user") {
       return { success: false, output: "", error: "destinationScope must be 'workspace' or 'user'" };
     }
-    const { scope: destinationScope, downgraded } = resolveDurableWriteScope(requestedDestinationScope, ctx);
+    const resolved = resolveDurableWriteScope(requestedDestinationScope, ctx);
+    if ("refused" in resolved) return { success: false, output: "", error: resolved.refused };
+    const { scope: destinationScope, downgraded } = resolved;
 
     try {
-      const result = await promoteMemoryRecords(ctx.workspacePath, query, {
-        sessionId: deriveSharedSessionId(ctx.sessionId),
-        scopes,
-        targetAgent,
-        destinationKind: kind || undefined,
-        destinationScope,
-        maxPromotions: limit,
-        writeContext: {
-          agentName: ctx.currentAgentName,
-          sessionId: ctx.sessionId,
-        },
-      });
+      // A list naming no source scope ("user", the user destination itself) asks for nothing: left
+      // empty it would reach the service as "no scopes", every default source.
+      const result: PromoteMemoryResult = requestedScopes?.length && !scopes?.length
+        ? { promoted: [], merged: [], skipped: 0, destinationScope }
+        : await promoteMemoryRecords(ctx.workspacePath, query, {
+          sessionId: deriveSharedSessionId(ctx.sessionId),
+          scopes,
+          targetAgent,
+          destinationKind: kind || undefined,
+          destinationScope,
+          maxPromotions: limit,
+          writeContext: {
+            agentName: ctx.currentAgentName,
+            sessionId: ctx.sessionId,
+          },
+        });
 
       const promotedLines = result.promoted.map((record) => `- promoted **${record.subject}** as ${record.kind}`);
       const mergedLines = result.merged.map((record) => `- merged into **${record.subject}** as ${record.kind}`);
@@ -860,22 +917,31 @@ registerTool({
 
     if (!lesson) return { success: false, output: "", error: "lesson is required" };
 
+    // The run this call belongs to: its task, account and progress (agent/sub-agent.ts attaches each
+    // in-process run to its own request context, which this call inherits). The lesson used to take the
+    // task of the latest ledger entry for this agent's name, which was another run's: one that
+    // finished meanwhile, possibly for another account, and otherwise the agent's PREVIOUS run, since
+    // this run's own outcome is written when it ends (found in review, 2026-10-08). A call from
+    // outside a registered run is filed under no one's task.
+    const run = currentOutcomeRun();
     // Derive agent name from sessionId (sub:parentId:agentName:timestamp)
     const parts = ctx.sessionId.split(":");
-    const agentName = parts.length >= 3 ? parts[2]! : "unknown";
+    const agentName = run?.agent ?? (parts.length >= 3 ? parts[2]! : "unknown");
+    const progress = run?.progress();
+    // The run's account; outside a registered run, the request's.
+    const account = run ? run.account : recordAccount();
 
-    // Read the most recent outcome for this agent and attach the lesson
-    const recents = readRecentOutcomes(ctx.workspacePath, 20);
-    const latest = [...recents].reverse().find(o => o.agent === agentName);
-
-    appendOutcome(ctx.workspacePath, {
+    // Shared root: the ledger describes the deployment's agents, and a per-user root holds one
+    // account's slice of it.
+    appendOutcome(getConfig().workspacePath, {
       ts: new Date().toISOString(),
       agent: agentName,
-      task: latest?.task ?? "(lesson recorded explicitly)",
+      task: run?.task ?? "(lesson recorded explicitly)",
       outcome,
-      iterations: latest?.iterations ?? 0,
-      totalTokens: latest?.totalTokens ?? 0,
+      iterations: progress?.iterations ?? 0,
+      totalTokens: progress?.totalTokens ?? 0,
       lesson,
+      ...(account ? { account } : {}),
     });
 
     log.info({ agentName, outcome, lesson }, "Lesson recorded");
@@ -1088,9 +1154,25 @@ registerTool({
     // with redundant information across multiple browser/search iterations.
     if (rawValue.length >= 50) {
       const existingFacts = await readAllFacts(parentSessionId);
-      const newTokens = tokenizeForDedup(rawValue);
-      for (const [existingKey, existingValue] of Object.entries(existingFacts)) {
-        if (existingKey === key) continue; // same key overwrite is fine
+      // A write to a key that already exists is an update: the hash replaces that
+      // one field, so it cannot add a fact, and skipping it would only keep the
+      // old value alive. Such a write is never compared with the other keys.
+      const others = Object.hasOwn(existingFacts, key) ? [] : Object.entries(existingFacts);
+      const newIsAtomic = isAtomicFactValue(rawValue);
+      const newTokens = newIsAtomic ? new Set<string>() : tokenizeForDedup(rawValue);
+      for (const [existingKey, existingValue] of others) {
+        // An identifier on either side is a duplicate only when the stored values
+        // are equal, so a finding that adds a claim or a source to a known path is
+        // new content.
+        if (newIsAtomic || isAtomicFactValue(existingValue)) {
+          if (existingValue !== value) continue;
+          log.info({ key, existingKey, parentSessionId }, "share_finding rejected as exact duplicate");
+          return {
+            success: true,
+            output: `Finding '${key}' has the same value as existing fact '${existingKey}'. Skipped to avoid duplicate.`,
+            metadata: { key, parentSessionId, deduplicated: true, nearDuplicateKey: existingKey },
+          };
+        }
         const overlapScore = tokenOverlapScore(newTokens, existingValue);
         if (overlapScore >= 0.85) {
           log.info({ key, existingKey, overlapScore, parentSessionId }, "share_finding rejected as near-duplicate");
@@ -1456,7 +1538,7 @@ registerTool({
       if (matches.length === 0) {
         return {
           success: true,
-          output: `No shared facts matched \"${query}\" for this session.`,
+          output: `No shared facts matched "${query}" for this session.`,
           metadata: { count: 0, query },
         };
       }
@@ -1466,7 +1548,7 @@ registerTool({
         .join("\n");
       return {
         success: true,
-        output: `## Shared Session Facts matching \"${query}\" (${matches.length})\n\n${formattedMatches}`,
+        output: `## Shared Session Facts matching "${query}" (${matches.length})\n\n${formattedMatches}`,
         metadata: { count: matches.length, query },
       };
     }

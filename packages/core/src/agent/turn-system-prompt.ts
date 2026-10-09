@@ -19,7 +19,8 @@
  * (they are runtime.ts-local) so this module needs no import from runtime.js -
  * keeping the dependency edge one-directional (no import cycle).
  */
-import type { LLMMessage } from "../providers/lmstudio.js";
+import { normalizeMessagesForModel, type LLMMessage } from "../providers/lmstudio.js";
+import { hashText } from "../providers/prompt-head.js";
 import type { AgentSession } from "./session.js";
 import { splitOrchestrationModule } from "./session.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
@@ -31,6 +32,7 @@ import {
   looksLikeArtifactCreationRequest,
   looksLikeComposedGuideRequest,
 } from "./deliverable-intent.js";
+import { buildTurnReplyLanguageInstruction, isFirstUserTurn, messageHasOwnLanguage } from "./reply-language.js";
 import {
   timedPhase,
   measurePrompt,
@@ -41,11 +43,14 @@ import { formatScopedMemoryGuidance } from "../memory/service.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { buildMemoryCapsule } from "./receptionist.js";
-import { prefetchCapabilityCandidates } from "./discovery-prefetch.js";
+import { startDiscoveryPrefetch, turnContextInjected } from "./turn-setup.js";
 import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
+import { AGENT_DISCOVERY_TOOL_NAMES } from "./delegation-response-collapse.js";
+import { loadTurnPlan } from "./turn-plan.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { currentRequestContext } from "../runtime/request-context.js";
 
 const log = childLogger("agent:runtime");
 
@@ -53,6 +58,13 @@ export interface AssembleTurnSystemMessagesParams {
   session: AgentSession;
   iterationCount: number;
   userMessage: string;
+  /** The turn's agent grant (a scene, a restricted session); the discovery capsule honours it. */
+  allowedAgents?: readonly string[];
+  /**
+   * The discovery prefetch the runtime already started for this turn (startDiscoveryPrefetch),
+   * consumed by iteration 0. Absent, iteration 0 starts its own.
+   */
+  startedDiscoveryPrefetch?: Promise<string>;
   initialDynamicGuidance: DynamicTurnGuidance | null;
   documentRagFoundDocs: boolean;
   trajectoryInjectionContext: string;
@@ -69,6 +81,16 @@ export interface AssembleTurnSystemMessagesParams {
   workflowCatalogEnforcementPrompt: string;
   approvedRunCandidateEnforcementPrompt: string;
   workflowExecutionEnforcementPrompt: string;
+  /** The agent the user directed this turn to (`--agent`), until that agent has run: the line that
+   *  names it. Empty otherwise. */
+  directiveAgentPrompt?: string;
+  /**
+   * Every tool the turn has called so far, with how often (the runtime's per-turn tally), and the
+   * delegations it has dispatched. Read after iteration 0 only, to decide whether the plan-first
+   * nudge still applies (turnIsStillDiscovering). Absent, it is never re-armed.
+   */
+  turnToolCallCounts?: ReadonlyMap<string, number>;
+  turnDelegationCount?: number;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
   applyRoutingTone: (text: string) => string;
@@ -83,6 +105,86 @@ export interface AssembleTurnSystemMessagesResult {
   lastPromptMetrics: ReturnType<typeof measurePrompt>;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
+  /**
+   * The cached-trajectory evidence went out in this prompt: injected (iteration 0, not lean) and
+   * not dropped by the budget trimmer. Only an entry the model was SHOWN may be scored as used or
+   * invalidated by the turn's outcome (turn-success-finalize.ts).
+   */
+  trajectoryShown: boolean;
+  /**
+   * The multi-domain plan-first nudge went out in this prompt with no correction pending: the tail
+   * asks for record_plan before the turn acts. The runtime hands it to the response's routing tools
+   * (ToolContext.planFirstPending) so their pointer does not tell the model to delegate now. False
+   * when the budget trimmer dropped the nudge, and from iteration 2 on, where the nudge is no longer
+   * repeated.
+   */
+  planFirstPending: boolean;
+}
+
+/**
+ * The line a turn the user directed to one agent (`--agent NAME`) carries until that agent has run.
+ * The tool call is forced as well (the runtime's mustOrchestrateBeforeAnswering); this says where.
+ */
+export function buildDirectiveAgentPrompt(agentName: string): string {
+  const name = JSON.stringify(agentName);
+  return `The user directed this request to the agent ${name} (--agent). Delegate it to that agent with delegate_to_agent `
+    + `(agentName ${name}), passing the request in full; do not answer it yourself and do not route it to another agent. `
+    + "Then answer the user from its result.";
+}
+
+/**
+ * Place the per-turn guidance so the leading system run stays byte-identical across iterations.
+ *
+ * With `stable` on, the request is head → history → guidance: the head is the KV-cache key and
+ * never changes within a turn, and the guidance lands after the history, where every provider
+ * already handles a non-leading system message (folded to user-role context in position by the
+ * LM Studio provider, delivered as user-turn context by the Anthropic one). With it off, the
+ * previous shape is preserved: every system message leads, and the head differs per iteration.
+ */
+export function composeTurnMessages(
+  head: readonly LLMMessage[],
+  history: readonly LLMMessage[],
+  guidance: readonly LLMMessage[],
+  stable: boolean,
+): LLMMessage[] {
+  return stable
+    ? [...head, ...history, ...guidance]
+    : [...head, ...guidance, ...history];
+}
+
+/**
+ * The leading system run of a message list as one text, folded exactly as the provider folds it
+ * before the wire (normalizeMessagesForModel; a non-Gemma id, so only the fold applies). Hashing
+ * this, rather than a join of our own, is what lets the prompt_section_sizes row and the provider
+ * rows name the same head with the same hash. Pass the list as it will be SENT: the fold takes
+ * every system message up to the first other one, which is more than the head when history opens
+ * with one. A long session's earlier-conversation summary did until 2026-10-05; it is a user-role
+ * message now (AgentSession.getCollapsedHistory), so the fold stops at the real head.
+ */
+export function foldedSystemText(messages: readonly LLMMessage[]): string {
+  const first = normalizeMessagesForModel(messages, "")[0];
+  return first && first.role === "system" && typeof first.content === "string" ? first.content : "";
+}
+
+/**
+ * Whether a turn is still only looking around: it has made at least one call, every call so far
+ * searched for an agent, a workflow or a tool (AGENT_DISCOVERY_TOOL_NAMES), and it has delegated
+ * nothing. That is the state the plan-first nudge leaves a turn in before record_plan, so the nudge
+ * stays in the tail for one more round while it holds. A count of zero is a call the runtime gave
+ * back, not one that ran. Without both inputs the answer is no.
+ */
+export function turnIsStillDiscovering(
+  toolCallCounts: ReadonlyMap<string, number> | undefined,
+  delegationCount: number | undefined,
+): boolean {
+  if (!toolCallCounts || delegationCount !== 0) return false;
+  let called = false;
+  for (const [tool, count] of toolCallCounts) {
+    if (count <= 0) continue;
+    if (!AGENT_DISCOVERY_TOOL_NAMES.has(tool)) return false;
+    called = true;
+  }
+  return called;
 }
 
 export async function assembleTurnSystemMessages(
@@ -92,6 +194,7 @@ export async function assembleTurnSystemMessages(
     session,
     iterationCount,
     userMessage,
+    allowedAgents,
     initialDynamicGuidance,
     documentRagFoundDocs,
     trajectoryInjectionContext,
@@ -108,17 +211,21 @@ export async function assembleTurnSystemMessages(
     workflowCatalogEnforcementPrompt,
     approvedRunCandidateEnforcementPrompt,
     workflowExecutionEnforcementPrompt,
+    directiveAgentPrompt = "",
     applyRoutingTone,
     buildTemporalContextPrompt,
   } = params;
-  // Skill slugs and the prompt-metrics object are carried in/out: on a context-
-  // injecting iteration the body reassigns them; otherwise the passed-in values
-  // pass through unchanged (identical to the outer `let`s the loop previously
-  // mutated in place).
+  // Skill slugs are carried in/out: on a context-injecting iteration the body reassigns them;
+  // otherwise the passed-in values pass through unchanged (identical to the outer `let`s the
+  // loop previously mutated in place). The metrics object is NOT carried in — every path
+  // through this function measures the prompt it has just assembled, so the incoming value is
+  // never the one returned.
   let injectedSkillSlugs = params.injectedSkillSlugs;
   let heldOutSkillSlugs = params.heldOutSkillSlugs;
-  let lastPromptMetrics = params.lastPromptMetrics;
-    let systemPrompt = session.getSystemPrompt();
+  let lastPromptMetrics: ReturnType<typeof measurePrompt>;
+    // Snapshotted for the turn: rebuilding it here read two files that a turn can change while it
+    // runs, and the head is the cache key. See AgentSession.getTurnSystemPrompt.
+    let systemPrompt = session.getTurnSystemPrompt();
     // Split orchestration prompt (agents.performance.splitOrchestrationPrompt, default off): the
     // ~13KB orchestration block (Swarm Rules → Orchestration Strategy) is only needed on turns that
     // actually orchestrate. Lift it out of the always-on base so a direct-answer turn pays a roughly
@@ -169,43 +276,38 @@ export async function assembleTurnSystemMessages(
     // on demand via recall_context (see config.agents.performance.leanContextInjection).
     // This also skips the retrieval calls entirely, saving latency on turns that
     // don't need that context.
-    const leanContextInjection = getConfig().agents.performance.leanContextInjection === true;
+    // One definition (turnContextInjected) for this and for the turn's up-front lookups that feed
+    // these blocks, so a lookup never runs for a block that will not be injected.
+    const leanContextInjection = !turnContextInjected();
     const injectTurnContext = iterationCount === 0 && !leanContextInjection;
     let flowGuidance = injectTurnContext
       ? formatFlowMemoryGuidance(session.getWorkspacePath(), userMessage, { limit: 3 })
       : "";
+    // Later iterations carry no language line, and the head names no default language: a message
+    // with no language of its own (a bare link that needs a fetch) would reach its answer with the
+    // default nowhere in view. Only then is the reply-language line repeated. The person's typed
+    // words come from the request context, where a forced synthesis reads them too.
     const languageAndIdentityGuidance = iterationCount === 0
-      ? buildLanguageAndIdentityTurnGuidance(userMessage)
-      : "";
+      ? buildLanguageAndIdentityTurnGuidance(userMessage, {
+        firstTurn: isFirstUserTurn(session.getHistory()),
+        userWords: currentRequestContext()?.userWords,
+      })
+      : messageHasOwnLanguage(userMessage) ? "" : buildTurnReplyLanguageInstruction(userMessage);
     // Memory guidance and procedural-skill guidance are independent and each do a
     // query embedding, so run them concurrently instead of serially on time-to-first
     // -LLM-call. (formatFlowMemoryGuidance above is synchronous — it stays out of the
     // batch.) Skills surface reusable approaches the swarm distilled; guidance only.
     const skillRetrievalEnabled = injectTurnContext && getConfig().skillLibrary.enabled;
-    // Discovery prefetch (staged orchestration S4): start it HERE so its embedding
-    // round-trip OVERLAPS the memory+skill embeddings below instead of running serially
-    // after them — all three independent retrievals fire concurrently, shaving an
-    // embedding round-trip off time-to-first-LLM-call on escalated turns. Soft head
-    // start (not a gate), compact + droppable, flag-gated default-off; best-effort —
-    // never blocks the turn (errors and the timeout both resolve to an empty capsule).
-    const DISCOVERY_PREFETCH_BUDGET_MS = 2500;
+    // Discovery prefetch (staged orchestration S4). The runtime starts it as soon as the fast lane
+    // declines the turn and hands the promise in (startedDiscoveryPrefetch, finding 2026-10-05), so
+    // its embedding round-trip overlaps the source judge and the document retrieval, not only the
+    // memory+skill embeddings below. Started here only when no promise was handed in. Soft head start
+    // (not a gate), compact + droppable, flag-gated; best-effort — errors and the timeout both
+    // resolve to an empty capsule (startDiscoveryPrefetch).
     const discoveryPrefetchPromise: Promise<string> =
       iterationCount === 0 && getConfig().orchestration?.discoveryPrefetch
-        ? timedPhase("discoveryPrefetch", async () => {
-            // HARD latency cap: the embedding round-trip behind the capsule can stall on
-            // a cold/queued embed backend (observed ~15s on a busy LM Studio). Bound it
-            // so a slow prefetch is abandoned (empty capsule) rather than delaying the
-            // turn; the model then discovers on demand.
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            try {
-              return await Promise.race([
-                prefetchCapabilityCandidates(userMessage),
-                new Promise<string>((resolve) => { timer = setTimeout(() => resolve(""), DISCOVERY_PREFETCH_BUDGET_MS); }),
-              ]);
-            } finally {
-              if (timer) clearTimeout(timer);
-            }
-          }).catch(() => "")
+        ? (params.startedDiscoveryPrefetch
+          ?? startDiscoveryPrefetch({ userMessage, sessionId: session.id, ...(allowedAgents ? { allowedAgents } : {}) }))
         : Promise.resolve("");
     // Proactive user-profile prefetch (orchestration.userProfilePrefetch, default-off,
     // eval-gated): on a userOwnFacts turn (a question about the user's OWN background /
@@ -334,15 +436,77 @@ export async function assembleTurnSystemMessages(
     // the operator dock can surface a high-stakes plan for approval. Soft and
     // droppable; trivial and single-domain turns are unaffected.
     let planGuidance = "";
-    if (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true)) {
-      planGuidance = looksMultiDomainResearch(userMessage)
-        ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step that runs it via run_workflow; otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step (run an existing scene/job/workflow via run_workflow) over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only."
+    // THE PLAN ROUND FOLD (orchestration.planRoundFold, 2026-10-05): a record_plan that is its
+    // response's only call runs the plan itself and returns the results. Telling the model to call
+    // execute_plan after it would spend the very round the fold removes, so the nudge follows the flag.
+    const planRoundFold = getConfig().orchestration?.planRoundFold ?? true;
+    // THE NUDGE LASTS UNTIL THE TURN ACTS (2026-10-09). It was armed on iteration 0 only, but its own
+    // multi-domain text sends iteration 0 to search_workflows, so when no strong workflow match is
+    // noted, record_plan can come at iteration 1 at the earliest, and by then the tail had been
+    // rebuilt without the nudge. In session 9991d150, iteration 0 searched workflows and agents,
+    // search_agents' result said to delegate now, and iteration 1 did that with two delegations.
+    // The second was dropped, no plan was recorded, and the plan round fold had nothing to fold. In
+    // c172d755 the same prompt happened to plan. The nudge now stays in the tail for one more round
+    // (see below) while every call the turn has made was a discovery call, nothing has been
+    // delegated, and no plan is stored. The first call that acts ends it. It is tail text, so the
+    // head does not move. A plan store that cannot be read counts as holding a plan, so the nudge is
+    // not repeated over a plan it cannot see.
+    // Only the multi-domain variant is repeated, and never beside a correction (review of 0623d139).
+    // The multi-domain text is the one that sends iteration 0 to a search before record_plan. The
+    // single-domain text asks for the plan before any tool, so repeating it after search_agents or
+    // search_tools asked a turn that had already found its agent or tool for a plan of direct steps,
+    // which cost a round. A correction the runtime has pending (the no-match fallback, a required
+    // workflow run, the agent the user directed) names the one call the next response must make. The
+    // nudge beside it asked for a different call, and a record_plan is not held to the fallback route.
+    // ONE EXTRA ROUND, AND NO SECOND SEARCH (E2E new-delegation-routing-bounded-fanout, 2026-10-09).
+    // Repeated word for word, the nudge told iteration 1 to "call search_workflows ONCE" again. The
+    // local model did so on every iteration it was repeated. The third call hit search_workflows'
+    // per-turn cap of 2, and the turn ended in the all-capped synthesis with nothing delegated
+    // (sessions 28598150, 4396301e). The repeated nudge now says the search has run and goes on to
+    // the plan. It is repeated on iteration 1 only, so a turn that still has not planned is back on
+    // the old path from iteration 2: no nudge, and search_agents' pointer says to delegate now
+    // (planFirstPending below is false once the nudge is gone).
+    const planFirst = getConfig().orchestration?.planFirst ?? true;
+    const multiDomainPlan = looksMultiDomainResearch(userMessage);
+    const correctionPending = [
+      delegatedResearchEnforcementPrompt,
+      searchAgentsNoMatchFallbackPrompt,
+      maintenanceDelegationEnforcementPrompt,
+      unresolvedDelegationEnforcementPrompt,
+      workflowCatalogEnforcementPrompt,
+      approvedRunCandidateEnforcementPrompt,
+      workflowExecutionEnforcementPrompt,
+      directiveAgentPrompt,
+    ].some((prompt) => prompt.length > 0);
+    const planNudgeArmed = planFirst && (
+      iterationCount === 0
+      || (iterationCount === 1
+        && multiDomainPlan
+        && !correctionPending
+        && turnIsStillDiscovering(params.turnToolCallCounts, params.turnDelegationCount)
+        && (await loadTurnPlan(session.id).then((plan) => plan === null, () => false)))
+    );
+    if (planNudgeArmed) {
+      const searchAlreadyRan = iterationCount > 0 || (params.turnToolCallCounts?.get("search_workflows") ?? 0) > 0;
+      planGuidance = multiDomainPlan
+        ? "PLAN FIRST: this spans several steps/areas. "
+          + (searchAlreadyRan
+            ? "The search has already run this turn — do not call search_workflows or search_agents again: if a fitting scene/job was found or noted, plan a reuse step NAMING it (workflow: <name>); otherwise decompose into agents. "
+            : "Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step NAMING it (workflow: <name>); otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. ")
+          + "Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only. "
+          + (planRoundFold
+            ? "Make record_plan the ONLY call in that response: it then runs the plan itself — the steps in dependency order, a parallelGroup concurrently, each step's result passed to the steps that depend on it — and returns every result plus any `direct` steps for you to do. Call execute_plan afterwards only if that report lists steps as YOURS TO DO or FAILED."
+            : "Then call execute_plan ONCE: it runs the steps in dependency order, runs a parallelGroup concurrently, passes each step's result to the steps that depend on it, and hands back any `direct` steps for you to do.")
+          + " Do not re-issue the plan's steps as separate calls."
         // Plan on every crucial turn, not just multi-domain research: a brief plan
         // gives the risk-gated QA gate explicit acceptance criteria to verify the
         // answer against, and makes the model decide the route before acting. Kept
         // lightweight so a single-domain task isn't taxed — and a pure direct-
         // knowledge answer skips it entirely (DIRECT ANSWER FIRST still holds).
-        : "PLAN FIRST: if this needs any tool, delegation, retrieval, or multi-step work, call record_plan ONCE with a SHORT plan before acting — objective; the step(s) (each tagged reuse | delegate | direct, with agentName for delegate steps); the acceptance criteria the final answer must meet; and stop conditions. A one-line objective with one or two acceptance criteria is enough for a simple single-step task — keep it lightweight. Set riskTier 'high' only when the task makes current/sourced factual claims, takes an external/destructive/credential action, or is otherwise consequential. If the request is fully answerable directly from your own knowledge in one reply, SKIP the plan and just answer. Then execute the plan in the same turn.";
+        : "PLAN FIRST: if this needs any tool, delegation, retrieval, or multi-step work, call record_plan ONCE with a SHORT plan before acting — objective; the step(s) (each tagged reuse | delegate | direct, with agentName for delegate steps); the acceptance criteria the final answer must meet; and stop conditions. A one-line objective with one or two acceptance criteria is enough for a simple single-step task — keep it lightweight. Set riskTier 'high' only when the task makes current/sourced factual claims, takes an external/destructive/credential action, or is otherwise consequential. If the request is fully answerable directly from your own knowledge in one reply, SKIP the plan and just answer. "
+          + (planRoundFold
+            ? "Make record_plan the ONLY call in that response: it then runs the plan's delegate and reuse steps itself (each result carried into the steps that depend on it) and returns their results; call execute_plan afterwards only if that report lists steps as YOURS TO DO or FAILED. `direct` steps are yours."
+            : "Then run it in the same turn: if the plan has any delegate or reuse step, call execute_plan once to dispatch them (it carries each result into the steps that depend on it); `direct` steps are yours.");
     }
     // discoveryCapsule (staged orchestration S4) was prefetched CONCURRENTLY with the
     // memory+skill embeddings above (discoveryPrefetchPromise) so it no longer adds a
@@ -363,8 +527,29 @@ export async function assembleTurnSystemMessages(
     const freshnessHonestyPrompt = getConfig().orchestration?.freshnessHonestyGuard
       ? "HONESTY ON CURRENCY: Do NOT claim or imply your answer is based on current, live, recent, latest, or external data (market data, news, prices, current events, 'as of today/this year') unless you actually retrieved it via a tool THIS turn. If the answer materially depends on such data, route it to a research-capable specialist and validate it — never assert it from memory, and never frame a from-memory answer as if it were freshly sourced."
       : "";
+    // Recent agent performance (repeated failures/partials in the last 6 h). It ended the base
+    // prompt until 2026-10-05 and so was part of the head, which the ledger changes after almost
+    // every delegation: each delegating turn left the warmed heads stale. In the tail it costs a
+    // few hundred characters per iteration instead of a cold head. Read per iteration, so an
+    // outcome a sub-agent appends mid-turn reaches the next iteration without moving the head.
+    const agentPerformanceNote = session.getAgentPerformanceNote();
 
-    const buildSystemMessages = (): LLMMessage[] => [
+    // THE HEAD IS THE CACHE KEY. LM Studio / llama.cpp reuse the KV cache for the longest
+    // unchanged prefix of the rendered prompt, and the provider folds the leading run of system
+    // messages into one. WHERE the tool block renders depends on the chat template: on the
+    // deployed Qwen3.6 template it renders BEFORE the system text — session 4082ac4f's first turn
+    // reused 12,475 of the warm-up's 12,991 tokens although its head carries this date line after
+    // the lean base, which is only possible with the ~9K-token tool block ahead of the text (the
+    // latency probe's /apply-template check reads the order off the server). Either way the head
+    // is one key: on this hybrid model reuse resumes only from a saved checkpoint, so a change
+    // ANYWHERE in the system text kept 0% of the prompt cached (live probe E2, 2026-09-26), and
+    // everything behind it — the whole history — is prefilled again. Measured on this box: an
+    // identical prefix prefilled in 1.36 s; 200 varying characters ahead of it, 6.25 s. So the head holds ONLY
+    // what is invariant within a turn: the base prompt, the (per-turn) orchestration module, the
+    // date, and the catalog notice. Everything that changes per iteration — language/identity,
+    // dynamic guidance, the plan nudge, the discovery capsule, shared findings — is emitted as
+    // the TAIL, after the history, where the provider relabels it as the most recent context.
+    const buildStableHead = (): LLMMessage[] => [
       { role: "system", content: systemPrompt },
       // Orchestration module (split-prompt mode): injected right after the lean base so the base
       // stays the shared, cacheable prefix; present only on orchestration-intent turns.
@@ -376,6 +561,8 @@ export async function assembleTurnSystemMessages(
       // needed. Only present when the catalog is actually withheld, so it costs
       // nothing in the default configuration.
       ...(leanToolCatalogNotice ? [{ role: "system" as const, content: leanToolCatalogNotice }] : []),
+    ];
+    const buildTurnGuidance = (): LLMMessage[] => [
       ...(languageAndIdentityGuidance ? [{ role: "system" as const, content: languageAndIdentityGuidance }] : []),
       ...(priorEvidenceFollowUpPrompt ? [{ role: "system" as const, content: priorEvidenceFollowUpPrompt }] : []),
       ...(sessionEvidenceReuseNudge ? [{ role: "system" as const, content: sessionEvidenceReuseNudge }] : []),
@@ -389,8 +576,10 @@ export async function assembleTurnSystemMessages(
       ...(effortPromptAddendum ? [{ role: "system" as const, content: effortPromptAddendum }] : []),
       ...(planGuidance ? [{ role: "system" as const, content: planGuidance }] : []),
       ...(discoveryCapsule ? [{ role: "system" as const, content: discoveryCapsule }] : []),
+      ...(agentPerformanceNote ? [{ role: "system" as const, content: agentPerformanceNote }] : []),
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
+      ...(directiveAgentPrompt ? [{ role: "system" as const, content: directiveAgentPrompt }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: applyRoutingTone(searchAgentsNoMatchFallbackPrompt) }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: applyRoutingTone(maintenanceDelegationEnforcementPrompt) }] : []),
@@ -409,6 +598,9 @@ export async function assembleTurnSystemMessages(
       // from training data (e.g. mic interface type, verified part specs, etc.).
       ...(sharedFindingsSystemMessage ? [{ role: "system" as const, content: sharedFindingsSystemMessage }] : []),
     ];
+    // The union, for measurement and the budget trimmer, which reason about the system text as
+    // one block regardless of where the provider ends up placing it.
+    const buildSystemMessages = (): LLMMessage[] => [...buildStableHead(), ...buildTurnGuidance()];
 
     let systemMessages = buildSystemMessages();
     lastPromptMetrics = measurePrompt(systemMessages, collapsedHistory, session.getToolSchemasChars());
@@ -419,6 +611,10 @@ export async function assembleTurnSystemMessages(
     // template is typically the bulk; memory/skill/user/flow/trajectory are the
     // reducible part that recall_context now covers on demand.
     if (iterationCount === 0) {
+      const head = buildStableHead();
+      const guidance = buildTurnGuidance();
+      const sumChars = (messages: LLMMessage[]): number =>
+        messages.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : 0), 0);
       logAudit("prompt_section_sizes", {
         total: lastPromptMetrics.systemPromptChars,
         base: systemPrompt.length,
@@ -433,6 +629,62 @@ export async function assembleTurnSystemMessages(
         trajectory: activeTrajectoryInjectionContext?.length ?? 0,
         contextDigest: contextRecallDigest.length,
         leanContextInjection,
+        // The eleven keys above account for 89-95% of the system prompt; the rest was an
+        // unattributed residual because the tail has far more sections than the row had
+        // keys, and the tool block — about 64% of the bytes actually sent — had no key at
+        // all. These close both gaps, so a prompt-diet change can be measured rather than
+        // estimated.
+        toolSchemas: session.getToolSchemasChars(),
+        toolCount: session.getToolCount(),
+        orchestrationModule: orchestrationModuleMsg.length,
+        leanToolCatalogNotice: leanToolCatalogNotice.length,
+        discoveryCapsule: discoveryCapsule.length,
+        effortAddendum: effortPromptAddendum.length,
+        freshnessHonesty: freshnessHonestyPrompt.length,
+        userProfileEvidence: userProfileEvidence.length,
+        priorEvidenceFollowUp: priorEvidenceFollowUpPrompt.length,
+        sessionEvidenceReuse: sessionEvidenceReuseNudge.length,
+        workflowGuidance: workflowCatalogGuidance.length + approvedRunCandidateGuidance.length,
+        enforcement:
+          delegatedResearchEnforcementPrompt.length
+          + searchAgentsNoMatchFallbackPrompt.length
+          + maintenanceDelegationEnforcementPrompt.length
+          + unresolvedDelegationEnforcementPrompt.length
+          + workflowCatalogEnforcementPrompt.length
+          + approvedRunCandidateEnforcementPrompt.length
+          + workflowExecutionEnforcementPrompt.length,
+        sharedFindings: sharedFindingsSystemMessage.length,
+        agentPerformance: agentPerformanceNote.length,
+        // Head vs tail is the cache-relevant split: head bytes are the KV prefix key,
+        // tail bytes are re-prefilled per iteration.
+        headChars: sumChars(head),
+        headMessages: head.length,
+        // Which head, not only how big (providers/prompt-head.ts). headSystemHash is the leading
+        // system run the provider will fold, composed as the send below composes it: the head, plus
+        // the turn guidance with stablePromptPrefix off, or any system message the collapsed history
+        // opens with. A long session's earlier-conversation summary no longer is one — it is a
+        // user-role message since 2026-10-05 (AgentSession.getCollapsedHistory), so a re-trim moves
+        // the history, not the head. So it equals systemHash on this turn's provider_model_call rows (those also
+        // carry toolsHash: the forced subset is chosen per call, after this row) — except on
+        // gpt-oss, whose rows hash the `Reasoning:` line too, and on the rare turn the budget
+        // trimmer below compacts the base prompt after this row.
+        // baseModuleHash leaves the date line out, so it names the head VARIANT across days —
+        // lean base alone, or lean base + orchestration module — which is what deciding which
+        // heads the warm-keeper should keep warm has to count.
+        headSystemHash: hashText(foldedSystemText(composeTurnMessages(
+          head,
+          collapsedHistory,
+          guidance,
+          getConfig().orchestration?.stablePromptPrefix ?? true,
+        ))),
+        baseModuleHash: hashText(foldedSystemText([
+          { role: "system", content: systemPrompt },
+          ...(orchestrationModuleMsg ? [{ role: "system" as const, content: orchestrationModuleMsg }] : []),
+        ])),
+        tailChars: sumChars(guidance),
+        tailMessages: guidance.length,
+        historyChars: lastPromptMetrics.collapsedHistoryChars,
+        historyMessages: collapsedHistory.length,
       }, { sessionId: session.id, severity: "info" });
     }
 
@@ -541,7 +793,12 @@ export async function assembleTurnSystemMessages(
       }
     }
 
-    const messages: LLMMessage[] = [...systemMessages, ...collapsedHistory];
+    const messages: LLMMessage[] = composeTurnMessages(
+      buildStableHead(),
+      collapsedHistory,
+      buildTurnGuidance(),
+      getConfig().orchestration?.stablePromptPrefix ?? true,
+    );
     return {
       messages,
       collapsedHistory,
@@ -549,5 +806,9 @@ export async function assembleTurnSystemMessages(
       lastPromptMetrics,
       injectedSkillSlugs,
       heldOutSkillSlugs,
+      // In the prompt as SENT: injected on iteration 0 and not dropped by the budget trimmer above.
+      trajectoryShown: iterationCount === 0 && Boolean(activeTrajectoryInjectionContext),
+      // In the prompt as SENT, like the line above.
+      planFirstPending: planGuidance.length > 0 && multiDomainPlan && !correctionPending,
     };
 }

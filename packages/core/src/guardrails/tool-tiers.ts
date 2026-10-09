@@ -518,6 +518,15 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  execute_plan: {
+    // Dispatches ONLY into delegate_to_agent / run_workflow, each of which is tier-gated,
+    // capped and approval-checked in its own right — this adds a scheduler, not a capability,
+    // so it sits with record_plan rather than above the tools it calls.
+    tier: ToolTier.ONE_WRITE,
+    description: "Execute the recorded turn plan in dependency order, dispatching each step by its kind",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   skill_manage: {
     tier: ToolTier.ONE_WRITE,
     description: "Create, patch, pin, archive, and maintain Skill Library procedures and support files",
@@ -569,6 +578,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   generate_image: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate an image from text and save it inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  transform_image: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Apply local raster edits (sharpen, soften, resize, crop, rotate) to a workspace image",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
@@ -1221,6 +1236,17 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false, // manages docker itself on the host network — cannot run inside a sandbox
   },
+  verify_page: {
+    tier: ToolTier.TWO_EXECUTE,
+    description: "Execute a built page's JavaScript against a minimal DOM and report uncaught errors",
+    requiresPerCallApproval: false, // read-only self-check, runs in the builder's fix loop
+    // The page runs in a CHILD PROCESS with a scrubbed environment, a working directory outside
+    // the workspace and a hard kill (tools/page-check.ts runScriptsIsolated). It is not a
+    // container: the child runs as the same OS user and can still reach the filesystem, so this
+    // says "not sandbox-managed", not "harmless". It was previously in-process, where the vm
+    // context leaked host-realm functions and a page could reach process.env and child_process.
+    requiresSandbox: false
+  },
   verify_app: {
     tier: ToolTier.TWO_EXECUTE,
     description: "Verify a serve_app app boots and serves (server-side HTTP/content check + container error logs)",
@@ -1409,7 +1435,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   extract_email: {
     tier: ToolTier.ZERO_READ_ONLY,
-    description: "Parse an .eml or single-message .mbox file into headers, body, and attachment list",
+    description: "Parse an .eml file, or one message of an .mbox chosen by index, into headers, body, and attachment list",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },

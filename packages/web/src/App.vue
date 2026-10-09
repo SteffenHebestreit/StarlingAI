@@ -491,7 +491,7 @@ interface NavLeaf {
 interface NavGroupDef {
   kind: "group";
   label: string;
-  items: (NavGroupItem & { operatorOnly?: boolean })[];
+  items: (NavGroupItem & { operatorOnly?: boolean; adminOnly?: boolean })[];
   operatorOnly?: boolean;
 }
 type NavEntry = NavLeaf | NavGroupDef;
@@ -530,7 +530,7 @@ const allNavEntries: NavEntry[] = [
       { to: "/plugins", label: "Plugins", hint: "Third-party tools", operatorOnly: true },
       { to: "/mcp", label: "MCP", hint: "External servers + publish self", operatorOnly: true },
       { to: "/a2a", label: "A2A", hint: "Agent-to-Agent peers", operatorOnly: true },
-      { to: "/users", label: "Users", hint: "Accounts & roles", operatorOnly: true },
+      { to: "/users", label: "Users", hint: "Accounts & roles", operatorOnly: true, adminOnly: true },
       { to: "/cost", label: "Cost", hint: "Token spend & budgets", operatorOnly: true },
       { to: "/settings", label: "Settings", hint: "Providers & config", operatorOnly: true },
     ],
@@ -569,8 +569,13 @@ const navEntries = computed<NavEntry[]>(() => {
           return entry;
         })
         .filter((entry) => entry.kind === "leaf" || entry.items.length > 0);
+  // Managing accounts is admin-only at the gateway, so an operator's Users page could only fail.
+  // No signed-in user (the legacy single-operator setup) keeps the full set, as above.
+  const shown = !auth.currentUser || auth.currentUser.role === "admin"
+    ? core
+    : core.map<NavEntry>((entry) => (entry.kind === "group" ? { ...entry, items: entry.items.filter((item) => !item.adminOnly) } : entry));
   // Extension entries render after the core ones, already sorted by the registry.
-  return [...core, ...extensionNav.value];
+  return [...shown, ...extensionNav.value];
 });
 
 function notificationCardClass(level: NotificationLevel): string {

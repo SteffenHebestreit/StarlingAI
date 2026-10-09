@@ -162,6 +162,7 @@ export async function handleFederationDelegateStream(
       kind: event.kind,
       iteration: event.iteration,
       toolName: event.toolName,
+      ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
       summary: event.summary,
     });
   };

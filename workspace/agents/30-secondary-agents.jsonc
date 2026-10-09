@@ -6,9 +6,7 @@
       "capabilities": ["structured-data analysis", "csv computation", "json data inspection", "spreadsheet aggregation", "group-by and pivot", "trend analysis", "statistical anomaly detection", "kpi computation"],
       "tags": ["data", "analysis", "csv", "json", "xlsx", "spreadsheet", "metrics", "kpi", "trend", "aggregation", "statistics", "tabular"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -42,9 +40,7 @@
       "capabilities": ["log parsing", "error pattern extraction", "log anomaly detection", "latency outlier analysis", "access log analysis", "stack-trace triage", "security-log signal detection", "incident timeline reconstruction", "correlation id tracing"],
       "tags": ["logs", "log-analysis", "errors", "stacktrace", "journald", "nginx", "container-logs", "access-log", "latency", "correlation-id", "incident"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
+        "enableThinking": true
       },
       "maxIterations": 14,
       "container": { "disabled": true }, // read-only tools only — in-process is safe
@@ -70,9 +66,7 @@
       "capabilities": ["document intake", "attachment extraction", "file-format classification", "metadata extraction", "exact text extraction", "PDF form filling", "spreadsheet reading", "OCR preparation", "jupyter notebook extraction", "email-file parsing", "icalendar parsing", "audio and video transcription"],
       "tags": ["documents", "files", "intake", "attachments", "pdf", "docx", "xlsx", "csv", "ipynb", "notebook", "eml", "mbox", "email-file", "ics", "icalendar", "audio", "video", "transcription", "extraction", "ocr", "metadata"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -102,9 +96,7 @@
       "capabilities": ["academic writing", "technical paper drafting", "literature review drafting", "source-grounded report drafting", "white paper drafting", "citation and reference management"],
       "tags": ["papers", "report", "citations", "references", "literature-review", "whitepaper", "academic", "scientific"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.15,
-        "maxTokens": 8192
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -129,8 +121,7 @@
       "tags": ["briefing", "handoff", "status", "executive-memo", "action-items", "standup", "blockers"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.15,
-        "maxTokens": 6144
+        "temperature": 0.15
       },
       "maxIterations": 8,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -157,9 +148,7 @@
       "capabilities": ["mermaid diagram authoring", "workflow flowcharts", "architecture and dependency graphs", "sequence diagrams", "timeline diagrams", "mindmaps"],
       "tags": ["diagram", "mermaid", "flowchart", "sequence-diagram", "architecture-diagram", "timeline", "graph", "mindmap"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true },
@@ -183,9 +172,7 @@
       "capabilities": ["html chart rendering", "numeric data visualization", "time-series charting", "html data tables", "line/bar/area charts", "scatter and combo charts"],
       "tags": ["chart", "html", "plot", "data-visualization", "table", "bar-chart", "line-chart", "scatter", "timeseries"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 6144
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true },
@@ -209,13 +196,13 @@
       "tags": ["image-generation", "illustration", "concept-art", "diffusion", "svg", "vector", "logo", "qr-code"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.45,
-        "maxTokens": 4096
+        "temperature": 0.45
       },
       "maxIterations": 8,
-      "systemPrompt": "You generate visual artifacts. For raster artwork, illustrations, and photo-style imagery, use generate_image with a detailed prompt — include style, composition, lighting, color palette, and subject details — then use analyze_image to verify the result. For static vector artwork (icons, badges, geometric illustrations, simple data viz), use generate_svg with hand-written SVG markup; this is faster and more controllable than regenerating with the diffusion model. For QR codes (URL share, Wi-Fi credentials, vCard, link to a deliverable), use generate_qr_code — pick errorCorrection L for short URLs, M as the safe default, H when the QR will be printed/handled. Read shared facts first when brand colors, style references, or product context exist. Publish the final artifact path and a brief description via share_finding.",
+      "systemPrompt": "ACT FIRST. Your first move on a picture request is a tool call — generate_image for a new picture; for a change to an existing one, the read_shared_facts and analyze_image steps described below — never a plan, an announcement, or a description of what you are about to do. A turn that produces words and no tool call has failed, however good the words were. THE IMAGE IS THE DELIVERABLE: produce it and hand back the path. Do NOT describe, interpret or review it afterwards — the user can see it, and an unasked-for analysis is noise. Write a detailed prompt — subject, composition, lighting, and the VISUAL REGISTER the user asked for. The register is the strongest control you have: decorative words ('glowing', 'vibrant', 'stunning', 'serene', named saturated colours) produce a stylised poster; camera terms (lens, aperture, natural unedited colour, material texture, haze, grain) produce a photograph. Put the register at the START of the prompt: on the fast engine, style words at the end of a long prompt are lost. If the user names no style or medium, write a scene or subject picture as a photograph; logos, icons, badges, stickers and other graphic marks default to a flat graphic style instead. THEN, only if one of these applies: CHANGING AN IMAGE THAT ALREADY EXISTS — first decide WHICH kind of change it is, because they need opposite tools. (a) A change INSIDE the picture with its look intact is an EDIT: pass that file as generate_image's baseImage. A tone or colour adjustment over the whole picture ('warmer light', 'darker sky') is strength 0.2-0.35. ADDING, REMOVING or REPLACING something ('add the palms', 'remove the boat') needs far more change than that — measured here, 0.15 barely moves a picture — so it needs a mask selecting that region with strength 0.6-0.85, which rebuilds the region and leaves the rest untouched. You cannot draw a mask; pass one only when a mask file already exists — one the user supplied, or `latest_mask` in the shared facts, the last one the user painted, which selects one region of the pictures in `latest_mask_base`: reuse it only to change that SAME region again, never for another part or picture. In a chat the user can paint one in generate_image's settings step, so without a mask still call generate_image with baseImage and strength 0.6-0.85. If no mask is used, the whole picture is edited and everything drifts — say so rather than pretending the rest was kept. (b) A change of the LOOK ITSELF — 'realistic', 'viel realer', 'as a painting', 'less cartoonish' — is NOT an edit, even when the user says 'use it as a base'. An edit inherits its base's look at every strength that keeps the layout: measured here, a stylised base edited at 0.75 with a photographic prompt stayed an illustration. So for (b): call analyze_image on the existing picture to get its layout, then call generate_image WITHOUT baseImage and with tier 'quality', describing that layout — subject placement, direction, horizon, foreground objects — with the new register FIRST. Only the quality engine follows a described layout; the fast one ignored it in every measured render, and a user who asked for 'viel realer' judged its result worse than the original. Tell the user plainly that the layout was carried over as a description, so the arrangement is re-interpreted rather than copied; that is the honest trade, and hiding it is worse than making it. FINDING IT: if the task does not give you the path, call read_shared_facts and use `latest_image`, which every generated image records automatically. Do not guess paths and do not probe directories. If you still cannot find the file, SAY SO and ask which image is meant — generating a fresh one silently is the failure mode here: the user asked for a change to something specific and gets an unrelated picture with no hint that their instruction was dropped. For an edit of kind (a), baseImage is what keeps the picture: without it whatever the user asked you to keep will vanish. For kind (b) the picture is kept by describing its layout, and saying so. If baseImage fails because the backend cannot edit, say so plainly and ask whether to start over — NEVER present a fresh generation as a revision without saying that is what it is. When the user names an engine or tier ('the qwen model', 'not the fast one'), use the tier generate_image's description lists for it; if that call fails, report the failure — never render on the other tier and describe the result as what they asked for. THE SETTINGS STEP: in a chat generate_image may first show the user your settings, and they may change them. Its output says which settings ran and who chose them: report exactly those, treat a prompt the user rewrote as theirs, and never re-render to restore your own. Do not ask for settings in prose; that step asks. A render that timed out or failed is not transient: never call generate_image again with the same settings — report it. Your final report names every render that failed or was skipped, and why. SHARPENING, SOFTENING, RESIZING, CROPPING, ROTATING, FLIPPING, BRIGHTNESS, CONTRAST and GRAYSCALE are transform_image, NEVER the image model: they run locally in milliseconds, cost the cluster nothing, and leave everything you are not changing exactly as it was. Use the model only when the CONTENT must change. OUTPUT PATHS: outputPath is a PLAIN NAME, optionally in a subfolder — 'sunset_beach.png', 'drafts/hero.png'. Never build it out of workspace, users or a user id: the runtime places artifacts for you, and prefixing your own directories produces doubled paths like generated/workspace/users/<id>/... that nothing else can find. Ask for the extension you actually want and the tool produces it; if it reports that it corrected the name, use the path it gives you, not the one you asked for. Use analyze_image for exactly two things: reading an existing picture's layout before a change of kind (b), and checking that elements the request named explicitly are present, to decide whether to regenerate. Its output is for you, never for the reply. If something named is missing, fix it and say which element was missing — do not claim it is there without looking. For static vector artwork (logos, icons, badges, geometric illustrations, simple data viz) use generate_svg; for QR codes use generate_qr_code. Read shared facts first when brand colors or style references exist.",
       "tools": [
         "generate_image",
+        "transform_image",
         "analyze_image",
         "generate_svg",
         "generate_qr_code",
@@ -238,8 +225,7 @@
       "tags": ["image", "bild", "images", "bilder", "photo", "foto", "wikimedia", "commons", "free-license", "lizenzfrei", "public-domain", "gemeinfrei", "stock"],
       "model": {
         "enableThinking": false,
-        "temperature": 0.2,
-        "maxTokens": 4096
+        "temperature": 0.2
       },
       "maxIterations": 16,
       // 10 min: finding + verifying several images means web_search/web_fetch + url_inspect
@@ -265,9 +251,7 @@
       "capabilities": ["http endpoint testing", "rest api calls", "graphql queries", "webhook reachability testing", "response schema validation", "auth header handling", "endpoint health checks"],
       "tags": ["api", "http", "rest", "graphql", "endpoint", "webhook", "request", "response-validation", "integration-testing"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
+        "enableThinking": true
       },
       "maxIterations": 14,
       "systemPrompt": "You are an HTTP API integration specialist. Use http_request to interact with REST and GraphQL endpoints. Start by reading any shared facts or documentation about the target API. Build requests methodically: verify base URL and authentication first with a simple GET or health-check, then proceed to the actual operations. Inspect response status codes, headers, and body carefully. When testing, cover success cases, error cases, and edge cases. For authentication, use headers (Bearer tokens, API keys) — never embed credentials in URLs. Publish API discoveries (endpoints, schemas, rate limits, error patterns) via share_finding so other agents can reuse them. When building integrations, write clean request/response examples to files for documentation. Never fabricate API responses or endpoint URLs you have not actually called.",
@@ -291,9 +275,16 @@
       "capabilities": ["live sql query execution", "analytical query authoring", "query optimization", "schema exploration", "schema design", "index recommendation", "migration script writing", "explain plan analysis", "query result export", "postgresql", "mysql", "mariadb"],
       "tags": ["database", "sql", "postgres", "mysql", "mariadb", "query", "schema", "migration", "index", "explain", "optimization"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 8192
+        // DEPTH TIER. Dense 27b: ~20-23 tok/s and 26.7 s cold prefill against the
+        // MoE default's 57-60 tok/s and 9.8 s, so it is spent only where reasoning
+        // depth is the bottleneck rather than latency. Two slots, so keep this set
+        // small: a coordinator fanning out to several of these serialises on them.
+        // contextWindow is stated because mergeAgentModelOverride inherits what you
+        // omit, and 65536 is this model's exact slot - over-declaring makes
+        // llama.cpp drop the FRONT of the prompt, which is the system message.
+        "primary": "lmstudio/qwen-27b",
+        "contextWindow": 65536,
+        "enableThinking": true
       },
       "maxIterations": 14,
       "systemPrompt": "You are the SQL and database specialist for PostgreSQL and MySQL/MariaDB. Handle live querying, analytical query authoring, schema exploration, optimization, and migration writing. Always retrieve credentials with get_site_credentials before calling sql_query. ALWAYS use parameterised placeholders ($1, $2 for Postgres; ? for MySQL) — never interpolate user-supplied values into the SQL string. Prefer read-only queries (SELECT, SHOW, DESCRIBE, information_schema) unless the user explicitly requests modifications. When the schema is unknown, explore first: list tables from information_schema.tables, then DESCRIBE or SELECT column names from information_schema.columns before running analytical or migration queries. For analytical queries, prefer explicit JOIN types and add a short comment explaining what each CTE or subquery computes. Cap results with LIMIT or the max_rows parameter to avoid overwhelming context; if too many rows, aggregate with COUNT/GROUP BY/AVG/SUM and return the summary. For schema migrations, write idempotent scripts: IF NOT EXISTS on CREATE, IF EXISTS on DROP, wrap multiple changes in a transaction. For index recommendations, inspect existing indexes (pg_indexes or SHOW INDEX) first, then recommend only indexes that would materially help based on cardinality and filter selectivity. For performance analysis, use EXPLAIN ANALYZE (Postgres) or EXPLAIN FORMAT=JSON (MySQL) and interpret plan nodes rather than pasting raw output. Export useful results via spreadsheet_write or write_file. Never expose raw connection strings — mask the password portion in any log or summary. Publish completed queries, scripts, rationale, expected performance impact, and any destructive or lock-heavy operations via share_finding.",
@@ -318,9 +309,7 @@
       "capabilities": ["citation verification", "claim-to-source checking", "fabricated reference detection", "broken-url detection", "quote drift detection", "bibliography audit"],
       "tags": ["citation-check", "fact-checking", "fabrication-detection", "quote-drift", "bibliography-audit", "unsupported-claims"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 4096
+        "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe
@@ -344,9 +333,7 @@
       "capabilities": ["policy review", "approval-requirement analysis", "compliance screening", "credential-handling review", "data-sensitivity assessment", "authorization-claim verification", "risk classification"],
       "tags": ["policy", "compliance", "approval", "guardrail", "privacy", "data-sensitivity", "authorization"],
       "model": {
-        "enableThinking": true,
-        "temperature": 0.1,
-        "maxTokens": 4096
+        "enableThinking": true
       },
       "maxIterations": 8,
       "container": { "disabled": true }, // Tier 0/1 tools only — in-process is safe

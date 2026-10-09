@@ -1,0 +1,46 @@
+// Browser automation: content that exists only after a client-side delay. lieferstatus.html shows
+// "Lieferstatus wird geladen … bitte warten." and builds the order table from /daten/lieferstatus.json
+// 4 s after load (eval/e2e/site/lieferstatus.html). Ground truth (ENVIRONMENT.md "Delivery status"):
+// NW-A-2041 versandt, parcel NWP-7731-0042, expected 09.10.2026.
+//
+// Event names verified against packages/core/src:
+//   sub_agent_tool_call {agentName, tool, phase, error}  agent/sub-agent.ts:6527 (start), :6918 (done)
+{
+  id: "core-ix-browser-delivery-status-delayed",
+  title: "Browser: wait for the delivery-status table that loads 4 s after the page",
+  group: "core",
+  tags: ["browser", "site", "dynamic-content"],
+  description: "The first snapshot after browser_navigate shows only a loading notice; the order table appears 4 s later. The browser agent has to wait (browser_wait_for) or look again (browser_snapshot) before it answers. Protects: answering from the rendered page instead of reporting the placeholder or guessing — the parcel number and date exist nowhere but in that table.",
+  requires: ["model", "browser", "e2e-site"],
+  timeoutMs: 1200000,
+  steps: [
+    {
+      kind: "turn",
+      id: "read-status",
+      message: "Öffne im Browser http://www.nordlicht-werkzeuge.test/lieferstatus.html – die Tabelle wird erst ein paar Sekunden nach dem Laden per JavaScript nachgeladen. Welchen Status hat der Auftrag NW-A-2041, wie lautet seine Paketnummer und wann wird er voraussichtlich zugestellt?",
+      timeoutMs: 900000,
+      expect: {
+        reply: {
+          includes: ["NWP-7731-0042"],
+          matches: [
+            "versandt|verschickt|versendet|shipped",
+            "0?9\\.\\s?10\\.\\s?2026|0?9\\.\\s*Oktober|2026-10-09|October\\s+0?9",
+          ],
+          // The placeholder text means the table was never seen.
+          excludes: ["wird geladen"],
+        },
+        tools: { mustCall: ["browser_navigate"] },
+        agents: { mustRun: ["browser_agent"] },
+        events: {
+          must: [
+            // A second look at the page after navigating: wait for the text, or snapshot again.
+            { type: "sub_agent_tool_call", where: { "data.agentName": "browser_agent", "data.tool": { in: ["browser_wait_for", "browser_snapshot"] }, "data.phase": "start" } },
+          ],
+          mustNot: [
+            { type: "sub_agent_tool_call", where: { "data.tool": "browser_navigate", "data.phase": "done", "data.error": { regex: "Refusing to navigate" } } },
+          ],
+        },
+      },
+    },
+  ],
+}

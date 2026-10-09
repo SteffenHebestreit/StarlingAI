@@ -6,9 +6,13 @@
       "toolName": "file_to_markdown",
       "timeoutMs": 60000,
       // Vision LLM — same model as the primary, Qwen 3.6 is multimodal (vision + tool calling).
+      // Address the llama-swap SELECTOR, not one station's local id: `qwen3.6-35b-a3b` names a
+      // single instance, so pinning it forfeits the second station (the same defect a7e210e fixed
+      // for the swarm). Measured: both stations decode an image and answer from it, so the
+      // selector is free to route either way.
       // visionTimeoutMs is separate from timeoutMs (which is for the file-to-markdown service)
       // because local LLM inference on large screenshots can take well over 60 s.
-      "visionModel": "lmstudio/qwen/qwen3.8-27b",
+      "visionModel": "lmstudio/qwen",
       "visionTimeoutMs": 120000
     },
     // Speech-to-text. baseUrl comes from SAI_MULTIMODAL_STT_URL at runtime.
@@ -41,14 +45,175 @@
       "defaultQuality": "medium",
       "timeoutMs": 60000
     },
+    // Two tiers behind one OpenAI-compatible endpoint, POST {baseUrl}/images/generations.
+    // The response carries base64 in `b64_json` — there is no file host behind it — and both
+    // tiers run FIXED at 1024x1024, rejecting any other size rather than resampling.
+    //
+    // The tiers are a cost choice, not a quality dial:
+    //   image          ~10 s, neural accelerator, costs the chat models nothing measurable
+    //   image-quality  ~120 s (up to 150 s, plus ~25 s to reload weights after 10 min idle),
+    //                  worker station's graphics chip, drops that station's chat throughput
+    //                  by ~70% while it runs, one at a time cluster-wide
+    //
+    // `generate_image` defaults to the fast tier; an agent must ask for `tier: "quality"`,
+    // and the tool description says what that spends. Only the quality engine follows a
+    // described layout (measured 2026-09-22, seed pinned: the fast engine ignored it in 6 of 6
+    // renders), so a "keep the composition, make it real" request belongs there.
     "imageGeneration": {
+      // Left EMPTY on purpose: with api "openai-compatible" the loader fills it from
+      // SAI_PRIMARY_MODEL_URL, the same variable the chat provider follows, so the two
+      // cannot drift. Set it here to point images somewhere else.
       "baseUrl": "",
-      "api": "automatic1111-compatible",
+      "api": "openai-compatible",
+      "model": "image",
+      "qualityModel": "image-quality",
+      // The engines' own names, which is what users say ("nimm das qwen model"). generate_image
+      // lists them to the agent and accepts either name or model id; any other name is refused
+      // before a render instead of 404ing at the router and falling back to the fast engine.
+      "tierLabels": { "fast": "Segmind Vega", "quality": "Qwen-Image 2.1" },
+      // Generous for a ~12 s tier. The client holds a slot per model, so a caller that has to
+      // wait for a device is NOT spending this budget — it starts counting once the request
+      // is actually on the wire.
       "timeoutMs": 120000,
+      // ~170 s per image plus ~25 s of weight reload after ten minutes idle. 210000 left
+      // almost no margin once the render alone is 170, so a queued or contended request
+      // would have been abandoned while it was still going to succeed. Both timeouts are for the
+      // tier's MEASURED reference render (1024x1024, 20 steps — IMAGE_TIER_REFERENCE_RENDER), not
+      // for its defaults below; a request with more steps, a larger size or true CFG gets
+      // proportionally more, never less. The 40-step quality default therefore gets 600 s.
+      "qualityTimeoutMs": 300000,
+      // The cluster's OWN limit: llama-swap gives up on a request to its corsair peer after
+      // `peers.corsair.timeouts.responseHeader` (600 s), and the quality engine sends nothing
+      // until the picture is done. So any render longer than this fails whatever our timeouts
+      // say — session fa673f2c lost two 10-minute renders to it. Renders expected to need more
+      // than 90% of it are refused up front. Raise it together with llama-swap's setting.
+      "maxRenderMs": 600000,
+      // Both tiers run ONE generation at a time, so the default ceiling of 1 applies to both
+      // and there is no per-model override.
+      //
+      // "image" was 2 for a while, from a measurement that no longer holds: six concurrent
+      // requests once finished in a 9.9 / 10.0 / 19.5 / 19.5 / 29.1 / 38.5 stagger, which is
+      // two at a time. Re-measured after the endpoint was reworked, three concurrent requests
+      // ran 9.7 / 19.2 / 28.7 s — strictly serial. Leaving it at 2 would put a second request
+      // inside the backend with our timeout already running, which is the precise failure the
+      // gate exists to prevent. Raise it again only against a fresh measurement.
+      // Only the NPU tier is fixed-resolution. Measured against the live endpoint:
+      // `image` answers HTTP 502 in ~13ms for any size but 1024x1024, while `image-quality`
+      // served 64x64 in 1.2s and 1024x768 in 91s. Listing both would refuse requests the
+      // quality tier is happy to serve — which it already did once, for 1024x768.
+      "fixedSizeModels": ["image"],
+      // Editing is LIVE on the quality tier. Verified against the endpoint: POST
+      // /v1/images/edits with `image` + `strength` returns usage.mode "img2img" and the
+      // applied strength, and a low strength really does stay close to the source (mean
+      // pixel distance 1.6 at 0.25 against 44.5 at 0.85). The fast tier is not listed
+      // because it has no edit route.
+      //
+      // `strength` is the whole game, and the bands are NOT symmetric. Measured on decoded
+      // pixels at the production settings below (20 steps, guidance 1), distance from base:
+      // 0.15 -> 10.1, 0.5 -> 16.3, 0.65 -> 21.8, 0.78 -> 23.8; a text-to-image control of the
+      // same prompt sits at 58.2. Those are MAGNITUDES — how much moved — not what kind of
+      // change it was. What they do not show, and later measurement did: an edit keeps its
+      // base's VISUAL REGISTER at every strength that still keeps the layout. A stylised base
+      // edited at 0.75 with a photographic prompt stayed an illustration (session c99ed77f,
+      // distance 33.3). So a change of LOOK is a new generation that describes the old layout,
+      // never a high-strength edit — and it belongs on the QUALITY tier: one fast render of a
+      // described layout once came back photographic, but pinned-seed probes on 2026-09-22
+      // showed the fast engine ignoring the layout every time, and the user judged its
+      // "realer" result worse than the original (session f4ebf47b). Edits are for
+      // changes inside a picture: tone at 0.2-0.35, adding or replacing content with a mask
+      // at 0.6-0.85. The tool schema and image_creator's prompt carry this; keep all three in
+      // step when it changes.
+      //
+      // The request form does not matter: bare base64, a data: URL and multipart/form-data
+      // all behave identically here, so there is no reason to build a multipart path.
+      //
+      // The generations route now answers 400 "does not accept 'image'" rather than quietly
+      // rendering something new, so a mistake here is loud at both ends.
+      "initImageModels": ["image-quality"],
+      // The tiers disagree about guidance and BOTH read the field, so one shared value is
+      // wrong for one of them. Measured with the seed pinned so only guidance could vary:
+      // the fast tier rendered differently at 1.0 than at 7.5, and the quality tier took 22 s
+      // at guidance 4 against 11 s at 1.0 — true CFG doubles the forward passes per step.
+      //
+      // QUALITY ENGINE — what it is and what it honours (researched and measured 2026-09-26/27):
+      // - Qwen-Image-2.1, Alibaba's release of 2026-09-20: a new 7B DiT with a Qwen3-VL-8B text
+      //   encoder. Advice written for the older Qwen-Image (true CFG 4, 1328² sizes, the
+      //   "Ultra HD, 4K" prompt suffix) does NOT apply to it.
+      // - STEPS 40: the model card's and the diffusers pipeline's default. 20 was our own choice
+      //   for time; the user raised it to 50 in the settings step (session 6ece6f2a). Measured
+      //   322-328 s at 1024x1024 on corsair's iGPU (the estimate the client uses says ~340 s).
+      // - GUIDANCE 1: the model is meant to be sampled WITHOUT guidance (pipeline default
+      //   true_cfg_scale 1.0) and has no guidance input at all — the "Guidance: 3.5" in every
+      //   render's record is sd.cpp's unused default, NOT embedded guidance as this comment once
+      //   said. A NEGATIVE PROMPT NEEDS GUIDANCE > 1: at 1 it changed nothing (identical pixels
+      //   with the seed pinned), at 4 it worked (mean distance 56) at twice the time.
+      // - SIZES are multiples of 32; the official ones are all ~4 MP (2048x2048, 2752x1536, ...),
+      //   which will not fit in maxRenderMs on this hardware (not measured). At ~1 MP the
+      //   pipeline's own shapes are round(√(1024² × ratio) / 32) × 32: 1376x768 for 16:9,
+      //   1184x896 for 4:3 — rendered live at exactly 1376x768.
+      // - SAMPLER / SCHEDULER / FLOW SHIFT: not request fields on this endpoint, and deliberately
+      //   not exposed. sd.cpp's default scheduler is the model's own resolution-dependent
+      //   schedule; naming ANY scheduler falls back to a generic shift-3 schedule, off-spec for
+      //   this model, and a flow shift is ignored without one (recorded in the PNG, identical
+      //   pixels). The only route to them — an <sd_cpp_extra_args> block inside the prompt,
+      //   which also overrode STEPS past the render limit — is stripped by the client.
+      // - ENGINE BUILD: corsair runs stable-diffusion.cpp master-929 (3f8527a, the prebuilt Vulkan
+      //   release) since 2026-10-05, replacing master-889 (c678dfe), which predated b167b94 (#2048:
+      //   this model's flow schedule aligned with the official defaults) and 0a9340c (#2054: VAE
+      //   convolution scaling). Measured on the same seed at 1024x1024, 40 steps: 321.8 s before,
+      //   327.9 s after; the picture moved by a mean of only 2.9 — at ~1 MP the fix is fidelity,
+      //   not a visible change (it mattered at 2K). Edits and masked edits measured identical on
+      //   both builds. A faint 4-px periodic pattern (strong in a phase-mean metric, visible at 3x)
+      //   is present on BOTH builds; upstream (#2041) traces the 2K grid to sd.cpp's DiT output
+      //   rather than the VAE. Rollback on corsair: ~/sd-upgrade/rollback-to-889.sh.
+      "qualityDefaults": { "steps": 40, "guidanceScale": 1 },
+      // NOT ACTIVE — and now has nothing to point at: re-tested 2026-09-26, the worker's shim
+      // answers POST /sdapi/v1/txt2img with 404 "this server exposes /v1/images/generations and
+      // /v1/images/edits". The CLIENT support for it is shipped and tested; only a route is missing.
+      //
+      // It was wanted because an earlier build of the OpenAI route parsed `prompt` and `size`
+      // and discarded the rest (eight probes varying steps, seed, cfg and negative prompt all
+      // returned steps=8 seed=42). That is NO LONGER TRUE. Re-measured 2026-09-23 with the seed
+      // pinned: BOTH engines on the OpenAI route honour seed, steps, guidance and negative
+      // prompt. Fast engine, mean pixel distance from the control render: another seed 55,
+      // 8 steps 27 (in half the time), guidance 2 29, a negative prompt 21. So both tiers take
+      // all four from generate_image and from the settings step below. Whether an OMITTED seed
+      // still repeats once per server process was not re-measured.
+      //
+      // The AUTOMATIC1111 route on the same sd-server honours all of it as well — seed -1 gave
+      // 1152108546 then 1467603400 with different images, an explicit seed reproduced
+      // byte-for-byte, steps/cfg came back in `info`.
+      //
+      // Worker station DIRECTLY: the head node 404s /upstream/ paths, so this must not be
+      // pointed at the 192.168.12.11 endpoint the rest of the config uses.
+      // "qualityBackend": {
+      // "api": "automatic1111-compatible",
+      // "baseUrl": "http://192.168.12.13:8080/upstream/qwen-image",
+        // The checkpoint this backend reports, not the `image-quality` router alias.
+      // "model": "qwen_image_2.1-Q8_0",
+        // Measured 169 s at 1024x1024, 20 steps, cfg 1.0 — plus a weight reload after idle.
+        // 210 s left almost no margin once the render alone is 169.
+      // "timeoutMs": 300000
+      // },
       "defaultWidth": 1024,
       "defaultHeight": 1024,
-      "defaultSteps": 28,
-      "defaultGuidanceScale": 7
+      "defaultSteps": 20,
+      // The FAST tier's value. It is not shared: `qualityDefaults` above overrides it for the
+      // quality tier, which wants 1.0. Confirmed live — the fast tier's own default output
+      // reproduces exactly at 20 steps / guidance 7.5.
+      "defaultGuidanceScale": 7.5,
+      // The settings step. Before EVERY render in an interactive chat turn generate_image shows
+      // the person what it is about to run — engine, prompt, size, steps, guidance, seed, base
+      // picture — and they take it (Auto), change it and paint a mask (Configure), or skip it.
+      // No answer within timeoutMs runs the agent's settings; opening the form extends the wait
+      // to configureTimeoutMs. Channels, scenes, jobs and --auto are never asked, and a chat
+      // set to "Images: auto" is not either.
+      "settingsPrompt": {
+        "enabled": true,
+        "timeoutMs": 120000,
+        "configureTimeoutMs": 600000,
+        "maxBaseCandidates": 6
+      }
     },
     "wakeWord": {
       "enabled": false,

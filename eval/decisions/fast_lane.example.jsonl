@@ -1,0 +1,226 @@
+// fast_lane — the receptionist's question: small talk the front desk answers itself, or a task for the
+// full assistant (decisions/points.ts FAST_LANE, agent/receptionist.ts). SYNTHETIC and hand-labelled; gold follows
+// the point's definition and the receptionist prompt, not the words: see eval/decisions/README.md.
+//
+// Enriched on purpose: small talk is about 40% here and close to 0% on the attributed traffic, because recall of
+// the rare class cannot be measured on cases that do not contain it. The bench reweighs to a traffic prior for its
+// projection. Cases tagged "gated" are ones the front desk never hands to its model (too long, a URL, a standing
+// instruction): the bench records them and asks neither arm, as a turn would not.
+//
+// Run: pnpm --filter @starlingai/core decisions:bench --points fast_lane
+{"id": "fl-de-001", "point": "fast_lane", "language": "de", "state": {"message": "hi"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-de-002", "point": "fast_lane", "language": "de", "state": {"message": "Hallo!"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-de-003", "point": "fast_lane", "language": "de", "state": {"message": "moin"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-de-004", "point": "fast_lane", "language": "de", "state": {"message": "Servus"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-de-005", "point": "fast_lane", "language": "de", "state": {"message": "Guten Morgen :)"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-006", "point": "fast_lane", "language": "de", "state": {"message": "Guten Abend zusammen"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-007", "point": "fast_lane", "language": "de", "state": {"message": "na, alles fit?"}, "gold": "small_talk", "tags": ["greeting", "how-are-you"]}
+{"id": "fl-de-008", "point": "fast_lane", "language": "de", "state": {"message": "Wie geht es dir?"}, "gold": "small_talk", "tags": ["how-are-you"]}
+{"id": "fl-de-009", "point": "fast_lane", "language": "de", "state": {"message": "wie gehts dir so heute"}, "gold": "small_talk", "tags": ["how-are-you", "typo"]}
+{"id": "fl-de-010", "point": "fast_lane", "language": "de", "state": {"message": "Hallöchen, wie läufts bei dir?"}, "gold": "small_talk", "tags": ["greeting", "how-are-you"]}
+{"id": "fl-de-011", "point": "fast_lane", "language": "de", "state": {"message": "Tach auch"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-012", "point": "fast_lane", "language": "de", "state": {"message": "Hey 👋"}, "gold": "small_talk", "tags": ["greeting", "emoji"]}
+{"id": "fl-de-013", "point": "fast_lane", "language": "de", "state": {"message": "Guten Tag, ich wollte nur mal hallo sagen"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-014", "point": "fast_lane", "language": "de", "state": {"message": "Freut mich, dich kennenzulernen!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-015", "point": "fast_lane", "language": "de", "state": {"message": "Danke!"}, "gold": "small_talk", "tags": ["thanks", "one-word"]}
+{"id": "fl-de-016", "point": "fast_lane", "language": "de", "state": {"message": "danke dir, echt super"}, "gold": "small_talk", "tags": ["thanks"]}
+{"id": "fl-de-017", "point": "fast_lane", "language": "de", "state": {"message": "Vielen Dank für die Hilfe!"}, "gold": "small_talk", "tags": ["thanks"]}
+{"id": "fl-de-018", "point": "fast_lane", "language": "de", "state": {"message": "Dankeschön 🙏"}, "gold": "small_talk", "tags": ["thanks", "emoji"]}
+{"id": "fl-de-019", "point": "fast_lane", "language": "de", "state": {"message": "Gute Arbeit, danke!"}, "gold": "small_talk", "tags": ["thanks", "compliment"]}
+{"id": "fl-de-020", "point": "fast_lane", "language": "de", "state": {"message": "tschüss"}, "gold": "small_talk", "tags": ["goodbye", "one-word"]}
+{"id": "fl-de-021", "point": "fast_lane", "language": "de", "state": {"message": "Bis später!"}, "gold": "small_talk", "tags": ["goodbye"]}
+{"id": "fl-de-022", "point": "fast_lane", "language": "de", "state": {"message": "Bis morgen dann 👋"}, "gold": "small_talk", "tags": ["goodbye", "emoji"]}
+{"id": "fl-de-023", "point": "fast_lane", "language": "de", "state": {"message": "Gute Nacht"}, "gold": "small_talk", "tags": ["goodbye"]}
+{"id": "fl-de-024", "point": "fast_lane", "language": "de", "state": {"message": "Schönes Wochenende dir!"}, "gold": "small_talk", "tags": ["goodbye"]}
+{"id": "fl-de-025", "point": "fast_lane", "language": "de", "state": {"message": "Frohe Weihnachten!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-de-026", "point": "fast_lane", "language": "de", "state": {"message": "ok"}, "gold": "small_talk", "tags": ["acknowledgement", "one-word"]}
+{"id": "fl-de-027", "point": "fast_lane", "language": "de", "state": {"message": "Alles klar, passt."}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-de-028", "point": "fast_lane", "language": "de", "state": {"message": "super, perfekt"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-de-029", "point": "fast_lane", "language": "de", "state": {"message": "Wie heißt du eigentlich?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-030", "point": "fast_lane", "language": "de", "state": {"message": "Hast du einen Namen?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-031", "point": "fast_lane", "language": "de", "state": {"message": "Was kannst du alles?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-de-032", "point": "fast_lane", "language": "de", "state": {"message": "Wobei kannst du mir so helfen?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-de-033", "point": "fast_lane", "language": "de", "state": {"message": "Bist du ein Mensch oder eine KI?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-034", "point": "fast_lane", "language": "de", "state": {"message": "Wer hat dich gebaut?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-035", "point": "fast_lane", "language": "de", "state": {"message": "Bist du ChatGPT?"}, "gold": "small_talk", "tags": ["about-assistant", "brand-in-passing"]}
+{"id": "fl-de-036", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du auch Bilder erstellen?"}, "gold": "small_talk", "tags": ["capability", "near-miss"]}
+{"id": "fl-de-037", "point": "fast_lane", "language": "de", "state": {"message": "Sprichst du auch Französisch?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-de-038", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du Deutsch?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-de-039", "point": "fast_lane", "language": "de", "state": {"message": "Schläfst du eigentlich nie?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-040", "point": "fast_lane", "language": "de", "state": {"message": "Magst du eigentlich Musik?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-041", "point": "fast_lane", "language": "de", "state": {"message": "Was ist dein Lieblingsessen?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-de-042", "point": "fast_lane", "language": "de", "state": {"message": "Du bist echt hilfreich, danke"}, "gold": "small_talk", "tags": ["compliment", "thanks"]}
+{"id": "fl-de-043", "point": "fast_lane", "language": "de", "state": {"message": "Haha, der war gut 😂"}, "gold": "small_talk", "tags": ["acknowledgement", "emoji"]}
+{"id": "fl-de-044", "point": "fast_lane", "language": "de", "state": {"message": "lol"}, "gold": "small_talk", "tags": ["acknowledgement", "one-word"]}
+{"id": "fl-de-045", "point": "fast_lane", "language": "de", "state": {"message": "Sorry, das war mein Fehler"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-de-046", "point": "fast_lane", "language": "de", "state": {"message": "Moment, ich bin gleich wieder da"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-de-047", "point": "fast_lane", "language": "de", "state": {"message": "Hi, grüß dich aus dem Büro bei Siemens!"}, "gold": "small_talk", "tags": ["greeting", "brand-in-passing", "near-miss"]}
+{"id": "fl-de-048", "point": "fast_lane", "language": "de", "state": {"message": "Du musst nichts nachschauen, sag einfach hallo zurück"}, "gold": "small_talk", "tags": ["do-not-look-up", "near-miss"]}
+{"id": "fl-de-049", "point": "fast_lane", "language": "de", "state": {"message": "Grüße aus dem ICE nach München 🚄"}, "gold": "small_talk", "tags": ["greeting", "brand-in-passing", "near-miss"]}
+{"id": "fl-de-050", "point": "fast_lane", "language": "de", "state": {"message": "Hab heute Geburtstag 🎉"}, "gold": "small_talk", "tags": ["small-talk", "near-miss"]}
+{"id": "fl-de-051", "point": "fast_lane", "language": "de", "state": {"message": "Wie spät ist es?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-052", "point": "fast_lane", "language": "de", "state": {"message": "wetter morgen?"}, "gold": "task", "tags": ["casual-fact", "typo"]}
+{"id": "fl-de-053", "point": "fast_lane", "language": "de", "state": {"message": "Was ist 17 mal 23?"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-de-054", "point": "fast_lane", "language": "de", "state": {"message": "Übersetz 'Guten Morgen' ins Spanische"}, "gold": "task", "tags": ["translate", "near-miss"]}
+{"id": "fl-de-055", "point": "fast_lane", "language": "de", "state": {"message": "Erzähl mir einen Witz"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-de-056", "point": "fast_lane", "language": "de", "state": {"message": "Schreib mir ein kurzes Gedicht über den Herbst"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-057", "point": "fast_lane", "language": "de", "state": {"message": "Wie heiße ich?"}, "gold": "task", "tags": ["about-user", "near-miss"]}
+{"id": "fl-de-058", "point": "fast_lane", "language": "de", "state": {"message": "Weißt du noch, was ich gestern gefragt habe?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-059", "point": "fast_lane", "language": "de", "state": {"message": "Hast du meinen Lebenslauf gespeichert?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-060", "point": "fast_lane", "language": "de", "state": {"message": "Wie heißt die Katze von meiner Schwester nochmal?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-061", "point": "fast_lane", "language": "de", "state": {"message": "Was war nochmal mein Passwort-Hinweis?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-062", "point": "fast_lane", "language": "de", "state": {"message": "Hallo, kannst du mir ein Bild von einer Katze malen?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-de-063", "point": "fast_lane", "language": "de", "state": {"message": "Hey, wie geht's? Wie wird das Wetter in Köln?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-de-064", "point": "fast_lane", "language": "de", "state": {"message": "Guten Morgen! Was gibt's Neues in den Nachrichten?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-de-065", "point": "fast_lane", "language": "de", "state": {"message": "Danke! Und was kostet das Ganze?"}, "gold": "task", "tags": ["small-talk-plus-request", "follow-up", "near-miss"]}
+{"id": "fl-de-066", "point": "fast_lane", "language": "de", "state": {"message": "Danke, und jetzt bitte auf Englisch"}, "gold": "task", "tags": ["small-talk-plus-request", "follow-up", "near-miss"]}
+{"id": "fl-de-067", "point": "fast_lane", "language": "de", "state": {"message": "Hallo! Wie viel ist 2 hoch 10?"}, "gold": "task", "tags": ["small-talk-plus-request", "compute"]}
+{"id": "fl-de-068", "point": "fast_lane", "language": "de", "state": {"message": "Hi, bist du da? Ich brauch schnell eine Rechnungsvorlage"}, "gold": "task", "tags": ["small-talk-plus-request", "create"]}
+{"id": "fl-de-069", "point": "fast_lane", "language": "de", "state": {"message": "Danke fürs Bild! Kannst du noch einen Sonnenuntergang dazumachen?"}, "gold": "task", "tags": ["small-talk-plus-request", "follow-up"]}
+{"id": "fl-de-070", "point": "fast_lane", "language": "de", "state": {"message": "Guten Morgen, erstell mir bitte eine Einkaufsliste"}, "gold": "task", "tags": ["small-talk-plus-request", "create"]}
+{"id": "fl-de-071", "point": "fast_lane", "language": "de", "state": {"message": "Mir ist langweilig, schlag mir was vor"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-de-072", "point": "fast_lane", "language": "de", "state": {"message": "nochmal bitte"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-073", "point": "fast_lane", "language": "de", "state": {"message": "mach es kürzer"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-074", "point": "fast_lane", "language": "de", "state": {"message": "und jetzt in rot"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-075", "point": "fast_lane", "language": "de", "state": {"message": "Ja, mach das so"}, "gold": "task", "tags": ["follow-up", "near-miss"]}
+{"id": "fl-de-076", "point": "fast_lane", "language": "de", "state": {"message": "weiter"}, "gold": "task", "tags": ["follow-up", "one-word"]}
+{"id": "fl-de-077", "point": "fast_lane", "language": "de", "state": {"message": "noch eins, aber mit Hund"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-078", "point": "fast_lane", "language": "de", "state": {"message": "Das zweite gefällt mir, nimm das"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-079", "point": "fast_lane", "language": "de", "state": {"message": "Mach daraus eine Tabelle"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-080", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du das Bild von vorhin größer machen?"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-081", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du den Text von eben nochmal prüfen?"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-de-082", "point": "fast_lane", "language": "de", "state": {"message": "wer hat die letzte WM gewonnen"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-083", "point": "fast_lane", "language": "de", "state": {"message": "wie hoch is der eiffelturm"}, "gold": "task", "tags": ["casual-fact", "typo"]}
+{"id": "fl-de-084", "point": "fast_lane", "language": "de", "state": {"message": "Was ist die Hauptstadt von Australien?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-085", "point": "fast_lane", "language": "de", "state": {"message": "Schau nichts nach, nur: Hauptstadt von Kanada?"}, "gold": "task", "tags": ["do-not-look-up", "casual-fact", "near-miss"]}
+{"id": "fl-de-086", "point": "fast_lane", "language": "de", "state": {"message": "Wie weit ist der Mond weg?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-087", "point": "fast_lane", "language": "de", "state": {"message": "wie lang kocht man eier"}, "gold": "task", "tags": ["casual-fact", "typo"]}
+{"id": "fl-de-088", "point": "fast_lane", "language": "de", "state": {"message": "Ist Tomate ein Obst?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-089", "point": "fast_lane", "language": "de", "state": {"message": "Welcher Tag ist heute?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-090", "point": "fast_lane", "language": "de", "state": {"message": "Was läuft heute Abend im Kino?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-091", "point": "fast_lane", "language": "de", "state": {"message": "Ist heute ein Feiertag in Bayern?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-092", "point": "fast_lane", "language": "de", "state": {"message": "Was kostet ein Deutschlandticket?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-de-093", "point": "fast_lane", "language": "de", "state": {"message": "Rechne 15 Prozent von 80 aus"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-de-094", "point": "fast_lane", "language": "de", "state": {"message": "Wie viele Tage hat der Februar 2028?"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-de-095", "point": "fast_lane", "language": "de", "state": {"message": "Konvertier 5 Meilen in Kilometer"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-de-096", "point": "fast_lane", "language": "de", "state": {"message": "Ordne diese Zahlen: 5, 2, 9, 1"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-de-097", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du mir bei meiner Bewerbung helfen?"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-de-098", "point": "fast_lane", "language": "de", "state": {"message": "kanst du mir helfn bei ner email an meinen chef"}, "gold": "task", "tags": ["create", "typo"]}
+{"id": "fl-de-099", "point": "fast_lane", "language": "de", "state": {"message": "Fass mir kurz zusammen, worum es in Faust geht"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-100", "point": "fast_lane", "language": "de", "state": {"message": "Was bedeutet 'Resilienz'?"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-101", "point": "fast_lane", "language": "de", "state": {"message": "Erklär mir Photosynthese in zwei Sätzen"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-102", "point": "fast_lane", "language": "de", "state": {"message": "Wie funktioniert eine Wärmepumpe?"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-103", "point": "fast_lane", "language": "de", "state": {"message": "Wie wird man Pilot?"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-104", "point": "fast_lane", "language": "de", "state": {"message": "Was denkst du über Atomkraft?"}, "gold": "task", "tags": ["explain", "near-miss"]}
+{"id": "fl-de-105", "point": "fast_lane", "language": "de", "state": {"message": "Ist 'Hallo zusammen, danke für alles' als Mailanfang okay?"}, "gold": "task", "tags": ["own-text", "near-miss"]}
+{"id": "fl-de-106", "point": "fast_lane", "language": "de", "state": {"message": "Korrigier: 'Ich habe das gestern gemacht gehabt.'"}, "gold": "task", "tags": ["own-text"]}
+{"id": "fl-de-107", "point": "fast_lane", "language": "de", "state": {"message": "Welche Termine habe ich morgen?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-108", "point": "fast_lane", "language": "de", "state": {"message": "Erinnere mich in einer Stunde an den Ofen"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-109", "point": "fast_lane", "language": "de", "state": {"message": "Mach mir ein Logo für meinen Laden"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-110", "point": "fast_lane", "language": "de", "state": {"message": "Gib mir drei Ideen fürs Abendessen"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-111", "point": "fast_lane", "language": "de", "state": {"message": "Such mir ein Rezept für Pfannkuchen"}, "gold": "task", "tags": ["lookup"]}
+{"id": "fl-de-112", "point": "fast_lane", "language": "de", "state": {"message": "Such mal nach Hotels in Wien"}, "gold": "task", "tags": ["lookup"]}
+{"id": "fl-de-113", "point": "fast_lane", "language": "de", "state": {"message": "Wie sagt man 'Danke' auf Japanisch?"}, "gold": "task", "tags": ["translate", "near-miss"]}
+{"id": "fl-de-114", "point": "fast_lane", "language": "de", "state": {"message": "Schreib 'Danke' an meine Kollegin Anna"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-de-115", "point": "fast_lane", "language": "de", "state": {"message": "Tschüss auf Italienisch?"}, "gold": "task", "tags": ["translate", "near-miss"]}
+{"id": "fl-de-116", "point": "fast_lane", "language": "de", "state": {"message": "Ich brauche einen Namen für meinen Hund"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-117", "point": "fast_lane", "language": "de", "state": {"message": "Bitte öffne meine letzte Datei"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-de-118", "point": "fast_lane", "language": "de", "state": {"message": "Plane mir einen Ausflug nach Hamburg"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-119", "point": "fast_lane", "language": "de", "state": {"message": "Sag mir einen guten Film für heute Abend"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-de-120", "point": "fast_lane", "language": "de", "state": {"message": "Gib mir ein Synonym für 'schnell'"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-de-121", "point": "fast_lane", "language": "de", "state": {"message": "hilfe, mein drucker druckt nicht"}, "gold": "task", "tags": ["near-miss", "typo"]}
+{"id": "fl-de-122", "point": "fast_lane", "language": "de", "state": {"message": "Kannst du mir bitte eine ausführliche Zusammenfassung der letzten drei Quartalsberichte unserer Firma mit allen Zahlen erstellen?"}, "gold": "task", "tags": ["gated", "long"]}
+{"id": "fl-de-123", "point": "fast_lane", "language": "de", "state": {"message": "Lies bitte https://www.bahn.de/angebote und sag mir, was günstiger ist"}, "gold": "task", "tags": ["gated", "url"]}
+{"id": "fl-de-124", "point": "fast_lane", "language": "de", "state": {"message": "Merk dir, dass ich Tee lieber mag als Kaffee"}, "gold": "task", "tags": ["gated", "memory"]}
+{"id": "fl-de-125", "point": "fast_lane", "language": "de", "state": {"message": "Hallo! Ich wollte nur mal sagen, dass ich mich sehr über deine Hilfe bei meinem Umzug letzte Woche gefreut habe"}, "gold": "small_talk", "tags": ["gated", "long"]}
+{"id": "fl-en-001", "point": "fast_lane", "language": "en", "state": {"message": "hey"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-en-002", "point": "fast_lane", "language": "en", "state": {"message": "Hello there!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-en-003", "point": "fast_lane", "language": "en", "state": {"message": "hi :)"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-en-004", "point": "fast_lane", "language": "en", "state": {"message": "Good morning!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-en-005", "point": "fast_lane", "language": "en", "state": {"message": "Evening!"}, "gold": "small_talk", "tags": ["greeting", "one-word"]}
+{"id": "fl-en-006", "point": "fast_lane", "language": "en", "state": {"message": "Nice to meet you!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-en-007", "point": "fast_lane", "language": "en", "state": {"message": "Happy new year!"}, "gold": "small_talk", "tags": ["greeting"]}
+{"id": "fl-en-008", "point": "fast_lane", "language": "en", "state": {"message": "How are you?"}, "gold": "small_talk", "tags": ["how-are-you"]}
+{"id": "fl-en-009", "point": "fast_lane", "language": "en", "state": {"message": "how r u doing today"}, "gold": "small_talk", "tags": ["how-are-you", "typo"]}
+{"id": "fl-en-010", "point": "fast_lane", "language": "en", "state": {"message": "Thanks!"}, "gold": "small_talk", "tags": ["thanks", "one-word"]}
+{"id": "fl-en-011", "point": "fast_lane", "language": "en", "state": {"message": "thx"}, "gold": "small_talk", "tags": ["thanks", "one-word"]}
+{"id": "fl-en-012", "point": "fast_lane", "language": "en", "state": {"message": "Thank you so much, that helped a lot"}, "gold": "small_talk", "tags": ["thanks"]}
+{"id": "fl-en-013", "point": "fast_lane", "language": "en", "state": {"message": "Cheers mate"}, "gold": "small_talk", "tags": ["thanks"]}
+{"id": "fl-en-014", "point": "fast_lane", "language": "en", "state": {"message": "Bye!"}, "gold": "small_talk", "tags": ["goodbye", "one-word"]}
+{"id": "fl-en-015", "point": "fast_lane", "language": "en", "state": {"message": "See you tomorrow"}, "gold": "small_talk", "tags": ["goodbye"]}
+{"id": "fl-en-016", "point": "fast_lane", "language": "en", "state": {"message": "Good night 🌙"}, "gold": "small_talk", "tags": ["goodbye", "emoji"]}
+{"id": "fl-en-017", "point": "fast_lane", "language": "en", "state": {"message": "Have a nice weekend!"}, "gold": "small_talk", "tags": ["goodbye"]}
+{"id": "fl-en-018", "point": "fast_lane", "language": "en", "state": {"message": "ok cool"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-en-019", "point": "fast_lane", "language": "en", "state": {"message": "Got it, thanks."}, "gold": "small_talk", "tags": ["acknowledgement", "thanks"]}
+{"id": "fl-en-020", "point": "fast_lane", "language": "en", "state": {"message": "haha nice one"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-en-021", "point": "fast_lane", "language": "en", "state": {"message": "Sorry, my bad"}, "gold": "small_talk", "tags": ["acknowledgement"]}
+{"id": "fl-en-022", "point": "fast_lane", "language": "en", "state": {"message": "brb"}, "gold": "small_talk", "tags": ["acknowledgement", "one-word"]}
+{"id": "fl-en-023", "point": "fast_lane", "language": "en", "state": {"message": "👍"}, "gold": "small_talk", "tags": ["acknowledgement", "emoji", "one-word"]}
+{"id": "fl-en-024", "point": "fast_lane", "language": "en", "state": {"message": "What's your name?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-025", "point": "fast_lane", "language": "en", "state": {"message": "Who are you?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-026", "point": "fast_lane", "language": "en", "state": {"message": "What can you do?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-en-027", "point": "fast_lane", "language": "en", "state": {"message": "What kinds of things can you help me with?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-en-028", "point": "fast_lane", "language": "en", "state": {"message": "Are you a real person?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-029", "point": "fast_lane", "language": "en", "state": {"message": "Who built you?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-030", "point": "fast_lane", "language": "en", "state": {"message": "Can you speak German?"}, "gold": "small_talk", "tags": ["capability"]}
+{"id": "fl-en-031", "point": "fast_lane", "language": "en", "state": {"message": "Can you make images too?"}, "gold": "small_talk", "tags": ["capability", "near-miss"]}
+{"id": "fl-en-032", "point": "fast_lane", "language": "en", "state": {"message": "What's your favorite movie?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-033", "point": "fast_lane", "language": "en", "state": {"message": "Do you ever sleep?"}, "gold": "small_talk", "tags": ["about-assistant"]}
+{"id": "fl-en-034", "point": "fast_lane", "language": "en", "state": {"message": "You're awesome"}, "gold": "small_talk", "tags": ["compliment"]}
+{"id": "fl-en-035", "point": "fast_lane", "language": "en", "state": {"message": "Greetings from the Starbucks on 5th Avenue!"}, "gold": "small_talk", "tags": ["greeting", "brand-in-passing", "near-miss"]}
+{"id": "fl-en-036", "point": "fast_lane", "language": "en", "state": {"message": "No need to look anything up, just say hi back"}, "gold": "small_talk", "tags": ["do-not-look-up", "near-miss"]}
+{"id": "fl-en-037", "point": "fast_lane", "language": "en", "state": {"message": "It's my birthday today 🎂"}, "gold": "small_talk", "tags": ["small-talk", "near-miss"]}
+{"id": "fl-en-038", "point": "fast_lane", "language": "en", "state": {"message": "What time is it in Tokyo?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-039", "point": "fast_lane", "language": "en", "state": {"message": "weather tomorrow?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-040", "point": "fast_lane", "language": "en", "state": {"message": "What's 12% of 250?"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-en-041", "point": "fast_lane", "language": "en", "state": {"message": "Translate 'good luck' into French"}, "gold": "task", "tags": ["translate"]}
+{"id": "fl-en-042", "point": "fast_lane", "language": "en", "state": {"message": "Tell me a joke"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-en-043", "point": "fast_lane", "language": "en", "state": {"message": "Write a haiku about coffee"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-044", "point": "fast_lane", "language": "en", "state": {"message": "What's my name?"}, "gold": "task", "tags": ["about-user", "near-miss"]}
+{"id": "fl-en-045", "point": "fast_lane", "language": "en", "state": {"message": "Do you remember what I asked you yesterday?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-en-046", "point": "fast_lane", "language": "en", "state": {"message": "Is my resume saved somewhere?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-en-047", "point": "fast_lane", "language": "en", "state": {"message": "Which files did I upload last week?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-en-048", "point": "fast_lane", "language": "en", "state": {"message": "What's on my calendar today?"}, "gold": "task", "tags": ["about-user"]}
+{"id": "fl-en-049", "point": "fast_lane", "language": "en", "state": {"message": "Hi! Can you draw a dog on a skateboard?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-en-050", "point": "fast_lane", "language": "en", "state": {"message": "Hey, how's it going? What's the weather in Boston?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-en-051", "point": "fast_lane", "language": "en", "state": {"message": "Morning! Any news about the elections?"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-en-052", "point": "fast_lane", "language": "en", "state": {"message": "Thanks! How much does it cost though?"}, "gold": "task", "tags": ["small-talk-plus-request", "follow-up", "near-miss"]}
+{"id": "fl-en-053", "point": "fast_lane", "language": "en", "state": {"message": "Thanks, now make it shorter"}, "gold": "task", "tags": ["small-talk-plus-request", "follow-up", "near-miss"]}
+{"id": "fl-en-054", "point": "fast_lane", "language": "en", "state": {"message": "Hi! What's 2 to the power of 16?"}, "gold": "task", "tags": ["small-talk-plus-request", "compute"]}
+{"id": "fl-en-055", "point": "fast_lane", "language": "en", "state": {"message": "I'm bored, suggest something to do"}, "gold": "task", "tags": ["small-talk-plus-request", "near-miss"]}
+{"id": "fl-en-056", "point": "fast_lane", "language": "en", "state": {"message": "again please"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-en-057", "point": "fast_lane", "language": "en", "state": {"message": "one more, but in blue"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-en-058", "point": "fast_lane", "language": "en", "state": {"message": "yes, go ahead"}, "gold": "task", "tags": ["follow-up", "near-miss"]}
+{"id": "fl-en-059", "point": "fast_lane", "language": "en", "state": {"message": "continue"}, "gold": "task", "tags": ["follow-up", "one-word"]}
+{"id": "fl-en-060", "point": "fast_lane", "language": "en", "state": {"message": "I like the second one, use that"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-en-061", "point": "fast_lane", "language": "en", "state": {"message": "Put this into a table"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-en-062", "point": "fast_lane", "language": "en", "state": {"message": "Can you make the last picture bigger?"}, "gold": "task", "tags": ["follow-up"]}
+{"id": "fl-en-063", "point": "fast_lane", "language": "en", "state": {"message": "who won the super bowl"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-064", "point": "fast_lane", "language": "en", "state": {"message": "how tall is mt everest"}, "gold": "task", "tags": ["casual-fact", "typo"]}
+{"id": "fl-en-065", "point": "fast_lane", "language": "en", "state": {"message": "What's the capital of Peru?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-066", "point": "fast_lane", "language": "en", "state": {"message": "Don't search, just tell me: capital of Kenya?"}, "gold": "task", "tags": ["do-not-look-up", "casual-fact", "near-miss"]}
+{"id": "fl-en-067", "point": "fast_lane", "language": "en", "state": {"message": "How far away is Mars?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-068", "point": "fast_lane", "language": "en", "state": {"message": "How long do I boil an egg?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-069", "point": "fast_lane", "language": "en", "state": {"message": "How much is a Netflix subscription?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-070", "point": "fast_lane", "language": "en", "state": {"message": "Is today a bank holiday in the UK?"}, "gold": "task", "tags": ["casual-fact"]}
+{"id": "fl-en-071", "point": "fast_lane", "language": "en", "state": {"message": "Convert 30 Celsius to Fahrenheit"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-en-072", "point": "fast_lane", "language": "en", "state": {"message": "Sort these: 8, 3, 11, 5"}, "gold": "task", "tags": ["compute"]}
+{"id": "fl-en-073", "point": "fast_lane", "language": "en", "state": {"message": "Can you help me write a cover letter?"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-en-074", "point": "fast_lane", "language": "en", "state": {"message": "summarize hamlet in 3 sentences"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-en-075", "point": "fast_lane", "language": "en", "state": {"message": "What does 'serendipity' mean?"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-en-076", "point": "fast_lane", "language": "en", "state": {"message": "Explain recursion simply"}, "gold": "task", "tags": ["explain"]}
+{"id": "fl-en-077", "point": "fast_lane", "language": "en", "state": {"message": "What do you think about nuclear power?"}, "gold": "task", "tags": ["explain", "near-miss"]}
+{"id": "fl-en-078", "point": "fast_lane", "language": "en", "state": {"message": "Is 'Hi all, thanks for everything' fine to open an email?"}, "gold": "task", "tags": ["own-text", "near-miss"]}
+{"id": "fl-en-079", "point": "fast_lane", "language": "en", "state": {"message": "Fix this: 'Their going to the park tomorow'"}, "gold": "task", "tags": ["own-text"]}
+{"id": "fl-en-080", "point": "fast_lane", "language": "en", "state": {"message": "Make a logo for my bakery"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-081", "point": "fast_lane", "language": "en", "state": {"message": "Give me three dinner ideas"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-082", "point": "fast_lane", "language": "en", "state": {"message": "Find me a pancake recipe"}, "gold": "task", "tags": ["lookup"]}
+{"id": "fl-en-083", "point": "fast_lane", "language": "en", "state": {"message": "How do you say 'thank you' in Korean?"}, "gold": "task", "tags": ["translate", "near-miss"]}
+{"id": "fl-en-084", "point": "fast_lane", "language": "en", "state": {"message": "Send a thank-you note to Mark"}, "gold": "task", "tags": ["create", "near-miss"]}
+{"id": "fl-en-085", "point": "fast_lane", "language": "en", "state": {"message": "I need a name for my cat"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-086", "point": "fast_lane", "language": "en", "state": {"message": "Plan a day trip to Brighton"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-087", "point": "fast_lane", "language": "en", "state": {"message": "Recommend a good movie for tonight"}, "gold": "task", "tags": ["create"]}
+{"id": "fl-en-088", "point": "fast_lane", "language": "en", "state": {"message": "help, my printer won't print"}, "gold": "task", "tags": ["near-miss"]}
+{"id": "fl-en-089", "point": "fast_lane", "language": "en", "state": {"message": "Could you please go through the attached quarterly figures and write a detailed summary for the board?"}, "gold": "task", "tags": ["gated", "long"]}
+{"id": "fl-en-090", "point": "fast_lane", "language": "en", "state": {"message": "Check https://status.example.com and tell me if it is down"}, "gold": "task", "tags": ["gated", "url"]}
+{"id": "fl-en-091", "point": "fast_lane", "language": "en", "state": {"message": "From now on, please call me Sam"}, "gold": "task", "tags": ["gated", "memory"]}

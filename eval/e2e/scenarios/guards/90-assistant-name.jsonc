@@ -1,0 +1,86 @@
+// GUARDS: the assistant's name. This file sorts LAST in the group because the scenario changes state.
+//
+// Where the name lives: identity.name of the main-assistant personality
+// (packages/core/src/personality/service.ts). Under multi-user auth every account has its own
+// override, <SAI_USER_MEMORY_PATH or ~/.starlingai/state>/users/<segment>/main-assistant-personality.json
+// (in Docker: /data/users/<segment>/…), next to the shared global profile. An account without an
+// override reads the global one. The eval account gets its own override, so it never touches the
+// operator's persona:
+//   - a chat turn runs with the session's user (agent/runtime.ts runTurn → runWithRequestContext
+//     {userId: session.userId}; the WS session belongs to the token's subject, gateway/rpc.ts);
+//   - an /api request runs as the caller (gateway/index.ts:177-200).
+// The rename is persisted deterministically, before the model runs: agent/turn-prepare.ts:169-184
+// calls extractAssistantName (agent/intent-classifier.ts:280), then setMainAssistantName. The model
+// may also call assistant_personality_update; either way identity.name is set. No audit event is
+// logged for the rename, so the scenario reads the stored profile: GET /api/personality
+// (gateway/sub-agent-routes.ts:271) returns compact JSON containing "name":"Max".
+//
+// Restore: POST /api/personality/reset (sub-agent-routes.ts:301, operator role) deletes the
+// CALLER'S override, so eval falls back to the global persona (clearMainAssistantPersonalityOverride,
+// service.ts:323). With no override present, it instead writes the built-in default as the caller's
+// override (service.ts:433). It never touches the global profile without ?scope=global (admin
+// only). The last step resets. The first step resets as well, because an attempt stops at its first
+// failed step: a failed earlier run may have left "Max" in place, and the next run starts clean.
+// After a failed attempt, the eval account keeps "Max" until this scenario runs again, or until a
+// POST /api/personality/reset as eval.
+{
+  id: "guards-assistant-rename-and-phone-call",
+  title: "A clear rename sticks across sessions; a phone-call sentence renames nothing",
+  group: "guards",
+  tags: ["smoke", "personality"],
+  description: "Protects the deterministic rename (audit b71523fb: \"Ab jetzt heißt du Luna\" was answered \"saved!\" and nothing was persisted) and its 2026-10-05 narrowing: questions, quoted speech, story frames and phone calls (\"I will call you Monday …\" renamed the assistant \"Monday\") are not renames. \"Ab jetzt heißt du Max, okay?\" must be stored, and must be the answer to \"Wie heißt du?\" in a NEW session (so the answer comes from the stored profile, not the chat history). \"Ich ruf dich Montag an.\" must leave the name at Max and call no personality tool. Changes the eval account's personality and resets it at the start and at the end.",
+  requires: ["model"],
+  timeoutMs: 1200000,
+  steps: [
+    // Start clean (see the header): a leftover "Max" from a failed run would make the rename check
+    // pass without a rename.
+    { kind: "http", id: "reset-before", method: "POST", path: "/api/personality/reset", expect: { status: 200 } },
+    {
+      kind: "turn",
+      id: "rename",
+      message: "Ab jetzt heißt du Max, okay?",
+      timeoutMs: 300000,
+    },
+    // Persisted, not just acknowledged.
+    {
+      kind: "http",
+      id: "name-stored",
+      method: "GET",
+      path: "/api/personality",
+      expect: { status: 200, bodyIncludes: ['"name":"Max"'] },
+    },
+    {
+      kind: "turn",
+      id: "phone-call",
+      message: "Ich ruf dich Montag an.",
+      timeoutMs: 300000,
+      expect: {
+        tools: { mustNotCall: ["assistant_personality_update"] },
+      },
+    },
+    // Still Max: a misread phone call would have stored "Montag".
+    {
+      kind: "http",
+      id: "name-unchanged",
+      method: "GET",
+      path: "/api/personality",
+      expect: { status: 200, bodyIncludes: ['"name":"Max"'] },
+    },
+    { kind: "newSession" },
+    {
+      kind: "turn",
+      id: "ask-name",
+      message: "Wie heißt du?",
+      timeoutMs: 300000,
+      expect: {
+        reply: {
+          // A word boundary keeps "maximal" and "Maximum" from counting.
+          matches: ["\\bMax\\b"],
+          excludes: ["Montag"],
+        },
+      },
+    },
+    // Restore: remove the eval account's override.
+    { kind: "http", id: "reset-after", method: "POST", path: "/api/personality/reset", expect: { status: 200 } },
+  ],
+}

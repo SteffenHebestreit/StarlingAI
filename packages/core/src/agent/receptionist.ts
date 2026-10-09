@@ -23,15 +23,21 @@
  */
 
 import { getConfig } from "../config/loader.js";
-import { getChatProviderForTier } from "../providers/index.js";
+import { decideWithReadout } from "../decisions/incumbent-readout.js";
+import { FAST_LANE } from "../decisions/points.js";
+import { applyActiveModelPreset, createChatProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
+import { effectiveOrchestration } from "../runtime/effort-context.js";
+import { runWithCallAttribution } from "../runtime/request-context.js";
 import { scanOutput } from "../guardrails/output.js";
 import { answerAssertsSpecifics } from "./citation-honesty.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { getReceptionistEscalateTerms, getReceptionistPersonaLines } from "./receptionist-policy.js";
 import { listUserMemoryRecords, listWorkspaceMemoryRecords } from "../memory/service.js";
 import { loadMainAssistantPersonality } from "../personality/service.js";
-import type { LLMMessage } from "../providers/lmstudio.js";
+import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import { childLogger } from "../logger.js";
+import { defaultReplyLanguage } from "./reply-language.js";
+import { detectTextLanguage } from "./text-language.js";
 
 const log = childLogger("agent:receptionist");
 
@@ -103,7 +109,7 @@ export interface ReceptionistResult {
   escalateReason?: string;
 }
 
-export type CompleteFn = (messages: LLMMessage[]) => Promise<string>;
+export type CompleteFn = (messages: LLMMessage[], signal?: AbortSignal) => Promise<string>;
 
 export interface RunReceptionistDeps {
   complete: CompleteFn;
@@ -116,6 +122,17 @@ export interface RunReceptionistDeps {
   confidenceAttempt?: boolean;
   /** Candidate-length ceiling for the relaxed Stage-0 gate in confidence-attempt mode. */
   confidenceMaxChars?: number;
+  /** For the decision ledger. */
+  sessionId?: string;
+  /** The language the conversation has been using, for a message that carries none. */
+  conversationLanguage?: string;
+  /** agents.mainAssistant.defaultLanguage. */
+  defaultLanguage?: string;
+  /**
+   * The model `complete` runs on, for the logit readout of the same question (decisions.readout):
+   * "small talk or task?" answered as one letter. Without it the readout is never asked.
+   */
+  readout?: { provider: Pick<ChatProvider, "complete">; signal?: AbortSignal };
 }
 
 /**
@@ -134,16 +151,39 @@ export async function runReceptionist(
   });
   if (!gate.fastLane) return { handled: false, escalateReason: gate.reason };
 
+  const messages = buildReceptionistMessages(userMessage, {
+    memoryCapsule: deps.memoryCapsule,
+    assistantName: deps.assistantName,
+    personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
+    confidenceAttempt,
+    ...(deps.conversationLanguage ? { conversationLanguage: deps.conversationLanguage } : {}),
+    ...(deps.defaultLanguage ? { defaultLanguage: deps.defaultLanguage } : {}),
+  });
   let raw: string;
   try {
-    raw = await deps.complete(
-      buildReceptionistMessages(userMessage, {
-        memoryCapsule: deps.memoryCapsule,
-        assistantName: deps.assistantName,
-        personaLines: deps.personaLines ?? getReceptionistPersonaLines(),
-        confidenceAttempt,
-      }),
-    );
+    // Laya may call a message a task on its own: then it goes straight to the full assistant and
+    // the micro-call — about two seconds on the shared GPU for a message that escalates anyway —
+    // is never waited for. "Small talk" it may not decide alone: only the model can write the reply.
+    // The same holds for the logit readout when it decides (decisions.readout "on"): its "task"
+    // escalates without the micro-call, its "small talk" still needs the micro-call's reply.
+    const outcome = await decideWithReadout<string>({
+      point: FAST_LANE,
+      state: { message: userMessage },
+      languageOf: userMessage,
+      layaMayTake: ["task"],
+      incumbent: (signal) => deps.complete(messages, signal),
+      toKey: (reply) => (receptionistEscalated(reply, confidenceAttempt) ? "task" : "small_talk"),
+      fromKey: () => ESCALATE_SENTINEL,
+      ...(deps.sessionId ? { sessionId: deps.sessionId } : {}),
+      readout: {
+        provider: deps.readout?.provider,
+        agentName: "receptionist",
+        parsedFor: ["small_talk"],
+        ...(deps.readout?.signal ? { signal: deps.readout.signal } : {}),
+      },
+    });
+    if (outcome.decidedBy === "laya") return { handled: false, escalateReason: "laya-task" };
+    raw = outcome.value ?? "";
   } catch (err) {
     log.debug({ err }, "Receptionist micro-call failed — escalating");
     return { handled: false, escalateReason: "micro-call-error" };
@@ -195,6 +235,17 @@ export async function runReceptionist(
   return { handled: true, response: text };
 }
 
+/** Did the front desk's model hand the message on, rather than answer it? */
+export function receptionistEscalated(raw: string, confidenceAttempt: boolean): boolean {
+  if (confidenceAttempt) return !parseReceptionistConfidence(raw).confident;
+  const text = raw.trim();
+  return !text || text.includes(ESCALATE_SENTINEL);
+}
+
+/** A character of a script that puts no spaces between words. */
+const UNSPACED_SCRIPT_CHARACTER =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/gu;
+
 /**
  * Does the user's message carry NO reliable language signal? A bare social token — "hi", "hey",
  * "ok", "danke", an emoji — is used verbatim in German chat too, so it does NOT establish English.
@@ -208,25 +259,57 @@ export async function runReceptionist(
  * emits ONE unconditional language directive instead, leaving the model nothing to weigh.
  *
  * Structural, no keyword table: an umlaut/ß is a positive German marker; otherwise a message of at
- * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language.
+ * most two short word-tokens (or pure emoji/punctuation) is treated as carrying no language. In a
+ * script written without spaces each character counts as a word: split at spaces, a Chinese or
+ * Japanese sentence ("如何在冬天储存电池？") was one word, and got the bare-greeting directive.
+ *
+ * The fast lane's rule only. The full path asks the detector alone (reply-language.ts,
+ * buildTurnReplyLanguageInstruction).
  */
 export function languageIsUndetermined(userMessage: string): boolean {
   const raw = (userMessage ?? "").trim();
   if (!raw) return true;
   if (/[äöüß]/i.test(raw)) return false; // unambiguous German marker
-  const words = raw.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
+  const words = raw
+    .replace(UNSPACED_SCRIPT_CHARACTER, " $& ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   if (words.length === 0) return true; // emoji / punctuation only
   return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
 }
 
 export function buildReceptionistMessages(
   userMessage: string,
-  opts: { memoryCapsule?: string; assistantName?: string; personaLines?: readonly string[]; confidenceAttempt?: boolean } = {},
+  opts: {
+    memoryCapsule?: string;
+    assistantName?: string;
+    personaLines?: readonly string[];
+    confidenceAttempt?: boolean;
+    /** The language this conversation has been using (read off the previous reply), if any. */
+    conversationLanguage?: string;
+    /** agents.mainAssistant.defaultLanguage — used only when the conversation has none yet. */
+    defaultLanguage?: string;
+  } = {},
 ): LLMMessage[] {
   // ONE unconditional directive when the message carries no language of its own — a conditional
-  // ("...if ambiguous, default to German") is not reliably followed by the fast-lane model.
+  // ("...if ambiguous, default to German") is not reliably followed by the fast-lane model. The
+  // language it names is the conversation's when there is one: hard-coding German answered an
+  // English speaker's "thanks" in German.
+  const fallbackLanguage = opts.conversationLanguage ?? opts.defaultLanguage ?? defaultReplyLanguage();
+  const fallbackReason = opts.conversationLanguage
+    ? "it is the language this conversation has been using"
+    : `${fallbackLanguage} is this assistant's default language`;
   const languageLine = languageIsUndetermined(userMessage)
-    ? "Reply in GERMAN. This message is a bare greeting/acknowledgement that carries no language of its own, and German is this assistant's default language. Do NOT answer in English."
+    ? `Reply in ${fallbackLanguage.toUpperCase()}. This message is a bare greeting/acknowledgement that carries no language of its own, and ${fallbackReason}. Do NOT answer in any other language.`
+    // KEEP THIS LINE AS IT IS, although it reads as if it forbade "answer in English" written in
+    // German. Measured on the routing model (2026-09-25, 5 such requests x 3, 4 wordings): with it,
+    // the model answered in the requested language or ESCALATED — the full assistant then applies
+    // the whole reply-language rule — and answered in the wrong language once in 15. Every
+    // "if the user asks for a language …" wording, whether a clause after this line, an entry in
+    // the escalation list, or a rule stated first, was answered in the wrong language 3-5 times in
+    // 15: the model took the mirror clause and dropped the exception.
     : "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.";
   const common = [
     ...(opts.personaLines ?? []),
@@ -279,6 +362,9 @@ export function parseReceptionistConfidence(raw: string): { confident: boolean; 
   return { confident: marker[1]!.toLowerCase() === "high" && answer.length > 0, answer };
 }
 
+/** Longest capsule line: one fact never takes the whole capsule. */
+const CAPSULE_LINE_MAX = 160;
+
 /**
  * Compressed memory capsule — durable decisions + preferences only, capped hard.
  * The "compressed memory" the front desk gets instead of the full per-turn
@@ -295,7 +381,18 @@ export function buildMemoryCapsule(workspacePath: string, maxChars = 400): strin
   const lines: string[] = [];
   let used = 0;
   for (const record of records) {
-    const line = `- ${singleLine(record.content)}`.slice(0, 160);
+    // With its subject: the content alone often names no topic ("Polarstern-Rooibos" for the user's
+    // favourite tea), and a capsule of bare values could not answer the question it was stored for.
+    const content = singleLine(record.content);
+    const subject = singleLine(record.subject ?? "");
+    // The value has the line first; the subject gets the room it leaves ("- " and ": " aside). The
+    // line was cut after the subject was prepended, and a subject has no length cap of its own
+    // (memory_promote copies an outcome's task text): a 154-character one left "… live tracking: Us"
+    // and no value.
+    const label = subject && !content.toLowerCase().includes(subject.toLowerCase())
+      ? fitCapsuleLabel(subject, CAPSULE_LINE_MAX - 4 - content.length)
+      : "";
+    const line = `- ${label ? `${label}: ` : ""}${content}`.slice(0, CAPSULE_LINE_MAX);
     if (used + line.length + 1 > maxChars) break;
     lines.push(line);
     used += line.length + 1;
@@ -303,9 +400,29 @@ export function buildMemoryCapsule(workspacePath: string, maxChars = 400): strin
   return lines.join("\n");
 }
 
+/** A subject in at most `room` characters: whole, cut after a word with "…", or left out when not
+ *  even its first word fits. */
+function fitCapsuleLabel(subject: string, room: number): string {
+  if (subject.length <= room) return subject;
+  const cut = subject.slice(0, Math.max(0, room)).lastIndexOf(" ");
+  return cut > 0 ? `${subject.slice(0, cut)}…` : "";
+}
+
 export interface FastLaneOutcome {
   response: string;
 }
+
+/**
+ * Why the fast lane did not answer. Every one of these collapsed to `null` before, so a
+ * production run showing 0 of 5 fast-lane hits could not say whether the gate rejected the
+ * message, the small model escalated, or — the actual live cause — no routing tier exists
+ * under a model preset, which makes the lane silently unreachable.
+ */
+export type FastLaneEscalateReason =
+  | "disabled"
+  | "no-routing-tier"
+  | "error"
+  | string;
 
 /**
  * Production entry used by the runtime. Returns the response when the front desk
@@ -314,21 +431,59 @@ export interface FastLaneOutcome {
 export async function tryReceptionistFastLane(
   userMessage: string,
   signal?: AbortSignal,
+  context: FastLaneConversationContext = {},
 ): Promise<FastLaneOutcome | null> {
+  const outcome = await tryReceptionistFastLaneDetailed(userMessage, signal, context);
+  return outcome.handled ? { response: outcome.response } : null;
+}
+
+/** What the fast lane may know about the conversation it is answering inside. */
+export interface FastLaneConversationContext {
+  /** The assistant's previous reply in this session, if any — the language anchor for a
+   *  message that carries none of its own. */
+  previousReply?: string;
+  /** For the decision ledger. */
+  sessionId?: string;
+  /** The session's workspace root: under multi-user auth the user's own root, where their workspace
+   *  memories are. The configured root is the shared one. */
+  workspacePath?: string;
+}
+
+/**
+ * Same lane, but it reports WHY it declined. The runtime logs the reason; a caller that
+ * only needs the answer can use {@link tryReceptionistFastLane}.
+ */
+export async function tryReceptionistFastLaneDetailed(
+  userMessage: string,
+  signal?: AbortSignal,
+  context: FastLaneConversationContext = {},
+): Promise<{ handled: true; response: string } | { handled: false; escalateReason: FastLaneEscalateReason }> {
   const config = getConfig();
-  if (!config.receptionist?.enabled) return null;
+  if (!config.receptionist?.enabled) return { handled: false, escalateReason: "disabled" };
 
   // No routing tier → there is no cheap model to answer with; use the full path.
   // reasoningEffort "none" is the point of this lane: it answers trivial turns ("hi")
   // cheaply, and on a graded-thinking model the default effort would otherwise spend
   // ~1.3k reasoning characters deciding how to say hello. Families that do not honor
   // the field ignore it, so this is safe across model swaps.
-  const provider = getChatProviderForTier("routing", { reasoningEffort: "none" });
-  if (!provider) return null;
+  // Under a model preset the tier resolver returns null for every turn, so the lane never
+  // runs at all — the reason the live deployment recorded 0 of 5 hits. The fallback builds a
+  // provider from the caller's own merged config carrying the tier's controls; it is
+  // flag-gated because making the fast lane start answering on a deployment where it never
+  // has is a behaviour change, not a repair.
+  const provider = effectiveOrchestration().routingTierPresetFallback === true
+    ? (getChatProviderForTier("routing", { reasoningEffort: "none" })
+      ?? createChatProvider({
+        ...applyActiveModelPreset(config.agents.defaults.model),
+        ...tierModelDefaults("routing"),
+        reasoningEffort: "none",
+      }))
+    : getChatProviderForTier("routing", { reasoningEffort: "none" });
+  if (!provider) return { handled: false, escalateReason: "no-routing-tier" };
 
   let capsule = "";
   try {
-    capsule = buildMemoryCapsule(config.workspacePath);
+    capsule = buildMemoryCapsule(context.workspacePath ?? config.workspacePath);
   } catch (err) {
     log.debug({ err }, "Memory capsule build failed — continuing without it");
   }
@@ -338,8 +493,23 @@ export async function tryReceptionistFastLane(
     assistantName = loadMainAssistantPersonality().identity?.name;
   } catch { /* default: unnamed */ }
 
+  // Read the conversation's language off the previous reply, which is written in it. Only a
+  // message with no language of its own uses it. Not awaited: the gateway loads the detector at
+  // boot, and until it has, the configured default stands in.
+  const conversationLanguage = context.previousReply?.trim() && languageIsUndetermined(userMessage)
+    ? detectTextLanguage(context.previousReply)?.name
+    : undefined;
+
   const result = await runReceptionist(userMessage, {
-    complete: async (messages) => (await provider.complete(messages, [], signal)).content ?? "",
+    ...(conversationLanguage ? { conversationLanguage } : {}),
+    defaultLanguage: defaultReplyLanguage(),
+    // A routing-tier call like the triage and the source-sensitivity judge, labelled like them.
+    // Unlabelled it inherited the turn's own context, so its provider row read agentName main,
+    // callSite main_turn — indistinguishable from the orchestrator's first call on the same model.
+    complete: async (messages, callSignal) => (await runWithCallAttribution({ callSite: "routing_tier", agentName: "receptionist" }, () =>
+      provider.complete(messages, [], callSignal && signal ? AbortSignal.any([signal, callSignal]) : callSignal ?? signal))).content ?? "",
+    readout: { provider, ...(signal ? { signal } : {}) },
+    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
     memoryCapsule: capsule || undefined,
     assistantName,
     personaLines: getReceptionistPersonaLines(),
@@ -349,7 +519,9 @@ export async function tryReceptionistFastLane(
     confidenceMaxChars: config.receptionist.confidenceAttemptMaxChars,
   });
 
-  return result.handled && result.response ? { response: result.response } : null;
+  return result.handled && result.response
+    ? { handled: true, response: result.response }
+    : { handled: false, escalateReason: result.escalateReason ?? "unhandled" };
 }
 
 function singleLine(value: string): string {

@@ -1,16 +1,17 @@
 /**
- * Workspace file routes — upload / download / archive / preview / served-site
- * proxy for files under the agent workspace volume. Every path is resolved
+ * Workspace file routes — upload / download / delete / archive / preview /
+ * served-site proxy for files under the agent workspace volume. Every path is resolved
  * through resolvePathWithinWorkspace so a request can never escape the workspace
  * boundary. Extracted verbatim from gateway/index.ts (god-file seam).
  */
 import type { Hono } from "hono";
-import { readFile, writeFile, stat, readdir, mkdir } from "node:fs/promises";
-import { basename, extname, resolve, sep } from "node:path";
+import { readFile, writeFile, stat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
 import { getConfig } from "../config/loader.js";
-import { resolvePathWithinWorkspace } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, userWorkspaceRoot, GENERATED_SUBDIR, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
+import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { logAudit } from "../audit/logger.js";
@@ -46,6 +47,23 @@ const WORKSPACE_PREVIEW_CSP = [
 ].join("; ");
 
 export function registerWorkspaceRoutes(app: Hono): void {
+  /**
+   * THESE ROUTES CARRY THEIR OWN IDENTITY.
+   *
+   * The artifact zone they resolve is per-user, and the /api/* middleware in gateway/index.ts
+   * is what normally establishes the ambient caller. Depending on that is exactly the kind of
+   * dependency that fails silently: mount this file without the middleware — a test harness, a
+   * second app instance, a future refactor — and every resolution below quietly falls back to
+   * the SHARED zone, serving one account's artifacts to another with no error anywhere. So the
+   * context is established here too. Idempotent: when the outer middleware already set it, this
+   * resolves the same username from the same header.
+   */
+  app.use("/api/workspace/*", async (c, next) => {
+    if (currentUserId()) return next();
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    return runWithRequestContext({ userId: caller?.username }, () => next());
+  });
+
   function guessWorkspaceContentType(filePath: string): string {
     const extension = extname(filePath).toLowerCase();
     const contentTypes: Record<string, string> = {
@@ -123,7 +141,12 @@ export function registerWorkspaceRoutes(app: Hono): void {
   }
 
   function resolveWorkspaceTarget(requestedPath: string): { resolved: string; relativePath: string } {
-    return resolvePathWithinWorkspace(requestedPath, getConfig().workspacePath);
+    // THE CALLER'S OWN ROOT. These routes hand workspace files back over HTTP, so resolving
+    // them against the shared root would serve one account the other's work no matter how the
+    // filesystem is partitioned. Rooting at the ambient caller means a request for
+    // "generated/index.html" reads THEIR generated/, and a path aimed at another account
+    // escapes this root and is refused by the workspace-boundary check like any other escape.
+    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath));
   }
 
   function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
@@ -219,10 +242,15 @@ export function registerWorkspaceRoutes(app: Hono): void {
       return c.json({ error: "file field is required" }, 400);
     }
 
+    // THE DESTINATION IS RESOLVED, NOT ACCEPTED. This route builds its own path with a
+    // `resolve` + prefix check and never goes through resolvePathWithinWorkspace, so the
+    // caller-supplied subdir was the one workspace write in the gateway answering to nobody's
+    // zone rules — "generated/users/<someone-else>" matches that character class and lands in
+    // their partition. It goes through the same resolver every tool uses now.
     const subdirRaw = formData.get("subdir");
-    const subdir = (typeof subdirRaw === "string" && /^[\w/-]+$/.test(subdirRaw))
+    const requestedSubdir = (typeof subdirRaw === "string" && /^[\w/-]+$/.test(subdirRaw))
       ? subdirRaw
-      : "uploads";
+      : UPLOADS_SUBDIR;
 
     // Sanitise filename: keep extension, replace unsafe characters
     const ext = extname(uploadedFile.name);
@@ -232,7 +260,16 @@ export function registerWorkspaceRoutes(app: Hono): void {
       .slice(0, 120) + ext;
 
     const workspaceRoot = getConfig().workspacePath;
-    const targetDir = resolve(workspaceRoot, subdir);
+    let subdir: string;
+    let targetDir: string;
+    try {
+      const resolvedSubdir = resolveWorkspaceTarget(requestedSubdir);
+      subdir = resolvedSubdir.relativePath;
+      targetDir = resolvedSubdir.resolved;
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
     const targetPath = resolve(targetDir, safeName);
 
     // Prevent path traversal
@@ -316,6 +353,76 @@ export function registerWorkspaceRoutes(app: Hono): void {
     }
   });
 
+  // ── Workspace file delete ────────────────────────────────────────────────
+  // DELETE /api/workspace/file?path=<rel>
+  // Removes one regular file under generated/ in the caller's own workspace root: 204 when it was
+  // removed, 404 when it is not there, 400 for a directory, a path outside that root, or one
+  // outside generated/. A file a turn wrote by mistake (an E2E run that created the file it was
+  // told not to create) had no way back short of the host filesystem, so the next run started
+  // from the wrong state.
+  const outsideDeleteZone = `Only a file under ${GENERATED_SUBDIR}/ can be deleted`;
+  app.delete("/api/workspace/file", async (c) => {
+    // THE ROLE IS CHECKED HERE TOO. The /api/* gate in gateway/index.ts refuses mutating verbs to
+    // a viewer, but only under multi-user auth and only when this file is mounted behind it. A
+    // delete is not something to leave to that: mounted without the gate, every valid token could
+    // remove files. A token with no role claim counts as operator (normalizeRole), so the
+    // single-operator token keeps working with auth off.
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    if (!caller) return c.json({ error: "Unauthorized" }, 401);
+    if (!userHasRole(caller, "operator")) {
+      logAudit("rbac_denied", {
+        username: caller.username,
+        role: caller.role,
+        method: "DELETE",
+        path: c.req.path,
+      }, { userId: caller.username, severity: "warn" });
+      return c.json({ error: "Operator role required for this action" }, 403);
+    }
+
+    const requestedPath = c.req.query("path")?.trim();
+    if (!requestedPath) {
+      return c.json({ error: "path query parameter is required" }, 400);
+    }
+
+    try {
+      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
+      // ONLY THE ZONE A TURN WRITES TO. The caller's root, which the GET serves, holds more than a
+      // turn's output: the config shards (agents/, jobs/, scenes/) when auth is off and it is the
+      // shared root, and the deployment ledgers and the memory store under the state dir. A
+      // turn's own files land under generated/ (resolveWorkspaceWritePath), so that is the one
+      // zone a delete may reach. Anything else is refused before the filesystem is asked whether
+      // the file exists.
+      if (relativePath.split("/")[0] !== GENERATED_SUBDIR) {
+        return c.json({ error: outsideDeleteZone }, 400);
+      }
+      const fileStat = await stat(resolved);
+      if (!fileStat.isFile()) {
+        return c.json({ error: "Requested workspace path is not a file" }, 400);
+      }
+      // The checks above compare path strings. A directory link inside the caller's root that
+      // points at another account's root passes them, and so does a link inside generated/ that
+      // points back at the root, and unlink would then remove a file out there. So the directory
+      // the file really sits in has to be under generated/ of the real root as well.
+      const [realRoot, realParent] = await Promise.all([
+        realpath(userWorkspaceRoot(getConfig().workspacePath)),
+        realpath(dirname(resolved)),
+      ]);
+      const fromRoot = relative(realRoot, realParent);
+      if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+        return c.json({ error: "Path must stay within the workspace" }, 400);
+      }
+      if (fromRoot.split(sep)[0] !== GENERATED_SUBDIR) {
+        return c.json({ error: outsideDeleteZone }, 400);
+      }
+
+      await unlink(resolved);
+      return c.body(null, 204, { "X-Workspace-Path": relativePath });
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
+  });
+
   app.get("/api/workspace/archive", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
@@ -375,9 +482,16 @@ export function registerWorkspaceRoutes(app: Hono): void {
   // with all relative imports resolved correctly, including fonts and images.
   app.get("/api/workspace/preview", async (c) => {
     const queryToken = c.req.query("token")?.trim();
-    if (!queryToken || !await verifyToken(queryToken)) {
+    // THE /api/* MIDDLEWARE NEVER SAW THIS CALLER. It reads the Authorization header, and an
+    // iframe cannot set one — which is exactly why the token rides in the query string here.
+    // So the identity is established from the verified payload instead; without it every
+    // per-user path this route resolves resolves as nobody's, and the caller would be served
+    // a 404 for their own artifact.
+    const previewPayload = queryToken ? await verifyToken(queryToken) : null;
+    if (!previewPayload) {
       return c.text("Unauthorized", 401);
     }
+    const previewUserId = typeof previewPayload.sub === "string" ? previewPayload.sub : undefined;
 
     const root = c.req.query("root")?.trim();
     const file = c.req.query("file")?.trim() || "index.html";
@@ -388,7 +502,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     let rootResolved: string;
     let fileResolved: string;
     try {
-      const rootTarget = resolveWorkspaceTarget(root);
+      const rootTarget = runWithRequestContext({ userId: previewUserId }, () => resolveWorkspaceTarget(root));
       rootResolved = rootTarget.resolved;
 
       // Resolve the requested file within the root (not the workspace) to
@@ -439,7 +553,11 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const queryToken = c.req.query("token")?.trim();
     const cookieToken = /(?:^|;\s*)sai_site_token=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
     const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.text("Unauthorized", 401);
+    // Same reason as the preview route above: a browser fetching a page's own stylesheet sends
+    // the cookie, not an Authorization header, so the caller has to be read off the token.
+    const sitePayload = token ? await verifyToken(token) : null;
+    if (!sitePayload) return c.text("Unauthorized", 401);
+    const siteUserId = typeof sitePayload.sub === "string" ? sitePayload.sub : undefined;
 
     let root: string;
     try {
@@ -461,7 +579,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
     let fileResolved: string;
     try {
-      const rootTarget = resolveWorkspaceTarget(root);
+      const rootTarget = runWithRequestContext({ userId: siteUserId }, () => resolveWorkspaceTarget(root));
       const candidate = resolve(rootTarget.resolved, file.replace(/^\/+/, ""));
       if (!candidate.startsWith(rootTarget.resolved + sep) && candidate !== rootTarget.resolved) {
         return c.text("File path escapes root directory", 400);

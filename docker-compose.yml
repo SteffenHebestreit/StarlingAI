@@ -7,6 +7,11 @@ services:
       context: .
       dockerfile: docker/gateway/Dockerfile
       target: runtime
+      # The commit the image is built from, stamped into its labels: `sai start` sets both from
+      # git; built another way they stay empty. The e2e harness reads them off the running image.
+      args:
+        SAI_BUILD_SHA: ${SAI_BUILD_SHA:-}
+        SAI_BUILD_DIRTY: ${SAI_BUILD_DIRTY:-}
     image: starlingai/gateway:dev
     restart: unless-stopped
     # Cap RSS so a runaway agent loop / large attachment / leak can't OOM the
@@ -61,6 +66,16 @@ services:
       # overlay /data/starlingai.runtime.json, so re-select Local<->Claude — but no re-auth.)
       - SAI_AUDIT_LOG=/workspace/.starlingai/audit.jsonl
       - SAI_CRED_STORE=/workspace/.starlingai/credentials.enc
+      # Same reasoning, and it was the one file left behind: the agent embedding cache
+      # defaults to `process.cwd()/.starlingai/` and WORKDIR is /app, which no mount
+      # covers — so every `--build` discarded all 49 agent vectors and re-embedded them
+      # at boot. Harmless when the embedding endpoint is up (~1-2s at concurrency 8),
+      # but on a boot that races the model server the FIRST failing chunk stops the
+      # whole build (`failed` breaks the loop), leaving the index empty and routing in
+      # keyword mode until the 15s retry. The cache is keyed per agent by that agent's
+      # own document hash and records the model it was built with, so a stale or
+      # partial file self-heals rather than poisoning anything.
+      - SAI_EMBEDDING_CACHE=/workspace/.starlingai/embedding-cache.json
       - SAI_USER_MEMORY_PATH=/data
       - SAI_CONFIG_PATH=/config/starlingai.json
       - SAI_MUTABLE_CONFIG_PATH=/data/starlingai.runtime.json
@@ -90,6 +105,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - SAI_PENTEST_SERVICE_URL=${SAI_PENTEST_SERVICE_URL:-http://kali-pentest:5010}
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
+      # Set by `sai start --laya` (http://laya:8080); empty keeps the Laya decision layer inert.
+      - SAI_LAYA_URL=${SAI_LAYA_URL:-}
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
@@ -391,8 +408,10 @@ services:
   # with no logprobs, so no continuous scores). Runs on the host GPU (RTX 4080, fp16,
   # ~1.4GB). Used by BOTH the gateway (retrieval.reranker, mode "tei", http://reranker:80)
   # and engram — the same +3.15/+3.84 nDCG@10 reranker for the whole stack. Serves on
-  # port 80 so the gateway config is unchanged; pulls the model from HuggingFace on
-  # first request (public network + cache volume).
+  # port 80 so the gateway config is unchanged. Its /health loads the model and scores a
+  # probe input before it answers 200, so the first healthcheck, about 15 s after start,
+  # pulls the model from HuggingFace (public network + cache volume) and the container
+  # turns healthy only once it can rerank.
   #
   # Behind the `rag` profile (OFF by default) so a plain `docker compose up` on a
   # GPU-less machine (any ordinary laptop, all Macs) never aborts on the nvidia
@@ -406,7 +425,8 @@ services:
   # is flaky or unavailable. It's OFF by default (engram embeds via LM Studio). To
   # enable: set RERANKER_EMBED_MODEL=Qwen/Qwen3-Embedding-0.6B AND point engram at it
   # with ENGRAM_EMBEDDING_API_BASE=http://reranker:80/v1 (both in .env). ~1.2GB extra
-  # GPU; loads lazily on the first /v1/embeddings request.
+  # GPU, taken at startup: the healthcheck loads and runs the embedder too, and the
+  # container is not healthy until it has.
   reranker:
     profiles: ["rag"]
     build:
@@ -429,12 +449,49 @@ services:
       - starlingai-public
     # GPU reservation is in docker-compose.gpu.yml (auto-added by `sai start` when a
     # GPU is present). On CPU the reranker still works, just slower.
+    # /health answers 503 until every configured model has loaded and run once. The
+    # start period covers the first start after `sai wipe`, which deletes the model cache:
+    # the download (about 1.2 GB, 2.4 GB with the embedder) shows as "starting", not
+    # "unhealthy". The first check that passes ends it.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:80/health')"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 300s
+
+  laya:
+    # The Laya decision sidecar (docker/laya): millisecond answers to the swarm's yes/no and
+    # pick-one questions for the decision layer (packages/core/src/decisions), and laya-browser
+    # steps for the browser agent. OFF unless the `laya` profile is on (`sai start --laya`, or
+    # SAI_ENABLE_LAYA=1 in .env), which also hands the gateway SAI_LAYA_URL.
+    # Downloaded checkpoints go in a named volume (fetched again after a wipe). Fine-tuned ones,
+    # trained on the decision ledger, live on the host in ./.starlingai/laya, which a wipe keeps —
+    # a checkpoint in ./.starlingai/laya/decision/current replaces the downloaded decision model.
+    profiles: ["laya"]
+    build:
+      context: ./docker/laya
+    image: starlingai/laya:dev
+    restart: unless-stopped
+    environment:
+      - LAYA_DECISION_MODEL=${LAYA_DECISION_MODEL:-convaiinnovations/laya@55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851#multilingual}
+      - LAYA_BROWSER_MODEL=${LAYA_BROWSER_MODEL:-cklxx/laya-browser@7139587325a39cd8639900bff21c3a2145969fd8#v15s}
+      - LAYA_PRELOAD=${LAYA_PRELOAD:-decision,browser}
+      - LAYA_LOCAL_DIR=/models/local
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+    volumes:
+      - gc-laya-hf-cache:/models/hf
+      - ./.starlingai/laya:/models/local
+    networks:
+      - starlingai-internal
+      - starlingai-public
+    # GPU reservation is in docker-compose.gpu.yml (added by `sai start` when a GPU is present).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
 
   mail-service:
     build:
@@ -834,6 +891,7 @@ volumes:
   gc-workspace:
   gc-qwen-model-cache:
   gc-engram-reranker-cache:
+  gc-laya-hf-cache:
   # engram-db snapshot — persists uploaded documents (CV/profile, workspace library)
   # across container restarts/rebuilds. Wiped only by `sai stop --volumes` / `--fresh`.
   engram-data:

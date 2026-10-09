@@ -9,10 +9,12 @@
  */
 
 import type { LLMMessage } from "../providers/lmstudio.js";
+import { trimSubAgentHistory } from "./sub-agent-history.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { scanOutput } from "../guardrails/output.js";
 import type { ContainerTaskPayload, ContainerTaskResult } from "./container-runner.js";
+import { missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
 import { createChatProvider } from "../providers/index.js";
 
 async function readStdin(): Promise<string> {
@@ -54,12 +56,33 @@ async function main(): Promise<void> {
     task,
     context,
     parentSessionId,
+    userId,
     workspacePath,
     agentConfig,
     resolvedModelConfig,
     providerBaseUrl,
     providerApiKey,
   } = payload;
+
+  // THE WORKER REGISTERS NO TOOLS. This process imports tools/registry.js for
+  // getToolsAsLLMDefs/executeTool, but a tool only enters the registry as the import side
+  // effect of its own module, and this entrypoint imports none of them — so the registry is
+  // empty. An agent that DECLARES tools would otherwise reach the loop below with zero of them
+  // wired up: getToolsAsLLMDefs returns nothing, the model is handed no tools, and it can only
+  // answer in prose, which reads downstream as a completed run and invites invented results.
+  // Fail loud instead: if any declared tool is not registered in THIS process, end now with a
+  // container-level failure that names the missing tools, before the provider is ever built or
+  // called. An agent that declares no tools is unaffected and runs exactly as before.
+  const registeredHere = new Set(getToolsAsLLMDefs().map((def) => def.name));
+  const missingTools = missingContainerTools(agentConfig.tools, registeredHere);
+  if ((agentConfig.tools?.length ?? 0) > 0 && missingTools.length > 0) {
+    clearInterval(heartbeatTimer);
+    writeResult({
+      success: false,
+      error: formatMissingContainerToolsFailure(agentName, missingTools, agentConfig.tools!.length),
+    });
+    return;
+  }
 
   const provider = createChatProvider(resolvedModelConfig, {
     providerId: resolvedModelConfig.primary.split("/")[0] || "lmstudio",
@@ -82,6 +105,9 @@ async function main(): Promise<void> {
   const toolContext: ToolContext = {
     sessionId: subSessionId,
     workspacePath,
+    // Whose work this is. Without it every per-user store and path inside this container
+    // resolves to the shared bucket while the gateway that spawned it resolves to the user's.
+    userId,
     approvalCallback: undefined,
     allowedTools: agentConfig.tools,
   };
@@ -94,6 +120,22 @@ async function main(): Promise<void> {
 
   try {
     while (iterations < maxIterations) {
+      // INPUT bound — the same one the in-process runner applies (agent/sub-agent.ts calls
+      // this before composing its request). It is not optional here: `agents.defaultContainerized`
+      // defaults true and 22 workspace agents declare no container flag, so this loop is where
+      // most delegated runs actually execute. Without the call, a 25,929-char read_file result
+      // slides under MAX_TOOL_RESULT_CHARS untouched and is re-sent verbatim for every remaining
+      // iteration (run 3959f3ac, 13 completions, 238,357 cumulative prompt tokens), and nothing
+      // bounds the prompt against contextWindow — from which the completion budget is derived
+      // (providers/lmstudio.ts computeOutputTokenBudget), so the output truncates before the
+      // window even overflows. Mutates `history` in place; the messages below are rebuilt from
+      // it every iteration, so the loop's own semantics are unchanged.
+      trimSubAgentHistory(history, {
+        systemPromptChars: systemPrompt.length,
+        tools,
+        contextWindow: resolvedModelConfig.contextWindow,
+      });
+
       const messages: LLMMessage[] = [
         { role: "system", content: systemPrompt },
         ...history,

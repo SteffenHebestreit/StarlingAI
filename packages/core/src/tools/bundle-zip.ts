@@ -14,6 +14,7 @@ import { ZipFile } from "yazl";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { overwriteGuard, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { guardPath, isSensitiveWorkspacePath } from "./filesystem.js";
 
 const log = childLogger("tool:bundle-zip");
 
@@ -92,7 +93,14 @@ function globMatch(pattern: string, path: string): boolean {
   return new RegExp(regexStr).test(path);
 }
 
-async function walkDir(absoluteRoot: string): Promise<string[]> {
+/**
+ * Every regular file under `absoluteRoot`, minus the paths the file tools' secrets denylist
+ * refuses — tested on the WORKSPACE-relative path, directories included, so a protected tree is
+ * never descended. Security finding S1 (2026-10-05): this walk zipped whatever it found, so
+ * bundling the workspace root packed `.env`, `.git/` and `.starlingai/` into a downloadable
+ * archive. Symlinks are not followed (a Dirent for a link is neither a file nor a directory).
+ */
+async function walkDir(absoluteRoot: string, workspaceRoot: string): Promise<string[]> {
   const out: string[] = [];
   async function visit(dir: string) {
     let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
@@ -103,6 +111,7 @@ async function walkDir(absoluteRoot: string): Promise<string[]> {
     }
     for (const e of entries) {
       const full = join(dir, e.name);
+      if (isSensitiveWorkspacePath(relative(workspaceRoot, full))) continue;
       if (e.isDirectory()) await visit(full);
       else if (e.isFile()) out.push(full);
     }
@@ -220,6 +229,9 @@ registerTool({
       } catch {
         return fail(`workspacePath escapes the workspace: ${wsPath}`);
       }
+      // read_file's guard, symlink realpath included (security finding S1, 2026-10-05): a named
+      // `.env` or `.git/config` was zipped as readily as any other file.
+      if (!guardPath(wsPath, ctx.workspacePath).safe) return fail(`Access denied: ${wsPath} is protected workspace data`);
       try {
         const s = await stat(resolved.resolved);
         if (!s.isFile()) return fail(`workspacePath is not a regular file: ${wsPath}`);
@@ -243,6 +255,7 @@ registerTool({
       } catch {
         return fail(`workspaceDir escapes the workspace: ${wsDir}`);
       }
+      if (!guardPath(wsDir, ctx.workspacePath).safe) return fail(`Access denied: ${wsDir} is protected workspace data`);
       try {
         const s = await stat(resolved.resolved);
         if (!s.isDirectory()) return fail(`workspaceDir is not a directory: ${wsDir}`);
@@ -254,7 +267,7 @@ registerTool({
       const includeGlobs = Array.isArray(entry.includeGlobs) ? entry.includeGlobs.map(String) : undefined;
       const excludeGlobs = Array.isArray(entry.excludeGlobs) ? entry.excludeGlobs.map(String) : undefined;
 
-      const allFiles = await walkDir(resolved.resolved);
+      const allFiles = await walkDir(resolved.resolved, ctx.workspacePath);
       for (const absolutePath of allFiles) {
         const rel = relative(resolved.resolved, absolutePath).split(sep).join("/");
         if (includeGlobs && !matchAny(rel, includeGlobs)) continue;

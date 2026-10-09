@@ -2,9 +2,9 @@ import { readFileSync, writeFileSync, existsSync, watchFile, unwatchFile, mkdirS
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
-import { ConfigSchema, type Config } from "./schema.js";
+import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -42,11 +42,51 @@ let _config: Config | null = null;
 const activeWatchedFiles = new Set<string>();
 const activeDirectoryWatchers: FSWatcher[] = [];
 
+/**
+ * Sub-agents a runtime client adds to the loaded config: the A2A client bridges each peer skill in
+ * as one. They are not config — never saved, never in a preview (a save is judged on the config as
+ * it loads from disk), never in the compiled artifact the bidder and sub-agent containers read. But
+ * every fresh load rebuilt the loaded config without them, and every save reloads: a sub-agent
+ * PATCH, now saved, dropped the peer's skills from delegation until the next card refresh, up to
+ * 15 minutes later (r4 A-security #3). So each load lays them back over.
+ */
+const _runtimeSubAgents = new Map<string, SubAgentConfig>();
+
+export function setRuntimeSubAgent(name: string, agent: SubAgentConfig): void {
+  _runtimeSubAgents.set(name, agent);
+  (getConfig().subAgents as Record<string, SubAgentConfig>)[name] = agent;
+}
+
+export function deleteRuntimeSubAgent(name: string): void {
+  _runtimeSubAgents.delete(name);
+  if (_config) delete (_config.subAgents as Record<string, SubAgentConfig>)[name];
+}
+
+/**
+ * Whether the loaded sub-agent `name` is one a runtime client laid over the config: the one
+ * withoutRuntimeSubAgents leaves out. Told apart as "loaded but not on disk", every check parsed
+ * the config on disk again, and named an agent deleted on disk but not yet reloaded a peer's
+ * (review of r6 leftovers, 2).
+ */
+export function isRuntimeSubAgent(name: string): boolean {
+  const agent = _runtimeSubAgents.get(name);
+  return agent !== undefined && getConfig().subAgents[name] === agent;
+}
+
 export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
   if (_config) return _config;
 
-  const raw = getEffectiveRawConfig();
+  _config = parseRawConfig(getEffectiveRawConfig());
+  for (const [name, agent] of _runtimeSubAgents) (_config.subAgents as Record<string, SubAgentConfig>)[name] = agent;
+  // The watch path skips this and writes only when a section actually changed (B21),
+  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
+  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
+  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
+  return _config;
+}
 
+/** The effective raw config as the runtime reads it: env overrides laid over, then validated. */
+function parseRawConfig(raw: Record<string, unknown>): Config {
   // Merge env overrides
   const merged = mergeEnvOverrides(raw);
 
@@ -72,12 +112,7 @@ export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
     result.data.workspacePath = CONFIG_SOURCE.workspacePath;
   }
 
-  _config = result.data;
-  // The watch path skips this and writes only when a section actually changed (B21),
-  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
-  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
-  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
-  return _config;
+  return result.data;
 }
 
 export function getConfig(): Config {
@@ -140,14 +175,35 @@ export function updateConfig(mutator: (raw: Record<string, unknown>) => void): C
   const raw = getEffectiveRawConfig();
 
   mutator(raw);
-  const rawToPersist = CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
-    ? raw
-    : buildOverlayConfig(baseRaw, raw);
+  const rawToPersist = persistedRawConfig(baseRaw, raw);
 
   mkdirSync(dirname(CONFIG_SOURCE.mutablePath), { recursive: true });
   writeFileSync(CONFIG_SOURCE.mutablePath, `${JSON.stringify(rawToPersist, null, 2)}\n`, "utf-8");
   _config = null;
   return loadConfig();
+}
+
+/**
+ * The config `updateConfig(mutator)` would load, without writing anything. It is not the mutated
+ * raw config: the write goes through JSON, which drops an `undefined`, so a value a base shard sets
+ * comes back; and the env overrides outrank what was written (SAI_PRIMARY_MODEL pins the model).
+ * A route that must judge what a save leaves in effect — which key goes where — judges this.
+ */
+export function previewConfigUpdate(mutator: (raw: Record<string, unknown>) => void): Config {
+  const baseRaw = getBaseRawConfig();
+  const raw = getEffectiveRawConfig();
+  mutator(raw);
+  const written = JSON.parse(JSON.stringify(persistedRawConfig(baseRaw, raw))) as Record<string, unknown>;
+  return parseRawConfig(CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
+    ? applyConfigRemovals(written)
+    : applyMutableOverlay(baseRaw, written));
+}
+
+/** What updateConfig writes for the mutated effective config: the whole file, or the overlay on the base. */
+function persistedRawConfig(baseRaw: Record<string, unknown>, raw: Record<string, unknown>): Record<string, unknown> {
+  return CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath
+    ? raw
+    : buildOverlayConfig(baseRaw, raw);
 }
 
 function getEffectiveRawConfig(): Record<string, unknown> {
@@ -162,9 +218,14 @@ function getEffectiveRawConfig(): Record<string, unknown> {
 
 function getBaseRawConfig(): Record<string, unknown> {
   if (CONFIG_SOURCE.baseType === "directory") {
-    const base = readRawConfigDirectory(CONFIG_SOURCE.basePath, CONFIG_SOURCE.mutablePath);
+    // Two-zone layout: each tree skips its own non-config zones. A single legacy directory holds
+    // both kinds, so it skips both.
+    const baseZones = CONFIG_SOURCE.workspacePath
+      ? NON_CONFIG_BASE_ZONES
+      : new Set([...NON_CONFIG_BASE_ZONES, ...NON_CONFIG_WORKSPACE_ZONES]);
+    const base = readRawConfigDirectory(CONFIG_SOURCE.basePath, CONFIG_SOURCE.mutablePath, baseZones);
     if (CONFIG_SOURCE.workspacePath) {
-      const workspace = readRawConfigDirectory(CONFIG_SOURCE.workspacePath, CONFIG_SOURCE.mutablePath);
+      const workspace = readRawConfigDirectory(CONFIG_SOURCE.workspacePath, CONFIG_SOURCE.mutablePath, NON_CONFIG_WORKSPACE_ZONES);
       return applyConfigRemovals(mergeConfigObjects(base, workspace));
     }
     return applyConfigRemovals(base);
@@ -249,14 +310,14 @@ function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<strin
   }
 }
 
-function readRawConfigDirectory(directoryPath: string, mutablePath: string): Record<string, unknown> {
+function readRawConfigDirectory(directoryPath: string, mutablePath: string, zones: ReadonlySet<string>): Record<string, unknown> {
   if (!existsSync(directoryPath) || !isExistingDirectory(directoryPath)) {
     logger.info({ path: directoryPath }, "No config directory found — using defaults");
     return {};
   }
 
   const merged: Record<string, unknown> = {};
-  const shardPaths = collectConfigShardPaths(directoryPath, mutablePath, CONFIG_SOURCE.compiledPath);
+  const shardPaths = collectConfigShardPaths(directoryPath, mutablePath, CONFIG_SOURCE.compiledPath, zones);
 
   for (const shardPath of shardPaths) {
     const shardRaw = readRawConfigFile(shardPath, "base");
@@ -270,17 +331,17 @@ function readRawConfigDirectory(directoryPath: string, mutablePath: string): Rec
   return merged;
 }
 
-function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string): string[] {
+function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string, zones: ReadonlySet<string>): string[] {
   const shardPaths: string[] = [];
   const visit = (currentPath: string, depth: number) => {
     for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
       const nextPath = resolve(currentPath, entry.name);
       if (entry.isDirectory()) {
-        // Working zones (generated/, uploads/, tools/) hold agent output, user
-        // uploads, and dynamic-tool bundles — NOT config. Sweeping them would
-        // let an agent-written data.json (or a malicious upload with a top-level
-        // "agents" key) merge straight into the live config on reload.
-        if (depth === 0 && NON_CONFIG_WORKSPACE_ZONES.has(entry.name)) continue;
+        // Working zones (generated/, uploads/, tools/, users/) hold agent output, user
+        // uploads, and dynamic-tool bundles — NOT config, and neither do hidden state
+        // dirs. Sweeping them would let an agent-written data.json (or a malicious
+        // upload with a top-level "agents" key) merge straight into the live config.
+        if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
         visit(nextPath, depth + 1);
         continue;
       }
@@ -291,7 +352,7 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
   };
 
   visit(directoryPath, 0);
-  return shardPaths.sort((left, right) => relative(directoryPath, left).localeCompare(relative(directoryPath, right)));
+  return shardPaths.sort(compareShardPaths(directoryPath));
 }
 
 function mergeConfigObjects(base: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
@@ -339,7 +400,7 @@ function writeCompiledConfig(config: Config): void {
 
   try {
     mkdirSync(dirname(CONFIG_SOURCE.compiledPath), { recursive: true });
-    const serialized = `${JSON.stringify(config, null, 2)}\n`;
+    const serialized = `${JSON.stringify(withoutRuntimeSubAgents(config), null, 2)}\n`;
     if (existsSync(CONFIG_SOURCE.compiledPath)) {
       const existing = readFileSync(CONFIG_SOURCE.compiledPath, "utf-8");
       if (existing === serialized) return;
@@ -348,6 +409,13 @@ function writeCompiledConfig(config: Config): void {
   } catch (err) {
     logger.warn({ err, path: CONFIG_SOURCE.compiledPath }, "Failed to write compiled config artifact");
   }
+}
+
+/** The loaded config without the sub-agents a runtime client laid over it (see setRuntimeSubAgent). */
+function withoutRuntimeSubAgents(config: Config): Config {
+  if (_runtimeSubAgents.size === 0) return config;
+  const subAgents = Object.fromEntries(Object.entries(config.subAgents).filter(([name, agent]) => _runtimeSubAgents.get(name) !== agent));
+  return { ...config, subAgents };
 }
 
 function buildOverlayConfig(base: Record<string, unknown>, updated: Record<string, unknown>): Record<string, unknown> {
@@ -472,6 +540,14 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
     raw["gateway"] = { ...(gw as object), jwtSecret: env["SAI_JWT_SECRET"] };
   }
+  // The Laya sidecar: `sai start --laya` runs it and sets this, so the decision layer finds it
+  // exactly when it is running. A baseUrl written in config wins over it.
+  if (env["SAI_LAYA_URL"]?.trim()) {
+    const decisions = (raw["decisions"] as Record<string, unknown> | undefined) ?? {};
+    if (typeof decisions["baseUrl"] !== "string" || !decisions["baseUrl"].trim()) {
+      raw["decisions"] = { ...decisions, baseUrl: env["SAI_LAYA_URL"].trim() };
+    }
+  }
   // Primary model provider endpoint — provider-NEUTRAL. The primary provider may be LM Studio,
   // Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, or ANY OpenAI-compatible server; it just
   // happens to be wired through the `lmstudio` provider slot (an OpenAI-compatible adapter).
@@ -482,6 +558,20 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), lmstudio: { ...lms, baseUrl: primaryModelUrl } };
   }
+  // Image generation on the SAME OpenAI-compatible endpoint as chat.
+  //
+  // Only when the api is `openai-compatible`: a cluster that serves chat and images behind one
+  // base URL would otherwise carry that URL twice, and the copy that nobody moved is the one
+  // that breaks. An A1111 or ComfyUI deployment keeps its own endpoint untouched, and an
+  // explicitly configured baseUrl always wins over this.
+  if (primaryModelUrl) {
+    const mm = (raw["multimodal"] as Record<string, unknown> | undefined) ?? {};
+    const img = (mm["imageGeneration"] as Record<string, unknown> | undefined);
+    if (img && img["api"] === "openai-compatible" && !String(img["baseUrl"] ?? "").trim()) {
+      raw["multimodal"] = { ...(mm as object), imageGeneration: { ...img, baseUrl: primaryModelUrl } };
+    }
+  }
+
   // Primary provider API key — needed in general, not just for one engine (LM Studio uses a
   // placeholder, OpenRouter a real key, Ollama often none). SAI_PRIMARY_MODEL_KEY is canonical;
   // SAI_LMSTUDIO_API_KEY is the back-compat alias.

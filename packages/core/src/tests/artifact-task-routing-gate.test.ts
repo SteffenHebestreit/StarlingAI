@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { agentCfgCanFulfillArtifactTask, isArtifactRenderTask, taskRequiresExternalResearch } from "../tools/sub-agent.js";
+import { delegationAsksForFile } from "../tools/delegation-artifact-classification.js";
 
 // Session 2d810e7d (2026-05-28) regression: a CPSA-F "erzeuge mir eine
 // vollumfängliche Lernwebsite" delegation was routed to an agent without
@@ -134,5 +135,39 @@ describe("isArtifactRenderTask — render delegations are not research gathers",
 
   it("treats a coordinator that can delegate the build as render-capable", () => {
     expect(isArtifactRenderTask(renderTask, { tools: ["delegate_to_agent", "parallel_delegate"] })).toBe(true);
+  });
+});
+
+// The pre-run gates read what the delegation DECLARES it must hand back (DelegationDeliverable) and
+// keep the verb test only for an undeclared one. The verb test cannot read a negation, so "draft a
+// reply, do not change any file" dropped every agent without a write tool — mail_agent among them —
+// and "analyse this page, change nothing" exempted a step from the research redirect as a render.
+describe("the pre-run gates follow the delegation's declared deliverable", () => {
+  const readOnly = { tools: ["read_file", "list_files"] };
+  const writerCfg = { tools: ["read_shared_facts", "generate_presentation", "write_file"] };
+
+  it("a delegation declared an answer filters no agent, whatever verbs its task contains", () => {
+    const negated = "Draft a reply to Tom's question about the invoice — do not change or create any file.";
+    expect(agentCfgCanFulfillArtifactTask(negated, { tools: [] })).toBe(false); // the verb test alone
+    expect(agentCfgCanFulfillArtifactTask(negated, { tools: [] }, "answer")).toBe(true);
+    expect(delegationAsksForFile(negated, "answer")).toBe(false);
+  });
+
+  it("a delegation declared a file is gated even when its task names no verb the table knows", () => {
+    const noVerb = "Ein Foliensatz zu den Ergebnissen, zwölf Folien, im Workspace.";
+    expect(agentCfgCanFulfillArtifactTask(noVerb, readOnly)).toBe(true); // the verb test alone
+    expect(agentCfgCanFulfillArtifactTask(noVerb, readOnly, "file")).toBe(false);
+    expect(agentCfgCanFulfillArtifactTask(noVerb, writerCfg, "file")).toBe(true);
+  });
+
+  it("the render exemption follows the declaration", () => {
+    const renderTask = "Write a reveal.js presentation from the verified facts and cite the official sources.";
+    expect(isArtifactRenderTask(renderTask, writerCfg, "answer")).toBe(false);
+    expect(isArtifactRenderTask("Slides from the gathered facts, cite the sources.", writerCfg, "file")).toBe(true);
+  });
+
+  it("an undeclared delegation keeps the verb test", () => {
+    expect(delegationAsksForFile("erstelle die Lernwebsite", undefined)).toBe(true);
+    expect(delegationAsksForFile("what files reference the routing heuristic?", undefined)).toBe(false);
   });
 });

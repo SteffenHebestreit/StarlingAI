@@ -73,6 +73,8 @@ The encrypted credential store holds secrets that should survive restarts but mu
 
 The store is read on startup and written on every change. The master key (`SAI_MASTER_KEY`) is the single point of trust — protect it as you would a root credential.
 
+**Keys in the dashboard settings.** The settings routes any signed-in account can read (multimodal, model routing, channels, `GET /api/agents`) return keys masked, and a masked key sent back stands for the stored one. A key goes only to an endpoint it already went to: a save that moves an endpoint must carry the key typed in, or `null`/`""` for none (`gateway/config-secrets.ts`, applied to those routes, `PATCH /api/agents/:name/model` and config-assistant apply). A `$NAME` or `secret:name` reference in a save is not a key typed in — it names a secret the caller never saw — so it passes only where it already went. Where an unset key falls back to another (the vision, orchestrator and embeddings keys to the provider's key, a sub-agent's to the default key), moving the endpoint needs that key set explicitly; `""` sends none. A save is judged on the config it leaves in effect, not on its body — a key a config shard sets survives a save that leaves it out, and an env-pinned model (`SAI_PRIMARY_MODEL`) decides whose key stands in — against the config as it loads from disk before the save, and each stand-in key is the one the runtime's own resolver sends (the embeddings resolve theirs apart from chat). A sub-agent's model change is saved to the config overlay like the others.
+
 ## Per-User Resource Access (RBAC)
 
 When multi-user auth is enabled (`auth.enabled: true` with accounts in `auth.users[]`), shared resources can be bound to specific users with an **`allowedUsers`** list. The authenticated user (the JWT subject) is enforced against it before any access:
@@ -110,6 +112,8 @@ When `auth.enabled` is true, durable **user-scope** stores are partitioned per a
 The whole turn — and every `/api/*` route — runs under the authenticated user's request context (`runWithRequestContext({ userId })`), and a delegated sub-agent inherits it, so prompt-assembly, memory, user-model, and personality all resolve to the caller. **`userScopedDir` gates on `auth.enabled` AND a present userId**, so single-operator / auth-off installs keep their original single shared path (fully back-compatible). **Workspace**-scope stores (durable workspace memory, skills, flow-memory) stay intentionally shared per project.
 
 Editing the shared **global** personality under auth requires the **`admin`** role (rank 90 > operator 50 > viewer 10); a regular operator only edits their own override (`PUT`/`POST /api/personality?scope=global`).
+
+Creating, deleting or resetting the password of an account (`POST`/`DELETE`/`PATCH /api/auth/users`) requires **`admin`** as well: everything above is keyed by username, so whoever can delete "alice" and create her again owns her data. The default `pnpm sai token` is an admin token, which is how the first account is created. A new account never takes a username that still owns sessions — reset the password instead (tokens already issued stay valid until they expire) — and none is created under `auth.provider: "oidc"`, where the identity provider owns the usernames. The last admin account cannot be deleted.
 
 Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph. See `docs/memory-context-overview.md` §6 for the full account.
 

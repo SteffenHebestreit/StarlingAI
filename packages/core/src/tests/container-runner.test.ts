@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildContainerTaskPayload,
   parseContainerDiagnosticLine,
   probeDockerReachability,
   shouldExtendContainerTimeoutForRecentOutput,
 } from "../agent/container-runner.js";
-import { resolveDockerWorkspaceMountSource } from "../tools/workspace-mount.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
+import type { SubAgentRunOptions } from "../agent/sub-agent.js";
+import type { ModelConfig, SubAgentConfig } from "../config/schema.js";
+import {
+  resolveDockerWorkspaceBind,
+  resolveDockerWorkspaceMountSource,
+  resolveHostWorkspacePath,
+} from "../tools/workspace-mount.js";
 
 describe("container runner diagnostics", () => {
   it("parses readiness markers with bootstrap timing", () => {
@@ -94,4 +102,141 @@ describe("container runner diagnostics", () => {
       else process.env["PATH"] = originalPath;
     }
   }, 10_000);
+});
+/**
+ * IDENTITY DOES NOT CROSS A PROCESS BOUNDARY BY ITSELF.
+ *
+ * Every in-process path keeps the owning user through AsyncLocalStorage: the turn establishes
+ * it, each tool call re-establishes it, and a delegated sub-agent inherits it. A CONTAINERIZED
+ * sub-agent is a different process with an empty store — and it is the DEFAULT execution mode
+ * (agents.defaultContainerized defaults true). Anything inside it that resolves a per-user path
+ * therefore resolved to the shared bucket while the gateway that spawned it resolved to the
+ * user's, which is how a partitioned artifact zone would end up written in one place and looked
+ * for in another.
+ */
+describe("the container payload carries the owning user", () => {
+  const opts = (over: Partial<SubAgentRunOptions> = {}): SubAgentRunOptions => ({
+    agentName: "web_coder",
+    task: "build the page",
+    parentSessionId: "sess-1",
+    workspacePath: "/w",
+    ...over,
+  } as SubAgentRunOptions);
+  const agentCfg = { tools: [] } as unknown as SubAgentConfig;
+  const model = { primary: "lmstudio/qwen" } as unknown as ModelConfig;
+  const build = (o: SubAgentRunOptions) => buildContainerTaskPayload(o, agentCfg, model, "http://x", "k");
+
+  it("carries an explicitly threaded userId", () => {
+    expect(build(opts({ userId: "alice" })).userId).toBe("alice");
+  });
+
+  it("falls back to the ambient turn user when the caller did not thread one", () => {
+    // The same fallback the in-process runner uses (tools/registry.ts), so a call site that
+    // predates the userId option still hands the container the real owner.
+    const payload = runWithRequestContext({ userId: "bob" }, () => build(opts()));
+    expect(payload.userId).toBe("bob");
+  });
+
+  it("carries nothing when there is nothing to carry — auth-off stays shared", () => {
+    expect(build(opts()).userId).toBeUndefined();
+  });
+
+  it("never lets an ambient user override an explicit one", () => {
+    const payload = runWithRequestContext({ userId: "bob" }, () => build(opts({ userId: "alice" })));
+    expect(payload.userId).toBe("alice");
+  });
+});
+
+/**
+ * A containerized specialist gets the user's own words too. The worker builds its first message
+ * from `task` and `context` only, so the block has to arrive inside `task` — at its end, where the
+ * in-process runner puts it — or a containerized agent would still see only the paraphrase.
+ */
+describe("the container payload carries the user's own words", () => {
+  const GERMAN = "nicht den fast-tier … das result ist schlimmer als das original";
+  const opts = (over: Partial<SubAgentRunOptions> = {}): SubAgentRunOptions => ({
+    agentName: "image_creator",
+    task: "Render the harbour at dusk.",
+    parentSessionId: "sess-1",
+    workspacePath: "/w",
+    ...over,
+  } as SubAgentRunOptions);
+  const model = { primary: "lmstudio/qwen" } as unknown as ModelConfig;
+  const build = (o: SubAgentRunOptions, domain?: string) =>
+    buildContainerTaskPayload(o, { tools: [], ...(domain ? { domain } : {}) } as unknown as SubAgentConfig, model, "http://x", "k");
+
+  it("appends them to the task, after the orchestrator's text, and adds nothing when there are none", () => {
+    const payload = build(opts({ turnUserWords: { opening: GERMAN, midTurn: [] } }));
+    expect(payload.task.startsWith("Render the harbour at dusk.")).toBe(true);
+    expect(payload.task).toContain("[USER'S OWN WORDS");
+    expect(payload.task.endsWith(GERMAN)).toBe(true);
+    expect(build(opts()).task).toBe("Render the harbour at dusk.");
+  });
+
+  it("keeps them off an A2A bridge agent", () => {
+    const withWords = opts({ turnUserWords: { opening: GERMAN, midTurn: [] } });
+    expect(build(withWords, "a2a").task).toBe("Render the harbour at dusk.");
+    // The control: the same payload for an ordinary agent does carry them.
+    expect(build(withWords).task).toContain(GERMAN);
+  });
+});
+
+/**
+ * THE MOUNT SOURCE IS NOT THE WORKSPACE.
+ *
+ * The shipped compose deployment binds the REPO root at /workspace on purpose — the
+ * self-improvement agents run git there — so the workspace is the `workspace/` directory
+ * inside it, which is why SAI_WORKSPACE_CONFIG_PATH is `/workspace/workspace`. Two call sites
+ * did not account for that offset, and both were verified wrong against the running stack:
+ * `-v <repo>:/workspace/workspace` put the repo where the workspace should be, and
+ * `/workspace/workspace/generated` came back "No such file or directory" with the real tree one
+ * level deeper. Containerized sub-agents are the DEFAULT execution mode, so that was every
+ * default sub-agent addressing a workspace that was not there.
+ */
+describe("workspace binds account for the mount source's offset", () => {
+  const DOCKERIZED = { mountSource: "/run/desktop/mnt/host/f/StarlingAI", fallbackVolume: "gc-workspace" };
+
+  it("binds the host equivalent of the path it was handed, at that same path", () => {
+    // The off-by-one was `<source>:/workspace/workspace`, which put the REPO where the workspace
+    // should be. The fix maps the container path to its host equivalent instead — and binding
+    // exactly that directory is also what makes a per-user root a boundary rather than a
+    // convention: there is no sibling in the mount to reach.
+    expect(resolveDockerWorkspaceBind("/workspace/workspace", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace:/workspace/workspace");
+  });
+
+  it("binds only the user's own root when the workspace is partitioned", () => {
+    expect(resolveDockerWorkspaceBind("/workspace/workspace/users/alice-abc123", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace/users/alice-abc123:/workspace/workspace/users/alice-abc123");
+  });
+
+  it("falls back to the whole tree when the source is a volume it cannot subdivide", () => {
+    expect(resolveDockerWorkspaceBind("/workspace/workspace", { mountSource: "", fallbackVolume: "gc-workspace" }))
+      .toBe("gc-workspace:/workspace");
+  });
+
+  it("binds at the workspace's own path when the source IS the workspace", () => {
+    // Outside a container there is no /workspace mapping; the in-container tools resolve
+    // against the same absolute path the host uses.
+    expect(resolveDockerWorkspaceBind("/srv/sai/workspace", { mountSource: "", fallbackVolume: "" }))
+      .toBe("/srv/sai/workspace:/srv/sai/workspace");
+  });
+
+  it("re-applies the workspace offset when building a host path for a subdirectory", () => {
+    // serve_app binds ONE app directory, so it needs the host path rather than the tree.
+    expect(resolveHostWorkspacePath("/workspace/workspace", "generated/my-app", DOCKERIZED))
+      .toBe("/run/desktop/mnt/host/f/StarlingAI/workspace/generated/my-app");
+  });
+
+  it("adds no offset when the workspace is not under /workspace", () => {
+    expect(resolveHostWorkspacePath("/srv/sai/workspace", "generated/my-app", { mountSource: "", fallbackVolume: "" }))
+      .toBe("/srv/sai/workspace/generated/my-app");
+  });
+
+  it("refuses to build a host path out of a named volume", () => {
+    // A volume has no host path to append to; the old code produced "gc-workspace/generated/x"
+    // and docker created a directory of that name.
+    expect(resolveHostWorkspacePath("/workspace/workspace", "generated/my-app", { mountSource: "", fallbackVolume: "gc-workspace" }))
+      .toBeNull();
+  });
 });

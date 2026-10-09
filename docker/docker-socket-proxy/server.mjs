@@ -52,16 +52,21 @@ function deny(client, code, reason, method, path) {
  * already fully forwarded and carries a rebuilt `Connection: close` head, so the
  * daemon terminates the response and we never relay a pipelined, un-inspected
  * second request. (Hijacks take the separate spliceHijack path below.)
+ *
+ * Once the daemon has closed its side, ours is closed too. The connection is half-open, so the
+ * daemon's FIN alone ended only the client: every forwarded request left a daemon socket behind, and
+ * the compose healthcheck alone (a GET /_ping every 15 s) had the proxy OOM-killed at its 128m limit
+ * in about three days, failing every docker call in flight (found 2026-10-08).
  */
-function toDaemon(client, initialWrites) {
-  const daemon = net.connect({ path: SOCKET_PATH, allowHalfOpen: true });
+export function toDaemon(client, initialWrites, connect = () => net.connect({ path: SOCKET_PATH, allowHalfOpen: true })) {
+  const daemon = connect();
   const kill = () => { try { client.destroy(); } catch { /* ignore */ } try { daemon.destroy(); } catch { /* ignore */ } };
   daemon.on("error", kill);
   client.on("error", kill);
   daemon.on("connect", () => {
     for (const w of initialWrites) if (w && w.length) daemon.write(w);
     daemon.pipe(client);
-    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } });
+    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } try { daemon.end(); } catch { /* ignore */ } });
   });
 }
 
@@ -118,7 +123,14 @@ export function spliceHijack(client, headers, rawHead, rest, connect = () => net
       }
     };
     daemon.on("data", onResp);
-    daemon.on("end", () => { try { client.end(); } catch { /* ignore */ } });
+    // A daemon that hangs up before a complete response head leaves nothing to relay either way, so
+    // our side of its half-open connection is closed too, or the socket is held as toDaemon's was.
+    // After the decision each branch above closes that side itself: a hijack keeps it open for stdin
+    // until the client is done.
+    daemon.on("end", () => {
+      try { client.end(); } catch { /* ignore */ }
+      if (!decided) { try { daemon.end(); } catch { /* ignore */ } }
+    });
   });
 }
 
@@ -152,12 +164,16 @@ function handleRequest(client, method, rawPath, headers, rawHead, rest) {
       toDaemon(client, [Buffer.from(head, "latin1"), outBody]);
     };
     if (body.length >= cl) return finish();
+    // The server keeps half-open sockets (createProxyServer), so a client that closes before its
+    // body is complete has to be answered here.
+    const onEnd = () => { client.removeListener("data", onBody); deny(client, 400, "create/exec body incomplete", method, p); };
     const onBody = (c) => {
       body = Buffer.concat([body, c]);
-      if (body.length > MAX_BODY) { client.removeListener("data", onBody); return deny(client, 413, "create/exec body too large", method, p); }
-      if (body.length >= cl) { client.removeListener("data", onBody); finish(); }
+      if (body.length > MAX_BODY) { client.removeListener("data", onBody); client.removeListener("end", onEnd); return deny(client, 413, "create/exec body too large", method, p); }
+      if (body.length >= cl) { client.removeListener("data", onBody); client.removeListener("end", onEnd); finish(); }
     };
     client.on("data", onBody);
+    client.once("end", onEnd);
     return;
   }
 
@@ -178,10 +194,23 @@ function handleRequest(client, method, rawPath, headers, rawHead, rest) {
   return deny(client, 403, "endpoint not on allow-list", method, p);
 }
 
-const server = net.createServer((client) => {
+/**
+ * allowHalfOpen: the docker CLI half-closes an attach connection as soon as it has no stdin to
+ * send (CloseWrite), then reads the container's output on it. Without it Node ends the client
+ * socket on that FIN, and every attached `docker run` through the proxy exited 0 with no output:
+ * the sandbox's shell_exec / run_script returned "(no output)" for every command (found
+ * 2026-10-07). Every forwarding path ends the client itself once the daemon is done; a client
+ * that closes before its request head is complete is closed here.
+ */
+export function createProxyServer() {
+  return net.createServer({ allowHalfOpen: true }, handleConnection);
+}
+
+function handleConnection(client) {
   client.setNoDelay(true);
   let buf = Buffer.alloc(0);
   let routed = false;
+  client.on("end", () => { if (!routed) { try { client.destroy(); } catch { /* ignore */ } } });
   const onHead = (chunk) => {
     if (routed) return;
     buf = Buffer.concat([buf, chunk]);
@@ -201,8 +230,9 @@ const server = net.createServer((client) => {
   };
   client.on("data", onHead);
   client.on("error", () => { try { client.destroy(); } catch { /* ignore */ } });
-});
+}
 
+const server = createProxyServer();
 server.on("error", (err) => { log({ event: "server-error", message: err.message }); });
 
 // Only bind when run as the entry point (`node server.mjs`); stays importable for tests.

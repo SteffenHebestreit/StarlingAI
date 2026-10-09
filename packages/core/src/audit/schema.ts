@@ -38,6 +38,12 @@ export type CoreAuditEventType =
   | "tool_output_framing_neutralized"
   | "guardrail_blocked"
   | "guardrail_flagged"
+  /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
+  | "decision_point"
+  /** A decision point's incumbent read by its logits, beside or instead of its parsed call (decisions/incumbent-readout.ts). */
+  | "decision_readout"
+  /** laya-browser beside the browser agent: its step and the model's, or one it took itself (decisions/browser-step.ts). */
+  | "browser_step"
   | "output_redacted"
   | "auth_success"
   | "auth_failure"
@@ -48,6 +54,7 @@ export type CoreAuditEventType =
   | "model_preset_switched"
   | "anthropic_oauth_connected"
   | "anthropic_oauth_disconnected"
+  | "anthropic_models_refreshed"
   | "agent_message_sent"
   | "channel_delivery_failed"
   | "agent_routing_evaluated"
@@ -58,10 +65,17 @@ export type CoreAuditEventType =
   | "sub_agent_started"
   | "sub_agent_completed"
   | "sub_agent_soft_deadline"
+  | "sub_agent_history_trimmed"
+  | "sub_agent_history_digested"
   | "sub_agent_tool_call"
   | "sub_agent_tool_blocked"
   | "sub_agent_max_iterations"
   | "sub_agent_reasoning"
+  | "sub_agent_staged_build_detected"
+  | "sub_agent_head"
+  | "sub_agent_head_rewarm"
+  | "plan_executed"
+  | "plan_round_folded"
   | "agent_reasoning"
   | "parallel_delegate_started"
   | "parallel_delegate_deduplicated"
@@ -69,6 +83,7 @@ export type CoreAuditEventType =
   | "turn_performance"
   | "event_loop_lag"
   | "provider_stall"
+  | "provider_model_call"
   | "scene_job_completed"
   | "scene_job_failed"
   | "scene_job_cancelled"
@@ -85,6 +100,11 @@ export type CoreAuditEventType =
   | "architect_fallback_rejected"
   | "prompt_budget_exceeded"
   | "prompt_section_sizes"
+  | "tool_restriction_refused"
+  | "routing_triage_decided"
+  /** The intent readout asked after a turn, beside what the turn did (agent/intent-shadow.ts,
+   *  orchestration.intentReadout). Letters, probabilities, agent names and lengths only. */
+  | "intent_readout_shadow"
   | "discovery_prefetch"
   | "history_compacted"
   | "session_memory_consolidated"
@@ -129,6 +149,10 @@ export type CoreAuditEventType =
   // Mid-turn user steering — fold user guidance into a running turn
   | "turn_steering_enqueued"
   | "turn_steering_injected"
+  | "sub_agent_steering_injected"
+  // Structured user input — a tool's question and how it ended (agent/user-input-broker.ts)
+  | "user_input_requested"
+  | "user_input_resolved"
   | "assistant_text_with_tool_calls_suppressed"
   | "tool_loop_detected"
   // Config proposals & self-improvement
@@ -180,13 +204,18 @@ export type CoreAuditEventType =
   | "delegation_bidding_filtered_capability_incapable"
   | "delegation_bidding_filtered_meta_factory"
   | "delegation_explicit_redirected_research_incapable"
+  | "delegation_research_candidate_selected"
   | "delegation_render_research_redirect_skipped"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"
+  // orchestration.loopAwareDelegation (b): a run of an agent that already looped this turn was
+  // handed the looped calls in its context (agent/delegation-loop-notes.ts).
+  | "delegation_prior_loop_noted"
   | "delegation_coordinator_recursion_blocked"
+  | "delegation_routing_rounds_exhausted"
   | "delegation_result_reused"
   // Task-lease coordination backend (Redis) unreachable in clustered mode — the
   // delegation was refused rather than misreported as contention (DST-102).
@@ -228,6 +257,10 @@ export type CoreAuditEventType =
   // that never ran.
   | "artifact_verification_failed"
   | "artifact_verification_unrepaired"
+  // A file path the model mis-copied into its final answer (a dropped or doubled
+  // character) was put back to the path the tool recorded. One event per distinct
+  // repair, so the rate of rewritten answers can be measured.
+  | "artifact_path_repaired"
   | "flow_high_stakes_unverified"
   | "plan_approval_requested"
   | "plan_approval_resolved"
@@ -237,6 +270,10 @@ export type CoreAuditEventType =
   // Deliverable self-consistency gate (plan-less internal-consistency check before delivery)
   | "deliverable_consistency_passed"
   | "deliverable_consistency_repaired"
+  // The consistency verdict came back empty or unparseable: no verdict, never a pass.
+  | "deliverable_consistency_unverified"
+  // The consistency verdict FAILED and no repair came back: shipped as it was, never a pass.
+  | "deliverable_consistency_failed"
   | "warden:tool_dev_stuck"
   | "warden:tool_dev_runaway"
   // Infrastructure health
@@ -246,6 +283,8 @@ export type CoreAuditEventType =
   | "coverage_shortfall_resynthesis"
   | "sub_agent_assistant_text_with_tool_calls_suppressed"
   | "sub_agent_tool_loop_detected"
+  // The loop brake withdrew a call (agents.performance.loopBrake): {action, tool, repeats, answered, sinceWrite}.
+  | "sub_agent_tool_loop_enforced"
   | "sub_agent_synthesis_forced"
   | "hallucinated_truncation_bypass"
   | "trajectory_cache_hit"
@@ -272,6 +311,7 @@ export type CoreAuditEventType =
   // Multi-user auth (Wave A) + RBAC (Wave B)
   | "auth_user_created"
   | "auth_user_deleted"
+  | "auth_user_password_reset"
   | "rbac_denied"
   // Plugin SDK
   | "plugin_loaded"

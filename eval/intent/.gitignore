@@ -1,0 +1,4 @@
+# A deployment's own intent cases (intent.jsonl) hold its users' messages: keep them local. The synthetic
+# *.example.jsonl file is the committed starting point.
+*.jsonl
+!*.example.jsonl

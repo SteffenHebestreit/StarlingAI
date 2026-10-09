@@ -2,17 +2,18 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { readRecentOutcomes } from "../agent/outcomes.js";
+import { readRecentOutcomes, type OutcomeEntry } from "../agent/outcomes.js";
 import { readFlowMemoryEntries } from "../agent/flow-memory.js";
 import { readAllFacts } from "../swarm/memory.js";
-import { upsertMemoryToGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
+import { upsertMemoryToGraph, deleteMemoryFromGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
+import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
 import { logAudit } from "../audit/logger.js";
-import { isEmbeddingAvailable, computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
+import { isEmbeddingAvailable, computeQueryEmbedding, computeRetrievalQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
 import { PRODUCT } from "../product/index.js";
-import { userScopedDir } from "../runtime/user-scope.js";
+import { canReadRecord, recordReader, userScopedDir } from "../runtime/user-scope.js";
 
 const log = childLogger("memory:service");
 
@@ -181,14 +182,60 @@ export function storeUserMemoryRecord(
   return storeDurableMemoryRecord("user", workspacePath, input, writeContext);
 }
 
+/** A memory search's records together with what it could and could not check. */
+export interface MemorySearchResult {
+  records: MemoryRecord[];
+  /**
+   * True when the relevance floor applied: the query was embedded and the candidates without a
+   * stored vector were embedded too, so every record shown matched by word or by meaning. False
+   * when semantic search was unavailable (no embedder, embedder down, a failed embedding call):
+   * then nothing is dropped for not matching — the records are ranked word matches first — and an
+   * absent memory is NOT evidence that nothing is stored. True for an empty query (nothing to check).
+   */
+  semanticRan: boolean;
+  /** Returned records that matched neither by word nor by meaning (only when !semanticRan). */
+  unmatchedIds: string[];
+  /** Records left out as non-matching without a semantic comparison (the backfill cap). */
+  notComparedSemantically: number;
+  /** Kind-allowed records each searched scope held, before any floor. */
+  candidatesByScope: Partial<Record<MemoryScope, number>>;
+}
+
 export async function searchMemoryRecords(
   workspacePath: string,
   query: string,
   opts: SearchMemoryOptions = {},
 ): Promise<MemoryRecord[]> {
+  return (await searchMemoryRecordsWithStatus(workspacePath, query, opts)).records;
+}
+
+/** Every scope a search reads when its caller names none. */
+const ALL_MEMORY_SCOPES: readonly MemoryScope[] = ["workspace", "user", "session", "agent"];
+
+/**
+ * The scopes a memory search may read: those requested (every scope when none are), without the
+ * agent scope when nothing in it could be shown, which is under multi-user auth with no user in
+ * the request. That scope reads the deployment's outcome ledger, one file for every account, and
+ * under multi-user auth a search shows only the caller's own entries of it (readAgentMemoryRecords).
+ * A config that cannot be read counts as multi-user with no user. Empty when only the agent scope
+ * was asked for there.
+ */
+export function searchableMemoryScopes(requested?: readonly MemoryScope[]): MemoryScope[] {
+  const scopes = requested?.length ? [...requested] : [...ALL_MEMORY_SCOPES];
+  const reader = recordReader();
+  return reader.all || reader.segment ? scopes : scopes.filter((scope) => scope !== "agent");
+}
+
+export async function searchMemoryRecordsWithStatus(
+  workspacePath: string,
+  query: string,
+  opts: SearchMemoryOptions = {},
+): Promise<MemorySearchResult> {
   const normalizedQuery = normalizeText(query.trim());
   const tokens = tokenize(normalizedQuery);
-  const scopes = new Set<MemoryScope>(opts.scopes?.length ? opts.scopes : ["workspace", "user", "session", "agent"]);
+  // For every caller, not only the search tools: memory_promote, a sub-agent's memory guidance and
+  // the user-profile prefetch read the agent scope too (found in review, 2026-10-08).
+  const scopes = new Set<MemoryScope>(searchableMemoryScopes(opts.scopes));
   const allowedKinds = opts.kinds?.length ? new Set(opts.kinds.map((kind) => normalizeKind(kind)).filter(Boolean) as MemoryKind[]) : null;
   const records: MemoryRecord[] = [];
 
@@ -216,17 +263,21 @@ export async function searchMemoryRecords(
     records.push(...readAgentMemoryRecords(workspacePath, opts.targetAgent));
   }
 
-  // Pre-score all candidates (token overlap + recency + decay) in a SINGLE pass.
-  // The previous filter+map computed scoreRecord twice per candidate; this folds
-  // the kind gate and the >0 drop into one scoring pass, output-identical:
+  // Pre-score all candidates (token overlap + recency + decay) in a SINGLE pass, and note
+  // whether each one MATCHES the query at all. The old gate was `score > 0`, but every score
+  // starts at scopeWeight + recencyBoost (> 0), so it never dropped anything: any non-empty
+  // store answered every query with its top-N records, related or not, and memory_search
+  // printed them as "Found N memory entries". A record now needs a word match (gateTokens /
+  // hasLexicalMatch) or, below, a semantic one — when the semantic check can run at all.
   //   - empty query  → keep every kind-allowed record (score = scoreRecord("") as before)
-  //   - real query   → drop score<=0 (matches the old `> 0` filter)
-  const textScored: Array<MemoryRecord & { score: number }> = [];
+  const gate = gateTokens(normalizedQuery);
+  const candidatesByScope: Partial<Record<MemoryScope, number>> = {};
+  const textScored: Array<MemoryRecord & { score: number; lexicalMatch: boolean }> = [];
   for (const record of records) {
     if (allowedKinds && !allowedKinds.has(record.kind)) continue;
+    candidatesByScope[record.scope] = (candidatesByScope[record.scope] ?? 0) + 1;
     const score = scoreRecord(record, normalizedQuery, tokens);
-    if (normalizedQuery && score <= 0) continue;
-    textScored.push({ ...record, score });
+    textScored.push({ ...record, score, lexicalMatch: !normalizedQuery || hasLexicalMatch(record, gate) });
   }
 
   // Embedding blend: when the embedding provider is available, compute the
@@ -234,7 +285,9 @@ export async function searchMemoryRecords(
   // records that have a stored vector.  Cheap — no per-record model calls.
   let queryVec: Float32Array | null = null;
   if (normalizedQuery && isEmbeddingAvailable()) {
-    try { queryVec = await computeQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
+    // Retrieval query: the corpus (_refreshDurableEmbedding, computeTextEmbeddings) is
+    // embedded bare, so this is the asymmetric half and takes the instruct prefix.
+    try { queryVec = await computeRetrievalQueryEmbedding(normalizedQuery); } catch { queryVec = null; }
   }
 
   // Backfill embeddings for candidates that have no stored vector — primarily
@@ -243,32 +296,59 @@ export async function searchMemoryRecords(
   // lexically. We embed only the top text-scored candidates that are missing a
   // vector, in ONE batched call, so all scopes become semantically retrievable
   // at bounded cost.
+  // The floor needs the semantic check: without it a paraphrase ("Wann fährt die Fähre ab" over
+  // "The island sailing leaves at 07:40") has no word in common and would be dropped as unrelated.
+  let semanticRan = !normalizedQuery || queryVec !== null;
   if (queryVec) {
     const SEMANTIC_BACKFILL_LIMIT = 24;
-    const missing = textScored
+    // One batch of at most 24, shared: lexical matches are embedded only for ranking, records
+    // WITHOUT one need a vector to be kept at all — so at least half the batch goes to them, and
+    // a share either side leaves unused goes to the other.
+    const unembedded = textScored
       .filter((record) => !embeddings.has(record.id))
-      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
-      .slice(0, SEMANTIC_BACKFILL_LIMIT);
+      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+    const lexical = unembedded.filter((record) => record.lexicalMatch);
+    const unmatched = unembedded.filter((record) => !record.lexicalMatch);
+    const unmatchedShare = Math.min(unmatched.length, Math.max(SEMANTIC_BACKFILL_LIMIT / 2, SEMANTIC_BACKFILL_LIMIT - lexical.length));
+    const missing = [
+      ...unmatched.slice(0, unmatchedShare),
+      ...lexical.slice(0, SEMANTIC_BACKFILL_LIMIT - unmatchedShare),
+    ];
     if (missing.length > 0) {
-      const vectors = await computeTextEmbeddings(missing.map((r) => `${r.subject}\n${r.content}`));
-      for (let i = 0; i < missing.length; i++) {
-        const vec = vectors[i];
-        if (vec && vec.length === queryVec.length) embeddings.set(missing[i]!.id, vec);
+      try {
+        const vectors = await computeTextEmbeddings(missing.map((r) => `${r.subject}\n${r.content}`));
+        for (let i = 0; i < missing.length; i++) {
+          const vec = vectors[i];
+          if (vec && vec.length === queryVec.length) embeddings.set(missing[i]!.id, vec);
+        }
+      } catch (err) {
+        log.debug({ err }, "memory search: embedding backfill failed — no relevance floor this search");
+        semanticRan = false;
       }
     }
   }
 
-  const embeddingScored = queryVec
+  const blended = queryVec
     ? textScored.map((record) => {
         const vec = embeddings.get(record.id);
-        if (!vec || vec.length !== queryVec!.length) return record;
+        if (!vec || vec.length !== queryVec!.length) return { ...record, semanticMatch: false };
         const sim = cosineSimilarity(queryVec!, vec);
         // Blend: 70% lexical/recency, 30% semantic.  Only adds — never
         // penalises a lexically relevant record that happens to have a low
         // cosine score against a paraphrased query.
-        return { ...record, score: (record.score ?? 0) + Math.max(0, sim) * 0.3 };
+        return { ...record, score: (record.score ?? 0) + Math.max(0, sim) * 0.3, semanticMatch: sim >= SEMANTIC_MATCH_MIN_SIMILARITY };
       })
-    : textScored;
+    : textScored.map((record) => ({ ...record, semanticMatch: false }));
+  // The relevance floor: no match of either kind, no result — applied only when the semantic
+  // check ran. Without it every record stays, word matches ranked first, and the caller is told
+  // (semanticRan / unmatchedIds) so it never presents them as matches or an empty answer as proof.
+  const matchedIds = new Set(blended.filter((record) => record.lexicalMatch || record.semanticMatch).map((record) => record.id));
+  const notComparedSemantically = semanticRan && normalizedQuery
+    ? blended.filter((record) => !matchedIds.has(record.id) && !embeddings.has(record.id)).length
+    : 0;
+  const embeddingScored = blended
+    .filter((record) => !semanticRan || matchedIds.has(record.id))
+    .map(({ lexicalMatch: _lexical, semanticMatch: _semantic, ...record }) => record);
 
   // Graph reranking: blend text score (55%) with graph score (45%)
   // Falls back to text-only if MemGraph is unavailable or the query is empty
@@ -283,7 +363,10 @@ export async function searchMemoryRecords(
     : embeddingScored;
 
   const sorted = finalScored
-    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || right.updatedAt.localeCompare(left.updatedAt))
+    .sort((left, right) =>
+      Number(matchedIds.has(right.id)) - Number(matchedIds.has(left.id))
+      || (right.score ?? 0) - (left.score ?? 0)
+      || right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, limit);
 
   // Track retrievals in the graph for the feedback loop (fire-and-forget)
@@ -297,7 +380,13 @@ export async function searchMemoryRecords(
     }
   }
 
-  return sorted;
+  return {
+    records: sorted,
+    semanticRan,
+    unmatchedIds: semanticRan ? [] : sorted.filter((record) => !matchedIds.has(record.id)).map((record) => record.id),
+    notComparedSemantically,
+    candidatesByScope,
+  };
 }
 
 export async function formatScopedMemoryGuidance(
@@ -369,13 +458,22 @@ export async function promoteMemoryRecords(
   } = {},
 ): Promise<PromoteMemoryResult> {
   const destinationScope = opts.destinationScope ?? "workspace";
-  const candidates = await searchMemoryRecords(workspacePath, query, {
+  const sources = opts.scopes?.length
+    ? opts.scopes.filter((scope): scope is MemoryScope => scope !== destinationScope)
+    : defaultPromotionSourceScopes(destinationScope);
+  // Sources that are all the destination itself leave nothing to promote. Passed on as an empty
+  // list, they reached the search as "no scopes", which reads every scope: a promotion from
+  // workspace into workspace copied session facts and agent lessons nobody asked for.
+  if (sources.length === 0) return { promoted: [], merged: [], skipped: 0, destinationScope };
+  const search = await searchMemoryRecordsWithStatus(workspacePath, query, {
     ...opts,
-    scopes: opts.scopes?.length
-      ? opts.scopes.filter((scope): scope is MemoryScope => scope !== destinationScope)
-      : defaultPromotionSourceScopes(destinationScope),
+    scopes: sources,
     limit: Math.max(1, Math.min(20, Math.trunc(opts.maxPromotions ?? opts.limit ?? 5))),
   });
+  // A promotion WRITES durable memory: a record that matched the query neither by word nor by
+  // meaning (returned only because semantic search was unavailable) is never promoted.
+  const unmatched = new Set(search.unmatchedIds);
+  const candidates = search.records.filter((record) => !unmatched.has(record.id));
 
   const existing = readDurableMemoryRecords(destinationScope, workspacePath);
   const promoted: MemoryRecord[] = [];
@@ -460,6 +558,8 @@ function compactDurableMemoryRecords(
       if (record.id === canonical.id) continue;
       if (record.key) {
         rmSync(join(memoryDirForScope(scope, workspacePath), `${record.key}.json`), { force: true });
+        // Like a delete: the merged-away record's node must not outlive its file.
+        void deleteMemoryFromGraph(record.id).catch((err) => log.debug({ err }, "Graph delete-through failed (compaction)"));
       }
     }
   }
@@ -579,10 +679,10 @@ function updateDurableMemoryRecordByKey(
   // store path. Both are best-effort and never block the edit.
   if (textChanged && isEmbeddingAvailable()) {
     const embedPromise = _refreshDurableEmbedding(filePath, cacheKey, nextIndex);
-    void upsertMemoryToGraph(result, undefined, undefined, embedPromise)
+    void upsertMemoryToGraph(result, undefined, undefined, embedPromise, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
   } else {
-    void upsertMemoryToGraph(result, undefined, undefined, existing.embedding)
+    void upsertMemoryToGraph(result, undefined, undefined, existing.embedding, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed (edit)"));
   }
   return result;
@@ -596,11 +696,17 @@ function deleteDurableMemoryRecordByKey(
   const dir = memoryDirForScope(scope, workspacePath);
   const filePath = join(dir, `${safeKey(key)}.json`);
   if (!existsSync(filePath)) return false;
+  let id: string | undefined;
+  try {
+    id = parseStoredWorkspaceMemory(readFileSync(filePath, "utf-8"))?.id;
+  } catch {
+    // Unreadable: no node id to remove.
+  }
   rmSync(filePath, { force: true });
   _invalidateDurableCache(_cacheKey(scope, dir));
-  // The MemGraph write-through node (if any) is intentionally left in place —
-  // there is no durable→graph delete path, and an orphaned node is harmless to
-  // the read-only inspector view.
+  // Its MemGraph node goes too: the Critical Memory block reads the graph, not the files, and kept
+  // injecting a deleted preference (graph-service.ts deleteMemoryFromGraph).
+  if (id) void deleteMemoryFromGraph(id).catch((err) => log.debug({ err }, "Graph delete-through failed"));
   return true;
 }
 
@@ -710,7 +816,7 @@ function storeDurableMemoryRecord(
   // record independently (two provider round-trips, on different text). Both writes
   // stay fire-and-forget — never the write's critical path.
   const graphWriteThrough = (vec?: Float32Array | number[] | null | Promise<Float32Array | null>) =>
-    upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId, vec)
+    upsertMemoryToGraph(result, writeContext?.agentName, writeContext?.sessionId, vec, dir)
       .catch((err) => log.debug({ err }, "Graph write-through failed"));
   if (!embedding && isEmbeddingAvailable()) {
     // Indexable text changed: compute the new vector once (written back to the flat
@@ -900,10 +1006,63 @@ async function readSessionMemoryRecords(sessionId: string): Promise<MemoryRecord
   }));
 }
 
+/** Agent-scope records one search considers: the most recent outcomes and flow entries. */
+const AGENT_LESSONS_PER_SEARCH = 60;
+const FLOW_ENTRIES_PER_SEARCH = 120;
+/** How far back a search for ONE agent looks for its records before applying those caps. 200 is
+ *  the outcomes ledger's cached window (agent/outcomes.ts OUTCOMES_CACHE_LIMIT): a deeper read
+ *  bypasses that cache and re-reads the file synchronously on every targeted search. */
+const AGENT_LESSON_SCAN_WINDOW = 200;
+/** How far back, under multi-user auth, a search looks for the caller's own outcomes. The ledger
+ *  holds every account's runs, so one account's last lessons can sit behind another account's busy
+ *  day: the read widens fivefold from AGENT_LESSON_SCAN_WINDOW until it holds the caller's last
+ *  AGENT_LESSONS_PER_SEARCH, reaches the start of the ledger, or reaches this many entries. The
+ *  bound keeps a search by an account with few lessons from parsing the whole ledger (up to 50,000
+ *  lines, agent/outcomes.ts MAX_OUTCOMES_LINES) every time. */
+const ACCOUNT_LESSON_SCAN_LIMIT = 5_000;
+
+/** The last AGENT_LESSONS_PER_SEARCH outcomes `keep` admits, from a read that widens as above. */
+function recentKeptOutcomes(root: string, keep: (outcome: OutcomeEntry) => boolean): OutcomeEntry[] {
+  for (let window = AGENT_LESSON_SCAN_WINDOW; ; window = Math.min(window * 5, ACCOUNT_LESSON_SCAN_LIMIT)) {
+    const entries = readRecentOutcomes(root, window);
+    const kept = entries.filter(keep);
+    if (kept.length >= AGENT_LESSONS_PER_SEARCH || entries.length < window || window >= ACCOUNT_LESSON_SCAN_LIMIT) {
+      return kept.slice(-AGENT_LESSONS_PER_SEARCH);
+    }
+  }
+}
+
 function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): MemoryRecord[] {
   const records: MemoryRecord[] = [];
 
-  for (const outcome of readRecentOutcomes(workspacePath, 60)) {
+  // Under multi-user auth, the caller's own entries only. The ledger holds every account's runs,
+  // and a lesson's subject is the task it was recorded for: one account's search listed another
+  // account's delegated task (found in review, 2026-10-08). An entry of another account, or with
+  // none (written before entries carried one), is left out, and a request with no user sees none.
+  // With one operator every entry is theirs.
+  const reader = recordReader();
+  if (!reader.all && !reader.segment) return records;
+  const own = (account: string | undefined) => canReadRecord(reader, account);
+
+  // The agent outcomes ledger is DEPLOYMENT-scoped: it describes this deployment's agents, and
+  // every other reader resolves it against the shared root. The path threaded through here is the
+  // caller's execution root, which per-user workspaces make one account's directory — so this read
+  // saw that account's slice of the ledger, which is empty, and an agent's lessons stopped
+  // appearing. Mapped back rather than replaced with config: the caller's root is all this
+  // function is given.
+  // The 60-outcome cap used to apply BEFORE the agent filter: with a target agent, its lessons
+  // had to be among the deployment's last 60 outcomes of ANY agent, so a busy swarm pushed an
+  // idle agent's lessons out and a targeted search found none. Filter first, then cap — by the
+  // caller's account as well, under multi-user auth, over a read deep enough to find them
+  // (recentKeptOutcomes), or a busy account would push another's lessons out the same way.
+  const root = deploymentWorkspaceRoot(workspacePath);
+  const lessonOfTarget = (outcome: OutcomeEntry) => (!targetAgent || outcome.agent === targetAgent) && Boolean(outcome.lesson?.trim());
+  const outcomes = !reader.all
+    ? recentKeptOutcomes(root, (outcome) => lessonOfTarget(outcome) && own(outcome.account))
+    : targetAgent
+      ? readRecentOutcomes(root, AGENT_LESSON_SCAN_WINDOW).filter(lessonOfTarget).slice(-AGENT_LESSONS_PER_SEARCH)
+      : readRecentOutcomes(root, AGENT_LESSONS_PER_SEARCH);
+  for (const outcome of outcomes) {
     if (targetAgent && outcome.agent !== targetAgent) continue;
     if (!outcome.lesson?.trim()) continue;
 
@@ -922,7 +1081,21 @@ function readAgentMemoryRecords(workspacePath: string, targetAgent?: string): Me
     });
   }
 
-  for (const entry of readFlowMemoryEntries(workspacePath, 120)) {
+  // Flow memory is one file at the deployment root as well: its writers, the config assistant's
+  // proposals and their feedback (gateway/index.ts) and the flow-memory POST route
+  // (gateway/sub-agent-routes.ts), append it there. Under multi-user auth this read used the
+  // caller's execution root, the account's own directory, where no entry is ever written: an
+  // account never found its own entries, and the account filter below never ran for a chat session
+  // (found in review, 2026-10-08). It reads the deployment root there now. The file is read whole
+  // either way (readFlowMemoryEntries), so the caller's own entries are chosen from all of it
+  // before the cap. With one operator the read is as it was.
+  const ofTarget = (entry: { targetAgent?: string; assistantAgent?: string }) => !targetAgent || entry.targetAgent === targetAgent || entry.assistantAgent === targetAgent;
+  const flowEntries = !reader.all
+    ? readFlowMemoryEntries(root, Number.MAX_SAFE_INTEGER).filter((entry) => ofTarget(entry) && own(entry.account)).slice(-FLOW_ENTRIES_PER_SEARCH)
+    : targetAgent
+      ? readFlowMemoryEntries(workspacePath, AGENT_LESSON_SCAN_WINDOW).filter(ofTarget).slice(-FLOW_ENTRIES_PER_SEARCH)
+      : readFlowMemoryEntries(workspacePath, FLOW_ENTRIES_PER_SEARCH);
+  for (const entry of flowEntries) {
     if (targetAgent && entry.targetAgent !== targetAgent && entry.assistantAgent !== targetAgent) continue;
     records.push({
       id: entry.id,
@@ -969,6 +1142,68 @@ function parseStoredWorkspaceMemory(raw: string): StoredWorkspaceMemoryRecord | 
     key: parsed.key,
     content: parsed.content,
   };
+}
+
+/**
+ * Cosine similarity at which a record with no word match still counts as matching the query.
+ * The query is embedded WITH the Qwen3 retrieval instruction and the corpus bare, which lowers
+ * cosines: the repo's own measurement on the serving embedder (qwen3-embedding-0.6b) put a
+ * near-verbatim relevant pair at 0.4118 wrapped vs 0.6923 bare (tests/embedding-query-asymmetry
+ * .test.ts, header). The floor sits below that so such a pair is kept; it is a floor against "any
+ * record at all", not a tuned relevance cut — ranking stays the blend.
+ */
+const SEMANTIC_MATCH_MIN_SIMILARITY = 0.35;
+
+/** Word boundary for the match gate. Unlike WORD_SEPARATOR, "_" separates too, so the key
+ *  "deadline_q4" offers the word "deadline". */
+const GATE_WORD_SEPARATOR = /[^\p{L}\p{N}]+/u;
+/** Scripts written without spaces between words. A token from one cannot be compared word by
+ *  word, so it is matched as a substring ("浴室" in "浴室のレイアウト"). */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+/** Shortest shared start that makes two words one word: "deadline"/"deadlines", "kind"/"kinder",
+ *  "projekt"/"projektstatus". */
+const MIN_SHARED_PREFIX = 4;
+/** Shortest word that counts as a part of a longer compound wherever it sits in it:
+ *  "status" in "projektstatus", "nutzer" in "benutzer". */
+const MIN_COMPOUND_PART = 5;
+
+interface MatchGate {
+  tokens: string[];
+  /** Only stopwords or tokens under 3 characters were left: those match whole words only. */
+  exactOnly: boolean;
+}
+
+/**
+ * The query tokens that can carry a match. A stopword or a token under three characters ("im",
+ * "me") is not evidence — as a substring it matched "im November" for "wann ist der Nutzer im
+ * Urlaub" and "theme" for "about me" — unless the query has nothing else, and then it has to
+ * equal a whole word of the record.
+ */
+function gateTokens(normalizedQuery: string): MatchGate {
+  const words = normalizedQuery.split(GATE_WORD_SEPARATOR).filter(Boolean);
+  const evidence = words.filter((word) => UNSPACED_SCRIPT.test(word) || (word.length >= 3 && !TOKEN_STOPWORDS.has(word)));
+  return evidence.length > 0 ? { tokens: evidence, exactOnly: false } : { tokens: words.filter((word) => word.length >= 2), exactOnly: true };
+}
+
+/** One query token and one record word are the same word: equal, one is the start of the other
+ *  (inflection, compound head), or the shorter is a part of a compound. Both directions. */
+function wordsMatch(token: string, word: string): boolean {
+  if (token === word) return true;
+  const [shorter, longer] = token.length <= word.length ? [token, word] : [word, token];
+  if (shorter.length >= MIN_SHARED_PREFIX && longer.startsWith(shorter)) return true;
+  return shorter.length >= MIN_COMPOUND_PART && longer.includes(shorter);
+}
+
+/** Whether a record mentions the query: a gate token matches a word of its subject, content,
+ *  tags, key ("_"/"-" as spaces) or kind. Word by word — a one-way substring test missed
+ *  "deadlines" against "deadline" and matched "me" inside "theme". */
+function hasLexicalMatch(record: MemoryRecord, gate: MatchGate): boolean {
+  const text = normalizeText([record.subject, record.content, ...record.tags, record.key ?? "", record.kind].join("\n"));
+  const words = [...new Set(text.split(GATE_WORD_SEPARATOR).filter(Boolean))];
+  return gate.tokens.some((token) => {
+    if (UNSPACED_SCRIPT.test(token)) return text.includes(token);
+    return gate.exactOnly ? words.includes(token) : words.some((word) => wordsMatch(token, word));
+  });
 }
 
 function scoreRecord(record: MemoryRecord, normalizedQuery: string, tokens: string[]): number {

@@ -7,12 +7,16 @@
  * and surfaces in the operator dock when a high-stakes/wide plan needs approval.
  * Recording a plan is soft and cheap — trivial turns skip it and answer directly.
  */
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, executeTool, type ToolContext, type ToolResult } from "./registry.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
+import { planHasDispatchableStep } from "./plan-executor.js";
+import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
+import { turnSteeringManager } from "../agent/turn-steering.js";
+import { deliverableParameterSchema } from "./delegation-artifact-classification.js";
 
 const log = childLogger("tool:record_plan");
 
@@ -48,10 +52,14 @@ registerTool({
           properties: {
             id: { type: "string", description: "Short id, e.g. 's1' (referenced by dependsOn)." },
             description: { type: "string", description: "One line describing the step." },
-            kind: { type: "string", enum: ["reuse", "delegate", "direct"], description: "reuse = run an existing scene/job/workflow; delegate = hand to an agent; direct = you do it." },
+            kind: { type: "string", enum: ["reuse", "delegate", "direct"], description: "reuse = run an existing scene/job/workflow; delegate = hand to an agent; direct = a tool call or your own work." },
             agent: { type: "string", description: "Target agent name for a delegate step." },
+            workflow: { type: "string", description: "Scene or job name for a reuse step — set this and execute_plan can run the step for you; without it the step is yours to run." },
+            tool: { type: "string", description: "Tool name for a direct step — set this (with toolArgs) and execute_plan runs the tool as part of the plan, in its dependency order. Leave unset for a direct step that is your own reasoning; the step is then handed back to you." },
+            toolArgs: { type: "object", description: "Arguments for `tool`. Literal values only — a tool takes structured arguments, so it cannot receive an earlier step's output; make a step that needs one a delegate step." },
             parallelGroup: { type: "number", description: "Steps sharing a parallelGroup are independent and may run concurrently." },
             dependsOn: { type: "array", items: { type: "string" }, description: "Ids of steps that must finish first." },
+            deliverable: deliverableParameterSchema("delegate_step"),
           },
           required: ["description", "kind"],
         },
@@ -64,8 +72,22 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const plan = normalizeTurnPlan(args);
-    if (!plan.objective && plan.steps.length === 0) {
-      return { success: false, output: "", error: "A plan needs at least an objective or one step." };
+    // A PLAN WITH NO STEPS IS NOT A PLAN. The old check only refused one that was ALSO missing its
+    // objective, so `{objective: "typo guard", steps: []}` — an actual local-model emission, seen in
+    // a live run — recorded successfully, logged "Turn plan recorded", and answered "Now execute it",
+    // with nothing to execute. Downstream it is worse than useless: it persists over whatever the
+    // turn had, hands riskGatedQA zero acceptance criteria, and gives decidePlanContinuation a plan
+    // whose every count is zero. Refusing it turns a silent no-op into a correction the model can act
+    // on, which is the whole value of the checkpoint.
+    if (plan.steps.length === 0) {
+      return {
+        success: false,
+        output: "",
+        error: "A plan needs at least one step. Each step is an object with a `description` (what will be done) and a `kind`: "
+          + "\"delegate\" to hand it to a specialist, \"reuse\" to run an existing workflow (name it in `workflow`), or "
+          + "\"direct\" for a tool call you make yourself (name it in `tool`). Re-record with the steps you intend to run — "
+          + "or, if this turn needs no plan, skip record_plan and just answer.",
+      };
     }
     await persistTurnPlan(ctx.sessionId, plan);
     const width = countParallelWidth(plan.steps);
@@ -106,20 +128,119 @@ registerTool({
     // unverified answer. Warn the orchestrator UP FRONT so it sets expectations with the user instead
     // of silently attempting a doomed run. Structural (delegate-step count + riskTier + effort tier);
     // no topic/keyword matching. Advisory only — it never blocks the plan.
+    // A reuse step whose workflow is named only in prose is not dispatchable — execute_plan can
+    // only hand it back. Cheaper to say so now, while the plan is still being written, than to
+    // discover it as a step that quietly became the orchestrator's own work.
+    const unnamedReuse = plan.steps.filter((s) => s.kind === "reuse" && !s.workflow).map((s) => s.id);
+    const unnamedReuseNote = unnamedReuse.length > 0
+      ? ` NOTE: reuse step${unnamedReuse.length === 1 ? "" : "s"} ${unnamedReuse.join(", ")} name${unnamedReuse.length === 1 ? "s" : ""} no workflow, so execute_plan cannot run ${unnamedReuse.length === 1 ? "it" : "them"} — re-record with \`workflow\` set to the scene/job name, or run ${unnamedReuse.length === 1 ? "it" : "them"} yourself.`
+      : "";
     const budgetWarning = shouldWarnLowEffortBigPlan(currentEffortTier(), plan.riskTier, delegateStepCount)
       ? ` ⚠️ BUDGET NOTE: ${delegateStepCount} delegate steps at HIGH risk under LOW effort (~2 min budget) — this will very likely NOT finish in time. Prefer telling the user to re-run at a higher effort tier (medium/high) or with a longer --timeout; if you proceed anyway, keep the scope tight and make any partial result's limitations explicit in your final answer.`
       : "";
+    // THE PLAN ROUND FOLD (orchestration.planRoundFold). Past the approval pause above, so a plan
+    // that needed approval only runs once it has it. Not under the budget note: that note asks the
+    // orchestrator to decide whether to run the plan at all, and folding would decide for it.
+    const folded = budgetWarning ? null : await foldPlanExecution(plan, ctx);
+    // A refused or malformed run (a dependsOn cycle, a scene that gates execute_plan behind an
+    // approval the operator denied) dispatched nothing: the plan stands as recorded, and the model
+    // is told why it did not run rather than simply to run it.
+    const foldFailedNote = folded && !folded.success
+      ? ` NOTE: running this plan in the same call did not start — ${(folded.error ?? "execute_plan failed").slice(0, 300)}`
+      : "";
+    if (folded?.success) {
+      return {
+        success: true,
+        output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}) and EXECUTED in this same call — `
+          + foldReceipt(folded.metadata)
+          + unnamedReuseNote
+          + `\n\n${folded.output}`,
+        metadata: {
+          stepCount: plan.steps.length,
+          riskTier: plan.riskTier,
+          wide: plan.wide,
+          ...folded.metadata,
+          planRoundFold: true,
+          // The folded run is an execute_plan call the turn did not see, so it is reported with the
+          // steps it dispatched: the turn's per-turn count of execute_plan then matches what ran.
+          nestedCalls: [
+            { tool: "execute_plan", success: true },
+            ...(Array.isArray(folded.metadata?.["nestedCalls"]) ? folded.metadata["nestedCalls"] as unknown[] : []),
+          ],
+        },
+      };
+    }
     return {
       success: true,
       output: `Plan recorded (${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}, risk: ${plan.riskTier}). `
         + (execParts.length > 0
-          ? `Recording a plan is NOT execution. Now CALL the orchestration tools to ${execParts.join(", and ")}. Do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
+          ? `Recording a plan is NOT execution. CALL execute_plan to run this plan in its own dependency order — it dispatches each step by kind (delegate to the specialist, reuse to the named workflow), runs a parallelGroup concurrently, feeds each step's result to the steps that depend on it, and hands \`direct\` steps back to you. `
+            + `Or drive it yourself and ${execParts.join(", and ")}. Either way: do NOT write the final answer until those steps have actually run; a tool-free answer after only record_plan does not satisfy this plan.`
           : `Now execute it and make sure the final answer meets the acceptance criteria.`)
-        + budgetWarning,
+        + unnamedReuseNote + budgetWarning + foldFailedNote,
       metadata: { stepCount: plan.steps.length, riskTier: plan.riskTier, wide: plan.wide, ...(budgetWarning ? { budgetWarning: true } : {}) },
     };
   },
 });
+
+const OWED_LABEL: Record<string, string> = { failed: "failed", manual: "yours to do", pending: "not run yet" };
+
+/**
+ * The folded receipt's verdict, naming every step still owed by id. It leads the tool result, and
+ * the collapsed history keeps a plan report's head: a model told only "do not call execute_plan
+ * unless the report says so" could not see the part of the report that said so.
+ */
+function foldReceipt(metadata: Record<string, unknown> | undefined): string {
+  const owed = (Array.isArray(metadata?.["outstandingSteps"]) ? metadata["outstandingSteps"] as unknown[] : [])
+    .flatMap((entry) => {
+      const record = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+      return typeof record["id"] === "string" ? [{ id: record["id"], status: String(record["status"] ?? "") }] : [];
+    });
+  if (owed.length === 0) {
+    return "every step has run, so do NOT call execute_plan again: write the answer from the results below.";
+  }
+  return `still outstanding: ${owed.map((o) => `${o.id} (${OWED_LABEL[o.status] ?? o.status})`).join(", ")}. `
+    + "Deal with those as the report below says — execute_plan({retry:[…]}) for a failed step, execute_plan({completed:[…]}) once you have done yours — "
+    + "and do NOT call execute_plan for the steps that are done.";
+}
+
+/**
+ * Run the plan just recorded through execute_plan, inside this call — or null when the fold does
+ * not apply (orchestration.planRoundFold).
+ *
+ * THE ROUND IT REMOVES. record_plan used to end with "CALL execute_plan", so every planned turn
+ * spent a whole orchestrator round on a call that takes no arguments: 1-2 s warm, 8-13 s on a cold
+ * head, more with thinking on (finding 2026-10-05; eval/latency/README.md, lever plan_round_fold).
+ * The executor goes through the registry exactly as the model's own call would, so the tier gate,
+ * a scene's approval step and the per-turn budget apply to it unchanged, and its steps are reported
+ * back to the turn by the caller (nestedCalls).
+ */
+async function foldPlanExecution(plan: TurnPlan, ctx: ToolContext): Promise<ToolResult | null> {
+  if (!(getConfig().orchestration?.planRoundFold ?? true)) return null;
+  // Only when record_plan was the response's ONLY call — the shape the lever measures. A response
+  // that recorded the plan AND issued its first step by hand is already acting on it, and folding
+  // would run that step a second time. Unknown (a sub-agent, a direct invocation) is not "alone".
+  const calls = ctx.responseToolCalls;
+  if (!calls || calls.length !== 1 || calls[0] !== "record_plan") return null;
+  // The user steered while the plan was being written. Steering is read at the top of the next
+  // iteration, so a folded run would carry out the whole plan before the model saw the message;
+  // unfolded, the next call reads it first and can still change the plan.
+  if ((getConfig().orchestration?.midTurnSteering ?? true) && turnSteeringManager.hasPending(ctx.sessionId)) return null;
+  // A plan of the orchestrator's own work dispatches nothing; folding it would only add a report.
+  if (!planHasDispatchableStep(plan)) return null;
+  // Never past what the caller may call itself: the same reach check execute_plan applies per step.
+  const reachable = !ctx.allowedTools
+    || ctx.allowedTools.includes("execute_plan")
+    || (ctx.loadableTools ?? []).includes("execute_plan");
+  if (!reachable) return null;
+  const cap = getPerTurnToolCallLimit("execute_plan");
+  if (cap !== undefined && (ctx.getTurnToolCallCount?.("execute_plan") ?? 0) >= cap) return null;
+  logAudit("plan_round_folded", {
+    agentName: ctx.currentAgentName ?? "main",
+    steps: plan.steps.length,
+  }, { sessionId: ctx.sessionId, severity: "info" });
+  return executeTool("execute_plan", {}, ctx);
+}
 
 /**
  * Returns a ToolResult to short-circuit the tool when the plan was not approved
@@ -141,7 +262,7 @@ async function maybeRequestPlanApproval(plan: TurnPlan, ctx: ToolContext, width:
     steps: plan.steps.length,
   }, { sessionId: ctx.sessionId, severity: "warn" });
 
-  let approved = false;
+  let approved: boolean;
   try {
     approved = await ctx.approvalCallback("record_plan", {
       summary: "Approve this plan before the swarm executes it?",

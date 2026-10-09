@@ -17,12 +17,15 @@ import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { runSubAgentWithStats } from "../agent/sub-agent.js";
-import { verifyToken, extractBearerToken } from "../gateway/auth.js";
+import { runSubAgentWithStats, type SubAgentRunOptions } from "../agent/sub-agent.js";
+import { authenticatedUser, verifyToken, extractBearerToken, type AuthenticatedUser } from "../gateway/auth.js";
 import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
+import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import {
   A2A_ERROR,
   A2A_PROTOCOL_VERSION,
@@ -124,9 +127,20 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
   try {
     let result: unknown;
     switch (rpc.method) {
-      case "tasks/send":
-        result = await handleTasksSend(rpc.params as A2ATasksSendParams, caller);
+      case "tasks/send": {
+        const params = rpc.params as A2ATasksSendParams;
+        // Under multi-user auth a sessionId must be a string. The body is parsed JSON, and a
+        // non-string one was used as the task's session id as it came and as its string inside the
+        // caller's namespace, two different values (found in review, 2026-10-09). With auth off the
+        // id is taken as it comes, as before; a null one is no id there and here.
+        const rawSessionId: unknown = params?.sessionId;
+        if (rawSessionId !== undefined && rawSessionId !== null && typeof rawSessionId !== "string" && getConfig().auth?.enabled === true) {
+          logAudit("a2a_request_failed", { method: rpc.method, caller, reason: "session_id_not_a_string" }, { severity: "warn" });
+          return respondError(res, id, A2A_ERROR.INVALID_PARAMS);
+        }
+        result = await handleTasksSend(params, caller, authResult.user);
         break;
+      }
       case "tasks/get": {
         const params = rpc.params as { id?: string };
         if (!params?.id) {
@@ -181,7 +195,8 @@ function respondError(
   return true;
 }
 
-async function handleTasksSend(params: A2ATasksSendParams, caller: string): Promise<A2ATask> {
+/** `user` is the account a gateway token resolved to under multi-user auth (authorizeInbound). */
+async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?: AuthenticatedUser): Promise<A2ATask> {
   const config = getConfig();
   if (!params || !params.message?.parts?.[0]?.text) {
     throw new Error("message.parts[0].text is required");
@@ -205,6 +220,11 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
     throw new Error("task id already exists");
   }
   const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
+  // The session the run works in. A caller-chosen id was used as it came, so under multi-user auth
+  // a caller could name another account's session and the run would read and write its shared
+  // facts, peer messages and checkpoints (found in review, 2026-10-08). There it now names a
+  // session in the caller's own namespace; the task still reports the id the caller sent.
+  const runSessionId = params.sessionId ? callerScopedSessionId(params.sessionId, caller) : sessionId;
   const userText = params.message.parts.map((p) => p.text).join("\n").trim();
   const context =
     typeof (params.metadata?.["context"]) === "string"
@@ -222,17 +242,29 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
   scheduleTaskExpiry(taskId);
 
   try {
-    const run = await runSubAgentWithStats({
+    const runOptions: SubAgentRunOptions = {
       agentName,
       task: userText,
       context,
-      parentSessionId: sessionId,
-      workspacePath: config.workspacePath,
+      parentSessionId: runSessionId,
+      // The workspace root the run works in. Every task ran in the shared root, so under
+      // multi-user auth a memory a caller stored with the default 'workspace' scope was the
+      // shared root's, and every other account's Critical Memory, graph inspector and graph_query
+      // read it: the storage directory, not the writer, decides a workspace record's tenant
+      // (found in review, 2026-10-08). A signed-in account's task now runs in that account's own
+      // root, as its chat runs and the legacy /a2a/agents route's do. The shared-bearer machine
+      // caller and an OIDC peer are no account of this deployment and keep the shared root.
+      workspacePath: user ? userWorkspaceRoot(config.workspacePath, user.username) : config.workspacePath,
       // Scope per-user resource guards (mail/credentials/compute) to the caller. A
       // machine "shared-bearer" caller carries no user identity, so it is correctly
       // denied user-restricted resources while still reaching shared ones.
       userId: caller === "anonymous" ? undefined : caller,
-    });
+    };
+    // The account on the request context too, which the run's own memory reads and per-user
+    // stores take their account from; with no account there, as before.
+    const run = user
+      ? await runWithRequestContext({ userId: user.username }, () => runSubAgentWithStats(runOptions))
+      : await runSubAgentWithStats(runOptions);
 
     const finalTask: A2ATask = {
       id: taskId,
@@ -278,7 +310,13 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string): Prom
   }
 }
 
-interface AuthResult { ok: boolean; caller: string }
+interface AuthResult {
+  ok: boolean;
+  caller: string;
+  /** The account a gateway token resolved to under multi-user auth; absent for the shared bearer,
+   *  an OIDC peer, and with one operator. */
+  user?: AuthenticatedUser;
+}
 
 async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
   const config = getConfig();
@@ -297,7 +335,19 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
   // Otherwise, accept a regular gateway JWT — operators get full access; viewer
   // tokens are accepted (tier policies still apply).
   const verified = await verifyToken(token);
-  if (verified) return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+  if (verified) {
+    // Under multi-user auth a signed token is only as good as the account behind it. Any
+    // unexpired one was accepted here, so a deleted or disabled account kept running tasks for
+    // the rest of the token's lifetime (found in review, 2026-10-08). The caller is now resolved
+    // against the user store, as on /api, the AG-UI stream and the legacy /a2a/agents route, and a
+    // token whose account no longer resolves is refused. With one operator there is no user store
+    // and the token's own claims stand, as before.
+    if (getConfig().auth?.enabled === true) {
+      const user = await authenticatedUser(`Bearer ${token}`);
+      return user ? { ok: true, caller: user.username, user } : { ok: false, caller: "anonymous" };
+    }
+    return { ok: true, caller: (verified as { sub?: string }).sub ?? "authenticated" };
+  }
 
   // OIDC A2A: accept a PEER's IdP token, validated against the issuer's JWKS
   // (signature + issuer + configured audience). Lets us trust other agents that
@@ -307,6 +357,17 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
     if (claims) return { ok: true, caller: typeof claims.sub === "string" ? claims.sub : "a2a-oidc" };
   }
   return { ok: false, caller: "anonymous" };
+}
+
+/** A caller-chosen session id inside the caller's own namespace under multi-user auth; as it came
+ *  with one operator. A config that cannot be read counts as multi-user. The legacy
+ *  /a2a/agents/:name route (gateway/index.ts) uses it too, so an id names one session on both. */
+export function callerScopedSessionId(sessionId: string, caller: string): string {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed */ }
+  return multiUser ? `a2a-in:${safeUserSegment(caller)}:${sessionId}` : sessionId;
 }
 
 function resolveSecret(value: string): string {

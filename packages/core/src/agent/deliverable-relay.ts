@@ -12,6 +12,7 @@
  * importers (tests, tools) keep working unchanged.
  */
 import { DELEGATE_TOOL_RESULT_RE, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
+import { readExecutionRecord, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
@@ -20,6 +21,7 @@ import {
   looksLikeRawSharedFactsDump,
   looksLikeRawWorkspaceToolDump,
 } from "./runtime-evidence-dump.js";
+import { UNFINISHED_STUB_MARKER } from "./sub-agent-prompt-guidance.js";
 
 /**
  * Cost-center 2 (audit 5d51862f): a meta-reasoning preamble the specialist sometimes
@@ -69,7 +71,7 @@ export function looksLikeTruncatedCodeDeliverable(text: string): boolean {
  * answer (headings/table/bullets) that is not a raw dump / provider error / scaffold.
  */
 export function extractSingleRelayableDeliverable(
-  toolResultMessages: readonly { role: string; content?: string | null }[],
+  toolResultMessages: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
   turnDelegationCount: number,
 ): string | null {
   if (turnDelegationCount !== 1) return null;
@@ -77,7 +79,12 @@ export function extractSingleRelayableDeliverable(
     (m) => m.role === "tool" && typeof m.content === "string" && DELEGATE_TOOL_RESULT_RE.test(String(m.content)),
   );
   if (delegateResults.length !== 1) return null;
-  const content = String(delegateResults[0]!.content ?? "");
+  // A run that stated figures no tool had returned is never shipped as-is, whatever its frame
+  // says. This early return skips the terminal guards, and before the run record existed the only
+  // thing standing between a fabricated table and the user was a regex over the frame's heading
+  // (E2E 2026-10-07: "8.393" primes relayed verbatim). Read from the metadata, not the text.
+  if (unbackedFiguresMasked(readExecutionRecord(delegateResults[0]!.metadata?.["specialistExecutions"]))) return null;
+  const content = stripDelegatedRunRecord(String(delegateResults[0]!.content ?? ""));
   if (!/TASK COMPLETED\b/i.test(content)) return null;
   if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(content)) return null;
   // Only the long-deliverable formatting carries this marker; short relays still synthesize.
@@ -108,6 +115,20 @@ export function extractSingleRelayableDeliverable(
     || looksLikeRawWorkspaceToolDump(evidence)
     || looksLikeOrchestrationOnlyEvidence(evidence)
   ) return null;
+  // A BUILD LOG IS NOT THE BUILD, and the shape test below cannot tell them apart —
+  // it asks whether the text is structured, not whether it is the answer. A staged
+  // build's progress table is extremely structured. Session 00b3675d relayed one to the
+  // user on three separate turns: ten rows of
+  // "| 1 | UNFINISHED_STUB: executive_summary | Filled |" followed by
+  // "Final artifact: … (254 lines)". Twelve table rows, so it sailed through as a
+  // presentable deliverable. The user had asked what a subscription costs.
+  //
+  // UNFINISHED_STUB_MARKER is the system's own sentinel, placed by the staged-build
+  // directive and already read back off disk by artifactFileLooksTruncated. Text carrying
+  // it is either a log ABOUT the artifact or an artifact still admitting it is unfinished.
+  // Neither is a finished deliverable, and neither may skip synthesis: returning null
+  // hands the turn back to the normal path, which summarises the real content instead.
+  if (evidence.includes(UNFINISHED_STUB_MARKER)) return null;
   const tableRows = (evidence.match(/^\s*\|.+\|\s*$/gm) ?? []).length;
   const headings = (evidence.match(/^#{1,6}\s/gm) ?? []).length;
   const bullets = (evidence.match(/^\s*[-*+]\s+\S/gm) ?? []).length;

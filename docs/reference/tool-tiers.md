@@ -37,7 +37,7 @@ Always allowed; no side effects.
 | `datetime_arithmetic` | — | — | Date/time arithmetic — add or subtract durations, compute differences, format/parse without delegating |
 | `export_workspace_artifact` | — | — | Expose an existing workspace file or folder as a downloadable chat artifact |
 | `extract_calendar` | — | — | Parse an .ics file into a structured event list |
-| `extract_email` | — | — | Parse an .eml or single-message .mbox file into headers, body, and attachment list |
+| `extract_email` | — | — | Parse an .eml file, or one message of an .mbox chosen by index, into headers, body, and attachment list |
 | `extract_file_content` | — | — | Convert a workspace file into Markdown using the configured file-conversion service |
 | `extract_notebook` | — | — | Convert a Jupyter .ipynb notebook into a single Markdown document with code, outputs, and image refs |
 | `federated_workspace_search` | — | — | Broadcast workspace_search across federated peer instances and merge ranked results |
@@ -148,6 +148,7 @@ Write operations inside the workspace; session-level consent once.
 | `curate_memory` | — | — | Review durable memory health and optionally consolidate duplicates |
 | `delete_file` | per-call | — | Delete file within workspace (with confirmation) |
 | `edit_file` | — | — | Apply patch/edit to file within workspace |
+| `execute_plan` | — | — | Execute the recorded turn plan in dependency order, dispatching each step by its kind |
 | `export_evidence_ledger` | — | — | Write a validated evidence ledger artifact into the workspace and share its path |
 | `fetch_image` | — | — | Download + verify a real image from a URL/page and save it into the workspace |
 | `forget_document` | — | — | Remove a document from the engram library (scope reference or hard delete) |
@@ -198,6 +199,7 @@ Write operations inside the workspace; session-level consent once.
 | `skill_manage` | — | — | Create, patch, pin, archive, and maintain Skill Library procedures and support files |
 | `spreadsheet_write` | — | — | Write JSON row data to an XLSX file in the workspace |
 | `synthesize_speech` | — | — | Generate speech audio and save it inside the workspace |
+| `transform_image` | — | — | Apply local raster edits (sharpen, soften, resize, crop, rotate) to a workspace image |
 | `use_knowledge_base` | — | — | Run a knowledge base's single-use worker agent on a task, grounded in that KB (may inspect live targets and write outputs) |
 | `user_model_update` | — | — | Revise the agent's evolving model of the current user |
 | `vscode_focus_panel` | — | — | Focus a VS Code panel (terminal, problems, explorer, source-control) |
@@ -258,6 +260,7 @@ Code/command execution; per-invocation approval; always sandboxed.
 | `tool_dev_start` | per-call | required | Start a tool development session in the Docker sandbox |
 | `tool_dev_test` | — | required | Run tests against tool code in the Docker sandbox |
 | `verify_app` | — | — | Verify a serve_app app boots and serves (server-side HTTP/content check + container error logs) |
+| `verify_page` | — | — | Execute a built page's JavaScript against a minimal DOM and report uncaught errors |
 | `vscode_command` | per-call | — | Execute an arbitrary VS Code command (escape hatch) |
 | `vscode_run_terminal_command` | per-call | — | Run a command in VS Code integrated terminal |
 

@@ -1,0 +1,11 @@
+Lagerliste Werkstatt Westmark - Stand 30.09.2026 (Testdatei, alle Angaben erfunden)
+Regal 1: Akku-Schrauber NW-1101, 12 Stueck
+Regal 2: Ladegeraete NW-LG 18, 7 Stueck
+Regal 3: Schutzbrillen NW-3102, 40 Stueck
+Hallentor B: nur werktags zwischen 7 und 16 Uhr oeffnen
+Kalibrierung extern beauftragt: Messschieber NW-4418, Pruefbericht folgt
+Gabelstapler-Schulung: Nachweis GS-5512 liegt im Buero
+Kalibrierintervall Drehmomentschluessel NW-4417: alle 18 Monate, Pruefprotokoll PK-2291
+Sichtpruefung Leitern: alle 6 Monate
+Regal 4: Bit-Sortimente NW-3106, 25 Stueck
+Feuerloescher: naechste Wartung im Maerz 2027

@@ -150,7 +150,7 @@ registerTool({
     const tmpFilename = `playbook_${randomBytes(6).toString("hex")}.yml`;
     const tmpPath = join(tmpdir(), tmpFilename);
     const tmpVaultPath = join(tmpdir(), `vault_${randomBytes(6).toString("hex")}.txt`);
-    let playbookPath = "";
+    let playbookPath: string;
     let shouldDeletePlaybook = false;
     let inventoryPath: string | undefined;
     let shouldDeleteInventory = false;

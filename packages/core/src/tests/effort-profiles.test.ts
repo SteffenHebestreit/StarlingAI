@@ -56,7 +56,12 @@ describe("resolveEffortProfile — built-in tiers", () => {
     const p = resolveEffortProfile("high");
     expect(p.enableThinking).toBe(true);
     expect(p.reasoningEffort).toBe("high");
-    expect(p.turnTimeoutMs).toBe(1_200_000);
+    // 40 min. `high` used to ship 1_200_000 — TEN MINUTES BELOW the 1_800_000 gateway
+    // default — so asking for high effort took time away while its own addendum promised
+    // "an expanded time and tool budget". Asserted as a relation, not a literal: whatever
+    // the numbers become, high must never be the tier that shortens the turn.
+    expect(p.turnTimeoutMs).toBe(2_400_000);
+    expect(p.turnTimeoutMs!).toBeGreaterThan(BUILTIN_EFFORT_PROFILES.low.turnTimeoutMs!);
     expect(p.maxDelegatedResultChars).toBe(40_000);
     expect(p.promptAddendum && p.promptAddendum.length).toBeGreaterThan(0);
     // gates untouched (undefined → inherit config)

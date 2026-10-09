@@ -6,7 +6,18 @@
  */
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
-import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
+import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
+import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
+import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
+import { collectArtifactRecords } from "../agent/artifact-metadata.js";
+// Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
+// are derived from ONE precedence rule; deriving them separately is how they drifted.
+import {
+  resolveDelegationCeilingMs,
+  resolveDelegationDeadlineMs,
+  resolveSoftDeadlineOffsetMs,
+} from "../agent/sub-agent-turn-budget.js";
 // Importing runArchitectFallback also runs ./ephemeral-agent-factory.ts's top-level
 // registerTool side effect, so create_ephemeral_agent stays registered when this
 // module loads. The factory imports a few shared helpers back from here
@@ -23,24 +34,41 @@ import {
   resolveAgentRouting,
   taskRequiresExternalResearch,
   agentIsResearchCapable,
+  agentGathersDirectly,
   preferResearchCapableCandidates,
+  preferFormatProducingCandidates,
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
   pickResearchFallbackAgent,
+  agentCfgReachesOutsideWorkspace,
+  agentCfgWorksOnlyFromHandedText,
+  agentCfgOnlyReadsOpenBrowserTab,
+  agentCfgDrivesSharedBrowser,
+  evidenceGatherPoint,
+  lookupAgentCapabilities,
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
   countRoutingQueryContentTokens,
   shortenOverspecifiedRoutingQuery,
   uniqueNames,
+  logRoutingEvaluated,
+  SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
+  type FileInPlay,
   type RoutingSelectionReason,
 } from "./agent-routing.js";
 import {
   looksLikePlanningOnlyResult,
-  WORKSPACE_MUTATION_TASK_RE,
+  parseFinalAnswerTag,
+  carriesConcreteEvidence,
+  everyWorkToolCallFailed,
   ARTIFACT_PRODUCING_TOOLS,
   agentCfgCanFulfillArtifactTask,
+  delegationAsksForFile,
+  deliverableParameterSchema,
+  readDelegationDeliverable,
+  type DelegationDeliverable,
   looksLikeInfrastructureFailure,
   looksLikeOnlyFailureStubs,
   partialResultHasSubstantiveEvidence,
@@ -60,14 +88,20 @@ export {
   classifyDelegationResult,
   isNarrativeOnlyDeliverableFailure,
   formatArtifactReferencesForSharedContext,
+  readDelegationDeliverable,
   type DelegationClassification,
+  type DelegationDeliverable,
 } from "./delegation-artifact-classification.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { getConfig } from "../config/loader.js";
+import { getSession } from "../agent/session.js";
+import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingSearchStatus } from "../providers/embeddings.js";
-import { getEmbeddingProvider, getChatProviderForTier, getChatProvider } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider, getChatProviderForTier, tierModelDefaults } from "../providers/index.js";
+import type { ChatProvider } from "../providers/lmstudio.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
+import { attemptRestatementRescue } from "../agent/routing-restatement.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -90,6 +124,7 @@ import { longRunningGenerationManager } from "../agent/long-running-generation.j
 
 const log = childLogger("tool:sub-agent");
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
+import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
 import { awaitQuorum } from "../agent/delegation-quorum.js";
 import { shouldCheckSubAgentDisagreement, checkSubAgentDisagreement } from "../agent/sub-agent-disagreement.js";
 
@@ -109,35 +144,12 @@ export {
   requiredExecutionCapabilities,
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
+  SEMANTIC_AGENT_ROUTING_MIN_SCORE,
   type AgentRoutingCandidate,
   type AgentRoutingResolution,
 } from "./agent-routing.js";
 
 const SERVER_EXECUTION_AGENT_NAMES = new Set(["shell_agent", "ops_triage", "infrastructure_agent"]);
-
-/**
- * Carve a synthesis-headroom reserve out of the parent turn budget before handing it
- * to a delegated sub-agent as that sub-agent's OWN hard timeout. A sub-agent today
- * inherits the FULL parent budget, so one slow node can consume the entire turn and
- * leave the orchestrator zero time to synthesize + deliver (audit b6f8336e). When
- * `reserveMs > 0`, the sub-agent gets at most `parentBudget − reserve` (never below
- * `floorMs`), guaranteeing the parent keeps `reserve` ms to finalize.
- *
- * Pure + identity-by-default: `reserveMs = 0` (the config default) returns the parent
- * budget unchanged, and an absent/unbounded budget is passed through untouched, so the
- * knob is a true no-op until explicitly enabled.
- */
-export function reserveSubAgentTimeout(
-  parentBudgetMs: number | undefined,
-  reserveMs: number,
-  floorMs = 60_000,
-): number | undefined {
-  if (typeof parentBudgetMs !== "number" || !Number.isFinite(parentBudgetMs) || parentBudgetMs <= 0) {
-    return parentBudgetMs; // unbounded / absent → leave as-is
-  }
-  if (reserveMs <= 0) return parentBudgetMs; // identity (default off)
-  return Math.max(floorMs, parentBudgetMs - reserveMs);
-}
 
 function buildSemanticRoutingMetadata(resolution: AgentRoutingResolution): Record<string, unknown> {
   const status = getEmbeddingSearchStatus();
@@ -205,6 +217,20 @@ function isStrongRoutingMatch(candidate: { confidence: string }): boolean {
   return candidate.confidence === "high";
 }
 
+/**
+ * The pointer a strong match gets, for every site that emits one. On a turn whose tail asks for a
+ * plan before acting (ToolContext.planFirstPending) it names the agent for the plan's delegate
+ * steps instead of telling the model to delegate now. In session 9991d150 the nudge asked for
+ * record_plan, search_agents' result said "Call delegate_to_agent ... NOW", and the next response
+ * sent two delegations: the second was dropped and no plan was recorded. Any other turn gets the
+ * old line, byte for byte.
+ */
+function strongMatchPointer(agentName: string, ctx: Pick<ToolContext, "planFirstPending">): string {
+  return ctx.planFirstPending === true
+    ? `➡ NEXT ACTION: Use agentName="${agentName}" for the delegate steps of your record_plan.`
+    : `➡ NEXT ACTION: Call delegate_to_agent(agentName="${agentName}", task="<your task>") NOW.`;
+}
+
 // ─── ephemeral-agent / architect factory ──────────────────────────────────────
 // The ephemeral-agent cluster (getEphemeralGenerationSettings, requestArchitectSpec,
 // normalizeArchitectModel, validateEphemeralToolSelection, maybePromoteEphemeral,
@@ -235,6 +261,14 @@ interface DelegationRequest {
    * nodes (caller-pinned ids) leave this off so distinct nodes are never cross-matched.
    */
   allowSignatureReuse?: boolean;
+  /**
+   * What the dispatching call declared the delegation must hand back (DelegationDeliverable in
+   * ./delegation-artifact-classification.ts): the model's `deliverable` argument, or "file" from
+   * the runtime's own corrective build and artifact repair. "file" makes a run that wrote nothing
+   * a missed deliverable; undeclared or "answer", only a write the run's output claims is judged
+   * (looksLikeClaimedWriteMiss). The pre-run gates read it through delegationAsksForFile.
+   */
+  deliverable?: DelegationDeliverable;
 }
 
 interface TaskGraphNodeInput {
@@ -247,6 +281,8 @@ interface TaskGraphNodeInput {
   fallbackAgents?: string[];
   routingQuery?: string;
   skillMatchThreshold?: number;
+  /** Raw model argument; read with readDelegationDeliverable. */
+  deliverable?: unknown;
 }
 
 const DEFAULT_MAX_AGENT_CALLS_PER_TURN = 2;
@@ -265,7 +301,7 @@ function getTotalDelegationLimit(ctx: ToolContext): number {
   return Math.max(DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN, ctx._turnTotalDelegationLimitOverride ?? DEFAULT_MAX_TOTAL_DELEGATIONS_PER_TURN);
 }
 
-function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+export function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
   const counts = new Map<string, number>();
   for (const agentName of agentNames) {
     const normalized = agentName?.trim();
@@ -301,6 +337,52 @@ function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<strin
     _turnAgentRepeatLimitOverrides: repeatOverrides,
     _turnTotalDelegationLimitOverride: nextTotalLimit,
   };
+}
+
+/**
+ * The context one member of a batch (plan step, parallel slice, graph node) is dispatched with.
+ * The batch's evidence gather point keeps the caller's context; every other member is exempt from
+ * the research gate's turn trigger, so it runs on the agent it names. Only on a turn that carries
+ * an evidence requirement — anywhere else the caller's context comes back untouched. The per-turn
+ * counters are created on the caller's context before the copy, so the copy shares them rather
+ * than starting its own.
+ */
+export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): ToolContext {
+  if (ctx.turnEvidence?.required !== true || isGatherPoint || ctx._turnGatherExempt === true) return ctx;
+  if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
+  return { ...ctx, _turnGatherExempt: true };
+}
+
+/** Index of a batch's evidence gather point among its members' agent names, in the order they run, or -1 (see agent-routing). */
+export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyArray<string | undefined>): number {
+  return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
+}
+
+/** An absolute web address in a task: a page the step has to open from outside the workspace. */
+const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
+/** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
+async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
+  try {
+    return Object.keys(await readAllFacts(deriveSharedSessionId(ctx.sessionId))).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this session's swarm has run an agent that drives the shared browser
+ * (agentCfgDrivesSharedBrowser) to the end without failing: an attempt of this turn, or of a task
+ * this turn carried over from the session's previous turn. One still running may not have opened its
+ * page yet, and one that failed may never have: a tab reader would read the tab as it was before.
+ */
+function swarmHasDrivenSharedBrowser(ctx: ToolContext): boolean {
+  const config = getConfig();
+  const promoted = readPromotedAgents(config.workspacePath);
+  return Object.values(ctx.swarmState?.tasks ?? {}).some((task) => (task.attempts ?? []).some((attempt) =>
+    (attempt.status === "completed" || attempt.status === "partial")
+    && agentCfgDrivesSharedBrowser(config.subAgents[attempt.agentName] ?? promoted[attempt.agentName])));
 }
 
 function getEphemeralGenerationSettings() {
@@ -493,6 +575,11 @@ function recomputeTaskTotals(task: SwarmTaskState): void {
 // counts toward the caller's bounded failure budget, so the loop is capped.
 const REUSE_SERVE_LIMIT = 1;
 
+/** Routing rounds one delegation may run before it gives up (executeDelegationWithFallback). Each
+ *  round excludes the agents tried or passed over so far, so the catalog ends the loop long before
+ *  this; the ceiling only backstops a path that queues an agent the exclusions miss. */
+const MAX_ROUTING_ROUNDS_PER_DELEGATION = 32;
+
 function buildExhaustedReuseStop(task: SwarmTaskState, attemptedAgents: string[]): ToolResult {
   // The guidance must live in BOTH fields: parallel_delegate surfaces only a failed
   // slice's `error` to the coordinator, while the single-delegation path surfaces
@@ -520,20 +607,46 @@ function buildTaskSignature(title: string, task: string, dependsOn: string[] = [
   return `${normalizedTitle}::${normalizedTask}::${normalizedDeps}`;
 }
 
+/**
+ * The turn deadline a delegation clamps to, as it stands now. The static _turnDeadlineMs was
+ * refreshed only after a tool call returned, so the next step of an execute_plan, a dependent
+ * task-graph node, or a delegation a specialist made after a wait in its subtree, ran to the
+ * deadline from before the person answered (review #14).
+ */
+function currentTurnDeadlineMs(ctx: ToolContext): number | undefined {
+  return ctx._liveTurnDeadlineMs?.() ?? ctx._turnDeadlineMs;
+}
+
 function resolveTaskLeaseTtlMs(ctx: ToolContext, agentTimeoutMs?: number | "unbound"): number {
   const configured = typeof ctx.turnTimeoutOverrideMs === "number" && ctx.turnTimeoutOverrideMs > 0
     ? ctx.turnTimeoutOverrideMs
     : typeof agentTimeoutMs === "number" ? agentTimeoutMs : 30_000;
-  const remaining = typeof ctx._turnDeadlineMs === "number"
-    ? Math.max(0, ctx._turnDeadlineMs - Date.now())
+  const turnDeadlineMs = currentTurnDeadlineMs(ctx);
+  const remaining = typeof turnDeadlineMs === "number"
+    ? Math.max(0, turnDeadlineMs - Date.now())
     : undefined;
   const bounded = remaining === undefined ? configured : Math.min(configured, remaining);
   return Math.max(5_000, Math.min(bounded, 60_000));
 }
 
-function findReusableSwarmTask(ctx: ToolContext, signature: string): SwarmTaskState | undefined {
+/** Whether a task's run was the given agent's: the agent its result is from, or one it attempted. */
+function taskRanAgent(task: SwarmTaskState, agentName: string): boolean {
+  return task.selectedAgent === agentName || task.attempts.some((attempt) => attempt.agentName === agentName);
+}
+
+/**
+ * The earlier task this delegation's signature matches. With `requiredAgent` (a delegation naming
+ * the agent the user directed the turn to), a task that did not fail matches only when that agent
+ * ran it; a failed one still matches, and the retry check then decides whether the named agent is
+ * new to it. The first match is not enough there: a later delegation to the agent would miss the
+ * agent's own run behind another agent's and start it again, past the reuse limit.
+ */
+function findReusableSwarmTask(ctx: ToolContext, signature: string, requiredAgent?: string): SwarmTaskState | undefined {
   if (!ctx.swarmState) return undefined;
-  return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
+  if (requiredAgent === undefined) return Object.values(ctx.swarmState.tasks).find((task) => task.signature === signature);
+  const matches = Object.values(ctx.swarmState.tasks).filter((task) => task.signature === signature);
+  return matches.find((task) => task.status !== "failed" && taskRanAgent(task, requiredAgent))
+    ?? matches.find((task) => task.status === "failed");
 }
 
 function allocateParallelTaskIds(ctx: ToolContext, count: number): string[] {
@@ -663,14 +776,14 @@ async function findReusableSessionEvidence(
   ctx: ToolContext,
   agentCfg?: { tools?: string[]; capabilities?: string[] },
 ): Promise<{ output: string; factCount: number; partialCount: number } | null> {
-  // If the task asks for an artifact (write/create/erstelle/...) and this
-  // agent has artifact-producing tools, do NOT short-circuit on cached
-  // research evidence — the cached facts won't satisfy the deliverable.
-  // Session 2d810e7d (2026-05-28) reused research findings as a "success"
-  // for content_writer asked to build a multi-file website, so the website
-  // never got written.
+  // If the delegation asks for a file (delegationAsksForFile: its declaration,
+  // else the verb test) and this agent has artifact-producing tools, do NOT
+  // short-circuit on cached research evidence — the cached facts won't satisfy
+  // the deliverable. Session 2d810e7d (2026-05-28) reused research findings as
+  // a "success" for content_writer asked to build a multi-file website, so the
+  // website never got written.
   if (
-    WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())
+    delegationAsksForFile(request.task, request.deliverable)
     && (agentCfg?.tools ?? []).some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))
   ) {
     return null;
@@ -732,28 +845,32 @@ async function findReusableSessionEvidence(
 
 function agentCanFulfillArtifactTask(
   agentName: string,
-  task: string,
+  request: Pick<DelegationRequest, "task" | "deliverable">,
   _ctx: ToolContext,
 ): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  if (!delegationAsksForFile(request.task, request.deliverable)) return true;
   const config = getConfig();
   const promotedAgents = readPromotedAgents(config.workspacePath);
   const cfg = config.subAgents[agentName] ?? promotedAgents[agentName];
-  return agentCfgCanFulfillArtifactTask(task, cfg);
+  return agentCfgCanFulfillArtifactTask(request.task, cfg, request.deliverable);
 }
 
 /**
- * True when a delegation is a RENDER/ARTIFACT step: the task asks to produce a
- * concrete deliverable (write the file / create the deck / generate the site) AND the
- * target agent can actually produce it. Such a step consumes already-gathered shared
- * facts; it must NOT be hijacked by the source-sensitive research-incapable redirect,
- * even when the brief carries research wording ("cite the official sources", "use the
- * verified URLs"). Audit 6b382964: a reveal.js write delegation to content_writer was
- * bounced to researcher, which narrated and never wrote the deck.
+ * True when a delegation is a RENDER/ARTIFACT step: it asks for a file
+ * (delegationAsksForFile: its declaration, else the verb test) AND the target agent can
+ * actually produce it. Such a step consumes already-gathered shared facts; it must NOT be
+ * hijacked by the source-sensitive research-incapable redirect, even when the brief carries
+ * research wording ("cite the official sources", "use the verified URLs"). Audit 6b382964: a
+ * reveal.js write delegation to content_writer was bounced to researcher, which narrated and
+ * never wrote the deck.
  */
-export function isArtifactRenderTask(task: string, cfg: { tools?: string[] } | undefined): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
-  return agentCfgCanFulfillArtifactTask(task, cfg);
+export function isArtifactRenderTask(
+  task: string,
+  cfg: { tools?: string[] } | undefined,
+  deliverable?: DelegationDeliverable,
+): boolean {
+  if (!delegationAsksForFile(task, deliverable)) return false;
+  return agentCfgCanFulfillArtifactTask(task, cfg, deliverable);
 }
 
 function getKnownDelegationAgentNames(workspacePath?: string): Set<string> {
@@ -838,14 +955,14 @@ function maybeEnrichServerDelegationContext(agentName: string, task: string, con
       `- port: ${port}`,
       `- username: ${username}`,
       authMethod ? `- authMethod: ${authMethod}` : "",
-      `Use ssh_exec with nodeName=\"${nodeName}\" so the runtime can reuse the configured target and credentials instead of rediscovering them.`,
+      `Use ssh_exec with nodeName="${nodeName}" so the runtime can reuse the configured target and credentials instead of rediscovering them.`,
       /\b(docker|container|containers)\b/i.test(task)
         ? "This is a direct remote inventory task. Prefer one SSH command such as docker ps or docker ps --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Ports}}' and then stop."
         : "Prefer a direct remote command first and only inspect local config files if that remote call fails and you need to verify the configuration.",
       "Do not spend multiple iterations browsing local runtime or workspace files when the target is already identified above.",
     ].filter(Boolean).join("\n");
 
-    if (context?.includes(`nodeName: ${nodeName}`) || context?.includes(`nodeName=\"${nodeName}\"`)) {
+    if (context?.includes(`nodeName: ${nodeName}`) || context?.includes(`nodeName="${nodeName}"`)) {
       return context;
     }
     return context ? `${context}\n\n${addition}` : addition;
@@ -879,6 +996,7 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
       if (agentCfgIsMetaFactory(cfg)) excluded.add(name);
     }
   }
+  const routingStartedAt = Date.now();
   const medium = await resolveAgentRouting(query, {
     minConfidence: "medium",
     allowedAgents: ctx.allowedAgents,
@@ -886,11 +1004,32 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
   });
 
   let candidates: AgentRoutingCandidate[] = medium.results;
+  // This is THE router in production: every live delegation was model-named, so
+  // search_agents (the only surface that logged a row) was never called while this
+  // path decided the target on every un-named delegation. Log the medium pass here
+  // and the low-confidence retry below, so the fallback is visible as its own row.
+  logRoutingEvaluated({
+    surface: "delegation",
+    query,
+    resolution: medium,
+    elapsedMs: Date.now() - routingStartedAt,
+    ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+    extra: { excludedCount: excluded.size, pass: "medium" },
+  });
   if (candidates.length === 0) {
+    const lowStartedAt = Date.now();
     const low = await resolveAgentRouting(query, {
       minConfidence: "low",
       allowedAgents: ctx.allowedAgents,
       excludeAgents: [...excluded],
+    });
+    logRoutingEvaluated({
+      surface: "delegation",
+      query,
+      resolution: low,
+      elapsedMs: Date.now() - lowStartedAt,
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+      extra: { excludedCount: excluded.size, pass: "low", afterEmptyMedium: true },
     });
     candidates = [...low.results, ...low.weakCandidates];
 
@@ -947,9 +1086,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // sets allowSignatureReuse because its `parallel_N` ids are auto-allocated, so a later round
   // that re-issues the same canonical research reuses the earlier slice's evidence instead of
   // re-running it (audit d20a9a5e: the coordinator researched the same request twice = ~2x turn).
+  //
+  // A delegation naming the agent the user directed the turn to (`--agent`) is served only that
+  // agent's own earlier result. Matched by signature alone, the runtime's own dispatch to the agent
+  // (the user's request as its task) was served what an ephemeral agent had answered for an
+  // undirected delegation of the same words: the named agent never ran, the turn stayed directed,
+  // and the next dispatch hit the reuse limit until the turn ended in a delegation failure
+  // (integration review, 2026-10-08). No other delegation is affected.
+  const reuseBoundToAgent = ctx.directiveAgent !== undefined && request.agentName?.trim() === ctx.directiveAgent
+    ? ctx.directiveAgent
+    : undefined;
   const reusableTask = reusableTaskById?.signature === signature
+    && (reuseBoundToAgent === undefined || reusableTaskById.status === "failed" || taskRanAgent(reusableTaskById, reuseBoundToAgent))
     ? reusableTaskById
-    : ((request.taskId && !request.allowSignatureReuse) ? undefined : findReusableSwarmTask(ctx, signature));
+    : ((request.taskId && !request.allowSignatureReuse) ? undefined : findReusableSwarmTask(ctx, signature, reuseBoundToAgent));
   const reusableTaskAttemptedAgents = reusableTask?.attempts.map((attempt) => attempt.agentName) ?? [];
 
   if (reusableTask?.status === "completed" && reusableTask.output) {
@@ -1071,6 +1221,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // "No suitable agent completed the task" which makes the coordinator
   // think it's a routing problem and re-delegate the same work.
   const cappedCandidates: string[] = [];
+  // Every candidate passed over WITHOUT an attempt (coordinator recursion, per-agent cap, outside
+  // the turn's scope). Re-routing excluded only ATTEMPTED agents, so a skipped top match came back
+  // on every round: session ffe08297 (2026-10-06) re-routed "browser automation for web scraping"
+  // ~750 times a minute for hours — browser_agent was at its turn cap — and the graph node never
+  // started, while the run's unbounded grant kept every deadline off.
+  const skippedCandidates = new Set<string>();
+  const excludedFromRouting = (): string[] => [...attemptedAgents, ...skippedCandidates];
+  let routingRounds = 0;
+  // The research gate's turn trigger for a ROUTED pick: decided at this delegation's first routing
+  // round and kept for the rest (see Step 1 below).
+  let routedTurnTriggered: boolean | undefined;
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1116,12 +1277,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       terminalState?: string;
       routingInfo?: RoutingSelectionReason;
       artifacts?: Record<string, unknown>[];
+      loopEnforced?: SubAgentLoopEnforced;
+      wardenStop?: SubAgentWardenStop;
+      executions?: DelegatedExecutionRecord;
+      maskedRuns?: MaskedDelegatedRun[];
     }
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
   const routingCandidateMap = new Map<string, RoutingSelectionReason>();
+  // The failed tool calls of every candidate that ran, the one whose result is returned included.
+  // Each return below carries them as specialistToolFailures, which the orchestrator's frame lists
+  // beside the specialist's own account of what it did.
+  const specialistToolFailures: SubAgentToolFailure[] = [];
+  const withToolFailures = (): Record<string, unknown> =>
+    (specialistToolFailures.length > 0 ? { specialistToolFailures: [...specialistToolFailures] } : {});
 
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  // The turn's looped runs (agent/delegation-loop-notes.ts). The runtime creates it per turn; a
+  // caller that did not (a scene, a test) gets one here, shared onward by reference.
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
 
   // Research-capability gate for EXPLICIT delegations (the routing/bidding gates
   // only cover undirected picks). If a source-sensitive / "search online" task
@@ -1129,6 +1303,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // a generator ranked high in search_agents), redirect to a research-capable
   // agent so a generator never runs a research task. Closes the loop the
   // routing/bidding gates opened. Only redirects when a capable fallback exists.
+  //
+  // TWO TRIGGERS arm it: the task's own text (taskRequiresExternalResearch, English-only
+  // since the de-lex) and, on a turn the up-front judge said needs outside facts, the TURN
+  // TRIGGER below, which reads no words and so also catches a step written in German.
+  // Everything after the trigger — the render exemption, explicitCoversExecution, the
+  // capable filter and the fallback pick — is the same block for both; only the turn trigger
+  // restricts the fallback to an agent this turn can still dispatch.
   //
   // EXCEPTION — RENDER/ARTIFACT delegations: writing the deck / creating the file /
   // generating the site from already-gathered shared facts is NOT a gather task, even
@@ -1150,9 +1331,45 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const renderCfgPromoted = readPromotedAgents(renderCfgConfig.workspacePath);
   // Pure over the (constant-here) task text — compute once and reuse across the render/redirect
   // block instead of re-running the regex classifier three times on the delegation hot path.
-  const requiresExternalResearch = taskRequiresExternalResearch(request.task);
+  const textRequiresResearch = taskRequiresExternalResearch(request.task);
+  // THE TURN TRIGGER — the same redirect, armed by structure instead of by the task's words.
+  // The word shape above is English-only, so a plan written in German sailed past it: a step
+  // naming web_coder to "die Website … abrufen" ran on web_coder, which cannot read a page, and the
+  // turn answered "not available" (E2E 2026-10-07, sessions 2f31f387 / 9ddd881f / f4fdf38e; the
+  // English twin dee3be85 was redirected only because its OBJECTIVE said "Find … website"). The
+  // signals here are the up-front judge's verdict (an LLM, any language), the named agents' routing
+  // taxonomy, and what this turn has engaged so far. It arms only when every condition holds:
+  //  - the judge said this turn needs outside facts (ctx.turnEvidence, orchestrator turns only),
+  //  - nothing this turn has reached outside the workspace yet (no such agent dispatched or
+  //    redirected to, no workflow or ephemeral agent run — ctx.turnEvidence.outsideEngaged), and
+  //    this delegation is its plan's / batch's gather point,
+  //  - every agent it names works only from the text it is handed (no outside surface, no source of
+  //    its own) — a mailbox, desktop, database or remote-infra agent always keeps its step,
+  //  - and, read below, the session holds no shared facts yet: once evidence exists a builder is
+  //    rendering it, which is the render exemption's own precondition.
+  // It redirects at most once per turn, only to an agent this turn may still dispatch, and leaves
+  // every other choice the model made exactly as it was.
+  const turnTriggerCandidate = ctx.turnEvidence?.required === true
+    && !ctx.turnEvidence.outsideEngaged
+    && ctx._turnGatherExempt !== true
+    && explicitAgentRequested
+    && candidateQueue.length > 0
+    && candidateQueue.every((name) => agentCfgWorksOnlyFromHandedText(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+  // THE TAB READER — an agent that only reads the page the shared browser tab shows
+  // (agentCfgOnlyReadsOpenBrowserTab). The trigger above stands down once anything this turn has
+  // reached outside, the step is exempt, or the session holds facts, and none of that puts a page of
+  // this session's in the tab. c172d755 named vision_browser_analyst for both of its site steps: the
+  // gather point went to researcher, which reads with web_fetch and leaves the tab where it was, and
+  // the second step ran exempt on a page another session had opened. So on a turn the judge flagged,
+  // a step for tab readers alone is redirected the same way until an agent that drives the browser
+  // has run for this session (swarmHasDrivenSharedBrowser); a step that runs after one keeps it.
+  const tabReaderUnserved = ctx.turnEvidence?.required === true
+    && explicitAgentRequested
+    && candidateQueue.length > 0
+    && candidateQueue.every((name) => agentCfgOnlyReadsOpenBrowserTab(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]))
+    && !swarmHasDrivenSharedBrowser(ctx);
   let renderHasGatheredFacts = true;
-  if (requiresExternalResearch) {
+  if (textRequiresResearch || turnTriggerCandidate) {
     try {
       const facts = await readAllFacts(deriveSharedSessionId(ctx.sessionId));
       renderHasGatheredFacts = Object.keys(facts).length > 0;
@@ -1160,10 +1377,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       renderHasGatheredFacts = false;
     }
   }
+  // Re-read after the await: a sibling of this delegation may have taken the turn's one redirect.
+  const turnTriggered = (turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged) || tabReaderUnserved;
+  const requiresExternalResearch = textRequiresResearch || turnTriggered;
+  const researchTrigger = textRequiresResearch ? "task_text" : "turn_evidence";
+  // A tab reader renders from the tab, not from the shared facts, so the render exemption is not its.
   const isArtifactRenderDelegation = renderHasGatheredFacts
+    && !tabReaderUnserved
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
-      isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+      isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name], request.deliverable));
   if (isArtifactRenderDelegation && requiresExternalResearch) {
     logAudit("delegation_render_research_redirect_skipped", {
       taskTitle: title,
@@ -1187,11 +1410,21 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   if (!isArtifactRenderDelegation && !explicitCoversExecution && requiresExternalResearch && candidateQueue.length > 0) {
     const capable = candidateQueue.filter((name) => agentIsResearchCapable(name));
     if (capable.length === 0) {
-      const fallback = pickResearchFallbackAgent(attemptedAgents);
+      // The turn trigger never dead-ends: an explicit request does not fall back to routing, so a
+      // redirect to an agent the attempt loop would skip — outside this turn's allowedAgents, or at
+      // its per-turn cap — would leave the step with nobody. Then the named agent keeps it.
+      const fallback = pickResearchFallbackAgent(
+        attemptedAgents,
+        textRequiresResearch
+          ? undefined
+          : (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+            && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+      );
       logAudit("delegation_explicit_redirected_research_incapable", {
         taskTitle: title,
         requestedAgents: candidateQueue,
         redirectedTo: fallback ?? null,
+        trigger: researchTrigger,
       }, { sessionId: ctx.sessionId });
       if (fallback) {
         routingCandidateMap.set(fallback, {
@@ -1204,6 +1437,28 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     } else if (capable.length < candidateQueue.length) {
       candidateQueue = capable;
     }
+    // Leave a trace of WHO ended up carrying a source-sensitive delegation and whether it can
+    // reach the web itself. The branch above narrowed silently, and the far more common case —
+    // session 00b3675d — never reached it at all: a writer holding `delegate_to_agent` passes
+    // `agentIsResearchCapable`, so nothing narrowed, nothing was logged, and four pricing
+    // reports were written from model memory with `delegationOutcome: "success"`. This row is
+    // the cheap form of the settling measurement (what fraction of source-sensitive delegations
+    // land on something that actually gathers): one field instead of a join across sub-session
+    // subtrees for `web_search`/`web_fetch` calls.
+    logAudit("delegation_research_candidate_selected", {
+      taskTitle: title,
+      selected: candidateQueue[0] ?? null,
+      gathersDirectly: candidateQueue[0] ? agentGathersDirectly(candidateQueue[0]) : null,
+      narrowed: capable.length > 0 && capable.length < candidateQueue.length,
+      explicitAgentRequested,
+      trigger: researchTrigger,
+    }, { sessionId: ctx.sessionId });
+  }
+  // Claimed here, synchronously after the decision, so a sibling resuming from its own fact read
+  // sees it (the re-read above): the turn's outside source is now engaged.
+  if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]
+    && agentCfgReachesOutsideWorkspace(renderCfgConfig.subAgents[candidateQueue[0]] ?? renderCfgPromoted[candidateQueue[0]])) {
+    ctx.turnEvidence.outsideEngaged = candidateQueue[0];
   }
 
   while (true) {
@@ -1265,15 +1520,27 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         break;
       }
 
+      // Each round excludes one more agent, so the catalog bounds the rounds; this ceiling is the
+      // backstop should any path queue an agent the exclusions miss.
+      if (++routingRounds > MAX_ROUTING_ROUNDS_PER_DELEGATION) {
+        logAudit("delegation_routing_rounds_exhausted", {
+          taskTitle: title,
+          rounds: routingRounds - 1,
+          attemptedAgents,
+          skippedAgents: [...skippedCandidates],
+        }, { sessionId: ctx.sessionId, severity: "warn" });
+        break;
+      }
+
       // ── Step 1: embedding + keyword routing (fast, outcome-boosted) ──────
       // Run first for all undirected delegations — deterministic, uses
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
-        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, attemptedAgents);
+        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting());
         // Drop candidates that cannot produce the deliverable the task asks
         // for. See agentCanFulfillArtifactTask for the regression context.
         let routingCandidates = allRoutingCandidates.filter((cand) =>
-          agentCanFulfillArtifactTask(cand.name, request.task, ctx)
+          agentCanFulfillArtifactTask(cand.name, request, ctx)
         );
         if (routingCandidates.length === 0 && allRoutingCandidates.length > 0) {
           logAudit("delegation_routing_filtered_artifact_incapable", {
@@ -1306,6 +1573,78 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             routingCandidates = [];
           } else {
             routingCandidates = researchCapable;
+          }
+        }
+        // THE TURN TRIGGER, for a routed pick. The gate above reads the task's words, which match
+        // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
+        // asking in German to fetch a page named an agent the catalog does not have (web_crawler),
+        // so it was routed, and the router put vision_browser_analyst, which can read the shared
+        // browser tab but not open a page, ahead of browser_agent and researcher (79dd29e0,
+        // 3c91cb68). It answered from a page another session had left there. The explicit path's
+        // turn trigger never saw the step: a plan leaves a step naming no known agent to routing
+        // (evidenceGatherPoint), so the step ran exempt.
+        // The router is therefore held to the same rule here, on the same conditions: the judge said
+        // this turn needs outside facts, nothing this turn has reached outside the workspace yet, and
+        // the session holds no shared facts. A candidate that works only from what it is handed
+        // (agentCfgWorksOnlyFromHandedText) cannot gather them, so it is dropped; when no other
+        // candidate was routed, the research fallback takes the step if this turn may still dispatch
+        // one, and otherwise the candidates stay (never a dead end). A candidate with a source of its
+        // own (the web, a mailbox, a codebase) keeps its rank. Decided at the first routing round and
+        // kept, so a gatherer that fails does not leave the next round free to pick the tab reader.
+        if (routedTurnTriggered === undefined) {
+          routedTurnTriggered = ctx.turnEvidence?.required === true
+            && !ctx.turnEvidence.outsideEngaged
+            && !(await sessionHoldsSharedFacts(ctx))
+            // Re-read after the await, as the explicit path does: a sibling may have engaged one.
+            && !ctx.turnEvidence.outsideEngaged;
+        }
+        // Once the trigger stands down, a routed tab reader is still held to the explicit path's tab
+        // rule (tabReaderUnserved): on a turn the judge flagged, it is dropped until an agent that
+        // drives the browser has run for this session.
+        const tabReadersBarred = !routedTurnTriggered && ctx.turnEvidence?.required === true && !swarmHasDrivenSharedBrowser(ctx);
+        if ((routedTurnTriggered || tabReadersBarred) && !textRequiresResearch && routingCandidates.length > 0) {
+          const turnCfg = getConfig();
+          const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
+          const unfitForTurn = routedTurnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
+          let gatherable = routingCandidates.filter((cand) =>
+            !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+          // A step that names a web address has to be read from outside, so a candidate whose source
+          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
+          // outside, when the router offered one. A routed step names no agent whose source it is
+          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
+          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
+          // cannot open the page either. Without a web address such a candidate keeps its rank.
+          if (routedTurnTriggered && WEB_ADDRESS_RE.test(request.task)) {
+            const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+            if (reaching.length > 0) gatherable = reaching;
+          }
+          if (gatherable.length < routingCandidates.length) {
+            const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
+              attemptedAgents,
+              (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+                && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+            );
+            // With no other candidate and no fallback this turn may dispatch, nothing is dropped.
+            const dropped = gatherable.length > 0 || fallback
+              ? routingCandidates.filter((cand) => !gatherable.includes(cand)).map((cand) => cand.name)
+              : [];
+            logAudit("delegation_routing_filtered_research_incapable", {
+              taskTitle: title,
+              droppedAgents: dropped,
+              redirectedTo: fallback ?? null,
+              trigger: "turn_evidence",
+            }, { sessionId: ctx.sessionId });
+            if (gatherable.length > 0) {
+              routingCandidates = gatherable;
+            } else if (fallback) {
+              routingCandidateMap.set(fallback, {
+                confidence: "medium",
+                matchedTerms: ["research", "turn-evidence", "redirected"],
+                score: 0.7,
+              });
+              candidateQueue.push(fallback);
+              routingCandidates = [];
+            }
           }
         }
         // Capability-aware gate: when the task needs a concrete execution tool class
@@ -1375,6 +1714,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             candidateQueue.push(topCandidate.name);
           }
         }
+        // Claimed here, synchronously after the decision, as the explicit path claims its pick. The
+        // dispatch below claims it too, but only after the lease, budget and admission waits: two
+        // routed builder slices of one parallel_delegate each decided before either got there, both
+        // dropped web_coder, and the build never ran.
+        if (routedTurnTriggered && ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]) {
+          const pickConfig = getConfig();
+          const pick = candidateQueue[0];
+          if (agentCfgReachesOutsideWorkspace(pickConfig.subAgents[pick] ?? readPromotedAgents(pickConfig.workspacePath)[pick])) {
+            ctx.turnEvidence.outsideEngaged = pick;
+          }
+        }
       }
 
       // ── Step 1b: shortened-query recovery for verbose task-only delegations ──
@@ -1394,8 +1744,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (candidateQueue.length === 0 && !request.routingQuery && !explicitAgentRequested) {
         const shortened = shortenOverspecifiedRoutingQuery(request.task);
         if (shortened) {
-          const shortlisted = (await routeAgentCandidates(shortened, ctx, attemptedAgents))
-            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request.task, ctx));
+          const shortlisted = (await routeAgentCandidates(shortened, ctx, excludedFromRouting()))
+            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request, ctx));
           const top = shortlisted[0];
           if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {
             bestAutoMatchScore = top.score;
@@ -1426,7 +1776,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
         const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
-        let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request.task, ctx));
+        let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request, ctx));
         if (bids.length === 0 && rawBids.length > 0) {
           logAudit("delegation_bidding_filtered_artifact_incapable", {
             taskTitle: title,
@@ -1494,13 +1844,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
 
     const candidate = candidateQueue.shift()!;
-    if (attemptedAgents.includes(candidate)) continue;
+    if (attemptedAgents.includes(candidate) || skippedCandidates.has(candidate)) continue;
 
     // Coordinator→coordinator block: a coordinator caller skips any coordinator
     // candidate so the hierarchy stays flat (coordinator → leaf specialist), instead
     // of nesting mission_coordinator under mission_coordinator. Skipped before the
     // attempt counter so it isn't recorded as a real attempt.
     if (callerIsCoordinator && agentNameIsCoordinator(candidate)) {
+      skippedCandidates.add(candidate);
       if (!skippedCoordinatorCandidates.includes(candidate)) {
         skippedCoordinatorCandidates.push(candidate);
         logAudit("delegation_coordinator_recursion_blocked", {
@@ -1521,12 +1872,14 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (!cappedCandidates.includes(candidate)) {
         cappedCandidates.push(candidate);
       }
+      skippedCandidates.add(candidate);
       continue;
     }
     // Skip a candidate this turn's scope forbids BEFORE consuming its per-agent budget or marking
     // it attempted — otherwise a disallowed agent burns per-turn state it never actually ran on
     // (and pollutes the attemptedAgents diagnostic with an agent that was never tried).
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(candidate)) {
+      skippedCandidates.add(candidate);
       continue;
     }
 
@@ -1569,7 +1922,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // DST-103 result following: the winner publishes a fence-guarded durable
       // result on the lease key — wait for it (bounded by the remaining turn
       // budget, capped) instead of duplicating the work.
-      const remainingBudgetMs = typeof ctx._turnDeadlineMs === "number" ? ctx._turnDeadlineMs - Date.now() : 0;
+      const turnDeadlineMs = currentTurnDeadlineMs(ctx);
+      const remainingBudgetMs = typeof turnDeadlineMs === "number" ? turnDeadlineMs - Date.now() : 0;
       const followWaitMs = Math.max(0, Math.min(remainingBudgetMs - 5_000, 30_000));
       const winner = await waitForTaskLeaseResult(leaseScope, { timeoutMs: followWaitMs });
       if (winner) {
@@ -1762,6 +2116,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     try {
     ctx._turnAgentCounts.set(candidate, prevCalls + 1);
     attemptedAgents.push(candidate);
+    // A routed or bid pick that reaches outside the workspace engages the turn's outside source too.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && agentCfgReachesOutsideWorkspace(agentCfg)) {
+      ctx.turnEvidence.outsideEngaged = candidate;
+    }
 
     const startedAt = new Date().toISOString();
     taskState.status = "running";
@@ -1922,12 +2280,60 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           "\nDo NOT repeat these exact approaches. Use a different strategy or source.\n";
         handoffContext = handoffPrefix + (enrichedContext ? `\n${enrichedContext}` : "");
       }
+      // C5' (b), orchestration.loopAwareDelegation: an earlier run of THIS agent in this turn looped,
+      // so this one is told the calls it repeated. Keyed on agent + tool + target, not on how alike
+      // the two tasks read: in c297c5ea the re-dispatch after a 199-iteration loop shared 0.29 of
+      // its words with the first task and would have repeated the loop all the same.
+      const priorLoopNote = effectiveOrchestration().loopAwareDelegation === true
+        ? buildPriorLoopNote(ctx._turnLoopRuns, candidate)
+        : null;
+      if (priorLoopNote) {
+        handoffContext = priorLoopNote + (handoffContext ? `\n\n${handoffContext}` : "");
+        logAudit("delegation_prior_loop_noted", {
+          agentName: candidate,
+          taskTitle: title,
+          calls: (ctx._turnLoopRuns ?? []).filter((record) => record.agent === candidate && record.loop).length,
+        }, { sessionId: ctx.sessionId, severity: "info" });
+      }
+
+      // A delegated child must never be handed more time than the parent turn has LEFT, minus the
+      // headroom the parent needs to synthesize + deliver what comes back. The caller budget is a
+      // STATIC number (gateway/rpc.ts sets the whole turn timeout on EVERY turn), so a child
+      // delegated 3 minutes into a 30-minute turn was still offered the full 30: run 3959f3ac's
+      // backend_coder ran 1,615,806 ms of an 1,800,000 ms turn (90%) and the orchestrator was cut
+      // mid-synthesis (finishReason "aborted_synthesized", recoveredAssistantText false) with the
+      // files it had built never delivered. All three numbers below derive from the SAME resolver
+      // and the SAME reserve, so the hard ceiling, the deadline handed down and the E18 soft
+      // deadline cannot drift apart the way the hard/soft pair once did.
+      const delegationNowMs = Date.now();
+      const parentDeadlineMs = currentTurnDeadlineMs(ctx);
+      const synthesisReserveMs = getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0;
+      const delegationCeilingMs = resolveDelegationCeilingMs({
+        callerBudgetMs: ctx.turnTimeoutOverrideMs,
+        parentDeadlineMs,
+        nowMs: delegationNowMs,
+        synthesisReserveMs,
+      });
+      // The deadline the child — and everything IT delegates — runs to. agent/sub-agent.ts copies
+      // the deadline it RECEIVED onto its own tool context, so tightening it here is what makes
+      // nested delegation compound the reserve (depth 1 ends by D−reserve, depth 2 by D−2×reserve)
+      // instead of every level racing the same absolute instant with nothing left over for the
+      // level above it. No depth counter needed; the sequence is monotonically non-increasing.
+      const delegationDeadlineMs = resolveDelegationDeadlineMs({
+        parentDeadlineMs,
+        nowMs: delegationNowMs,
+        synthesisReserveMs,
+      });
 
       const subAgentArgs = {
         agentName: candidate,
         task: request.task,
         taskTitle: request.taskTitle,
         context: handoffContext,
+        // Beside the task, never merged into it: `task` drives routing, the reuse signature and
+        // translation, and the user's words must reach the specialist untouched by any of them.
+        // Every tool-level delegation passes through here, execute_plan's steps included.
+        turnUserWords: ctx.turnUserWords,
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
@@ -1942,40 +2348,33 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         maxIterationsOverride: ctx.maxIterationsOverride,
         // Reserve synthesis headroom for the parent so a single slow sub-agent can't
         // consume the entire turn budget and leave nothing for finalize+deliver
-        // (audit b6f8336e). Identity (= ctx.turnTimeoutOverrideMs) until the reserve
-        // knob is set; soft deadline below derives from this same effective value.
-        turnTimeoutOverrideMs: reserveSubAgentTimeout(
-          ctx.turnTimeoutOverrideMs,
-          getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
-        ),
+        // (audit b6f8336e, run 3959f3ac). Only ever REDUCES the caller budget, and is
+        // `undefined` when the caller had none — see resolveDelegationCeilingMs for why
+        // inventing one there would LENGTHEN a leaf agent's budget instead.
+        turnTimeoutOverrideMs: delegationCeilingMs,
         swarmState: ctx.swarmState,
         onSwarmState: ctx.onSwarmState,
         _turnAgentCounts: ctx._turnAgentCounts,
+        _turnLoopRuns: ctx._turnLoopRuns,
         _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
         _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
         _workflowExecutionStack: ctx._workflowExecutionStack,
-        // D3: propagate the parent turn's absolute deadline so the specialist clamps its hard timeout
-        // to the remaining budget (orchestration.clampSubAgentTimeoutToParent).
-        _turnDeadlineMs: ctx._turnDeadlineMs,
+        // D3: propagate the (reserve-tightened) turn deadline so the specialist clamps its hard
+        // timeout to the remaining budget (orchestration.clampSubAgentTimeoutToParent) — and so its
+        // OWN delegations clamp to a deadline that already excludes this level's headroom.
+        _turnDeadlineMs: delegationDeadlineMs,
         // E18: Soft deadline — give the specialist 70% of its effective timeout so
         // it starts wrapping up before the hard timeout fires.
         softDeadlineMs: (() => {
-          // Derive from the SAME reserved budget as the hard timeout above so the soft
-          // deadline (70%) stays proportional when a synthesis reserve is in effect.
-          const reserved = reserveSubAgentTimeout(
-            ctx.turnTimeoutOverrideMs,
-            getConfig().orchestration?.subAgentSynthesisReserveMs ?? 0,
-          );
-          const raw = reserved ?? agentCfg?.turnTimeoutMs ?? 60_000;
-          // "unbound" (no numeric budget) → push the soft deadline effectively
-          // out of reach so it never fires for long-running agents.
-          const effective = typeof raw === "number" ? raw : Number.MAX_SAFE_INTEGER;
-          const softMs = Date.now() + Math.floor(effective * 0.70);
-          // D3: don't let the wrap-up nudge land AFTER the parent turn's hard deadline (else it never
-          // fires and the specialist is guillotined mid-flight). Clamp when the clamp flag is on.
-          return (getConfig().orchestration?.clampSubAgentTimeoutToParent === true && typeof ctx._turnDeadlineMs === "number")
-            ? Math.min(softMs, ctx._turnDeadlineMs)
-            : softMs;
+          // Derive from the SAME parent-relative ceiling as the hard timeout above so the soft
+          // deadline (70%) stays proportional to the time that actually remains, and from the SAME
+          // min(caller, declared) precedence the runner resolves the hard deadline with — see
+          // resolveSoftDeadlineOffsetMs for why that matters.
+          const softMs = delegationNowMs + resolveSoftDeadlineOffsetMs(delegationCeilingMs, agentCfg?.turnTimeoutMs);
+          // Don't let the wrap-up nudge land AFTER the deadline the specialist is running to (else it
+          // never fires and the specialist is guillotined mid-flight). Unconditional: the deadline
+          // above is already parent-relative, so the two must agree whatever the clamp flag says.
+          return typeof delegationDeadlineMs === "number" ? Math.min(softMs, delegationDeadlineMs) : softMs;
         })(),
       };
 
@@ -1989,6 +2388,20 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
       } | undefined;
       let artifacts: Record<string, unknown>[] = [];
+      // What the loop brake did on this run and whether the warden stopped it (agent/sub-agent.ts
+      // SubAgentLoopEnforced / SubAgentWardenStop), passed up in the result's metadata.
+      let runLoopEnforced: SubAgentLoopEnforced | undefined;
+      let runWardenStop: SubAgentWardenStop | undefined;
+      // Tool calls of THIS run that ran and failed (their tool names) — a nested specialist's
+      // failures and the person's declines excluded. A structural input to
+      // classifyDelegationResult (2026-10-05).
+      let runOwnFailedToolNames: string[] | undefined;
+      // The code the run executed and the figures it masked (agent/delegated-run-record.ts),
+      // passed up as specialistExecutions.
+      let runExecutions: DelegatedExecutionRecord | undefined;
+      // And each run under it that masked figures, by name, when the run delegated (a coordinator):
+      // passed up as maskedRuns, so the turn names that run and its files only.
+      let runMaskedRuns: MaskedDelegatedRun[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2003,6 +2416,25 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           artifacts = Array.isArray(maybeResult.artifacts)
             ? maybeResult.artifacts.map((artifact) => ({ ...artifact }))
             : [];
+          if (Array.isArray(maybeResult.toolFailures)) specialistToolFailures.push(...maybeResult.toolFailures);
+          runOwnFailedToolNames = (maybeResult.toolFailures ?? [])
+            .filter((failure) => (failure.agent ?? candidate) === candidate && !failure.declinedByUser)
+            .map((failure) => failure.tool);
+          runExecutions = readExecutionRecord(maybeResult.executions) ?? undefined;
+          runMaskedRuns = readMaskedRuns(maybeResult.maskedRuns);
+          runLoopEnforced = maybeResult.loopEnforced;
+          runWardenStop = maybeResult.wardenStop;
+          if (runLoopEnforced || runWardenStop) {
+            // The turn's record (agent/delegation-loop-notes.ts), shared with every level of it.
+            ctx._turnLoopRuns?.push({
+              agent: candidate,
+              coordinator: agentNameIsCoordinator(candidate),
+              ...(runLoopEnforced ? { loop: { ...runLoopEnforced } } : {}),
+              ...(runWardenStop ? { wardenStop: { ...runWardenStop } } : {}),
+              ...(stats.outcome ? { outcome: stats.outcome } : {}),
+              paths: collectArtifactRecords({ artifacts }).map((record) => record.ref),
+            });
+          }
         } else {
           output = await runSubAgent(subAgentArgs);
         }
@@ -2033,16 +2465,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (!await leaseStillCurrent()) return abandonLostLease();
 
       let delegationOutcome = stats?.outcome;
-      let parsedOutcome: any = null;
-      const tagMatch = output.match(/<final_answer\s+status="([^"]+)">([\s\S]*?)<\/final_answer>/i);
-      if (tagMatch) {
-        parsedOutcome = { status: tagMatch[1]!.toLowerCase(), data: tagMatch[2]!.trim() };
-      }
+      // One parser for the tag everywhere (parseFinalAnswerTag; the run's own stats.outcome reads
+      // the same one in agent/sub-agent.ts).
+      const parsedOutcome = parseFinalAnswerTag(output);
 
       if (parsedOutcome && parsedOutcome.status) {
         delegationOutcome = parsedOutcome.status;
         output = parsedOutcome.data || output;
       }
+      // After the tag, so a run's own `<final_answer status="success">` cannot outrank its record:
+      // figures it had to mask were not computed, whatever it says about them (E2E 2026-10-07).
+      // classifyDelegationResult then reads "partial" and no other candidate is run against the
+      // same sandbox.
+      delegationOutcome = capOutcomeForUnbackedFigures(delegationOutcome, runExecutions);
 
       // Delegation-boundary inline-app harvest (audit 1ac79471): a build delegation
       // "succeeds" with ZERO artifacts but pastes the complete app document into its
@@ -2050,8 +2485,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // its completion cap cut the write_file call). The expensive content exists —
       // write it NOW so the deliverable survives, instead of classifying around the
       // loss. Mirrors the runtime's corrective-build harvest one level down, covering
-      // EVERY delegated builder.
-      if (artifacts.length === 0 && WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())) {
+      // EVERY delegated builder. A delegation declared "answer" is never harvested:
+      // its HTML is the material it was asked about, and a page quoted back in a
+      // diagnosis is not a build (delegationAsksForFile).
+      if (artifacts.length === 0 && delegationAsksForFile(request.task, request.deliverable)) {
         const inlineDoc = extractInlineHtmlDocument(output);
         if (inlineDoc) {
           try {
@@ -2078,7 +2515,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // coordinatorMicroCompletion / weak variables that used to live here.
       const classification = classifyDelegationResult(
         output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
+        {
+          explicitVerdict: Boolean(parsedOutcome?.status),
+          ...(runOwnFailedToolNames !== undefined ? { failedToolNames: runOwnFailedToolNames } : {}),
+          ...(request.deliverable ? { deliverable: request.deliverable } : {}),
+        },
       );
+      // The result's own evidence, judged once here where the task is known (figures echoed from
+      // the task do not count, nor does anything when every work call failed). The orchestrator's
+      // frame reads it from the metadata instead of re-deriving it from the text (2026-10-05).
+      const delegationCarriesEvidence =
+        !everyWorkToolCallFailed(stats?.toolCount, stats?.toolNames, { ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) })
+        && carriesConcreteEvidence(output, request.task);
       const routingInfo = routingCandidateMap.get(candidate);
 
       attempt.finishedAt = new Date().toISOString();
@@ -2097,7 +2545,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // structured reason that names what was missing so the orchestrator
         // can adjust its next move.
         const narrativeOnly = isNarrativeOnlyDeliverableFailure(
-          classification, output, request.task, stats, agentCfg,
+          classification, output, request.task, stats, agentCfg, request.deliverable,
+          { artifacts, ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) },
         );
         if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
@@ -2119,9 +2568,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // stop cut off its synthesis and left an interrupted-output stub — must NOT
         // be discarded. That discard is why audit 5a6db38d shipped a training-data
         // answer despite 31 min of real research. Skip pure failure stubs,
-        // planning-only narration, and infrastructure failures.
+        // planning-only narration, and infrastructure failures. A run that never started for want of
+        // a usable tool ("missing_tools") is the runner's own refusal, not evidence: kept here, it came
+        // back to the caller as a successful partial.
         if (
           !lastFailureWasInfrastructure
+          && stats?.terminalState !== "missing_tools"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)
           && !looksLikeOnlyFailureStubs(output)
@@ -2134,6 +2586,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
             ...(routingInfo ? { routingInfo } : {}),
             ...(artifacts.length > 0 ? { artifacts } : {}),
+            ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
+            ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
+            ...(runExecutions ? { executions: runExecutions } : {}),
+            ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
           };
         }
         publishSwarmState(ctx);
@@ -2253,13 +2709,30 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attemptedAgents,
           delegationSucceeded: true,
           delegationOutcome: delegationOutcome ?? "success",
+          // Where the outcome came from. "explicit" = the sub-agent closed with a
+          // `<final_answer status>` tag; "heuristic" = the runtime's default (a five-phrase regex
+          // over the first 300 characters), which is not a verdict and must not silence the
+          // orchestrator's failure sniff.
+          delegationVerdict: parsedOutcome?.status ? "explicit" : "heuristic",
+          // The text carries its own concrete evidence (see delegationCarriesEvidence): read by
+          // looksLikeDelegatedFailureEvidence, so a failure WORD inside such a result is not a
+          // failure verdict (agent/tool-result-format.ts delegationCarriesOwnEvidence).
+          ...(delegationCarriesEvidence ? { delegationEvidence: true } : {}),
           // MIS-202: the attempt links to its effective (narrowed) contract.
           ...(contractId ? { contractId } : {}),
           // Mark runtime-authored research slices: their output is synthesis
           // INPUT (evidence), never a verbatim-relayable final deliverable.
           ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
+          ...withToolFailures(),
           ...(stats?.terminalState ? { terminalState: stats.terminalState } : {}),
+          // The run looped or the warden stopped it: read by the orchestrator's frame
+          // (agent/tool-result-format.ts, orchestration.loopAwareDelegation).
+          ...(runLoopEnforced ? { loopEnforced: runLoopEnforced } : {}),
+          ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
+          // What the run executed: read by the frame, the relay and the turn's scorecard.
+          ...(runExecutions ? { specialistExecutions: runExecutions } : {}),
+          ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -2298,13 +2771,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           budgetReservation,
           budgetActual ?? { tokens: 0, toolCalls: 0, activeTimeMs: 0 },
         ).catch(() => { /* ledger TTL bounds a lost reconcile */ });
-        budgetReservation = null;
       }
       // CAP-204: free the provider slot on every terminal path.
       if (capacityRenewTimer) clearInterval(capacityRenewTimer);
       if (capacityPermit) {
         await releaseProviderPermit(capacityPermit).catch(() => { /* permit TTL self-heals */ });
-        capacityPermit = null;
       }
     }
   }
@@ -2337,9 +2808,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         taskState.error = architectResult.success ? undefined : architectResult.error;
         ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
         publishSwarmState(ctx);
+        const architectFailures = architectResult.metadata?.["specialistToolFailures"];
+        if (Array.isArray(architectFailures)) specialistToolFailures.push(...architectFailures);
         return {
           ...architectResult,
-          metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success },
+          metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success, ...withToolFailures() },
         };
       }
     }
@@ -2369,7 +2842,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         partialFallback: true,
         ...(isCanonicalResearchSliceTask(request.task) ? { researchSlice: true } : {}),
         ...(bestPartialResult.artifacts?.length ? { artifacts: bestPartialResult.artifacts } : {}),
+        ...withToolFailures(),
         ...(bestPartialResult.terminalState ? { terminalState: bestPartialResult.terminalState } : {}),
+        ...(bestPartialResult.loopEnforced ? { loopEnforced: bestPartialResult.loopEnforced } : {}),
+        ...(bestPartialResult.wardenStop ? { wardenStop: bestPartialResult.wardenStop } : {}),
+        ...(bestPartialResult.executions ? { specialistExecutions: bestPartialResult.executions } : {}),
+        ...(bestPartialResult.maskedRuns ? { maskedRuns: bestPartialResult.maskedRuns } : {}),
         ...(bestPartialResult.routingInfo
           ? {
             routingReason: {
@@ -2452,6 +2930,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           blockedCoordinators: [...skippedCoordinatorCandidates],
         }
         : {}),
+      ...withToolFailures(),
     },
   };
 }
@@ -2652,15 +3131,28 @@ registerTool({
         items: {
           type: "object",
           properties: {
-            id: { type: "string" },
-            title: { type: "string" },
-            agentName: { type: "string" },
-            task: { type: "string" },
-            context: { type: "string" },
-            dependsOn: { type: "array", items: { type: "string" } },
-            fallbackAgents: { type: "array", items: { type: "string" } },
-            routingQuery: { type: "string" },
-            skillMatchThreshold: { type: "number" },
+            id: { type: "string", description: "Unique node id within this graph, referenced by other nodes' dependsOn." },
+            title: { type: "string", description: "Short human-readable label for the node, shown in swarm state." },
+            agentName: { type: "string", description: "Exact specialist to run this node. Omit to let routing choose." },
+            task: {
+              type: "string",
+              // Session e95eec63: the node's task read "…They pasted their current config and
+              // want a detailed tutorial of what to change." The config itself was never
+              // passed, the specialist could not see the conversation, and it answered with
+              // an entirely invented address plan — 10.66.66.0/24 where the user's pasted
+              // file says 10.10.0.1/24. A task that REFERS to material it does not carry is a
+              // request to make something up.
+              description: "What the specialist must do, stated in full. The sub-agent CANNOT see the conversation, so never refer to material the user provided ('their config', 'the pasted file', 'the attached log') without putting that material in this node's context.",
+            },
+            context: {
+              type: "string",
+              description: "Verbatim material this task depends on — a pasted config, log, code, error output, or prior findings. The sub-agent has no access to the conversation; anything it must reason over has to be here, copied exactly rather than summarized.",
+            },
+            dependsOn: { type: "array", items: { type: "string" }, description: "Ids of nodes that must finish before this one starts." },
+            fallbackAgents: { type: "array", items: { type: "string" }, description: "Configured agent names to try in order if the first choice fails. Never invent names." },
+            routingQuery: { type: "string", description: "Short phrase describing the CAPABILITY this node needs, used for routing when agentName is omitted. Describe the skill, not the request." },
+            skillMatchThreshold: { type: "number", description: "Minimum routing similarity (0-1) before this node falls back to an ephemeral agent." },
+            deliverable: deliverableParameterSchema(),
           },
           required: ["id", "task"],
         },
@@ -2687,6 +3179,12 @@ registerTool({
     publishSwarmState(ctx);
 
     const delegatedCtx = withDelegationFanoutAllowance(ctx, rawNodes.map((node) => node.agentName), rawNodes.length);
+    // Same rule as execute_plan's steps: none when any node can reach outside the workspace, and
+    // otherwise at most one node may be redirected — the first node working from handed text that
+    // the graph STARTS, picked as its wave starts below. The graph runs by its dependsOn edges, so
+    // the node listed first can start last, after a node that ran without the evidence.
+    const graphMayGather = batchEvidenceGatherPoint(ctx, rawNodes.map((node) => node.agentName)) >= 0;
+    let gatherNodeId: string | undefined;
 
     const remaining = new Map(rawNodes.map((node) => [node.id, node]));
     const completed = new Set<string>();
@@ -2697,7 +3195,25 @@ registerTool({
     // parallel_delegate — see that handler). Without this a graph whose final
     // node BUILT a file ships no download and the honesty guards see 0 produced.
     const graphArtifacts: Record<string, unknown>[] = [];
+    // And every node's failed tool calls, from failed nodes as well as completed ones.
+    const graphToolFailures: unknown[] = [];
+    // And the code each node's run executed (see parallel_delegate).
+    const graphExecutions = createFanOutExecutionRecords();
+    // Who ran each node this run started, from the node's own result: the agent it is from and the
+    // agents it attempted, read as a delegation's result is. The swarm state cannot say it: the
+    // turn's is seeded with the previous turn's tasks, attempts included, and a node whose id
+    // repeats one of them keeps that task's attempts even when it was turned away before any agent
+    // ran. A turn directed to an agent read such a node as that agent having run (review of
+    // faeee22, 2026-10-08).
+    const nodeRuns: Record<string, Pick<NestedToolCall, "agentName" | "attemptedAgents">> = {};
     const graphId = `graph_${Date.now()}_${Object.keys(swarmState.tasks).length}`;
+    // Write ownership among the nodes running at the same time (agent/sibling-write-ownership.ts,
+    // orchestration.siblingWriteOwnership). c297c5ea: the write_paper node edited the deck while
+    // write_presentation built it. A node that has finished owns nothing, so a dependent node
+    // (started only once its prerequisites finished) writes freely.
+    const writeGroup = effectiveOrchestration().siblingWriteOwnership !== false && rawNodes.length > 1
+      ? new SiblingWriteGroup("run_task_graph", ctx.workspacePath)
+      : null;
 
     for (const node of rawNodes) {
       getOrCreateSwarmTask(ctx, node.id, node.title ?? summarizeText(node.task, 80), node.dependsOn ?? []);
@@ -2815,6 +3331,10 @@ registerTool({
 
     const startReadyNodes = () => {
       const ready = [...remaining.values()].filter((node) => (node.dependsOn ?? []).every((dep) => completed.has(dep)));
+      if (graphMayGather && gatherNodeId === undefined) {
+        const index = batchEvidenceGatherPoint(ctx, ready.map((node) => node.agentName));
+        if (index >= 0) gatherNodeId = ready[index]!.id;
+      }
 
       for (const node of ready) {
         remaining.delete(node.id);
@@ -2837,7 +3357,8 @@ registerTool({
           void writeTaskGraphNodeStarted(graphDefSessionId, graphId, node.id).catch(() => { /* best-effort marker */ });
         }
 
-        active.set(node.id, executeDelegationWithFallback({
+        const ownerLabel = `node '${node.id}'${node.agentName ? ` (${node.agentName})` : ""}`;
+        active.set(node.id, runAsWriteSibling(writeGroup, node.id, ownerLabel, node.task, () => executeDelegationWithFallback({
           agentName: node.agentName,
           task: node.task,
           context: node.context,
@@ -2847,7 +3368,8 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
-        }, delegatedCtx).then((result) => ({ node, result })));
+          deliverable: readDelegationDeliverable(node.deliverable),
+        }, withTurnGatherRole(delegatedCtx, node.id === gatherNodeId))).then((result) => ({ node, result })));
       }
     };
 
@@ -2882,6 +3404,10 @@ registerTool({
 
       const { node, result } = await Promise.race(active.values());
       active.delete(node.id);
+      nodeRuns[node.id] = delegationAgentsOf(result.metadata);
+      const nodeToolFailures = result.metadata?.["specialistToolFailures"];
+      if (Array.isArray(nodeToolFailures)) graphToolFailures.push(...nodeToolFailures);
+      graphExecutions.add(result.metadata, node.agentName);
 
       if (result.success) {
         completed.add(node.id);
@@ -2955,8 +3481,11 @@ registerTool({
         failed: [...failed],
         blocked: [...blocked],
         ...(reused.size > 0 ? { reused: [...reused] } : {}),
+        nodeRuns,
         swarmState,
         ...(graphArtifacts.length > 0 ? { artifacts: graphArtifacts } : {}),
+        ...(graphToolFailures.length > 0 ? { specialistToolFailures: graphToolFailures } : {}),
+        ...graphExecutions.metadata(),
       },
     };
   },
@@ -3032,7 +3561,7 @@ registerTool({
 
     const topCandidate = allCandidates[0];
     const nextActionLine = topCandidate && isStrongRoutingMatch(topCandidate)
-      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topCandidate.name}", task="<your task>") NOW.`
+      ? strongMatchPointer(topCandidate.name, ctx)
       : `ℹ Review the candidates below and pick the most relevant, or use create_ephemeral_agent if none fit.`;
 
     return {
@@ -3175,6 +3704,15 @@ registerTool({
     // surface the researcher when the whole ranking is research-incapable. Flows
     // through the audit topResult, the NEXT ACTION pointer, and suggestedFallbackAgents.
     resolution.results = preferResearchCapableCandidates(resolution.results, raw);
+    // The same guard for a request to MAKE a file of a named format (.docx, .pptx, .xlsx, .pdf):
+    // agents that can write it go first, and the imperative NEXT ACTION below points only at one
+    // that can (see preferFormatProducingCandidates). A file of that format the user handed over in
+    // this session is the input, not the deliverable, and turns this off for that format.
+    const formatGate = preferFormatProducingCandidates(resolution.results, raw, sessionFilesInPlay(ctx.sessionId));
+    resolution.results = formatGate.results;
+    const formatGateMetadata = formatGate.formats.length > 0
+      ? { outputFormats: formatGate.formats, topCanProduceOutputFormats: formatGate.topCanProduce }
+      : {};
     const semanticMetadata = buildSemanticRoutingMetadata(resolution);
     const semanticUnavailableNote = formatSemanticUnavailableNote(semanticMetadata);
 
@@ -3187,9 +3725,11 @@ registerTool({
       weakCount: resolution.weakCandidates.length,
       gated: resolution.gated,
       trippedAgents: resolution.trippedAgents,
+      ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
       excludedAgents: resolution.excludedAgents ?? [],
       allLowConfidence: resolution.allLowConfidence,
       topResult: resolution.results[0]?.name ?? null,
+      ...formatGateMetadata,
     }, { sessionId: ctx.sessionId, channel: "agent-routing" });
 
     const circuitNote = resolution.trippedAgents.length > 0
@@ -3240,7 +3780,7 @@ registerTool({
           }, { sessionId: ctx.sessionId, channel: "agent-routing" });
           const topAgent = retryResolution.results[0]!;
           const nextActionLine = isStrongRoutingMatch(topAgent)
-            ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+            ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
             : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
           return {
             success: true,
@@ -3263,6 +3803,73 @@ registerTool({
         }
       }
 
+      // Last resort before declaring failure: route an English restatement of the request.
+      //
+      // The catalog is English and the embedding is scored against it, so a German request
+      // lands a few hundredths under the 0.72 admission floor while meaning the same thing.
+      // On 138 live queries this rescued 20 that the raw pass left empty (recall 87 -> 107,
+      // 84 -> 97 at the capsule) with zero regressions — and every one of those gains came
+      // from a query that had found NOTHING, which is why it sits here and not on the
+      // healthy path. The whole thing costs p50 3.5s, which is also why it is not in the
+      // turn's 2.5s prompt-assembly race: there it would time out into an empty capsule on
+      // exactly the turns it exists to save.
+      //
+      // Nothing about the failure message below changes when this does not fire.
+      if (effectiveOrchestration().routingRestatementRescue !== false) {
+        const rescue = await attemptRestatementRescue(raw, {
+          resolve: (query) => resolveAgentRouting(query, {
+            minConfidence,
+            allowedAgents: ctx.allowedAgents,
+            allowKeywordFallback: false,
+          }),
+          // Self-exclusion applies to the restatement too: a coordinator that routed to
+          // itself would be handed back the agent the router just refused to offer.
+          admitted: (candidate) => candidate.results.some((entry) => entry.name !== currentAgentName),
+        });
+
+        if (rescue) {
+          const rescued = currentAgentName
+            ? { ...rescue.resolution, results: rescue.resolution.results.filter((c) => c.name !== currentAgentName) }
+            : rescue.resolution;
+          const rescueMetadata = buildSemanticRoutingMetadata(rescued);
+          logAudit("agent_routing_evaluated", {
+            query: rescue.restatement,
+            originalQuery: raw,
+            restatementRescue: true,
+            minConfidence,
+            mode: rescued.mode,
+            ...rescueMetadata,
+            resultCount: rescued.results.length,
+            weakCount: rescued.weakCandidates.length,
+            gated: rescued.gated,
+            topResult: rescued.results[0]?.name ?? null,
+          }, { sessionId: ctx.sessionId, channel: "agent-routing" });
+
+          const topAgent = rescued.results[0]!;
+          const nextActionLine = isStrongRoutingMatch(topAgent)
+            ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
+            : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
+          return {
+            success: true,
+            output: `${nextActionLine}\n\n⚠ Original query "${raw}" matched no agents. Retried as "${rescue.restatement}" and found ${rescued.results.length} match(es):\n\n${rescued.results.map(formatRoutingCandidate).join("\n\n")}${circuitNote}${selfExclusionNote}`,
+            metadata: {
+              query: raw,
+              restatementQuery: rescue.restatement,
+              restatementRescue: true,
+              minConfidence,
+              routingMode: rescued.mode,
+              ...rescueMetadata,
+              resultCount: rescued.results.length,
+              weakCount: rescued.weakCandidates.length,
+              topResult: topAgent.name,
+              topResultConfidence: topAgent.confidence,
+              topResultScore: topAgent.score,
+              suggestedFallbackAgents: rescued.results.slice(1, 4).map((candidate) => candidate.name),
+            },
+          };
+        }
+      }
+
       // Complete routing failure — auto-record a capability gap for self-improvement pipeline
       recordCapabilityGap({
         description: `No agent found for routing query: "${raw}"`,
@@ -3272,9 +3879,29 @@ registerTool({
       const shortenedNote = shortened
         ? ` (also tried shortened query "${shortened}" — also 0 matches)`
         : "";
+      // "Nothing matched" and "nothing cleared the bar" are different answers, and only the
+      // second one is usually true. The sub-floor scores are discarded before anyone sees
+      // them, so this branch invites the model to invent a specialist while the right one
+      // sits a few hundredths under the gate — measured: a German request put the correct
+      // agent at 0.7115 against a 0.72 floor and produced exactly this message.
+      //
+      // Nothing is admitted here: these names are offered as information, the scores are
+      // stated as below the bar, and the delegation stays the model's own decision.
+      //
+      // The bar named here is the SEMANTIC ADMISSION FLOOR, not `minConfidence`. Sub-floor
+      // semantic scores are zeroed in computeHybridRoutingScore before minConfidence is ever
+      // consulted, so 0.72 is the bar that actually applied whatever the caller asked for.
+      // Naming the requested level instead would print "below the medium bar" next to a score
+      // of 0.71, which is above medium's own 0.45 and reads as nonsense.
+      const nearMissNote = effectiveOrchestration().surfaceRoutingNearMisses && resolution.nearMisses.length > 0
+        ? `\n\nClosest matches, all below the ${SEMANTIC_AGENT_ROUTING_MIN_SCORE} semantic admission floor: `
+          + `${resolution.nearMisses.map((entry) => `${entry.name} (${entry.score.toFixed(3)})`).join(", ")}. `
+          + "If one of these plainly covers the request, delegate to it by name; a near miss is "
+          + "common when the request is phrased in another language or unusually. Otherwise proceed as above."
+        : "";
       return {
         success: true,
-        output: `No agents matched "${raw}"${shortenedNote}.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}`,
+        output: `No agents matched "${raw}"${shortenedNote}.${semanticUnavailableNote} Do not call search_agents again for this turn. Delegate without an agentName so autonomous routing can bid on the original task, or use create_ephemeral_agent only if this is a brand-new capability not covered by ANY existing specialist.${circuitNote}${selfExclusionNote}${nearMissNote}`,
         metadata: {
           query: raw,
           minConfidence,
@@ -3285,6 +3912,9 @@ registerTool({
           topResult: null,
           trippedAgents: resolution.trippedAgents,
           excludedAgents: resolution.excludedAgents ?? [],
+          // Recorded whether or not the note was shown, so the flag's effect is measurable
+          // from the log rather than only from the model's behaviour.
+          nearMisses: resolution.nearMisses,
           ...(shortened ? { shortenedQueryAttempted: shortened } : {}),
         },
       };
@@ -3328,9 +3958,11 @@ registerTool({
     // for "research news headlines" — and the imperative wording pushed weaker
     // models to delegate to the wrong specialist. For weak top results, present
     // the candidate list neutrally and let the LLM choose, including the option
-    // to call list_agents or create_ephemeral_agent.
-    const nextActionLine = isStrongRoutingMatch(topAgent)
-      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+    // to call list_agents or create_ephemeral_agent. The same holds for a top match
+    // that cannot write the file format the query asks to have made: no candidate
+    // could, or the reorder above would have put that one first.
+    const nextActionLine = isStrongRoutingMatch(topAgent) && formatGate.topCanProduce
+      ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
       : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
       success: true,
@@ -3348,10 +3980,38 @@ registerTool({
         suggestedFallbackAgents: resolution.results.slice(1, 4).map((candidate) => candidate.name),
         trippedAgents: resolution.trippedAgents,
         excludedAgents: resolution.excludedAgents ?? [],
+        ...formatGateMetadata,
       },
     };
   },
 });
+
+/**
+ * The files the user handed over in this session: the attachments on its user messages. An
+ * assistant message's attachments are what the swarm produced, not an input. A sub-agent's id
+ * resolves to its root's. A session this process does not hold reads as no files, which leaves
+ * the format ranking on: the guard is not lifted on what cannot be checked.
+ */
+function sessionFilesInPlay(sessionId: string): FileInPlay[] {
+  const session = getSession(deriveSharedSessionId(sessionId));
+  if (!session) return [];
+  const files: FileInPlay[] = [];
+  for (const message of session.getHistory()) {
+    if (message.role !== "user") continue;
+    const attachments = message.metadata?.["attachments"];
+    if (!Array.isArray(attachments)) continue;
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment !== "object") continue;
+      const { filename, relativePath, contentType } = attachment as Record<string, unknown>;
+      files.push({
+        ...(typeof filename === "string" ? { filename } : {}),
+        ...(typeof relativePath === "string" ? { relativePath } : {}),
+        ...(typeof contentType === "string" ? { contentType } : {}),
+      });
+    }
+  }
+  return files;
+}
 
 // ─── search_tools ────────────────────────────────────────────────────────────
 // Semantic search over the registered tool catalog. Keeps sub-agent context
@@ -3471,6 +4131,54 @@ registerTool({
   },
 });
 
+/**
+ * The provider for the delegation-language normalizer: a translate-and-tag micro-call on the
+ * routing tier, issued twice per delegation (once in each of the two delegate tools).
+ *
+ * The fallback used to be getChatProvider() — the orchestrator's own instance, thinking ON — so
+ * with no routing tier configured a "translate this task to English" call reasoned first. And no
+ * routing tier is not the exotic case: getChatProviderForTier returns null for EVERY call while
+ * a model preset is active (the dashboard Local ⇄ Claude switch), which is the deployment this
+ * was measured in. Build instead from the caller's own merged model config with the routing
+ * tier's controls laid over it, which is what every other verdict-shaped call site now does.
+ *
+ * "The caller's own merged config" here is agents.defaults.model with the active preset applied:
+ * these tools run in the orchestrator's process on the orchestrator's turn, and the main
+ * assistant has no model block of its own (agents.mainAssistant carries toolMode and
+ * trustModelRouting only) — agents.defaults.model IS its configuration, the same input
+ * getChatProvider() builds the orchestrator from.
+ *
+ * Exported for testing.
+ */
+export function delegationLanguageProvider(): ChatProvider {
+  const config = getConfig();
+  return getChatProviderForTier("routing")
+    ?? createChatProvider({
+      ...applyActiveModelPreset(config.agents.defaults.model, config),
+      ...tierModelDefaults("routing"),
+    });
+}
+
+/**
+ * orchestration.normalizeDelegationToEnglish, for one delegated task: the English task plus an
+ * output-language line, judged from the task and the user's own words. Fail-open: the original
+ * task on any error.
+ */
+async function normalizeDelegatedTask(task: string, ctx: ToolContext): Promise<string> {
+  const normalized = await normalizeDelegationTaskLanguage({
+    task,
+    provider: delegationLanguageProvider(),
+    signal: ctx.signal,
+    ...(ctx.turnUserWords ? { userWords: ctx.turnUserWords } : {}),
+  });
+  if (!normalized.changed) return task;
+  logAudit("delegation_task_normalized_to_english", {
+    sourceLanguage: normalized.sourceLanguage,
+    outputLanguage: normalized.outputLanguage,
+  }, { sessionId: ctx.sessionId, severity: "info" });
+  return normalized.task;
+}
+
 // ─── delegate_to_agent ────────────────────────────────────────────────────────
 
 registerTool({
@@ -3504,6 +4212,7 @@ registerTool({
         type: "number",
         description: "Optional 0-1 threshold. If the best auto-selected specialist scores below this value, generate an ephemeral agent instead.",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["task"],
   },
@@ -3511,16 +4220,17 @@ registerTool({
     // agentName is now optional — omitting it triggers undirected swarm bidding
     const requestedAgentName = args["agentName"] ? String(args["agentName"]).trim() : "";
     let task = deriveDelegationTask(args);
-    const context = args["context"] ? String(args["context"]) : undefined;
+    // The excerpts of this turn's attachments, when this call is the runtime's own dispatch on a
+    // turn directed to an agent: handed over beside the arguments, which are kept long after the
+    // excerpts' own note is pruned (ToolContext.delegationDocuments). They go before the call's own
+    // context, where they stood when they were part of it.
+    const ownContext = args["context"] ? String(args["context"]) : undefined;
+    const context = [ctx.delegationDocuments, ownContext].filter(Boolean).join("\n\n") || undefined;
     // Work internally in English: translate a non-English task to English for routing +
     // the sub-agent's work, carrying an output-language directive so the deliverable still
-    // comes back in the user's language. Context evidence is left verbatim. Gated, fail-open.
+    // comes back in the language the user wants. Context evidence is left verbatim. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
-      if (normalized.sourceLanguage !== "English") {
-        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
-        task = normalized.task;
-      }
+      task = await normalizeDelegatedTask(task, ctx);
     }
     const explicitFallbackAgents = Array.isArray(args["fallbackAgents"]) ? args["fallbackAgents"].map(String) : undefined;
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
@@ -3571,6 +4281,7 @@ registerTool({
       routingQuery,
       skillMatchThreshold,
       taskTitle,
+      deliverable: readDelegationDeliverable(args["deliverable"]),
     }, ctx);
   },
 });
@@ -3606,6 +4317,7 @@ registerTool({
         type: "number",
         description: "Optional 0–1 threshold. If the best-matched specialist scores below this value an ephemeral agent is synthesised instead. Defaults to the swarm's global threshold.",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["task"],
   },
@@ -3615,11 +4327,7 @@ registerTool({
     // Work internally in English (same as the directed path): translate a non-English task
     // for routing + the sub-agent's work, with an output-language directive. Gated, fail-open.
     if (task && effectiveOrchestration().normalizeDelegationToEnglish) {
-      const normalized = await normalizeDelegationTaskLanguage({ task, provider: getChatProviderForTier("routing") ?? getChatProvider(), signal: ctx.signal });
-      if (normalized.sourceLanguage !== "English") {
-        logAudit("delegation_task_normalized_to_english", { sourceLanguage: normalized.sourceLanguage }, { sessionId: ctx.sessionId, severity: "info" });
-        task = normalized.task;
-      }
+      task = await normalizeDelegatedTask(task, ctx);
     }
     const routingQuery = args["routingQuery"] ? String(args["routingQuery"]) : undefined;
     const skillMatchThreshold = typeof args["skillMatchThreshold"] === "number" ? args["skillMatchThreshold"] : undefined;
@@ -3636,6 +4344,7 @@ registerTool({
       routingQuery,
       skillMatchThreshold,
       taskTitle,
+      deliverable: readDelegationDeliverable(args["deliverable"]),
     }, ctx);
   },
 });
@@ -3754,6 +4463,7 @@ registerTool({
             fallbackAgents: { type: "array", items: { type: "string" }, description: "Optional fallback agents for this task" },
             routingQuery: { type: "string", description: "Optional routing query for self-healing fallback selection" },
             skillMatchThreshold: { type: "number", description: "Optional 0-1 threshold for generating an ephemeral agent when no specialist matches strongly enough" },
+            deliverable: deliverableParameterSchema(),
           },
           required: ["task"],
         },
@@ -3764,7 +4474,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const tasks = Array.isArray(args["tasks"])
-      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string; skillMatchThreshold?: number }>)
+      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string; skillMatchThreshold?: number; deliverable?: unknown }>)
       : [];
 
     if (tasks.length === 0) return { success: false, output: "", error: "tasks array must not be empty" };
@@ -3794,6 +4504,7 @@ registerTool({
         ...taskSpec,
         agentName: primaryValidation.valid[0],
         fallbackAgents: fallbackValidation.valid.length > 0 ? fallbackValidation.valid : undefined,
+        deliverable: readDelegationDeliverable(taskSpec.deliverable),
       };
     });
 
@@ -3809,6 +4520,7 @@ registerTool({
       fallbackAgents: string[] | undefined;
       routingQuery?: string;
       skillMatchThreshold?: number;
+      deliverable?: DelegationDeliverable;
     }> = [];
     for (const taskSpec of normalizedTasks) {
       if ("error" in taskSpec) {
@@ -3835,7 +4547,9 @@ registerTool({
       // gradually prefers the direct specialist for this task class. Learning signal
       // only — no hard rule, and a partial dedup (3→2) still counts as real partitioning.
       if (dispatchTasks.length === 1 && runnableTasks.length > 1 && ctx.currentAgentName) {
-        appendOutcome(ctx.workspacePath, {
+        // Shared root — this is the deployment's routing history, not the caller's.
+        const collapseAccount = recordAccount();
+        appendOutcome(getConfig().workspacePath, {
           ts: new Date().toISOString(),
           agent: ctx.currentAgentName,
           task: (dispatchTasks[0]?.task ?? "").slice(0, 300),
@@ -3844,6 +4558,8 @@ registerTool({
           totalTokens: 0,
           lesson: "parallel_delegate fan-out collapsed to ONE task (identical slices) — no decomposition value added; this request shape fits a single specialist directly",
           taskKeywords: extractTaskKeywords(dispatchTasks[0]?.task ?? ""),
+          // For the account the delegation is for: under multi-user auth its task is shown to them only.
+          ...(collapseAccount ? { account: collapseAccount } : {}),
         });
       }
     }
@@ -3860,16 +4576,31 @@ registerTool({
       dispatchTasks.length,
     );
     const taskIds = allocateParallelTaskIds(delegatedCtx, dispatchTasks.length);
+    // Write ownership among the slices, which all run at once (agent/sibling-write-ownership.ts,
+    // orchestration.siblingWriteOwnership): a file one slice's task names, or that a running slice
+    // wrote first, is refused to the others.
+    const writeGroup = effectiveOrchestration().siblingWriteOwnership !== false && dispatchTasks.length > 1
+      ? new SiblingWriteGroup("parallel_delegate", ctx.workspacePath)
+      : null;
 
+    // On a turn that needs outside facts, at most the first slice that works from handed text may be
+    // redirected to gather them, and none when another slice can reach outside itself.
+    const gatherSlice = batchEvidenceGatherPoint(ctx, dispatchTasks.map((taskSpec) => taskSpec.agentName));
     const runSlice = (taskSpec: typeof dispatchTasks[number], index: number, ctxOverride: ToolContext) =>
-      executeDelegationWithFallback({
-        ...taskSpec,
-        taskId: taskIds[index],
-        taskTitle: summarizeText(taskSpec.task, 80),
-        // Auto-allocated parallel id — let a later round reuse an earlier same-signature
-        // slice's evidence instead of re-researching it.
-        allowSignatureReuse: true,
-      }, ctxOverride);
+      runAsWriteSibling(
+        writeGroup,
+        `task_${index + 1}`,
+        `task ${index + 1}${taskSpec.agentName ? ` (${taskSpec.agentName})` : ""}`,
+        taskSpec.task,
+        () => executeDelegationWithFallback({
+          ...taskSpec,
+          taskId: taskIds[index],
+          taskTitle: summarizeText(taskSpec.task, 80),
+          // Auto-allocated parallel id — let a later round reuse an earlier same-signature
+          // slice's evidence instead of re-researching it.
+          allowSignatureReuse: true,
+        }, withTurnGatherRole(ctxOverride, index === gatherSlice)),
+      );
 
     // QUORUM EARLY-SYNTHESIS (orchestration.quorumEarlySynthesis, default-off): return as
     // soon as ceil(quorumFraction * N) slices SUCCEED (+ a straggler grace window), aborting
@@ -3916,7 +4647,13 @@ registerTool({
     // sign of the built app (audit 411ed14f: iSAQB learn-platform built by
     // backend_coder, never surfaced). Aggregate them here.
     const aggregatedArtifacts: Record<string, unknown>[] = [];
-    for (const result of results) {
+    // Each slice's failed tool calls, failed slices included; every entry names its agent.
+    const aggregatedToolFailures: unknown[] = [];
+    // And the code each slice's run executed, so the coordinator's own figure check and the turn's
+    // read the record a single delegate_to_agent hands back (agent/delegated-run-record.ts).
+    const sliceExecutions = createFanOutExecutionRecords();
+    for (const [index, result] of results.entries()) {
+      sliceExecutions.add(result.metadata, dispatchTasks[index]?.agentName);
       const arts = result.metadata?.["artifacts"];
       if (Array.isArray(arts)) {
         for (const artifact of arts) {
@@ -3925,6 +4662,8 @@ registerTool({
           }
         }
       }
+      const sliceToolFailures = result.metadata?.["specialistToolFailures"];
+      if (Array.isArray(sliceToolFailures)) aggregatedToolFailures.push(...sliceToolFailures);
     }
 
     // DISAGREEMENT-AS-SIGNAL (orchestration.subAgentDisagreementVerify, default-off): when
@@ -3936,7 +4675,7 @@ registerTool({
         .map((result, index) => ({ label: dispatchTasks[index]?.agentName ?? `task_${index + 1}`, text: result.output ?? "", success: result.success }))
         .filter((entry) => entry.success && entry.text.trim().length > 0)
         .map(({ label, text }) => ({ label, text }));
-      disagreementMarker = await checkSubAgentDisagreement(successfulOutputs, delegatedCtx.signal);
+      disagreementMarker = await checkSubAgentDisagreement(successfulOutputs, delegatedCtx.signal, ctx.sessionId);
     }
 
     const baseOutput = formatted.join("\n\n---\n\n");
@@ -3947,8 +4686,22 @@ registerTool({
         taskCount: dispatchTasks.length,
         succeeded,
         failed: results.length - succeeded,
+        // ONE CALL, N DELEGATIONS. The turn counts a fan-out as a single delegation, so a plan
+        // whose step dispatched three specialists in one call looked one-third done and
+        // decidePlanContinuation told the model to redo steps that had already run. Reported the
+        // way execute_plan reports its steps, so the turn's own accounting applies to each child
+        // (agent/turn-tool-contribution.ts). Each carries the agents its slice's result named: a
+        // slice that names no agent is routed, and the architect fallback may answer it with an
+        // ephemeral agent, so who ran cannot be read from the turn's grant.
+        nestedCalls: results.map((result) => ({
+          tool: "delegate_to_agent",
+          success: result.success === true,
+          ...delegationAgentsOf(result.metadata),
+        })),
         ...(disagreementMarker ? { subAgentDisagreement: true } : {}),
         ...(aggregatedArtifacts.length > 0 ? { artifacts: aggregatedArtifacts } : {}),
+        ...(aggregatedToolFailures.length > 0 ? { specialistToolFailures: aggregatedToolFailures } : {}),
+        ...sliceExecutions.metadata(),
         ...(duplicatesRemoved > 0 ? { requestedTaskCount: runnableTasks.length, duplicatesRemoved } : {}),
       },
     };

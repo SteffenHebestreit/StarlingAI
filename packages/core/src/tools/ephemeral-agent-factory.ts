@@ -18,14 +18,24 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats } from "../agent/sub-agent.js";
+import { canWriteWorkspaceFiles } from "../agent/sub-agent-model-config.js";
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { readRecentOutcomes } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
-import { promoteEphemeralAgent, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
+import { promoteEphemeralAgent, withPromotedAgents, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
+import { buildAgentIndex } from "../providers/embeddings.js";
+import { getEmbeddingProvider } from "../providers/index.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
+import {
+  deliverableParameterSchema,
+  looksLikeClaimedWriteMiss,
+  parseFinalAnswerTag,
+  readDelegationDeliverable,
+} from "./delegation-artifact-classification.js";
+import { holdsArtifactBuilderTool } from "../agent/sub-agent-prompt-guidance.js";
 
 const log = childLogger("tool:sub-agent");
 
@@ -223,6 +233,7 @@ function buildArchitectPrompt(task: string, previousContext?: string): string {
     "- maxIterations must be between 3 and 8 for non-computer tasks. For computer-use tasks (tools starting with computer_), use 10-15 iterations because each screen interaction needs snapshot+action+verify cycles.",
     "- For computer-use agents: include 'Do NOT call the same tool with identical arguments twice in a row' in the systemPrompt. The session is already started — begin with computer_list_windows, not computer_session_start.",
     "- Choose a model appropriate for the task. Use a single string model id in model.primary when you want to override the default.",
+    "- Do NOT set model.maxTokens. The output budget is derived per request from the model's context window; a declared value is a hard ceiling that truncates a large write_file mid-arguments.",
     "",
     "Schema:",
     "{",
@@ -231,7 +242,7 @@ function buildArchitectPrompt(task: string, previousContext?: string): string {
     '  "systemPrompt": "<instructions>",',
     '  "tools": ["<tool1>", "<tool2>"],',
     '  "maxIterations": 5,',
-    '  "model": { "primary": "<optional model id override>", "temperature": 0.1, "maxTokens": 6144 }',
+    '  "model": { "primary": "<optional model id override>", "temperature": 0.1 }',
     "}",
     "",
     `Task: ${task.slice(0, 1200)}`,
@@ -292,9 +303,16 @@ function normalizeArchitectModel(model: unknown): import("../config/schema.js").
  */
 function maybePromoteEphemeral(
   agentName: string,
-  workspacePath: string,
   cfg: import("../config/schema.js").SubAgentConfig,
 ): void {
+  // BOTH LEDGERS ARE DEPLOYMENT-SCOPED, not per-user. Every reader of the promoted catalog resolves
+  // it against the shared root (tools/agent-routing.ts, tools/sub-agent.ts, swarm/bidder-worker.ts,
+  // tools/memory.ts — fifteen sites), and the outcomes ledger is documented the same way where it is
+  // written in agent/sub-agent.ts. This was handed the caller's execution root, which per-user
+  // workspaces made the CALLING USER's directory: the promotion was written where nothing reads it,
+  // and the success rate deciding it was computed from one account's slice of the history. An
+  // ephemeral agent that earned its place therefore never appeared, silently.
+  const workspacePath = getConfig().workspacePath;
   const outcomes = readRecentOutcomes(workspacePath, 100);
   const relevant = outcomes.filter(o => o.agent === agentName);
   const successes = relevant.filter(o => o.outcome === "success").length;
@@ -307,6 +325,12 @@ function maybePromoteEphemeral(
   const config = getConfig();
   if (config.subAgents[promotedName]) return;
   promoteEphemeralAgent(workspacePath, promotedName, cfg);
+  // The semantic index is otherwise rebuilt only at startup and on a config reload, so a fresh
+  // promotion stayed invisible to semantic routing and search_agents until the next restart.
+  const embeddingModel = config.agents.defaults.model.embeddingModel;
+  if (embeddingModel) {
+    buildAgentIndex(withPromotedAgents(config.subAgents, workspacePath), getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+  }
 }
 
 /**
@@ -364,7 +388,13 @@ export async function runEphemeralWorker(input: {
 
   const agentName = `ephemeral:${String(input.agentName || "kb_worker").trim().replace(/\W+/g, "_").slice(0, 64)}`;
   const maxIter = Math.min(10, Math.max(1, input.maxIterations ?? 6));
-  const resolvedTimeoutMs = input.timeoutMs !== undefined ? Math.min(600_000, Math.max(60_000, input.timeoutMs)) : undefined;
+  // Capability-dependent ceiling, same rationale as create_ephemeral_agent below: an
+  // ephemeral granted workspace-write tools gets the permanent builders' 25 min, everything
+  // else 10. The WIDE predicate is right here and the narrow stream-cap one is not: this
+  // only bounds what an architect may ASK for (resolvedTimeoutMs stays undefined unless a
+  // timeoutMs was passed), whereas the stream cap is applied to every run automatically.
+  const timeoutCeilingMs = canWriteWorkspaceFiles(tools) ? 1_500_000 : 600_000;
+  const resolvedTimeoutMs = input.timeoutMs !== undefined ? Math.min(timeoutCeilingMs, Math.max(60_000, input.timeoutMs)) : undefined;
 
   // Validate model.primary against configured models (reject hallucinated ids).
   let modelPrimary: string | undefined;
@@ -500,9 +530,19 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     { agentName: ephemeralName, tools, maxIterations, model: model?.primary ?? null, architectAgentName: settings.architectAgentName },
     { sessionId: ctx.sessionId },
   );
+  // An ephemeral agent has no catalog taxonomy, so the research gate counts it as reaching outside
+  // the workspace (agentCfgReachesOutsideWorkspace). Its run claims the turn's outside source
+  // (ToolContext.turnEvidence) the way a catalog agent's dispatch does: this undirected pick never
+  // reaches that dispatch, and without the claim a builder named later this turn, finding no shared
+  // facts yet, would be sent to gather again.
+  if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) ctx.turnEvidence.outsideEngaged = ephemeralName;
 
   let result: string;
   let terminalState: string | undefined;
+  // What the run recorded, beside what it said: the files it produced and the calls that failed
+  // on the way. A configured specialist's delegation carries both; this stand-in for one must too,
+  // or its frame shows only the agent's own account of what happened.
+  let runRecord: Record<string, unknown>;
   try {
     // Inject shared facts into the ephemeral agent's context so it can use
     // URLs, partial results, and evidence discovered by earlier agents.
@@ -511,6 +551,8 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       agentName: ephemeralName,
       task,
       context: ephemeralSharedCtx ?? undefined,
+      // Stands in for a delegation that found no specialist, so it gets what a specialist would.
+      turnUserWords: ctx.turnUserWords,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       userId: ctx.userId,
@@ -521,6 +563,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       swarmState: ctx.swarmState,
       onSwarmState: ctx.onSwarmState,
       _turnAgentCounts: ctx._turnAgentCounts,
+      _turnLoopRuns: ctx._turnLoopRuns,
       _turnAgentRepeatLimitOverrides: ctx._turnAgentRepeatLimitOverrides,
       _turnTotalDelegationLimitOverride: ctx._turnTotalDelegationLimitOverride,
       _workflowExecutionStack: ctx._workflowExecutionStack,
@@ -528,6 +571,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     });
     result = runResult.output;
     terminalState = runResult.stats.terminalState;
+    runRecord = runRecordMetadata(runResult);
   } catch (err) {
     logAudit(
       "architect_fallback_failed",
@@ -537,11 +581,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
     return null;
   }
 
-  let parsedOutcome: any = null;
-  const tagMatch = result.match(/<final_answer\s+status="([^"]+)">([\s\S]*?)<\/final_answer>/i);
-  if (tagMatch) {
-    parsedOutcome = { status: tagMatch[1]!.toLowerCase(), data: tagMatch[2]!.trim() };
-  }
+  const parsedOutcome = parseFinalAnswerTag(result);
 
   const success = terminalState === undefined || terminalState === "completed"
     ? (parsedOutcome ? parsedOutcome.status !== "failure" && parsedOutcome.status !== "needs_info" : !looksLikeFailureResult(result))
@@ -558,7 +598,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
   );
 
   if (success) {
-    maybePromoteEphemeral(ephemeralName, ctx.workspacePath, inlineConfig);
+    maybePromoteEphemeral(ephemeralName, inlineConfig);
   }
 
   return {
@@ -570,7 +610,19 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
       architect: true,
       tools,
       promoted: success && config.subAgents[agentName] === undefined,
+      ...runRecord,
     },
+  };
+}
+
+/** The produced files, failed calls and executed code of an ephemeral run, as delegation metadata,
+ *  with each run under it that masked figures when it delegated (agent/delegated-run-record.ts). */
+function runRecordMetadata(run: { artifacts?: unknown[]; toolFailures?: unknown[]; executions?: unknown; maskedRuns?: unknown[] }): Record<string, unknown> {
+  return {
+    ...(run.artifacts?.length ? { artifacts: run.artifacts } : {}),
+    ...(run.toolFailures?.length ? { specialistToolFailures: run.toolFailures } : {}),
+    ...(run.executions ? { specialistExecutions: run.executions } : {}),
+    ...(run.maskedRuns?.length ? { maskedRuns: run.maskedRuns } : {}),
   };
 }
 
@@ -617,7 +669,7 @@ registerTool({
       },
       timeoutMs: {
         type: "number",
-        description: "Wall-clock timeout in milliseconds for the ephemeral agent run (minimum: 60000, maximum: 600000). Defaults to 60 s if omitted. Use 300000 for research tasks with multiple web_search iterations.",
+        description: "Wall-clock timeout in milliseconds for the ephemeral agent run (minimum: 60000; maximum: 600000, or 1500000 when the agent is granted file-writing tools). Defaults to 60 s if omitted. Use 300000 for research tasks with multiple web_search iterations, and 900000+ when the agent must BUILD a large file in several passes.",
       },
       task: {
         type: "string",
@@ -627,6 +679,7 @@ registerTool({
         type: "string",
         description: "Optional background context to pass to the agent",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["agentName", "systemPrompt", "tools", "task"],
   },
@@ -637,7 +690,7 @@ registerTool({
     const systemPrompt = String(args["systemPrompt"] ?? "").trim();
 
     if (!agentName || !task || !systemPrompt) {
-      return { success: false, output: "", error: "agentName, systemPrompt, and task are required" };
+      return { success: false, output: "", error: "agentName, systemPrompt, and task are required", rejectedBeforeEffect: true };
     }
 
     // Validate and filter tool list
@@ -693,6 +746,7 @@ registerTool({
         output: "",
         error: `Unknown tool(s) requested: ${rejected.join(", ")}. Use search_tools/semantic tool discovery and choose only existing tools. Suggested tools for this task: ${semanticToolMatches.join(", ") || "none"}.`,
         metadata: { agentName, rejectedTools: rejected, suggestedTools: semanticToolMatches },
+        rejectedBeforeEffect: true,
       };
     }
 
@@ -727,6 +781,7 @@ registerTool({
         output: "",
         error: policyIssues.join(" ") + suggestionHint,
         metadata: { agentName, rejectedTools: rejected, grantedTools: tools, suggestedTools: semanticToolMatches },
+        rejectedBeforeEffect: true,
       };
     }
 
@@ -760,12 +815,19 @@ registerTool({
     }
 
     const maxIter = Math.min(10, Math.max(1, Number(args["maxIterations"] ?? 5) || 5));
-    // Honour an explicit timeoutMs from the caller (min 60 s, max 10 min).
+    // Honour an explicit timeoutMs from the caller (min 60 s).
     // The leaf-agent default of 60 s is far too short for research tasks with
     // multiple web_search iterations — callers should pass 300000 for those.
+    // The MAXIMUM is capability-dependent: an ephemeral granted write_file/edit_file or a
+    // document emitter can be building something, and one build pass on this hardware can
+    // legitimately run ~26 min (~30 KB ≈ 9K tokens at ~16.8 tok/s, plus the reasoning before
+    // it), so the flat 10-minute ceiling truncated the architect's own choice. Same
+    // 25-minute budget as the permanent builders; every other ephemeral keeps 10 minutes.
+    // Wide predicate on purpose — see the ceiling in runEphemeralWorker above.
     const rawTimeoutMs = typeof args["timeoutMs"] === "number" ? args["timeoutMs"] : undefined;
+    const timeoutCeilingMs = canWriteWorkspaceFiles(tools) ? 1_500_000 : 600_000;
     const resolvedTimeoutMs = rawTimeoutMs !== undefined
-      ? Math.min(600_000, Math.max(60_000, rawTimeoutMs))
+      ? Math.min(timeoutCeilingMs, Math.max(60_000, rawTimeoutMs))
       : undefined;
 
     const inlineConfig = {
@@ -788,11 +850,15 @@ registerTool({
     };
 
     const ephemeralName = `ephemeral:${agentName}`;
+    // Same claim as the architect's ephemeral above: no taxonomy, so it counts as reaching outside.
+    if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) ctx.turnEvidence.outsideEngaged = ephemeralName;
 
     const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
       context,
+      // Same as any delegated specialist: the orchestrator wrote this task, the user did not.
+      turnUserWords: ctx.turnUserWords,
       parentSessionId: ctx.sessionId,
       workspacePath: ctx.workspacePath,
       userId: ctx.userId,
@@ -813,9 +879,20 @@ registerTool({
     // <tool_call> block as TEXT (never actually called write_file), and this
     // path returned success: true with the hallucination as the output — the
     // orchestrator dutifully told the user "Die Lernwebsite wurde erfolgreich
-    // erstellt" when no file existed.
+    // erstellt" when no file existed. Judged against the declared deliverable
+    // (DelegationDeliverable). Declaring nothing, the agent was still built to produce a file
+    // when it was granted a tool that renders one (ARTIFACT_BUILDER_TOOLS: generate_document,
+    // render_pdf) — granted write_file says only what it MAY do, and an ephemeral analyst that
+    // answers in prose has missed nothing. Whatever was declared, a run whose own output claims
+    // a write it never made has missed the file it claims (looksLikeClaimedWriteMiss).
     const ephemeralCfg = { tools };
-    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never);
+    const declaredDeliverable = readDelegationDeliverable(args["deliverable"]);
+    const ephemeralDeliverable = declaredDeliverable ?? (holdsArtifactBuilderTool(tools) ? "file" : undefined);
+    const ephemeralFailedTools = (runResult.toolFailures ?? [])
+      .filter((failure) => !failure.declinedByUser && (failure.agent ?? ephemeralName) === ephemeralName)
+      .map((failure) => failure.tool);
+    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never, ephemeralDeliverable)
+      || looksLikeClaimedWriteMiss(result, ephemeralStats, runResult.artifacts ?? [], ephemeralFailedTools);
     if (narrativeOnly) {
       const expectedTools = tools.filter((name) =>
         /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
@@ -833,6 +910,7 @@ registerTool({
           rejectedTools: rejected,
           narrativeOnly: true,
           toolNames: ephemeralStats?.toolNames ?? [],
+          ...runRecordMetadata(runResult),
         },
       };
     }
@@ -841,7 +919,7 @@ registerTool({
     return {
       success: true,
       output: `[ephemeral:${agentName}]: ${result}${note}`,
-      metadata: { agentName: ephemeralName, grantedTools: tools, rejectedTools: rejected },
+      metadata: { agentName: ephemeralName, grantedTools: tools, rejectedTools: rejected, ...runRecordMetadata(runResult) },
     };
   },
 });

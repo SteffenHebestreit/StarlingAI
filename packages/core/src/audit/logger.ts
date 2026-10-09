@@ -20,8 +20,47 @@ const SENSITIVE_AUDIT_KEY = /^(?:authorization|cookie|password|passwd|pwd|passph
  * persist a credential-shaped value. Keys are redacted conservatively; ordinary
  * strings are passed through the shared secret scanner (including known env values).
  */
-export function sanitizeAuditData(value: unknown, key = ""): unknown {
+/**
+ * Binary payloads that belong on disk, not in the audit log.
+ *
+ * A single 1024x1024 PNG is ~1.5 MB, which becomes ~2 MB of base64 — and it was being
+ * written into `tool_call_completed` metadata AND again into the delegation's `artifacts`,
+ * so one two-minute image session put 3.89 MB into audit.jsonl and the file reached 8.4 MB.
+ * That is not a log any operator can read, and every later grep pays for it.
+ *
+ * The bytes are not lost: they are already on disk, and the same object carries the
+ * `outputPath` they were written to. So the log keeps the pointer and drops the payload,
+ * which is the thing an audit trail actually needs — WHICH image, not the image.
+ *
+ * Applied by shape rather than by field name, so a screenshot, an upload or the next
+ * producer nobody has written yet is covered without being added to a list.
+ */
+const AUDIT_INLINE_PAYLOAD_MAX = 2048;
+const DATA_URL_PREFIX = /^data:[^;,]*;base64,/;
+/** Base64 alphabet plus the line breaks some encoders insert, and nothing else. */
+const BARE_BASE64 = /^[A-Za-z0-9+/=\r\n]+$/;
+
+function summarizeInlinePayload(value: string, siblingPath?: string): string {
+  // Measure the PAYLOAD, not the `data:image/png;base64,` preamble, so the number in the
+  // log is the size of the thing on disk rather than the size of the string we dropped.
+  const payload = value.replace(DATA_URL_PREFIX, "");
+  const bytes = Math.round((payload.length * 3) / 4);
+  const where = siblingPath ? ` -> ${siblingPath}` : "";
+  return `[omitted: inline ${bytes.toLocaleString("en-US")}-byte payload${where}]`;
+}
+
+/** A long, opaque blob: a data: URL, or bare base64 with no whitespace. */
+function looksLikeInlinePayload(value: string): boolean {
+  if (value.length <= AUDIT_INLINE_PAYLOAD_MAX) return false;
+  if (DATA_URL_PREFIX.test(value)) return true;
+  return BARE_BASE64.test(value);
+}
+
+export function sanitizeAuditData(value: unknown, key = "", siblingPath?: string): unknown {
   if (SENSITIVE_AUDIT_KEY.test(key)) return "[REDACTED:sensitive-field]";
+  if (typeof value === "string" && looksLikeInlinePayload(value)) {
+    return summarizeInlinePayload(value, siblingPath);
+  }
   if (typeof value === "string") {
     // Audit logging must never turn a non-critical worker failure into a
     // gateway failure. Isolated plugin workers deliberately lack the complete
@@ -43,8 +82,14 @@ export function sanitizeAuditData(value: unknown, key = ""): unknown {
     // (a Date via toJSON → ISO string, a Buffer → {type:"Buffer",data:[…]}); an
     // Object.entries rebuild would flatten a Date to {} and explode a Buffer.
     if (!isPlainObject(value)) return value;
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .map(([entryKey, entryValue]) => [entryKey, sanitizeAuditData(entryValue, entryKey)]));
+    const record = value as Record<string, unknown>;
+    // Pass the sibling path down so a dropped payload names the file it was written to,
+    // rather than becoming an anonymous "[omitted]" nobody can trace back to an artifact.
+    const path = typeof record["outputPath"] === "string" ? record["outputPath"]
+      : typeof record["path"] === "string" ? record["path"]
+      : undefined;
+    return Object.fromEntries(Object.entries(record)
+      .map(([entryKey, entryValue]) => [entryKey, sanitizeAuditData(entryValue, entryKey, path)]));
   }
   return value;
 }
@@ -85,20 +130,34 @@ export function getAuditWriteStatus(): AuditWriteStatus {
   return { pendingWrites: _pendingWrites, failedWrites: _failedWrites, lastWriteFailureAt: _lastWriteFailureAt };
 }
 
+/**
+ * Lines waiting for the next write. One write takes everything queued by the time it runs: a
+ * mkdir + append per line fell hours behind on the bind-mounted workspace when a runaway routing
+ * loop logged ~12 events a second (session ffe08297, 2026-10-06) — the file stopped at 08:08 while
+ * the gateway went on queueing in memory.
+ */
+let _batch: string[] = [];
+
 function enqueueWrite(line: string): void {
   _pendingWrites++;
-  _writeChain = _writeChain
-    .then(async () => {
+  _batch.push(line);
+  // A write for the current batch is already chained; it will take this line too.
+  if (_batch.length > 1) return;
+  _writeChain = _writeChain.then(async () => {
+    const lines = _batch;
+    _batch = [];
+    try {
       const auditLogPath = resolveAuditLogPath();
       await mkdir(dirname(auditLogPath), { recursive: true });
-      await appendFile(auditLogPath, line, "utf-8");
-    })
-    .catch(err => {
-      _failedWrites++;
+      await appendFile(auditLogPath, lines.join(""), "utf-8");
+    } catch (err) {
+      _failedWrites += lines.length;
       _lastWriteFailureAt = new Date().toISOString();
-      log.error({ err }, "Failed to write audit log");
-    })
-    .finally(() => { _pendingWrites--; });
+      log.error({ err, lines: lines.length }, "Failed to write audit log");
+    } finally {
+      _pendingWrites -= lines.length;
+    }
+  });
 }
 
 /** Flush any pending audit writes.  Call during graceful shutdown. */

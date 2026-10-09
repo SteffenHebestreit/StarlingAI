@@ -6,7 +6,9 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts"],
     // Redirects the default audit-log destination to a temp dir so unisolated
-    // tests stop appending to the repo's own .starlingai/audit.jsonl.
+    // tests stop appending to the repo's own .starlingai/audit.jsonl, deletes
+    // ambient service URLs (model, Laya, Redis, Postgres, ...) and refuses
+    // connections that leave this machine. SAI_TEST_LIVE=1 lifts the last two.
     setupFiles: ["src/tests/vitest.setup.ts"],
     testTimeout: 60000,
     hookTimeout: 30000,

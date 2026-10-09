@@ -1,9 +1,13 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { probeArtifacts, probeHtmlStructure } from "../agent/artifact-probes.js";
+import { checkStructuralCompleteness, findLocalAssetRefs, probeArtifacts, probeHtmlStructure, summarizeProbeFailures } from "../agent/artifact-probes.js";
+import { extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
+import { collectJudgeableArtifactRefs } from "../agent/qa-tool-judge.js";
+import { getTool, type ToolContext } from "../tools/registry.js";
+import "../tools/website.js";
 
 // Temp workspace, not process.cwd(): vitest runs from packages/core, so rooting
 // the fixtures at cwd/tmp wrote into the source tree — and the old afterAll only
@@ -13,19 +17,45 @@ import { probeArtifacts, probeHtmlStructure } from "../agent/artifact-probes.js"
 const WORKSPACE = mkdtempSync(join(tmpdir(), "sai-probe-ws-"));
 const ROOT = join(WORKSPACE, "probe-fixtures");
 
-describe("deterministic artifact probes (QA-304)", () => {
-  beforeAll(async () => {
-    await mkdir(ROOT, { recursive: true });
-    await writeFile(resolve(ROOT, "valid.json"), JSON.stringify({ ok: true, items: [1, 2, 3] }));
-    await writeFile(resolve(ROOT, "broken.json"), '{"ok": true, "items": [1, 2'); // truncated
-    await writeFile(resolve(ROOT, "valid.html"), "<html><body><script>const x = 1;</script><p>hi</p></body></html>");
-    await writeFile(resolve(ROOT, "truncated.html"), "<html><body><script>const data = [1,2,3"); // mid-write cut
-    await writeFile(resolve(ROOT, "empty.txt"), "");
-  });
-  afterAll(async () => {
-    await rm(WORKSPACE, { recursive: true, force: true });
-  });
+/**
+ * The two halves of the measured failure (session a7b8fe3e), as files:
+ *
+ *   staged-build-dead.html     what shipped — a staged skeleton whose JS slots were
+ *                              never filled. Well-formed, balanced, and dead.
+ *   staged-build-inlined.html  the same deliverable finished, carrying every
+ *                              legitimate construct the rule must not fire on.
+ */
+// Newlines normalised: whether these check out CRLF or LF is a git setting, and the
+// assertions below are about content, not about which line ending the clone happens to
+// have. (The probe itself is agnostic — it trims every line before reading it.)
+const readFixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const DEAD_BUNDLE = readFixture("staged-build-dead.html");
+const INLINED_BUNDLE = readFixture("staged-build-inlined.html");
 
+// File-scoped, not per-describe: the fixtures are shared by both suites below, and an
+// afterAll nested in the first one deleted the workspace before the second ever ran.
+beforeAll(async () => {
+  await mkdir(ROOT, { recursive: true });
+  await writeFile(resolve(ROOT, "valid.json"), JSON.stringify({ ok: true, items: [1, 2, 3] }));
+  await writeFile(resolve(ROOT, "broken.json"), '{"ok": true, "items": [1, 2'); // truncated
+  await writeFile(resolve(ROOT, "valid.html"), "<html><body><script>const x = 1;</script><p>hi</p></body></html>");
+  await writeFile(resolve(ROOT, "truncated.html"), "<html><body><script>const data = [1,2,3"); // mid-write cut
+  await writeFile(resolve(ROOT, "empty.txt"), "");
+  await writeFile(resolve(ROOT, "staged-build-dead.html"), DEAD_BUNDLE);
+  await writeFile(resolve(ROOT, "staged-build-inlined.html"), INLINED_BUNDLE);
+  await writeFile(resolve(ROOT, "linked.html"), '<html><head><link rel="stylesheet" href="styles.css"></head><body><h1>Hi</h1><script src="./game.js"></script></body></html>');
+  // The two files linked.html loads, written for real. A multi-file site is only the
+  // legitimate deliverable this fixture stands for while the parts it names EXIST — the
+  // `runs` probe opens what the page loads, and a page whose only script is a 404 is a
+  // broken page, not a soft style note.
+  await writeFile(resolve(ROOT, "styles.css"), "h1 { color: #eee; }\n");
+  await writeFile(resolve(ROOT, "game.js"), "document.querySelector('h1');\n");
+});
+afterAll(async () => {
+  await rm(WORKSPACE, { recursive: true, force: true });
+});
+
+describe("deterministic artifact probes (QA-304)", () => {
   it("passes valid JSON and HTML with hash receipts", async () => {
     const report = await probeArtifacts(
       [{ kind: "file", location: "probe-fixtures/valid.json" }, { kind: "file", location: "probe-fixtures/valid.html" }],
@@ -77,4 +107,273 @@ describe("deterministic artifact probes (QA-304)", () => {
   it("no artifacts → not_applicable", async () => {
     expect((await probeArtifacts([], { workspacePath: WORKSPACE })).status).toBe("not_applicable");
   });
+});
+
+describe("structural completeness — the unfilled-placeholder failure", () => {
+  it("hard-fails the delivered skeleton whose JS slots were never filled", async () => {
+    const report = await probeArtifacts([{ kind: "file", location: "probe-fixtures/staged-build-dead.html" }], { workspacePath: WORKSPACE });
+
+    expect(report.status).toBe("fail");
+    const completeness = report.receipts.find((r) => r.probe === "completeness");
+    expect(completeness?.status).toBe("fail");
+    expect(completeness?.severity).not.toBe("soft"); // hard, so it can actually fail the report
+    expect(completeness?.detail).toContain("JS_PART1");
+
+    // The point of the fixture: every probe that existed BEFORE this check still passes
+    // on it. `exists` + `html_structure` are the two probes that made the real run
+    // report artifactProbeStatus "pass" / artifactProbeCount 2 over a dead file.
+    expect(report.receipts.find((r) => r.probe === "exists")?.status).toBe("pass");
+    expect(report.receipts.find((r) => r.probe === "html_structure")?.status).toBe("pass");
+  });
+
+  it("passes the finished bundle, including the constructs that look like markers", async () => {
+    // Guard the guard: if a later edit strips these out of the fixture, the pass below
+    // stops proving anything about false positives.
+    expect(INLINED_BUNDLE).toContain("Roadmap: TODO");                  // prose in visible text
+    expect(INLINED_BUNDLE).toContain("// TODO\n");                      // bare marker inside a <pre> code sample
+    expect(INLINED_BUNDLE).toContain("/* PLACEHOLDER */");               // ditto, block form
+    expect(INLINED_BUNDLE).toContain("/* ===== PART 2: INPUT ===== */"); // screaming-case section banner
+    expect(INLINED_BUNDLE).toContain("/* PARTICLES */");                 // single caps token, not a stub word
+    expect(INLINED_BUNDLE).toContain("// TODO: throttle");               // a real annotation, with prose
+    expect(INLINED_BUNDLE).toContain("HIGH_SCORE_TODO_KEY");             // compound identifier carrying a stub word
+
+    const report = await probeArtifacts([{ kind: "file", location: "probe-fixtures/staged-build-inlined.html" }], { workspacePath: WORKSPACE });
+    expect(report.status).toBe("pass");
+    expect(report.receipts.find((r) => r.probe === "completeness")?.status).toBe("pass");
+  });
+
+  it("catches the marker shapes without a table of this run's exact strings", () => {
+    const wrap = (inner: string) => `<html><body><div id="app"></div><script>\n${inner}\n</script></body></html>`;
+    for (const inner of [
+      "/* JS_PART1 */",             // the observed shape
+      "/* CSS_STUB */",
+      "/* PLACEHOLDER */",
+      "// SECTION_TBD",
+      "/* BEGIN GAME_PART2 */",     // marker plus a delimiter word: caught because the block is dead
+      "<!-- FIXME -->",
+    ]) {
+      expect(checkStructuralCompleteness("bundle.html", wrap(inner))?.status, inner).toBe("fail");
+    }
+    // A dead file with no markup wrapper at all — the whole file is the block.
+    expect(checkStructuralCompleteness("game.js", "/* JS_PART2 */\n")?.status).toBe("fail");
+  });
+
+  it("does not fire on prose, annotations, banners, or near-miss identifiers", () => {
+    const live = (inner: string) => `<html><body><script>\n${inner}\nconst score = 0;\nrender(score);\n</script></body></html>`;
+    for (const inner of [
+      "// TODO: handle the resize when the canvas is detached",  // annotation, carries prose
+      "/* ===== PART 2: RENDERING ===== */",                     // banner, several tokens
+      "/* PARTICLES */",                                          // stub word only as a prefix
+      "// see MAX_TODO_ITEMS for the cap",                        // identifier inside a sentence
+      '// docs at https://example.invalid/TODO',                  // a URL, not a marker
+    ]) {
+      expect(checkStructuralCompleteness("bundle.html", live(inner))?.status, inner).toBe("pass");
+    }
+    // A <pre> code sample is not a comment: outside script/style, `//` and `/* */` are text.
+    expect(checkStructuralCompleteness("page.html", "<html><body><pre>\n// TODO\n/* STUB */\n</pre></body></html>")?.status).toBe("pass");
+    // A <script src> element legitimately has an empty body.
+    expect(checkStructuralCompleteness("page.html", '<html><body><script src="app.js"></script></body></html>')?.status).toBe("pass");
+    // Prose formats are out of scope — a stub word there is content, not a hole.
+    expect(checkStructuralCompleteness("notes.md", "# Plan\n\n// TODO\n")).toBeNull();
+  });
+
+  it("reports a page that still links its own css/js — soft, so it never costs a rebuild", async () => {
+    const report = await probeArtifacts([{ kind: "file", location: "probe-fixtures/linked.html" }], { workspacePath: WORKSPACE });
+    const selfContained = report.receipts.find((r) => r.probe === "self_contained");
+    expect(selfContained?.status).toBe("fail");
+    expect(selfContained?.severity).toBe("soft");
+    expect(selfContained?.detail).toContain("styles.css");
+    // Soft — a multi-file site is a legitimate deliverable and the probe cannot see the
+    // request, so the report as a whole must still pass.
+    expect(report.status).toBe("pass");
+
+    expect(findLocalAssetRefs('<script src="https://cdn.invalid/lib.js"></script><link href="//cdn.invalid/a.css">')).toEqual([]);
+    expect(findLocalAssetRefs('<link rel="icon" href="favicon.ico">')).toEqual([]);
+  });
+});
+
+/**
+ * THE DELIVERABLE IS THE PAGE, NOT THE FILE THAT HAPPENED TO BE WRITTEN LAST.
+ *
+ * Run db88fa5b shipped a broken app with `artifactProbeStatus: "pass"`. The probed artifact
+ * was index.html — genuinely clean — while the styles.css it loads on the very next line
+ * still carried an UNFINISHED_STUB marker. The refs were already being DISCOVERED here (a
+ * soft self_contained receipt names them); they were simply never opened, so a marker one
+ * `<link>` away was invisible to the gate that exists to catch exactly that.
+ */
+describe("artifact probe — follows what the page loads", () => {
+  const APP = "probe-fixtures/app";
+
+  it("HARD-fails the page when a stylesheet it loads is unfinished", async () => {
+    await mkdir(join(WORKSPACE, APP), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, APP, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="styles.css"/></head>`
+      + `<body><h1>Neon Tetris</h1><script src="app.js"></script></body></html>`,
+      "utf8",
+    );
+    await writeFile(join(WORKSPACE, APP, "styles.css"), `.box { color: red }\n/* UNFINISHED_STUB: styles */`, "utf8");
+    await writeFile(join(WORKSPACE, APP, "app.js"), "const game = 1;", "utf8");
+
+    const report = await probeArtifacts([{ kind: "file", location: `${APP}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.status).toBe("fail");
+    const followed = report.receipts.find((r) => r.target.includes("styles.css"));
+    expect(followed, "the stylesheet the page loads must be probed").toBeDefined();
+    expect(followed!.severity).toBe("hard");
+    expect(followed!.detail).toContain("UNFINISHED_STUB");
+  });
+
+  it("still PASSES when every file the page loads is finished", async () => {
+    // THE DISCRIMINATOR. Same shape, same references, same soft self_contained note — only
+    // the contents of the referenced files differ. Without this the rule would fail every
+    // multi-file site, which is most of them.
+    const OK = "probe-fixtures/app-ok";
+    await mkdir(join(WORKSPACE, OK), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, OK, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="styles.css"/></head>`
+      + `<body><h1>Neon Tetris</h1><script src="app.js"></script></body></html>`,
+      "utf8",
+    );
+    await writeFile(join(WORKSPACE, OK, "styles.css"), ".box { color: red }", "utf8");
+    await writeFile(join(WORKSPACE, OK, "app.js"), "const game = 1;", "utf8");
+
+    const report = await probeArtifacts([{ kind: "file", location: `${OK}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.status).not.toBe("fail");
+    expect(report.receipts.some((r) => r.probe === "self_contained")).toBe(true);
+  });
+
+  it("does not walk out of the workspace via a crafted reference", async () => {
+    const ESC = "probe-fixtures/app-escape";
+    await mkdir(join(WORKSPACE, ESC), { recursive: true });
+    await writeFile(
+      join(WORKSPACE, ESC, "index.html"),
+      `<!doctype html><html><head><link rel="stylesheet" href="../../../../../../etc/passwd.css"/></head><body>x</body></html>`,
+      "utf8",
+    );
+
+    const report = await probeArtifacts([{ kind: "file", location: `${ESC}/index.html` }], { workspacePath: WORKSPACE });
+
+    expect(report.receipts.some((r) => r.target.includes("passwd"))).toBe(false);
+  });
+});
+
+/**
+ * A FOLDER DELIVERABLE IS PROBED THROUGH ITS index.html.
+ *
+ * generate_website and generate_presentation record the folder they wrote as outputPath (with
+ * indexPath beside it), and the probe hard-failed that folder as "not a file" (sessions daa170fc
+ * and 67ea4742). Both sites were correct; the repair could not succeed, since the recheck
+ * collected the same folder, and it replaced the tool's output with a hand-written one. These run
+ * the real tools and send their metadata down the gate's own path: tool result, attachments,
+ * judgeable refs, probes.
+ */
+describe("artifact probe — a folder deliverable is probed through its index.html", () => {
+  const fresh = () => mkdtempSync(join(tmpdir(), "sai-probe-folder-"));
+  /** The delegate_to_agent result the gate reads: the producing tool's metadata, nested. */
+  const refsFor = (metadata: Record<string, unknown>, sourceTool: string) => {
+    const attachments: Array<Record<string, unknown>> = [];
+    extractArtifactsFromMetadata({ artifacts: [{ ...metadata, sourceTool }] }, attachments, new Set());
+    return collectJudgeableArtifactRefs(attachments);
+  };
+
+  it("passes the site generate_website records as a folder", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_website")!.execute({
+      outputDir: "generated/baeckerei-morgenrot",
+      title: "Bäckerei Morgenrot",
+      pages: [
+        { path: "index.html", title: "Start", content: "# Willkommen\n\nFrisches Brot ab 6:30." },
+        { path: "kontakt.html", title: "Kontakt", content: "Mo-Fr 6:30-18:00, Sa 7:00-13:00" },
+      ],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    const refs = refsFor(result.metadata!, "generate_website");
+    expect(refs).toEqual([{ kind: "file", location: "generated/baeckerei-morgenrot" }]);
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    expect(report.receipts.some((r) => r.detail === "not a file")).toBe(false);
+    const page = report.receipts.filter((r) => r.target === "generated/baeckerei-morgenrot/index.html");
+    expect(page.map((r) => r.probe)).toEqual(expect.arrayContaining(["exists", "html_structure", "runs"]));
+  }, 40_000);
+
+  it("passes the site generate_website writes with includeMermaid, whose module script imports", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_website")!.execute({
+      outputDir: "generated/ablauf",
+      title: "Ablauf",
+      includeMermaid: true,
+      pages: [{ path: "index.html", title: "Ablauf", content: "# Ablauf\n\n```mermaid\ngraph TD; A-->B;\n```" }],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    expect(readFileSync(join(ws, "generated", "ablauf", "index.html"), "utf8")).toMatch(/<script type="module">\s*import mermaid/);
+    const refs = refsFor(result.metadata!, "generate_website");
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    const runs = report.receipts.find((r) => r.target === "generated/ablauf/index.html" && r.probe === "runs");
+    expect(runs?.status).toBe("pass");
+  }, 40_000);
+
+  it("passes the reveal.js deck generate_presentation records as a folder", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_presentation")!.execute({
+      outputDir: "digitaler-wartungsplan",
+      title: "Digitaler Wartungsplan",
+      slides: [
+        { title: "Ziel", content: "Wartung **planbar** machen.", notes: "Einstieg." },
+        { title: "Schritte", bullets: ["Erfassen", "Planen", "Prüfen"] },
+      ],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    const refs = refsFor(result.metadata!, "generate_presentation");
+    expect(refs.map((r) => r.location)).toEqual(["generated/digitaler-wartungsplan", "generated/digitaler-wartungsplan/notes.md"]);
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    const runs = report.receipts.find((r) => r.target === "generated/digitaler-wartungsplan/index.html" && r.probe === "runs");
+    expect(runs?.status).toBe("pass");
+  }, 40_000);
+
+  it("reports a folder with no index.html as unverifiable, never as a defect", async () => {
+    const ws = fresh();
+    await mkdir(join(ws, "generated", "bilder"), { recursive: true });
+    await writeFile(join(ws, "generated", "bilder", "a.txt"), "text");
+
+    const report = await probeArtifacts([{ kind: "file", location: "generated/bilder" }], { workspacePath: ws });
+
+    expect(report.status).toBe("unverifiable");
+    expect(report.receipts).toHaveLength(1);
+    expect(report.receipts[0]).toMatchObject({ target: "generated/bilder", status: "unverifiable", severity: "soft" });
+    expect(summarizeProbeFailures(report)).toBe("");
+  });
+
+  it("still fails a folder whose index.html is really broken, and names that page once", async () => {
+    const ws = fresh();
+    await mkdir(join(ws, "generated", "spiel"), { recursive: true });
+    await writeFile(
+      join(ws, "generated", "spiel", "index.html"),
+      '<!doctype html><html><body><canvas id="board-canvas"></canvas>'
+      + '<script>const board = document.getElementById("board"); board.getContext("2d");</script></body></html>',
+    );
+
+    // The folder and its page, recorded separately, in both orders: one probe of the page.
+    for (const refs of [
+      [{ kind: "file" as const, location: "generated/spiel" }, { kind: "file" as const, location: "generated/spiel/index.html" }],
+      [{ kind: "file" as const, location: "generated/spiel/index.html" }, { kind: "file" as const, location: "generated/spiel" }],
+    ]) {
+      const report = await probeArtifacts(refs, { workspacePath: ws });
+      expect(report.status).toBe("fail");
+      const failing = report.receipts.filter((r) => r.status === "fail" && r.severity !== "soft");
+      expect(failing).toHaveLength(1);
+      expect(failing[0]).toMatchObject({ target: "generated/spiel/index.html", probe: "runs" });
+      expect(failing[0]!.detail).toMatch(/TypeError/);
+    }
+  }, 40_000);
 });

@@ -36,6 +36,17 @@ export interface OutcomeEntry {
   taskKeywords?: string[];
   /** G32: Number of share_finding calls made during this run (quality signal). */
   sharedFindingsCount?: number;
+  /**
+   * The account the run was for: its user-scope segment (runtime/user-scope.ts recordAccount),
+   * never the raw user id. Set by the writers that run for an account: a sub-agent run's outcomes
+   * (agent/sub-agent.ts), a collapsed parallel_delegate (tools/sub-agent.ts) and record_lesson.
+   * Absent with one operator, for a run with no user, for the warden's entries, and on entries
+   * written before it existed. A reader that shows an entry's task or lesson shows it only to that
+   * account (memory/service.ts, gateway/sub-agent-routes.ts). Not stamped here: this module is a
+   * leaf the session and the warden import, and importing the user scope (and through it the
+   * config) from it hung runtime-superseded-turn.test.ts, which imports both at once.
+   */
+  account?: string;
 }
 
 const OUTCOMES_FILE = `${PRODUCT.stateDirName}/agent_outcomes.ndjson`;
@@ -58,6 +69,20 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
     log.warn({ err }, "Failed to write agent outcome — non-critical, continuing");
   }
 }
+
+/** What record_lesson takes from the run it is called in. The run carries it in its request context
+ *  (runtime/request-context.ts attachRequestOutcomeRun), so a lesson is filed under the run's own task:
+ *  the last ledger entry for the agent's name was another run's (found in review, 2026-10-08). */
+export interface OutcomeRun {
+  agent: string;
+  /** The task as the run's own outcome records it. */
+  task: string;
+  /** The account the run is for, as appendOutcome would stamp it. */
+  account?: string;
+  /** How far the run has got. */
+  progress(): { iterations: number; totalTokens: number };
+}
+
 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
   const file = resolve(workspacePath, OUTCOMES_FILE);
@@ -173,6 +198,13 @@ export function computeAdaptiveSubAgentTimeoutMs(
 /**
  * Returns a compact Markdown section summarising recent agent performance.
  * Empty string if there's nothing noteworthy.
+ *
+ * It goes into the turn's TAIL, not the base prompt (AgentSession.getAgentPerformanceNote,
+ * 2026-10-05). At the end of the base it was part of the cached head, and it changes after
+ * almost every delegation and as outcomes age out of the window, so each delegating turn left
+ * the warmed heads stale. In the tail a changing count costs nothing, so the success count
+ * stays: without it, 2 partials out of ~27 runs read like 2 out of 2, under a line that tells
+ * the model to prefer another agent.
  */
 export function formatOutcomesForPrompt(workspacePath: string): string {
   const cutoffMs = Date.now() - PROMPT_OUTCOME_LOOKBACK_MS;
@@ -196,7 +228,7 @@ export function formatOutcomesForPrompt(workspacePath: string): string {
   }
 
   const failingAgents = [...stats.entries()]
-    .filter(([name, s]) => !name.startsWith("ephemeral:"))
+    .filter(([name]) => !name.startsWith("ephemeral:"))
     .filter(([, s]) => s.failure + s.partial >= PROMPT_MIN_ADVERSE_OUTCOMES)
     .sort((left, right) => {
       const leftAdverse = left[1].failure + left[1].partial;

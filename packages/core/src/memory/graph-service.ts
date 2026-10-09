@@ -29,25 +29,134 @@
  *   (MemoryRecord)-[:SUPERSEDES {ts, reason}]->(MemoryRecord)
  *   (MemoryRecord)-[:CONTRADICTS {detectedAt, confidence}]->(MemoryRecord)
  *   (Agent)-[:RETRIEVED {ts, sessionId, rank, wasUseful}]->(MemoryRecord)
+ *
+ * Under multi-user auth a Session node's id and a RETRIEVED edge's sessionId hold graphSessionId's
+ * digest of the session id, never the id itself.
  */
 
+import { createHmac, randomBytes } from "node:crypto";
 import { isGraphDbAvailable, runCypher, toPlainRecords } from "../db/neo4j.js";
 import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { currentUserId } from "../runtime/request-context.js";
+import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
 
 /**
- * Per-user tenant for graph partitioning: the authenticated userId when
+ * Per-user tenant for 'user'-scope graph nodes: the authenticated userId when
  * multi-user auth is on, else null (single-operator — no partitioning, fully
- * back-compat). Only the 'user' scope is tenant-partitioned; workspace / session
- * / agent scopes stay shared. Pass the record's scope on WRITE (tenant only for
- * user-scope nodes); omit on READ to get the current reader's tenant.
+ * back-compat). Workspace-scope nodes are partitioned too, by their storage root
+ * (graphWorkspaceTenant); session / agent scopes stay shared. Pass the record's
+ * scope on WRITE; omit on READ to get the current reader's tenant.
  */
 function graphUserTenant(scope?: string): string | null {
   if (scope !== undefined && scope !== "user") return null;
   return getConfig().auth?.enabled === true ? (currentUserId() ?? null) : null;
+}
+
+/**
+ * Tenant of a workspace-scope node whose record lives at the SHARED workspace root. Never equal to
+ * a user segment: those always end in "-" plus 16 hex digits (safeUserSegment).
+ */
+export const SHARED_WORKSPACE_TENANT = "shared";
+const USER_SEGMENT_RE = /^[A-Za-z0-9_-]+-[0-9a-f]{16}$/;
+
+/**
+ * Tenant of a workspace-scope node on WRITE, mirroring where its record is stored. Under multi-user
+ * auth a workspace record lives in its writer's own root, <workspace>/users/<segment>/ (agent/session.ts
+ * userWorkspaceRoot), and the graph treated workspace scope as shared: the "Critical Memory" block
+ * every turn injects served one account's workspace decisions and preferences to every other account
+ * (found 2026-10-07). The storage directory decides — the segment after its last `users/` component,
+ * else the shared root — and without one the ambient user's segment does. Null with auth off.
+ */
+export function graphWorkspaceTenant(storageDir?: string): string | null {
+  if (getConfig().auth?.enabled !== true) return null;
+  if (storageDir !== undefined) {
+    const parts = storageDir.replace(/\\/g, "/").split("/");
+    for (let i = parts.length - 2; i >= 0; i--) {
+      if (parts[i] === USERS_SUBDIR && USER_SEGMENT_RE.test(parts[i + 1] ?? "")) return parts[i + 1]!;
+    }
+    return SHARED_WORKSPACE_TENANT;
+  }
+  return activeUserScopeSegment() ?? SHARED_WORKSPACE_TENANT;
+}
+
+/** The label of the memory service's nodes. */
+export const MEMORY_RECORD_LABEL = "MemoryRecord";
+
+/**
+ * Whose MemoryRecord text one reader may see under multi-user auth, named as the parameters of
+ * graphMemoryReadablePredicate: the reader's own user-scope nodes, and the workspace nodes of the
+ * reader's own root and of the shared root. The Critical Memory read (graphL0Layer) applies the same
+ * rule. A node with no tenant (written before tenants existed, or by graphPromoteFact) is nobody's.
+ */
+export interface GraphMemoryReader {
+  readerUserTenant: string | null;
+  readerWorkspaceTenant: string;
+  sharedWorkspaceTenant: string;
+}
+
+/**
+ * The ambient reader, or null with auth off, where every node stays readable. The graph is one
+ * instance for every account, and the readers that sample it directly, the graph inspector and
+ * graph_query, returned every account's memory text (found 2026-10-08). With no user in the context
+ * only the shared root's workspace nodes are readable.
+ */
+export function graphMemoryReader(): GraphMemoryReader | null {
+  if (getConfig().auth?.enabled !== true) return null;
+  return {
+    readerUserTenant: graphUserTenant(),
+    readerWorkspaceTenant: graphWorkspaceTenant() ?? SHARED_WORKSPACE_TENANT,
+    sharedWorkspaceTenant: SHARED_WORKSPACE_TENANT,
+  };
+}
+
+/** The reader's rule as a Cypher condition on `variable`; the query binds GraphMemoryReader's fields. */
+export function graphMemoryReadablePredicate(variable: string): string {
+  return `(NOT ${variable}:${MEMORY_RECORD_LABEL}`
+    + ` OR (${variable}.scope = 'user' AND ${variable}.tenant = $readerUserTenant)`
+    + ` OR (${variable}.scope = 'workspace' AND ${variable}.tenant IN [$readerWorkspaceTenant, $sharedWorkspaceTenant]))`;
+}
+
+/** The same rule for a node read back from the graph. Every node that is not a memory is readable. */
+export function isGraphMemoryReadable(
+  labels: readonly string[],
+  properties: Readonly<Record<string, unknown>>,
+  reader: GraphMemoryReader,
+): boolean {
+  if (!labels.includes(MEMORY_RECORD_LABEL)) return true;
+  const tenant = properties["tenant"];
+  if (typeof tenant !== "string") return false;
+  if (properties["scope"] === "user") return tenant === reader.readerUserTenant;
+  if (properties["scope"] === "workspace") return tenant === reader.readerWorkspaceTenant || tenant === reader.sharedWorkspaceTenant;
+  return false;
+}
+
+/** The key of graphSessionId's digests: drawn once per process and never stored. */
+let _graphSessionKey: Buffer | null = null;
+
+/**
+ * The id a session goes by in the graph: under multi-user auth a digest of the session id keyed by
+ * this process, never the id itself; with one operator the id as it is.
+ *
+ * The graph is one instance for every account, and the session ids it held, on Session nodes and on
+ * RETRIEVED edges, were every account's to read: graph_query projected them as plain strings and the
+ * graph inspector showed the Session nodes (found in review, 2026-10-08). A session id is what a run
+ * names to work in that session's shared facts. The graph only ties a session's records and
+ * retrievals together with it, and the digest does that as well. The key is the process's own, so
+ * after a restart, or in another process, a session goes by another digest: its records then hang
+ * off two Session nodes. The retrieval feedback loop is unaffected, since it marks a turn's
+ * retrievals in the process that recorded them. A config that cannot be read counts as multi-user.
+ */
+export function graphSessionId(sessionId: string): string {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed: digest */ }
+  if (!multiUser) return sessionId;
+  _graphSessionKey ??= randomBytes(32);
+  return createHmac("sha256", _graphSessionKey).update(sessionId).digest("hex").slice(0, 32);
 }
 
 const log = childLogger("memory:graph");
@@ -75,6 +184,8 @@ export async function upsertMemoryToGraph(
   // the non-scoring peerCount, so reusing the richer search vector is behavior-neutral.
   // When omitted (other callers), the graph computes its own from record.content.
   sharedEmbedding?: Float32Array | number[] | null | Promise<Float32Array | null>,
+  /** Directory the record is stored in; decides a workspace-scope node's tenant. */
+  storageDir?: string,
 ): Promise<void> {
   if (!isGraphDbAvailable()) return;
 
@@ -85,12 +196,19 @@ export async function upsertMemoryToGraph(
   const topic = record.kind;
 
   try {
+    // Under multi-user auth a write with no user in its context keeps the tenant the node has. The
+    // sleep-time sweep compacts each account's user memory in a context that names its directory
+    // and not the user, and the record the duplicates merged into was stored again with tenant null:
+    // the account lost its own preference from Critical Memory, the graph inspector and graph_query
+    // (found in review, 2026-10-08). A node the graph never had stays without one, which no account
+    // reads. With one operator no reader looks at the tenant, and the write is the one it was.
+    const keepTenant = getConfig().auth?.enabled === true;
     await runCypher(`
       MERGE (m:MemoryRecord {id: $id})
       SET m.content     = $content,
           m.kind        = $kind,
           m.scope       = $scope,
-          m.tenant      = $tenant,
+          m.tenant      = ${keepTenant ? "coalesce($tenant, m.tenant)" : "$tenant"},
           m.domain      = $domain,
           m.topic       = $topic,
           m.importance  = coalesce(m.importance, 0.5),
@@ -102,8 +220,9 @@ export async function upsertMemoryToGraph(
       content: record.content.slice(0, 2000),
       kind: record.kind,
       scope: record.scope,
-      // Per-user tenant for 'user'-scope nodes (multi-user auth); null otherwise.
-      tenant: graphUserTenant(record.scope),
+      // Under multi-user auth: the user for 'user'-scope nodes, the storage root's owner (or
+      // SHARED_WORKSPACE_TENANT) for 'workspace'-scope nodes; null otherwise.
+      tenant: record.scope === "workspace" ? graphWorkspaceTenant(storageDir) : graphUserTenant(record.scope),
       domain,
       topic,
       createdAt: record.createdAt,
@@ -141,7 +260,7 @@ export async function upsertMemoryToGraph(
         WITH s
         MATCH (m:MemoryRecord {id: $id})
         MERGE (s)-[:PRODUCED]->(m)
-      `, { sessionId, id: record.id }, { write: true });
+      `, { sessionId: graphSessionId(sessionId), id: record.id }, { write: true });
     } catch (err) {
       log.debug({ err }, "PRODUCED relationship upsert failed");
     }
@@ -221,25 +340,43 @@ export async function graphL0Layer(
 ): Promise<string> {
   if (!isGraphDbAvailable()) return "";
 
-  // Tenant MUST be in the cache key — else one user's cached L0 block would be
+  // Tenants MUST be in the cache key — else one user's cached L0 block would be
   // served to another user under multi-user auth.
   const tenant = graphUserTenant();
-  const cacheKey = `${domain ?? ""} ${maxChars} ${tenant ?? ""}`;
+  // The reader's own workspace root, plus the shared root's nodes. A node written before
+  // workspace tenants existed has none and is left out under auth (fail closed).
+  const workspaceTenant = graphWorkspaceTenant();
+  const cacheKey = `${domain ?? ""} ${maxChars} ${tenant ?? ""} ${workspaceTenant ?? ""}`;
   const cached = _graphL0Cache.get(cacheKey);
   if (cached && Date.now() - cached.storedAt <= GRAPH_L0_CACHE_TTL_MS) return cached.content;
 
+  // Under multi-user auth the nodes read are those of the reader rule the graph inspector and
+  // graph_query apply. This read had a rule of its own, in which a null user tenant matched every
+  // node: a request with no user (an A2A, MCP or federation run, and the sub-agent runs started from
+  // one) got every account's user-scope decisions and preferences as its Critical Memory (found in
+  // review, 2026-10-08). With the reader rule a request with no user reads no user node. With one
+  // operator the query is the one it was.
+  const reader = graphMemoryReader();
+  const tenantFilter = reader
+    ? graphMemoryReadablePredicate("m")
+    : `((m.scope = 'workspace'
+              AND ($workspaceTenant IS NULL OR m.tenant = $workspaceTenant OR m.tenant = $sharedTenant))
+             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))`;
   try {
     const queryPromise = runCypher(`
       MATCH (m:MemoryRecord)
       WHERE m.kind IN ['decision', 'preference']
-        AND (m.scope = 'workspace'
-             OR (m.scope = 'user' AND ($tenant IS NULL OR m.tenant = $tenant)))
+        AND ${tenantFilter}
         AND (m.validTo IS NULL OR m.validTo > $now)
         AND ($domain IS NULL OR m.domain = $domain OR m.domain IS NULL)
       RETURN m.id AS id, m.kind AS kind, m.content AS content
       ORDER BY m.importance DESC, m.updatedAt DESC
       LIMIT 5
-    `, { domain: domain ?? null, now: new Date().toISOString(), tenant }).catch(() => null); // swallow a late rejection after timeout
+    `, {
+      domain: domain ?? null,
+      now: new Date().toISOString(),
+      ...(reader ?? { tenant, workspaceTenant, sharedTenant: SHARED_WORKSPACE_TENANT }),
+    }).catch(() => null); // swallow a late rejection after timeout
     const result = await Promise.race([
       queryPromise,
       new Promise<typeof _GRAPH_L0_TIMEOUT>((resolve) => {
@@ -278,6 +415,28 @@ export async function graphL0Layer(
   } catch (err) {
     log.debug({ err }, "L0 layer query failed");
     return "";
+  }
+}
+
+// ── Delete-through ────────────────────────────────────────────────────────────
+
+/**
+ * Remove the node of a durable record whose file was deleted, and drop the cached Critical Memory
+ * blocks. The node used to stay ("harmless to the read-only inspector view"), but graphL0Layer
+ * serves a tenant's decision and preference nodes without looking at any file: after the e2e
+ * harness had emptied eval's memory, its deleted "Polarstern-Rooibos" preference was still in the
+ * graph to inject, one orphan more with every re-store under a new id (found 2026-10-08).
+ *
+ * Callers should fire-and-forget: deleteMemoryFromGraph(id).catch(() => {})
+ */
+export async function deleteMemoryFromGraph(id: string): Promise<void> {
+  if (!isGraphDbAvailable()) return;
+  try {
+    await runCypher(`MATCH (m:MemoryRecord {id: $id}) DETACH DELETE m`, { id }, { write: true });
+  } catch (err) {
+    log.warn({ err, id }, "Graph MemoryRecord delete failed");
+  } finally {
+    _graphL0Cache.clear();
   }
 }
 
@@ -421,7 +580,7 @@ export async function graphTrackRetrieval(
     `, {
       id: memoryId,
       agentName,
-      sessionId,
+      sessionId: graphSessionId(sessionId),
       rank,
       now: new Date().toISOString(),
     }, { write: true });
@@ -483,7 +642,7 @@ export async function graphPromoteFact(
       WITH m
       MERGE (s:Session {id: $sessionId})
       MERGE (s)-[:PRODUCED]->(m)
-    `, { id, content, agentName, key, sessionId, now }, { write: true });
+    `, { id, content, agentName, key, sessionId: graphSessionId(sessionId), now }, { write: true });
 
     // If the content changed, record the supersession. The fact uses a STABLE id
     // (one node per agent+key), so the MERGE above overwrote the content in place —
@@ -542,7 +701,7 @@ export async function graphMarkSessionRetrievalsUseful(
             ELSE coalesce(m.importance, 0.5) + $boost
           END
       RETURN count(ret) AS marked
-    `, { sessionId, boost }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), boost }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, boost }, "Retrieval feedback closed");
@@ -584,7 +743,7 @@ export async function graphMarkSessionRetrievalsUnhelpful(
             ELSE coalesce(m.importance, 0.5) - $penalty
           END
       RETURN count(ret) AS marked
-    `, { sessionId, penalty, floor }, { write: true });
+    `, { sessionId: graphSessionId(sessionId), penalty, floor }, { write: true });
 
     const marked = asInt(toPlainRecords(result ?? null as never)[0]?.["marked"], 0);
     if (marked > 0) log.debug({ sessionId, marked, penalty }, "Retrieval negative feedback applied");

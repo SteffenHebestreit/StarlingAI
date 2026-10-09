@@ -1,8 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { AgentSession, createSession, getSessionTranscript, resetSessionsForTests, archiveIdleSessions } from "../agent/session.js";
+import * as configLoader from "../config/loader.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -71,10 +73,42 @@ describe("AgentSession collapsed history", () => {
     // History was actually trimmed (not all 49 messages retained).
     expect(history.length).toBeLessThan(49);
 
-    // The dropped turns survive as a leading digest system message.
+    // The dropped turns survive as a leading digest message — user-role, so the provider's fold of
+    // the leading system run stops at the real head and a re-trim does not move it (2026-10-05).
     const collapsed = session.getCollapsedHistory();
-    expect(collapsed[0]?.role).toBe("system");
+    expect(collapsed[0]?.role).toBe("user");
     expect(collapsed[0]?.content).toContain("EARLIER CONVERSATION");
+    expect(collapsed.some((message) => message.role === "system")).toBe(false);
+    // ...and the pinned original request follows it as its own message.
+    expect(collapsed[1]?.content).toContain("ORIGINAL TASK");
+  });
+
+  it("never merges tool results into the earlier-conversation summary", () => {
+    // The summary is user-role (2026-10-05), and the collapse folds a tool round into the user
+    // message before it. With no pinned request between them, that message was the summary.
+    const summary = "[EARLIER CONVERSATION — condensed]\n• user: build the report";
+    const at = new Date().toISOString();
+    const session = new AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+      earlierSummary: summary,
+      history: [
+        {
+          role: "assistant",
+          content: "",
+          timestamp: at,
+          tool_calls: [{ id: "call_read", type: "function", function: { name: "read_file", arguments: JSON.stringify({ path: "a.txt" }) } }],
+        },
+        { role: "tool", tool_call_id: "call_read", content: "file body", timestamp: at },
+      ],
+    });
+
+    const collapsed = session.getCollapsedHistory();
+
+    expect(collapsed[0]).toEqual({ role: "user", content: summary });
+    expect(collapsed[1]?.role).toBe("user");
+    expect(collapsed[1]?.content).toContain("[Tool: read_file(path: a.txt) → file body]");
   });
 
   it("drops stale transient synthesis system messages before the next user turn", () => {
@@ -702,6 +736,43 @@ describe("AgentSession effort/time-limit settings", () => {
     // The built-in config default is "medium"; createSession seeds it so the
     // composer always has a concrete tier to display.
     expect(session.getSettings().effort).toBe("medium");
+  });
+});
+
+describe("AgentSession workspace root under multi-user auth", () => {
+  // Found in review (2026-10-08): the constructor partitions the root it is given, and a restored
+  // session gave it the root it had persisted, already the user's. After one gateway restart the
+  // root was <shared>/users/<seg>/users/<seg>, so the receptionist's capsule, the durable-facts
+  // capsule and memory_store all used a directory with none of the user's records in it.
+  const shared = resolve("/srv/workspace");
+  const segment = safeUserSegment("alice");
+  const aliceRoot = resolve(shared, "users", segment);
+
+  beforeEach(() => {
+    const real = configLoader.getConfig();
+    vi.spyOn(configLoader, "getConfig").mockReturnValue({ ...real, auth: { ...real.auth, enabled: true } } as typeof real);
+  });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("keeps the user's root when the session is restored, however often", () => {
+    const session = new AgentSession({ channel: "webchat", userId: "alice", workspacePath: shared, systemPrompt: "x" });
+    expect(session.getWorkspacePath()).toBe(aliceRoot);
+
+    const restored = AgentSession.fromRecord(session.toRecord());
+    expect(restored.getWorkspacePath()).toBe(aliceRoot);
+    expect(AgentSession.fromRecord(restored.toRecord()).getWorkspacePath()).toBe(aliceRoot);
+  });
+
+  it("keeps the caller's root for a workflow run started from it", () => {
+    // tools/workflow-catalog.ts passes the caller's root, already partitioned, with the caller's id.
+    const run = createSession({ sessionId: "workflow:s1:demo:1", channel: "workflow", userId: "alice", workspacePath: aliceRoot });
+    expect(run.getWorkspacePath()).toBe(aliceRoot);
+  });
+
+  it("brings a session persisted with the extra levels back to the user's root", () => {
+    const session = new AgentSession({ channel: "webchat", userId: "alice", workspacePath: shared, systemPrompt: "x" });
+    const record = { ...session.toRecord(), workspacePath: resolve(aliceRoot, "users", segment, "users", segment) };
+    expect(AgentSession.fromRecord(record).getWorkspacePath()).toBe(aliceRoot);
   });
 });
 

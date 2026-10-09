@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { warmTextLanguageDetector } from "../agent/text-language.js";
 import { prependUnverifiedSourceCaveat } from "../agent/runtime.js";
+
+// The banner language comes from the lazily loaded detector (text-language.ts).
+beforeAll(async () => { await warmTextLanguageDetector(); });
 
 /**
  * Anti-hallucination caveat (regression: session f59f85f5, 2026-05-29). A

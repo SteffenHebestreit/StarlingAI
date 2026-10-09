@@ -53,6 +53,20 @@ export interface TurnPerformanceMetrics {
   /** turnDurationMs minus llmTimeMs, toolExecutionTimeMs, and all tracked phase timings —
    *  the residual that surfaces the next unmeasured cost. */
   untrackedMs?: number;
+  /**
+   * The model calls the QA gates made — the delivery loop's and the consistency gate's
+   * verdicts and their rewrite calls — and the wall-clock they took. A BREAKDOWN, not another
+   * slice: the time already sits inside phaseTimingsMs.qaDeliveryLoop /
+   * deliverableConsistencyQa, and it is NOT in llmTimeMs, which stays the orchestrator loop's
+   * own calls. Those stage timings are what the Warden partitions a slow turn by, so moving
+   * QA time into llmTimeMs would have either counted it twice or renamed a "qaDeliveryLoop was
+   * slow" alert into "llm was slow". What the stage timing cannot say is how much of it was
+   * the model and over how many calls: session f4ebf47b's 145 s turn showed llmTimeMs 19 s
+   * and qaDeliveryLoop 85 s, and only the provider rows showed that 85 s was three calls,
+   * two of them verdicts that reasoned for 30 s and 47 s. Present only when a QA call ran.
+   */
+  qaLlmCalls?: number;
+  qaLlmTimeMs?: number;
 }
 
 // Turn-scoped accumulator for per-stage wall-clock (A1). A turn runs inside one
@@ -60,14 +74,20 @@ export interface TurnPerformanceMetrics {
 // AsyncLocalStorage (a module-level singleton would cross-contaminate turns), not a
 // shared mutable. timedPhase() records the elapsed ms of a stage into the active
 // turn's store; buildTurnPerformanceMetrics() reads it and computes untrackedMs.
-const _phaseTimingsStore = new AsyncLocalStorage<Record<string, number>>();
+interface TurnTimingStore {
+  phases: Record<string, number>;
+  /** The QA gates' model calls — see TurnPerformanceMetrics.qaLlmCalls. */
+  qaLlm: { calls: number; timeMs: number };
+}
+
+const _phaseTimingsStore = new AsyncLocalStorage<TurnTimingStore>();
 
 /**
  * Establish a fresh per-turn phase-timing store and run `fn` inside it, so any
  * `timedPhase()` call anywhere in the turn records into THIS turn's map.
  */
 export function runWithPhaseTimings<T>(fn: () => Promise<T>): Promise<T> {
-  return _phaseTimingsStore.run(Object.create(null) as Record<string, number>, fn);
+  return _phaseTimingsStore.run({ phases: Object.create(null) as Record<string, number>, qaLlm: { calls: 0, timeMs: 0 } }, fn);
 }
 
 export async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promise<T> {
@@ -77,7 +97,21 @@ export async function timedPhase<T>(phase: string, fn: () => Promise<T>): Promis
   try {
     return await fn();
   } finally {
-    store[phase] = (store[phase] ?? 0) + (Date.now() - start);
+    store.phases[phase] = (store.phases[phase] ?? 0) + (Date.now() - start);
+  }
+}
+
+/** Time one model call a QA gate makes (a verdict, or the rewrite it asks for) into this turn's
+ *  qaLlmCalls / qaLlmTimeMs. A call that throws still counts: it spent the time. */
+export async function timedQaModelCall<T>(fn: () => Promise<T>): Promise<T> {
+  const store = _phaseTimingsStore.getStore();
+  if (!store) return fn();
+  const start = Date.now();
+  try {
+    return await fn();
+  } finally {
+    store.qaLlm.calls += 1;
+    store.qaLlm.timeMs += Date.now() - start;
   }
 }
 
@@ -156,8 +190,10 @@ export function buildTurnPerformanceMetrics(input: {
   // Per-stage timings recorded by timedPhase() during this turn (empty when no
   // tracked stage ran). untrackedMs is the residual after LLM + tool + tracked
   // stages — it surfaces the next unmeasured cost.
-  const phaseStore = _phaseTimingsStore.getStore();
+  const timingStore = _phaseTimingsStore.getStore();
+  const phaseStore = timingStore?.phases;
   const phaseTimingsMs = phaseStore && Object.keys(phaseStore).length > 0 ? { ...phaseStore } : undefined;
+  const qaLlm = timingStore && timingStore.qaLlm.calls > 0 ? timingStore.qaLlm : undefined;
   const trackedPhaseMs = phaseTimingsMs ? Object.values(phaseTimingsMs).reduce((a, b) => a + b, 0) : 0;
   const untrackedMs = Math.max(0, turnDurationMs - input.llmTimeMs - input.toolExecutionTimeMs - trackedPhaseMs);
   return {
@@ -180,5 +216,6 @@ export function buildTurnPerformanceMetrics(input: {
     effortSloBudgetMs: effectiveOrchestratorTurnSloMs(),
     ...(phaseTimingsMs ? { phaseTimingsMs } : {}),
     untrackedMs,
+    ...(qaLlm ? { qaLlmCalls: qaLlm.calls, qaLlmTimeMs: qaLlm.timeMs } : {}),
   };
 }

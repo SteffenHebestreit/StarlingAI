@@ -18,6 +18,7 @@
 // severities, conditions, and ordering are byte-identical to the inline original.
 
 import { logAudit } from "../audit/logger.js";
+import { findUnfilledStubFiles, findBrokenBuiltPages } from "./sub-agent.js";
 import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
@@ -45,12 +46,14 @@ import {
   looksLikeFabricatedToolDeliveryLink,
   looksLikeInlinedAppDocument,
 } from "./deliverable-intent.js";
+import { collectSessionArtifactPaths, workspaceFileExists } from "./artifact-path-repair.js";
 import {
   looksLikeRegurgitatedPriorAnswer,
   looksLikeOrchestrationOnlyEvidence,
   stripPresentationFormatting,
 } from "./runtime-utils.js";
 import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js";
+import { isExecutionChatterOnly } from "./sanitize-response.js";
 import { looksLikeRawSharedFactsDump } from "./runtime-evidence-dump.js";
 import {
   looksLikeTransparentIncompleteReport,
@@ -60,6 +63,7 @@ import {
 } from "./citation-honesty.js";
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
+import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -85,6 +89,8 @@ interface QaDeliveryGateResult {
   artifactProbeCount: number;
   escalated: boolean;
   unverified: boolean;
+  /** The reviewer returned no verdict (empty/unparseable reply or a thrown check). */
+  noVerdict?: boolean;
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -93,6 +99,8 @@ interface DeliverableConsistencyGateResult {
   changed: boolean;
   rounds: number;
   passed: boolean;
+  status: "pass" | "fail" | "unverified";
+  noVerdict?: boolean;
 }
 
 /**
@@ -130,12 +138,24 @@ export interface TerminalGuardContext {
    */
   readonly skipDraftRecovery?: boolean;
 
+  /**
+   * When this turn began (wall clock). The disk evidence below — unfilled markers, a page that
+   * does not run — lives in a `generated/` zone shared by every turn the deployment has ever
+   * run, so without this the claim "THIS turn left an incomplete artifact" is really "some
+   * turn, ever, did", and one never-cleaned page spends a corrective build on every
+   * artifact-shaped turn from every user thereafter. Undefined falls back to the whole zone,
+   * which is the old behaviour and is only right for a caller that means exactly that.
+   */
+  readonly turnStartedAtMs?: number;
+
   // --- turn-state signals, read-only within this run ---
   readonly currentTurnHasExecutableOrchestration: boolean;
   readonly forcedSynthesisFired: boolean;
   readonly consecutiveDelegationFailures: number;
   readonly turnToolCallCounts: Map<string, number>;
   readonly turnShareFindingCount: number;
+  /** The page URLs this turn's knowledge-base reads returned to the model (knowledgeBaseSourceUrls). */
+  readonly turnKnowledgeBaseSourceUrls: ReadonlySet<string>;
   readonly workflowRunCompletedThisTurn: boolean;
   readonly releasedWithoutResearchEvidence: boolean;
   readonly autoResearchAnswer: string | null;
@@ -195,10 +215,45 @@ export interface TerminalGuardContext {
  * mutated state back after the call. Every branch, condition, audit event, severity, and the
  * ordering are the inline span moved verbatim (only enclosing free-var reads became ctx.x).
  */
+/**
+ * The riskGatedQA one-shot criteria verification is redundant when the QA delivery loop will check
+ * the same criteria — and the loop is a no-op without criteria, so then the one-shot stays.
+ */
+export function oneShotCriteriaVerifyIsRedundant(qaDeliveryLoopOn: boolean, criteriaCount: number): boolean {
+  return qaDeliveryLoopOn && criteriaCount > 0;
+}
+
+/**
+ * Whether a file the answer names really exists — on disk at that workspace-relative path, or
+ * among the paths this session's tools recorded (an earlier turn's artifact). Only a PURE pointer
+ * at real files is excused by this (claimsArtifactWrittenButUnproduced). The match is by whole
+ * path segments, and a bare file name only matches a recorded file of exactly that path: "index.html"
+ * must not borrow the existence of apps/old/index.html. Lazy and fail-closed to "missing": a lookup
+ * error must never excuse a fabricated file.
+ */
+export function answerReferencedFileExists(session: Pick<AgentSession, "getWorkspacePath" | "getHistory">): (ref: string) => boolean {
+  let onDisk: ((token: string) => boolean) | undefined;
+  let recorded: string[] | undefined;
+  return (ref) => {
+    try {
+      const normalized = ref.replace(/^\.?\//, "");
+      onDisk ??= workspaceFileExists(session.getWorkspacePath());
+      if (onDisk(normalized)) return true;
+      recorded ??= collectSessionArtifactPaths(session.getHistory()).map((path) => path.replace(/^\.?\//, ""));
+      return recorded.some((path) => path === normalized || (normalized.includes("/") && path.endsWith(`/${normalized}`)));
+    } catch {
+      return false;
+    }
+  };
+}
+
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
   const { signal, session, provider, userMessage, toolContext, deliverableIntent, initialDynamicGuidance, guardrailEvents } = ctx;
   const { rawResponse, iterationCount, effectiveToolIterations, terminalFinishReason, toolCallsRequested } = ctx;
-  const { currentTurnHasExecutableOrchestration } = ctx;
+  const { currentTurnHasExecutableOrchestration, turnStartedAtMs } = ctx;
+  // Every completion-claim check below reads the same workspace (2026-10-05: a claim now needs
+  // claim grammar, and a pointer at a file that exists is not one).
+  const artifactClaimOptions = { fileExists: answerReferencedFileExists(session) };
 
   let finalResponse = await ctx.finalizeUserFacingAssistantResponse(rawResponse, effectiveToolIterations, session, provider, signal);
 
@@ -219,14 +274,14 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     )
   ) {
     const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id, 6_000);
-    const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+    const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
     const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: true });
     if (recoveryEvidence && !looksLikeWeakRecoveryEvidence(recoveryEvidence.evidence)) {
       const synthesized = await ctx.forceSynthesis(
         session,
         provider,
         signal,
-        "Research specialists have gathered findings during this turn. Synthesize all [SHARED FINDINGS AVAILABLE] entries and the recovered evidence below into a complete, well-structured answer in the user's language.\n"
+        `Research specialists have gathered findings during this turn. Synthesize all [SHARED FINDINGS AVAILABLE] entries and the recovered evidence below into a complete, well-structured answer ${IN_REPLY_LANGUAGE}.\n`
         + "Do NOT echo raw key names (e.g. auto_xxx_yyy). Convert every finding into readable, user-facing prose.\n"
         + "Recovered evidence:\n" + recoveryEvidence.evidence.slice(0, 5_000),
       );
@@ -266,7 +321,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       || hasRecentSourceSensitivePartialDelegation(session.getHistory())
     )
   ) {
-    const delegateEvidence = findRecentDelegateEvidence(session.getHistory());
+    const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
     const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
     const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence);
     if (recoveryEvidence) {
@@ -337,6 +392,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     turnDelegationCount: ctx.getTurnDelegationCount(),
     workflowRunCompletedThisTurn: ctx.workflowRunCompletedThisTurn,
     turnShareFindingCount: ctx.turnShareFindingCount,
+    turnKnowledgeBaseSourceUrls: ctx.turnKnowledgeBaseSourceUrls,
     guardrailEvents,
   }));
 
@@ -348,7 +404,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // eingefügt … URLs überprüft"). The three AND-conditions keep real builds (an artifact
   // was produced → skipped) and report-only turns (no claim → skipped) untouched;
   // topic-agnostic. Runs for ALL backends, not only source-sensitive ones.
-  const artifactClaimUnbacked = claimsArtifactWrittenButUnproduced(finalResponse);
+  const artifactClaimUnbacked = claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions);
   const staleArtifactReplay = !artifactClaimUnbacked
     && looksLikeRegurgitatedPriorAnswer(finalResponse, session.getHistory());
   if (
@@ -365,11 +421,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     const honest = await ctx.forceSynthesis(
       session, provider, signal,
       "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — OR it re-pastes an earlier turn's answer almost verbatim — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed and do NOT re-post a previous turn's answer as if this turn's request were done. "
-      + "Reply briefly and honestly IN THE USER'S LANGUAGE: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.",
+      + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.`,
     );
     const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
     finalResponse = (candidate && candidate.trim().length >= 40
-      && !claimsArtifactWrittenButUnproduced(candidate)
+      && !isExecutionChatterOnly(candidate)
+      && !claimsArtifactWrittenButUnproduced(candidate, artifactClaimOptions)
       && !looksLikeRegurgitatedPriorAnswer(candidate, session.getHistory()))
       ? candidate
       : "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.\n\nI did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.";
@@ -387,7 +444,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   // plan with acceptance criteria, check the answer against those criteria
   // and repair if it falls short. Source-sensitive turns were already
   // anchored by the evidence backstop above, so they skip the redundant
-  // verify call. Low-stakes / chat turns skip QA entirely.
+  // verify call. Low-stakes / chat turns skip this one-shot check; while qaDeliveryLoop is on,
+  // the loop replaces it on every plan with criteria, whatever the risk tier.
   if (effectiveOrchestration().riskGatedQA) {
     const qaPlan = await loadTurnPlan(session.id);
     const invokedApprovalGatedTool = [...ctx.turnToolCallCounts.keys()].some(requiresApproval);
@@ -420,7 +478,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       evidenceAnchoringRepairRan = true;
       const anchorInstruction = [
         "EVIDENCE-ANCHORING REPAIR:",
-        "Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, in the SAME language as the user's request.",
+        `Your previous answer did not reference the verified findings this run gathered. Re-write the answer so it is grounded in the findings below, ${IN_REPLY_LANGUAGE}.`,
         "Use ONLY these findings plus this conversation's tool results. Do not invent any specifics — names, numbers, dates, sources, or claims — beyond them. Mark anything the findings do not support as unverified/incomplete.",
         "Keep it a concise, useful answer — do not dump raw tool traces or page snapshots.",
         "Verified findings:",
@@ -441,7 +499,15 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }
     }
 
-    if (risk === "high" && !evidenceAnchoringRepairRan) {
+    // With the QA delivery loop on, the same criteria are checked again a few lines down, and the
+    // loop's check is the one that can send the answer back for more work — so this one-shot
+    // verification was a second full-context synthesis call (30–90 s on the single GPU) whose
+    // verdict the loop then re-derived. It runs only where the loop will not.
+    const qaLoopWillVerify = oneShotCriteriaVerifyIsRedundant(
+      effectiveOrchestration().qaDeliveryLoop === true,
+      qaPlan?.acceptanceCriteria.length ?? 0,
+    );
+    if (risk === "high" && !evidenceAnchoringRepairRan && !qaLoopWillVerify) {
       if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
         acceptanceCriteriaQaRan = true;
         const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
@@ -461,7 +527,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             { sessionId: session.id, severity: repaired ? "warn" : "info" });
           if (repaired) guardrailEvents.push({ type: "guardrail_flagged", details: "risk_gated_qa_repaired" });
         } else {
-          logAudit("flow_verification_passed", { reason: "verify_produced_no_better_candidate" }, { sessionId: session.id, severity: "info" });
+          // Nothing usable came back — no reply, or a stub — so nothing was checked. It logged as
+          // flow_verification_passed, a pass nobody gave (review of the thinking-off verdicts, D3b).
+          logAudit("flow_high_stakes_unverified", {
+            reason: verified ? "verify_returned_a_stub" : "verify_returned_nothing",
+            invokedApprovalGatedTool,
+          }, { sessionId: session.id, severity: "info" });
         }
       } else {
         logAudit("flow_high_stakes_unverified", { reason: qaPlan ? "no_acceptance_criteria" : "no_plan", invokedApprovalGatedTool }, { sessionId: session.id, severity: "info" });
@@ -492,8 +563,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             if (signal.aborted) return null;
             const task = "QA RE-PLAN — the delivered answer STILL fails these acceptance criteria after a rewrite, "
               + "which means the gap needs real work, not re-wording. Make a focused plan to fix EXACTLY these flaws "
-              + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable in "
-              + "the user's language. Ground every claim in tool results; do not fabricate to satisfy a criterion — if "
+              + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable "
+              + `${IN_REPLY_LANGUAGE}. Ground every claim in tool results; do not fabricate to satisfy a criterion — if `
               + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
               + "\n\nCurrent answer to improve:\n" + current.slice(0, 6_000);
@@ -566,6 +637,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         status: gate.status,
         ...(gate.evidence ? { qaEvidence: gate.evidence } : {}),
         unverified: gate.unverified,
+        ...(gate.noVerdict ? { noVerdict: true } : {}),
         improved: gate.changed,
         escalated: gate.escalated,
         acceptanceCriteria: criteria.length,
@@ -604,10 +676,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     })
   ) {
     const userStatements = collectUserStatements(session.getHistory(), 2000);
-    const gate = await ctx.runDeliverableConsistencyGate(
+    // Timed as its own stage, like the delivery loop: its verdict and repair calls ran outside
+    // every counter turn_performance keeps, so their time landed in untrackedMs unnamed.
+    const gate = await timedPhase("deliverableConsistencyQa", () => ctx.runDeliverableConsistencyGate(
       session, provider, signal, finalResponse, userStatements,
       effectiveOrchestration().deliverableConsistencyQaMaxRounds,
-    );
+    ));
     if (gate.changed) {
       finalResponse = gate.answer;
       invalidateQaSignals();
@@ -620,24 +694,74 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       }
       guardrailEvents.push({ type: "guardrail_flagged", details: "deliverable_consistency_repaired" });
     }
-    logAudit(gate.changed ? "deliverable_consistency_repaired" : "deliverable_consistency_passed",
-      { rounds: gate.rounds, passed: gate.passed, repaired: gate.changed },
+    // An empty or unparseable verdict is no verdict: it used to log as
+    // deliverable_consistency_passed with passed:true, a pass nobody gave. A FAIL whose repair
+    // returned nothing logged as "passed" too, with passed:false in its own row (review of the
+    // thinking-off verdicts, D3c).
+    logAudit(
+      gate.changed
+        ? "deliverable_consistency_repaired"
+        : gate.noVerdict ? "deliverable_consistency_unverified"
+          : gate.passed ? "deliverable_consistency_passed" : "deliverable_consistency_failed",
+      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}) },
       { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
   }
 
   // Completion QA gate (normal-stop path): the user asked to BUILD an interactive/served
   // app, the model finished a turn (finishReason stop) describing a CONCEPT, but no real
+  // Unfilled markers or a page that does not run, read straight off disk — the same evidence
+  // the sub-agent's own resume detection uses, so the corrective build it triggers arrives in
+  // repair mode with the fault named rather than starting over.
+  const artifactScope = { modifiedSinceMs: turnStartedAtMs };
+  const turnLeftAnIncompleteArtifact = async (workspacePath: string): Promise<boolean> => {
+    try {
+      if (findUnfilledStubFiles(workspacePath, artifactScope).count > 0) return true;
+      return (await findBrokenBuiltPages(workspacePath, artifactScope)).length > 0;
+    } catch {
+      return false;   // a scan failure must never manufacture a rebuild
+    }
+  };
+
   // artifact was produced → run ONE corrective build and ship the built app instead of the
   // description. Scoped to app/served deliverables (web_coder/backend_coder) so plain
   // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
   // qaCorrectiveBuildUsed latch. (The forced-terminal path has its own build gate above.)
-  if (
-    effectiveOrchestration().finalResponseQaGate
+  // Hoisted out of the condition below: establishing whether a page runs now costs a child
+  // process, so it is only asked when everything cheaper has already said yes.
+  const qaGateEligible = effectiveOrchestration().finalResponseQaGate
     && !ctx.getQaCorrectiveBuildUsed()
     && !signal.aborted
-    && deliverableIntent.wantsArtifact
+    && deliverableIntent.wantsArtifact;
+  const describedInsteadOfBuilding = qaGateEligible
     && deliverableIntent.isAppBuild
-    && ctx.collectTurnArtifactAttachments(session).length === 0
+    && ctx.collectTurnArtifactAttachments(session).length === 0;
+  if (
+    qaGateEligible
+    && (
+      // "Described it instead of building it" stays scoped to app builds: for a deck or a
+      // report the model writing the content inline IS the deliverable, and forcing a build
+      // there would be wrong.
+      describedInsteadOfBuilding
+      // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
+      //
+      // This gate asked only "was an artifact produced", because it was written for the
+      // model that DESCRIBES an app instead of building one. The clean-slate validation run
+      // hit the other shape: a real 20 KB artifact with two subsystems unwritten, failing its
+      // probe and its QA gate — and because a file existed, the one mechanism that could have
+      // finished it was skipped, and the turn shipped a partial with an honest apology.
+      //
+      // The QA loop cannot close this itself: its improve() rewrites the ANSWER, never the
+      // file. Only a build can fix a build, and the evidence for needing one is on disk.
+      // A BROKEN ARTIFACT IS BROKEN WHOEVER BUILT IT.
+      //
+      // isAppBuild is `builder !== "content_writer"` — which agent won the bid — and the
+      // second validation run routed a playable browser game to content_writer. So a page
+      // that throws before it draws was classified as not-an-app-build and skipped the one
+      // guard that could have repaired it, on the basis of a routing decision that has
+      // nothing to do with whether the file works. The disk evidence is structural and does
+      // not care who wrote it.
+      || (!describedInsteadOfBuilding && await turnLeftAnIncompleteArtifact(session.getWorkspacePath()))
+    )
   ) {
     const factsCtx = initialDynamicGuidance?.sourceSensitive
       ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
@@ -700,7 +824,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     toolCallsRequested === 0
     && ctx.collectTurnArtifactAttachments(session).length === 0
     && (looksLikeFabricatedToolDeliveryLink(finalResponse)
-      || (requestIsArtifactShaped && claimsArtifactWrittenButUnproduced(finalResponse))
+      || (requestIsArtifactShaped && claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions))
       || inlinedAppDocumentInsteadOfBuild)
   ) {
     logAudit("guardrail_flagged", {
@@ -784,9 +908,9 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
   if (
     deliverableIntent.wantsArtifactMutation
     && ctx.collectTurnArtifactAttachments(session).length === 0
-    && claimsArtifactWrittenButUnproduced(finalResponse)
+    && claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions)
   ) {
-    finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Build lief in eine Zeitüberschreitung). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build timed out). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
+    finalResponse = "> ⚠️ **Die angeforderte Datei wurde in diesem Schritt NICHT erstellt** (der Bau wurde nicht abgeschlossen). Der folgende Inhalt ist nur ein Text-Entwurf — bestätige, dann lasse ich den Inhalts-Spezialisten die Datei jetzt bauen.\n> _The requested file was **not** created this turn (the build did not complete). The content below is a text draft only — confirm and I'll have the content specialist build the file now._\n\n"
       + finalResponse;
     guardrailEvents.push({ type: "guardrail_flagged", details: "artifact_completion_claim_unbacked_bannered" });
     logAudit("guardrail_flagged", {

@@ -90,6 +90,10 @@ async function main(): Promise<void> {
     try { await shutdownMcpServers(); } catch { /* ignore */ }
     try { shutdownDynamicTools(); } catch { /* ignore */ }
     try { await shutdownTracing(); } catch { /* ignore */ }
+    // Session-store writes are coalesced (agent/session.ts): land the last window before exiting.
+    // Imported here, not at the top, to keep this entrypoint's startup minimal; when a tool call
+    // already loaded the module this is the same instance.
+    try { await (await import("./agent/session.js")).flushSessionStore(); } catch { /* ignore */ }
     process.exit(0);
   };
 

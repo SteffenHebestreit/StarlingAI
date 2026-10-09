@@ -3,12 +3,14 @@
  * Never executes on the host machine directly.
  */
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
+import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:shell");
 const execFileAsync = promisify(execFile);
@@ -73,7 +75,12 @@ registerTool({
       }
     }
 
-    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    // The WORKSPACE at /workspace, not the deployment's mount source. See
+    // resolveDockerWorkspaceBind: binding the source there made /workspace the repo, so this
+    // sandbox's own contract ("paths are relative to /workspace") was false — and, now that
+    // the workspace root is per-user, binding it is also what keeps one account's shell out of
+    // another's files.
+    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
     const wrappedCommand = buildSandboxCommand(command, workdir);
 
     const dockerArgs = [
@@ -86,7 +93,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
-      "-v", `${workspaceMountSource}:/workspace`,
+      "-v", workspaceBind,
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -106,23 +113,39 @@ registerTool({
       return {
         success: true,
         output: output || "(no output)",
-        metadata: { command, exitCode: 0, sandboxed: true },
+        metadata: { command, exitCode: 0, sandboxed: true, programOutputChars: printedChars(output) },
       };
     } catch (err: unknown) {
       const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
       if (e.killed) {
-        return { success: false, output: e.stdout ?? "", error: `Command timed out after ${EXEC_TIMEOUT_MS}ms` };
+        return {
+          success: false,
+          output: e.stdout ?? "",
+          error: `Command timed out after ${EXEC_TIMEOUT_MS}ms`,
+          metadata: { command, sandboxed: true, timedOut: true, programOutputChars: printedChars([e.stdout, e.stderr].filter(Boolean).join("\n")) },
+        };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
       return {
         success: false,
         output,
         error: `Exit code ${e.code ?? "?"}: ${e.message ?? "Unknown error"}`,
-        metadata: { sandboxed: true },
+        metadata: { sandboxed: true, exitCode: typeof e.code === "number" ? e.code : null, programOutputChars: printedChars(output) },
       };
     }
   },
 });
+
+/**
+ * What the program printed, counted without the whitespace around it. The result text cannot say:
+ * an empty run reads "(no output)", and a failed one carries only the docker command line. E2E
+ * 2026-10-07: the docker-socket proxy swallowed every byte, three runs "succeeded" with "(no
+ * output)", and the coder answered with figures no run had printed. The field also tells the
+ * sub-agent that the program ran at all; the early refusals above never set it.
+ */
+function printedChars(output: string): number {
+  return output.trim().length;
+}
 
 /**
  * Shell commands bypass the filesystem-tool allowlist, so reject direct
@@ -156,9 +179,14 @@ function normalizeCommandToken(token: string): string {
     .replace(/^\/+/, "");
 }
 
+/** A runtime's environment accessor ends in ".env" like a dotenv file named `prod.env`, but on a
+ *  command line (`node -e "console.log(process.env)"`, `grep -rn import.meta.env src`) it is code,
+ *  not a path. Only the bare accessor is exempt; `config/process.env` is still a file. */
+const RUNTIME_ENV_ACCESSOR = /^(?:process|import\.meta|Deno|Bun)\.env$/;
+
 function isSensitiveCommandToken(token: string): boolean {
   const rel = normalizeCommandToken(token);
-  return rel.length > 0 && isSensitiveWorkspacePath(rel);
+  return rel.length > 0 && !RUNTIME_ENV_ACCESSOR.test(rel) && isSensitiveWorkspacePath(rel);
 }
 
 function normalizeWorkdir(workdir: string): string | null {
@@ -175,6 +203,29 @@ function buildSandboxCommand(command: string, workdir: string): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * The workspace-relative path of a script to run: as given, or, when nothing is there, where
+ * write_file put it. write_file roots a working agent's writes under generated/, so "write
+ * primes.js, then run primes.js" looked for /workspace/primes.js and failed (E2E, 2026-10-07).
+ *
+ * Last, the path exactly as named. For a scope-confined agent "as given" is already re-rooted under
+ * generated/, but its shell_exec runs at /workspace, so a script it wrote there (or a build's dist/)
+ * is at the root and was not found after the change above (review, 2026-10-08). The sandbox is
+ * handed the whole working root, so running it exposes nothing shell_exec could not reach.
+ */
+export function resolveScriptPath(scriptPath: string, workspacePath: string): string {
+  try {
+    const within = resolvePathWithinWorkspace(scriptPath, workspacePath);
+    if (existsSync(within.resolved)) return within.relativePath;
+    const written = resolveWorkspaceWritePath(scriptPath, workspacePath);
+    if (existsSync(written.resolved)) return written.relativePath;
+    const literal = resolveLiteralWorkspacePath(scriptPath, workspacePath);
+    return existsSync(literal.resolved) ? literal.relativePath : within.relativePath;
+  } catch {
+    return scriptPath;
+  }
 }
 
 // ── run_script ────────────────────────────────────────────────────────────────
@@ -243,7 +294,7 @@ registerTool({
       };
     }
 
-    const sandboxScript = `/workspace/${scriptPath}`;
+    const sandboxScript = `/workspace/${resolveScriptPath(scriptPath, ctx.workspacePath)}`;
     const quotedArgs = scriptArgs.map(shellQuote).join(" ");
     const command = `${interpreter} ${shellQuote(sandboxScript)}${quotedArgs ? ` ${quotedArgs}` : ""}`;
 
@@ -254,7 +305,7 @@ registerTool({
       }
     }
 
-    const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
 
     const dockerArgs = [
       "run", "--rm",
@@ -266,7 +317,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", `${workspaceMountSource}:/workspace`,
+      "-v", workspaceBind,
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,
@@ -286,19 +337,24 @@ registerTool({
       return {
         success: true,
         output: output || "(no output)",
-        metadata: { script: scriptPath, exitCode: 0, sandboxed: true },
+        metadata: { script: scriptPath, exitCode: 0, sandboxed: true, programOutputChars: printedChars(output) },
       };
     } catch (err: unknown) {
       const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
       if (e.killed) {
-        return { success: false, output: e.stdout ?? "", error: `Script timed out after ${EXEC_TIMEOUT_MS}ms` };
+        return {
+          success: false,
+          output: e.stdout ?? "",
+          error: `Script timed out after ${EXEC_TIMEOUT_MS}ms`,
+          metadata: { script: scriptPath, sandboxed: true, timedOut: true, programOutputChars: printedChars([e.stdout, e.stderr].filter(Boolean).join("\n")) },
+        };
       }
       const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
       return {
         success: false,
         output,
         error: `Exit code ${e.code ?? "?"}: ${e.message ?? "Unknown error"}`,
-        metadata: { script: scriptPath, sandboxed: true },
+        metadata: { script: scriptPath, sandboxed: true, exitCode: typeof e.code === "number" ? e.code : null, programOutputChars: printedChars(output) },
       };
     }
   },

@@ -1,0 +1,100 @@
+// Durable memory across sessions, and its per-user boundary.
+//
+// How memory is scoped (packages/core/src): with auth on, the durable USER scope lives in
+// <user-memory>/users/<segment(userId)>/ (memory/service.ts memoryDirForScope -> runtime/user-scope.ts
+// userScopedDir), and every session's working root — where the WORKSPACE scope lives — is
+// <workspace>/users/<segment>/ (agent/session.ts:256 userWorkspaceRoot). So whichever scope the
+// assistant picks, "eval" and "eval-viewer" should never share a record. The MemGraph mirror tags the
+// nodes of both scopes with their account (memory/graph-service.ts:49 graphUserTenant, :69
+// graphWorkspaceTenant; workspace nodes since 5fc9a8e), and its always-injected "Critical Memory" layer
+// reads the reader's own nodes and the shared root's only — the viewer scenario below is the one that
+// notices if eval's preference reaches another account through any of these.
+//
+// The harness empties the durable memory and the user model of every identity of an attempt before it
+// starts (README: the memory reset), so no scenario can rely on what another one stored. The viewer
+// scenario therefore stores eval's preference itself and asks as eval-viewer in the same attempt (a
+// turn's `as`): it means the same in any order, and alone (--id, --tag isolation).
+//
+// Event names verified against packages/core/src:
+//   tool_call_requested {tool, args}      agent/runtime.ts:4265
+//   tool_call_completed {tool, success}   agent/runtime.ts:4444
+//   guardrail_blocked                     agent/turn-prepare.ts:109, :125
+// HTTP: GET /api/memory/entries?scope=user|workspace&query=… -> {"scope","total","returned","records"}
+//   gateway/memory-graph-routes.ts:22 (both scopes are the caller's own store; workspace since 5fc9a8e).
+[
+  {
+    id: "core-ix-memory-recall-new-session",
+    title: "Memory: a personal preference told in one session is recalled in a new one",
+    group: "core",
+    tags: ["memory", "smoke"],
+    description: "Turn 1 tells the assistant a synthetic preference and asks it to keep it; the turn must store it (memory_store, or user_model_update for an understanding of the user). Turn 2 runs in a fresh session of the same account — no shared history — and must name the preference. Afterwards the data layer is checked from the other account: eval-viewer's own user and workspace stores must not hold the record. Protects: durable cross-session recall per account, and that the per-user partition keeps the record out of other accounts' stores.",
+    requires: ["model"],
+    identity: "eval",
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "remember",
+        message: "Bitte merke dir dauerhaft, auch für künftige Chats: Meine Lieblingsteesorte ist „Polarstern-Rooibos“. Das ist eine persönliche Vorliebe von mir.",
+        timeoutMs: 300000,
+        expect: {
+          events: {
+            must: [
+              { type: "tool_call_requested", where: { "data.tool": { in: ["memory_store", "user_model_update"] } } },
+            ],
+            mustNot: [{ type: "guardrail_blocked" }],
+          },
+        },
+      },
+      { kind: "newSession" },
+      {
+        kind: "turn",
+        id: "recall",
+        message: "Welche Teesorte trinke ich am liebsten?",
+        timeoutMs: 300000,
+        expect: {
+          reply: { includes: ["Polarstern"] },
+        },
+      },
+      // The other account's views of the stores (read-only GETs, any role).
+      { kind: "http", as: "eval-viewer", method: "GET", path: "/api/memory/entries?scope=user&query=polarstern", expect: { status: 200, bodyIncludes: ["\"total\":0"] } },
+      { kind: "http", as: "eval-viewer", method: "GET", path: "/api/memory/entries?scope=workspace&query=polarstern", expect: { status: 200, bodyIncludes: ["\"total\":0"] } },
+    ],
+  },
+  {
+    id: "core-ix-memory-viewer-isolation",
+    title: "Memory: another account cannot recall eval's preference",
+    group: "core",
+    tags: ["memory", "isolation", "smoke"],
+    description: "Turn 1 runs as eval and stores the synthetic preference, as core-ix-memory-recall-new-session does; the store must complete, or the answer below proves nothing. Turn 2 runs as eval-viewer, in its own session, and asks for it. The answer must not contain it: not through memory_search/recall_context, the receptionist's memory capsule, the user model, or the per-turn memory guidance (including the MemGraph 'Critical Memory' layer). The attempt stores the record it guards, so the scenario means the same in any order and alone.",
+    requires: ["model"],
+    identity: "eval",
+    timeoutMs: 900000,
+    steps: [
+      {
+        kind: "turn",
+        id: "remember",
+        message: "Bitte merke dir dauerhaft, auch für künftige Chats: Meine Lieblingsteesorte ist „Polarstern-Rooibos“. Das ist eine persönliche Vorliebe von mir.",
+        timeoutMs: 300000,
+        expect: {
+          events: {
+            must: [
+              { type: "tool_call_completed", where: { "data.tool": { in: ["memory_store", "user_model_update"] } } },
+            ],
+            mustNot: [{ type: "guardrail_blocked" }],
+          },
+        },
+      },
+      {
+        kind: "turn",
+        id: "ask-other-account",
+        as: "eval-viewer",
+        message: "Welche Teesorte trinke ich am liebsten? Wenn du dazu nichts über mich gespeichert hast, sag das einfach.",
+        timeoutMs: 300000,
+        expect: {
+          reply: { excludes: ["Polarstern"] },
+        },
+      },
+    ],
+  },
+]

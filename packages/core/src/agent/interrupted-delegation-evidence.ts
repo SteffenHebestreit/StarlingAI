@@ -13,6 +13,8 @@
  * container-failure, runtime-evidence-dump). It must NEVER import from runtime.js —
  * keep it cycle-free.
  */
+import { currentTurnStartIndex } from "./turn-boundary.js";
+import { stripDelegatedRunRecord } from "./delegated-run-record.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
 import {
   DELEGATE_TOOL_RESULT_RE,
@@ -170,14 +172,15 @@ function measureEvidenceCoverage(
   };
 }
 
-/** Index of the most recent `user` message, or -1. Marks the current turn's start. */
+/**
+ * Index of the user message that opened the current turn, or -1. A mid-turn steering or
+ * oversight message is user-role but does not open a turn (agent/turn-boundary.ts) — keyed on the
+ * bare role, the scoped backstops dropped this turn's pre-steering evidence.
+ */
 function lastUserMessageIndex(
-  history: readonly { role: string }[],
+  history: readonly { role: string; metadata?: Record<string, unknown> }[],
 ): number {
-  for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i]?.role === "user") return i;
-  }
-  return -1;
+  return currentTurnStartIndex(history);
 }
 
 function findRecentDelegateEvidence(
@@ -198,7 +201,7 @@ function findRecentDelegateEvidence(
 
   for (const message of recent) {
     if (message.role !== "tool") continue;
-    const content = String(message.content ?? "");
+    const content = stripDelegatedRunRecord(String(message.content ?? ""));
     const meta = message.metadata ?? {};
 
     // Workflow execution results (run_workflow) carry the same
@@ -210,7 +213,11 @@ function findRecentDelegateEvidence(
     const isWorkflowResult = WORKFLOW_TOOL_RESULT_RE.test(content)
       || typeof meta["workflowName"] === "string";
     const isDelegate = DELEGATE_TOOL_RESULT_RE.test(content) || looksLikeDelegateMetadata(meta);
-    if (!isDelegate && !isWorkflowResult) continue;
+    // A plan's report is delegated evidence too — it carries every step's result — but it is shaped
+    // like neither of the above, so this backstop skipped it entirely and a turn that ran its whole
+    // plan and then hit an LLM error at synthesis had nothing left to recover from.
+    const isPlanResult = meta["planExecution"] === true;
+    if (!isDelegate && !isWorkflowResult && !isPlanResult) continue;
 
     const evidenceMatch = EVIDENCE_SECTION_RE.exec(content);
     const rawEvidence = evidenceMatch
