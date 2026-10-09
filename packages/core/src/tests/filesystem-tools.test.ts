@@ -38,6 +38,22 @@ describe("filesystem tools", () => {
     }
   });
 
+  it("read_file on a missing file says that creating it is not changing it, on a line of its own", async () => {
+    // E2E guards: the coder was told to change a file and not to create one. read_file said
+    // "File not found", and the coder created the file with write_file anyway.
+    const { getTool } = await import("../tools/registry.js");
+    const { MISSING_FILE_IS_NOT_A_CHANGE } = await import("../tools/filesystem.js");
+    const r = await getTool("read_file")!.execute(
+      { path: "generated/e2e-guards/sommeraktion.html" },
+      { sessionId: "session-read-missing", workspacePath: tempDir },
+    );
+    expect(r.success).toBe(false);
+    // The first line, which audit rows and failure lists keep, is what it always was.
+    expect(r.error).toBe(`File not found: generated/e2e-guards/sommeraktion.html\n${MISSING_FILE_IS_NOT_A_CHANGE}`);
+    expect(MISSING_FILE_IS_NOT_A_CHANGE).not.toContain("\n");
+    expect(MISSING_FILE_IS_NOT_A_CHANGE).toMatch(/report it as missing instead of creating it/);
+  });
+
   it("reads jsonc files used by workspace agent shards", async () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("read_file");
