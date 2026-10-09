@@ -34,10 +34,12 @@ import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
-import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
+import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
   addReceivedFigureKeys,
+  addReceivedIdentifierKeys,
+  countUnbackedIdentifiers,
   argumentTexts,
   countUnobservedFigures,
   maskFiguresByKey,
@@ -3868,6 +3870,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
     const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
       .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
+    // THE NARRATED-ACTION-CLAIM CHECK (orchestration.unbackedActionClaims, design §12; default off,
+    // shadow is audit-only). The consequential tools the run HELD: those whose tier requires
+    // per-call approval and that are not read-only (not IDEMPOTENT_TOOLS). Tier metadata, not a
+    // tool-name list. If the run holds none, no narrated-action claim is possible, so the check is
+    // off for it whatever the mode. When it IS on, the default figure path stays byte-identical:
+    // every added line below is guarded by checksActionClaims, which is false under the "off"
+    // default.
+    const unbackedActionClaimsMode = config.orchestration.unbackedActionClaims;
+    const consequentialToolsHeld = (effectiveToolNames ?? tools.map((tool) => tool.name))
+      .filter((name) => getToolTier(name).requiresPerCallApproval && !IDEMPOTENT_TOOLS.has(name));
+    const checksActionClaims = unbackedActionClaimsMode !== "off" && consequentialToolsHeld.length > 0;
+    // Keys of the action identifiers (commit/tag hashes, http(s) URLs) the run RECEIVED, the same
+    // input set as the figures below. Fed at the same absorb points; stays empty unless the check
+    // is on. And the consequential tools that actually succeeded at least once this run.
+    const receivedIdentifierKeys = new Set<string>();
+    const succeededConsequentialTools = new Set<string>();
     // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
     // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
     // shared or the commands it sent to the sandbox: those are the claims being checked.
@@ -3877,6 +3895,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // The prompt's "Today's date" in the numeric forms an answer writes it in.
       addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
     }
+    if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, systemPrompt);
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
     // into the arguments of its own calls before any input had contained them: the files it
     // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
@@ -3895,12 +3914,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // messages add nothing: their prose and their calls are what it claims.
     let absorbedHistoryLength = 0;
     const absorbNewHistory = (): void => {
-      if (!tracksFigures) return;
+      if (!tracksFigures && !checksActionClaims) return;
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
         if (message.role === "assistant") continue;
         const content = typeof message.content === "string" ? message.content : "";
-        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        // An identifier any non-assistant message holds (the task, a git_log tool result, a system
+        // message) is one the run RECEIVED, so an answer that states it is backed.
+        if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, content);
       }
     };
     /**
@@ -4024,6 +4046,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
       if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
+    };
+    /**
+     * SHADOW narrated-action-claim check (design §12; audit only, changes nothing). When the run
+     * held consequential tools but NONE of them succeeded this run, an action identifier in the
+     * answer that no input contained — a commit/tag hash or a URL the run invented — is a narrated
+     * action that did not happen ("committed as 3f9c2ab and pushed", no successful git_commit). A
+     * read that quotes a hash (git_log) makes that hash a received input, so it is not flagged; a
+     * successful consequential call means the premise fails and nothing is checked. Writes one
+     * sub_agent_unbacked_action_claim row with counts only; the answer and the outcome are
+     * untouched until an "enforce" mode is added (separate, eval-gated).
+     */
+    const shadowUnbackedActionClaim = (answer: string): void => {
+      if (!checksActionClaims) return;
+      const succeeded = consequentialToolsHeld.filter((name) => succeededConsequentialTools.has(name));
+      if (succeeded.length > 0) return;
+      absorbNewHistory();
+      const identifiers = countUnbackedIdentifiers(answer, receivedIdentifierKeys);
+      if (identifiers === 0) return;
+      logAudit("sub_agent_unbacked_action_claim", {
+        agentName: opts.agentName,
+        mode: unbackedActionClaimsMode,
+        identifiers,
+        consequentialToolsHeld: consequentialToolsHeld.length,
+        consequentialToolsSucceeded: succeeded.length,
+      }, { sessionId: subSessionId, severity: "warn" });
     };
     /**
      * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
@@ -6679,6 +6726,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           result = outputScan.redacted;
         }
 
+        // SHADOW: flag a commit/tag hash or URL this answer states that no input backed, when the
+        // run held consequential tools and none of them succeeded. Audit only.
+        shadowUnbackedActionClaim(result);
+
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
           ?? completedRunOutcome(result);
@@ -7617,6 +7668,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (result.success) {
           successfulToolCount += 1;
+          // For the narrated-action-claim check: record which consequential tools actually
+          // succeeded, so a run that only ATTEMPTED (or was approval-blocked on) its privileged
+          // tools is distinguished from one that completed one. Gated, so the default path is
+          // byte-identical.
+          if (checksActionClaims) succeededConsequentialTools.add(tc.name);
           // The supervisor's progress counter: a success counts only when it brought back a result
           // this run has not seen (isNovelToolOutcome). Taken from resultContent here, before any
           // note or nudge is appended to the message that carries it.

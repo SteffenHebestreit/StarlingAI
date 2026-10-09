@@ -86,6 +86,65 @@ export function addReceivedFigureKeys(into: Set<string>, text: string | null | u
 }
 
 /**
+ * Action identifiers (v1), structural and language-independent — no verb or keyword lists, per the
+ * no-keyword rule. Two shapes: a hex token of 7 to 40 characters that holds at least one digit AND
+ * at least one a–f letter (a git commit or tag id), and an http(s) URL. The digit-and-letter rule
+ * keeps pure-digit figures (which the figure check already covers) and all-letter words out. A hex
+ * token is keyed lowercased; a URL is trimmed of trailing sentence punctuation and lowercased.
+ */
+const HEX_IDENTIFIER_RE = /(?<![\p{L}\p{N}_])[0-9a-fA-F]{7,40}(?![\p{L}\p{N}_])/gu;
+const URL_IDENTIFIER_RE = /https?:\/\/[^\s<>"'`()[\]]+/giu;
+const HEX_KEY_RE = /^[0-9a-f]{7,40}$/;
+
+function isCommitLikeHex(token: string): boolean {
+  return /[0-9]/.test(token) && /[a-f]/i.test(token);
+}
+
+function normalizeUrlIdentifier(url: string): string {
+  return url.replace(/[.,;:!?)\]}>"']+$/, "").toLowerCase();
+}
+
+/** The normalized action identifiers `text` contains: commit/tag hex ids and http(s) URLs. */
+export function identifierTokens(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const match of text.matchAll(HEX_IDENTIFIER_RE)) {
+    if (isCommitLikeHex(match[0])) out.push(match[0].toLowerCase());
+  }
+  for (const match of text.matchAll(URL_IDENTIFIER_RE)) {
+    const key = normalizeUrlIdentifier(match[0]);
+    if (key.length > "https://".length) out.push(key);
+  }
+  return out;
+}
+
+/** Add the key of every action identifier `text` holds as an input of the run, to `into`. Fed at
+ *  the same absorb points as addReceivedFigureKeys, so an identifier any input contained — the
+ *  task, a tool result (a git_log hash), a system message — counts as backed. */
+export function addReceivedIdentifierKeys(into: Set<string>, text: string | null | undefined): void {
+  for (const key of identifierTokens(text)) into.add(key);
+}
+
+/**
+ * How many action identifiers in `answer` no received input backs. A hex id is backed by a prefix
+ * in EITHER direction, because git abbreviates a 40-char hash to seven or more characters: an
+ * answer's "3f9c2ab" is backed by an input's full hash, and the full hash is backed by an input's
+ * abbreviation. A URL is backed by an exact key match. The run's own prose and its call arguments
+ * are never in `received`, so an invented hash or URL — the narrated claim with no successful
+ * action behind it — is unbacked.
+ */
+export function countUnbackedIdentifiers(answer: string, received: ReadonlySet<string>): number {
+  const hexReceived = received.size === 0 ? [] : [...received].filter((key) => HEX_KEY_RE.test(key));
+  let count = 0;
+  for (const id of identifierTokens(answer)) {
+    if (received.has(id)) continue;
+    if (HEX_KEY_RE.test(id) && hexReceived.some((key) => key.startsWith(id) || id.startsWith(key))) continue;
+    count++;
+  }
+  return count;
+}
+
+/**
  * The run's date as programs and locales write it in numbers: 2026-10-08, 08.10.2026, 10/08/2026
  * and 20261008. The system prompt gives it as "Thursday, October 8, 2026", whose keys are 8 and
  * 2026, and in review "Stand 08.10.2026 (2026-10-08)" came back "Stand [not observed].2026

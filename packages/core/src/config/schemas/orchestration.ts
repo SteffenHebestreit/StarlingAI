@@ -897,5 +897,16 @@ export const OrchestrationSchema = z.object({
   /** Per-turn caps for the main orchestrator agent (not sub-agents).
    *  Built-in: delegate_to_agent=5, computer_click=8, computer_type=6, … */
   perTurnCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
+  /** The narrated-action-claim check (design-tool-bridge §12). A sub-agent that held a
+   *  consequential tool (one whose tier requires per-call approval and that is not read-only) and
+   *  that had NONE of those tools succeed, yet whose answer states an action identifier — a git
+   *  commit/tag hash or an http(s) URL — that no input of the run contained, is narrating an action
+   *  that did not happen (e.g. "committed as 3f9c2ab and pushed" with no successful git_commit).
+   *  The signal is structural and language-independent (tier metadata + identifier shape), not a
+   *  verb list. "off" does nothing. "shadow" writes a sub_agent_unbacked_action_claim audit row
+   *  with counts only and changes neither the answer nor the outcome, so the false-positive rate
+   *  can be measured before any enforcement. Default off; an "enforce" mode that masks the
+   *  identifiers and caps the outcome is a separate, eval-gated follow-up. */
+  unbackedActionClaims: z.enum(["off", "shadow"]).default("off"),
 });
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
