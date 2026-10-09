@@ -129,7 +129,7 @@ Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`)
 |---|---|---|
 | **Guardrails** (prompt-injection block, secret scan, moderation) | mostly on | `guardrails.*`: `promptInjectionBlock`(true), `outputSecretScan`(true), `modelModeration.enabled`(false) |
 | **Receptionist fast-lane** (cheap short-answer bypass) | off | `receptionist.*`: `enabled`(false), `maxResponseChars`(400), `alwaysEscalateTerms`([]) |
-| **Model sampling / context / cache** | per model | `agents.defaults.model.*`: `contextWindow`(32768), `temperature`, tiers, `promptCache`, `toolCallPrefill`(off in the schema, `"qwen-xml"` in the shipped `00-platform.jsonc`: the orchestrator's forced `--agent` and build calls start inside the call on llama.cpp Qwen3.5/3.6; research and post-plan forced calls are not prefilled) |
+| **Model sampling / context / cache** | per model | `agents.defaults.model.*`: `contextWindow`(32768), `temperature`, tiers, `promptCache`, `toolCallPrefill`(off in the schema; the shipped `00-platform.jsonc` names `"qwen-xml"` per model id, for `lmstudio/qwen` and `lmstudio/qwen-27b` only, so an id set by `SAI_PRIMARY_MODEL` or the dashboard gets none: the orchestrator's forced `--agent` and build calls start inside the call on llama.cpp Qwen3.5/3.6; research and post-plan forced calls are not prefilled) |
 | **Base-prompt assembly** | lean on | `leanContextInjection`(true), `taskConditionalPrompt`(false, reverted), split-orchestration, cache-warm |
 
 ---

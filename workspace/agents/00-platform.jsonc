@@ -125,10 +125,17 @@
         // build called diagram_designer 12 of 12 with it and 0 of 12 without (8 ran prose to the
         // ceiling); the --agent call kept its route and halved its generation time. Both model ids
         // above are Qwen3.6 served by llama.cpp with --jinja, the same build on both stations, and
-        // both took the opener (qwen-27b 3 of 3). Remove it if either id moves to another model
-        // family: an opener the server's tool grammar does not take fails the request, which the
-        // provider then retries without it, and once that retry is served it stops sending it there.
-        "toolCallPrefill": "qwen-xml",
+        // both took the opener (qwen-27b 3 of 3).
+        // Named per id, not as one string, because the ids can be replaced while this key stays:
+        // SAI_PRIMARY_MODEL (the setup wizard writes it for every backend, e.g. lmstudio/qwen2.5:7b
+        // on Ollama), the dashboard's model save, a later shard. An id not named here gets no
+        // opener. A server that continues the trailing message instead of refusing it with a 4xx
+        // (Ollama, per the review of e7da7236) never trips the provider's refusal retry, so a wrong
+        // opener would not be switched off there.
+        "toolCallPrefill": {
+          "lmstudio/qwen": "qwen-xml",
+          "lmstudio/qwen-27b": "qwen-xml"
+        },
         "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
         // Routing tier — the fast lane that answers trivial turns ("hi") without the
         // full prompt + swarm. This pointed at qwen3.5-9b, which reports

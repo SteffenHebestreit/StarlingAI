@@ -7,7 +7,7 @@ import { Agent as UndiciAgent } from "undici";
 import type { ChatCompletion, ChatCompletionChunk, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Stream } from "openai/streaming";
 import { childLogger } from "../logger.js";
-import type { ModelConfig } from "../config/schema.js";
+import type { ModelConfig, ToolCallPrefillSyntax } from "../config/schema.js";
 import { resolveStreamTotalCapMs } from "./stream-budget.js";
 import { wireHeadSignature, type PromptHeadSignature } from "./prompt-head.js";
 import { beginProviderCall, recordProviderToken, endProviderCall } from "../observability/provider-activity-monitor.js";
@@ -1144,6 +1144,26 @@ export interface ToolCallPrefillDecision {
 const QWEN_XML_TOOL_CALL_OPENER = "<tool_call>\n<function=";
 
 /**
+ * The tool-call syntax ModelConfig.toolCallPrefill names for the model THIS config sends to: its
+ * `primary`. Each endpoint of a failover chain is its own config with its own id as primary
+ * (providers/index.ts createChatProvider), so the primary, the fallback and the cloud fallback
+ * each get the syntax named for their own id.
+ *
+ * A map names the syntax per id, and an id it does not name gets none. Written as one string on the
+ * shipped default model, the flag outlived the ids it was true of: SAI_PRIMARY_MODEL and the
+ * dashboard's model save replace the primary and keep every other key of the model, so a wizard
+ * install pinned to `lmstudio/qwen2.5:7b` on Ollama would have sent the Qwen3-Coder opener on every
+ * forced --agent and build call (review of e7da7236). By that review, Ollama continues a trailing
+ * assistant message as text instead of refusing it with the 4xx the refusal retry needs, so the
+ * call comes back with no tool call parsed and nothing switches the opener off.
+ */
+export function toolCallPrefillSyntaxFor(modelConfig: Pick<ModelConfig, "primary" | "toolCallPrefill">): ToolCallPrefillSyntax | undefined {
+  const named = modelConfig.toolCallPrefill;
+  if (named === undefined || typeof named === "string") return named;
+  return Object.prototype.hasOwnProperty.call(named, modelConfig.primary) ? named[modelConfig.primary] : undefined;
+}
+
+/**
  * Whether THIS call goes out prefilled, and with what (CompletionCallOptions.prefillToolCall).
  *
  * `undefined` when the feature does not govern the call at all — the model config names no
@@ -1164,7 +1184,8 @@ const QWEN_XML_TOOL_CALL_OPENER = "<tool_call>\n<function=";
  * call whose own prefilled request was refused (ToolCallPrefillSkip).
  */
 export function resolveToolCallPrefill(input: {
-  syntax: ModelConfig["toolCallPrefill"];
+  /** The syntax named for the model this call goes to (toolCallPrefillSyntaxFor). */
+  syntax: ToolCallPrefillSyntax | undefined;
   toolChoice: CompletionCallOptions["toolChoice"];
   request: CompletionCallOptions["prefillToolCall"];
   /** The messages exactly as they go on the wire, after normalizeMessagesForModel and the gpt-oss line. */
@@ -1803,7 +1824,7 @@ export class LMStudioProvider {
     callRefusal: CallPrefillRefusal | undefined,
   ): ToolCallPrefillDecision | undefined {
     return resolveToolCallPrefill({
-      syntax: this.modelConfig.toolCallPrefill,
+      syntax: toolCallPrefillSyntaxFor(this.modelConfig),
       toolChoice: options?.toolChoice,
       request: options?.prefillToolCall,
       wireMessages,

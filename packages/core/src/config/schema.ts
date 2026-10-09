@@ -107,6 +107,10 @@ export const ProvidersSchema = z.object({
   anthropic: AnthropicProviderSchema.optional(),
 });
 
+/** The tool-call syntaxes a forced call can be started in (ModelConfig.toolCallPrefill). */
+export const ToolCallPrefillSyntaxSchema = z.enum(["qwen-xml"]);
+export type ToolCallPrefillSyntax = z.infer<typeof ToolCallPrefillSyntaxSchema>;
+
 export const ModelConfigSchema = z.object({
   primary: z.string().max(200).default("lmstudio/qwen/qwen3.6-35b-a3b"),
   fallback: z.string().max(200).optional(),
@@ -235,16 +239,26 @@ export const ModelConfigSchema = z.object({
    *  streamed and not, thinking on or off. A continuation closes the think block, so a prefilled
    *  call does not deliberate first.
    *
-   *  Set it only on a model whose endpoints (primary, fallback and cloudFallback share this
-   *  config) all serve that syntax through llama.cpp's Qwen3-Coder handler with
-   *  --prefill-assistant (on by default): the opener must be a valid start of the server's
-   *  tool-call grammar. A model preset that replaces the model (activeModelPreset) drops it,
-   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. A
-   *  prefilled request answered with an HTTP 4xx about the request is retried once without the
-   *  prefill, and only when that retry is served is the endpoint remembered and its forced calls
-   *  sent without one; a context overflow is not taken for a refusal. Qwen3's JSON tool-call
-   *  syntax needs a different opener and is not covered. The Anthropic provider ignores it. */
-  toolCallPrefill: z.enum(["qwen-xml"]).optional(),
+   *  Set it only on a model that serves that syntax through llama.cpp's Qwen3-Coder handler
+   *  with --prefill-assistant (on by default): the opener must be a valid start of the server's
+   *  tool-call grammar. Two forms:
+   *  - a map from model id to syntax, `{ "lmstudio/qwen": "qwen-xml" }`: each endpoint of the
+   *    config (primary, fallback, cloudFallback) gets the syntax its own id names, and an id
+   *    the map does not name gets none. Use it on a model config whose ids can be replaced
+   *    while the flag stays: agents.defaults.model, whose primary SAI_PRIMARY_MODEL, the
+   *    dashboard's model settings, a later shard or a sub-agent's own model block can change.
+   *    Written as one string there, the flag outlives the id: a wizard install pinned to
+   *    `lmstudio/qwen2.5:7b` on Ollama would get the Qwen3.6 opener on every forced call;
+   *  - one string: every endpoint of this config. For a config whose ids nothing else sets.
+   *  A model preset that replaces the model (activeModelPreset) drops either form, as it drops
+   *  the tiers and endpoint overrides: the syntax is the replaced model's. A prefilled request
+   *  answered with an HTTP 4xx about the request is retried once without the prefill, and only
+   *  when that retry is served is the endpoint remembered and its forced calls sent without one;
+   *  a context overflow is not taken for a refusal. A server that continues the trailing
+   *  assistant message instead of refusing it with a 4xx (Ollama, per the review of e7da7236) is
+   *  not caught that way, which is why the syntax is named per id. Qwen3's JSON tool-call syntax
+   *  needs a different opener and is not covered. The Anthropic provider ignores it. */
+  toolCallPrefill: z.union([ToolCallPrefillSyntaxSchema, z.record(z.string().min(1).max(200), ToolCallPrefillSyntaxSchema)]).optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as
