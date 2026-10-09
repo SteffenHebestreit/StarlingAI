@@ -8,6 +8,11 @@
  *
  * It also hands each response's routing tools ToolContext.planFirstPending, so search_agents does not
  * tell the model to delegate now while that nudge asks for a plan (tools/sub-agent.ts).
+ *
+ * The nudge is repeated once, without its search instruction, so a turn that keeps searching is back
+ * on the old path from iteration 2: no nudge, and a strong match says to delegate now (E2E
+ * new-delegation-routing-bounded-fanout, where the repeated "call search_workflows ONCE" ran the turn
+ * into search_workflows' per-turn cap).
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -179,10 +184,28 @@ describe("the plan-first nudge across iterations of a real turn", () => {
     expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     const nudge = planNudge(messagesOfCall(0));
     expect(nudge, "iteration 0 carries the nudge").toBeDefined();
-    expect(planNudge(messagesOfCall(1))).toBe(nudge);
+    expect(nudge).toContain("call search_workflows ONCE");
+    const repeated = planNudge(messagesOfCall(1));
+    expect(repeated, "iteration 1 carries the nudge").toBeDefined();
+    expect(repeated).toContain("call record_plan once");
+    expect(repeated).not.toContain("call search_workflows ONCE");
     expect(foldedSystemText(messagesOfCall(1))).toBe(foldedSystemText(messagesOfCall(0)));
     expect(JSON.stringify(streamMock.mock.calls[1]?.[1])).toBe(JSON.stringify(streamMock.mock.calls[0]?.[1]));
     expect(toolNamesOfCall(1)).toContain("record_plan");
+  });
+
+  it("does not reach iteration 2 of a turn that keeps searching", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallStream("w1", "search_workflows", { query: "visit a website and extract facts" }))
+      .mockImplementationOnce(() => toolCallStream("w2", "search_workflows", { query: "website facts workflow" }))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE });
+
+    expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(planNudge(messagesOfCall(1))).toBeDefined();
+    expect(planNudge(messagesOfCall(2))).toBeUndefined();
   });
 
   it("does not reach iteration 1 once iteration 0 delegated", async () => {
@@ -229,6 +252,19 @@ describe("the routing pointer's plan-first flag across a real turn", () => {
     await runTurn({ session, userMessage: USER_MESSAGE });
 
     expect(pointerFlags).toEqual([true]);
+  });
+
+  it("is not set from iteration 2, so a strong match says to delegate now again", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallStream("w1", "search_workflows", { query: "visit a website and extract facts" }))
+      .mockImplementationOnce(() => toolCallStream("w2", "search_workflows", { query: "website facts workflow" }))
+      .mockImplementationOnce(() => toolCallStream("a1", "search_agents", { query: "browse a website and read pages" }))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE });
+
+    expect(pointerFlags).toEqual([false]);
   });
 
   it("is not set for the single-domain nudge", async () => {
