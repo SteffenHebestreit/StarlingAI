@@ -114,6 +114,41 @@ describe("the declared deliverable reaches the sub-agent run", () => {
     expect(byAgent.get("summarizer")).toBe("file");
   }, 30_000);
 
+  it("create_ephemeral_agent: a lookup declared \"answer\" reaches its run with it, and an undeclared one passes none", async () => {
+    // This tool calls the runner itself, not through executeDelegationWithFallback. The stand-in
+    // holds write_file and edit_file and its task is past the threshold, so without the
+    // declaration its size and tools alone stage it.
+    const EPHEMERAL_TOOLS = ["web_fetch", "read_file", "write_file", "edit_file"];
+    const task = [
+      "Open http://www.nordlicht-werkzeuge.test/lager.html and read the stock table for every warehouse.",
+      "List each article whose total stock across all three warehouses is below its minimum stock,",
+      "with its article number, its name, the stock in each warehouse and the total.",
+      "Then open /preise.html and read the unit price and the quantity discount for NW-3102,",
+      "and work out what 30 pieces cost including the discount and the shipping flat rate shown on that page.",
+      "Finally open /dokumentation.html and quote what error code E22 means, word for word.",
+      "If a page does not load, say which one and go on with the others.",
+      "Answer with the three results; do not save anything.",
+    ].join(" ");
+    expect(task.length).toBeGreaterThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+    expect(isStagedArtifactBuildRun(EPHEMERAL_TOOLS, task)).toBe(true);
+    const spec = {
+      agentName: "stock_lookup",
+      description: "Reads stock, prices and documentation from one site.",
+      systemPrompt: "You read web pages and report exactly what they show.",
+      tools: EPHEMERAL_TOOLS,
+      task,
+    };
+    const getTool = await tools();
+    const declared = await getTool("create_ephemeral_agent")!.execute({ ...spec, deliverable: "answer" }, ctx("s-ephemeral-answer"));
+    await getTool("create_ephemeral_agent")!.execute(spec, ctx("s-ephemeral-undeclared"));
+
+    expect(declared.success).toBe(true);
+    expect(received()).toHaveLength(2);
+    expect(received()[0]!.agentName).toBe("ephemeral:stock_lookup");
+    expect(received()[0]!.deliverable).toBe("answer");
+    expect("deliverable" in received()[1]!).toBe(false);
+  }, 30_000);
+
   it("execute_plan: three parallel lookup steps declared \"answer\" each reach browser_agent with it, all at once", async () => {
     // Session 62b04e8b's plan: three short lookups in one parallelGroup. buildStepTask adds the turn's
     // objective and criteria to every step, which carries each task past the staged-build threshold,
