@@ -70,6 +70,7 @@ import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
+import { agentCfgDomainTools, agentCfgHasNoUsableTools } from "../tools/agent-routing.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
@@ -2543,7 +2544,7 @@ export interface SubAgentExecutionStats {
   model: string;
   capabilities: string[];
   outcome?: SubAgentOutcome;
-  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config";
+  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config" | "missing_tools";
   containerColdStartMs?: number;
   containerBootstrapMs?: number;
   containerRuntimeMs?: number;
@@ -2695,6 +2696,37 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         capabilities: [],
         outcome: "failure",
         terminalState: "missing_config",
+      },
+    };
+  }
+
+  // An agent with no tool to do its work in this process (agentCfgHasNoUsableTools), such as one
+  // whose tools are all bridged from an MCP server that is down. Routing no longer offers it, but a
+  // delegation that names it still reached the run below, which keeps only the registered tools
+  // without saying so: process_memory_keeper, named while processmem was unreachable, ran with
+  // read_shared_facts and share_finding and reported success (E2E 2026-10-08,
+  // guards-list-files-on-a-file). It fails here instead, before any model call and without an
+  // outcome record, and names the tools it lacks, so the delegation can pick another agent.
+  if (agentCfgHasNoUsableTools(agentCfg)) {
+    const unusable = agentCfgDomainTools(agentCfg);
+    const named = unusable.length > 8 ? `${unusable.slice(0, 8).join(", ")} (+${unusable.length - 8} more)` : unusable.join(", ");
+    log.warn({ agentName: opts.agentName, unusable }, "Refusing a sub-agent run: none of the agent's tools is available in this process");
+    return {
+      output: `Sub-agent '${opts.agentName}' cannot run: none of the tools it works with is available in this process (${named}). It did no work. Give this task to another agent.`,
+      stats: {
+        agentName: opts.agentName,
+        sessionId: `sub:${opts.parentSessionId}:${opts.agentName}:no-tools`,
+        promptChars: 0,
+        userContentChars: opts.task.length + (opts.context?.length ?? 0),
+        toolCount: 0,
+        toolNames: [],
+        iterations: 0,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+        model: "",
+        capabilities: agentCfg.capabilities ?? [],
+        outcome: "failure",
+        terminalState: "missing_tools",
       },
     };
   }

@@ -284,8 +284,13 @@ function declaredToolIsUnusable(toolName: string): boolean {
  * this: it never depended on one.
  */
 export function agentCfgHasNoUsableTools(cfg: { tools?: string[] } | undefined): boolean {
-  const domainTools = (cfg?.tools ?? []).filter((toolName) => !SWARM_BOOKKEEPING_TOOL_NAMES.has(toolName));
+  const domainTools = agentCfgDomainTools(cfg);
   return domainTools.length > 0 && domainTools.every(declaredToolIsUnusable);
+}
+
+/** The tools an agent declares beyond the swarm's bookkeeping pair: the ones it does its work with. */
+export function agentCfgDomainTools(cfg: { tools?: string[] } | undefined): string[] {
+  return (cfg?.tools ?? []).filter((toolName) => !SWARM_BOOKKEEPING_TOOL_NAMES.has(toolName));
 }
 
 /**

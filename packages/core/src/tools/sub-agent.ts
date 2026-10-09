@@ -2468,9 +2468,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // stop cut off its synthesis and left an interrupted-output stub — must NOT
         // be discarded. That discard is why audit 5a6db38d shipped a training-data
         // answer despite 31 min of real research. Skip pure failure stubs,
-        // planning-only narration, and infrastructure failures.
+        // planning-only narration, and infrastructure failures. A run that never started for want of
+        // a usable tool ("missing_tools") is the runner's own refusal, not evidence: kept here, it came
+        // back to the caller as a successful partial.
         if (
           !lastFailureWasInfrastructure
+          && stats?.terminalState !== "missing_tools"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)
           && !looksLikeOnlyFailureStubs(output)
