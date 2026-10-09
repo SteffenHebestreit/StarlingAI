@@ -71,23 +71,46 @@ export interface ToolResultFrameContext {
    * lifted past the harness's own cut line it would read as the runtime speaking.
    */
   readonly runtimeNote?: string;
+  /**
+   * The turn's tally of the retrieval evidence its frames have shown the model, in characters
+   * (agent/runtime.ts keeps one per turn). A retrieval result is held to what the tally leaves of
+   * the turn's budget (retrievalEvidenceAllowance) and adds what it shows. Without a tally the
+   * result is allowed the whole budget.
+   */
+  readonly retrievalShown?: { chars: number };
 }
 
 /** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
 const DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS = 6000;
 
 /**
- * Ceiling on a retrieval result the model reads (isRetrievalEvidenceResult), in the frame and in the
- * history snippet of the turn that made the call. It is the budget the deployment already sets for
- * retrieved passages in a prompt, retrieval.documentRag.maxContextChars: the excerpts the turn
- * injects on its own are held to it, and a search the model makes itself returns the same kind of
- * excerpts.
+ * The retrieval results (isRetrievalEvidenceResult) one turn shows the model, in characters: a
+ * total for the turn, not a ceiling per result. It is retrieval.documentRag.maxContextChars, the cap
+ * on the document excerpts a turn injects on its own; a search the model makes itself returns the
+ * same kind of excerpts. One result is never allowed more, in the frame or in the history snippet of
+ * the turn that made the call.
  */
 export function retrievalEvidenceMaxChars(): number {
   const configured = getConfig().retrieval?.documentRag?.maxContextChars;
   return typeof configured === "number" && Number.isFinite(configured) && configured > 0
     ? configured
     : DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS;
+}
+
+/** A result the turn's earlier ones have left less than this share of the budget gets this share. */
+const RETRIEVAL_EVIDENCE_FLOOR_DIVISOR = 4;
+
+/**
+ * What one retrieval result may show, after the turn's earlier retrieval results have shown
+ * `charsShown`: what they left of the turn's budget, and no less than a quarter of it. Every result
+ * is sent again with each later prompt of the turn, and the history trim steps in only once a
+ * prompt is already over the window's budget, so a budget granted to each result let a turn of
+ * several searches carry several budgets into every prompt after them. The floor keeps a later
+ * search readable, the head of its best-ranked passages, once earlier ones have used the budget up.
+ */
+export function retrievalEvidenceAllowance(charsShown: number): number {
+  const budget = retrievalEvidenceMaxChars();
+  return Math.max(Math.floor(budget / RETRIEVAL_EVIDENCE_FLOOR_DIVISOR), budget - Math.max(0, charsShown));
 }
 
 /**
@@ -688,9 +711,13 @@ function frameToolResult(
   }
 
   // Retrieved passages are the evidence itself, not a summary of work done elsewhere: kept as the
-  // tool wrote them, up to the retrieval budget, instead of the 600-character fallback below.
+  // tool wrote them, up to what the turn's retrieval budget allows them, instead of the
+  // 600-character fallback below.
   if (isRetrievalEvidenceResult(toolName)) {
-    return boundRetrievalEvidence(resultText, retrievalEvidenceMaxChars(), frameContext?.runtimeNote);
+    const shown = frameContext?.retrievalShown;
+    const framed = boundRetrievalEvidence(resultText, retrievalEvidenceAllowance(shown?.chars ?? 0), frameContext?.runtimeNote);
+    if (shown) shown.chars += framed.length;
+    return framed;
   }
 
   return fallback;

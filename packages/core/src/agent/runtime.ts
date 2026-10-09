@@ -2199,6 +2199,9 @@ async function _runTurn(
   const _rejectedCallsGivenBack = new Set<string>();
   const _lastToolResultByName = new Map<string, string>();
   const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>();
+  // The retrieval evidence this turn's frames have shown the model, in characters: the turn's
+  // retrieval results share one budget (tool-result-format.ts retrievalEvidenceAllowance).
+  const _turnRetrievalShown = { chars: 0 };
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -4565,7 +4568,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote }),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
@@ -4924,6 +4927,7 @@ async function _runTurn(
         argsSig,
         session,
         runtimeNote,
+        retrievalShown: _turnRetrievalShown,
         onIntervention: opts.onIntervention,
         onToolResult: opts.onToolResult,
         guardrailEvents,

@@ -147,6 +147,45 @@ describe("the model-visible frame of a retrieval result", () => {
     }
   });
 
+  it("holds the turn's retrieval results to one budget, and a late one to a quarter of it", () => {
+    // Every result goes out again with each later prompt of the turn, and the current turn's calls
+    // are never trimmed from the history: a budget per result let several searches carry several
+    // budgets into every prompt after them.
+    getConfig().retrieval.documentRag.maxContextChars = 2_000;
+    const shown = { chars: 0 };
+    const first = kbResult([excerpt(1, CHARGE_FACT), excerpt(2, `${"Wartungshinweis ".repeat(50)}ERSTER-ENDE`)]);
+    const second = kbResult([excerpt(1, `ZWEITER-KOPF ${"Wartungshinweis ".repeat(20)}`), excerpt(2, `${"Wartungshinweis ".repeat(60)}ZWEITER-ENDE`)]);
+    const third = kbResult([excerpt(1, `DRITTER-KOPF ${"Wartungshinweis ".repeat(10)}`), excerpt(2, `${"Wartungshinweis ".repeat(60)}DRITTER-ENDE`)]);
+    // Each would fit the budget alone; the first two together do not.
+    expect(Math.max(first.length, second.length, third.length)).toBeLessThan(2_000);
+    expect(first.length + second.length).toBeGreaterThan(2_000);
+
+    // The first fits whole...
+    expect(buildModelVisibleToolResult("search_knowledge_base", first, { hits: 2 }, { retrievalShown: shown })).toBe(first);
+    expect(shown.chars).toBe(first.length);
+    // ...the second, from another retrieval tool, gets what is left...
+    const secondVisible = buildModelVisibleToolResult("memory_search", second, { hits: 2 }, { retrievalShown: shown });
+    expect(secondVisible.length).toBeLessThanOrEqual(2_000 - first.length);
+    expect(secondVisible).toContain("ZWEITER-KOPF");
+    expect(secondVisible).not.toContain("ZWEITER-ENDE");
+    expect(secondVisible).toMatch(CUT_LINE_AT_END);
+    expect(shown.chars).toBe(first.length + secondVisible.length);
+    // ...and with the budget used up, the third still shows the head of its best passage.
+    const thirdVisible = buildModelVisibleToolResult("search_knowledge_base", third, { hits: 2 }, { retrievalShown: shown });
+    expect(thirdVisible.length).toBeLessThanOrEqual(500);
+    expect(thirdVisible).toContain("DRITTER-KOPF");
+    expect(thirdVisible).not.toContain("DRITTER-ENDE");
+    expect(shown.chars).toBe(first.length + secondVisible.length + thirdVisible.length);
+  });
+
+  it("counts no other tool's result against the turn's retrieval budget", () => {
+    const shown = { chars: 0 };
+    for (const tool of ["web_fetch", "delegate_to_agent", "list_knowledge_bases"]) {
+      buildModelVisibleToolResult(tool, KB_RESULT, { hits: 1 }, { retrievalShown: shown });
+    }
+    expect(shown.chars).toBe(0);
+  });
+
   it("takes its budget from retrieval.documentRag.maxContextChars, and the schema default when the config has none", () => {
     getConfig().retrieval.documentRag.maxContextChars = 4_321;
     expect(retrievalEvidenceMaxChars()).toBe(4_321);

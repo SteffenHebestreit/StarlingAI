@@ -518,12 +518,61 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
     expect(repeat).toMatch(CUT_LINE);
     const cachedNote = /not shown\.\]\n\n\[Note: This is a cached result — you already called 'search_knowledge_base' with identical arguments earlier in this turn\. Do NOT call it again\. [^\n]*\]/;
     expect(repeat).toMatch(new RegExp(`${cachedNote.source}$`));
+    // The first search used the turn's retrieval budget up, so the copy is held to a quarter of it.
+    expect(repeat!.length).toBeLessThanOrEqual(1500);
     // And the call after the repeat reads it.
     expect(streamMock.mock.calls.length, "the turn made no call after the repeat").toBeGreaterThanOrEqual(3);
     const nextCall = (streamMock.mock.calls[2]![0] as Array<{ content?: unknown }>)
       .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
       .join("\n");
     expect(nextCall).toMatch(cachedNote);
+  }, 60_000);
+});
+
+describe("a turn's retrieval results share the retrieval budget", () => {
+  it("a second search over budget gets what the first left, at least a quarter of the budget", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Two searches for two parts of the question, each returning six long excerpts of a crawled site.
+    const sixExcerpts = (topic: string) => Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `${topic}-${i}`,
+      text: `${topic} Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock
+      .mockResolvedValueOnce({ chunks: sixExcerpts("LADEN"), retrievalFailed: false, lowConfidence: false })
+      .mockResolvedValueOnce({ chunks: sixExcerpts("FETT"), retrievalFailed: false, lowConfidence: false });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("kb1", "search_knowledge_base", { knowledge_base: KB_ID, query: "Ladezeit NW-3104" });
+      if (call === 2) return toolCallStream("kb2", "search_knowledge_base", { knowledge_base: KB_ID, query: "Getriebefett NW-AS 18" });
+      return textStream("Die Auszüge nennen weder Ladezeit noch Prüfintervall.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(2);
+    const results = new Map((session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .filter((message) => message.role === "tool")
+      .map((message) => [message.tool_call_id, message.content ?? ""]));
+    const first = results.get("kb1") ?? "";
+    const second = results.get("kb2") ?? "";
+    expect(first).toContain("LADEN Abschnitt 1:");
+    expect(first.length).toBeLessThanOrEqual(6000);
+    // The first used the budget up, so the second is held to a quarter of it: the head of its best
+    // excerpt and the line saying how much is missing.
+    expect(first.length).toBeGreaterThan(6000 - 1500);
+    expect(second.length).toBeLessThanOrEqual(1500);
+    expect(second).toContain("FETT Abschnitt 1:");
+    expect(second).toMatch(/\[Cut to fit the context budget: the remaining \d+ characters of this result are not shown\.\]$/);
+    // And that is what the call after them reads.
+    const nextCall = (streamMock.mock.calls[2]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain("FETT Abschnitt 1:");
+    expect(nextCall).not.toContain("FETT Abschnitt 2:");
   }, 60_000);
 });
 

@@ -61,7 +61,7 @@ Every public schema field, where it is declared, and how many production files r
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 75 |
 | `bucket` | packages/core/src/config/schema.ts:482 | 25 |
 | `budget` | packages/core/src/config/schema.ts:1655 | 92 |
-| `budgets` | packages/core/src/config/schema.ts:543 | 14 |
+| `budgets` | packages/core/src/config/schema.ts:543 | 15 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:932 | 48 |
 | `capabilityCacheTtlMs` | packages/core/src/config/schema.ts:615 | 1 |
@@ -166,7 +166,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:698 | 127 |
-| `evidence` | packages/core/src/config/schema.ts:1682 | 104 |
+| `evidence` | packages/core/src/config/schema.ts:1682 | 105 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:296 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:276 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:550 | 3 |

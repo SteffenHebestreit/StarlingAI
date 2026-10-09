@@ -40,6 +40,9 @@ export interface ToolResultPostProcessContext {
   /** The note the turn loop appended to the result text itself, handed to the frame beside it
    *  (tool-result-format.ts ToolResultFrameContext). */
   readonly runtimeNote?: string;
+  /** The turn's tally of the retrieval evidence its frames have shown, which the frame reads and
+   *  advances in place (tool-result-format.ts ToolResultFrameContext). */
+  readonly retrievalShown?: { chars: number };
 
   // --- enclosing `opts` callbacks (passed through, never imported) ---
   readonly onIntervention?: (notice: InterventionNotice) => void;
@@ -145,7 +148,10 @@ export const postProcessToolResult = async (
 
   if (ctx.onToolResult) ctx.onToolResult(tc.id, tc.name, resultText, result.metadata);
 
-  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata, { runtimeNote: ctx.runtimeNote });
+  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata, {
+    runtimeNote: ctx.runtimeNote,
+    retrievalShown: ctx.retrievalShown,
+  });
 
   ctx.toolResultMessages.push({
     role: "tool",

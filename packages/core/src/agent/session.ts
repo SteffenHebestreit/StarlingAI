@@ -382,9 +382,10 @@ export class AgentSession {
           // instruction to synthesize from them. It is the collapsed view that the answer-writing
           // iteration reads, so this is the number that decides what the answer can be based on.
           // A retrieval result is the passages the answer is to come from, and the frame has already
-          // held it to the retrieval budget (tool-result-format.ts). At the generic 500 the turn that
-          // made the search read only its first few hundred characters (E2E
-          // core-ix-kb-documentation-rag). Once the turn is over it is history like any other result.
+          // held it to its share of the turn's retrieval budget (tool-result-format.ts), never more
+          // than the whole budget allowed here. At the generic 500 the turn that made the search read
+          // only its first few hundred characters (E2E core-ix-kb-documentation-rag). Once the turn
+          // is over it is history like any other result.
           const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
             : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
