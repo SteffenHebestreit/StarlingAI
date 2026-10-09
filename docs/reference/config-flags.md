@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:731 | 119 |
 | `http` | packages/core/src/config/schema.ts:776 | 90 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1333 | 20 |
-| `id` | packages/core/src/config/schema.ts:585 | 297 |
+| `id` | packages/core/src/config/schema.ts:585 | 298 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1380 | 2 |
 | `image` | packages/core/src/config/schema.ts:704 | 102 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -253,7 +253,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxConsolidatedPerSession` | packages/core/src/config/schema.ts:1531 | 1 |
 | `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 4 |
 | `maxCrawlMs` | packages/core/src/config/schemas/retrieval.ts:198 | 1 |
-| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1891 | 1 |
+| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1891 | 2 |
 | `maxDelegationDepth` | packages/core/src/config/schemas/effort.ts:27 | 2 |
 | `maxDepthCap` | packages/core/src/config/schemas/retrieval.ts:188 | 1 |
 | `maxDiscoveredPeers` | packages/core/src/config/schema.ts:637 | 1 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1242 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:534 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:724 | 53 |
-| `provider` | packages/core/src/config/schema.ts:455 | 132 |
+| `provider` | packages/core/src/config/schema.ts:455 | 133 |
 | `providers` | packages/core/src/config/schema.ts:1234 | 101 |
 | `publicUrl` | packages/core/src/config/schema.ts:341 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |

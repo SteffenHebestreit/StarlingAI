@@ -442,6 +442,125 @@ describe("the excerpts a search returned reach the model's next call", () => {
   }, 60_000);
 });
 
+describe("a knowledge-base worker's report reaches the model's next call", () => {
+  // 2026-10-09: use_knowledge_base's result had no frame of its own. The frame cut it to 600
+  // characters and the collapsed history to 500, and the tool's relay instruction takes 238 of them,
+  // so the orchestrator was told to relay findings it could see only the first few of.
+  const PAGE_URL = "http://www.nordlicht-werkzeuge.test/dokumentation.html";
+  const sectionNote = (n: number) =>
+    `- Abschnitt ${n}: geprüft, enthält keine Angabe zur gefragten Ladezeit oder zum Wartungsintervall; ${"Hinweise zu Inbetriebnahme und Zubehör. ".repeat(3)}`;
+  const [charge, grease] = KB_EXCERPTS;
+  // The worker's findings, the charge time past character 600 of the tool's result and the grease
+  // interval past the 2,000 characters a delegated result keeps in the history snippet.
+  const REPORT = [
+    `Grundlage: Kurzanleitung Akku-Schrauber NW-AS 18 (${PAGE_URL}).`,
+    "",
+    "Gelesene Abschnitte:",
+    ...[1, 2, 3].map(sectionNote),
+    "",
+    `1. **Ladezeit:** ${charge!.text}`,
+    "",
+    ...[4, 5, 6, 7, 8, 9, 10, 11].map(sectionNote),
+    "",
+    `2. **Wartung:** ${grease!.text}`,
+    "",
+    `Fundstelle: ${PAGE_URL}`,
+  ].join("\n");
+
+  it("the call after the worker reads every finding of its report, the ones past character 600 included", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    runEphemeralWorkerMock.mockResolvedValue({
+      success: true,
+      output: REPORT,
+      grantedTools: ["search_knowledge_base", "list_knowledge_bases"],
+      rejectedTools: [],
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolCallStream("kbw1", "use_knowledge_base", { knowledge_base: KB_ID, task: "Ladezeit NW-3104 und Getriebefett-Intervall NW-AS 18" })
+        : textStream("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const toolResults: Array<{ name: string; result: string }> = [];
+    await runTurn({
+      session,
+      userMessage: KB_QUESTION,
+      onToolResult: (_id, name, result) => { toolResults.push({ name, result }); },
+    });
+
+    expect(runEphemeralWorkerMock).toHaveBeenCalledTimes(1);
+    const worker = toolResults.find((entry) => entry.name === "use_knowledge_base")?.result ?? "";
+    expect(worker.indexOf(charge!.text), "the fixture's charge time does not sit past character 600").toBeGreaterThan(600);
+    expect(worker.indexOf(grease!.text), "the fixture's grease interval does not sit past character 2,000").toBeGreaterThan(2_000);
+    // The turn stored the tool's result as it came, relay instruction and all.
+    const stored = (session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .find((message) => message.role === "tool" && message.tool_call_id === "kbw1")?.content;
+    expect(stored).toBe(worker);
+    expect(stored).toMatch(/^Worker result \(grounded in "E2E Nordlicht Doku \(core-ix\)"\) — relay these findings to the user as-is;/);
+    // And the call after it reads every finding.
+    expect(streamMock.mock.calls.length, "the turn made no call after the worker").toBeGreaterThanOrEqual(2);
+    const nextCall = (streamMock.mock.calls[1]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain(charge!.text);
+    expect(nextCall).toContain(grease!.text);
+    expect(nextCall).not.toContain("snippet summarized for prior-turn history");
+  }, 60_000);
+
+  it("a worker that could not run is no report: the call after it reads a generic tool result's 600 characters, its snippet 500", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    const { truncateForContext } = await import("../agent/tool-result-format.js");
+    // The worker timed out while its searches kept hitting a provider's error page. Its partial
+    // transcript repeats the page, and the tool hands that on behind its failure line.
+    const tail = "Letzter Stand vor dem Abbruch: keine Antwort des Modells nach 600 s.";
+    runEphemeralWorkerMock.mockResolvedValue({
+      success: false,
+      output: [
+        "Partial progress before interruption:",
+        ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) =>
+          `- search_knowledge_base (Versuch ${n}): HTTP 502 <html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center></body></html>`),
+        tail,
+      ].join("\n"),
+      grantedTools: ["search_knowledge_base", "list_knowledge_bases"],
+      rejectedTools: [],
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolCallStream("kbw1", "use_knowledge_base", { knowledge_base: KB_ID, task: "Ladezeit NW-3104 und Getriebefett-Intervall NW-AS 18" })
+        : textStream("Die Wissensdatenbank war in diesem Durchlauf nicht erreichbar.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const toolResults: Array<{ name: string; result: string }> = [];
+    await runTurn({
+      session,
+      userMessage: KB_QUESTION,
+      onToolResult: (_id, name, result) => { toolResults.push({ name, result }); },
+    });
+
+    expect(runEphemeralWorkerMock).toHaveBeenCalledTimes(1);
+    const worker = toolResults.find((entry) => entry.name === "use_knowledge_base")?.result ?? "";
+    expect(worker).toMatch(/^Error: The knowledge-base worker could not run: Partial progress before interruption:/);
+    expect(worker.indexOf(tail), "the fixture's last line does not sit past character 600").toBeGreaterThan(600);
+    // The turn stored the failure as a generic tool result's frame shows it, not at a report's budget.
+    const stored = (session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .find((message) => message.role === "tool" && message.tool_call_id === "kbw1")?.content ?? "";
+    expect(stored).toBe(truncateForContext(worker, 600));
+    // And the call after it reads the generic snippet of it.
+    expect(streamMock.mock.calls.length, "the turn made no call after the worker").toBeGreaterThanOrEqual(2);
+    const nextCall = (streamMock.mock.calls[1]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain(`${stored.substring(0, 500)} [snippet summarized for prior-turn history; full result preserved in the original tool call above, ${stored.length} chars total]`);
+    expect(nextCall).not.toContain(tail);
+  }, 60_000);
+});
+
 describe("the turn loop's own notes on a retrieval result survive its cut to the budget", () => {
   const SEARCH_ARGS = { knowledge_base: KB_ID, query: "Ladezeit NW-3104 NW-LG 18 0 auf 80 %" };
   const CUT_LINE = /\[Cut to fit the context budget: the remaining \d+ characters of this result are not shown\.\]/;

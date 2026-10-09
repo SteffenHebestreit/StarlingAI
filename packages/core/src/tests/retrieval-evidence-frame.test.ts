@@ -69,7 +69,9 @@ describe("the model-visible frame of a retrieval result", () => {
   });
 
   it("leaves every other tool on the 600-character fallback, byte for byte", () => {
-    for (const tool of ["web_fetch", "list_documents", "list_knowledge_bases", "use_knowledge_base", "search_sessions", "memory_store"]) {
+    // use_knowledge_base is not on this list: its worker's report has a frame of its own
+    // (kb-worker-report-frame.test.ts).
+    for (const tool of ["web_fetch", "list_documents", "list_knowledge_bases", "search_sessions", "memory_store"]) {
       const visible = buildModelVisibleToolResult(tool, KB_RESULT, { hits: 1 });
       expect(visible, tool).toBe(truncateForContext(KB_RESULT, 600));
       expect(visible, tool).not.toContain("38 Minuten");
