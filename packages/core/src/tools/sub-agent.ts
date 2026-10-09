@@ -42,6 +42,8 @@ import {
   pickResearchFallbackAgent,
   agentCfgReachesOutsideWorkspace,
   agentCfgWorksOnlyFromHandedText,
+  agentCfgOnlyReadsOpenBrowserTab,
+  agentCfgDrivesSharedBrowser,
   evidenceGatherPoint,
   lookupAgentCapabilities,
   filterCandidatesByExecutionCapability,
@@ -326,6 +328,32 @@ export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): To
 /** Index of a batch's evidence gather point among its members' agent names, in the order they run, or -1 (see agent-routing). */
 export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyArray<string | undefined>): number {
   return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
+}
+
+/** An absolute web address in a task: a page the step has to open from outside the workspace. */
+const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
+/** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
+async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
+  try {
+    return Object.keys(await readAllFacts(deriveSharedSessionId(ctx.sessionId))).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this session's swarm has run an agent that drives the shared browser
+ * (agentCfgDrivesSharedBrowser) to the end without failing: an attempt of this turn, or of a task
+ * this turn carried over from the session's previous turn. One still running may not have opened its
+ * page yet, and one that failed may never have: a tab reader would read the tab as it was before.
+ */
+function swarmHasDrivenSharedBrowser(ctx: ToolContext): boolean {
+  const config = getConfig();
+  const promoted = readPromotedAgents(config.workspacePath);
+  return Object.values(ctx.swarmState?.tasks ?? {}).some((task) => (task.attempts ?? []).some((attempt) =>
+    (attempt.status === "completed" || attempt.status === "partial")
+    && agentCfgDrivesSharedBrowser(config.subAgents[attempt.agentName] ?? promoted[attempt.agentName])));
 }
 
 function getEphemeralGenerationSettings() {
@@ -1168,6 +1196,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   const skippedCandidates = new Set<string>();
   const excludedFromRouting = (): string[] => [...attemptedAgents, ...skippedCandidates];
   let routingRounds = 0;
+  // The research gate's turn trigger for a ROUTED pick: decided at this delegation's first routing
+  // round and kept for the rest (see Step 1 below).
+  let routedTurnTriggered: boolean | undefined;
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1291,6 +1322,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     && explicitAgentRequested
     && candidateQueue.length > 0
     && candidateQueue.every((name) => agentCfgWorksOnlyFromHandedText(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+  // THE TAB READER — an agent that only reads the page the shared browser tab shows
+  // (agentCfgOnlyReadsOpenBrowserTab). The trigger above stands down once anything this turn has
+  // reached outside, the step is exempt, or the session holds facts, and none of that puts a page of
+  // this session's in the tab. c172d755 named vision_browser_analyst for both of its site steps: the
+  // gather point went to researcher, which reads with web_fetch and leaves the tab where it was, and
+  // the second step ran exempt on a page another session had opened. So on a turn the judge flagged,
+  // a step for tab readers alone is redirected the same way until an agent that drives the browser
+  // has run for this session (swarmHasDrivenSharedBrowser); a step that runs after one keeps it.
+  const tabReaderUnserved = ctx.turnEvidence?.required === true
+    && explicitAgentRequested
+    && candidateQueue.length > 0
+    && candidateQueue.every((name) => agentCfgOnlyReadsOpenBrowserTab(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]))
+    && !swarmHasDrivenSharedBrowser(ctx);
   let renderHasGatheredFacts = true;
   if (textRequiresResearch || turnTriggerCandidate) {
     try {
@@ -1301,10 +1345,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
   }
   // Re-read after the await: a sibling of this delegation may have taken the turn's one redirect.
-  const turnTriggered = turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged;
+  const turnTriggered = (turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged) || tabReaderUnserved;
   const requiresExternalResearch = textRequiresResearch || turnTriggered;
   const researchTrigger = textRequiresResearch ? "task_text" : "turn_evidence";
+  // A tab reader renders from the tab, not from the shared facts, so the render exemption is not its.
   const isArtifactRenderDelegation = renderHasGatheredFacts
+    && !tabReaderUnserved
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
       isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
@@ -1496,6 +1542,78 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             routingCandidates = researchCapable;
           }
         }
+        // THE TURN TRIGGER, for a routed pick. The gate above reads the task's words, which match
+        // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
+        // asking in German to fetch a page named an agent the catalog does not have (web_crawler),
+        // so it was routed, and the router put vision_browser_analyst, which can read the shared
+        // browser tab but not open a page, ahead of browser_agent and researcher (79dd29e0,
+        // 3c91cb68). It answered from a page another session had left there. The explicit path's
+        // turn trigger never saw the step: a plan leaves a step naming no known agent to routing
+        // (evidenceGatherPoint), so the step ran exempt.
+        // The router is therefore held to the same rule here, on the same conditions: the judge said
+        // this turn needs outside facts, nothing this turn has reached outside the workspace yet, and
+        // the session holds no shared facts. A candidate that works only from what it is handed
+        // (agentCfgWorksOnlyFromHandedText) cannot gather them, so it is dropped; when no other
+        // candidate was routed, the research fallback takes the step if this turn may still dispatch
+        // one, and otherwise the candidates stay (never a dead end). A candidate with a source of its
+        // own (the web, a mailbox, a codebase) keeps its rank. Decided at the first routing round and
+        // kept, so a gatherer that fails does not leave the next round free to pick the tab reader.
+        if (routedTurnTriggered === undefined) {
+          routedTurnTriggered = ctx.turnEvidence?.required === true
+            && !ctx.turnEvidence.outsideEngaged
+            && !(await sessionHoldsSharedFacts(ctx))
+            // Re-read after the await, as the explicit path does: a sibling may have engaged one.
+            && !ctx.turnEvidence.outsideEngaged;
+        }
+        // Once the trigger stands down, a routed tab reader is still held to the explicit path's tab
+        // rule (tabReaderUnserved): on a turn the judge flagged, it is dropped until an agent that
+        // drives the browser has run for this session.
+        const tabReadersBarred = !routedTurnTriggered && ctx.turnEvidence?.required === true && !swarmHasDrivenSharedBrowser(ctx);
+        if ((routedTurnTriggered || tabReadersBarred) && !textRequiresResearch && routingCandidates.length > 0) {
+          const turnCfg = getConfig();
+          const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
+          const unfitForTurn = routedTurnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
+          let gatherable = routingCandidates.filter((cand) =>
+            !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+          // A step that names a web address has to be read from outside, so a candidate whose source
+          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
+          // outside, when the router offered one. A routed step names no agent whose source it is
+          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
+          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
+          // cannot open the page either. Without a web address such a candidate keeps its rank.
+          if (routedTurnTriggered && WEB_ADDRESS_RE.test(request.task)) {
+            const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+            if (reaching.length > 0) gatherable = reaching;
+          }
+          if (gatherable.length < routingCandidates.length) {
+            const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
+              attemptedAgents,
+              (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+                && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+            );
+            // With no other candidate and no fallback this turn may dispatch, nothing is dropped.
+            const dropped = gatherable.length > 0 || fallback
+              ? routingCandidates.filter((cand) => !gatherable.includes(cand)).map((cand) => cand.name)
+              : [];
+            logAudit("delegation_routing_filtered_research_incapable", {
+              taskTitle: title,
+              droppedAgents: dropped,
+              redirectedTo: fallback ?? null,
+              trigger: "turn_evidence",
+            }, { sessionId: ctx.sessionId });
+            if (gatherable.length > 0) {
+              routingCandidates = gatherable;
+            } else if (fallback) {
+              routingCandidateMap.set(fallback, {
+                confidence: "medium",
+                matchedTerms: ["research", "turn-evidence", "redirected"],
+                score: 0.7,
+              });
+              candidateQueue.push(fallback);
+              routingCandidates = [];
+            }
+          }
+        }
         // Capability-aware gate: when the task needs a concrete execution tool class
         // (shell/code-exec/browser interaction) and both capable and incapable agents
         // were routed, keep the capable ones so bidding/routing can't elect an agent
@@ -1561,6 +1679,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               score: topCandidate.score,
             });
             candidateQueue.push(topCandidate.name);
+          }
+        }
+        // Claimed here, synchronously after the decision, as the explicit path claims its pick. The
+        // dispatch below claims it too, but only after the lease, budget and admission waits: two
+        // routed builder slices of one parallel_delegate each decided before either got there, both
+        // dropped web_coder, and the build never ran.
+        if (routedTurnTriggered && ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]) {
+          const pickConfig = getConfig();
+          const pick = candidateQueue[0];
+          if (agentCfgReachesOutsideWorkspace(pickConfig.subAgents[pick] ?? readPromotedAgents(pickConfig.workspacePath)[pick])) {
+            ctx.turnEvidence.outsideEngaged = pick;
           }
         }
       }
@@ -2402,9 +2531,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // stop cut off its synthesis and left an interrupted-output stub — must NOT
         // be discarded. That discard is why audit 5a6db38d shipped a training-data
         // answer despite 31 min of real research. Skip pure failure stubs,
-        // planning-only narration, and infrastructure failures.
+        // planning-only narration, and infrastructure failures. A run that never started for want of
+        // a usable tool ("missing_tools") is the runner's own refusal, not evidence: kept here, it came
+        // back to the caller as a successful partial.
         if (
           !lastFailureWasInfrastructure
+          && stats?.terminalState !== "missing_tools"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)
           && !looksLikeOnlyFailureStubs(output)
@@ -3554,6 +3686,7 @@ registerTool({
       weakCount: resolution.weakCandidates.length,
       gated: resolution.gated,
       trippedAgents: resolution.trippedAgents,
+      ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
       excludedAgents: resolution.excludedAgents ?? [],
       allLowConfidence: resolution.allLowConfidence,
       topResult: resolution.results[0]?.name ?? null,

@@ -420,7 +420,7 @@ Every public schema field, where it is declared, and how many production files r
 | `secretAccessKey` | packages/core/src/config/schema.ts:484 | 4 |
 | `seed` | packages/core/src/config/schema.ts:172 | 24 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 1 |
-| `servers` | packages/core/src/config/schema.ts:786 | 24 |
+| `servers` | packages/core/src/config/schema.ts:786 | 25 |
 | `serverSideScopeFilter` | packages/core/src/config/schemas/retrieval.ts:154 | 1 |
 | `serviceName` | packages/core/src/config/schema.ts:577 | 3 |
 | `serviceUrl` | packages/core/src/config/schema.ts:1190 | 2 |
@@ -481,7 +481,7 @@ Every public schema field, where it is declared, and how many production files r
 | `terraformBinary` | packages/core/src/config/schema.ts:1088 | 1 |
 | `threshold` | packages/core/src/config/schemas/decisions.ts:24 | 45 |
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
-| `tiers` | packages/core/src/config/schema.ts:259 | 39 |
+| `tiers` | packages/core/src/config/schema.ts:259 | 40 |
 | `timeoutMs` | packages/core/src/config/schema.ts:69 | 103 |
 | `token` | packages/core/src/config/schema.ts:1170 | 185 |
 | `tokenId` | packages/core/src/config/schema.ts:1069 | 1 |

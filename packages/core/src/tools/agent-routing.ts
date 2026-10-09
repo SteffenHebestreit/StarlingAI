@@ -18,6 +18,10 @@ import { rerankCandidates } from "../retrieval/reranker.js";
 import { logAudit } from "../audit/logger.js";
 import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
 import { WORKSPACE_MUTATION_TASK_RE } from "./delegation-artifact-classification.js";
+import { isCompileTimeMappedTool } from "../guardrails/tool-tiers.js";
+import { getTool } from "./registry.js";
+import { isToolDisabled } from "./groups.js";
+import { runtimeComponentAttempted } from "../runtime/status.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -74,6 +78,8 @@ export interface AgentRoutingResolution {
   gated: boolean;
   /** Agents excluded because their circuit breaker is open (too many recent failures). */
   trippedAgents: string[];
+  /** Agents excluded because no tool they declare is usable here (agentCfgHasNoUsableTools). Absent when there were none. */
+  toollessAgents?: string[];
   /** True when every result is only "low" confidence — consider ephemeral agent or user clarification. */
   allLowConfidence: boolean;
   /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
@@ -153,6 +159,7 @@ export function logRoutingEvaluated(input: {
     gated: resolution.gated,
     allLowConfidence: resolution.allLowConfidence,
     trippedAgents: resolution.trippedAgents,
+    ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
     excludedAgents: resolution.excludedAgents ?? [],
     topResult: resolution.results[0]?.name ?? null,
     topScore: resolution.results[0]?.score ?? null,
@@ -239,6 +246,52 @@ export function isCircuitOpen(agentName: string, workspacePath: string): boolean
   if (recent.length < CIRCUIT_MIN_SAMPLES) return false;
   const failures = recent.filter(o => o.outcome === "failure").length;
   return failures / recent.length > CIRCUIT_FAILURE_THRESHOLD;
+}
+
+/** The swarm's own bookkeeping tools, which any agent may hold. They do none of an agent's work. */
+const SWARM_BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set(["read_shared_facts", "share_finding"]);
+
+/**
+ * Whether this process cannot offer a tool an agent declares. A registered tool is usable. An
+ * unregistered one is not when nothing but runtime state could register it: a name with no
+ * compile-time tier, which is a bridged MCP tool (mcp__<server>__<tool>, registered only while its
+ * server is connected), an A2A or self-developed tool, or a name no process can register at all;
+ * or a tool config disables, which registerTool skips. A built-in tool that is merely unregistered
+ * stays usable: its module registers it on import, and a process that routes without importing
+ * every tool module (a CLI, a test) would otherwise find no agent.
+ *
+ * A bridged MCP tool is judged the same way only once this process has connected its MCP servers
+ * (syncMcpServers marks the attempt before it connects any). A process that never does, such as
+ * routing:canary, routing:eval or the pre-router bench, has none of them registered whatever state
+ * the servers are in: it left process_memory_keeper out of every ranking on a machine whose config
+ * includes it, and scored the eval cases that expect it as misses.
+ */
+function declaredToolIsUnusable(toolName: string): boolean {
+  if (getTool(toolName)) return false;
+  if (isToolDisabled(toolName)) return true;
+  if (isCompileTimeMappedTool(toolName)) return false;
+  if (toolName.startsWith("mcp__")) return runtimeComponentAttempted("mcp");
+  return true;
+}
+
+/**
+ * Whether an agent is left with no tool to do its work: it declares tools beyond the swarm's
+ * bookkeeping pair, and every one of them is unusable here (declaredToolIsUnusable). On the E2E run
+ * of 2026-10-08 the processmem MCP server was unreachable, so process_memory_keeper's ten
+ * mcp__processmem__ tools were never registered and a sub-agent run silently keeps only registered
+ * tools. Routing still offered it as the only match for "Schreibe die Textdatei …"; it ran with
+ * read_shared_facts and share_finding, called share_finding, reported success, and the file was
+ * never written. An agent that declares no tools beyond the pair, or inherits the full set, is not
+ * this: it never depended on one.
+ */
+export function agentCfgHasNoUsableTools(cfg: { tools?: string[] } | undefined): boolean {
+  const domainTools = agentCfgDomainTools(cfg);
+  return domainTools.length > 0 && domainTools.every(declaredToolIsUnusable);
+}
+
+/** The tools an agent declares beyond the swarm's bookkeeping pair: the ones it does its work with. */
+export function agentCfgDomainTools(cfg: { tools?: string[] } | undefined): string[] {
+  return (cfg?.tools ?? []).filter((toolName) => !SWARM_BOOKKEEPING_TOOL_NAMES.has(toolName));
 }
 
 /**
@@ -441,6 +494,16 @@ export async function resolveAgentRouting(
     entries = entries.filter(([name]) => !trippedAgents.includes(name));
   }
 
+  // Filter out agents left with no usable tool (agentCfgHasNoUsableTools), such as one whose MCP
+  // server is unreachable: routed, it runs with only the bookkeeping tools and reports success.
+  const toollessAgents: string[] = entries
+    .filter(([, cfg]) => agentCfgHasNoUsableTools(cfg))
+    .map(([name]) => name);
+  if (toollessAgents.length > 0) {
+    entries = entries.filter(([name]) => !toollessAgents.includes(name));
+  }
+  const toollessField = toollessAgents.length > 0 ? { toollessAgents } : {};
+
   const semanticScores = new Map<string, number>();
   let usedSemanticSearch = false;
   let semanticSearchAttempted = false;
@@ -470,6 +533,7 @@ export async function resolveAgentRouting(
       nearMisses: [],
       gated: true,
       trippedAgents,
+      ...toollessField,
       allLowConfidence: false,
       excludedAgents: opts?.excludeAgents,
       semanticUnavailableReason: semanticSearchAttempted
@@ -645,6 +709,7 @@ export async function resolveAgentRouting(
     nearMisses,
     gated: ranked.length > 0 && gated.length === 0,
     trippedAgents,
+    ...toollessField,
     allLowConfidence,
     excludedAgents: opts?.excludeAgents ? [...opts.excludeAgents] : undefined,
   };
@@ -685,6 +750,16 @@ export function isWebReachingToolName(toolName: string): boolean {
 }
 
 /**
+ * Browser tools that only look at the page the shared browser tab already shows, in both the
+ * gateway's own names and the bridged Playwright server's. None of them opens a URL, so they
+ * read whatever page the last navigation left there, which may be another session's.
+ */
+const BROWSER_TAB_VIEW_TOOL_NAMES = new Set<string>([
+  "browser_snapshot", "browser_screenshot", "browser_take_screenshot",
+  "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
+]);
+
+/**
  * True for a tool that can GATHER fresh external evidence (search + fetch page
  * content + drive a browser). This is the narrower cousin of isWebReachingToolName:
  * it excludes url_inspect, which only probes a URL you already have (headers,
@@ -692,9 +767,16 @@ export function isWebReachingToolName(toolName: string): boolean {
  * only "web" tool is url_inspect cannot do PRIMARY research — evidence_analyst
  * (url_inspect only, no web_search/web_fetch) was wrongly classed research-capable
  * and dead-looped url_inspect on a 404 after being handed a gather task (audit 687a224b).
+ *
+ * It excludes the browser tab views (BROWSER_TAB_VIEW_TOOL_NAMES) for the same reason. The
+ * browser_ prefix credited them, so vision_browser_analyst, which holds only browser_snapshot
+ * and browser_screenshot, counted as a gatherer. Routing gave it "die URL … abrufen" steps
+ * ahead of browser_agent and researcher, and it snapshotted a tab an earlier session had left on
+ * another page nine times, then answered from that page (E2E 2026-10-08, 79dd29e0, 3c91cb68,
+ * c172d755). A browser tool that drives the page (browser_navigate, browser_click, …) still counts.
  */
 export function isWebGatheringToolName(toolName: string): boolean {
-  if (toolName === "url_inspect") return false;
+  if (toolName === "url_inspect" || BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName)) return false;
   return isWebReachingToolName(toolName);
 }
 
@@ -702,7 +784,8 @@ export function isWebGatheringToolName(toolName: string): boolean {
  * Pure capability check against an agent's tool list. Research-capable means it can
  * GATHER from the web directly (web_search/web_fetch/browser_*) or is a coordinator
  * that can delegate to one that does. url_inspect alone does NOT qualify (it only
- * probes a known URL, cannot search/fetch). An undefined tool list means "inherit all
+ * probes a known URL, cannot search/fetch), and neither do browser tab views alone
+ * (browser_snapshot/browser_screenshot read the open page, cannot open one). An undefined tool list means "inherit all
  * tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
  */
 export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined): boolean {
@@ -853,13 +936,41 @@ type CapabilityBearing = (TaxonomyBearing & { tools?: string[] }) | undefined;
 const WORKSPACE_SURFACES: ReadonlySet<string> = new Set(["workspace", "local_sandbox", "swarm_internal"]);
 
 /**
+ * Whether an agent's one way outside the workspace is the page the shared browser tab already
+ * shows: it holds nothing that gathers or delegates (agentCfgIsResearchCapable, which does not
+ * count a snapshot or screenshot of the open tab), and the browser is the only outside surface its
+ * routing taxonomy names. It can read a page but not open one, so it reads whatever the last
+ * navigation left there. On a turn nothing has gathered for yet, that is another turn's page: on
+ * the E2E run of 2026-10-08 (c172d755) a plan named vision_browser_analyst for both of its site
+ * steps, and it read dokumentation.html, which another session had opened, and reported a
+ * headcount and two page visits it never made.
+ */
+export function agentCfgOnlyReadsOpenBrowserTab(cfg: CapabilityBearing): boolean {
+  if (!cfg || agentCfgIsResearchCapable(cfg)) return false;
+  const outside = (resolveRoutingTaxonomy(cfg)?.surface ?? []).filter((surface) => !WORKSPACE_SURFACES.has(surface));
+  return outside.length > 0 && outside.every((surface) => surface === "browser");
+}
+
+/**
+ * Whether an agent drives the shared browser: it holds a browser tool that opens a page or acts on
+ * one (browser_navigate, browser_click, the bridged Playwright server's), not only a view of the
+ * open tab (BROWSER_TAB_VIEW_TOOL_NAMES). After such an agent has run, the tab shows a page it
+ * opened. An agent that inherits the full tool set is not counted: nothing says it opened one.
+ */
+export function agentCfgDrivesSharedBrowser(cfg: { tools?: readonly string[] } | undefined): boolean {
+  return (cfg?.tools ?? []).some((toolName) => (toolName.startsWith("browser_") || toolName.startsWith("mcp__playwright__browser_"))
+    && !BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName));
+}
+
+/**
  * Whether an agent can reach anything outside the workspace: it can gather or delegate (the
  * research gate's own veto, agentCfgIsResearchCapable), or its routing taxonomy names a surface
  * outside the workspace — a mailbox, a calendar, a desktop, remote infrastructure. Read from the
  * taxonomy rather than from tool names, because that is where the catalog already records it
  * (`surface` is derived from the tool list and linted for staleness). An agent with no taxonomy,
  * or an empty surface list, is treated as reaching out: the turn trigger never touches what it
- * cannot classify.
+ * cannot classify. An agent that only reads the open browser tab (agentCfgOnlyReadsOpenBrowserTab)
+ * does not reach out: the page it reads is one another agent opened.
  */
 export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean {
   if (!cfg || agentCfgIsResearchCapable(cfg)) return true;
@@ -867,6 +978,7 @@ export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean
   // routing block can lack `surface` altogether: unclassifiable, not a crash on the delegation path.
   const surfaces = resolveRoutingTaxonomy(cfg)?.surface ?? [];
   if (surfaces.length === 0) return true;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return false;
   return surfaces.some((surface) => !WORKSPACE_SURFACES.has(surface));
 }
 
@@ -874,10 +986,13 @@ export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean
  * Whether an agent works only from the text it is handed: confined to the workspace, and its
  * taxonomy's input is text alone. A builder, writer or generator (web_coder, content_writer,
  * image_creator). An agent that reads a codebase, an uploaded file or a data table has a source of
- * its own and is not this — its step may well be about that source.
+ * its own and is not this — its step may well be about that source. An agent that only reads the
+ * open browser tab is this too, whatever its input: the page is handed to it the way text is, by
+ * whichever agent opened it, and with nothing gathered yet it has nothing to read.
  */
 export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean {
   if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return true;
   const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
   return inputs.length > 0 && inputs.every((input) => input === "text" || input === "none");
 }
@@ -888,9 +1003,11 @@ export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean
  * first one, in the order given, naming an agent that works only from handed text. -1 when any member
  * could reach outside the workspace itself (it names such an agent, names none, or names an
  * unknown one): the batch has then already decided where its evidence comes from, and every member
- * keeps the agent it names. The order given has to be the order the members run in: a plan and a
- * task graph run by their dependsOn edges, so they ask once for the whole batch (is there a gather
- * point at all) and then again for each round they dispatch, which picks the first one that runs.
+ * keeps the agent it names. A member naming none or an unknown one is routed, and the router holds
+ * its pick to the same turn trigger (executeDelegationWithFallback, Step 1). The order given has to
+ * be the order the members run in: a plan and a task graph run by their dependsOn edges, so they ask
+ * once for the whole batch (is there a gather point at all) and then again for each round they
+ * dispatch, which picks the first one that runs.
  */
 export function evidenceGatherPoint(
   agentNames: ReadonlyArray<string | undefined>,
@@ -1143,7 +1260,10 @@ function agentSatisfiesExecutionCapability(cfg: { tools?: string[] } | undefined
     case "code_exec":
       return tools.some((t) => t.startsWith("mcp__code_sandbox__") || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(t));
     case "browser_interaction":
-      return tools.some((t) => t.startsWith("browser_") || t === "site_fill_credentials" || t.startsWith("computer_"));
+      // A view of the open tab (BROWSER_TAB_VIEW_TOOL_NAMES) cannot click, type or submit anything:
+      // vision_browser_analyst, which holds only views, passed here on their browser_ prefix.
+      return tools.some((t) => (t.startsWith("browser_") && !BROWSER_TAB_VIEW_TOOL_NAMES.has(t))
+        || t === "site_fill_credentials" || t.startsWith("computer_"));
   }
 }
 
