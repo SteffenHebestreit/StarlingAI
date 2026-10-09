@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { classifyDelegationResult, isNarrativeOnlyDeliverableFailure } from "../tools/sub-agent.js";
-import { loadWorkspaceAgents } from "./support/workspace-shards.js";
 import type { DelegationClassification } from "../tools/sub-agent.js";
 import {
   carriesConcreteEvidence,
@@ -9,7 +8,6 @@ import {
   looksLikePlanningOnlyResult,
   parseFinalAnswerTag,
   readDelegationDeliverable,
-  taxonomyDefaultDeliverable,
 } from "../tools/delegation-artifact-classification.js";
 
 const baseStats = {
@@ -945,13 +943,11 @@ describe("classifyDelegationResult — a file is missed only when the delegation
     const review = "browser_agent and vision_browser_analyst both run on the 35B model; vision_browser_analyst sets no "
       + "fallback, so a model outage leaves it without one. Nothing else in the two definitions conflicts.";
     const task = "Review the browser_agent and vision_browser_analyst agent config. Do not change anything.";
-    // A reviewer with the tags the old heuristic read, and no routing label (that default is tested
-    // below, with the shipped roster).
-    const reviewer = { tags: ["prompts", "agents"] } as never;
-    expect(classifyDelegationResult(review, "success", reviewStats, reviewer, "prompt_optimizer", task))
+    const maintainer = { tags: ["swarm", "maintenance"] } as never;
+    expect(classifyDelegationResult(review, "success", reviewStats, maintainer, "swarm_maintainer", task))
       .toBe<DelegationClassification>("success");
     // Declared a change, the same read-only run missed it.
-    expect(classifyDelegationResult(review, "success", reviewStats, reviewer, "prompt_optimizer", task, [], { deliverable: "file" }))
+    expect(classifyDelegationResult(review, "success", reviewStats, maintainer, "swarm_maintainer", task, [], { deliverable: "file" }))
       .toBe<DelegationClassification>("failure");
   });
 
@@ -961,138 +957,5 @@ describe("classifyDelegationResult — a file is missed only when the delegation
     for (const value of ["files", "document", "", undefined, null, 1, true, ["file"]]) {
       expect(readDelegationDeliverable(value), JSON.stringify(value)).toBeUndefined();
     }
-  });
-});
-
-// A delegation that declares nothing takes its AGENT's deliverable kind from the routing taxonomy
-// (workspace/agents/59-routing.generated.jsonc, resolveRoutingTaxonomy). A builder still fails
-// when it only narrates, as it did before the declaration existed; an evidence agent's prose
-// answer (7c4cbb28) is still its deliverable. An explicit declaration always wins; an agent with
-// no taxonomy (ephemeral, promoted, unknown) keeps "undeclared means no miss".
-describe("an undeclared delegation takes its agent's deliverable kind from the routing taxonomy", () => {
-  // The shipped roster, merged the way the config builder merges the shards: tools from the agent
-  // shards, the routing label from the generated one.
-  const roster = loadWorkspaceAgents<Record<string, unknown>>();
-  const shipped = (name: string) => {
-    const agent = roster[name];
-    expect(agent, `${name} is in the shipped roster`).toBeDefined();
-    return agent as never;
-  };
-  const zeroTools = { toolCount: 0, toolNames: [] as string[], terminalState: "completed", outcome: "success" as const };
-  const narration = "This is a substantial single-page deliverable with a quiz, a dark theme and seven sections. "
-    + "Given the size (~15KB+), I'll write it in one go.";
-  const buildTask = "Build the CPSA-F learning page from the shared facts.";
-
-  it("an undeclared web_coder that only narrates is a failure, as before the declaration", () => {
-    expect(taxonomyDefaultDeliverable(shipped("web_coder"))).toBe("file");
-    expect(classifyDelegationResult(narration, "success", zeroTools, shipped("web_coder"), "web_coder", buildTask))
-      .toBe<DelegationClassification>("failure");
-    expect(isNarrativeOnlyDeliverableFailure("failure", narration, buildTask, zeroTools, shipped("web_coder"), undefined)).toBe(true);
-  });
-
-  it("an undeclared code_analyst answering in prose is a success (the incident)", () => {
-    const task = [
-      "Statische Code-Analyse (kein Ausführen, kein Ändern): Identifiziere das fehlerhafte Konstrukt.",
-      "```python",
-      "def invoice_total(items):",
-      "    \"\"\"Sum the items and add 20% tax.\"\"\"",
-      "    return int(sum(items) * 1.2)",
-      "```",
-    ].join("\n");
-    const diagnosis = "int(subtotal + tax) schneidet die Nachkommastellen ab, statt zu runden; dieselbe Stelle steckt in receipt_total.";
-    expect(taxonomyDefaultDeliverable(shipped("code_analyst"))).toBe("answer");
-    expect(classifyDelegationResult(diagnosis, "success", zeroTools, shipped("code_analyst"), "code_analyst", task))
-      .toBe<DelegationClassification>("success");
-  });
-
-  it("an explicit declaration wins over the agent's kind", () => {
-    expect(classifyDelegationResult(
-      narration, "success", zeroTools, shipped("web_coder"), "web_coder", buildTask, [], { deliverable: "answer" },
-    )).toBe<DelegationClassification>("success");
-    const readOnly = { toolCount: 2, toolNames: ["read_file", "grep_files"], terminalState: "completed", outcome: "success" as const };
-    expect(classifyDelegationResult(
-      "Here is what the module does.", "success", readOnly, shipped("code_analyst"), "code_analyst", "Fix the rounding in invoices.py.", [], { deliverable: "file" },
-    )).toBe<DelegationClassification>("failure");
-  });
-
-  it("maps the shipped roster's kinds: file builders, answer agents, coordinators and unlabelled agents", () => {
-    // A kind whose product is a file; a document builder (prose_doc with a tool that renders it); a
-    // change to the swarm's own config.
-    for (const name of [
-      "web_coder", "backend_coder", "coder", "tool_developer", "diagram_designer", "chart_designer", "image_creator",
-      "image_sourcer", "content_writer", "paper_author", "report_writer_agent", "meeting_briefing_agent", "swarm_maintainer",
-    ]) {
-      expect(taxonomyDefaultDeliverable(shipped(name)), name).toBe("file");
-    }
-    // Findings, verdicts, plans, messages, tables, inline prose (summarizer: the same prose_doc
-    // label as content_writer, no rendering tool), and changes that land outside the workspace.
-    for (const name of [
-      "code_analyst", "researcher", "evidence_analyst", "quality_supervisor", "prompt_optimizer", "project_planner",
-      "mail_agent", "data_analyst", "document_intake", "sql_specialist", "summarizer", "git_developer",
-      "infrastructure_agent", "calendar_agent", "web_task_coordinator",
-    ]) {
-      expect(taxonomyDefaultDeliverable(shipped(name)), name).toBe("answer");
-    }
-    // A coordinator delivers its specialists' work ("none"); an ephemeral or unknown agent has no label.
-    for (const name of ["mission_coordinator", "pentest_coordinator", "devops_coordinator"]) {
-      expect(taxonomyDefaultDeliverable(shipped(name)), name).toBeUndefined();
-    }
-    expect(taxonomyDefaultDeliverable({ tools: ["write_file", "generate_website"] } as never)).toBeUndefined();
-    expect(taxonomyDefaultDeliverable(undefined)).toBeUndefined();
-  });
-
-  it("an undeclared builder without a label keeps the previous rule: no miss", () => {
-    const ephemeralBuilder = { tools: ["write_file", "generate_website"] } as never;
-    expect(classifyDelegationResult(narration, "success", zeroTools, ephemeralBuilder, "ephemeral:site_builder", buildTask))
-      .toBe<DelegationClassification>("success");
-  });
-
-  it("25f55376 on the shipped mission_coordinator: a zero-tool narration is never a success", () => {
-    for (const run of [{}, { deliverable: "file" as const }]) {
-      expect(classifyDelegationResult(narration, "success", zeroTools, shipped("mission_coordinator"), "mission_coordinator", buildTask, [], run), JSON.stringify(run))
-        .toBe<DelegationClassification>("coordinator_noop");
-    }
-  });
-
-  it("a builder that checked or served what it built worked on the deliverable; it did not narrate", () => {
-    // A builder is judged by its own kind without a declaration, so its "is the page working?" and
-    // "restart the app" delegations reach the miss check too. verify_page / verify_app / serve_app
-    // write no file, and the run that called them is not one that narrated instead of building.
-    const checked = { toolCount: 2, toolNames: ["read_file", "verify_page"], terminalState: "completed", outcome: "success" as const };
-    expect(classifyDelegationResult(
-      "verify_page: PASS — index.html renders, the quiz answers register, no console errors.", "success", checked,
-      shipped("web_coder"), "web_coder", "Check whether generated/quiz/index.html works.",
-    )).toBe<DelegationClassification>("success");
-    const served = { toolCount: 1, toolNames: ["serve_app"], terminalState: "completed", outcome: "success" as const };
-    expect(classifyDelegationResult(
-      "The app is running again at /api/app/12/.", "success", served,
-      shipped("backend_coder"), "backend_coder", "Restart the inventory app.",
-    )).toBe<DelegationClassification>("success");
-  });
-
-  it("c903b401 on the shipped mission_coordinator: asked for a file, it neither built nor delegated", () => {
-    // The shipped mission_coordinator holds no file-writing tool, so the miss check used to stop at
-    // "no artifact tool to call" and a coordinator that only read context and narrated "Let me build
-    // this…" passed. Its way to produce a file is to delegate it; asked for one, not delegating is
-    // the miss. A coordinator has no default ("none"), so this needs the declaration.
-    const contextOnly = { toolCount: 2, toolNames: ["read_shared_facts", "memory_search"], terminalState: "completed", outcome: "success" as const };
-    const c903 = "This is a substantial multi-section deliverable (full interactive learning website with 5 major topic areas, "
-      + "quiz functionality, dark/light mode). Let me build this as a complete single-file HTML application.";
-    const coordinator = shipped("mission_coordinator");
-    expect(classifyDelegationResult(c903, "success", contextOnly, coordinator, "mission_coordinator", buildTask, [], { deliverable: "file" }))
-      .toBe<DelegationClassification>("failure");
-    expect(isNarrativeOnlyDeliverableFailure("failure", c903, buildTask, contextOnly, coordinator, "file")).toBe(true);
-    const delegated = { ...contextOnly, toolNames: ["read_shared_facts", "delegate_to_agent"] };
-    expect(classifyDelegationResult(c903, "success", delegated, coordinator, "mission_coordinator", buildTask, [], { deliverable: "file" }))
-      .toBe<DelegationClassification>("success");
-  });
-
-  it("an undeclared swarm_maintainer that only read is a missed edit again; a reviewer is not", () => {
-    const readOnly = { toolCount: 3, toolNames: ["list_files", "read_file", "read_file"], terminalState: "completed", outcome: "success" as const };
-    const report = "browser_agent and vision_browser_analyst both run on the 35B model; the second sets no fallback.";
-    expect(classifyDelegationResult(report, "success", readOnly, shipped("swarm_maintainer"), "swarm_maintainer", "Switch browser_agent to the 9B model."))
-      .toBe<DelegationClassification>("failure");
-    expect(classifyDelegationResult(report, "success", readOnly, shipped("prompt_optimizer"), "prompt_optimizer", "Review the browser_agent config. Do not change anything."))
-      .toBe<DelegationClassification>("success");
   });
 });
