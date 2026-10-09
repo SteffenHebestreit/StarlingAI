@@ -585,35 +585,82 @@ describe("an --auto turn the word lists see asks the readout too, and a question
     }
   });
 
-  // A Claude routing tier or a server without token logprobs never gives a reading; on such a
-  // deployment every --auto build would otherwise be left to answer inline.
-  it("without a reading the word lists decide as before: the build is forced", async () => {
-    const reading = modeReading("converse");
-    const noReading = [
-      { ok: false, reason: "no_logprobs", ms: 12 },
-      { ok: false, reason: "error", ms: 12, error: "500" },
-      { ...reading, readout: { ...reading.readout, facets: {} } },
-      { ...reading, readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "converse", singlePass: "served" } } } } },
-    ];
-    for (const result of noReading) {
+  // The user's decision 6 (option 3): an --auto question is never forced, a build is. The read's
+  // four outcomes on a question the word lists fire on: a verdict here, a read that missed and a
+  // readout the deployment cannot give in the cases below.
+  it("the same word-list question is forced on a reading of work and not on a reading of an answer", async () => {
+    const question = WORD_LIST_QUESTIONS[0]!;
+    for (const [choice, forced] of [["PRODUCE", true], ["converse", false]] as const) {
       streamMock.mockReset();
       readoutMock.mockReset();
       auditMock.mockClear();
-      const loaded = await load({});
-      readoutMock.mockResolvedValue(result);
-      expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice, JSON.stringify(result).slice(0, 80)).toBe("required");
-      expect(readoutMock).toHaveBeenCalledTimes(1);
-      expect(modeReadRows()).toHaveLength(1);
-      expect(modeReadRows()[0]).toMatchObject({ arm: "word_list" });
-      expect(["no_logprobs", "error", "no_mode", "single_pass"]).toContain(modeReadRows()[0]!["outcome"]);
+      const loaded = await load({ discoveryPrefetch: false });
+      expect(loaded.deliverableIntent.classifyDeliverableIntent(question).wantsArtifact).toBe(true);
+      readoutMock.mockResolvedValue(modeReading(choice));
+      expect((await firstCallOptions(loaded, question, true))?.toolChoice, choice).toBe(forced ? "required" : undefined);
+      expect(modeReadRows()).toMatchObject([{ outcome: forced ? "produce" : "ask", arm: "word_list" }]);
     }
-    streamMock.mockReset();
-    readoutMock.mockReset();
-    auditMock.mockClear();
-    const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
-    expect((await firstCallOptions(claude, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
-    expect(readoutMock).not.toHaveBeenCalled();
-    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider", arm: "word_list" }]);
+  });
+
+  // The read's own bound ends it (PRODUCE_INTENT_READ_TIMEOUT_MS, not a parameter of the turn), so
+  // this case waits it out.
+  it("a word-list question whose read timed out, on a server that gives readings, is not forced", async () => {
+    const question = WORD_LIST_QUESTIONS[0]!;
+    const loaded = await load({ discoveryPrefetch: false });
+    // Resolves only once its signal fires, as askIntentReadout does on an abort.
+    readoutMock.mockImplementation((_provider: unknown, _input: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener("abort", () => resolve({ ok: false, reason: "aborted", ms: 1 }), { once: true });
+    }));
+    expect(await firstCallOptions(loaded, question, true)).toBeUndefined();
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    expect(modeReadRows()).toMatchObject([{ outcome: "timeout", arm: "word_list" }]);
+  }, 20_000);
+
+  // A read that missed this time says nothing about the request, so neither a question nor a
+  // build is forced for it: the build is left to the orchestrator for that turn.
+  it("nor does a read that missed otherwise force the arm: an error, one option order alone, no mode facet", async () => {
+    const reading = modeReading("PRODUCE");
+    const missed = [
+      { result: { ok: false, reason: "error", ms: 12, error: "500" }, outcome: "error" },
+      { result: { ...reading, readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "PRODUCE", singlePass: "served" } } } } }, outcome: "single_pass" },
+      { result: { ...reading, readout: { ...reading.readout, facets: {} } }, outcome: "no_mode" },
+    ];
+    for (const message of [WORD_LIST_QUESTIONS[0]!, WEBSITE_REQUEST]) {
+      for (const { result, outcome } of missed) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        auditMock.mockClear();
+        const loaded = await load({});
+        readoutMock.mockResolvedValue(result);
+        expect(await firstCallOptions(loaded, message, true), `${message} / ${outcome}`).toBeUndefined();
+        expect(readoutMock).toHaveBeenCalledTimes(1);
+        expect(modeReadRows()).toMatchObject([{ outcome, arm: "word_list" }]);
+      }
+    }
+  });
+
+  // A Claude routing tier or a server without token logprobs never gives a reading; on such a
+  // deployment every --auto build would otherwise be left to answer inline. A question among
+  // them is forced there too: the readout cannot tell it from a build.
+  it("where the routing tier gives no logprobs the word lists decide as before: a build, and a question, is forced", async () => {
+    for (const message of [WEBSITE_REQUEST, WORD_LIST_QUESTIONS[0]!]) {
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const noLogprobs = await load({});
+      readoutMock.mockResolvedValue({ ok: false, reason: "no_logprobs", ms: 12 });
+      expect((await firstCallOptions(noLogprobs, message, true))?.toolChoice, message).toBe("required");
+      expect(readoutMock).toHaveBeenCalledTimes(1);
+      expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs", arm: "word_list" }]);
+
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
+      expect((await firstCallOptions(claude, message, true))?.toolChoice, message).toBe("required");
+      expect(readoutMock).not.toHaveBeenCalled();
+      expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider", arm: "word_list" }]);
+    }
   });
 
   it("no read is asked, and nothing changes, without --auto, with the flag off, on a workflow step or on an --agent directive turn", async () => {
@@ -640,7 +687,7 @@ describe("an --auto turn the word lists see asks the readout too, and a question
 });
 
 describe("startProduceIntentRead", () => {
-  it("passes the prior exchange, and resolves null with the reason on a timeout, a stopped turn or a throw", async () => {
+  it("passes the prior exchange, and resolves missed with the reason on a timeout, a stopped turn or a throw", async () => {
     const { turnSetup } = await load({});
     readoutMock.mockResolvedValue(modeReading("GATHER"));
     const controller = new AbortController();
@@ -664,20 +711,34 @@ describe("startProduceIntentRead", () => {
       sessionId: "s-timeout",
       signal: new AbortController().signal,
       timeoutMs: 20,
-    })).toBeNull();
+    })).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "timeout" }]);
 
     auditMock.mockClear();
     const stopped = new AbortController();
     const read = turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-stopped", signal: stopped.signal });
     stopped.abort();
-    expect(await read).toBeNull();
+    expect(await read).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "aborted" }]);
 
     auditMock.mockClear();
     readoutMock.mockReset().mockRejectedValue(new Error("boom"));
-    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-throws", signal: new AbortController().signal })).toBeNull();
+    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-throws", signal: new AbortController().signal })).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "error" }]);
+  });
+
+  it("resolves unavailable where the routing tier gives no logprobs: a reply without them, or a Claude tier", async () => {
+    const { turnSetup } = await load({});
+    readoutMock.mockResolvedValue({ ok: false, reason: "no_logprobs", ms: 12 });
+    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-no-logprobs", signal: new AbortController().signal })).toBe("unavailable");
+    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs", ms: 12 }]);
+
+    auditMock.mockClear();
+    readoutMock.mockReset();
+    const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
+    expect(await claude.turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-claude", signal: new AbortController().signal })).toBe("unavailable");
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider" }]);
   });
 });
 

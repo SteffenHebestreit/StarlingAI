@@ -261,7 +261,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentVerdict } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1880,24 +1880,28 @@ async function _runTurn(
   // Nor does every build stay forced: the E2E request to run the verified_research_brief workflow
   // reads GATHER in the served order, so this arm releases it; there the source-sensitivity
   // judge's research requirement forces the first call (its readout read yes on 5 of 5 probe reads).
-  // Without a reading the word lists decide as they always did, a question among them included:
-  // that is an exception to the decision of 2026-10-09, kept until the user rules on it. A Claude
-  // routing tier, or a server without token logprobs, never gives a reading, and on such a
-  // deployment every --auto build would otherwise lose the call that keeps it from being answered
-  // inline; on the Halo the read, both orders at once and the mode line alone, came back in time
+  // Without a reading, as the user ruled (decision 6, option 3), the word lists decide as they
+  // always did only where the deployment can never give one ("unavailable": a Claude routing tier,
+  // a server without token logprobs, no provider), and there a question among them is forced too.
+  // On such a deployment every --auto build would otherwise lose the call that keeps it from being
+  // answered inline. Where the readout can read, a read that gave nothing this time ("missed": a
+  // timeout, an error, one option order alone, no mode facet) releases the arm, so no question is
+  // forced because one read failed; a build there is left to the orchestrator for that turn. That
+  // is rare: on the Halo the read, both orders at once and the mode line alone, came back in time
   // on all 68 probe reads of new messages, with less than a second to spare after the server's
-  // slots had been overwritten (PRODUCE_INTENT_READ_TIMEOUT_MS). The routing arm,
-  // whose own signal is the top agent's tools rather than anything in the request, forces only on
-  // a reading of work. Neither arm asks on a workflow step, which is never forced, or on an
-  // --agent directive turn, whose directive forces the call until its agent has run (see the
-  // routing arm below); there the word lists decide as before. With the flag off or without
-  // --auto nothing is asked.
+  // slots had been overwritten (PRODUCE_INTENT_READ_TIMEOUT_MS). The routing arm, whose own signal
+  // is the top agent's tools rather than anything in the request, forces only on a reading of
+  // work, and never without one, "unavailable" included. Neither arm asks on a workflow step,
+  // which is never forced, or on an --agent directive turn, whose directive forces the call until
+  // its agent has run (see the routing arm below); there the word lists decide as before. With the
+  // flag off or without --auto nothing is asked.
   const autoArtifactArmed = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
     && opts.autoApprove === true;
   // Typed by assertion: it may be assigned inside the prefetch's callback, which narrowing does
   // not follow.
-  let produceIntentRead = null as Promise<ProduceIntentVerdict | null> | null;
-  let intentReadVerdict: ProduceIntentVerdict | null = null;
+  let produceIntentRead = null as Promise<ProduceIntentReadOutcome> | null;
+  /** The read's outcome once awaited; null on a turn that asked none. */
+  let intentReadOutcome: ProduceIntentReadOutcome | null = null;
   const startIntentRead = (arm: "word_list" | "routing"): void => {
     const priorTurnDigest = buildPriorTurnDigest(session);
     produceIntentRead = startProduceIntentRead({
@@ -2914,7 +2918,7 @@ async function _runTurn(
     if (produceIntentRead) {
       const pendingRead = produceIntentRead;
       produceIntentRead = null;
-      intentReadVerdict = await timedPhase("produceIntentReadWait", () => pendingRead);
+      intentReadOutcome = await timedPhase("produceIntentReadWait", () => pendingRead);
     }
 
     let llmResponse: LLMResponse;
@@ -2979,9 +2983,12 @@ async function _runTurn(
       // wantsArtifact); no topic/keywords.
       // The word lists also fire on a question about making one ("Wie erstelle ich eine
       // Präsentation in PowerPoint?"), so the intent readout is asked as well (started where the
-      // lists fired), and its reading that the request asks for an answer releases the arm; without
-      // a reading the lists decide as before. A question the readout reads as work ("How do I make
-      // a good slide about tides?") is still forced (see where the read starts).
+      // lists fired), and its reading that the request asks for an answer releases the arm. Without
+      // a reading the lists decide as before only on a deployment that can never give one
+      // ("unavailable"); a read that missed this time releases the arm (the user's decision 6,
+      // option 3). On a turn that asked no read (a workflow step, an --agent directive turn) the
+      // lists decide as before. A question the readout reads as work ("How do I make a good slide
+      // about tides?") is still forced (see where the read starts).
       // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable): the word
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
@@ -2993,8 +3000,8 @@ async function _runTurn(
       // orchestrator decides as on any turn.
       // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
-        (autoArtifactArmed && deliverableIntent.wantsArtifact && intentReadVerdict !== "ask")
-        || (prefetchRoutedToDeliverable && intentReadVerdict === "produce");
+        (autoArtifactArmed && deliverableIntent.wantsArtifact && intentReadOutcome !== "ask" && intentReadOutcome !== "missed")
+        || (prefetchRoutedToDeliverable && intentReadOutcome === "produce");
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
       // The research requirement is also released by a knowledge-base read that brought content
