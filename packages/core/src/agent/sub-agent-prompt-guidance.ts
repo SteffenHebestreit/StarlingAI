@@ -63,7 +63,8 @@ export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
 
 /**
  * A line that opens a fenced block: a run of three or more backticks or tildes, then at
- * most one info word ("javascript") and the end of the line.
+ * most one info word ("javascript") and the end of the line. A longer info string
+ * (```js title="a.js") is not read as an opener, and the task is then measured whole.
  */
 const FENCE_OPENER_LINE = /^\s*(`{3,}|~{3,})[ \t]*[^\s`]*\s*$/;
 /**
@@ -80,6 +81,8 @@ const FENCE_OPENER_TRAILING = /\s(`{3,}|~{3,})[^\s`]*\s*$/;
  * ("```js") opens a nested block in the material and closes nothing.
  */
 const FENCE_CLOSER = /^\s*(`{3,}|~{3,})(?=\s|$)(.*)$/;
+/** Any run of three or more backticks or tildes, wherever it sits on a line. */
+const FENCE_RUN = /`{3,}|~{3,}/g;
 /** A quoted line, as Markdown and mail both write it: `>` after at most three spaces. */
 const QUOTED_LINE = /^ {0,3}>/;
 
@@ -94,37 +97,55 @@ const QUOTED_LINE = /^ {0,3}>/;
  * with four markers, and the progress verifier then sent it back to fill them. The
  * question itself was about 260 chars long.
  *
- * Only a block the text itself closes is set aside. A fence that is never closed is
- * counted, lines and all, so a malformed task is measured as it was before this, and a
- * task with nothing fenced or quoted is measured exactly as before: its trimmed length.
- * One pass over the lines, because a delegation task has no length cap.
+ * Material is set aside only when the text places every fence it holds: each block it
+ * opens is closed, and no run of three backticks or tildes is left over, whether in
+ * prose, glued to the word before it, under an info string this does not read, beside
+ * another run on an opening or closing line, or inside a block where it could have been
+ * that block's end. Any other text is measured whole, as it was before this. One fence
+ * read wrongly pairs the next one wrongly, and what lies between two blocks is then set
+ * aside as material, which in such a task is usually its instructions: a task with a
+ * ```js title="a.js" block, twelve numbered requirements and a second block measured 57
+ * of its 1,175 chars. A task with nothing fenced or quoted is measured exactly as
+ * before: its trimmed length. One pass over the lines, because a delegation task has no
+ * length cap.
  */
 export function taskOwnWordChars(task: string): number {
+  const whole = task.trim().length;
   const own: string[] = [];
-  let open: { run: string; before: string; lines: string[] } | null = null;
+  let open: { run: string; before: string } | null = null;
   for (const line of task.split("\n")) {
+    const runs = line.match(FENCE_RUN) ?? [];
     if (open) {
-      open.lines.push(line);
+      const openRun = open.run;
       const closer = FENCE_CLOSER.exec(line);
       const run = closer?.[1];
-      if (run !== undefined && run[0] === open.run[0] && run.length >= open.run.length) {
+      if (run !== undefined && run[0] === openRun[0] && run.length >= openRun.length) {
+        // A second run on the closing line is a fence this cannot place.
+        if (runs.length > 1) return whole;
         // The words around the block on its opening and closing lines are the task's own.
         if (open.before.trim()) own.push(open.before.trimEnd());
         if (closer?.[2]?.trim()) own.push(closer[2].trimStart());
         open = null;
+        continue;
       }
+      // A run of the block's own character, at least as long as its opener, that does not
+      // close it: the block's end written after code on its line, or the next block's start.
+      // Shorter runs, and runs of the other character, are the material's own nested fences.
+      if (runs.some((other) => other[0] === openRun[0] && other.length >= openRun.length)) return whole;
       continue;
     }
     if (QUOTED_LINE.test(line)) continue;
-    const opener = FENCE_OPENER_LINE.exec(line) ?? FENCE_OPENER_TRAILING.exec(line);
-    if (opener?.[1]) {
-      const runStart = opener.index + opener[0].indexOf(opener[1]);
-      open = { run: opener[1], before: line.slice(0, runStart), lines: [line] };
+    if (runs.length === 0) {
+      own.push(line);
       continue;
     }
-    own.push(line);
+    const opener = FENCE_OPENER_LINE.exec(line) ?? FENCE_OPENER_TRAILING.exec(line);
+    if (!opener?.[1] || runs.length > 1) return whole;
+    const runStart = opener.index + opener[0].indexOf(opener[1]);
+    open = { run: opener[1], before: line.slice(0, runStart) };
   }
-  if (open) own.push(...open.lines);
+  // A block nothing closes: its intended end may have been read as an earlier block's.
+  if (open) return whole;
   return own.join("\n").trim().length;
 }
 

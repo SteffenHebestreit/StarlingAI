@@ -195,6 +195,41 @@ describe("staged artifact build — only the task's own words count", () => {
     expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, unclosed)).toBe(true);
   });
 
+  it("measures the whole task when it holds a fence opener it does not read", () => {
+    // An info string of more than one word, and a run glued to the word before it. Neither
+    // was read as an opener, so the first block's bare closing ``` opened a block instead,
+    // which ran to the end of the second block: the requirements between the two were set
+    // aside as material, and the task measured 57 and 27 chars.
+    for (const opening of ["Fix the bug in this file:\n```js title=\"a.js\"", "Fix the bug in this file:```js"]) {
+      const task = `${opening}\nconst a = 1;\n\`\`\`\n${PROBE_LARGE_TASK}\nFor reference the helper:\n\`\`\`js\nconst b = 2;\n\`\`\``;
+      expect(taskOwnWordChars(task), opening).toBe(task.trim().length);
+      expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task), opening).toBe(true);
+    }
+  });
+
+  it("measures the whole task when a block holds a run that could have been its end", () => {
+    // The first block's end is written after code on its line, so it closes nothing; the
+    // reader went on through the requirements and closed the block at the end of the second.
+    const task = `Fix this:\n\`\`\`js\nconst a = 1; \`\`\`\n${PROBE_LARGE_TASK}\n\`\`\`js\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(true);
+  });
+
+  it("measures the whole task when a block is left open, whatever it set aside before it", () => {
+    // The first block is never closed, so its intended end pairs with the next block's
+    // start: the requirements in between are read as code, and the last ``` opens a block
+    // that nothing closes. Counting only that last block measured the task at 26 chars.
+    const task = `Material:\n\`\`\`\nconst a = 1;\n${PROBE_LARGE_TASK}\n\`\`\`\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(true);
+  });
+
+  it("still sets material aside when the text places every fence it holds", () => {
+    // Two blocks, each opened and closed, with the requirements between them.
+    const task = `Fix the bug in this file:\n\`\`\`js\nconst a = 1;\n\`\`\`\n${PROBE_LARGE_TASK}\nFor reference the helper:\n\`\`\`js\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(`Fix the bug in this file:\n${PROBE_LARGE_TASK}\nFor reference the helper:`.length);
+  });
+
   it("measures a task with nothing fenced or quoted exactly as before", () => {
     for (const task of [PROBE_SMALL_TASK, PROBE_LARGE_TASK, OBSERVED_BUILD_TASK, `  ${PROBE_SMALL_TASK}\r\n\r\n`]) {
       expect(taskOwnWordChars(task)).toBe(task.trim().length);
