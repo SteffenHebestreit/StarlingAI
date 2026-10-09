@@ -10,20 +10,23 @@
 //                                     context?} (tools/workflow-catalog.ts:1448-1474)
 //   sub_agent_started {agentName}     agent/sub-agent.ts:2950 — agents.*
 //
-// EXPECTED TO FAIL on the code as of 2026-10-07: runSceneInline bootstraps a scene whose task starts
-// with "Use <agent> first|to" by running that agent alone (tools/workflow-catalog.ts:594-610). The
-// second branch (:601-606) takes ANY such agent, not only a coordinator, and ignores the condition after
-// "first when …" — so this scene ("Use document_intake first when the request starts from attached
-// material, …") always runs document_intake alone, which has no web or delegation tools; researcher,
-// evidence_analyst, source_verifier and summarizer never run inside the workflow. agents.mustNotRun
-// document_intake is the check that names it. source_backed_paper, onboarding_packet,
-// meeting_briefing_packet and data_pipeline_review start the same way.
+// How it runs (tools/workflow-catalog.ts, runSceneInline): the scene's task names several of its
+// agents, so it is not bootstrapped by its first one (since 0694693; before that, document_intake ran
+// alone). It runs as an orchestrator turn of its own in a session "workflow:<chat>:verified_research_brief:
+// <uuid>" on channel "workflow", with the scene's allowedAgents. In the E2E run of 2026-10-08 that turn
+// still had the catalog tools: it searched for this scene, tried to run it again, and ran deck_research
+// in place of its agents. It now has no search_workflows and no run_workflow (6d51fde) and is not held
+// to a catalog search (34a1db8), so nothing turns its delegations away from the scene's own agents:
+// researcher, then evidence_analyst, source_verifier or summarizer. A turn that gives up with no
+// specialist's result reports the scene blocked (d1b1f3d). agents.mustNotRun document_intake still
+// guards the old bootstrap: there is no attachment. Whether the model also dispatches a second agent
+// after researcher is model variance; mustRunAny follows the scene's task.
 {
   id: "core-ix-workflow-scene-research-brief",
   title: "Workflow: run the verified_research_brief scene on the fixture site",
   group: "core",
   tags: ["workflow", "scene", "site"],
-  description: "Asks for the verified_research_brief workflow on the fictional company's website. The turn must call run_workflow for that scene, the scene's research agents must run (researcher, then at least one of evidence_analyst / source_verifier / summarizer), and document_intake must not run — there is no attachment. The brief must carry the home page's facts. Protects: scene dispatch from chat, the scene's agent scope, and grounded research on a reachable site. See the header for the bootstrap defect this currently trips over.",
+  description: "Asks for the verified_research_brief workflow on the fictional company's website. The turn must call run_workflow for that scene, the scene's research agents must run (researcher, then at least one of evidence_analyst / source_verifier / summarizer), and document_intake must not run — there is no attachment. The brief must carry the home page's facts. Protects: scene dispatch from chat, the scene's agent scope, and grounded research on a reachable site.",
   requires: ["model", "e2e-site"],
   timeoutMs: 2400000,
   steps: [
