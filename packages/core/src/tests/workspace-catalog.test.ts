@@ -64,11 +64,18 @@ describe("workspace catalog integrity", () => {
   // had not asked for. Its prompt tells it to finish the whole task and to stop only at a hard
   // blocker, and said nothing about a refused value, so the refusal read as an obstacle to work
   // around. The line under that rule makes it a stop.
+  //
+  // Only for a refused CHOICE. The first wording named every "validation error" a hard blocker, and
+  // the same fixture form (eval/e2e/site/kontakt.html) shows "Bitte prüfen Sie folgende Angaben: …"
+  // whenever a required field is still unset, such as a privacy checkbox whose click did not
+  // register. The sibling order-form-reference run completes by ticking it and submitting again,
+  // which changes none of the user's choices; so does retyping a value in the format the page asks for.
   it("tells browser_agent that a refused submission is reported, not resubmitted with other choices", () => {
     const prompt = loadAgentCatalog().subAgents["browser_agent"]?.systemPrompt ?? "";
-    const rule = "A form that refuses a value the user chose (validation error, refused option) IS a hard blocker: report the page's error text and stop; never resubmit with choices the user did not make.";
+    const rule = "A form that refuses an option or value the user chose IS a hard blocker: report the page's error text and stop; never resubmit with a different choice than the user made (filling in a field you missed, or re-entering the same value in the format the page asks for, is fine).";
     expect(prompt).toContain(rule);
     expect(prompt.indexOf(rule)).toBeGreaterThan(prompt.indexOf("FINISH THE WHOLE TASK IN ONE RUN"));
+    expect(prompt).not.toContain("(validation error, refused option)");
   });
 
   // search_agents ranks agents by an embedding of their catalog text, and the file format is often
