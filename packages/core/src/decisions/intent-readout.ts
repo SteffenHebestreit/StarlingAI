@@ -59,10 +59,17 @@
  * 89.7 → 91.7%, decision 69.6 → 72.9%, multi 98.3% either way. So the mode asks the served order
  * and then every facet reversed (reversedFacets: same grammar, another prefix), reads each pass's
  * letters back to their options, and averages per option (averageOrderReadings). The price is a
- * second call on a second ~1k-token prefix. The two go one after the other, never together: the
- * server has four slots, probe E4 measured small calls in parallel about 0.4 s slower each, and
- * in sequence an abort between them keeps the second from being sent at all. Its readings are
- * INTENT_READOUT_BOTH_ORDERS_VERSION's, never counted with one order's.
+ * second call on a second ~1k-token prefix. By default the two go one after the other: the server
+ * has four slots, probe E4 measured small calls in parallel about 0.4 s slower each, and in
+ * sequence an abort between them keeps the second from being sent at all. A caller that holds the
+ * turn's first call until the reading is in asks for them together (`concurrentOrders`): one after
+ * the other, the produce-intent read timed out at its 6 s bound on all three E2E attempts of the
+ * Mermaid build (2026-10-09). On that server (the Halo, qwen3.6-35b-a3b, four slots), a new
+ * message each time, the pair with the whole reply took p50 3.8 s in sequence and 2.5 s together,
+ * with the source judge's call beside it, as in a turn, 5.3 s and 3.5 s, and after every slot had
+ * been overwritten ran past the 6 s bound on 20 of 20 reads in sequence and 6 of 20 together
+ * (agent/turn-setup.ts PRODUCE_INTENT_READ_TIMEOUT_MS). Its readings are
+ * INTENT_READOUT_BOTH_ORDERS_VERSION's either way, never counted with one order's.
  *
  * The sampling temperature defaults to 0. A slot's top list is the raw distribution whatever the
  * sampler does (logit-readout.ts), but each later slot is conditioned on the letter SAMPLED before
@@ -440,7 +447,7 @@ export interface IntentReadout {
   language: LanguageBucket;
   /** Generated tokens with a log-probability (both calls' on a `bothOrders` readout). */
   tokens: number;
-  /** Round trip, when the reading came from a call (both calls, one after the other, on a `bothOrders` readout). */
+  /** Round trip, when the reading came from a call (on a `bothOrders` readout, the wall time over both calls, in sequence or together). */
   ms: number;
   /**
    * A `bothOrders` readout's second call, with the options reversed: its round trip and tokens, or
@@ -687,14 +694,24 @@ export interface IntentReadoutOptions {
    * Ask twice — the options in the served order (`facets`, default INTENT_FACETS), then every
    * facet's reversed (reversedFacets) — and average the two readings per option
    * (combineOrderReadouts; see the file header for why and what it measured). The calls go one
-   * after the other; `signal` covers both, and an abort before the second keeps it from being
-   * sent. The served pass failing is the readout failing, and the reversed order is not asked: the
+   * after the other (together with `concurrentOrders`); `signal` covers both, and an abort before
+   * the second keeps it from being sent. The served pass failing is the readout failing, and the reversed order is not asked: the
    * same server with the same grammar gives the same no-list or error. A reversed pass that fails
    * leaves every facet the served pass's alone; an abort during it is an aborted readout, never a
    * half one. `temperatures` apply to the average (fit them on averaged readings). Default off:
    * one call. The readout is INTENT_READOUT_BOTH_ORDERS_VERSION's.
    */
   bothOrders?: boolean;
+  /**
+   * With `bothOrders`, send the two calls together rather than one after the other: for a caller
+   * that waits on the reading before the turn's first call (agent/turn-setup.ts
+   * startProduceIntentRead), where the second round trip is wall-clock the user waits through.
+   * The reading is the same: the same two prefixes, the same grammar, combined the same way. What
+   * changes is what a failure costs. The reversed call is already on the wire when the served one
+   * fails, so it is aborted then and its slot freed; an abort of `signal` reaches both at once.
+   * Off by default: the shadow asks after the reply and has no one waiting.
+   */
+  concurrentOrders?: boolean;
 }
 
 export type IntentReadoutResult =
@@ -757,11 +774,29 @@ export async function askIntentReadout(
   const language = options.language ?? languageBucket(detectTextLanguage(input.userMessage)?.code);
   if (!options.bothOrders) return askIntentReadoutOnce(provider, input, options, language, options.facets, options.temperatures);
   const started = Date.now();
+  const reversedFacetList = reversedFacets(options.facets ?? INTENT_FACETS);
   // Each pass at T = 1: the temperature applies to the average, not to either pass.
-  const served = await askIntentReadoutOnce(provider, input, options, language, options.facets, undefined);
-  if (!served.ok) return served;
+  const servedCall = askIntentReadoutOnce(provider, input, options, language, options.facets, undefined);
+  // With concurrentOrders the reversed call goes out beside the served one, under a signal of its
+  // own as well: a served pass that fails stops it, rather than leaving it to hold a slot.
+  const stopReversed = options.concurrentOrders ? new AbortController() : undefined;
+  const reversedAlongside = stopReversed
+    ? askIntentReadoutOnce(
+      provider,
+      input,
+      { ...options, signal: options.signal ? AbortSignal.any([options.signal, stopReversed.signal]) : stopReversed.signal },
+      language,
+      reversedFacetList,
+      undefined,
+    )
+    : undefined;
+  const served = await servedCall;
+  if (!served.ok) {
+    stopReversed?.abort();
+    return served;
+  }
   if (options.signal?.aborted) return { ok: false, reason: "aborted", ms: Date.now() - started };
-  const reversed = await askIntentReadoutOnce(provider, input, options, language, reversedFacets(options.facets ?? INTENT_FACETS), undefined);
+  const reversed = await (reversedAlongside ?? askIntentReadoutOnce(provider, input, options, language, reversedFacetList, undefined));
   const ms = Date.now() - started;
   let second: IntentReadout | ReversedPassFailure;
   if (reversed.ok) second = reversed.readout;

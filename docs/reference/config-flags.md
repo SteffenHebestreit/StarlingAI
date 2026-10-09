@@ -17,7 +17,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:725 | 1 |
 | `admin` | packages/core/src/config/schema.ts:410 | 32 |
-| `agents` | packages/core/src/config/schema.ts:1734 | 183 |
+| `agents` | packages/core/src/config/schema.ts:1734 | 184 |
 | `alertmanager` | packages/core/src/config/schema.ts:1174 | 1 |
 | `all` | packages/core/src/config/schema.ts:1327 | 300 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1347 | 31 |
@@ -96,7 +96,7 @@ Every public schema field, where it is declared, and how many production files r
 | `configRemovals` | packages/core/src/config/schema.ts:1730 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1557 | 1 |
-| `container` | packages/core/src/config/schema.ts:731 | 80 |
+| `container` | packages/core/src/config/schema.ts:731 | 81 |
 | `contextWindow` | packages/core/src/config/schema.ts:126 | 14 |
 | `control` | packages/core/src/config/schema.ts:1705 | 57 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:896 | 4 |
@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:746 | 119 |
 | `http` | packages/core/src/config/schema.ts:791 | 90 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1348 | 20 |
-| `id` | packages/core/src/config/schema.ts:600 | 297 |
+| `id` | packages/core/src/config/schema.ts:600 | 298 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1395 | 2 |
 | `image` | packages/core/src/config/schema.ts:719 | 102 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 29 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1108 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1106 | 1 |
-| `label` | packages/core/src/config/schema.ts:288 | 147 |
+| `label` | packages/core/src/config/schema.ts:288 | 148 |
 | `labeledAt` | packages/core/src/config/schema.ts:942 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:941 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 96 |
@@ -253,7 +253,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxConsolidatedPerSession` | packages/core/src/config/schema.ts:1546 | 1 |
 | `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 4 |
 | `maxCrawlMs` | packages/core/src/config/schemas/retrieval.ts:198 | 1 |
-| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1906 | 1 |
+| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1906 | 2 |
 | `maxDelegationDepth` | packages/core/src/config/schemas/effort.ts:27 | 2 |
 | `maxDepthCap` | packages/core/src/config/schemas/retrieval.ts:188 | 1 |
 | `maxDiscoveredPeers` | packages/core/src/config/schema.ts:652 | 1 |
@@ -276,7 +276,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxSteps` | packages/core/src/config/schema.ts:1580 | 4 |
 | `maxStreamTotalMs` | packages/core/src/config/schema.ts:171 | 4 |
 | `maxTemplateOutputChars` | packages/core/src/config/schema.ts:1582 | 2 |
-| `maxTokens` | packages/core/src/config/schema.ts:147 | 24 |
+| `maxTokens` | packages/core/src/config/schema.ts:147 | 25 |
 | `maxTokensPerTask` | packages/core/src/config/schema.ts:1951 | 1 |
 | `maxToolCalls` | packages/core/src/config/schema.ts:1675 | 3 |
 | `maxToolCallsPerTask` | packages/core/src/config/schema.ts:1953 | 1 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1257 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:549 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:739 | 53 |
-| `provider` | packages/core/src/config/schema.ts:470 | 132 |
+| `provider` | packages/core/src/config/schema.ts:470 | 133 |
 | `providers` | packages/core/src/config/schema.ts:1249 | 101 |
 | `publicUrl` | packages/core/src/config/schema.ts:356 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |

@@ -84,6 +84,8 @@ const QUESTIONS = [
 const MERMAID_REQUEST = "Zeichne den folgenden Bestellablauf als Mermaid-Flussdiagramm: Bestellung geht ein → "
   + "Zahlung prüfen → wenn bezahlt: Ware kommissionieren → Versand → Zustellung; wenn nicht bezahlt: "
   + "Zahlungserinnerung senden → nach 14 Tagen ohne Zahlung: Bestellung stornieren.";
+/** Questions about making something, which the word lists fire on as on a request to make it. */
+const WORD_LIST_QUESTIONS = ["Wie erstelle ich eine Präsentation in PowerPoint?", "How do I build a website with Hugo?"];
 const SMALL_TALK = "how was your weekend?";
 const WEBSITE_REQUEST = "build me a website about local bird species";
 
@@ -287,17 +289,21 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     // A build the turn must hand off starts inside its tool call where the model config names the
     // syntax: unprefilled on the Halo, this request ran prose to the token ceiling 8 times in 12.
     expect((options as { prefillToolCall?: unknown } | undefined)?.prefillToolCall).toEqual({});
-    // Asked once for the whole turn, in both option orders, under the turn's signal, as routing-tier work.
+    // Asked once for the whole turn, in both option orders at once and only as far as the mode line,
+    // under the turn's signal, as routing-tier work.
     expect(readoutMock).toHaveBeenCalledTimes(1);
-    const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string; priorTurnDigest?: string }, { bothOrders?: boolean; signal?: AbortSignal }];
+    const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string; priorTurnDigest?: string }, { bothOrders?: boolean; concurrentOrders?: boolean; maxTokens?: number; signal?: AbortSignal }];
     expect(input).toEqual({ userMessage: MERMAID_REQUEST });
     expect(readoutOptions.bothOrders).toBe(true);
+    expect(readoutOptions.concurrentOrders).toBe(true);
+    expect(readoutOptions.maxTokens).toBe(loaded.turnSetup.PRODUCE_INTENT_READ_MAX_TOKENS);
+    expect(loaded.turnSetup.PRODUCE_INTENT_READ_MAX_TOKENS).toBeLessThan(10);
     expect(readoutOptions.signal).toBeInstanceOf(AbortSignal);
     expect(readoutCallSites).toEqual([{ callSite: "routing_tier", agentName: "intent_readout" }]);
     // One row: the reading, rounded, and never the message or the readout's restatement.
     const rows = modeReadRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ outcome: "produce", choice: "PRODUCE", top: 0.9123, margin: 0.8346, runnerUp: "GATHER", orderAgreed: true });
+    expect(rows[0]).toMatchObject({ outcome: "produce", arm: "routing", choice: "PRODUCE", top: 0.9123, margin: 0.8346, runnerUp: "GATHER", orderAgreed: true });
     expect(JSON.stringify(rows[0])).not.toContain("Bestellablauf");
     expect(JSON.stringify(rows[0])).not.toContain("restatement");
   });
@@ -477,21 +483,18 @@ describe("no other turn asks the readout", () => {
   // The flag and autoApprove are checked once per arm: where the prefetch starts for the routing
   // arm (the two cases above), and in autonomousArtifactBuild for the word-list arm (this case).
   it("the word-list arm keeps its own gates: a request the lists see is forced only on --auto with the flag on", async () => {
+    readoutMock.mockResolvedValue(modeReading("PRODUCE"));
     const onAuto = await load({});
     expect(onAuto.deliverableIntent.classifyDeliverableIntent(WEBSITE_REQUEST).wantsArtifact).toBe(true);
     expect((await firstCallOptions(onAuto, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    readoutMock.mockClear();
     streamMock.mockReset();
     const withoutAuto = await load({});
     expect(await firstCallOptions(withoutAuto, WEBSITE_REQUEST, false)).toBeUndefined();
     streamMock.mockReset();
     const flagOff = await load({ antiRefusal: false });
     expect(await firstCallOptions(flagOff, WEBSITE_REQUEST, true)).toBeUndefined();
-  });
-
-  it("a request the word lists see is forced by them, routed to an emitter or not, and asks no readout", async () => {
-    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
-    readoutMock.mockResolvedValue(modeReading("converse"));
-    expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
     expect(readoutMock).not.toHaveBeenCalled();
   });
 
@@ -544,8 +547,150 @@ describe("no other turn asks the readout", () => {
   }, 20_000);
 });
 
+describe("an --auto turn the word lists see asks the readout too, and a question is not forced", () => {
+  it("a question the word lists fire on is not forced when the readout reads an answer", async () => {
+    for (const question of WORD_LIST_QUESTIONS) {
+      for (const choice of ["converse", "GATHER", "VERIFY"]) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        readoutCallSites.length = 0;
+        auditMock.mockClear();
+        // No prefetch: the word-list arm asks on its own, before and without any routing.
+        const loaded = await load({ discoveryPrefetch: false });
+        expect(loaded.deliverableIntent.classifyDeliverableIntent(question).wantsArtifact, question).toBe(true);
+        readoutMock.mockResolvedValue(modeReading(choice));
+        expect(await firstCallOptions(loaded, question, true), `${question} / ${choice}`).toBeUndefined();
+        expect(prefetchCalls.count).toBe(0);
+        expect(readoutMock).toHaveBeenCalledTimes(1);
+        const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string }, { bothOrders?: boolean; concurrentOrders?: boolean; signal?: AbortSignal }];
+        expect(input).toEqual({ userMessage: question });
+        expect(readoutOptions).toMatchObject({ bothOrders: true, concurrentOrders: true });
+        expect(readoutOptions.signal).toBeInstanceOf(AbortSignal);
+        expect(readoutCallSites).toEqual([{ callSite: "routing_tier", agentName: "intent_readout" }]);
+        expect(modeReadRows()).toMatchObject([{ outcome: "ask", choice, arm: "word_list" }]);
+      }
+    }
+  });
+
+  it("a build the word lists see is forced when the readout reads work, routed to an emitter or not, and is read once", async () => {
+    for (const capsule of [undefined, { agents: [{ name: "diagram_designer", confidence: "high" }] }]) {
+      for (const choice of ["PRODUCE", "ACT", "ORCHESTRATE"]) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        auditMock.mockClear();
+        const loaded = await load({ ...(capsule ? { capsule } : {}) });
+        readoutMock.mockResolvedValue(modeReading(choice));
+        expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice, choice).toBe("required");
+        // Asked by the word-list arm alone: the routing arm does not ask again for a request the lists see.
+        expect(readoutMock, choice).toHaveBeenCalledTimes(1);
+        expect(modeReadRows()).toMatchObject([{ outcome: "produce", choice, arm: "word_list" }]);
+      }
+    }
+  });
+
+  // The user's decision 6 (option 3): an --auto question is never forced, a build is. The read's
+  // four outcomes on a question the word lists fire on: a verdict here, a read that missed and a
+  // readout the deployment cannot give in the cases below.
+  it("the same word-list question is forced on a reading of work and not on a reading of an answer", async () => {
+    const question = WORD_LIST_QUESTIONS[0]!;
+    for (const [choice, forced] of [["PRODUCE", true], ["converse", false]] as const) {
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const loaded = await load({ discoveryPrefetch: false });
+      expect(loaded.deliverableIntent.classifyDeliverableIntent(question).wantsArtifact).toBe(true);
+      readoutMock.mockResolvedValue(modeReading(choice));
+      expect((await firstCallOptions(loaded, question, true))?.toolChoice, choice).toBe(forced ? "required" : undefined);
+      expect(modeReadRows()).toMatchObject([{ outcome: forced ? "produce" : "ask", arm: "word_list" }]);
+    }
+  });
+
+  // The read's own bound ends it (PRODUCE_INTENT_READ_TIMEOUT_MS, not a parameter of the turn), so
+  // this case waits it out.
+  it("a word-list question whose read timed out, on a server that gives readings, is not forced", async () => {
+    const question = WORD_LIST_QUESTIONS[0]!;
+    const loaded = await load({ discoveryPrefetch: false });
+    // Resolves only once its signal fires, as askIntentReadout does on an abort.
+    readoutMock.mockImplementation((_provider: unknown, _input: unknown, options: { signal: AbortSignal }) => new Promise((resolve) => {
+      options.signal.addEventListener("abort", () => resolve({ ok: false, reason: "aborted", ms: 1 }), { once: true });
+    }));
+    expect(await firstCallOptions(loaded, question, true)).toBeUndefined();
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    expect(modeReadRows()).toMatchObject([{ outcome: "timeout", arm: "word_list" }]);
+  }, 20_000);
+
+  // A read that missed this time says nothing about the request, so neither a question nor a
+  // build is forced for it: the build is left to the orchestrator for that turn.
+  it("nor does a read that missed otherwise force the arm: an error, one option order alone, no mode facet", async () => {
+    const reading = modeReading("PRODUCE");
+    const missed = [
+      { result: { ok: false, reason: "error", ms: 12, error: "500" }, outcome: "error" },
+      { result: { ...reading, readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "PRODUCE", singlePass: "served" } } } } }, outcome: "single_pass" },
+      { result: { ...reading, readout: { ...reading.readout, facets: {} } }, outcome: "no_mode" },
+    ];
+    for (const message of [WORD_LIST_QUESTIONS[0]!, WEBSITE_REQUEST]) {
+      for (const { result, outcome } of missed) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        auditMock.mockClear();
+        const loaded = await load({});
+        readoutMock.mockResolvedValue(result);
+        expect(await firstCallOptions(loaded, message, true), `${message} / ${outcome}`).toBeUndefined();
+        expect(readoutMock).toHaveBeenCalledTimes(1);
+        expect(modeReadRows()).toMatchObject([{ outcome, arm: "word_list" }]);
+      }
+    }
+  });
+
+  // A Claude routing tier or a server without token logprobs never gives a reading; on such a
+  // deployment every --auto build would otherwise be left to answer inline. A question among
+  // them is forced there too: the readout cannot tell it from a build.
+  it("where the routing tier gives no logprobs the word lists decide as before: a build, and a question, is forced", async () => {
+    for (const message of [WEBSITE_REQUEST, WORD_LIST_QUESTIONS[0]!]) {
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const noLogprobs = await load({});
+      readoutMock.mockResolvedValue({ ok: false, reason: "no_logprobs", ms: 12 });
+      expect((await firstCallOptions(noLogprobs, message, true))?.toolChoice, message).toBe("required");
+      expect(readoutMock).toHaveBeenCalledTimes(1);
+      expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs", arm: "word_list" }]);
+
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
+      expect((await firstCallOptions(claude, message, true))?.toolChoice, message).toBe("required");
+      expect(readoutMock).not.toHaveBeenCalled();
+      expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider", arm: "word_list" }]);
+    }
+  });
+
+  it("no read is asked, and nothing changes, without --auto, with the flag off, on a workflow step or on an --agent directive turn", async () => {
+    readoutMock.mockResolvedValue(modeReading("converse"));
+    const withoutAuto = await load({});
+    expect(await firstCallOptions(withoutAuto, WORD_LIST_QUESTIONS[0]!, false)).toBeUndefined();
+    streamMock.mockReset();
+    const flagOff = await load({ antiRefusal: false });
+    expect(await firstCallOptions(flagOff, WORD_LIST_QUESTIONS[0]!, true)).toBeUndefined();
+    streamMock.mockReset();
+    const workflow = await load({});
+    expect(await firstCallOptions(workflow, WEBSITE_REQUEST, true, "workflow")).toBeUndefined();
+    expect(readoutMock).not.toHaveBeenCalled();
+
+    streamMock.mockReset();
+    const directive = await load({});
+    streamMock.mockImplementation(() => textStream("Here is the site."));
+    const session = new directive.AgentSession({ channel: "test", workspacePath: directive.workspacePath, systemPrompt: "You are a test agent." });
+    await directive.runTurn({ session, userMessage: WEBSITE_REQUEST, autoApprove: true, directiveAgent: "diagram_designer", allowedAgents: ["diagram_designer"] });
+    expect((streamMock.mock.calls[0]?.[3] as { toolChoice?: unknown } | undefined)?.toolChoice).toBe("required");
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toEqual([]);
+  });
+});
+
 describe("startProduceIntentRead", () => {
-  it("passes the prior exchange, and resolves null with the reason on a timeout, a stopped turn or a throw", async () => {
+  it("passes the prior exchange, and resolves missed with the reason on a timeout, a stopped turn or a throw", async () => {
     const { turnSetup } = await load({});
     readoutMock.mockResolvedValue(modeReading("GATHER"));
     const controller = new AbortController();
@@ -569,20 +714,34 @@ describe("startProduceIntentRead", () => {
       sessionId: "s-timeout",
       signal: new AbortController().signal,
       timeoutMs: 20,
-    })).toBeNull();
+    })).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "timeout" }]);
 
     auditMock.mockClear();
     const stopped = new AbortController();
     const read = turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-stopped", signal: stopped.signal });
     stopped.abort();
-    expect(await read).toBeNull();
+    expect(await read).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "aborted" }]);
 
     auditMock.mockClear();
     readoutMock.mockReset().mockRejectedValue(new Error("boom"));
-    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-throws", signal: new AbortController().signal })).toBeNull();
+    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-throws", signal: new AbortController().signal })).toBe("missed");
     expect(modeReadRows()).toMatchObject([{ outcome: "error" }]);
+  });
+
+  it("resolves unavailable where the routing tier gives no logprobs: a reply without them, or a Claude tier", async () => {
+    const { turnSetup } = await load({});
+    readoutMock.mockResolvedValue({ ok: false, reason: "no_logprobs", ms: 12 });
+    expect(await turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-no-logprobs", signal: new AbortController().signal })).toBe("unavailable");
+    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs", ms: 12 }]);
+
+    auditMock.mockClear();
+    readoutMock.mockReset();
+    const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
+    expect(await claude.turnSetup.startProduceIntentRead({ userMessage: QUESTIONS[0]!, sessionId: "s-claude", signal: new AbortController().signal })).toBe("unavailable");
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider" }]);
   });
 });
 
@@ -597,6 +756,34 @@ describe("produceIntentVerdict", () => {
     // Every option ASK_MODES names is one the readout can give: a renamed option fails here, not in a turn.
     for (const choice of turnSetup.ASK_MODES) expect(modeKeys).toContain(choice);
     expect(turnSetup.produceIntentVerdict(undefined)).toBeNull();
+  });
+
+  // Measured 2026-10-09: "Wie erstelle ich eine Präsentation in PowerPoint?" read converse served and
+  // PRODUCE reversed on every read, and the average sometimes came out PRODUCE.
+  it("is work only when both orders read work: an average that two disagreeing orders put on PRODUCE is an answer", async () => {
+    const { turnSetup } = await load({});
+    const verdict = (choice: string, served: string, reversed: string) =>
+      turnSetup.produceIntentVerdict({ choice, orders: { served, reversed, agreed: served === reversed } });
+    expect(verdict("PRODUCE", "converse", "PRODUCE")).toBe("ask");
+    expect(verdict("PRODUCE", "PRODUCE", "GATHER")).toBe("ask");
+    expect(verdict("converse", "converse", "PRODUCE")).toBe("ask");
+    expect(verdict("PRODUCE", "PRODUCE", "PRODUCE")).toBe("produce");
+    // Work in both orders, if not the same work.
+    expect(verdict("PRODUCE", "PRODUCE", "ORCHESTRATE")).toBe("produce");
+    expect(verdict("ACT", "ACT", "ACT")).toBe("produce");
+    // Both orders on work and the average on an answer (possible when they split the work between two modes): an answer.
+    expect(verdict("converse", "PRODUCE", "ACT")).toBe("ask");
+  });
+
+  it("a turn whose two orders disagree is not forced, though the average reads PRODUCE, and the row has both orders", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
+    const reading = modeReading("PRODUCE");
+    readoutMock.mockResolvedValue({
+      ...reading,
+      readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "converse", reversed: "PRODUCE", agreed: false } } } },
+    });
+    expect(await firstCallOptions(loaded, QUESTIONS[0]!, true)).toBeUndefined();
+    expect(modeReadRows()).toMatchObject([{ outcome: "ask", choice: "PRODUCE", servedChoice: "converse", reversedChoice: "PRODUCE", orderAgreed: false }]);
   });
 });
 
