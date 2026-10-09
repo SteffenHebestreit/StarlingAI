@@ -37,6 +37,7 @@ import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, ty
 import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
+  addArgumentIdentifierKeys,
   addReceivedFigureKeys,
   addReceivedIdentifierKeys,
   countUnbackedIdentifiers,
@@ -3908,6 +3909,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
     // the auto-share below).
     const ownClaimFigureKeys = new Set<string>();
+    // The action-identifier equivalent of ownClaimFigureKeys. A hash or URL the run wrote into a
+    // call's arguments before any input contained it (recordOwnClaims) is still its own claim when a
+    // tool hands it back: a FAILED git_commit returns "Exit code N: Command failed: … git commit -m
+    // <message>", so a URL or hash the model put in its own commit message comes back in the error
+    // text and, absorbed verbatim, would back the answer that narrates the commit as done. read_
+    // shared_facts handing back the run's own share_finding values does the same. So these keys are
+    // skipped when absorbing non-user messages; the user task and the system prompt still count.
+    const ownClaimIdentifierKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
     // would miss a figure the run read early and the trim has since removed. The run's own
@@ -3921,8 +3930,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         const content = typeof message.content === "string" ? message.content : "";
         if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
         // An identifier any non-assistant message holds (the task, a git_log tool result, a system
-        // message) is one the run RECEIVED, so an answer that states it is backed.
-        if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, content);
+        // message) is one the run RECEIVED, so an answer that states it is backed — unless it is one
+        // of the run's OWN claims a tool echoed back (ownClaimIdentifierKeys), which the user's own
+        // messages never carry, the same rule as the figure path above.
+        if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, content, message.role === "user" ? undefined : ownClaimIdentifierKeys);
       }
     };
     /**
@@ -3939,11 +3950,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
      * keeps its figures (see the quoted-code check below).
      */
     const recordOwnClaims = (toolName: string, args: unknown): void => {
-      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
-      const claimed = new Set<string>();
-      addArgumentFigureKeys(claimed, args);
-      for (const key of claimed) {
-        if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+      // A read (IDEMPOTENT_TOOLS) asks for something and claims nothing, for identifiers the same as
+      // for figures: a URL in a web_fetch argument is the run choosing what to fetch, confirmed by
+      // what the fetch returns, not an action it narrates.
+      if (IDEMPOTENT_TOOLS.has(toolName)) return;
+      if (tracksFigures) {
+        const claimed = new Set<string>();
+        addArgumentFigureKeys(claimed, args);
+        for (const key of claimed) {
+          if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+        }
+      }
+      // The same for action identifiers: a hash or URL this call introduces that no input had yet
+      // contained is the run's own, so a failed tool that echoes the argument back cannot back it.
+      if (checksActionClaims) {
+        const claimedIds = new Set<string>();
+        addArgumentIdentifierKeys(claimedIds, args);
+        for (const key of claimedIds) {
+          if (!receivedIdentifierKeys.has(key)) ownClaimIdentifierKeys.add(key);
+        }
       }
     };
     // QUOTED CODE IS NOT A CLAIM. In review, the coder of a broken sandbox reported honestly and
@@ -6040,18 +6065,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // bound — only their POSITION changed.
       const nudgeMessage = iterationNudges.join("\n\n");
       // Read what the run has received BEFORE the trim digests, drops or clamps it (see
-      // absorbNewHistory); the nudges count too, since the model reads them as context.
-      if (tracksFigures) {
+      // absorbNewHistory); the nudges count too, since the model reads them as context. The absorb
+      // runs for the action-identifier check as well — design §12.2 absorbs identifiers at the same
+      // input points as figures — or an agent that checks claims but does not track figures (holds
+      // an approval-gated tool, no sandbox tool: a mail/notification/http specialist) would lose a
+      // URL or hash a tool result carried the moment the trim digested that result, and flag the
+      // answer that cites it as unbacked. The nudges stay figure-only: the runtime's own wrap-up
+      // text is context the model reads, never an action identifier it could legitimately cite.
+      if (tracksFigures || checksActionClaims) {
         absorbNewHistory();
-        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
       }
       const trimmed = trimSubAgentHistory(history, {
         systemPromptChars: systemPrompt.length + nudgeMessage.length,
         tools: effectiveTools,
         contextWindow: modelConfig.contextWindow,
       });
-      // The trim shortens history in place, so everything left in it has been read.
-      if (tracksFigures) absorbedHistoryLength = history.length;
+      // The trim shortens history in place, so everything left in it has been read. Reset under the
+      // same combined condition the pre-trim absorb used: left gated on tracksFigures alone,
+      // absorbedHistoryLength would stay past the shrunken length for a claim-checking leaf and the
+      // next absorb would skip the messages appended after this trim.
+      if (tracksFigures || checksActionClaims) absorbedHistoryLength = history.length;
       // A digest is a KV-prefix break (everything behind the rewritten message re-prefills,
       // 10-16 s cold on the audited runs), so each batch is its own row: the log must show
       // how many breaks a run paid, not just how many messages it dropped. The row carries

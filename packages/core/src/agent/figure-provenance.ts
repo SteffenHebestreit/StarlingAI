@@ -118,11 +118,30 @@ export function identifierTokens(text: string | null | undefined): string[] {
   return out;
 }
 
-/** Add the key of every action identifier `text` holds as an input of the run, to `into`. Fed at
- *  the same absorb points as addReceivedFigureKeys, so an identifier any input contained — the
- *  task, a tool result (a git_log hash), a system message — counts as backed. */
-export function addReceivedIdentifierKeys(into: Set<string>, text: string | null | undefined): void {
-  for (const key of identifierTokens(text)) into.add(key);
+/** Add the key of every action identifier `text` holds as an input of the run, to `into`, except the
+ *  keys in `except`. Fed at the same absorb points as addReceivedFigureKeys, so an identifier any
+ *  input contained — the task, a tool result (a git_log hash), a system message — counts as backed.
+ *  `except` carries the run's OWN claims (ownClaimIdentifierKeys), so a hash or URL the run wrote
+ *  into a call argument and a failed tool handed back verbatim does not vouch for itself. */
+export function addReceivedIdentifierKeys(into: Set<string>, text: string | null | undefined, except?: ReadonlySet<string>): void {
+  for (const key of identifierTokens(text)) {
+    if (!except?.has(key)) into.add(key);
+  }
+}
+
+/**
+ * Add the key of every action identifier a tool call's arguments hold: each string, at any depth,
+ * read the way an input is (addReceivedIdentifierKeys). Mirrors addArgumentFigureKeys so a hash or
+ * URL the run wrote into its own call — a commit message, an http_request url — is recorded as its
+ * own claim before the call runs, and then skipped when a tool result (git's "Command failed: …"
+ * error echoes the whole command back) re-introduces it. Numbers carry no commit-hash letter and no
+ * URL scheme, so only strings are read.
+ */
+export function addArgumentIdentifierKeys(into: Set<string>, value: unknown, depth = 0): void {
+  if (typeof value === "string") addReceivedIdentifierKeys(into, value);
+  else if (value && typeof value === "object" && depth < 8) {
+    for (const entry of Array.isArray(value) ? value : Object.values(value)) addArgumentIdentifierKeys(into, entry, depth + 1);
+  }
 }
 
 /**
