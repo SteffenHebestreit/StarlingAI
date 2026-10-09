@@ -301,6 +301,25 @@ describe("artifact probe — a folder deliverable is probed through its index.ht
     expect(page.map((r) => r.probe)).toEqual(expect.arrayContaining(["exists", "html_structure", "runs"]));
   }, 40_000);
 
+  it("passes the site generate_website writes with includeMermaid, whose module script imports", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_website")!.execute({
+      outputDir: "generated/ablauf",
+      title: "Ablauf",
+      includeMermaid: true,
+      pages: [{ path: "index.html", title: "Ablauf", content: "# Ablauf\n\n```mermaid\ngraph TD; A-->B;\n```" }],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    expect(readFileSync(join(ws, "generated", "ablauf", "index.html"), "utf8")).toMatch(/<script type="module">\s*import mermaid/);
+    const refs = refsFor(result.metadata!, "generate_website");
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    const runs = report.receipts.find((r) => r.target === "generated/ablauf/index.html" && r.probe === "runs");
+    expect(runs?.status).toBe("pass");
+  }, 40_000);
+
   it("passes the reveal.js deck generate_presentation records as a folder", async () => {
     const ws = fresh();
     const result = await getTool("generate_presentation")!.execute({

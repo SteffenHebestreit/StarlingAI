@@ -408,3 +408,67 @@ describe("verify_page — globals a remote script would define", () => {
     expect(run(`<html><body>${CDN}<script>Lib.init();</script></body></html>`).errors).toEqual([]);
   });
 });
+
+/**
+ * AN ES MODULE THAT IMPORTS CANNOT RUN HERE, AND THAT IS NOT A DEFECT OF THE PAGE.
+ *
+ * This check runs every script as a classic script and never loads a module graph. A module
+ * script with an import therefore failed with "SyntaxError: Cannot use import statement outside a
+ * module" before a line of it ran: generate_website with includeMermaid writes exactly that, so
+ * the artifact gate hard-failed a correct site and sent it for a repair. A module script that does
+ * compile as a classic script still runs, and a broken one still counts.
+ */
+describe("verify_page — a module script this check cannot run", () => {
+  const run = (html: string) => {
+    const { scripts } = collectScripts(html, "/w/index.html");
+    return runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+  };
+  const MERMAID = '<script type="module">\n'
+    + '  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";\n'
+    + '  mermaid.initialize({ startOnLoad: true, theme: "default" });\n'
+    + "</script>";
+
+  it("does not count a module script that fails only because it imports, and says it did not run it", async () => {
+    const page = `<html><body><div id="app"></div>${MERMAID}<script>document.getElementById("app").textContent = "ok";</script></body></html>`;
+    const r = run(page);
+    expect(r.errors).toEqual([]);
+    expect(r.modulesNotRun).toEqual(["inline script #1"]);
+
+    // Through the worker, the artifact gate's path and verify_page's.
+    const root = mkdtempSync(join(tmpdir(), "sai-pagecheck-module-"));
+    writeFileSync(join(root, "index.html"), page);
+    expect(await checkBuiltPage(join(root, "index.html"), "index.html")).toEqual({ ok: true, detail: "" });
+    const tool = await getTool("verify_page")!.execute({ path: "index.html" }, { sessionId: "t", workspacePath: root } as unknown as ToolContext);
+    expect(tool.success).toBe(true);
+    expect(tool.output).toContain("runs: 1 script(s) executed");
+    expect(tool.output).toContain("not run: inline script #1");
+  }, 40_000);
+
+  it("still counts a module script's runtime error, and a module script that does not parse", () => {
+    // No import: it compiles as a classic script, so it runs as before, and what it throws counts.
+    expect(run('<html><body><script type="module">document.getElementById("nope").textContent = "x";</script></body></html>').errors.join(" "))
+      .toMatch(/TypeError/);
+    expect(run('<html><body><script type="module">JSON.parse("{");</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError/);
+    // An import, and the module is cut off: a browser cannot run it either.
+    expect(run('<html><body><script type="module">import m from "https://x.example/m.mjs"; m.init({</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError/);
+    // An import in a classic script is the page's bug.
+    expect(run('<html><body><script>import m from "https://x.example/m.mjs"; m.init();</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError: Cannot use import statement outside a module/);
+    // A page without a module script sends the worker the same request as before.
+    expect(collectScripts("<html><body><script>let a = 1;</script></body></html>", "/w/index.html").scripts.some((s2) => "module" in s2))
+      .toBe(false);
+  });
+
+  it("counts the module script when it cannot tell a module from a broken script", () => {
+    _setTypeScriptForTests(null);
+    try {
+      expect(run(`<html><body>${MERMAID}</body></html>`).errors.join(" "))
+        .toMatch(/SyntaxError: Cannot use import statement outside a module/);
+    } finally {
+      _setTypeScriptForTests(undefined);
+    }
+    expect(run(`<html><body>${MERMAID}</body></html>`).errors).toEqual([]);
+  });
+});

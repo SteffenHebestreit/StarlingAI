@@ -195,6 +195,7 @@ export async function runScriptsIsolated(
       const parsed = JSON.parse(result.stdout) as {
         errors: string[]; consoleErrors: string[]; framesRun: number;
         canvases: Array<[string, CanvasPaintReport]>; timedOut?: boolean; remoteGlobals?: string[];
+        modulesNotRun?: string[];
       };
       workerCommand = argv;
       return {
@@ -205,6 +206,9 @@ export async function runScriptsIsolated(
         ...(parsed.timedOut === true ? { timedOut: true } : {}),
         ...(Array.isArray(parsed.remoteGlobals) && parsed.remoteGlobals.length > 0
           ? { remoteGlobals: parsed.remoteGlobals.map(String) }
+          : {}),
+        ...(Array.isArray(parsed.modulesNotRun) && parsed.modulesNotRun.length > 0
+          ? { modulesNotRun: parsed.modulesNotRun.map(String) }
           : {}),
       };
     } catch {
@@ -265,7 +269,8 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
 
   // report.remoteGlobals are deliberately not problems: a library the page loads from a CDN is
   // missing here and present in a browser, and no name the page binds itself is ever among them
-  // (page-check-runner.ts runScripts).
+  // (page-check-runner.ts runScripts). Neither are report.modulesNotRun: a browser loads those
+  // scripts as modules, which this check never does.
   const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
   // A REF THIS PROBE CANNOT OPEN IS NOT PROOF THE PAGE IS BROKEN.
   //
@@ -417,7 +422,7 @@ registerTool({
 
     return {
       success: true,
-      output: `PASS — '${rel}' runs: ${scripts.length} script(s) executed, ${report.framesRun} animation frame(s) survived, no uncaught errors.`
+      output: `PASS — '${rel}' runs: ${scripts.length - (report.modulesNotRun?.length ?? 0)} script(s) executed, ${report.framesRun} animation frame(s) survived, no uncaught errors.`
         + (canvasVerdicts.length > 0
           ? "\n" + canvasVerdicts.map((v) => `  - ${v.detail}`).join("\n")
           : "")
@@ -425,6 +430,9 @@ registerTool({
         // assumption, because a misspelt name of the page's own is just as undeclared.
         + (report.remoteGlobals
           ? `\n  - not run past ${report.remoteGlobals.join(", ")}: not declared by this page's own scripts, so taken as a global of a remote <script src> this check does not fetch; if no library the page loads defines it, that is a bug.`
+          : "")
+        + (report.modulesNotRun
+          ? `\n  - not run: ${report.modulesNotRun.join(", ")}: ES module script(s), which this check does not load.`
           : "")
         + "\n(Logic and drawing-geometry check. It does not judge colour, layout or whether the result looks GOOD — "
         + "if you can render or screenshot the page, look at it before calling it done.)",

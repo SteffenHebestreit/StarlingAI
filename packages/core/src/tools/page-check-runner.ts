@@ -16,7 +16,7 @@
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve as resolvePath } from "node:path";
-import { createContext, runInContext } from "node:vm";
+import { createContext, runInContext, Script } from "node:vm";
 import { createRecordingContext, type CanvasPaintReport } from "./canvas-geometry.js";
 import { describeErrorSite, SCRIPT_VM_FILENAME } from "./error-site.js";
 
@@ -36,6 +36,12 @@ export interface ScriptSource {
    * false, so a page without one sends the worker the same request as before.
    */
   afterRemote?: true;
+  /**
+   * The page loads this script with type="module". It still runs here as a classic script, but
+   * one that cannot compile as one only because it is a module is not counted (see runScripts).
+   * Absent, never false, so a page without one sends the worker the same request as before.
+   */
+  module?: true;
 }
 
 /**
@@ -66,7 +72,10 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
     const typeMatch = /type\s*=\s*["']([^"']+)["']/i.exec(attrs);
     const type = typeMatch?.[1]?.toLowerCase();
     if (type && !/javascript|module/.test(type)) continue;
-    const order = remoteBefore ? { afterRemote: true as const } : {};
+    const marks = {
+      ...(remoteBefore ? { afterRemote: true as const } : {}),
+      ...(type === "module" ? { module: true as const } : {}),
+    };
 
     const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
     if (srcMatch?.[1]) {
@@ -100,13 +109,13 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
         continue;
       }
       if (existsSync(abs) && statSync(abs).isFile()) {
-        scripts.push({ label: ref, code: readFileSync(abs, "utf-8"), ...order });
+        scripts.push({ label: ref, code: readFileSync(abs, "utf-8"), ...marks });
       } else {
         externalMisses.push(ref);
       }
       continue;
     }
-    if (body.trim()) scripts.push({ label: `inline script #${index}`, code: body, ...order });
+    if (body.trim()) scripts.push({ label: `inline script #${index}`, code: body, ...marks });
   }
   return { scripts, externalMisses };
 }
@@ -194,6 +203,12 @@ export interface RunReport {
    * when there is at least one.
    */
   remoteGlobals?: string[];
+  /**
+   * Labels of the module scripts that were not run because they compile only as a module (an
+   * import, an export or a top-level await). Not in `errors`: a browser loads them as modules,
+   * and this check never does. Present only when there is at least one.
+   */
+  modulesNotRun?: string[];
 }
 
 /** vm's timeout, read from the error's code rather than its message. */
@@ -265,6 +280,34 @@ function namesBoundBy(scripts: ScriptSource[]): Set<string> | null {
     return null;
   }
   return names;
+}
+
+/**
+ * Does this script fail to compile as a classic script only because it is an ES module?
+ *
+ * Every script runs here as a classic script, so a module with an import died on "SyntaxError:
+ * Cannot use import statement outside a module" before a line of it ran. generate_website with
+ * includeMermaid writes exactly that, and the artifact gate hard-failed the correct site. True
+ * only when the code does not compile as a classic script (compiled, never run, so an error it
+ * throws while running still counts) and the TypeScript parser finds no syntax error in it read
+ * as a module, so a module cut off mid-write still counts. Without the parser, false.
+ */
+function compilesOnlyAsModule(code: string): boolean {
+  try {
+    new Script(code);
+    return false;
+  } catch (err) {
+    if ((err as { name?: unknown } | null)?.name !== "SyntaxError") return false;
+  }
+  const ts = loadTypeScript();
+  if (!ts) return false;
+  try {
+    const file = ts.createSourceFile("module.js", code, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
+    const diagnostics = (file as typeof file & { parseDiagnostics?: readonly unknown[] }).parseDiagnostics;
+    return Array.isArray(diagnostics) && diagnostics.length === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -463,6 +506,11 @@ export function runScripts(
       });
     } catch (err) {
       if (recordRemoteGlobal(err, script.afterRemote === true)) continue;
+      if (script.module === true && compilesOnlyAsModule(script.code)) {
+        report.modulesNotRun ??= [];
+        report.modulesNotRun.push(script.label);
+        continue;
+      }
       if (isExecutionTimeout(err)) report.timedOut = true;
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       report.errors.push(`${script.label} — ${message}${describeErrorSite(err, script.code)}`);

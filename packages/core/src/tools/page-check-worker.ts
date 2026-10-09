@@ -41,6 +41,8 @@ export interface PageCheckResponse {
   timedOut?: boolean;
   /** Globals a remote script would have defined (RunReport.remoteGlobals). */
   remoteGlobals?: string[];
+  /** Module scripts that compile only as a module, not run (RunReport.modulesNotRun). */
+  modulesNotRun?: string[];
 }
 
 function readStdin(): Promise<string> {
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
     canvases: [...report.canvasPainting.entries()].map(([id, read]) => [id, read()]),
     ...(report.timedOut ? { timedOut: true } : {}),
     ...(report.remoteGlobals ? { remoteGlobals: report.remoteGlobals } : {}),
+    ...(report.modulesNotRun ? { modulesNotRun: report.modulesNotRun } : {}),
   };
   process.stdout.write(JSON.stringify(response));
 }
