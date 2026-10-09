@@ -20,6 +20,7 @@ import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-t
 import { isCompileTimeMappedTool } from "../guardrails/tool-tiers.js";
 import { getTool } from "./registry.js";
 import { isToolDisabled } from "./groups.js";
+import { runtimeComponentAttempted } from "../runtime/status.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -257,10 +258,19 @@ const SWARM_BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set(["read_shared_
  * or a tool config disables, which registerTool skips. A built-in tool that is merely unregistered
  * stays usable: its module registers it on import, and a process that routes without importing
  * every tool module (a CLI, a test) would otherwise find no agent.
+ *
+ * A bridged MCP tool is judged the same way only once this process has connected its MCP servers
+ * (syncMcpServers marks the attempt before it connects any). A process that never does, such as
+ * routing:canary, routing:eval or the pre-router bench, has none of them registered whatever state
+ * the servers are in: it left process_memory_keeper out of every ranking on a machine whose config
+ * includes it, and scored the eval cases that expect it as misses.
  */
 function declaredToolIsUnusable(toolName: string): boolean {
   if (getTool(toolName)) return false;
-  return !isCompileTimeMappedTool(toolName) || isToolDisabled(toolName);
+  if (isToolDisabled(toolName)) return true;
+  if (isCompileTimeMappedTool(toolName)) return false;
+  if (toolName.startsWith("mcp__")) return runtimeComponentAttempted("mcp");
+  return true;
 }
 
 /**

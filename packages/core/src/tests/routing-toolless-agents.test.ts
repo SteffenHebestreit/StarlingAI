@@ -14,6 +14,14 @@ import { join } from "node:path";
  * share_finding, called share_finding, was counted a success, and the file was never written.
  */
 
+/**
+ * The processmem server as the E2E stack saw it: every connect fails. syncMcpServers is the gateway's
+ * own connect pass; a process that never runs it (routing:canary, routing:eval) has no bridged tool
+ * whatever state the server is in.
+ */
+const connectMcpServer = vi.hoisted(() => vi.fn(async (name: string) => { throw new Error(`getaddrinfo ENOTFOUND ${name}`); }));
+vi.mock("../mcp/client.js", () => ({ connectMcpServer, cleanupConfiguredDockerMcpContainers: async () => undefined }));
+
 /** process_memory_keeper's declared tools, verbatim from the local 60-processmem shard. */
 const PROCESSMEM_TOOLS = [
   "mcp__processmem__open_process", "mcp__processmem__transition_process", "mcp__processmem__attach_subprocess",
@@ -44,7 +52,8 @@ const QUERY = "correspondence dispute matter timeline website browser research s
 
 let tempDir: string | undefined;
 
-async function routeWith(agents: Record<string, unknown>, extraConfig: Record<string, unknown> = {}) {
+/** Routes over `agents` in a fresh process. `connectMcp` runs the gateway's MCP connect pass first, as every serving process does. */
+async function routeWith(agents: Record<string, unknown>, extraConfig: Record<string, unknown> = {}, { connectMcp = true } = {}) {
   vi.resetModules();
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-toolless-"));
   const configPath = join(tempDir, "starlingai.json");
@@ -53,9 +62,11 @@ async function routeWith(agents: Record<string, unknown>, extraConfig: Record<st
     agents: { defaults: { model: { primary: "lmstudio/qwen" } } },
     subAgents: agents,
     retrieval: { reranker: { enabled: false } },
+    mcp: { servers: { processmem: { transport: "http", url: "http://processmem:8080/mcp" } } },
     ...extraConfig,
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = configPath;
+  if (connectMcp) await (await import("../mcp/registry.js")).syncMcpServers();
   const [{ resolveAgentRouting }, registry] = await Promise.all([
     import("../tools/agent-routing.js"),
     import("../tools/registry.js"),
@@ -68,6 +79,7 @@ async function routeWith(agents: Record<string, unknown>, extraConfig: Record<st
 }
 
 afterEach(async () => {
+  connectMcpServer.mockClear();
   delete process.env["SAI_CONFIG_PATH"];
   (await import("../config/loader.js")).resetConfigForTests();
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
@@ -85,6 +97,15 @@ describe("routing an agent whose tools are all unusable", () => {
     // Their built-in tools are not registered in this process either: a module registers them on
     // import, so their absence here says nothing about the deployment.
     expect(names).toEqual(expect.arrayContaining(["browser_agent", "researcher"]));
+  });
+
+  it("keeps it in a process that never connected its MCP servers, such as the routing CLIs", async () => {
+    const { route } = await routeWith(AGENTS, {}, { connectMcp: false });
+    const { resolution, names } = await route();
+
+    expect(connectMcpServer).not.toHaveBeenCalled();
+    expect(names).toEqual(expect.arrayContaining(["process_memory_keeper", "browser_agent", "researcher"]));
+    expect("toollessAgents" in resolution).toBe(false);
   });
 
   it("routes it again once one of its MCP tools is registered", async () => {
@@ -135,6 +156,7 @@ describe("routing an agent whose tools are all unusable", () => {
 
 describe("the predicate", () => {
   it("counts only tools this process cannot offer, beyond the bookkeeping pair", async () => {
+    await routeWith(AGENTS);
     const { agentCfgHasNoUsableTools } = await import("../tools/agent-routing.js");
     expect(agentCfgHasNoUsableTools({ tools: PROCESSMEM_TOOLS })).toBe(true);
     // A name no process can register (no tier, not bridged) leaves its holder with nothing too.
@@ -145,5 +167,15 @@ describe("the predicate", () => {
     expect(agentCfgHasNoUsableTools({ tools: [] })).toBe(false);
     expect(agentCfgHasNoUsableTools({})).toBe(false);
     expect(agentCfgHasNoUsableTools(undefined)).toBe(false);
+  });
+
+  it("counts a bridged MCP tool as unusable only once this process has tried to connect its servers", async () => {
+    await routeWith(AGENTS, {}, { connectMcp: false });
+    const { agentCfgHasNoUsableTools } = await import("../tools/agent-routing.js");
+    expect(agentCfgHasNoUsableTools({ tools: PROCESSMEM_TOOLS })).toBe(false);
+    // A name nothing registers is unusable in any process, connected or not.
+    expect(agentCfgHasNoUsableTools({ tools: ["fetch_the_page", "share_finding"] })).toBe(true);
+    await (await import("../mcp/registry.js")).syncMcpServers();
+    expect(agentCfgHasNoUsableTools({ tools: PROCESSMEM_TOOLS })).toBe(true);
   });
 });

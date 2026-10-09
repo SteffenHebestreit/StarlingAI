@@ -420,7 +420,7 @@ Every public schema field, where it is declared, and how many production files r
 | `secretAccessKey` | packages/core/src/config/schema.ts:484 | 4 |
 | `seed` | packages/core/src/config/schema.ts:172 | 24 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 1 |
-| `servers` | packages/core/src/config/schema.ts:786 | 24 |
+| `servers` | packages/core/src/config/schema.ts:786 | 25 |
 | `serverSideScopeFilter` | packages/core/src/config/schemas/retrieval.ts:154 | 1 |
 | `serviceName` | packages/core/src/config/schema.ts:577 | 3 |
 | `serviceUrl` | packages/core/src/config/schema.ts:1190 | 2 |
