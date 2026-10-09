@@ -112,6 +112,7 @@
       "tools": [
         "web_search",
         "web_fetch",
+        "web_table",
         "url_inspect",
         "list_knowledge_bases",
         "search_knowledge_base",

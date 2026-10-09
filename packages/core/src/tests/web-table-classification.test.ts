@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { agentCfgIsResearchCapable, isWebGatheringToolName, isWebReachingToolName } from "../tools/agent-routing.js";
 import { shouldAcceptPartialDelegation } from "../tools/delegation-artifact-classification.js";
 import { comparablePageUrl, readsLiveState, summarizeToolAuditMetadata, webTableCallAllowedAfterEvidenceStrip } from "../agent/sub-agent.js";
+import { buildSubAgentToolInventory } from "../agent/sub-agent-prompt-guidance.js";
 
 /**
  * Where the web_table name must be known (design section 5): it reaches the web, it does not
@@ -49,5 +50,21 @@ describe("web_table classification", () => {
     expect(readsLiveState("web_table", { url: "http://shop.test/a.html" })).toBe(false);
     expect(readsLiveState("browser_snapshot", {})).toBe(true);
     expect(readsLiveState("web_fetch", { url: "http://shop.test/a.html" })).toBe(false);
+  });
+
+  // pass^k-relevant: the one model-facing line besides the tool's own description.
+  it("adds one inventory line in a run that holds web_table, and leaves every other inventory as it was", () => {
+    const without = buildSubAgentToolInventory(["web_search", "web_fetch", "share_finding"]);
+    expect(without).toBe([
+      "TOOL INVENTORY",
+      "You may use only these tools in this run: web_search, web_fetch, share_finding",
+      "The runtime provides the real tool schemas separately. Use those exact tool definitions for names and parameters. Do not invent or paraphrase tool names.",
+      "When the task depends on current, external, or source-sensitive facts, validate them with up-to-date web evidence whenever feasible instead of relying only on prior knowledge.",
+    ].join("\n"));
+    const line = "Take a total, count, minimum or maximum over a web table's rows from web_table instead of adding up or counting rows yourself; for a table spread over several pages, give it every page's URL.";
+    const withTable = buildSubAgentToolInventory(["web_search", "web_fetch", "web_table", "share_finding"]);
+    expect(withTable.split("\n").filter((entry) => entry === line)).toHaveLength(1);
+    expect(withTable.replace(`\n${line}`, "")).toBe(without.replace("web_fetch, share_finding", "web_fetch, web_table, share_finding"));
+    expect(buildSubAgentToolInventory(["browser_navigate", "web_table"])).toContain(line);
   });
 });
