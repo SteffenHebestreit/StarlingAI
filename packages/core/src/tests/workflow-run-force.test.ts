@@ -314,3 +314,113 @@ describe("workflow-run force-after-search", () => {
     expect(auditCalls("workflow_run_released_after_search")).toHaveLength(1);
   });
 });
+
+// A scene or job step runs a workflow that is already running. Its own task names that workflow,
+// so a search there finds it; the after-search check then dropped the step's delegation with "Call
+// run_workflow now" and the model ran another scene in place of the agents the scene's author named
+// (E2E 2026-10-08, verified_research_brief). The step turn's session is on channel "workflow".
+describe("the after-search check on a scene or job step", () => {
+  const RUNNING_SCENE_MATCH = {
+    name: "verified_research_brief",
+    workflowType: "scene" as const,
+    score: 0.81,
+    matchedTerms: ["verified_research_brief"],
+  };
+  const stepTask = "Use researcher for broad source discovery, evidence_analyst to weigh the findings, and summarizer for the final brief.";
+
+  function registerCatalog(runWorkflowExecute: ReturnType<typeof vi.fn>) {
+    registerTool({
+      name: "search_workflows",
+      description: "search",
+      parameters: { type: "object", properties: {} },
+      execute: async () => ({ success: true, output: "Found verified_research_brief [scene].", metadata: { workflowMatches: [RUNNING_SCENE_MATCH] } }),
+    });
+    registerTool({
+      name: "run_workflow",
+      description: "run",
+      parameters: { type: "object", properties: {} },
+      execute: runWorkflowExecute,
+    });
+  }
+
+  it("lets the step delegate to its agents after a search, and runs no workflow in their place", async () => {
+    const runWorkflowExecute = vi.fn(async () => ({ success: true, output: "ran", metadata: {} }));
+    const swarmDelegateExecute = vi.fn(async () => ({
+      success: true,
+      output: "researcher, evidence_analyst and summarizer returned the brief.",
+      metadata: { delegationOutcome: "success" },
+    }));
+    registerCatalog(runWorkflowExecute);
+    registerTool({
+      name: "swarm_delegate",
+      description: "swarm delegate",
+      parameters: { type: "object", properties: {} },
+      execute: swarmDelegateExecute,
+    });
+
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("s1", "search_workflows", { query: "verified_research_brief" });
+      if (call === 2) return toolCallStream("d1", "swarm_delegate", { task: "research, weigh and summarize" });
+      if (call === 3) return toolCallStream("d2", "swarm_delegate", { task: "research, weigh and summarize again" });
+      return textStream("The brief is done.");
+    });
+
+    const session = new AgentSession({ channel: "workflow", workspacePath: "/workspace", systemPrompt: "test" });
+    await runTurn({
+      session,
+      userMessage: stepTask,
+      allowedAgents: ["researcher", "evidence_analyst", "summarizer"],
+      _workflowExecutionStack: ["scene:verified_research_brief"],
+    });
+
+    expect(swarmDelegateExecute).toHaveBeenCalled();
+    expect(runWorkflowExecute).not.toHaveBeenCalled();
+    expect(auditCalls("workflow_run_required_after_search")).toHaveLength(0);
+    const forced = vi.mocked(logAudit).mock.calls.filter(
+      (c) => (c[1] as { reason?: string } | undefined)?.reason === "workflow_run_forced_after_search",
+    );
+    expect(forced).toHaveLength(0);
+  });
+
+  it("does not reject the step's tool-free answer after a search", async () => {
+    const runWorkflowExecute = vi.fn(async () => ({ success: true, output: "ran", metadata: {} }));
+    registerCatalog(runWorkflowExecute);
+
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("s1", "search_workflows", { query: "verified_research_brief" });
+      return textStream("The brief: the facts the step's agents already shared.");
+    });
+
+    const session = new AgentSession({ channel: "workflow", workspacePath: "/workspace", systemPrompt: "test" });
+    await runTurn({
+      session,
+      userMessage: stepTask,
+      allowedAgents: ["researcher", "evidence_analyst", "summarizer"],
+      _workflowExecutionStack: ["scene:verified_research_brief"],
+    });
+
+    expect(auditCalls("tool_free_workflow_run_rejected")).toHaveLength(0);
+    expect(runWorkflowExecute).not.toHaveBeenCalled();
+  });
+
+  it("control: a chat turn's tool-free answer after a strong match is still rejected", async () => {
+    const runWorkflowExecute = vi.fn(async () => ({ success: true, output: "ran", metadata: {} }));
+    registerCatalog(runWorkflowExecute);
+
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("s1", "search_workflows", { query: "verified_research_brief" });
+      return textStream("The brief: the facts the step's agents already shared.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    await runTurn({ session, userMessage: stepTask });
+
+    expect(auditCalls("tool_free_workflow_run_rejected")).toHaveLength(1);
+  });
+});

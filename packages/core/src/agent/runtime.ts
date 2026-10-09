@@ -1856,8 +1856,14 @@ async function _runTurn(
   // prompt assembly it began only after the judge's wait and the document retrieval, and its
   // embedding round-trip (capped at DISCOVERY_PREFETCH_BUDGET_MS) sat on the path to the first
   // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
+  // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
-    ? startDiscoveryPrefetch({ userMessage, sessionId: session.id, ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}) })
+    ? startDiscoveryPrefetch({
+      userMessage,
+      sessionId: session.id,
+      ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
+      ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
+    })
     : undefined;
 
   // ── Facet triage (orchestration.routingTriage) ──────────────────────────────
@@ -2078,6 +2084,13 @@ async function _runTurn(
   );
   if (suppressAgentCatalogTool) {
     allowedToolNames = allowedToolNames.filter((toolName) => toolName !== "list_agents");
+  }
+  // A scene or job step runs a workflow that is already running, with the agents its author named.
+  // With the catalog tools it searched for that workflow, which its own task names, tried to run it
+  // again, and ran a different scene in place of its agents (E2E 2026-10-08). load_tool cannot bring
+  // them back: it loads direct tools only, and these are orchestration tools.
+  if (opts._withoutWorkflowCatalog) {
+    allowedToolNames = allowedToolNames.filter((toolName) => !isWorkflowCatalogToolName(toolName));
   }
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
@@ -3463,8 +3476,13 @@ async function _runTurn(
     // delegation before the named agent ran, or a follow-up delegation after it ran, was dropped with
     // "Call run_workflow now" and, made again, rewritten into the matched workflow, so a workflow the
     // user did not name ran before or after the agent they did (review of f607ce0, 2026-10-08).
+    // A scene or job step is not held to it either. Its own task names the workflow it runs, so a
+    // search there finds that workflow; the check then dropped the step's delegation to the agents
+    // its author named with "Call run_workflow now", and the rewrite below would have turned it into
+    // a run of the running workflow, or of another one, in their place (E2E 2026-10-08).
     if (
       !workflowCatalogSuppressedForMaintenance
+      && !isWorkflowExecutionTurn
       &&
       shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
       && !workflowRunCompletedThisTurn
@@ -3779,10 +3797,12 @@ async function _runTurn(
       // answer from the named agent's result was rejected with "Call run_workflow now"; a model that
       // obeyed had its run_workflow turned away by the synthesis-required guard, and the turn
       // shipped a forced partial answer in place of the agent-backed one (integration review,
-      // 2026-10-08).
+      // 2026-10-08). A scene or job step's answer is not rejected for it either, for the reason
+      // given at the check on its tool calls above.
       if (
         !releasedAfterRoutingNudge
         && !workflowCatalogSuppressedForMaintenance
+        && !isWorkflowExecutionTurn
         &&
         shouldRequireWorkflowExecutionAfterSearch(workflowSearchMatches)
         && !workflowRunCompletedThisTurn

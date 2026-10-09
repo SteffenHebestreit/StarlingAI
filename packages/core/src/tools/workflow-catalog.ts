@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { logAudit } from "../audit/logger.js";
 import { requestApprovalViaChannel } from "../approval/index.js";
-import { archiveSession, createSession, type AgentSession } from "../agent/session.js";
+import { archiveSession, createSession, type AgentSession, type SessionHistoryMessage } from "../agent/session.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+import { buildWorkflowExecutionKey } from "../agent/workflow-execution-key.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
-import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
+import { runTurn, collectTurnArtifactAttachments, classifyPostOrchestrationDisposition } from "../agent/runtime.js";
+import type { TurnOutput } from "../agent/turn-types.js";
 import { getConfig } from "../config/loader.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
@@ -33,10 +35,6 @@ interface WorkflowSearchCandidate {
   semanticScore: number;
   combinedScore: number;
   matchedTerms: string[];
-}
-
-function buildWorkflowExecutionKey(name: string, workflowType: WorkflowType): string {
-  return `${workflowType}:${name}`;
 }
 
 const COORDINATOR_BOOTSTRAP_TOOL_NAMES = new Set([
@@ -913,14 +911,58 @@ type WorkflowExecutions = ReturnType<FanOutExecutionRecords["metadata"]>;
  * Adds the record of every delegation the workflow's own orchestrator turns made. They ran in the
  * workflow's session, which is archived when it ends, so the parent turn reads none of their tool
  * messages: a coder's masked figures inside a workflow reached the turn as "Workflow … completed"
- * with no record, and the turn's honest directive never fired.
+ * with no record, and the turn's honest directive never fired. Returns the tool messages it read.
  */
-function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession, recorded?: WeakSet<object>): void {
+function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSession, recorded?: WeakSet<object>): SessionHistoryMessage[] {
+  const read: SessionHistoryMessage[] = [];
   for (const message of session.getHistory()) {
     if (message.role !== "tool" || !message.metadata || recorded?.has(message)) continue;
     recorded?.add(message);
     into.add(message.metadata);
+    read.push(message);
   }
+  return read;
+}
+
+/**
+ * The finish reasons with which a turn stops its own orchestration (agent/runtime.ts): the warden
+ * after delegations failed back to back, every tool call of several iterations refused, or the
+ * iteration cap. Its answer is then a forced synthesis of whatever the turn had.
+ */
+const ORCHESTRATION_GIVE_UP_FINISH_REASONS: ReadonlySet<string> = new Set([
+  "delegation_failures_terminal",
+  "all_tool_calls_blocked",
+  "max_tool_iterations",
+]);
+
+/**
+ * A scene's or job step's orchestrated turn that gave up, and whose delegations brought no
+ * specialist's result back, did none of the step's work. Each delegation is read as the turn itself
+ * read it (classifyPostOrchestrationDisposition): only one it would synthesize from or continue on
+ * counts. Such a turn still returned blocked:false, with its forced synthesis as the answer, and the
+ * step was reported completed: in the E2E run of source_grounded_paper_packet no specialist ran
+ * anywhere and run_workflow came back "completed" (2026-10-08). A turn that ended any other way, or
+ * brought one result back, is read as before.
+ */
+function stepTurnRanNoSpecialist(
+  result: TurnOutput,
+  toolMessages: readonly SessionHistoryMessage[],
+  audit: { sessionId: string; workflow: string; step?: string },
+): boolean {
+  const finishReason = result.qualityScorecard?.finishReason ?? result.performance?.finishReason;
+  if (!finishReason || !ORCHESTRATION_GIVE_UP_FINISH_REASONS.has(finishReason)) return false;
+  const delivered = toolMessages.some((message) => {
+    const disposition = classifyPostOrchestrationDisposition([message]);
+    return disposition === "synthesize" || disposition === "continue";
+  });
+  if (delivered) return false;
+  logAudit("guardrail_flagged", {
+    type: "workflow_step_ran_no_specialist",
+    workflow: audit.workflow,
+    ...(audit.step ? { step: audit.step } : {}),
+    finishReason,
+  }, { sessionId: audit.sessionId, severity: "warn" });
+  return true;
 }
 
 /** What a job step whose run masked figures says, under its answer, in place of a result. */
@@ -1090,6 +1132,9 @@ async function runSceneInline(
       maxIterationsOverride: ctx.maxIterationsOverride,
       turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       _workflowExecutionStack: workflowExecutionStack,
+      // The scene is already selected and its task names its agents: the step's turn gets no
+      // catalog to search it in or to start it, or another scene, from (agent/runtime.ts).
+      _withoutWorkflowCatalog: true,
       onSubAgentProgress: ctx.onSubAgentProgress,
       onComputerAction: ctx.onComputerAction,
       onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1097,7 +1142,11 @@ async function runSceneInline(
       onSwarmState: ctx.onSwarmState,
     });
 
-    const resultBlocked = result.blocked || workflowOutputIsBlocked(result.response);
+    const sceneExecutions = createFanOutExecutionRecords();
+    const sceneToolMessages = addSessionExecutions(sceneExecutions, session);
+    const resultBlocked = result.blocked
+      || workflowOutputIsBlocked(result.response)
+      || stepTurnRanNoSpecialist(result, sceneToolMessages, { sessionId: ctx.sessionId, workflow: scene.name });
     finalizeWorkflowSwarmState(
       ctx,
       workflowTaskId,
@@ -1112,8 +1161,6 @@ async function runSceneInline(
     // without a clickable download AND letting the source-sensitive auto-build
     // spuriously re-fire (it keys on "zero artifacts this turn"). run_workflow
     // threads these into its result metadata.artifacts.
-    const sceneExecutions = createFanOutExecutionRecords();
-    addSessionExecutions(sceneExecutions, session);
     return {
       response: result.response,
       blocked: resultBlocked,
@@ -1189,6 +1236,12 @@ async function runJobInline(
           agents: allowedAgents,
         }, { sessionId: ctx.sessionId, severity: "info" });
       }
+      // The step runs its own scene, so that scene is on the stack its agents see, as a scene run
+      // on its own puts itself there (runSceneInline). With only the job there, the step of
+      // source_grounded_paper_packet ran its own scene, source_backed_paper, nested inside itself
+      // (E2E 2026-10-08). The step's turn no longer has run_workflow, but a coordinator it delegates
+      // to keeps one (mission_coordinator), and the recursion check reads this stack.
+      const stepExecutionStack = [...workflowExecutionStack, buildWorkflowExecutionKey(step.sceneName, "scene")];
 
       // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)
       // to EVERY step, not just the first. Later steps otherwise never learn the subject:
@@ -1224,7 +1277,7 @@ async function runJobInline(
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
           swarmState: ctx.swarmState,
           onSwarmState: ctx.onSwarmState,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
           // Same as the scene bootstrap: the step's task is the job author's, not the person's.
           ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
         };
@@ -1285,7 +1338,9 @@ async function runJobInline(
           inputCallback: ctx.inputCallback,
           maxIterationsOverride: ctx.maxIterationsOverride,
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
+          // As in runSceneInline: the step's turn runs the step, it does not look for a workflow.
+          _withoutWorkflowCatalog: true,
           onSubAgentProgress: ctx.onSubAgentProgress,
           onComputerAction: ctx.onComputerAction,
           onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1300,9 +1355,11 @@ async function runJobInline(
         // delegated to a coder that masked its figures did not stop the job, and the next step ran
         // on its answer, as the next step after a direct one no longer does (above).
         const stepRuns = createFanOutExecutionRecords();
-        addSessionExecutions(stepRuns, session, recordedToolMessages);
+        const stepToolMessages = addSessionExecutions(stepRuns, session, recordedToolMessages);
         const stepRecord = stepRuns.metadata();
         jobExecutions.add({ ...stepRecord });
+        // A step whose turn gave up with no specialist's result did not do its work: the job stops here.
+        stepBlocked ||= stepTurnRanNoSpecialist(result, stepToolMessages, { sessionId: ctx.sessionId, workflow: job.name, step: step.label });
         if (stepRecord.maskedRuns) {
           stepMaskedFigures = !stepBlocked;
           stepBlocked = true;
