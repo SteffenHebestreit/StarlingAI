@@ -47,7 +47,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoConsolidateSessions` | packages/core/src/config/schema.ts:1529 | 1 |
 | `autoIngestAttachments` | packages/core/src/config/schemas/retrieval.ts:99 | 3 |
 | `automation` | packages/core/src/config/schema.ts:1114 | 12 |
-| `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 1 |
+| `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 2 |
 | `autoPromoteToScene` | packages/core/src/config/schema.ts:1500 | 3 |
 | `autoReconnect` | packages/core/src/config/schema.ts:794 | 1 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 75 |
 | `bucket` | packages/core/src/config/schema.ts:482 | 25 |
-| `budget` | packages/core/src/config/schema.ts:1655 | 92 |
+| `budget` | packages/core/src/config/schema.ts:1655 | 93 |
 | `budgets` | packages/core/src/config/schema.ts:543 | 14 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:932 | 48 |
@@ -132,7 +132,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:48 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:203 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:613 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:910 | 59 |
+| `deliverable` | packages/core/src/config/schema.ts:910 | 60 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:589 | 183 |
@@ -229,7 +229,7 @@ Every public schema field, where it is declared, and how many production files r
 | `label` | packages/core/src/config/schema.ts:273 | 147 |
 | `labeledAt` | packages/core/src/config/schema.ts:927 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:926 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 95 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 96 |
 | `layaFirstMs` | packages/core/src/config/schemas/decisions.ts:52 | 3 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1810 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1261 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:545 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:707 | 11 |
-| `name` | packages/core/src/config/schema.ts:1997 | 373 |
+| `name` | packages/core/src/config/schema.ts:1997 | 374 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 57 |
 | `node` | packages/core/src/config/schema.ts:1066 | 240 |

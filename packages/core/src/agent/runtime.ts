@@ -260,7 +260,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, startDiscoveryPrefetch, turnEvidenceRequirement } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, turnEvidenceRequirement } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1857,12 +1857,23 @@ async function _runTurn(
   // embedding round-trip (capped at DISCOVERY_PREFETCH_BUDGET_MS) sat on the path to the first
   // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
   // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
+  // On an --auto turn under orchestration.autonomousModeAntiRefusal the capsule's routing is also
+  // read back: a top agent admitted at high confidence that emits deliverables arms the same
+  // forced first tool call as an artifact request the word lists recognise (autonomousArtifactBuild
+  // below). Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a
+  // late or failed prefetch. Every other turn starts the prefetch exactly as before.
+  let prefetchRoutedToDeliverable = false;
+  const readPrefetchRouting = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+    && opts.autoApprove === true;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
       userMessage,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
+      ...(readPrefetchRouting
+        ? { onCapsuleAgents: (agents) => { prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents); } }
+        : {}),
     })
     : undefined;
 
@@ -2863,10 +2874,14 @@ async function _runTurn(
       // artifact request also forces the first tool call, even if the narrower
       // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
       // wantsArtifact); no topic/keywords.
+      // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable, set where
+      // the prefetch starts): the word lists are English and German, and a request they miss
+      // ("Zeichne … als Mermaid-Flussdiagramm") was answered inline although routing had put
+      // diagram_designer at high confidence.
       const autonomousArtifactBuild =
         (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
         && opts.autoApprove === true
-        && deliverableIntent.wantsArtifact;
+        && (deliverableIntent.wantsArtifact || prefetchRoutedToDeliverable);
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
       // The research requirement is also released by a knowledge-base read that brought content

@@ -58,6 +58,12 @@ export function formatDiscoveryCapsule(
   ].join("\n");
 }
 
+/** An agent the capsule lists, with the confidence routing admitted it at. */
+export interface DiscoveryCapsuleAgent {
+  name: string;
+  confidence?: string;
+}
+
 /**
  * Discover candidate agents + workflows for a query in parallel and format the
  * capsule. Best-effort: a failure in either discovery degrades to whatever the other
@@ -73,9 +79,11 @@ export async function prefetchCapabilityCandidates(
     /**
      * The capsule's agent names, in the order the capsule lists them, once they are known (also
      * when there are none). The capsule itself is text; the intent readout's shadow needs the
-     * candidate list the turn actually had (agent/intent-shadow.ts).
+     * candidate list the turn actually had (agent/intent-shadow.ts). The second argument is the
+     * same list with each agent's routing confidence, for a caller that acts on how sure the
+     * routing was (the runtime's --auto artifact build, agent/turn-setup.ts).
      */
-    onAgents?: (names: readonly string[]) => void;
+    onAgents?: (names: readonly string[], agents: readonly DiscoveryCapsuleAgent[]) => void;
     /**
      * The turn has no catalog tools (a scene or job step, agent/runtime.ts). No workflow is looked
      * up or named: the capsule would point the turn at run_workflow, which it cannot call, and at
@@ -141,7 +149,10 @@ export async function prefetchCapabilityCandidates(
   }));
 
   try {
-    opts?.onAgents?.(agents.map((agent) => agent.name));
+    opts?.onAgents?.(
+      agents.map((agent) => agent.name),
+      agents.map((agent) => ({ name: agent.name, confidence: agent.confidence })),
+    );
   } catch {
     // An observer's failure is never the capsule's.
   }
