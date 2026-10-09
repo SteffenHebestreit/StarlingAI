@@ -55,8 +55,6 @@ const EQUALS_RE = /^[ \t\u00a0\u202f]*=[ \t\u00a0\u202f]*$/u;
 const LINE_SPACE_RE = /[ \t\u00a0\u202f]/u;
 /** What may stand right before a chain, besides the start of the line and a letter. */
 const LEAD_MARKS = new Set([":", "|"]);
-/** A list or quote marker alone at the start of the line. */
-const LINE_MARKER_RE = /^[ \t]*(?:[-•>]|\d+\.)$/u;
 /** What may not follow the stated total: an operator, a bracket, "%" (and a digit, checked apart). */
 const AFTER_REJECT = new Set(["+", "-", "−", "×", "*", "·", "/", "÷", "^", "=", "(", ")", "[", "]", "{", "}", "%", "…"]);
 
@@ -151,11 +149,32 @@ function evaluate(terms: Term[], operators: Array<"+" | "-">, stated: Term, conv
   return { matches: rounded === statedValue.units, computed: format(total, scale, convention) };
 }
 
-function leadAllowed(line: string, start: number): boolean {
-  const prefix = line.slice(0, start).replace(/[ \t\u00a0\u202f]+$/u, "");
-  if (prefix === "") return true;
-  const last = prefix[prefix.length - 1]!;
-  return /\p{L}/u.test(last) || LEAD_MARKS.has(last) || LINE_MARKER_RE.test(prefix);
+/**
+ * Where a list or quote marker alone at the line's start ends ("- ", "\u2022 ", "> ", "12. "), or -1:
+ * the end of /^[ \t]*(?:[-•>]|\d+\.)/, found once per line. As a regex tested against the text
+ * before every chain, it walked the line's leading blanks or digits again for each chain.
+ */
+function lineMarkerEnd(line: string): number {
+  let first = 0;
+  while (first < line.length && (line[first] === " " || line[first] === "\t")) first++;
+  if (first < line.length && "-\u2022>".includes(line[first]!)) return first + 1;
+  let digits = first;
+  while (digits < line.length && line.charCodeAt(digits) >= 48 && line.charCodeAt(digits) <= 57) digits++;
+  return digits > first && line[digits] === "." ? digits + 1 : -1;
+}
+
+/**
+ * Whether a chain may start at `start`: the text before it, without the spaces right before it,
+ * is empty, ends in a letter, ":" or "|", or is a list or quote marker. The spaces are stepped over
+ * backwards; trimmed off the whole text before the chain by a regex, once per chain, they made a
+ * 200,000-character line take seconds to tens of seconds.
+ */
+function leadAllowed(line: string, start: number, markerEnd: number): boolean {
+  let end = start;
+  while (end > 0 && LINE_SPACE_RE.test(line[end - 1]!)) end--;
+  if (end === 0) return true;
+  const last = line[end - 1]!;
+  return /\p{L}/u.test(last) || LEAD_MARKS.has(last) || end === markerEnd;
 }
 
 function tailAllowed(line: string, end: number): boolean {
@@ -169,6 +188,7 @@ function tailAllowed(line: string, end: number): boolean {
 function lineMismatches(line: string, original: string): ArithmeticMismatch[] {
   const found: ArithmeticMismatch[] = [];
   const items = termsOf(line);
+  const markerEnd = lineMarkerEnd(line);
   let chain: Term[] = [];
   let operators: Array<"+" | "-"> = [];
   for (let index = 0; index < items.length; index++) {
@@ -192,7 +212,7 @@ function lineMismatches(line: string, original: string): ArithmeticMismatch[] {
     }
     if (EQUALS_RE.test(gap) && chain.length >= 2 && chain.length <= MAX_TERMS) {
       const stated = item;
-      if (leadAllowed(line, chain[0]!.start) && tailAllowed(line, stated.end)) {
+      if (leadAllowed(line, chain[0]!.start, markerEnd) && tailAllowed(line, stated.end)) {
         const verdicts = (["comma", "point"] as const).map((convention) => ({ convention, verdict: evaluate(chain, operators, stated, convention) }));
         const readable = verdicts.filter((entry) => entry.verdict !== null);
         const skipped = readable.some((entry) => entry.verdict === "skip");

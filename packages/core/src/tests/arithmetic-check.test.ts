@@ -55,6 +55,34 @@ describe("findArithmeticMismatches", () => {
     expect(findArithmeticMismatches("- 34,90 € + 27,50 € = 62,50 €")).toEqual([expect.objectContaining({ computed: "62,40" })]);
   });
 
+  it("lets a chain follow a list or quote marker alone at the line's start, and nothing else that is not a letter, \":\" or \"|\"", () => {
+    for (const lead of ["- ", "• ", "> ", "12. ", "  - ", "\t3. ", "  ", ""]) {
+      expect(findArithmeticMismatches(`${lead}1 + 1 = 3`), JSON.stringify(lead)).toHaveLength(1);
+    }
+    for (const lead of ["x, ", "12.5 ", "1.2. ", "-- ", "a - ", "(", "2 ", ". "]) {
+      expect(findArithmeticMismatches(`${lead}1 + 1 = 3`), JSON.stringify(lead)).toEqual([]);
+    }
+  });
+
+  it("reads a line of 200,000 characters in linear time, whatever stands before its chains", () => {
+    // The space before a chain was trimmed by a regex over the whole line before it, once per
+    // chain: 150,000 spaces before one chain took seconds, and a 70 kB line of chains after a
+    // comma took longer, while every sub-agent answer in shadow mode passes through here.
+    const lines = [
+      `${" ".repeat(150_000)}x 1 + 1 = 3`,
+      `${" ".repeat(2_000)}${", 1 + 1 = 3".repeat(6_000)}`,
+      `${"1".repeat(2_000)}${", 1 + 1 = 3".repeat(6_000)}`,
+      "x 1 + 1 = 3 ".repeat(15_000),
+    ];
+    const found: number[] = [];
+    for (const line of lines) {
+      const started = Date.now();
+      found.push(findArithmeticMismatches(line).length);
+      expect(Date.now() - started, line.slice(0, 20)).toBeLessThan(300);
+    }
+    expect(found).toEqual([1, 0, 0, 15_000]);
+  });
+
   it("skips texts over 200,000 characters and chains of 200 terms or more", () => {
     expect(findArithmeticMismatches(`${"x".repeat(200_001)}\nSumme: 17 + 9 = 27`)).toEqual([]);
     expect(findArithmeticMismatches(`Summe: ${Array.from({ length: 200 }, () => "1").join(" + ")} = 7`)).toEqual([]);
