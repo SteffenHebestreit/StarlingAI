@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:1997 | 378 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 59 |
-| `node` | packages/core/src/config/schema.ts:1066 | 241 |
+| `node` | packages/core/src/config/schema.ts:1066 | 242 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:583 | 3 |
 | `notes` | packages/core/src/config/schema.ts:814 | 61 |
 | `oneLiner` | packages/core/src/config/schema.ts:923 | 3 |
@@ -345,7 +345,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:1985 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:56 | 54 |
+| `points` | packages/core/src/config/schemas/decisions.ts:56 | 55 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:327 | 41 |
 | `primary` | packages/core/src/config/schema.ts:111 | 70 |
@@ -452,7 +452,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:750 | 4 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:478 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:450 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1404 | 84 |
+| `steps` | packages/core/src/config/schema.ts:1404 | 85 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
 | `store` | packages/core/src/config/schema.ts:1637 | 165 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:413 | 1 |

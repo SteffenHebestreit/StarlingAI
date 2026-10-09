@@ -80,6 +80,7 @@ export interface ParsedTable {
   caption: string;
   columns: string[];
   headerSource: "thead" | "th" | "none";
+  /** Each row up to its last cell: a row may be shorter than `columns`, and a missing cell is empty. */
   rows: TableCell[][];
   footer: TableCell[][];
   /** A cap cut the table: rows after the first `rows.length` were not read. */
@@ -224,6 +225,31 @@ function stripInvisible(text: string): string {
   return text.replace(/\p{Cc}/gu, " ").replace(/\p{Cf}/gu, "");
 }
 
+/**
+ * `raw` decoded and appended to `current`, up to TABLE_LIMITS.cellChars in all; what lies past the
+ * cap is never decoded. The cap was checked before appending, and one text node was appended
+ * whole: a cell made of a single 4.8 MB text node kept all of it. A decoded entity is never longer
+ * than its source, so decoding grows from `room` source characters until it fills the room, and a
+ * cut is moved before an "&" just behind it, so no entity is decoded from half its source.
+ */
+function appendDecoded(current: string, raw: string): string {
+  const room = TABLE_LIMITS.cellChars - current.length;
+  if (room <= 0) return current;
+  for (let take = room; ; take *= 2) {
+    let end = Math.min(raw.length, take);
+    if (end < raw.length) {
+      const amp = raw.lastIndexOf("&", end - 1);
+      if (amp >= 0 && end - amp < 40) end = amp;
+    }
+    const decoded = decodeHTML(raw.slice(0, end));
+    if (decoded.length >= room || end >= raw.length) {
+      if (decoded.length <= room) return current + decoded;
+      const cut = /[\uD800-\uDBFF]/.test(decoded[room - 1]!) ? room - 1 : room;
+      return current + decoded.slice(0, cut);
+    }
+  }
+}
+
 /** A cell's stored text: invisible characters out, ASCII whitespace evened out. No-break spaces stay,
  *  because they group thousands ("1 234"). */
 function cellText(parts: string): string {
@@ -254,15 +280,11 @@ export function parseHtmlTables(html: string, budget: CellBudget = newCellBudget
     if (table.cell) {
       const cell = table.cell;
       if (cell.hidden) return;
-      const decoded = decodeHTML(raw);
-      if (cell.struckDepth > 0) {
-        if (cell.struck.length < TABLE_LIMITS.cellChars) cell.struck += decoded;
-      } else if (cell.text.length < TABLE_LIMITS.cellChars) {
-        cell.text += decoded;
-      }
+      if (cell.struckDepth > 0) cell.struck = appendDecoded(cell.struck, raw);
+      else cell.text = appendDecoded(cell.text, raw);
       return;
     }
-    if (table.inCaption && table.caption.length < TABLE_LIMITS.cellChars) table.caption += decodeHTML(raw);
+    if (table.inCaption) table.caption = appendDecoded(table.caption, raw);
   };
 
   const closeCell = (table: OpenTable): void => {
@@ -458,6 +480,12 @@ interface GridCell {
   cell: TableCell;
 }
 
+/** What a row holds at a position no cell of its own covers, and past its last cell. Shared, never written. */
+const EMPTY_CELL: TableCell = Object.freeze({ text: "", struck: "" });
+
+/** A column's name is at most this long: a header is a few words. */
+const COLUMN_NAME_CHARS = 200;
+
 /** A parsed table's grid, header and rows, its expanded cells counted against both budgets. */
 function finishTable(raw: OpenTable, number: number, budget: CellBudget): ParsedTable {
   let truncated = raw.truncated;
@@ -465,10 +493,10 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
   const grid: Array<{ section: Section; cells: Array<GridCell | undefined> }> = [];
   let pending: Array<{ cell: GridCell; left: number } | undefined> = [];
   let section: Section | null = null;
-  const take = (): boolean => {
-    if (tableCells >= TABLE_LIMITS.cellsPerTable || budget.cellsLeft <= 0) return false;
-    tableCells++;
-    budget.cellsLeft--;
+  const take = (count = 1): boolean => {
+    if (tableCells + count > TABLE_LIMITS.cellsPerTable || count > budget.cellsLeft) return false;
+    tableCells += count;
+    budget.cellsLeft -= count;
     return true;
   };
   rows: for (const row of raw.rows) {
@@ -479,11 +507,13 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
     }
     const out: Array<GridCell | undefined> = [];
     let col = 0;
+    let covered = 0;
     const fillPendingAt = (index: number): boolean => {
       const carried = pending[index];
       if (!carried || carried.left <= 0) return false;
       if (!take()) return false;
       out[index] = carried.cell;
+      covered++;
       carried.left--;
       return true;
     };
@@ -502,6 +532,7 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
           break rows;
         }
         out[col] = value;
+        covered++;
         pending[col] = cell.rowspan > 1 ? { cell: value, left: cell.rowspan - 1 } : undefined;
         col++;
       }
@@ -511,6 +542,12 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
         truncated = true;
         break rows;
       }
+    }
+    // A gap left of a rowspan carried further right is stored as an empty cell, so it is paid
+    // for like one: the stored rows hold no more positions than the caps allow.
+    if (!take(out.length - covered)) {
+      truncated = true;
+      break rows;
     }
     grid.push({ section: row.section, cells: out });
   }
@@ -531,23 +568,43 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
     if (leading > 0) headerSource = "th";
   }
   const width = grid.reduce((max, row) => Math.max(max, row.cells.length), 0);
+  // A column's name joins the distinct texts its header rows hold, top to bottom. Only the
+  // positions a header row covers are visited, and a header cell's text is shown once however
+  // many columns it spans: walking header rows × width for every column took 2,000 one-cell
+  // header rows over a 98,000-column row through 196 million steps. A name is capped, so a
+  // header cell's text past the cap is never shown, and a column stops taking parts past it.
+  const shownHeader = new Map<GridCell, string>();
+  const parts: string[][] = [];
+  const partChars: number[] = [];
+  for (const row of headerRows) {
+    row.cells.forEach((cell, index) => {
+      if (!cell) return;
+      let text = shownHeader.get(cell);
+      if (text === undefined) {
+        const shown = displayText(cell.cell.text);
+        text = shown.slice(0, codePointEnd(shown, COLUMN_NAME_CHARS + 1));
+        shownHeader.set(cell, text);
+      }
+      const list = (parts[index] ??= []);
+      if (!text || list[list.length - 1] === text || (partChars[index] ?? 0) > 2 * COLUMN_NAME_CHARS + 3) return;
+      list.push(text);
+      partChars[index] = (partChars[index] ?? 0) + text.length + 3;
+    });
+  }
   const columns: string[] = [];
   const seen = new Map<string, number>();
   for (let index = 0; index < width; index++) {
-    const parts: string[] = [];
-    for (const row of headerRows) {
-      const text = displayText(row.cells[index]?.cell.text ?? "");
-      if (text && parts[parts.length - 1] !== text) parts.push(text);
-    }
-    let name = parts.join(" / ") || String(index + 1);
+    let name = capped(parts[index]?.join(" / ") ?? "", COLUMN_NAME_CHARS) || String(index + 1);
     const key = normalizeText(name);
     const count = (seen.get(key) ?? 0) + 1;
     seen.set(key, count);
     if (count > 1) name = `${name} (${count})`;
     columns.push(name);
   }
-  const asRow = (row: { cells: Array<GridCell | undefined> }): TableCell[] =>
-    Array.from({ length: width }, (_, index) => row.cells[index]?.cell ?? { text: "", struck: "" });
+  // A row keeps its own positions only, and a reader takes a missing one as empty. Padding every
+  // row to the widest row's width held rows × width cells for a page that paid for far fewer:
+  // 64.5 kB of empty rows under one 100,000-column row ran the gateway out of heap.
+  const asRow = (row: { cells: Array<GridCell | undefined> }): TableCell[] => Array.from(row.cells, (cell) => cell?.cell ?? EMPTY_CELL);
   const nonEmpty = (cells: TableCell[]): boolean => cells.some((cell) => cell.text || cell.struck);
   return {
     number,
@@ -603,9 +660,21 @@ export function displayText(text: string): string {
   return stripInvisible(text).replace(/\s+/gu, " ").trim();
 }
 
+/** Where the first `count` code points of `text` end, as a UTF-16 index: its length when it has fewer. */
+function codePointEnd(text: string, count: number): number {
+  let index = 0;
+  for (let seen = 0; seen < count && index < text.length; seen++) {
+    const code = text.charCodeAt(index);
+    const pair = code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00;
+    index += pair ? 2 : 1;
+  }
+  return index;
+}
+
+/** At most `max` code points, the last one "…" when cut. Reads only as far as the cut, not the whole text. */
 function capped(text: string, max: number): string {
-  const chars = [...text];
-  return chars.length <= max ? text : `${chars.slice(0, max - 1).join("")}…`;
+  if (text.length <= max || codePointEnd(text, max) >= text.length) return text;
+  return `${text.slice(0, codePointEnd(text, max - 1))}…`;
 }
 
 /** Page text JSON-quoted on one line, capped: an id or caption at 80, a header at 60. */
@@ -613,10 +682,17 @@ export function quoted(text: string, max: number): string {
   return JSON.stringify(capped(displayText(text), max));
 }
 
+/** A column's name as the output shows it, unquoted: on one line, at most 60 characters. */
+export function shownColumnName(name: string): string {
+  return capped(displayText(name), HEADER_CHARS);
+}
+
 const ID_CHARS = 80;
 const CAP_NOTE = `cut at a cap: at most ${TABLE_LIMITS.rowsPerTable} rows and ${TABLE_LIMITS.cellsPerTable} cells per table, ${TABLE_LIMITS.cellsPerCall} per call`;
 const HEADER_CHARS = 60;
 const CELL_CHARS = 200;
+/** Cells shown of a listed or footer row: its first 200 columns. */
+const ROW_CELLS_SHOWN = 200;
 const LABEL_CHARS = 60;
 
 function describeTable(table: ParsedTable): string {
@@ -720,25 +796,42 @@ function rowRef(row: UnionRow): string {
 type ColumnResolution = { ok: true; index: number } | { ok: false; error: string; ambiguous?: boolean };
 
 /**
+ * A header's names as columns compare them, normalized once per header: a table may have up to
+ * 100,000 columns, and each named column, condition and candidate table resolves against them.
+ */
+const NORMALIZED_NAMES = new WeakMap<readonly string[], string[]>();
+
+function normalizedNames(columns: readonly string[]): string[] {
+  let names = NORMALIZED_NAMES.get(columns);
+  if (!names) {
+    names = columns.map(normalizeText);
+    NORMALIZED_NAMES.set(columns, names);
+  }
+  return names;
+}
+
+/**
  * A column argument against a header: its exact name (NFKC, case folded, whitespace evened out),
  * else its 1-based number, else the one header containing it ("Preis" for "Preis (€)").
  */
 export function resolveColumn(columns: readonly string[], argument: string): ColumnResolution {
   const wanted = normalizeText(argument);
-  const exact = columns.findIndex((name) => normalizeText(name) === wanted);
+  const names = normalizedNames(columns);
+  const exact = names.indexOf(wanted);
   if (exact >= 0) return { ok: true, index: exact };
   if (/^\d+$/.test(wanted)) {
     const number = Number(wanted);
     if (number >= 1 && number <= columns.length) return { ok: true, index: number - 1 };
   }
   if (wanted) {
-    const containing = columns.map((name, index) => ({ name, index })).filter(({ name }) => normalizeText(name).includes(wanted));
+    const containing = columns.map((name, index) => ({ name, index })).filter(({ index }) => names[index]!.includes(wanted));
     if (containing.length === 1) return { ok: true, index: containing[0]!.index };
     if (containing.length > 1) {
+      const listed = containing.slice(0, 12).map(({ name, index }) => `${index + 1} ${quoted(name, HEADER_CHARS)}`).join(" | ");
       return {
         ok: false,
         ambiguous: true,
-        error: `column ${quoted(argument, HEADER_CHARS)} matches several columns: ${containing.map(({ name, index }) => `${index + 1} ${quoted(name, HEADER_CHARS)}`).join(" | ")}; name it exactly or by number`,
+        error: `column ${quoted(argument, HEADER_CHARS)} matches several columns: ${listed}${containing.length > 12 ? ` | … ${containing.length - 12} more` : ""}; name it exactly or by number`,
       };
     }
   }
@@ -776,12 +869,47 @@ function chooseTable(page: PageInput, query: TableQuery, namedColumns: readonly 
   return { error: `${fitting.length} tables${where} have the column(s) ${named}; name one with table (its number or id):\n${listTables(fitting, 0)}` };
 }
 
-function rowSignature(rows: readonly TableCell[][]): string {
-  return rows.map((cells) => cells.map((cell) => normalizeText(`${cell.text} ${cell.struck}`)).join("\u0001")).join("\u0002");
+/** Ids of normalized cell texts, shared by the pages of one call; the empty text is 0. */
+interface CellIds {
+  byText: Map<string, number>;
+  byCell: Map<TableCell, number>;
+}
+
+function newCellIds(): CellIds {
+  return { byText: new Map([["", 0]]), byCell: new Map() };
+}
+
+/**
+ * A table's rows as pages compare them: the width, then each row's cells as ids of their
+ * normalized text, trailing empty cells left out. Equal exactly when the rows padded to the width
+ * are, without building rows × width; a cell spanning rows and columns is one object at every
+ * position it covers and is normalized once.
+ */
+function rowSignature(rows: readonly TableCell[][], width: number, ids: CellIds): string {
+  const idOf = (cell: TableCell): number => {
+    let id = ids.byCell.get(cell);
+    if (id === undefined) {
+      const text = normalizeText(`${cell.text} ${cell.struck}`);
+      id = ids.byText.get(text);
+      if (id === undefined) {
+        id = ids.byText.size;
+        ids.byText.set(text, id);
+      }
+      ids.byCell.set(cell, id);
+    }
+    return id;
+  };
+  const shown = rows.map((cells) => {
+    const row = cells.map(idOf);
+    let end = row.length;
+    while (end > 0 && row[end - 1] === 0) end--;
+    return row.slice(0, end).join(",");
+  });
+  return `${width}:${shown.join(";")}`;
 }
 
 function headerSignature(columns: readonly string[]): string {
-  return columns.map(normalizeText).join("\u0001");
+  return normalizedNames(columns).join("\u0001");
 }
 
 /** A cell as it is listed: its value, its struck part as ~~…~~, capped and on one line. */
@@ -791,9 +919,14 @@ function showCell(cell: TableCell): string {
   return capped(struck ? `${text}${text ? " " : ""}~~${struck}~~` : text, CELL_CHARS);
 }
 
+/** A row's first `count` cells, a missing one as empty. */
+function cellsUpTo(cells: readonly TableCell[], count: number): TableCell[] {
+  return Array.from({ length: count }, (_, index) => cells[index] ?? EMPTY_CELL);
+}
+
 /** What names a row in a computed line: its first column, or its second when the first is the one computed. */
-function rowLabel(row: UnionRow, computedColumn: number): string {
-  const index = computedColumn === 0 && row.cells.length > 1 ? 1 : 0;
+function rowLabel(row: UnionRow, computedColumn: number, width: number): string {
+  const index = computedColumn === 0 && width > 1 ? 1 : 0;
   return `${rowRef(row)} ${quoted(row.cells[index]?.text ?? "", LABEL_CHARS)}`;
 }
 
@@ -802,12 +935,41 @@ interface ColumnFacts {
   reading: ColumnReadingResult;
 }
 
+/**
+ * Text work on a cell, done once per cell object for one call. A cell spanning rows is the same
+ * object in each of the up to 50 rows it covers; read, compared and grouped once per row, 100
+ * cells of 10,000 characters spanning 50 rows each put 50 MB of text work on a 1.1 MB page and
+ * held the event loop for seconds a page.
+ */
+interface CellTexts {
+  value(cell: TableCell | undefined): CellValue;
+  normalized(cell: TableCell | undefined): string;
+  /** The cell's text quoted for a figure's label, at most 40 characters. */
+  label(cell: TableCell | undefined): string;
+}
+
+function newCellTexts(): CellTexts {
+  const memo = <T>(compute: (text: string) => T): ((cell: TableCell | undefined) => T) => {
+    const cache = new Map<TableCell, T>();
+    return (cell) => {
+      const key = cell ?? EMPTY_CELL;
+      let result = cache.get(key);
+      if (result === undefined) {
+        result = compute(key.text);
+        cache.set(key, result);
+      }
+      return result;
+    };
+  };
+  return { value: memo(readCellValue), normalized: memo(normalizeText), label: memo((text) => quoted(text, 40)) };
+}
+
 /** Every row's value in one column, and the column's reading, taken over all rows of the union. */
-function columnFacts(rows: readonly UnionRow[], index: number, lang: string | null): ColumnFacts {
-  const values = rows.map((row) => readCellValue(row.cells[index]?.text ?? ""));
+function columnFacts(rows: readonly UnionRow[], index: number, lang: string | null, texts: CellTexts): ColumnFacts {
+  const values = rows.map((row) => texts.value(row.cells[index]));
   const figures: Array<{ raw: string; label: string }> = [];
   values.forEach((value, i) => {
-    if (value.kind === "number") figures.push({ raw: value.raw, label: `${rowRef(rows[i]!)} ${quoted(rows[i]!.cells[index]?.text ?? "", 40)}` });
+    if (value.kind === "number") figures.push({ raw: value.raw, label: `${rowRef(rows[i]!)} ${texts.label(rows[i]!.cells[index])}` });
   });
   return { values, reading: inferColumnReading(figures, lang) };
 }
@@ -876,10 +1038,11 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
   const chosen: Array<{ page: PageInput; table: ParsedTable }> = [];
   const pagesSkipped: Array<{ page: number; reason: string }> = [];
   const signatures = new Map<string, number>();
+  const cellIds = newCellIds();
   for (const page of pages) {
     const choice = chooseTable(page, query, namedColumns, pages.length);
     if ("error" in choice) return { ok: false, error: choice.error, ...(page.doc.tables.length === 0 ? { noTable: true } : {}) };
-    const signature = rowSignature(choice.table.rows);
+    const signature = rowSignature(choice.table.rows, choice.table.columns.length, cellIds);
     const earlier = signatures.get(signature);
     if (earlier !== undefined && choice.table.rows.length > 0) {
       pagesSkipped.push({ page: page.page, reason: `its table has the same rows as page ${earlier}` });
@@ -901,11 +1064,12 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
   const tableDescription = chosen.length === 1 ? describeTable(chosen[0]!.table) : `${describeTable(chosen[0]!.table)} on each`;
 
   const resolve = (argument: string): ColumnResolution => resolveColumn(columns, argument);
+  const texts = newCellTexts();
   const factsCache = new Map<number, ColumnFacts>();
   const factsOf = (index: number): ColumnFacts => {
     let facts = factsCache.get(index);
     if (!facts) {
-      facts = columnFacts(rows, index, lang);
+      facts = columnFacts(rows, index, lang, texts);
       factsCache.set(index, facts);
     }
     return facts;
@@ -958,7 +1122,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
         }
         return compares(condition.op, compareScaled(cellFigure, figure!));
       }
-      const text = normalizeText(rows[position]!.cells[index]?.text ?? "");
+      const text = texts.normalized(rows[position]!.cells[index]);
       if (condition.op === "contains") return text.includes(wantedText);
       if (condition.op === "=") return text === wantedText;
       if (condition.op === "!=") return text !== wantedText;
@@ -1016,11 +1180,11 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
   if (groupIndex !== null) {
     const byKey = new Map<string, { key: string; label: string; positions: number[] }>();
     for (const position of kept) {
-      const text = rows[position]!.cells[groupIndex]?.text ?? "";
-      const key = normalizeText(text);
+      const cell = rows[position]!.cells[groupIndex];
+      const key = texts.normalized(cell);
       let group = byKey.get(key);
       if (!group) {
-        group = { key, label: displayText(text), positions: [] };
+        group = { key, label: displayText(cell?.text ?? ""), positions: [] };
         byKey.set(key, group);
         groups.push(group);
       }
@@ -1032,7 +1196,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
     for (const { table } of chosen) {
       for (const footerRow of table.footer) {
         const cell = footerRow[index];
-        if (cell && readCellValue(cell.text).kind === "number") return displayText(cell.text);
+        if (cell && texts.value(cell).kind === "number") return displayText(cell.text);
       }
     }
     return "";
@@ -1060,7 +1224,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
       if (name === "min" ? order < 0 : order > 0) best = entry;
     }
     const ties = values.filter((entry) => compareScaled(entry.value, best.value) === 0);
-    const at = ties.slice(0, 5).map((entry) => rowLabel(rows[entry.position]!, index)).join(", ") + (ties.length > 5 ? `, and ${ties.length - 5} more` : "");
+    const at = ties.slice(0, 5).map((entry) => rowLabel(rows[entry.position]!, index, columns.length)).join(", ") + (ties.length > 5 ? `, and ${ties.length - 5} more` : "");
     return { value: formatScaled(best.value, reading), at, numeric: values.length };
   };
 
@@ -1134,11 +1298,11 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
   if (struckCells > 0) lines.push(`${struckCells} cell${struckCells === 1 ? " has" : "s have"} struck-through text (~~…~~), not part of ${struckCells === 1 ? "its value" : "their values"}`);
   const footerRows = chosen.flatMap(({ table }) => table.footer);
   if (footerRows.length > 0) {
-    lines.push(`footer (not computed): ${footerRows.slice(0, 3).map((cells) => cells.map(showCell).join(" | ")).join(" ‖ ")}`);
+    lines.push(`footer (not computed): ${footerRows.slice(0, 3).map((cells) => cellsUpTo(cells, Math.min(columns.length, ROW_CELLS_SHOWN)).map(showCell).join(" | ")).join(" ‖ ")}`);
   }
   lines.push(`columns: ${listColumns(columns)}`);
   const listed = conditionTexts.length > 0 ? kept : rows.map((_, index) => index);
-  lines.push(renderRows(listed.map((position) => rows[position]!), conditionTexts.length > 0 ? "rows kept" : "rows", options.rowsChars ?? TABLE_LIMITS.rowsChars, !extraction));
+  lines.push(renderRows(listed.map((position) => rows[position]!), conditionTexts.length > 0 ? "rows kept" : "rows", options.rowsChars ?? TABLE_LIMITS.rowsChars, !extraction, columns.length));
 
   return {
     ok: true,
@@ -1152,11 +1316,11 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
 }
 
 /** The rows section, within its character budget, saying what a cut left out. */
-function renderRows(rows: readonly UnionRow[], title: string, budget: number, computed: boolean): string {
+function renderRows(rows: readonly UnionRow[], title: string, budget: number, computed: boolean, width: number): string {
   const lines: string[] = [];
   let used = 0;
   for (const row of rows) {
-    const line = capped(`${rowRef(row)} | ${row.cells.slice(0, 200).map(showCell).join(" | ")}`, budget);
+    const line = capped(`${rowRef(row)} | ${cellsUpTo(row.cells, Math.min(width, ROW_CELLS_SHOWN)).map(showCell).join(" | ")}`, budget);
     if (used + line.length + 1 > budget && lines.length > 0) break;
     lines.push(line);
     used += line.length + 1;
@@ -1181,7 +1345,7 @@ function extractAll(page: PageInput, options: ComputeOptions): ComputeResult {
     lines.push(`${describeTable(table)}: ${table.rows.length} rows × ${table.columns.length} columns${table.truncated ? ` (${CAP_NOTE})` : ""}`);
     lines.push(`columns: ${listColumns(table.columns)}`);
     const rows = table.rows.map((cells, index) => ({ page: page.page, r: index + 1, cells }));
-    const section = renderRows(rows, "rows", Math.max(200, budget), false);
+    const section = renderRows(rows, "rows", Math.max(200, budget), false, table.columns.length);
     lines.push(section);
     budget -= section.length;
   }

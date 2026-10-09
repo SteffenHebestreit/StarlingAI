@@ -190,6 +190,17 @@ describe("web_table source url: pages", () => {
     expect((r.metadata?.["webTable"] as Record<string, unknown>)["pagesRead"]).toBe(3);
   });
 
+  it("refuses more than 20 where conditions before fetching anything", async () => {
+    const requested = site();
+    const where = Array.from({ length: 21 }, () => ({ column: "Preis", op: "<", value: 50 }));
+    const r = await webTable({ url: `${PUBLIC}/lager.html`, aggregates: ["count"], where });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("at most 20 where conditions; 21 were given");
+    expect(r.rejectedBeforeEffect).toBe(true);
+    expect(requested).toEqual([]);
+    expect((await webTable({ url: `${PUBLIC}/lager.html`, aggregates: ["count"], where: where.slice(0, 20).map((c) => ({ ...c, column: "Südtal", value: 1_000 })) })).success).toBe(true);
+  });
+
   it("refuses 11 distinct URLs before fetching any", async () => {
     const requested = site();
     const r = await webTable({ url: Array.from({ length: 11 }, (_, i) => `${PUBLIC}/p${i}.html`), aggregates: ["count"] });
@@ -235,6 +246,24 @@ describe("web_table source url: pages", () => {
     expect(r.success).toBe(false);
     expect(r.error).toMatch(/^stopped: the turn was stopped; 0 of 2 pages had been read/);
     expect(requested).toEqual([`${PUBLIC}/produkte/seite-1.html`]);
+  });
+
+  it("puts column names into its metadata as the output shows them: at most 40, each at most 60 characters", async () => {
+    // metadata.webTable reaches the audit log, its Postgres sink and the dashboard. A 4.8 MB
+    // header text spanning 40 columns put 192 MB of page text there.
+    const huge = "x".repeat(4_800_000);
+    site({
+      [`${PUBLIC}/breit.html`]: () => html(`<table><thead><tr><th>Artikel</th><th colspan=45>${huge}</th></tr></thead>`
+        + `<tbody><tr><td>A</td>${"<td>1</td>".repeat(45)}</tr></tbody></table>`),
+    });
+    const r = await webTable({ url: `${PUBLIC}/breit.html`, column: "2", aggregates: ["sum"] });
+    expect(r.success, r.error).toBe(true);
+    const columns = (r.metadata?.["webTable"] as { columns: string[] }).columns;
+    expect(columns).toHaveLength(40);
+    expect(columns[0]).toBe("Artikel");
+    expect(columns[1]).toBe(`${"x".repeat(59)}…`);
+    expect(columns.every((name) => [...name].length <= 60)).toBe(true);
+    expect(JSON.stringify(r.metadata).length).toBeLessThan(4_000);
   });
 
   it("fails on a 404 page with its status, computing nothing over the error page", async () => {

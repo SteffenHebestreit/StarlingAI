@@ -16,9 +16,9 @@
  * browser tab shows now, with one browser_evaluate and no navigation, and checks that page and its
  * frames as browser_axe_audit does.
  *
- * Bounded: 10 pages and 90 s per call, the deadline enforced inside every body read and the turn's
- * abort signal honoured; 5 MB per page and 10 MB per call; 40 pages per run (the sub-agent run's
- * own session id), and the run's call cap in SUB_AGENT_PER_TOOL_CAPS.
+ * Bounded: 10 pages, 20 where conditions and 90 s per call, the deadline enforced inside every
+ * body read and the turn's abort signal honoured; 5 MB per page and 10 MB per call; 40 pages per
+ * run (the sub-agent run's own session id), and the run's call cap in SUB_AGENT_PER_TOOL_CAPS.
  */
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -33,6 +33,7 @@ import {
   displayText,
   newCellBudget,
   parseHtmlTables,
+  shownColumnName,
   type AggregateName,
   type CellBudget,
   type ComputeResult,
@@ -56,6 +57,7 @@ export const WEB_TABLE_LIMITS = Object.freeze({
   /** What the tab source reads of the page: at most this many top-level tables and characters. */
   tabTables: 50,
   tabChars: 2_000_000,
+  whereConditions: 20,
 });
 
 /** The call deadline. The registry's own 120 s timeout is a race that does not stop the handler. */
@@ -145,6 +147,11 @@ function parseRequest(args: Record<string, unknown>): Request | string {
   }
 
   const whereList = asList(args["where"]);
+  // Each condition resolves its column against a header of up to 100,000 columns and passes over
+  // every row: an unbounded list held the event loop for as long as the list was long.
+  if (whereList && whereList.length > WEB_TABLE_LIMITS.whereConditions) {
+    return `at most ${WEB_TABLE_LIMITS.whereConditions} where conditions; ${whereList.length} were given`;
+  }
   const where: Condition[] = [];
   for (const entry of whereList ?? []) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "where must be a list of conditions like {\"column\": \"Preis\", \"op\": \"<\", \"value\": 50}";
@@ -300,7 +307,9 @@ async function finish(result: ComputeResult, meta: WebTableMeta, ctx: ToolContex
         pagesSkipped: [...(meta.pagesSkipped ?? []), ...result.pagesSkipped],
         table: result.table,
         rows: result.rows,
-        columns: result.columns.slice(0, 40),
+        // As the output shows them. The audit log, its Postgres sink and the dashboard receive
+        // this; a 4.8 MB header text spanning 40 columns once put 192 MB of page text there.
+        columns: result.columns.slice(0, 40).map(shownColumnName),
         aggregates: result.aggregates,
       },
     },
