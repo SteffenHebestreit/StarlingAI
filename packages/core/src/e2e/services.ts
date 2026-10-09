@@ -34,7 +34,7 @@
  * Response bodies are read for the fields above only — /api/mcp/servers and the computer-use
  * config carry configuration the harness never logs.
  */
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { E2EService } from "./scenario.js";
@@ -120,16 +120,37 @@ export function environmentStatusSource(repoRoot: string, ttlMs = 5 * 60_000): E
   return () => {
     if (cached && Date.now() - cached.at < ttlMs) return cached.status;
     const status = new Promise<{ json: unknown } | { error: string }>((resolveStatus) => {
-      execFile(process.execPath, [script, "status", "--json"], { cwd: repoRoot, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      // windowsHide gives the child a hidden console of its own. A harness whose launching task
+      // was stopped on Windows has lost its console, and a child that inherits the dead one dies
+      // at process start (0xC0000142) before printing anything, so every status read as "no
+      // output" and the mail scenarios were skipped.
+      execFile(process.execPath, [script, "status", "--json"], { cwd: repoRoot, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
         const parsed = safeJsonParse(String(stdout).trim());
         if (parsed !== undefined) return resolveStatus({ json: parsed });
-        const why = String(stderr).trim().split(/\r?\n/)[0] || (err ? err.message : "no output");
-        resolveStatus({ error: `pnpm e2e:env status --json gave no status (${why})` });
+        const why = String(stderr).trim().split(/\r?\n/)[0] || "no output";
+        resolveStatus({ error: `pnpm e2e:env status --json gave no status (${why}; ${howChildEnded(err)})` });
       });
     });
     cached = { at: Date.now(), status };
     return status;
   };
+}
+
+/**
+ * How the status child ended: its exit code and the signal that stopped it. A child that dies
+ * before it prints anything leaves nothing else to go on, and a Windows status code (above 255) is
+ * also shown in hex, the form it is documented under (3221225794 = 0xC0000142).
+ */
+function howChildEnded(err: ExecFileException | null): string {
+  if (!err) return "exit code 0";
+  const parts: string[] = [];
+  if (typeof err.code === "number") {
+    parts.push(err.code > 255 ? `exit code ${err.code} (0x${(err.code >>> 0).toString(16).toUpperCase()})` : `exit code ${err.code}`);
+  } else if (typeof err.code === "string") {
+    parts.push(`failed to run: ${err.code}`);
+  }
+  if (err.signal) parts.push(`signal ${err.signal}`);
+  return parts.join(", ") || err.message.split(/\r?\n/)[0] || "failed";
 }
 
 export function environmentFromSource(source: EnvironmentStatusSource): EnvironmentStatusProvider {
