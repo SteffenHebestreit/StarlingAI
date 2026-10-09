@@ -17,6 +17,9 @@ import { readRecentOutcomes, computeAgentCostProfile, computeOutcomeRoutingMulti
 import { rerankCandidates } from "../retrieval/reranker.js";
 import { logAudit } from "../audit/logger.js";
 import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
+import { isCompileTimeMappedTool } from "../guardrails/tool-tiers.js";
+import { getTool } from "./registry.js";
+import { isToolDisabled } from "./groups.js";
 
 /**
  * Minimum score for a candidate to qualify when semantic embeddings are
@@ -73,6 +76,8 @@ export interface AgentRoutingResolution {
   gated: boolean;
   /** Agents excluded because their circuit breaker is open (too many recent failures). */
   trippedAgents: string[];
+  /** Agents excluded because no tool they declare is usable here (agentCfgHasNoUsableTools). Absent when there were none. */
+  toollessAgents?: string[];
   /** True when every result is only "low" confidence — consider ephemeral agent or user clarification. */
   allLowConfidence: boolean;
   /** Agents explicitly excluded from this routing pass, such as the invoking coordinator. */
@@ -152,6 +157,7 @@ export function logRoutingEvaluated(input: {
     gated: resolution.gated,
     allLowConfidence: resolution.allLowConfidence,
     trippedAgents: resolution.trippedAgents,
+    ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
     excludedAgents: resolution.excludedAgents ?? [],
     topResult: resolution.results[0]?.name ?? null,
     topScore: resolution.results[0]?.score ?? null,
@@ -238,6 +244,38 @@ export function isCircuitOpen(agentName: string, workspacePath: string): boolean
   if (recent.length < CIRCUIT_MIN_SAMPLES) return false;
   const failures = recent.filter(o => o.outcome === "failure").length;
   return failures / recent.length > CIRCUIT_FAILURE_THRESHOLD;
+}
+
+/** The swarm's own bookkeeping tools, which any agent may hold. They do none of an agent's work. */
+const SWARM_BOOKKEEPING_TOOL_NAMES: ReadonlySet<string> = new Set(["read_shared_facts", "share_finding"]);
+
+/**
+ * Whether this process cannot offer a tool an agent declares. A registered tool is usable. An
+ * unregistered one is not when nothing but runtime state could register it: a name with no
+ * compile-time tier, which is a bridged MCP tool (mcp__<server>__<tool>, registered only while its
+ * server is connected), an A2A or self-developed tool, or a name no process can register at all;
+ * or a tool config disables, which registerTool skips. A built-in tool that is merely unregistered
+ * stays usable: its module registers it on import, and a process that routes without importing
+ * every tool module (a CLI, a test) would otherwise find no agent.
+ */
+function declaredToolIsUnusable(toolName: string): boolean {
+  if (getTool(toolName)) return false;
+  return !isCompileTimeMappedTool(toolName) || isToolDisabled(toolName);
+}
+
+/**
+ * Whether an agent is left with no tool to do its work: it declares tools beyond the swarm's
+ * bookkeeping pair, and every one of them is unusable here (declaredToolIsUnusable). On the E2E run
+ * of 2026-10-08 the processmem MCP server was unreachable, so process_memory_keeper's ten
+ * mcp__processmem__ tools were never registered and a sub-agent run silently keeps only registered
+ * tools. Routing still offered it as the only match for "Schreibe die Textdatei …"; it ran with
+ * read_shared_facts and share_finding, called share_finding, reported success, and the file was
+ * never written. An agent that declares no tools beyond the pair, or inherits the full set, is not
+ * this: it never depended on one.
+ */
+export function agentCfgHasNoUsableTools(cfg: { tools?: string[] } | undefined): boolean {
+  const domainTools = (cfg?.tools ?? []).filter((toolName) => !SWARM_BOOKKEEPING_TOOL_NAMES.has(toolName));
+  return domainTools.length > 0 && domainTools.every(declaredToolIsUnusable);
 }
 
 /**
@@ -440,6 +478,16 @@ export async function resolveAgentRouting(
     entries = entries.filter(([name]) => !trippedAgents.includes(name));
   }
 
+  // Filter out agents left with no usable tool (agentCfgHasNoUsableTools), such as one whose MCP
+  // server is unreachable: routed, it runs with only the bookkeeping tools and reports success.
+  const toollessAgents: string[] = entries
+    .filter(([, cfg]) => agentCfgHasNoUsableTools(cfg))
+    .map(([name]) => name);
+  if (toollessAgents.length > 0) {
+    entries = entries.filter(([name]) => !toollessAgents.includes(name));
+  }
+  const toollessField = toollessAgents.length > 0 ? { toollessAgents } : {};
+
   const semanticScores = new Map<string, number>();
   let usedSemanticSearch = false;
   let semanticSearchAttempted = false;
@@ -469,6 +517,7 @@ export async function resolveAgentRouting(
       nearMisses: [],
       gated: true,
       trippedAgents,
+      ...toollessField,
       allLowConfidence: false,
       excludedAgents: opts?.excludeAgents,
       semanticUnavailableReason: semanticSearchAttempted
@@ -644,6 +693,7 @@ export async function resolveAgentRouting(
     nearMisses,
     gated: ranked.length > 0 && gated.length === 0,
     trippedAgents,
+    ...toollessField,
     allLowConfidence,
     excludedAgents: opts?.excludeAgents ? [...opts.excludeAgents] : undefined,
   };
