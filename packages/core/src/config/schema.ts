@@ -225,7 +225,8 @@ export const ModelConfigSchema = z.object({
    *  opening of the model's tool-call syntax, and the server continues it. The only format is
    *  "qwen-xml", the Qwen3-Coder XML syntax Qwen3.5/3.6 use on llama.cpp (`<tool_call>` then
    *  `<function=`). Only callers that ask for it get it (CompletionCallOptions.prefillToolCall;
-   *  today the orchestrator's forced calls), so every other request is unchanged.
+   *  today the orchestrator's forced --agent and build calls, agent/runtime.ts forcedCallPrefill),
+   *  so every other request is unchanged.
    *
    *  Why: on the deployed llama.cpp (b11015), "required" only keeps the turn from ENDING until a
    *  call is complete, and prose before the call is allowed. A model that wants to answer itself

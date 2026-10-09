@@ -175,10 +175,10 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
     expect(forced?.["toolChoice"], "first call was not the forced call").toBe("required");
     expect(forced?.["controls"]).toEqual({ enableThinking: false, reasoningEffort: "none" });
     expect(forced?.["maxTokens"]).toBe(4000);
-    // Thinking-off made the burn rarer, not impossible (9 of 12 forced calls on a prompt the model
-    // wanted to answer itself). The prefill is asked for on every forced call, bare when no tool
-    // is the one right answer; the provider sends it only where ModelConfig.toolCallPrefill is set.
-    expect(forced?.["prefillToolCall"]).toEqual({});
+    // No prefilled tool call once a plan exists. Replayed on the Halo (2026-10-09), the prefilled
+    // thinking-off dispatch of a research turn picked record_plan, run_workflow or execute_plan 12
+    // times in 12 and never delegated; unprefilled it delegated 7 times in 12.
+    expect(forced?.["prefillToolCall"], "a research turn's dispatch asked for the prefill").toBeUndefined();
 
     // The next call is not forced: no options at all, so the instance config (thinking ON, the
     // derived max_tokens budget) applies exactly as before this change.
@@ -207,8 +207,86 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
     // But NOT silenced: this is the call that writes the plan, and thinking-off was justified by
     // "the plan was recorded one call earlier" — which is false for the call recording it.
     expect(forced?.["controls"], "the planning call was sent thinking-off").toBeUndefined();
-    // The prefill is asked for here too. Where the flag sends it, the continuation starts after a
-    // closed think block, so this call stops deliberating; a two-phase plan call is the follow-up.
+    // Nor on a research-forced plan call: prefilled, the continuation starts after a closed think
+    // block, and on the Halo the multi-step plan call then skipped the agent search its tail asks
+    // for and planned with web_coder 10 times in 12 (2026-10-09).
+    expect(forced?.["prefillToolCall"], "a research turn's plan call asked for the prefill").toBeUndefined();
+  });
+});
+
+/**
+ * A BUILD THE TURN MUST HAND OFF STARTS INSIDE ITS TOOL CALL — UNTIL A PLAN EXISTS.
+ *
+ * An --auto turn the deliverable word lists see as a build is forced (autonomousModeAntiRefusal),
+ * and there "required" alone let the model draw the deliverable in prose: replayed on the Halo
+ * (2026-10-09), the Mermaid build ran prose to the 4,000-token ceiling 8 times in 12 and called a
+ * refused tool the other 4. Asked for the prefilled tool call, it delegated to diagram_designer
+ * 12 times in 12. Once a plan exists the call is a dispatch, which goes without it (above).
+ */
+describe("a build the turn must hand off asks for the prefilled tool call while no plan exists", () => {
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    streamMock.mockReset();
+    completeMock.mockClear();
+    routingCompleteMock.mockClear();
+    planState.recorded = false;
+    vi.resetModules();
+    (await import("../config/loader.js")).resetConfigForTests();
+  });
+
+  /** A request the deliverable word lists recognise as a build. */
+  const BUILD_REQUEST = "build me a website about local bird species";
+
+  async function forcedBuildCallOptions(): Promise<Record<string, unknown> | undefined> {
+    const dir = mkdtempSync(join(tmpdir(), "sai-forced-build-"));
+    writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+      agents: { mainAssistant: { toolMode: "orchestration_only" } },
+      orchestration: {
+        forceToolChoiceWhenOrchestrationRequired: true,
+        // The --auto build arm: forces the first call of an autoApprove turn that asks for a build.
+        autonomousModeAntiRefusal: true,
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
+    vi.resetModules();
+    const [{ AgentSession }, { runTurn }, { classifyDeliverableIntent }] = await Promise.all([
+      import("../agent/session.js"),
+      import("../agent/runtime.js"),
+      import("../agent/deliverable-intent.js"),
+    ]);
+    // Without this the turn would not be a build turn, and an unforced call would pass the
+    // "no prefill" case below for the wrong reason.
+    expect(classifyDeliverableIntent(BUILD_REQUEST).wantsArtifact).toBe(true);
+    // One burned forced call, then a plain answer so the turn ends.
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return burnStream();
+      return (async function* () {
+        yield { type: "text_delta", content: "done" };
+        yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      })();
+    });
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: BUILD_REQUEST, autoApprove: true });
+    const forced = streamOptions()[0];
+    expect(forced?.["toolChoice"], "the build turn's first call was not forced").toBe("required");
+    return forced;
+  }
+
+  it("asks for the bare opener on the forced call before a plan exists", async () => {
+    planState.recorded = false;
+    const forced = await forcedBuildCallOptions();
+    // Bare: the call has no one tool that is right (delegate_to_agent or record_plan both are).
     expect(forced?.["prefillToolCall"]).toEqual({});
+    // The thinking controls are untouched: still the planning call's.
+    expect(forced?.["controls"]).toBeUndefined();
+  });
+
+  it("does not ask for it once a plan exists: that call is a dispatch", async () => {
+    planState.recorded = true;
+    const forced = await forcedBuildCallOptions();
+    expect(forced?.["controls"]).toEqual({ enableThinking: false, reasoningEffort: "none" });
+    expect(forced?.["prefillToolCall"]).toBeUndefined();
   });
 });

@@ -424,7 +424,8 @@ const MAX_CONTINUATION_OVERLAP_CHARS = 400;
  * The call only has to name an agent and a task. Thinking-off makes the burn rarer but does not
  * remove it: on a prompt the model wants to answer itself, 9 of 12 forced calls came with thinking
  * off and 1 of 12 with it on, and every miss ran to the ceiling (2026-10-08). What holds there is
- * the prefilled tool call at the call site (ModelConfig.toolCallPrefill, off by default). The
+ * the prefilled tool call at the call site (ModelConfig.toolCallPrefill), which the turn asks for
+ * on its --agent and build calls only (forcedCallPrefill in the iteration loop). The
  * ceiling bounds a runaway that gets past them: the largest forced-call arguments observed are a
  * record_plan with steps + acceptance criteria ≈1,200 tokens and a coordinator task ≈500 chars,
  * so 4,000 clears them and caps a runaway at ~2 min at the measured 34.5 tok/s instead of the
@@ -2971,6 +2972,31 @@ async function _runTurn(
         planRecorded: async () => (await loadTurnPlan(session.id)) !== null,
       });
       iterationToolRestriction = restriction;
+      // WHICH FORCED CALLS START INSIDE THEIR TOOL CALL (ModelConfig.toolCallPrefill). "required" does
+      // not make the call come first on the deployed llama.cpp: it only keeps the turn from ending
+      // until a call is complete, so a model that wants to answer itself writes prose up to the
+      // ceiling (13,263 characters on the --agent turn of 2026-10-07). With `<tool_call>\n<function=`
+      // prefilled, the call is the continuation, and the think block is closed before it.
+      // Replayed on the Halo on 2026-10-09 (the turn's own forced requests, 12 per arm in one run),
+      // the prefill helped the calls whose next call is already decided and hurt the ones that still
+      // have to decide it, so it is asked for on the first kind only:
+      // - an --agent directive, named: delegate_to_agent to code_analyst 12 of 12 with and without
+      //   it, at half the generation time (6.6 s against 15.4 s median);
+      // - a build the turn must hand off (the artifact arms), bare, while no plan exists. Without
+      //   it the Mermaid build wrote prose to the 4,000-token ceiling 8 times in 12 and called a
+      //   tool the call site refuses the other 4; with it, delegate_to_agent to diagram_designer 12
+      //   of 12. A site, a chart and a deck that needs research first routed the same either way.
+      // Not on a call forced for research alone: the multi-step plan call then skipped the agent
+      // search its tail asks for and planned with web_coder 10 times in 12. Not once a plan exists:
+      // on the price question, after a no-op execute_plan, the thinking-off dispatch picked
+      // record_plan, run_workflow or execute_plan 12 times in 12 and delegated 0 times, against 7
+      // of 12 without it. The provider sends the opener only where the model config names the
+      // syntax; unasked, nothing changes.
+      const forcedCallPrefill: { tool?: string } | undefined = directiveAgentPending
+        ? { tool: "delegate_to_agent" }
+        : (requiresArtifactDelegation || autonomousArtifactBuild) && forcedPlanState?.planRecorded === false
+          ? {}
+          : undefined;
       llmResponse = await collectStream(
         provider.stream(
           messages,
@@ -2984,18 +3010,8 @@ async function _runTurn(
                 // call's whole job is the deliberation — see FORCED_TOOL_CALL_CONTROLS.
                 ...(forcedPlanState?.planRecorded !== false ? { controls: FORCED_TOOL_CALL_CONTROLS } : {}),
                 maxTokens: FORCED_TOOL_CALL_MAX_TOKENS,
-                // "required" DOES NOT MAKE THE CALL COME FIRST on the deployed llama.cpp: it only
-                // keeps the turn from ending until a call is complete, so a model that wants to
-                // answer itself writes prose up to the ceiling (13,263 characters on the --agent
-                // turn of 2026-10-07). With `<tool_call>\n<function=` prefilled the call is the
-                // continuation: 24 of 24 against 10 of 24 on one prompt. Asked on every forced
-                // call; the provider sends it only where ModelConfig.toolCallPrefill names the
-                // syntax, so with that unset the request is what it was. Named while an --agent
-                // directive is pending: that call has one right answer, the delegation the user
-                // asked for. On the PLANNING call a continuation also closes the think block
-                // (0 reasoning characters, 4 of 4), so with the flag set the plan is recorded
-                // without deliberating; a two-phase call that thinks first is the follow-up.
-                prefillToolCall: directiveAgentPending ? { tool: "delegate_to_agent" } : {},
+                // See forcedCallPrefill above for which forced calls ask for it.
+                ...(forcedCallPrefill ? { prefillToolCall: forcedCallPrefill } : {}),
               }
             : undefined,
         ),

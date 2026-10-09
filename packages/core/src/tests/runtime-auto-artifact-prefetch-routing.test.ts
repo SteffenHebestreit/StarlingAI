@@ -284,6 +284,9 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     const options = await firstCallOptions(loaded, MERMAID_REQUEST, true);
     expect(prefetchCalls.count).toBe(1);
     expect(options?.toolChoice).toBe("required");
+    // A build the turn must hand off starts inside its tool call where the model config names the
+    // syntax: unprefilled on the Halo, this request ran prose to the token ceiling 8 times in 12.
+    expect((options as { prefillToolCall?: unknown } | undefined)?.prefillToolCall).toEqual({});
     // Asked once for the whole turn, in both option orders, under the turn's signal, as routing-tier work.
     expect(readoutMock).toHaveBeenCalledTimes(1);
     const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string; priorTurnDigest?: string }, { bothOrders?: boolean; signal?: AbortSignal }];
