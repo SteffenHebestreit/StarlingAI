@@ -1874,7 +1874,12 @@ async function _runTurn(
   // two calls overlap the document retrieval and the prompt assembly: only a reading that the
   // request asks for something to be made or done arms the same forced first tool call as an
   // artifact request the word lists recognise (autonomousArtifactBuild below). A request the word
-  // lists see is forced by them already, and a workflow step is never forced, so neither asks.
+  // lists see is forced by them already, and a workflow step is never forced, so neither asks. Nor
+  // does an --agent directive turn: the directive forces the call until its agent has run, and the
+  // delegation that runs it releases this arm, so the verdict would change nothing and its wait
+  // would only delay the first token. (A plan step that attempted the agent and failed releases the
+  // directive without counting as a delegation; that turn is left to the orchestrator, as a turn
+  // without a reading is.)
   // Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a late
   // or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and autoApprove
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
@@ -1895,7 +1900,8 @@ async function _runTurn(
         ? {
             onCapsuleAgents: (agents) => {
               prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
-              if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow") {
+              if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
+                && directiveAgent === undefined) {
                 const priorTurnDigest = buildPriorTurnDigest(session);
                 produceIntentRead = startProduceIntentRead({
                   userMessage,

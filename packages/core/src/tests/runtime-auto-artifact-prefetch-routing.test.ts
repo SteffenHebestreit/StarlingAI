@@ -437,6 +437,28 @@ describe("no other turn asks the readout", () => {
     expect(readoutMock).not.toHaveBeenCalled();
   });
 
+  // The directive forces the first call already, and the delegation that runs its agent releases
+  // the --auto arm: the verdict would change nothing, and its wait would delay the first token.
+  it("an --agent directive turn to an emitter asks no readout, and the directive still forces the first call", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
+    readoutMock.mockResolvedValue(modeReading("PRODUCE"));
+    streamMock.mockImplementation(() => textStream("Hier ist das Diagramm."));
+    const session = new loaded.AgentSession({ channel: "test", workspacePath: loaded.workspacePath, systemPrompt: "You are a test agent." });
+    await loaded.runTurn({
+      session,
+      userMessage: MERMAID_REQUEST,
+      autoApprove: true,
+      directiveAgent: "diagram_designer",
+      allowedAgents: ["diagram_designer"],
+    });
+    const options = streamMock.mock.calls[0]?.[3] as { toolChoice?: unknown; prefillToolCall?: unknown } | undefined;
+    expect(options?.toolChoice).toBe("required");
+    expect(options?.prefillToolCall).toEqual({ tool: "delegate_to_agent" });
+    expect(prefetchCalls.count).toBe(1);
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toEqual([]);
+  });
+
   it("a workflow step routed to an emitter asks no readout and is not forced", async () => {
     const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
     readoutMock.mockResolvedValue(modeReading("PRODUCE"));
