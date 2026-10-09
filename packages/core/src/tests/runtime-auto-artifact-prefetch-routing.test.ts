@@ -599,6 +599,34 @@ describe("produceIntentVerdict", () => {
     for (const choice of turnSetup.ASK_MODES) expect(modeKeys).toContain(choice);
     expect(turnSetup.produceIntentVerdict(undefined)).toBeNull();
   });
+
+  // Measured 2026-10-09: "Wie erstelle ich eine Präsentation in PowerPoint?" read converse served and
+  // PRODUCE reversed on every read, and the average sometimes came out PRODUCE.
+  it("is work only when both orders read work: an average that two disagreeing orders put on PRODUCE is an answer", async () => {
+    const { turnSetup } = await load({});
+    const verdict = (choice: string, served: string, reversed: string) =>
+      turnSetup.produceIntentVerdict({ choice, orders: { served, reversed, agreed: served === reversed } });
+    expect(verdict("PRODUCE", "converse", "PRODUCE")).toBe("ask");
+    expect(verdict("PRODUCE", "PRODUCE", "GATHER")).toBe("ask");
+    expect(verdict("converse", "converse", "PRODUCE")).toBe("ask");
+    expect(verdict("PRODUCE", "PRODUCE", "PRODUCE")).toBe("produce");
+    // Work in both orders, if not the same work.
+    expect(verdict("PRODUCE", "PRODUCE", "ORCHESTRATE")).toBe("produce");
+    expect(verdict("ACT", "ACT", "ACT")).toBe("produce");
+    // Both orders on work and the average on an answer (possible when they split the work between two modes): an answer.
+    expect(verdict("converse", "PRODUCE", "ACT")).toBe("ask");
+  });
+
+  it("a turn whose two orders disagree is not forced, though the average reads PRODUCE, and the row has both orders", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
+    const reading = modeReading("PRODUCE");
+    readoutMock.mockResolvedValue({
+      ...reading,
+      readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "converse", reversed: "PRODUCE", agreed: false } } } },
+    });
+    expect(await firstCallOptions(loaded, QUESTIONS[0]!, true)).toBeUndefined();
+    expect(modeReadRows()).toMatchObject([{ outcome: "ask", choice: "PRODUCE", servedChoice: "converse", reversedChoice: "PRODUCE", orderAgreed: false }]);
+  });
 });
 
 describe("prefetchRoutedToDeliverableEmitter", () => {

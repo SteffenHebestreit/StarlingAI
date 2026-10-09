@@ -156,10 +156,22 @@ export const PRODUCE_INTENT_READ_MAX_TOKENS = 6;
 /** What the readout's mode says of the request: something to be made or done, or an answer. */
 export type ProduceIntentVerdict = "produce" | "ask";
 
-/** The readout's mode as a verdict: "ask" for ASK_MODES, "produce" for any other option, null when the facet was not read. Pure. */
-export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice"> | undefined): ProduceIntentVerdict | null {
+/**
+ * The readout's mode as a verdict: "produce" only when every reading of it is work — the choice and,
+ * on a both-orders reading, each order's own choice (PRODUCE, ACT or ORCHESTRATE, not necessarily the
+ * same one) — "ask" when any of them is one of ASK_MODES, null when the facet was not read. Pure.
+ *
+ * The averaged choice alone forced questions. "Wie erstelle ich eine Präsentation in PowerPoint?"
+ * read converse in the served order and PRODUCE in the reversed one on all 47 reads of the probe of
+ * 2026-10-09, and the average landed on PRODUCE on 5 of them. On 64 build reads the rule changed no
+ * verdict: every build read work in both orders except a request to run a research workflow, which
+ * read GATHER in one order and in the average too. Requiring both orders costs a build nothing
+ * there, and keeps a question whose orders disagree from being forced.
+ */
+export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice" | "orders"> | undefined): ProduceIntentVerdict | null {
   if (!mode) return null;
-  return ASK_MODES.has(mode.choice) ? "ask" : "produce";
+  const readings = [mode.choice, mode.orders?.served, mode.orders?.reversed].filter((choice): choice is string => choice !== undefined);
+  return readings.some((choice) => ASK_MODES.has(choice)) ? "ask" : "produce";
 }
 
 const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
@@ -176,7 +188,8 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * right in 84.8 % of 312 cases with both option orders averaged and in 74.2 % with one, and on real
  * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked,
  * at once (askIntentReadout concurrentOrders) and only as far as the mode line
- * (PRODUCE_INTENT_READ_MAX_TOKENS): the turn's first call waits for them.
+ * (PRODUCE_INTENT_READ_MAX_TOKENS): the turn's first call waits for them. Both orders must read
+ * work for the verdict to be "produce" (produceIntentVerdict).
  *
  * Resolves to "produce", "ask", or null when there is no reading: an Anthropic routing tier (the
  * readout needs a grammar and token logprobs, which only a llama.cpp server gives, and the shadow
@@ -188,9 +201,9 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * a reading the orchestrator decides as it does on any other turn.
  *
  * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
- * reading the mode's choice, top probability, margin, runner-up, whether the two orders agreed, and
- * which pass read it when only one did. Never the user's message, the digest or the readout's
- * restatement. Never rejects.
+ * reading the mode's choice, top probability, margin, runner-up, each order's own choice and whether
+ * they agreed, and which pass read it when only one did. Never the user's message, the digest or the
+ * readout's restatement. Never rejects.
  */
 export async function startProduceIntentRead(params: {
   userMessage: string;
@@ -213,6 +226,8 @@ export async function startProduceIntentRead(params: {
               top: round4(mode.top),
               margin: round4(mode.margin),
               runnerUp: mode.runnerUp ?? null,
+              servedChoice: mode.orders?.served ?? null,
+              reversedChoice: mode.orders?.reversed ?? null,
               orderAgreed: mode.orders?.agreed ?? null,
               ...(mode.orders?.singlePass ? { singlePass: mode.orders.singlePass } : {}),
             }
