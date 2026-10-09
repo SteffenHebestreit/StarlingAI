@@ -18,6 +18,7 @@ import { registerKnowledgeBaseRoutes } from "./knowledge-base-routes.js";
 import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
 import { registerMissionRoutes } from "./mission-routes.js";
+import { registerLongRunningRoutes } from "./long-running-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { registerChannelRoutes } from "./channels-routes.js";
@@ -3351,8 +3352,8 @@ export function createGateway() {
     // Under multi-user auth a non-admin lists the runs made as themselves (scene-job-access.ts),
     // chosen in the store before the limit.
     const viewer = await sceneJobViewer(c.req.header("Authorization"));
-    if (!viewer.all && !viewer.userId) return c.json({ jobs: [] });
-    const jobs = await listJobs({ limit, status, ...(viewer.all ? {} : { userId: viewer.userId }) });
+    if (!viewer.all && !viewer.identity) return c.json({ jobs: [] });
+    const jobs = await listJobs({ limit, status, ...(viewer.all ? {} : { owner: viewer.identity }) });
     return c.json({
       jobs: jobs.map((job) => presentSceneJob(job, viewer)),
     });
@@ -3549,34 +3550,9 @@ export function createGateway() {
   // Mission flight recorder + controls (UX-501/502) — reads for any authed user, cancel operator-gated.
   registerMissionRoutes(app);
 
-  // ── Long-running-generation routes ──────────────────────────────────────────
-  // Surface paused sub-agent runs to the dashboard and accept the operator's
-  // decision (continue / unbounded / stop). See
-  // agent/long-running-generation.ts for the failure mode this addresses.
-  app.get("/api/long-running/active", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(longRunningGenerationManager.listPending());
-  });
-
-  app.post("/api/long-running/:id/respond", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    let body: { outcome?: unknown };
-    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
-    const outcome = typeof body.outcome === "string" ? body.outcome : "";
-    if (outcome !== "continue" && outcome !== "unbounded" && outcome !== "stop") {
-      return c.json({ error: "outcome must be one of: continue, unbounded, stop" }, 400);
-    }
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    const resolved = longRunningGenerationManager.resolveRequest(
-      c.req.param("id"),
-      outcome,
-      user?.username ?? "operator",
-    );
-    if (!resolved) return c.json({ error: "Request not found or already resolved" }, 404);
-    return c.json({ ok: true, request: resolved });
-  });
+  // ── Long-running-generation routes — extracted to ./long-running-routes.ts ──
+  // Surface paused sub-agent runs to the dashboard and accept the decision on one.
+  registerLongRunningRoutes(app);
 
   // ── REST chat endpoint ───────────────────────────────────────────────────
   // Never implemented: a turn is inherently streaming (tool calls, delegation,

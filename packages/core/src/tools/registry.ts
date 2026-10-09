@@ -140,6 +140,13 @@ export function toolContextIdentity(ctx: Pick<ToolContext, "userId" | "identity"
 export function toolCallIdentity(ctx: Pick<ToolContext, "userId" | "identity">): Identity | undefined {
   return pairedIdentity(toolContextIdentity(ctx));
 }
+
+/** The caller a per-user resource guard (guardrails/resource-access.ts) checks for this call: the
+ *  call's identity, whole, when its ToolContext names a user; nobody when it names none, as the
+ *  guards always read `ctx.userId`. */
+export function resourceGuardIdentity(ctx: Pick<ToolContext, "userId" | "identity">): Identity | undefined {
+  return ctx.userId ? toolCallIdentity(ctx) : undefined;
+}
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;

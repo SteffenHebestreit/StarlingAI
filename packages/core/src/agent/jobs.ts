@@ -5,6 +5,7 @@ import type { TurnOutput, TurnPerformanceMetrics } from "./runtime.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
 import type { Identity, PrincipalKind } from "../runtime/accounts.js";
+import { multiUserAuthActive, ownsRecord } from "../runtime/user-scope.js";
 
 const log = childLogger("agent:jobs");
 
@@ -205,11 +206,18 @@ export async function createJob(input: CreateSceneJobInput): Promise<SceneJob> {
 }
 
 /** Which jobs a listing returns: the newest `limit` (default 50, at most 200) of those with the
- *  given status and, when `userId` is set, run as that user. Both filters apply before the limit. */
+ *  given status and, when `owner` is set, run as that identity. Both filters apply before the
+ *  limit. */
 export interface ListJobsOptions {
   limit?: number;
   status?: JobStatus;
-  userId?: string;
+  /**
+   * Only the runs this identity owns (runtime/user-scope.ts ownsRecord): an account's by its id, a
+   * principal's by its kind and name. It was the username the runs were made as, so an account
+   * created again under a deleted one's name listed the old one's runs. A run from before account
+   * ids, or made as nobody, is nobody's here.
+   */
+  owner?: Identity;
 }
 
 export async function listJobs(opts?: ListJobsOptions): Promise<SceneJob[]> {
@@ -391,7 +399,7 @@ class InMemorySceneJobStore implements SceneJobStore {
     const limit = normalizeListLimit(opts?.limit);
     return [...this.jobs.values()]
       .filter((job) => !opts?.status || job.status === opts.status)
-      .filter((job) => opts?.userId === undefined || job.userId === opts.userId)
+      .filter((job) => opts?.owner === undefined || ownsRecord(opts.owner, sceneJobIdentity(job)))
       .sort((left, right) => (right.completedAt ?? right.startedAt ?? right.createdAt).localeCompare(left.completedAt ?? left.startedAt ?? left.createdAt))
       .slice(0, limit)
       .map((job) => toPublicJob(job));
@@ -661,9 +669,25 @@ class PostgresSceneJobStore implements SceneJobStore {
       values.push(opts.status);
       conditions.push(`status = $${values.length}`);
     }
-    if (opts?.userId !== undefined) {
-      values.push(opts.userId);
-      conditions.push(`user_id = $${values.length}`);
+    if (opts?.owner !== undefined) {
+      // The same rule in SQL: an account's runs by account_id; a principal's by its name, its kind
+      // (kept in the payload) and no account. Anything else owns nothing.
+      const owner = opts.owner;
+      if (owner.account) {
+        values.push(owner.account);
+        conditions.push(`account_id = $${values.length}`);
+      } else if (owner.principal && owner.userId !== undefined) {
+        values.push(owner.userId);
+        const userParam = `$${values.length}`;
+        values.push(owner.principal);
+        conditions.push(`account_id IS NULL AND user_id = ${userParam} AND payload->>'principal' = $${values.length}`);
+      } else if (!multiUserAuthActive() && owner.userId !== undefined) {
+        // One operator: by the name the runs were made as, as always.
+        values.push(owner.userId);
+        conditions.push(`user_id = $${values.length}`);
+      } else {
+        conditions.push("FALSE");
+      }
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     values.push(limit);

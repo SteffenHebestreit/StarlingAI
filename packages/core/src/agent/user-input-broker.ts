@@ -21,6 +21,8 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { checkInput } from "../guardrails/input.js";
 import { currentRequestContext } from "../runtime/request-context.js";
+import { ownsRecord, recordHasOwner } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 import { getSessionRecord } from "./session.js";
 import {
   DEFAULT_MAX_ANSWER_BYTES,
@@ -53,6 +55,9 @@ const EXPIRED: UserInputFieldError[] = [{ field: "inputId", message: "expired" }
  *  holds by default and so would let anyone answer anyone's question. */
 export interface UserInputCaller {
   userId?: string;
+  /** The same caller whole (its account id or principal kind with its name): under multi-user auth
+   *  a turn is its owner's by identity, not by name (ownsRecord). */
+  identity?: Identity;
   isAdmin: boolean;
 }
 
@@ -68,14 +73,14 @@ export type UserInputRespondResult = { ok: true } | { ok: false; errors: UserInp
 
 interface OpenTurn {
   rootSessionId: string;
-  ownerUserId?: string;
+  owner?: Identity;
   /** A graceful Stop: open requests were settled, and new ones are answered "cancelled". */
   stopped: boolean;
 }
 
 interface PendingUserInput {
   event: UserInputNeededEvent;
-  ownerUserId?: string;
+  owner?: Identity;
   createdAt: number;
   expiresAtMs: number;
   holdTimeoutMs: number;
@@ -119,9 +124,9 @@ class UserInputBroker {
 
   /** A turn that may ask. Requests naming any other turn get "no_channel": a background run that
    *  outlived its turn has nobody to ask. */
-  openTurn(turnId: string, rootSessionId: string, ownerUserId?: string): void {
+  openTurn(turnId: string, rootSessionId: string, owner?: Identity): void {
     this.abortedTurns.delete(turnId);
-    this.turns.set(turnId, { rootSessionId, ...(ownerUserId !== undefined ? { ownerUserId } : {}), stopped: false });
+    this.turns.set(turnId, { rootSessionId, ...(recordHasOwner(owner) ? { owner } : {}), stopped: false });
   }
 
   /**
@@ -197,15 +202,15 @@ class UserInputBroker {
   /** The owner check for a root: its owner, an admin, or anyone when the session has no owner
    *  (single-user mode, the same rule canAccessSession applies). */
   canAnswerFor(rootSessionId: string, caller: UserInputCaller): boolean {
-    const owner = [...this.turns.values()].find((turn) => turn.rootSessionId === rootSessionId)?.ownerUserId
-      ?? getSessionRecord(rootSessionId)?.userId;
+    const owner = [...this.turns.values()].find((turn) => turn.rootSessionId === rootSessionId)?.owner
+      ?? getSessionRecord(rootSessionId)?.identity();
     return this.ownerAllows(owner, caller);
   }
 
   /** Open requests of a root the caller may answer, for a page that was reloaded. */
   listOpen(rootSessionId: string, caller: UserInputCaller): UserInputNeededEvent[] {
     return [...this.pending.values()]
-      .filter((entry) => entry.event.sessionId === rootSessionId && this.ownerAllows(entry.ownerUserId, caller))
+      .filter((entry) => entry.event.sessionId === rootSessionId && this.ownerAllows(entry.owner, caller))
       .map((entry) => ({ ...entry.event }));
   }
 
@@ -312,7 +317,7 @@ class UserInputBroker {
       };
       this.pending.set(inputId, {
         event,
-        ...(turn.ownerUserId !== undefined ? { ownerUserId: turn.ownerUserId } : {}),
+        ...(turn.owner ? { owner: turn.owner } : {}),
         createdAt,
         expiresAtMs: createdAt + timeoutMs,
         holdTimeoutMs,
@@ -346,7 +351,7 @@ class UserInputBroker {
   async respond(inputId: string, answer: unknown, caller: UserInputCaller): Promise<UserInputRespondResult> {
     const entry = this.pending.get(inputId);
     if (!entry) return { ok: false, errors: EXPIRED };
-    if (!this.ownerAllows(entry.ownerUserId, caller)) {
+    if (!this.ownerAllows(entry.owner, caller)) {
       logAudit("rbac_denied", { surface: "user_input", inputId, ...(caller.userId ? { username: caller.userId } : {}) }, {
         sessionId: entry.event.sessionId,
         ...(caller.userId ? { userId: caller.userId } : {}),
@@ -391,7 +396,7 @@ class UserInputBroker {
    */
   hold(inputId: string, caller: UserInputCaller): { expiresAt: string } | null {
     const entry = this.pending.get(inputId);
-    if (!entry || !this.ownerAllows(entry.ownerUserId, caller)) return null;
+    if (!entry || !this.ownerAllows(entry.owner, caller)) return null;
     const ceiling = entry.createdAt + entry.event.timeoutMs + entry.holdTimeoutMs;
     const next = Math.min(Date.now() + entry.holdTimeoutMs, ceiling);
     if (next > entry.expiresAtMs) {
@@ -407,7 +412,7 @@ class UserInputBroker {
    *  id it never offered resolves to nothing and no path ever comes from the client. */
   async preview(inputId: string, candidateId: string, caller: UserInputCaller): Promise<UserInputPreview | null> {
     const entry = this.pending.get(inputId);
-    if (!entry || !entry.request.preview || !this.ownerAllows(entry.ownerUserId, caller)) return null;
+    if (!entry || !entry.request.preview || !this.ownerAllows(entry.owner, caller)) return null;
     try {
       return (await entry.request.preview(candidateId)) ?? null;
     } catch (err) {
@@ -468,9 +473,11 @@ class UserInputBroker {
     this.waitListeners.clear();
   }
 
-  private ownerAllows(ownerUserId: string | undefined, caller: UserInputCaller): boolean {
-    if (caller.isAdmin || ownerUserId === undefined) return true;
-    return caller.userId !== undefined && caller.userId === ownerUserId;
+  /** Its owner (by identity under multi-user auth, ownsRecord: an account created again under an
+   *  old name answered the old one's questions), an admin, or anyone when the turn has no owner. */
+  private ownerAllows(owner: Identity | undefined, caller: UserInputCaller): boolean {
+    if (caller.isAdmin || !recordHasOwner(owner)) return true;
+    return ownsRecord(caller.identity ?? (caller.userId !== undefined ? { userId: caller.userId } : undefined), owner);
   }
 
   private settleWhere(match: (entry: PendingUserInput) => boolean, reason: "turn_aborted"): number {

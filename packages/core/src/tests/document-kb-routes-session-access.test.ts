@@ -317,8 +317,9 @@ describe("knowledge-base routes and the session a request names", () => {
     const { request, aliceSession } = await deployment(true);
     const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const shared = await createKnowledgeBase({ name: "Harbour rules", seedUrls: ["https://harbour.example/rules"] });
-    const bobs = await createKnowledgeBase({ name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", ownerId: "bob" });
-    const alices = await createKnowledgeBase({ name: "Alice's ferries", seedUrls: ["https://alice.example/"], scope: "user", ownerId: "alice" });
+    // A user KB is its owner's by account id (callerCanAccessKb), stamped as the routes stamp it.
+    const bobs = await createKnowledgeBase({ name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", ownerId: "bob", ownerAccount: testAccountId("bob") });
+    const alices = await createKnowledgeBase({ name: "Alice's ferries", seedUrls: ["https://alice.example/"], scope: "user", ownerId: "alice", ownerAccount: testAccountId("alice") });
     if (!shared.ok || !bobs.ok || !alices.ok) throw new Error("seeding the KB store failed");
     const sessionKb = await aliceSessionKb(aliceSession);
     const listed = async (path: string): Promise<string[]> => {

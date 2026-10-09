@@ -9,7 +9,9 @@
 
 import { getAllSessions, type AgentSession } from "./session.js";
 import { getConfig } from "../config/loader.js";
-import { currentUserId } from "../runtime/request-context.js";
+import { currentIdentity } from "../runtime/request-context.js";
+import { ownsRecord } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 
 const STOPWORDS = new Set<string>([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "how",
@@ -39,15 +41,16 @@ export interface SearchSessionsOptions {
   includeArchived?: boolean;
   minMessages?: number;
   /**
-   * The user the results are FOR. Under multi-user auth only that user's own sessions are
-   * searched (see sessionVisibilityFilter). Defaults to the ambient request user, so a caller
-   * that forgets to pass it is still scoped rather than handed every account's history.
+   * The user the results are FOR, whole (its account id or principal kind with its name). Under
+   * multi-user auth only that user's own sessions are searched (see sessionVisibilityFilter).
+   * Defaults to the ambient request identity, so a caller that forgets to pass it is still scoped
+   * rather than handed every account's history.
    */
-  requestingUserId?: string | undefined;
+  requester?: Identity | undefined;
 }
 
 /**
- * Which past sessions a search made for `requestingUserId` may return.
+ * Which past sessions a search made for `requester` may return.
  *
  * Security finding S2 (2026-10-05): search_sessions and recall_context's sessions section
  * searched EVERY session in the process, so one authenticated user's question pulled snippets of
@@ -59,10 +62,13 @@ export interface SearchSessionsOptions {
  *     with no requesting user (an unattended run) sees none. No admin exemption: an admin's
  *     recall quietly mixing other users' chats into the admin's answers is the same leak.
  */
-export function sessionVisibilityFilter(requestingUserId: string | undefined): (sessionUserId: string | undefined) => boolean {
+export function sessionVisibilityFilter(requester: Identity | undefined): (sessionOwner: Identity | undefined) => boolean {
   if (getConfig().auth?.enabled !== true) return () => true;
-  if (!requestingUserId?.trim()) return () => false;
-  return (sessionUserId) => sessionUserId === requestingUserId;
+  if (!requester?.userId?.trim()) return () => false;
+  // Owned by identity (ownsRecord), not by name: an account created again under a deleted one's
+  // name searched the old one's chats, and so did one whose name a channel sender's sessions
+  // carried. A session from before account ids is nobody's here (no admin exemption).
+  return (sessionOwner) => ownsRecord(requester, sessionOwner);
 }
 
 export function searchSessions(query: string, opts: SearchSessionsOptions = {}): SessionSearchResult[] {
@@ -72,12 +78,12 @@ export function searchSessions(query: string, opts: SearchSessionsOptions = {}):
   const limit = Math.max(1, Math.min(20, opts.limit ?? 5));
   const minMessages = opts.minMessages ?? 2;
   const includeArchived = opts.includeArchived ?? true;
-  const visible = sessionVisibilityFilter(opts.requestingUserId ?? currentUserId());
+  const visible = sessionVisibilityFilter(opts.requester ?? currentIdentity());
 
   const results: SessionSearchResult[] = [];
   for (const session of getAllSessions({ includeArchived })) {
     if (opts.excludeSessionId && session.id === opts.excludeSessionId) continue;
-    if (!visible(session.userId)) continue;
+    if (!visible(session.identity())) continue;
 
     const messages = extractMessages(session);
     if (messages.length < minMessages) continue;

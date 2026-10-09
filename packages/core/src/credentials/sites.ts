@@ -15,6 +15,7 @@ import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { canAccessResource } from "../guardrails/resource-access.js";
+import type { Identity } from "../runtime/accounts.js";
 
 const log = childLogger("credentials:sites");
 
@@ -74,7 +75,7 @@ export type SiteCredentialLookup =
 export function lookupSiteCredential(
   hostname: string,
   sessionId?: string,
-  userId?: string,
+  who?: Identity,
 ): SiteCredentialLookup {
   const host = normalizeHost(hostname);
 
@@ -83,7 +84,7 @@ export function lookupSiteCredential(
   const configMatch = findConfiguredSite(hostname, config.sites);
   if (configMatch) {
     const [matchedHost, configEntry] = configMatch;
-    if (!canAccessResource(userId, { allowedUsers: (configEntry as { allowedUsers?: string[] }).allowedUsers })) {
+    if (!canAccessResource(who, { allowedUsers: (configEntry as { allowedUsers?: string[] }).allowedUsers })) {
       logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: matchedHost, source: "config" }, { sessionId, severity: "warn" });
       return { status: "denied", hostname: matchedHost };
     }
@@ -113,7 +114,7 @@ export function lookupSiteCredential(
   // 2. Check runtime credential store (API-managed)
   const stored = getStoredSiteCredentialRecord(host);
   if (stored) {
-    if (!canAccessResource(userId, { allowedUsers: stored.allowedUsers })) {
+    if (!canAccessResource(who, { allowedUsers: stored.allowedUsers })) {
       logAudit("guardrail_flagged", { type: "credential_access_denied", hostname: stored.hostname, source: "store" }, { sessionId, severity: "warn" });
       return { status: "denied", hostname: stored.hostname };
     }
@@ -142,9 +143,9 @@ export function lookupSiteCredential(
 export function resolveSiteCredential(
   hostname: string,
   sessionId?: string,
-  userId?: string,
+  who?: Identity,
 ): ResolvedSiteCredential | null {
-  const result = lookupSiteCredential(hostname, sessionId, userId);
+  const result = lookupSiteCredential(hostname, sessionId, who);
   return result.status === "resolved" ? result.credential : null;
 }
 

@@ -170,6 +170,54 @@ export function isLegacyIdentity(who: Identity | undefined): boolean {
   return Boolean(who?.userId) && !who?.account && !who?.principal;
 }
 
+/** Whether multi-user auth is on, for a decision about whose a record is. A config that cannot be
+ *  read counts as multi-user: identities are compared, never names. */
+export function multiUserAuthActive(): boolean {
+  try {
+    return partitioningEnabled();
+  } catch {
+    return true;
+  }
+}
+
+/** Whether a record names an owner at all. One that names none (auth-off history, a webhook run)
+ *  stays open wherever such records were open. */
+export function recordHasOwner(owner: Identity | undefined): owner is Identity {
+  return owner !== undefined && (owner.userId !== undefined || owner.account !== undefined);
+}
+
+/**
+ * Whether `caller` owns a record written for `owner`: THE ONE RULE every ownership check uses (a
+ * session, a job, a knowledge base, a mission, a schedule, an MCP or A2A binding, a question a
+ * turn asked).
+ *
+ * Every such check compared usernames, so an account deleted and created again under the same name
+ * owned everything the old one left, and a channel sender or a bootstrap token whose raw name was
+ * an account's username owned that account's records. Under multi-user auth the comparison is by
+ * identity now:
+ *
+ * - a record of an account is the caller's when the caller is that account (by id);
+ * - a record of a principal when the caller is the same principal: the same kind and the same name;
+ * - a record that names a user but no kind predates account ids and is no caller's: whoever it was
+ *   written for, a guess by name would hand it to the next person given that name. Callers that
+ *   exempt admins let an admin reach it, and nobody else;
+ * - a record that names nobody is no caller's either (callers decide whether such records stay
+ *   open, recordHasOwner).
+ *
+ * With one operator there are no kinds, and a record is the caller's by name, exactly as every
+ * check compared before. A config that cannot be read counts as multi-user: identities, not names.
+ */
+export function ownsRecord(caller: Identity | undefined, owner: Identity | undefined): boolean {
+  if (!caller || !recordHasOwner(owner)) return false;
+  if (!multiUserAuthActive()) return owner.userId !== undefined && caller.userId === owner.userId;
+  if (owner.account) return caller.account !== undefined && sameAccountId(caller.account, owner.account);
+  if (owner.principal) {
+    return caller.account === undefined && caller.principal === owner.principal
+      && caller.userId !== undefined && caller.userId === owner.userId;
+  }
+  return false;
+}
+
 /** The `users` directory name, shared with the workspace zone resolver. */
 export { USERS_SUBDIR };
 

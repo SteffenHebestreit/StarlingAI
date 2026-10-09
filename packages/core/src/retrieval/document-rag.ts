@@ -72,9 +72,7 @@ function multiUserDocuments(): boolean {
  */
 export function callerUserSource(ctx: Pick<RagScopeContext, "userId" | "identity">): string | null {
   if (!multiUserDocuments()) return ctx.userId ? userSource(ctx.userId) : null;
-  const who = ctx.identity && (ctx.userId === undefined || ctx.identity.userId === ctx.userId)
-    ? ctx.identity
-    : ctx.userId ? pairedIdentity({ userId: ctx.userId }) : undefined;
+  const who = ragCallerIdentity(ctx);
   if (!who?.userId) return null;
   const segment = segmentFor(who);
   return segment ? userSource(segment) : null;
@@ -85,6 +83,14 @@ export function callerUserSource(ctx: Pick<RagScopeContext, "userId" | "identity
  * account ids that the account migration let this account adopt (retrieval/document-aliases.ts).
  * With one operator just its own, as always.
  */
+/** The caller a scope context names, whole: its identity when that names the same user as its
+ *  userId, else the userId paired with the ambient identity (pairedIdentity). */
+function ragCallerIdentity(ctx: Pick<RagScopeContext, "userId" | "identity">): Identity | undefined {
+  return ctx.identity && (ctx.userId === undefined || ctx.identity.userId === ctx.userId)
+    ? ctx.identity
+    : ctx.userId ? pairedIdentity({ userId: ctx.userId }) : undefined;
+}
+
 export function callerUserSources(ctx: Pick<RagScopeContext, "userId" | "identity">): string[] {
   const own = callerUserSource(ctx);
   if (!own) return [];
@@ -298,7 +304,12 @@ export async function retrieveDocumentContextWithStatus(
   try {
     const { ambientKbSources } = await import("./knowledge-bases.js");
     // Scope-aware: only ambient KBs THIS caller may access join the union.
-    for (const s of await ambientKbSources({ ...(ctx.userId ? { userId: ctx.userId } : {}), ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}) })) {
+    const kbCaller = ctx.userId !== undefined ? ragCallerIdentity(ctx) : undefined;
+    for (const s of await ambientKbSources({
+      ...(ctx.userId ? { userId: ctx.userId } : {}),
+      ...(kbCaller ? { identity: kbCaller } : {}),
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+    })) {
       scopeSources.add(s);
     }
   } catch { /* KB registry unreadable — ambient KBs just don't join this turn */ }

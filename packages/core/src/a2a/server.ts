@@ -23,7 +23,7 @@ import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
-import { principalIdentity } from "../runtime/user-scope.js";
+import { ownsRecord, principalIdentity } from "../runtime/user-scope.js";
 import { ACCOUNT_ID_RE, principalSegment, type Identity } from "../runtime/accounts.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
@@ -42,9 +42,9 @@ const log = childLogger("a2a:server");
 
 /** In-memory task store.  Single-node by design — federation/A2A clients hit one instance. */
 const _tasks = new Map<string, A2ATask>();
-/** Resolved caller (JWT sub / shared-bearer) that submitted each task, kept OFF the
- *  wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
-const _taskOwners = new Map<string, string>();
+/** Resolved caller (JWT sub / shared-bearer) that submitted each task, with the identity it ran
+ *  as, kept OFF the wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
+const _taskOwners = new Map<string, { caller: string; identity?: Identity }>();
 const TASK_RETENTION_MS = 30 * 60_000;
 
 /** Match a path against the A2A surface; returns true when handled. */
@@ -154,7 +154,7 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
         // the same synthetic id, so they still match. Reuse TASK_NOT_FOUND to avoid
         // disclosing that the task exists.
         const owner = _taskOwners.get(params.id);
-        if (owner !== undefined && owner !== caller) {
+        if (owner !== undefined && !sameTaskCaller(owner, caller, a2aRunIdentity(caller, authResult.user))) {
           logAudit("a2a_request_failed", { method: "tasks/get", caller, reason: "task_owner_mismatch" }, { severity: "warn" });
           return respondError(res, id, A2A_ERROR.TASK_NOT_FOUND);
         }
@@ -196,6 +196,24 @@ function respondError(
   return true;
 }
 
+/** Who a caller's tasks run as, whole: a signed-in account (or a bootstrap token) as itself; the
+ *  shared bearer, an identity-provider peer, and any caller with one operator as a peer principal. */
+function a2aRunIdentity(caller: string, user: AuthenticatedUser | undefined): Identity | undefined {
+  if (user) return callerIdentity(user);
+  return caller === "anonymous" ? undefined : principalIdentity(caller, "peer");
+}
+
+/**
+ * Whether a tasks/get caller is the one that submitted the task. By identity (ownsRecord), not by
+ * the caller's name: an account created again under a deleted one's name read the old one's task
+ * output and history, and so did a peer whose token `sub` was an account's username. With one
+ * operator identities carry no kind and compare by name, as the caller string always did.
+ */
+function sameTaskCaller(owner: { caller: string; identity?: Identity }, caller: string, identity: Identity | undefined): boolean {
+  if (owner.identity || identity) return ownsRecord(identity, owner.identity);
+  return owner.caller === caller;
+}
+
 /** `user` is the account a gateway token resolved to under multi-user auth (authorizeInbound). */
 async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?: AuthenticatedUser): Promise<A2ATask> {
   const config = getConfig();
@@ -221,11 +239,8 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
     throw new Error("task id already exists");
   }
   const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
-  // Who the task runs as, whole: a signed-in account (or a bootstrap token) as itself; the shared
-  // bearer, an identity-provider peer, and any caller with one operator as a peer principal.
-  const runIdentity: Identity | undefined = user
-    ? callerIdentity(user)
-    : caller === "anonymous" ? undefined : principalIdentity(caller, "peer");
+  // Who the task runs as, whole (a2aRunIdentity).
+  const runIdentity = a2aRunIdentity(caller, user);
   // The session the run works in. A caller-chosen id was used as it came, so under multi-user auth
   // a caller could name another account's session and the run would read and write its shared
   // facts, peer messages and checkpoints (found in review, 2026-10-08). There it now names a
@@ -244,7 +259,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
     history: [params.message],
   };
   _tasks.set(taskId, initialTask);
-  _taskOwners.set(taskId, caller);
+  _taskOwners.set(taskId, { caller, ...(runIdentity ? { identity: runIdentity } : {}) });
   scheduleTaskExpiry(taskId);
 
   try {

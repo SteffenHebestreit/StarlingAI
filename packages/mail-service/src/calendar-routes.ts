@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import * as dav from "./dav-client.js";
 import type { MailAccountConfig } from "./types.js";
-import { getAccount } from "./account-access.js";
+import { getAccount, mailCaller } from "./account-access.js";
 
 const CalendarUrlSchema = z.object({
   accountId: z.string().min(1),
@@ -54,7 +54,7 @@ export function calendarRoutes(accounts: MailAccountConfig[]) {
 
   // List calendars for an account
   app.get("/api/calendar/:accountId/calendars", async (c) => {
-    const account = getAccount(accounts, c.req.param("accountId"), c.req.header("x-sai-user"));
+    const account = getAccount(accounts, c.req.param("accountId"), mailCaller((name) => c.req.header(name)));
     if (!account.caldav) {
       return c.json({ error: "Account has no CalDAV configuration" }, 422);
     }
@@ -65,7 +65,7 @@ export function calendarRoutes(accounts: MailAccountConfig[]) {
   // List events in a calendar within a date range
   app.post("/api/calendar/events/list", async (c) => {
     const body = ListEventsSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.caldav) {
       return c.json({ error: "Account has no CalDAV configuration" }, 422);
     }
@@ -76,7 +76,7 @@ export function calendarRoutes(accounts: MailAccountConfig[]) {
   // Create a new calendar event
   app.post("/api/calendar/events", async (c) => {
     const body = CreateEventSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.caldav) {
       return c.json({ error: "Account has no CalDAV configuration" }, 422);
     }
@@ -87,7 +87,7 @@ export function calendarRoutes(accounts: MailAccountConfig[]) {
   // Update an existing calendar event
   app.put("/api/calendar/events", async (c) => {
     const body = UpdateEventSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.caldav) {
       return c.json({ error: "Account has no CalDAV configuration" }, 422);
     }
@@ -98,7 +98,7 @@ export function calendarRoutes(accounts: MailAccountConfig[]) {
   // Delete a calendar event
   app.delete("/api/calendar/events", async (c) => {
     const body = DeleteEventSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.caldav) {
       return c.json({ error: "Account has no CalDAV configuration" }, 422);
     }

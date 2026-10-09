@@ -19,6 +19,7 @@ import { stopManagedChannels, syncAllChannels } from "./channels/runtime.js";
 import { runChannelHealthChecks } from "./channels/registry.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./runtime/status.js";
 import { loadAccountRegistry } from "./runtime/account-registry.js";
+import { reportBareAclEntries } from "./guardrails/acl-entries-check.js";
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
@@ -117,6 +118,9 @@ export async function main() {
   // reported at boot rather than at the first sign-in. Only under multi-user auth, which is the
   // only mode that consults it.
   if (getConfig().auth?.enabled === true) loadAccountRegistry();
+  // allowedUsers entries are matched by identity kind under multi-user auth: name the bare ones that
+  // no account holds, which grant nothing any more (a channel sender needs `principal:<raw>`).
+  reportBareAclEntries();
 
   // Check LLM provider health
   await initProviders();

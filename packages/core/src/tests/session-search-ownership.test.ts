@@ -22,10 +22,15 @@ const UNOWNED = "unowned-0001";
 
 const workspaces: string[] = [];
 
-function seed(id: string, userId: string | undefined, secret: string): void {
+// The accounts the sessions belong to: under multi-user auth a session is its owner's by account
+// id, not by name (runtime/user-scope.ts ownsRecord).
+const ALICE_WHO = { userId: "alice", account: "alice-00000000000000a1" };
+const BOB_WHO = { userId: "bob", account: "bob-00000000000000b0" };
+
+function seed(id: string, owner: { userId: string; account: string } | undefined, secret: string): void {
   const workspacePath = mkdtempSync(join(tmpdir(), "sai-sess-owner-"));
   workspaces.push(workspacePath);
-  const session = createSession({ sessionId: id, channel: "webchat", ...(userId ? { userId } : {}), workspacePath });
+  const session = createSession({ sessionId: id, channel: "webchat", ...(owner ?? {}), workspacePath });
   session.addMessage({ role: "user", content: `Plan the ${MARKER} rollout — ${secret}` });
   session.addMessage({ role: "assistant", content: `Done: the ${MARKER} plan is drafted.` });
 }
@@ -60,8 +65,8 @@ describe("session search is scoped to the requesting user", () => {
   });
 
   function seedAll(): void {
-    seed(ALICE, "alice", "alice-private-note");
-    seed(BOB, "bob", "bob-private-salary-figure");
+    seed(ALICE, ALICE_WHO, "alice-private-note");
+    seed(BOB, BOB_WHO, "bob-private-salary-figure");
     seed(UNOWNED, undefined, "channel-private-address");
   }
 
@@ -80,12 +85,12 @@ describe("session search is scoped to the requesting user", () => {
     seedAll();
     const t = await tool("search_sessions", "../tools/session-search.js");
 
-    const alice = await t.execute({ query: MARKER, limit: 10 }, { sessionId: "current", workspacePath: workspaces[0]!, userId: "alice" });
+    const alice = await t.execute({ query: MARKER, limit: 10 }, { sessionId: "current", workspacePath: workspaces[0]!, userId: "alice", identity: ALICE_WHO });
     expect(sessionIds(alice.metadata)).toEqual([ALICE]);
     expect(String(alice.output)).not.toContain("bob-private-salary-figure");
     expect(String(alice.output)).not.toContain("channel-private-address");
 
-    const bob = await t.execute({ query: MARKER, limit: 10 }, { sessionId: "current", workspacePath: workspaces[0]!, userId: "bob" });
+    const bob = await t.execute({ query: MARKER, limit: 10 }, { sessionId: "current", workspacePath: workspaces[0]!, userId: "bob", identity: BOB_WHO });
     expect(sessionIds(bob.metadata)).toEqual([BOB]);
   });
 
@@ -93,7 +98,7 @@ describe("session search is scoped to the requesting user", () => {
     withAuth(true);
     seedAll();
     const t = await tool("search_sessions", "../tools/session-search.js");
-    const r = await runWithRequestContext({ identity: { userId: "bob" } }, () =>
+    const r = await runWithRequestContext({ identity: BOB_WHO }, () =>
       t.execute({ query: MARKER, limit: 10 }, { sessionId: "sub:current:researcher:1", workspacePath: workspaces[0]! }));
     expect(sessionIds(r.metadata)).toEqual([BOB]);
   });
@@ -113,7 +118,7 @@ describe("session search is scoped to the requesting user", () => {
     const t = await tool("recall_context", "../tools/recall-context.js");
     const r = await t.execute(
       { query: `${MARKER} rollout`, include: ["sessions"], limit: 10 },
-      { sessionId: "current", workspacePath: workspaces[0]!, userId: "alice" },
+      { sessionId: "current", workspacePath: workspaces[0]!, userId: "alice", identity: ALICE_WHO },
     );
     expect(r.success).toBe(true);
     expect(r.metadata?.["sessions"]).toBe(1);

@@ -210,13 +210,13 @@ describe("site credential lookup-miss honesty", () => {
     await withSitesConfig(
       { username: "u@example.com", password: "$FM_PASSWORD", allowedUsers: ["steffen"] },
       (sites) => {
-        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", "admin");
+        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", { userId: "admin" });
         expect(result.status).toBe("denied");
         const msg = sites.siteCredentialMissMessage(result, "freelancermap.de");
         expect(msg).toContain("restricted");
         expect(msg).not.toContain("No credentials found");
         // Back-compat wrapper still collapses to null.
-        expect(sites.resolveSiteCredential("freelancermap.de", "sess-1", "admin")).toBeNull();
+        expect(sites.resolveSiteCredential("freelancermap.de", "sess-1", { userId: "admin" })).toBeNull();
       },
     );
   });
@@ -226,7 +226,7 @@ describe("site credential lookup-miss honesty", () => {
     await withSitesConfig(
       { username: "u@example.com", password: "$FM_PASSWORD", allowedUsers: ["steffen"] },
       (sites) => {
-        expect(sites.lookupSiteCredential("freelancermap.de", "sess-1", "steffen").status).toBe("resolved");
+        expect(sites.lookupSiteCredential("freelancermap.de", "sess-1", { userId: "steffen" }).status).toBe("resolved");
         expect(sites.lookupSiteCredential("freelancermap.de", "sess-1", undefined).status).toBe("resolved");
       },
     );
@@ -237,7 +237,7 @@ describe("site credential lookup-miss honesty", () => {
     await withSitesConfig(
       { username: "u@example.com", password: "$FM_PASSWORD" },
       (sites) => {
-        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", "admin");
+        const result = sites.lookupSiteCredential("freelancermap.de", "sess-1", { userId: "admin" });
         expect(result.status).toBe("unresolved");
         const msg = sites.siteCredentialMissMessage(result, "freelancermap.de");
         expect(msg).toContain("could not be resolved");
@@ -250,7 +250,7 @@ describe("site credential lookup-miss honesty", () => {
     await withSitesConfig(
       { username: "u@example.com", password: "pw-literal" },
       (sites) => {
-        const result = sites.lookupSiteCredential("unknown-site.example", "sess-1", "admin");
+        const result = sites.lookupSiteCredential("unknown-site.example", "sess-1", { userId: "admin" });
         expect(result.status).toBe("not_found");
         expect(sites.siteCredentialMissMessage(result, "unknown-site.example")).toContain("No credentials found");
       },

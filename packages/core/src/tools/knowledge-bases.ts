@@ -48,7 +48,9 @@ function rethrowUnlessUnreadable(err: unknown): ToolResult {
  *  would never match a session-scoped KB), so prefer it when present. */
 function accessCtx(ctx: ToolContext): KbAccessContext {
   const sessionId = ctx.kbAccessSessionId ?? ctx.sessionId;
-  return { ...(ctx.userId ? { userId: ctx.userId } : {}), ...(sessionId ? { sessionId } : {}) };
+  // The caller whole: a user KB is its owner's by identity, not by name (callerCanAccessKb).
+  const identity = ctx.userId ? toolCallIdentity(ctx) : undefined;
+  return { ...(ctx.userId ? { userId: ctx.userId } : {}), ...(identity ? { identity } : {}), ...(sessionId ? { sessionId } : {}) };
 }
 
 function kbUnavailableReason(): string | null {
@@ -271,7 +273,7 @@ registerTool({
       ...(Array.isArray(args["exclude_patterns"]) ? { excludePatterns: args["exclude_patterns"] as string[] } : {}),
       scope,
       ...(ctx.userId ? { ownerId: ctx.userId } : {}),
-      ...(owner?.account ? { ownerAccount: owner.account } : {}),
+      ...(owner?.account ? { ownerAccount: owner.account } : owner?.principal ? { ownerPrincipal: owner.principal } : {}),
       ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
       ...(worker ? { worker } : {}),
       ...(ctx.userId ? { createdBy: ctx.userId } : {}),

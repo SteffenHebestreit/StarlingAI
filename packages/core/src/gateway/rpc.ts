@@ -10,6 +10,7 @@ import {
   createSession,
   deleteSession,
   describeMissingSession,
+  getAllSessions,
   getSession,
   getSessionRecord,
   getSessionTranscript,
@@ -18,7 +19,7 @@ import {
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
 import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
-import { principalIdentity } from "../runtime/user-scope.js";
+import { ownsRecord, principalIdentity, recordHasOwner } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { callerMayUseSession } from "./session-route-access.js";
@@ -547,8 +548,20 @@ export class RpcConnection implements AccountConnection {
   private canAccessSession(sid: string): boolean {
     if (!this.connUserId || this.isSessionAdmin()) return true;
     const rec = getSessionRecord(sid);
-    if (!rec || rec.userId === undefined) return true;
-    return rec.userId === this.connUserId;
+    if (!rec) return true;
+    return this.ownsSession(rec);
+  }
+
+  /**
+   * Whether this connection's caller owns a session, or the session has no owner. By identity under
+   * multi-user auth (ownsRecord): the username matched, so an account created again under a deleted
+   * one's name listed, opened and drove the old one's chats, and a session a channel sender or a
+   * bootstrap token opened under an account's name was that account's. By name with one operator,
+   * as before.
+   */
+  private ownsSession(session: { identity(): Identity | undefined }): boolean {
+    const owner = session.identity();
+    return !recordHasOwner(owner) || ownsRecord(this.connIdentity(), owner);
   }
 
   /**
@@ -556,8 +569,10 @@ export class RpcConnection implements AccountConnection {
    * answering a question in someone else's running turn puts words in their mouth.
    */
   private userInputCaller(): UserInputCaller {
+    const identity = this.connIdentity();
     return {
       ...(this.connUserId ? { userId: this.connUserId } : {}),
+      ...(identity ? { identity } : {}),
       isAdmin: this.isSessionAdmin(),
     };
   }
@@ -567,7 +582,11 @@ export class RpcConnection implements AccountConnection {
    * (callerMayUseSession) and this connection's own session access, whichever is stricter.
    */
   private mayStopTurnIn(sessionId: string): boolean {
-    const caller = this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
+    // Under multi-user auth the caller as the store resolved it (its account or principal kind with
+    // its live role): a name alone would read as an instance credential (callerIdentity).
+    const caller = this.liveUser
+      ? { ...this.liveUser, role: normalizeRole(this.connRole) }
+      : this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
     return this.canAccessSession(sessionId) && callerMayUseSession(caller, sessionId);
   }
 
@@ -580,9 +599,15 @@ export class RpcConnection implements AccountConnection {
    */
   private mayWatchAuditEvent(event: AuditEvent): boolean {
     if (!this.connUserId || this.isSessionAdmin()) return true;
-    if (!event.sessionId) return event.userId !== undefined && event.userId === this.connUserId;
+    if (!event.sessionId) {
+      // An event with no session names its user by name alone, with no account or principal kind:
+      // under multi-user auth, by the rule for such records, it is an admin's (a channel sender's
+      // refusal names the sender, who may share an account's name). With one operator, by name.
+      if (this.liveUser) return false;
+      return event.userId !== undefined && event.userId === this.connUserId;
+    }
     const owner = getSessionRecord(owningChatSessionId(event.sessionId));
-    return owner !== undefined && (owner.userId === undefined || owner.userId === this.connUserId);
+    return owner !== undefined && this.ownsSession(owner);
   }
 
   /** Settings as a session shows them: its own choices over the defaults. session.get and
@@ -611,9 +636,10 @@ export class RpcConnection implements AccountConnection {
 
   /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
-    const all = listSessions({ includeArchived: true });
-    if (!this.connUserId || this.isSessionAdmin()) return all;
-    return all.filter((s) => s.userId === undefined || s.userId === this.connUserId);
+    if (!this.connUserId || this.isSessionAdmin()) return listSessions({ includeArchived: true });
+    return getAllSessions({ includeArchived: true })
+      .filter((session) => this.ownsSession(session))
+      .map((session) => session.toSummary());
   }
 
   async handleMessage(raw: string): Promise<void> {
@@ -1120,7 +1146,7 @@ export class RpcConnection implements AccountConnection {
         // nobody to ask. The questions go to this socket and to any tab that loads the session.
         const interactiveTurn = !overrideFlags.autoApprove;
         if (interactiveTurn) {
-          userInputBroker.openTurn(requestId, session.id, session.userId);
+          userInputBroker.openTurn(requestId, session.id, session.identity());
           userInputBroker.attachSink(session.id, this.connId, (event) => this.sendEvent(event), this.userInputCaller());
         }
 
