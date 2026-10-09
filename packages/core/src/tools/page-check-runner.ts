@@ -14,6 +14,7 @@
  */
 
 import { readFileSync, existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import { createContext, runInContext } from "node:vm";
 import { createRecordingContext, type CanvasPaintReport } from "./canvas-geometry.js";
@@ -187,9 +188,10 @@ export interface RunReport {
   timedOut?: boolean;
   /**
    * Globals a script reached for that a remote script earlier in the page would have defined
-   * (ScriptSource.afterRemote). They are not in `errors`: the page is not broken, this check
-   * just never fetched the library. The script stopped at that point, so the code after it in
-   * that script was not run. Present only when there is at least one.
+   * (ScriptSource.afterRemote), and that none of the page's own scripts binds anywhere. They are
+   * not in `errors`: the page is not broken, this check just never fetched the library. The
+   * script stopped at that point, so the code after it in that script was not run. Present only
+   * when there is at least one.
    */
   remoteGlobals?: string[];
 }
@@ -209,6 +211,60 @@ function undefinedGlobalOf(err: unknown): string | null {
   const e = err as { name?: unknown; message?: unknown } | null;
   if (!e || e.name !== "ReferenceError" || typeof e.message !== "string") return null;
   return /^([\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*) is not defined$/u.exec(e.message)?.[1] ?? null;
+}
+
+type TypeScriptModule = typeof import("typescript");
+/** TypeScript is a runtime dependency of this package; loaded on first use, null when absent. */
+let typescript: TypeScriptModule | null | undefined;
+function loadTypeScript(): TypeScriptModule | null {
+  if (typescript !== undefined) return typescript;
+  try {
+    typescript = createRequire(import.meta.url)("typescript") as TypeScriptModule;
+  } catch {
+    typescript = null;
+  }
+  return typescript;
+}
+
+/** Tests only: null stands for a runtime without the parser; undefined loads it again. */
+export function _setTypeScriptForTests(value: null | undefined): void {
+  typescript = value;
+}
+
+/**
+ * Every name the page's own scripts bind anywhere, in any scope: a var, let or const (also
+ * inside a destructuring pattern), a parameter, a catch variable, a function or class name, an
+ * import, or the target of a plain `name = ...` assignment, which creates a global in sloppy
+ * code. Read off the TypeScript parser's syntax tree, as artifact-validators.ts reads files,
+ * because a hand-rolled scan gets regex literals and template strings wrong. Nothing is run.
+ *
+ * null when the parser is unavailable or throws, and the caller then counts the error: without
+ * this answer a page's own variable cannot be told apart from a library's global.
+ */
+function namesBoundBy(scripts: ScriptSource[]): Set<string> | null {
+  const ts = loadTypeScript();
+  if (!ts) return null;
+  const names = new Set<string>();
+  const visit = (node: import("typescript").Node): void => {
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)
+      || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+      || ts.isClassDeclaration(node) || ts.isClassExpression(node)
+      || ts.isImportClause(node) || ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+      if (node.name && ts.isIdentifier(node.name)) names.add(node.name.text);
+    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(node.left)) {
+      names.add(node.left.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  try {
+    for (const script of scripts) {
+      visit(ts.createSourceFile("page.js", script.code, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS));
+    }
+  } catch {
+    return null;
+  }
+  return names;
 }
 
 /**
@@ -381,9 +437,16 @@ export function runScripts(
   // defect of the page. The same name before any remote script, or after only a deferred one,
   // still counts as an error, and so does every other error.
   const anyAfterRemote = scripts.some((script) => script.afterRemote === true);
+  // ...unless the page's own code binds that name somewhere. A page that loads three.js from a
+  // CDN, declares `const state` inside init() and reads `state.x` in its draw loop passed this
+  // check, so the `runs` probe let through the very bug it was added for. Parsed only once a
+  // name is in question, so a page without one never loads the parser.
+  let boundByPage: Set<string> | null | undefined;
   const recordRemoteGlobal = (err: unknown, afterRemote: boolean): boolean => {
     const name = afterRemote ? undefinedGlobalOf(err) : null;
     if (!name) return false;
+    if (boundByPage === undefined) boundByPage = namesBoundBy(scripts);
+    if (boundByPage === null || boundByPage.has(name)) return false;
     report.remoteGlobals ??= [];
     if (!report.remoteGlobals.includes(name)) report.remoteGlobals.push(name);
     return true;

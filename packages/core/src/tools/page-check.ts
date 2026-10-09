@@ -264,7 +264,8 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
   if (!report) return { ok: true, detail: "" };
 
   // report.remoteGlobals are deliberately not problems: a library the page loads from a CDN is
-  // missing here and present in a browser (page-check-runner.ts runScripts).
+  // missing here and present in a browser, and no name the page binds itself is ever among them
+  // (page-check-runner.ts runScripts).
   const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
   // A REF THIS PROBE CANNOT OPEN IS NOT PROOF THE PAGE IS BROKEN.
   //
@@ -420,9 +421,10 @@ registerTool({
         + (canvasVerdicts.length > 0
           ? "\n" + canvasVerdicts.map((v) => `  - ${v.detail}`).join("\n")
           : "")
-        // Said, not hidden: the script stopped there, so the code after it was not run.
+        // Said, not hidden: the script stopped there, so the code after it was not run. Said as an
+        // assumption, because a misspelt name of the page's own is just as undeclared.
         + (report.remoteGlobals
-          ? `\n  - not run past ${report.remoteGlobals.join(", ")}: defined by a remote <script src> this check does not fetch (not a defect).`
+          ? `\n  - not run past ${report.remoteGlobals.join(", ")}: not declared by this page's own scripts, so taken as a global of a remote <script src> this check does not fetch; if no library the page loads defines it, that is a bug.`
           : "")
         + "\n(Logic and drawing-geometry check. It does not judge colour, layout or whether the result looks GOOD — "
         + "if you can render or screenshot the page, look at it before calling it done.)",

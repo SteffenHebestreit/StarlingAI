@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBuiltPage, collectScripts, collectDeclaredElements, collectElementIds, runScripts, runScriptsIsolated } from "../tools/page-check.js";
 import { judgeCanvasPainting } from "../tools/canvas-geometry.js";
+import { _setTypeScriptForTests } from "../tools/page-check-runner.js";
 import { getTool, type ToolContext } from "../tools/registry.js";
 import "../tools/website.js";
 
@@ -297,6 +298,8 @@ describe("verify_page — globals a remote script would define", () => {
     const tool = await getTool("verify_page")!.execute({ path: "generated/wartungsplan/index.html" }, ctx);
     expect(tool.success).toBe(true);
     expect(tool.output).toContain("not run past Reveal");
+    // Said as an assumption the agent can check, not as a verdict that the name is fine.
+    expect(tool.output).toMatch(/not run past Reveal: not declared by this page's own scripts.*if no library the page loads defines it, that is a bug/);
   }, 40_000);
 
   it("does not count a global the remote script before it would define, in a script or a frame", () => {
@@ -346,4 +349,62 @@ describe("verify_page — globals a remote script would define", () => {
     expect(verdict.ok).toBe(false);
     expect(verdict.detail).toMatch(/TypeError/);
   }, 40_000);
+
+  /**
+   * The exemption is for a name nothing in the page defines. A page that loads three.js or the
+   * Tailwind CDN and declares `const state` inside init() but reads `state.x` in its draw loop has
+   * its own scoping bug, the one the `runs` probe was added for; it passed once a CDN tag stood
+   * before it, and verify_page called it "not a defect".
+   */
+  it("still counts a name the page's own code binds, read where that binding is out of scope", async () => {
+    const STATE = 'function init() { const state = { x: 10 }; }\n'
+      + 'function draw() { document.getElementById("c").getContext("2d").fillRect(state.x, 0, 5, 5); }';
+    // In a script after the remote one, and in a frame.
+    for (const tail of ["init(); draw();", "init(); requestAnimationFrame(draw);"]) {
+      const r = run(`<html><body>${CDN}<canvas id="c"></canvas><script>${STATE}\n${tail}</script></body></html>`);
+      expect(r.errors.join(" "), tail).toMatch(/ReferenceError: state is not defined/);
+      expect(r.remoteGlobals, tail).toBeUndefined();
+    }
+
+    // Any binding of the name counts, in any of the page's own scripts, before or after the remote one.
+    for (const binds of [
+      "function f(state) {}",
+      "const f = ({ state }) => 0;",
+      "function f() { let [a, state] = [1, 2]; return a; }",
+      "function f() { var state; }",
+      "function f() { function state() {} }",
+      "function f() { class state {} }",
+      "try { throw 1; } catch (state) {}",
+      "function f() { state = 1; }",
+    ]) {
+      const r = run(`<html><body>${CDN}<script>${binds}\nstate.x;</script></body></html>`);
+      expect(r.errors.join(" "), binds).toMatch(/ReferenceError: state is not defined/);
+    }
+    expect(run(`<html><body><script>function f(state) {}</script>${CDN}<script>state.x;</script></body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: state is not defined/);
+
+    // Through the isolated worker: the artifact gate's `runs` probe and verify_page both fail it.
+    const root = ws();
+    const ctx = { sessionId: "t", workspacePath: root } as unknown as ToolContext;
+    mkdirSync(join(root, "spiel"), { recursive: true });
+    const page = join(root, "spiel", "index.html");
+    writeFileSync(page, `<html><head>${CDN}</head><body><canvas id="c"></canvas><script>${STATE}\ninit(); requestAnimationFrame(draw);</script></body></html>`);
+    const verdict = await checkBuiltPage(page, "spiel/index.html");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/ReferenceError: state is not defined/);
+    const tool = await getTool("verify_page")!.execute({ path: "spiel/index.html" }, ctx);
+    expect(tool.success).toBe(false);
+    expect(tool.error).toMatch(/ReferenceError: state is not defined/);
+  }, 40_000);
+
+  it("counts the error when it cannot tell whether the page binds the name", () => {
+    _setTypeScriptForTests(null);
+    try {
+      expect(run(`<html><body>${CDN}<script>Lib.init();</script></body></html>`).errors.join(" "))
+        .toMatch(/ReferenceError: Lib is not defined/);
+    } finally {
+      _setTypeScriptForTests(undefined);
+    }
+    expect(run(`<html><body>${CDN}<script>Lib.init();</script></body></html>`).errors).toEqual([]);
+  });
 });
