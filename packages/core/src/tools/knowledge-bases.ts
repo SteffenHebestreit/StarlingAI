@@ -209,7 +209,9 @@ registerTool({
     return {
       success: true,
       output: `Top ${chunks.length} excerpt(s) from "${kb.name}":\n\n${blocks.join("\n\n---\n\n")}${confidenceNote}`,
-      metadata: { hits: chunks.length, kbId: kb.id, lowConfidence },
+      // The pages these excerpts came from. The turn's citation guard keeps a citation of one of
+      // them and strips any other URL the answer cites (agent/turn-terminal-guards.ts).
+      metadata: { hits: chunks.length, kbId: kb.id, lowConfidence, sourceUrls: [...new Set(chunks.flatMap((c) => (c.url ? [c.url] : [])))] },
     };
   },
 });
@@ -432,7 +434,15 @@ registerTool({
       // specific violations on top of a worker's honest "0 violations" result.
       output:
         `Worker result (grounded in "${kb.name}") — relay these findings to the user as-is; do NOT add, infer, or invent any finding the worker did not report, and do NOT claim files were written that the worker did not create:\n\n${run.output}${note}`,
-      metadata: { kbId: kb.id, grantedTools: run.grantedTools, rejectedTools: run.rejectedTools },
+      // The URLs the worker's result names: the pages it was told to cite from its own searches, and
+      // any target it inspected. The turn's citation guard keeps a citation of one of them and
+      // strips any URL the answer adds (agent/turn-terminal-guards.ts).
+      metadata: {
+        kbId: kb.id,
+        grantedTools: run.grantedTools,
+        rejectedTools: run.rejectedTools,
+        sourceUrls: [...new Set(run.output.match(/\bhttps?:\/\/[^\s<>"'`)\]]+/gi) ?? [])],
+      },
     };
   },
 });

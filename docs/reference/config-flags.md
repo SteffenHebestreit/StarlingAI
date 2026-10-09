@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1510 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:602 | 1 |
-| `host` | packages/core/src/config/schema.ts:731 | 118 |
+| `host` | packages/core/src/config/schema.ts:731 | 119 |
 | `http` | packages/core/src/config/schema.ts:776 | 89 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1333 | 20 |
 | `id` | packages/core/src/config/schema.ts:585 | 298 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1488 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:846 | 1 |
 | `mode` | packages/core/src/config/schema.ts:495 | 141 |
-| `model` | packages/core/src/config/schema.ts:1258 | 275 |
+| `model` | packages/core/src/config/schema.ts:1258 | 276 |
 | `modelModeration` | packages/core/src/config/schema.ts:1254 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1726 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1741 | 4 |
@@ -506,10 +506,10 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:988 | 466 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 3 |
-| `url` | packages/core/src/config/schema.ts:587 | 149 |
+| `url` | packages/core/src/config/schema.ts:587 | 151 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:130 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
-| `urls` | packages/core/src/config/schema.ts:810 | 10 |
+| `urls` | packages/core/src/config/schema.ts:810 | 11 |
 | `userAgent` | packages/core/src/config/schema.ts:1173 | 3 |
 | `username` | packages/core/src/config/schema.ts:376 | 54 |
 | `usernameClaim` | packages/core/src/config/schema.ts:416 | 1 |

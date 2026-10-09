@@ -91,6 +91,8 @@ const kbRecord = {
   },
 };
 const searchKnowledgeBaseMock = vi.hoisted(() => vi.fn());
+/** The knowledge-base worker use_knowledge_base runs: only its result is stood in for. */
+const runEphemeralWorkerMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../retrieval/knowledge-bases.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../retrieval/knowledge-bases.js")>();
@@ -113,6 +115,10 @@ vi.mock("../retrieval/document-rag.js", async (importOriginal) => {
     augmentTurnWithDocuments: async () => ({ ingested: 0, failed: 0, contextBlock: "", retrievalUnavailable: false }),
     searchKnowledgeBase: (...args: unknown[]) => searchKnowledgeBaseMock(...args),
   };
+});
+vi.mock("../tools/ephemeral-agent-factory.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/ephemeral-agent-factory.js")>();
+  return { ...actual, runEphemeralWorker: (...args: unknown[]) => runEphemeralWorkerMock(...args) };
 });
 
 const KB_QUESTION = `Suche in der Wissensdatenbank „${KB_ID}“: Wie lange dauert es, den Akku-Pack NW-3104 mit dem Schnellladegerät NW-LG 18 von 0 auf 80 % zu laden, und nach wie vielen Betriebsstunden soll das Getriebefett des Akku-Schraubers NW-AS 18 geprüft werden?`;
@@ -213,6 +219,7 @@ afterEach(async () => {
   routingCompleteMock.mockClear();
   auditMock.mockClear();
   searchKnowledgeBaseMock.mockReset();
+  runEphemeralWorkerMock.mockReset();
   checkToolOutputMock.mockImplementation(() => ({ allowed: true }));
   moderateToolResultTextMock.mockImplementation(async () => null);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -376,13 +383,18 @@ describe("citations in an answer from this turn's knowledge-base read are its so
     "NW-LG 18 in 38 Minuten von 0 % auf 80 % geladen, und das Getriebefett des Akku-Schraubers NW-AS 18 soll",
     `alle 150 Betriebsstunden geprüft werden. Quelle: [Dokumentation NW-AS 18](${PAGE_URL})`,
   ].join(" ");
+  // A datasheet no tool returned, cited beside the page the search did return: bare, and as a link.
+  const MADE_UP_URL = "https://www.nordlicht-werkzeuge.example/datenblatt-nw3104.pdf";
+  const MADE_UP_LINK = "https://www.nordlicht-werkzeuge.example/wartung-nw-as-18.html";
+  const MIXED_ANSWER = `${CITED_ANSWER} Datenblatt: ${MADE_UP_URL} und [Wartungsplan](${MADE_UP_LINK}).`;
+  const UNVERIFIED_BANNER = "NICHT mit aktuellen Online-Quellen";
 
   async function citationGuard() {
     await loadRuntime({ citationHonestyGuard: true });
     return (await import("../agent/turn-terminal-guards.js")).applyCitationHonestyGuard;
   }
 
-  function params(finalResponse: string, turnRetrievedKnowledgeBaseContent: boolean, userMessage = KB_QUESTION) {
+  function params(finalResponse: string, sourceUrls: string[], userMessage = KB_QUESTION) {
     return {
       finalResponse,
       userMessage,
@@ -391,30 +403,50 @@ describe("citations in an answer from this turn's knowledge-base read are its so
       turnDelegationCount: 0,
       workflowRunCompletedThisTurn: false,
       turnShareFindingCount: 0,
-      turnRetrievedKnowledgeBaseContent,
+      turnKnowledgeBaseSourceUrls: new Set(sourceUrls),
       guardrailEvents: [] as Array<{ type: string; details: string }>,
     };
   }
 
-  it("the control: with no knowledge-base content this turn, the same citation is stripped and caveated", async () => {
+  it("the control: with no knowledge-base page this turn, the same citation is stripped and caveated", async () => {
     const applyCitationHonestyGuard = await citationGuard();
-    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, false));
+    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, []));
     expect(finalResponse).not.toContain(PAGE_URL);
+    expect(finalResponse).toContain(UNVERIFIED_BANNER);
     expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
   });
 
   it("keeps the knowledge-base page the answer cites, with no caveat", async () => {
     const applyCitationHonestyGuard = await citationGuard();
-    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, true));
+    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, [PAGE_URL]));
     expect(finalResponse).toBe(CITED_ANSWER);
     expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
+  });
+
+  it("the page cited bare, before punctuation, with a fragment or in another host case is still the page", async () => {
+    const applyCitationHonestyGuard = await citationGuard();
+    const otherCase = PAGE_URL.replace("www.nordlicht-werkzeuge.test", "WWW.Nordlicht-Werkzeuge.test");
+    const answer = `${CITED_ANSWER} Siehe auch ${PAGE_URL}. Abschnitt: ${PAGE_URL}#akku, oder **${otherCase}**`;
+    const { finalResponse } = await applyCitationHonestyGuard(params(answer, [PAGE_URL]));
+    expect(finalResponse).toBe(answer);
+  });
+
+  it("strips every URL no knowledge-base read returned, keeps the page one did, and caveats the answer", async () => {
+    const applyCitationHonestyGuard = await citationGuard();
+    const { finalResponse } = await applyCitationHonestyGuard(params(MIXED_ANSWER, [PAGE_URL]));
+    expect(finalResponse).not.toContain(MADE_UP_URL);
+    expect(finalResponse).not.toContain(MADE_UP_LINK);
+    expect(finalResponse).toContain("Wartungsplan");
+    expect(finalResponse).toContain(`[Dokumentation NW-AS 18](${PAGE_URL})`);
+    expect(finalResponse).toContain(UNVERIFIED_BANNER);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
   });
 
   it("does not stand in for reading a URL the user gave", async () => {
     const applyCitationHonestyGuard = await citationGuard();
     const userMessage = `${KB_QUESTION} Vergleiche das mit https://www.example.test/datenblatt.html`;
     const longAnswer = `${CITED_ANSWER} ${"Das Datenblatt nennt dieselben Werte. ".repeat(8)}`;
-    const { finalResponse } = await applyCitationHonestyGuard(params(longAnswer, true, userMessage));
+    const { finalResponse } = await applyCitationHonestyGuard(params(longAnswer, [PAGE_URL], userMessage));
     expect(auditTypes()).toContain("guardrail_flagged:url_content_unverified_no_fetch");
     expect(finalResponse).not.toBe(longAnswer);
   });
@@ -429,6 +461,63 @@ describe("citations in an answer from this turn's knowledge-base read are its so
 
     expect(output.response).toContain(PAGE_URL);
     expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
+  }, 60_000);
+
+  it("a whole turn: a made-up datasheet beside the page the search returned is stripped, and the page stays", async () => {
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(MIXED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(output.response).toContain(PAGE_URL);
+    expect(output.response).not.toContain(MADE_UP_URL);
+    expect(output.response).not.toContain(MADE_UP_LINK);
+    expect(output.response).toContain(UNVERIFIED_BANNER);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
+  }, 60_000);
+
+  it("a whole turn: a search whose excerpts the screen blocked returned no page to cite", async () => {
+    // Not source-sensitive, so nothing forces the turn on: the answer after the blocked search is the
+    // one that ships, and the page it cites is one the model never saw.
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true, upfrontSourceSensitiveClassifier: false });
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    checkToolOutputMock.mockImplementation((text) => (text.includes("38 Minuten") ? { allowed: false, reason: "suspicious payload" } : { allowed: true }));
+    searchThenAnswer(CITED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(auditTypes()).toContain("tool_output_blocked");
+    expect(output.response).not.toContain(PAGE_URL);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
+  }, 60_000);
+
+  it("a whole turn: the pages a knowledge-base worker cites are sources, and a URL the answer adds is not", async () => {
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    runEphemeralWorkerMock.mockResolvedValue({
+      success: true,
+      output: `38 Minuten von 0 % auf 80 %; Getriebefett alle 150 Betriebsstunden prüfen. Quelle: ${PAGE_URL}`,
+      grantedTools: ["search_knowledge_base", "list_knowledge_bases"],
+      rejectedTools: [],
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      return call === 1
+        ? toolCallStream("kbw1", "use_knowledge_base", { knowledge_base: KB_ID, task: "Ladezeit NW-3104 und Getriebefett-Intervall NW-AS 18" })
+        : textStream(MIXED_ANSWER);
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(runEphemeralWorkerMock).toHaveBeenCalledTimes(1);
+    expect(output.response).toContain(PAGE_URL);
+    expect(output.response).not.toContain(MADE_UP_URL);
+    expect(output.response).not.toContain(MADE_UP_LINK);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
   }, 60_000);
 
   it("a turn cut off after the search: the synthesized answer keeps the page it cites too", async () => {
@@ -452,4 +541,38 @@ describe("citations in an answer from this turn's knowledge-base read are its so
     expect(output.response).toContain(PAGE_URL);
     expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
   }, 60_000);
+
+  it("a turn cut off after the search: a made-up URL in the synthesized answer is stripped there too", async () => {
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(MIXED_ANSWER);
+    completeMock.mockImplementation(async () => ({
+      content: MIXED_ANSWER,
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION, maxIterationsOverride: 1 });
+
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(output.response).toContain(PAGE_URL);
+    expect(output.response).not.toContain(MADE_UP_URL);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
+  }, 60_000);
+});
+
+describe("knowledgeBaseSourceUrls — the pages a knowledge-base read returned", () => {
+  it("reads the URLs a counted read reported, and nothing from a read that does not count", async () => {
+    const { knowledgeBaseSourceUrls } = await import("../agent/turn-tool-contribution.js");
+    const urls = ["http://a.test/1", "http://a.test/2"];
+    expect(knowledgeBaseSourceUrls("search_knowledge_base", { success: true, metadata: { hits: 2, sourceUrls: urls } })).toEqual(urls);
+    expect(knowledgeBaseSourceUrls("use_knowledge_base", { success: true, metadata: { sourceUrls: urls } })).toEqual(urls);
+    expect(knowledgeBaseSourceUrls("search_knowledge_base", { success: true, metadata: { hits: 0, sourceUrls: urls } })).toEqual([]);
+    expect(knowledgeBaseSourceUrls("search_knowledge_base", { success: false, metadata: { hits: 2, sourceUrls: urls } })).toEqual([]);
+    expect(knowledgeBaseSourceUrls("search_documents", { success: true, metadata: { hits: 2, sourceUrls: urls } })).toEqual([]);
+    expect(knowledgeBaseSourceUrls("search_knowledge_base", { success: true, metadata: { hits: 2, sourceUrls: "http://a.test/1" } })).toEqual([]);
+    expect(knowledgeBaseSourceUrls("search_knowledge_base", { success: true, metadata: { hits: 2, sourceUrls: ["http://a.test/1", 7, ""] } })).toEqual(["http://a.test/1"]);
+  });
 });

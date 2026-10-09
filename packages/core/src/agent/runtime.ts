@@ -70,6 +70,7 @@ import {
   nestedCallContribution,
   readNestedToolCalls,
   retrievedKnowledgeBaseContent,
+  knowledgeBaseSourceUrls,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
@@ -2224,6 +2225,9 @@ async function _runTurn(
   // research delegation does, so it releases the turn's research requirement; see where
   // requiresDelegatedResearch is read below.
   let _turnRetrievedKnowledgeBaseContent = false;
+  // The page URLs those reads returned (knowledgeBaseSourceUrls). The citation guard keeps an
+  // answer's citation of one of them and strips every other URL it cites.
+  const _turnKnowledgeBaseSourceUrls = new Set<string>();
   let _forcedSynthesisFired = false;
   // The latest delegation that carried a run record masked figures no tool had returned
   // (agent/delegated-run-record.ts). A later delegation with a record decides again, so a retry
@@ -4104,7 +4108,7 @@ async function _runTurn(
         consecutiveDelegationFailures: _consecutiveDelegationFailures,
         turnToolCallCounts: _turnToolCallCounts,
         turnShareFindingCount: _turnShareFindingCount,
-        turnRetrievedKnowledgeBaseContent: _turnRetrievedKnowledgeBaseContent,
+        turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
         workflowRunCompletedThisTurn,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
@@ -4905,7 +4909,10 @@ async function _runTurn(
       // set from the raw result, before the screen above, so a search whose excerpts were blocked
       // (an injection-shaped tag in a crawled page, a moderation block) still released the turn,
       // and the model answered from memory with only the block error in front of it.
-      if (!outputBlocked && retrievedKnowledgeBaseContent(tc.name, result)) _turnRetrievedKnowledgeBaseContent = true;
+      if (!outputBlocked && retrievedKnowledgeBaseContent(tc.name, result)) {
+        _turnRetrievedKnowledgeBaseContent = true;
+        for (const url of knowledgeBaseSourceUrls(tc.name, result)) _turnKnowledgeBaseSourceUrls.add(url);
+      }
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -5655,7 +5662,7 @@ async function _runTurn(
     consecutiveDelegationFailures: _consecutiveDelegationFailures,
     turnToolCallCounts: _turnToolCallCounts,
     turnShareFindingCount: _turnShareFindingCount,
-    turnRetrievedKnowledgeBaseContent: _turnRetrievedKnowledgeBaseContent,
+    turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
     workflowRunCompletedThisTurn,
     releasedWithoutResearchEvidence: false,
     autoResearchAnswer: null,

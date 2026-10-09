@@ -238,6 +238,55 @@ export function stripFabricatedCitations(text: string): string {
 }
 
 /**
+ * One form for a cited URL and a URL a tool returned, so the two can be compared: the punctuation
+ * and markdown emphasis an answer puts after a bare URL are dropped, and so are the fragment and a
+ * trailing slash; scheme and host case and percent-encoding are those of the URL parser. A scheme,
+ * host, path or query that differs is a different URL. Pure.
+ */
+export function normalizeCitationUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/[>.,;:!?'"*_]+$/, "");
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return trimmed;
+  }
+}
+
+/**
+ * stripFabricatedCitations for a turn that did retrieve some pages, but not by any of the means the
+ * citation guard counts as research: a knowledge-base read. Each cited URL that is one of
+ * `sourceUrls` (compared by normalizeCitationUrl) is kept as written; every other one is stripped
+ * as stripFabricatedCitations strips it. With nothing stripped the text comes back unchanged, so
+ * the caller can tell an answer that cites only its sources from one that also invents a link.
+ * Pure.
+ */
+export function stripCitationsOutside(text: string, sourceUrls: Iterable<string>): { text: string; stripped: number } {
+  const sources = new Set([...sourceUrls].map(normalizeCitationUrl));
+  const isSource = (url: string) => sources.has(normalizeCitationUrl(url));
+  let stripped = 0;
+  // The same two passes as stripFabricatedCitations. The bare pass also meets the URL inside a link
+  // the first pass kept, and keeps it for the same reason.
+  const out = text
+    .replace(/\[([^\]]+)\]\(\s*(https?:\/\/[^)]*)\)/gi, (link: string, label: string, target: string) => {
+      if (isSource(target.trim().split(/\s/)[0] ?? "")) return link;
+      stripped += 1;
+      return label;
+    })
+    .replace(/\bhttps?:\/\/[^\s)\]]+/gi, (url: string) => {
+      if (isSource(url)) return url;
+      stripped += 1;
+      return "";
+    });
+  if (stripped === 0) return { text, stripped };
+  return {
+    text: out.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n").trim(),
+    stripped,
+  };
+}
+
+/**
  * The user's message this turn carried an actionable http(s) URL — they handed the assistant a
  * page to READ. Structural / language-free (same regex family as intent-classifier's
  * containsActionableUrl). Used by the URL-not-fetched honesty guard below.

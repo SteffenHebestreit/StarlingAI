@@ -169,6 +169,22 @@ export function retrievedKnowledgeBaseContent(
   return toolName === "use_knowledge_base";
 }
 
+/**
+ * The page URLs a knowledge-base read that counts (retrievedKnowledgeBaseContent) returned, as the
+ * tool reported them in `sourceUrls`: the pages a search's excerpts came from, or the URLs a
+ * knowledge-base worker's result names. An answer citing one of them is citing its source; any
+ * other URL it cites is stripped as a fabrication (applyCitationHonestyGuard). Empty for every
+ * other call, and for a report that is not a list of strings.
+ */
+export function knowledgeBaseSourceUrls(
+  toolName: string,
+  result: { success: boolean; metadata?: Record<string, unknown> },
+): string[] {
+  if (!retrievedKnowledgeBaseContent(toolName, result)) return [];
+  const urls = result.metadata?.["sourceUrls"];
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string" && url.length > 0) : [];
+}
+
 /** One tool call a tool made on the turn's behalf, reported so the turn can account for it. */
 export interface NestedToolCall {
   tool: string;
