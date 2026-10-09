@@ -154,6 +154,8 @@ export interface TerminalGuardContext {
   readonly consecutiveDelegationFailures: number;
   readonly turnToolCallCounts: Map<string, number>;
   readonly turnShareFindingCount: number;
+  /** A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent). */
+  readonly turnRetrievedKnowledgeBaseContent: boolean;
   readonly workflowRunCompletedThisTurn: boolean;
   readonly releasedWithoutResearchEvidence: boolean;
   readonly autoResearchAnswer: string | null;
@@ -390,6 +392,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     turnDelegationCount: ctx.getTurnDelegationCount(),
     workflowRunCompletedThisTurn: ctx.workflowRunCompletedThisTurn,
     turnShareFindingCount: ctx.turnShareFindingCount,
+    turnRetrievedKnowledgeBaseContent: ctx.turnRetrievedKnowledgeBaseContent,
     guardrailEvents,
   }));
 

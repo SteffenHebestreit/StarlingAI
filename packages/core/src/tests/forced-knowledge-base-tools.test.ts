@@ -206,7 +206,7 @@ const auditTypes = () => auditMock.mock.calls.map((call) => {
 afterEach(async () => {
   delete process.env["SAI_CONFIG_PATH"];
   streamMock.mockReset();
-  completeMock.mockClear();
+  completeMock.mockReset();
   routingCompleteMock.mockClear();
   auditMock.mockClear();
   searchKnowledgeBaseMock.mockReset();
@@ -325,5 +325,90 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
 
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
     expect(streamOptions()[1]?.["toolChoice"], "an empty search released the research requirement").toBe("required");
+  }, 60_000);
+});
+
+describe("citations in an answer from this turn's knowledge-base read are its sources", () => {
+  const PAGE_URL = "http://www.nordlicht-werkzeuge.test/dokumentation.html";
+  const CITED_ANSWER = [
+    "Laut der Wissensdatenbank core-ix-nw-doku: Der Akku-Pack NW-3104 (18 V) ist mit dem Schnellladegerät",
+    "NW-LG 18 in 38 Minuten von 0 % auf 80 % geladen, und das Getriebefett des Akku-Schraubers NW-AS 18 soll",
+    `alle 150 Betriebsstunden geprüft werden. Quelle: [Dokumentation NW-AS 18](${PAGE_URL})`,
+  ].join(" ");
+
+  async function citationGuard() {
+    await loadRuntime({ citationHonestyGuard: true });
+    return (await import("../agent/turn-terminal-guards.js")).applyCitationHonestyGuard;
+  }
+
+  function params(finalResponse: string, turnRetrievedKnowledgeBaseContent: boolean, userMessage = KB_QUESTION) {
+    return {
+      finalResponse,
+      userMessage,
+      sessionId: "kb-citation-session",
+      turnToolCallCounts: new Map([["search_knowledge_base", 1]]),
+      turnDelegationCount: 0,
+      workflowRunCompletedThisTurn: false,
+      turnShareFindingCount: 0,
+      turnRetrievedKnowledgeBaseContent,
+      guardrailEvents: [] as Array<{ type: string; details: string }>,
+    };
+  }
+
+  it("the control: with no knowledge-base content this turn, the same citation is stripped and caveated", async () => {
+    const applyCitationHonestyGuard = await citationGuard();
+    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, false));
+    expect(finalResponse).not.toContain(PAGE_URL);
+    expect(auditTypes()).toContain("guardrail_flagged:fabricated_citations_stripped");
+  });
+
+  it("keeps the knowledge-base page the answer cites, with no caveat", async () => {
+    const applyCitationHonestyGuard = await citationGuard();
+    const { finalResponse } = await applyCitationHonestyGuard(params(CITED_ANSWER, true));
+    expect(finalResponse).toBe(CITED_ANSWER);
+    expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
+  });
+
+  it("does not stand in for reading a URL the user gave", async () => {
+    const applyCitationHonestyGuard = await citationGuard();
+    const userMessage = `${KB_QUESTION} Vergleiche das mit https://www.example.test/datenblatt.html`;
+    const longAnswer = `${CITED_ANSWER} ${"Das Datenblatt nennt dieselben Werte. ".repeat(8)}`;
+    const { finalResponse } = await applyCitationHonestyGuard(params(longAnswer, true, userMessage));
+    expect(auditTypes()).toContain("guardrail_flagged:url_content_unverified_no_fetch");
+    expect(finalResponse).not.toBe(longAnswer);
+  });
+
+  it("a whole turn: the answer from the knowledge-base search ships with the page it cites", async () => {
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(CITED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(output.response).toContain(PAGE_URL);
+    expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
+  }, 60_000);
+
+  it("a turn cut off after the search: the synthesized answer keeps the page it cites too", async () => {
+    // The iteration ceiling ends the turn right after the knowledge-base search, so the answer is
+    // the terminal synthesis, and it reaches the citation guard through the backstop path.
+    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(CITED_ANSWER);
+    completeMock.mockImplementation(async () => ({
+      content: CITED_ANSWER,
+      tool_calls: [],
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: "stop",
+    }));
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION, maxIterationsOverride: 1 });
+
+    expect(streamMock).toHaveBeenCalledTimes(1);
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
+    expect(output.response).toContain(PAGE_URL);
+    expect(auditTypes()).not.toContain("guardrail_flagged:fabricated_citations_stripped");
   }, 60_000);
 });

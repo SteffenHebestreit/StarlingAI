@@ -31,6 +31,8 @@ export interface CitationHonestyGuardParams {
   workflowRunCompletedThisTurn: boolean;
   /** Number of share_finding calls executed this turn. */
   turnShareFindingCount: number;
+  /** A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent). */
+  turnRetrievedKnowledgeBaseContent: boolean;
   /** Guardrail events array — appended to in place (mutated), mirroring the inline original. */
   guardrailEvents: Array<{ type: string; details: string }>;
 }
@@ -58,6 +60,7 @@ export async function applyCitationHonestyGuard(
     turnDelegationCount,
     workflowRunCompletedThisTurn,
     turnShareFindingCount,
+    turnRetrievedKnowledgeBaseContent,
     guardrailEvents,
   } = params;
   let finalResponse = params.finalResponse;
@@ -95,7 +98,12 @@ export async function applyCitationHonestyGuard(
       const hadRealResearch = hadTurnScopedResearch
         || (sessionEvidenceCounts && (sharedFactsForCitation?.itemCount ?? 0) > 0);
 
-      if (presentsCitations && !hadRealResearch) {
+      // A knowledge-base search returns its excerpts with the URLs of the crawled pages they came
+      // from, and the tool asks for them to be cited, so citations in an answer from this turn's
+      // knowledge-base read are its sources, not fabrications. Stripped, an answer taken from the
+      // knowledge base the user named would lose its source links and carry the unverified caveat.
+      // It does not stand in for reading a URL the user gave: the branch below still asks for that.
+      if (presentsCitations && !hadRealResearch && !turnRetrievedKnowledgeBaseContent) {
         finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
         guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
         logAudit("guardrail_flagged", {
