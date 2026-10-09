@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:589 | 184 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
-| `digest` | packages/core/src/config/schema.ts:1998 | 56 |
+| `digest` | packages/core/src/config/schema.ts:1998 | 57 |
 | `dir` | packages/core/src/config/schema.ts:1987 | 59 |
 | `disabled` | packages/core/src/config/schema.ts:833 | 110 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2016 | 3 |
@@ -234,7 +234,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1810 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1800 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 50 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 49 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1517 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:809 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:532 | 8 |
@@ -364,8 +364,8 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1242 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:534 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:724 | 53 |
-| `provider` | packages/core/src/config/schema.ts:455 | 131 |
-| `providers` | packages/core/src/config/schema.ts:1234 | 100 |
+| `provider` | packages/core/src/config/schema.ts:455 | 132 |
+| `providers` | packages/core/src/config/schema.ts:1234 | 101 |
 | `publicUrl` | packages/core/src/config/schema.ts:341 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |
 | `qaDeliveryLoopEscalateToCoordinator` | packages/core/src/config/schemas/orchestration.ts:343 | 1 |
@@ -482,7 +482,7 @@ Every public schema field, where it is declared, and how many production files r
 | `threshold` | packages/core/src/config/schemas/decisions.ts:24 | 46 |
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:259 | 40 |
-| `timeoutMs` | packages/core/src/config/schema.ts:69 | 103 |
+| `timeoutMs` | packages/core/src/config/schema.ts:69 | 104 |
 | `token` | packages/core/src/config/schema.ts:1170 | 185 |
 | `tokenId` | packages/core/src/config/schema.ts:1069 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1070 | 1 |

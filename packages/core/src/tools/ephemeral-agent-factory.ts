@@ -853,10 +853,17 @@ registerTool({
     // Same claim as the architect's ephemeral above: no taxonomy, so it counts as reaching outside.
     if (ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged) ctx.turnEvidence.outsideEngaged = ephemeralName;
 
+    // This tool calls the runner itself rather than through executeDelegationWithFallback, so it
+    // passes the declaration on itself: a run declared "answer" is never a staged build
+    // (agent/sub-agent.ts stagedBuildCandidate), even when it was granted write_file and edit_file
+    // and its task is long enough to be staged. The declared value goes, not the one inferred below
+    // from a builder tool, and an undeclared run passes no deliverable key.
+    const declaredDeliverable = readDelegationDeliverable(args["deliverable"]);
     const runResult = await runSubAgentWithStats({
       agentName: ephemeralName,
       task,
       context,
+      ...(declaredDeliverable ? { deliverable: declaredDeliverable } : {}),
       // Same as any delegated specialist: the orchestrator wrote this task, the user did not.
       turnUserWords: ctx.turnUserWords,
       parentSessionId: ctx.sessionId,
@@ -886,7 +893,6 @@ registerTool({
     // answers in prose has missed nothing. Whatever was declared, a run whose own output claims
     // a write it never made has missed the file it claims (looksLikeClaimedWriteMiss).
     const ephemeralCfg = { tools };
-    const declaredDeliverable = readDelegationDeliverable(args["deliverable"]);
     const ephemeralDeliverable = declaredDeliverable ?? (holdsArtifactBuilderTool(tools) ? "file" : undefined);
     const ephemeralFailedTools = (runResult.toolFailures ?? [])
       .filter((failure) => !failure.declinedByUser && (failure.agent ?? ephemeralName) === ephemeralName)

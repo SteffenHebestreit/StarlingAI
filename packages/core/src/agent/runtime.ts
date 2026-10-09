@@ -261,7 +261,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, turnEvidenceRequirement } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentVerdict } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -1851,6 +1851,14 @@ async function _runTurn(
     ? startUpfrontSourceSensitiveClassifier(userMessage, signal, session.id)
     : null;
 
+  // The turn's deliverable intent, classified ONCE. Every finalization gate below
+  // (auto-build, relay suppression, false-completion nets) consumes this single
+  // object — N gates independently re-classifying the same message is exactly how
+  // the two-autopilot conflicts of v0.30/v0.31 happened. Classified before the discovery
+  // prefetch starts, whose routing arm asks the intent readout only for a request the word
+  // lists do not already see.
+  const deliverableIntent = classifyDeliverableIntent(userMessage);
+
   // ── Discovery prefetch: STARTED here, consumed by the first prompt assembly ──
   // It reads only the user's message and the turn's agent grant, so like the judge above it starts
   // the moment the fast lane has declined the turn (finding 2026-10-05). Started inside the first
@@ -1859,14 +1867,27 @@ async function _runTurn(
   // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
   // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
   // On an --auto turn under orchestration.autonomousModeAntiRefusal the capsule's routing is also
-  // read back: a top agent that holds a deliverable-emitting tool arms the same forced first tool
-  // call as an artifact request the word lists recognise (autonomousArtifactBuild below). With an
-  // embedding model every agent the prefetch admits is high confidence, so on the deployed stack
-  // that is the whole condition (prefetchRoutedToDeliverableEmitter). Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a
-  // late or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and
-  // autoApprove are not checked again for it below, so every other turn starts the prefetch exactly
-  // as before and can never be armed by it.
+  // read back (prefetchRoutedToDeliverableEmitter): a top agent that holds a deliverable-emitting
+  // tool. With an embedding model every agent the prefetch admits is high confidence, so on the
+  // deployed stack that reads the top agent's tools and not the request, and a question routed
+  // there would be forced too. Such a turn asks the intent readout instead, started here so its
+  // two calls overlap the document retrieval and the prompt assembly: only a reading that the
+  // request asks for something to be made or done arms the same forced first tool call as an
+  // artifact request the word lists recognise (autonomousArtifactBuild below). A request the word
+  // lists see is forced by them already, and a workflow step is never forced, so neither asks. Nor
+  // does an --agent directive turn: the directive forces the call until its agent has run, and the
+  // delegation that runs it releases this arm, so the verdict would change nothing and its wait
+  // would only delay the first token. (A plan step that attempted the agent and failed releases the
+  // directive without counting as a delegation; that turn is left to the orchestrator, as a turn
+  // without a reading is.)
+  // Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a late
+  // or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and autoApprove
+  // are not checked again for it below, so every other turn starts the prefetch exactly as before,
+  // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
+  // Typed by assertion: it is assigned only inside the callback, which narrowing does not follow.
+  let produceIntentRead = null as Promise<ProduceIntentVerdict | null> | null;
+  let prefetchAskedToProduce: ProduceIntentVerdict | null = null;
   const readPrefetchRouting = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
     && opts.autoApprove === true;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
@@ -1876,7 +1897,21 @@ async function _runTurn(
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
       ...(readPrefetchRouting
-        ? { onCapsuleAgents: (agents) => { prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents); } }
+        ? {
+            onCapsuleAgents: (agents) => {
+              prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
+              if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
+                && directiveAgent === undefined) {
+                const priorTurnDigest = buildPriorTurnDigest(session);
+                produceIntentRead = startProduceIntentRead({
+                  userMessage,
+                  ...(priorTurnDigest ? { priorTurnDigest } : {}),
+                  sessionId: session.id,
+                  signal,
+                });
+              }
+            },
+          }
         : {}),
     })
     : undefined;
@@ -2059,11 +2094,6 @@ async function _runTurn(
   // research?" (regression: session 3a35cff0).
   const { priorUserRequest, priorAssistantAnswer } = extractPriorTurnContext(session.getHistory(), userMessage);
   const researchSubject = buildEffectiveResearchSubject(userMessage, priorUserRequest, priorAssistantAnswer);
-  // The turn's deliverable intent, classified ONCE. Every finalization gate below
-  // (auto-build, relay suppression, false-completion nets) consumes this single
-  // object — N gates independently re-classifying the same message is exactly how
-  // the two-autopilot conflicts of v0.30/v0.31 happened.
-  const deliverableIntent = classifyDeliverableIntent(userMessage);
   // The model's OWN build spec, rescued when the research-first rewrite or the
   // surplus-delegation filter discards a builder delegation. The corrective build
   // uses it as the blueprint instead of running on generic facts alone (audit
@@ -2834,6 +2864,17 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "info" });
     }
 
+    // The intent readout's verdict for the --auto routing arm (autonomousArtifactBuild below),
+    // awaited once, on the first iteration it is pending. It is timed as its own phase, and awaited
+    // here, before llmStartedAt, because turn_performance counts a phase outside llmTimeMs: awaited
+    // inside the call's window, the same seconds were counted in both, and a slow turn's SLO alert
+    // named the model and this wait for one stretch of wall-clock.
+    if (produceIntentRead) {
+      const pendingRead = produceIntentRead;
+      produceIntentRead = null;
+      prefetchAskedToProduce = await timedPhase("produceIntentReadWait", () => pendingRead);
+    }
+
     let llmResponse: LLMResponse;
     const llmStartedAt = Date.now();
     llmCalls += 1;
@@ -2898,12 +2939,16 @@ async function _runTurn(
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
       // first. That signal is gated once, where the prefetch starts (readPrefetchRouting: the same
-      // flag and autoApprove), and is true only when that gate passed.
+      // flag and autoApprove), and is true only when that gate passed. It reads the top agent's
+      // tools, not the request, so it forces only with the intent readout's word that the request
+      // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
+      // a question is not forced, and without a reading the orchestrator decides as on any turn.
+      // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
         ((getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
           && opts.autoApprove === true
           && deliverableIntent.wantsArtifact)
-        || prefetchRoutedToDeliverable;
+        || (prefetchRoutedToDeliverable && prefetchAskedToProduce === "produce");
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
       // The research requirement is also released by a knowledge-base read that brought content
