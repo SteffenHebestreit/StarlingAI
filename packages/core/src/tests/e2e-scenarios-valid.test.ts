@@ -65,4 +65,37 @@ describe("e2e scenario files", () => {
     expect(judge({ status: "failed", reason: "error", intent: { ok: false, reason: "error", ms: 40 }, preRoute: null })).not.toEqual([]);
     expect(judge({ status: "failed", reason: "no_provider", intent: null, preRoute: null })).not.toEqual([]);
   });
+
+  it("the cart assessment fails any file write in its turn, and names a write to cart.js apart", () => {
+    // Ground truth: a "why" question, so a diagnosis and no file change. A failed run wrote a
+    // report, cart_bug_analyse.md; the scenario caught it only because its /cart/ path match
+    // also matched the report's name, and the same report under another name passed.
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const scenario = scenarios.find((entry) => entry.scenario.id === "core-build-code-assessment-no-edit")?.scenario;
+    const turn = scenario?.steps.find((step) => step.kind === "turn");
+    expect(turn?.kind).toBe("turn");
+    const expectation = turn?.kind === "turn" ? turn.expect : undefined;
+    const sessionId = "sub:4d048a29:code_analyst:1791500810464";
+    const ran = { type: "sub_agent_started", sessionId, data: { agentName: "code_analyst" } };
+    // The row sub-agent.ts logs when it dispatches a call (buildSubAgentToolAuditPayload, phase start).
+    const call = (tool: string, path: string) => ({
+      type: "sub_agent_tool_call",
+      sessionId,
+      data: { agentName: "code_analyst", tool, phase: "start", toolCallId: `call-${tool}-${path}`, args: { path } },
+    });
+    const failures = (...events: Array<ReturnType<typeof call> | typeof ran>) => evaluateEventExpectations(expectation, [ran, ...events]);
+    const namesCartSource = (list: string[]) => list.some((failure) => failure.startsWith("events.mustNot"));
+
+    expect(failures()).toEqual([]);
+    // The same report under a name that has nothing to do with the cart is still a file change.
+    expect(failures(call("write_file", "generated/analyse.md"))).not.toEqual([]);
+    // The report the run wrote: a file change, and not an edit of cart.js.
+    const report = failures(call("write_file", "cart_bug_analyse.md"), call("edit_file", "generated/cart_bug_analyse.md"));
+    expect(report).not.toEqual([]);
+    expect(namesCartSource(report)).toBe(false);
+    // The unasked fix, wherever the source sits.
+    for (const path of ["cart.js", "generated/cart.js"]) {
+      expect(namesCartSource(failures(call("edit_file", path))), path).toBe(true);
+    }
+  });
 });

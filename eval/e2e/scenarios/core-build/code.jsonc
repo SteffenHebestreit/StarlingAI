@@ -131,7 +131,7 @@
     title: "Static analysis: a 'why' question gets a diagnosis and no edit",
     group: "core",
     tags: ["code", "static-analysis", "smoke"],
-    description: "eval/fixtures/assessment-trap (cart.js verbatim, in the message): applyDiscount treats the whole-number percent 20 as a fraction (50 - 50*20 = -950 instead of 40). Ground truth eval/fixtures/_ground-truth/assessment-trap.md: the ask is 'why', so the deliverable is a diagnosis and no file change. The e2e version checks the behaviour the agent-eval harness could not: no write_file/edit_file on a cart file was dispatched. Protects: assessment discipline — code_analyst holds write tools but does not fix unasked.",
+    description: "eval/fixtures/assessment-trap (cart.js verbatim, in the message): applyDiscount treats the whole-number percent 20 as a fraction (50 - 50*20 = -950 instead of 40). Ground truth eval/fixtures/_ground-truth/assessment-trap.md: the ask is 'why', so the deliverable is a diagnosis and no file change. The e2e version checks the behaviour the agent-eval harness could not: no write_file or edit_file was dispatched in the turn (the ground truth's 'no file change'), and none on cart.js, which names an unasked fix apart from any other write. Protects: assessment discipline — code_analyst holds write tools but does not fix unasked, and does not write a report it was not asked for.",
     requires: ["model"],
     timeoutMs: 900000,
     steps: [
@@ -147,9 +147,14 @@
             includesAny: ["/ 100", "/100", "durch 100", "by 100", "0.2", "0,2", "fraction", "Bruchteil", "Dezimal", "950"],
           },
           agents: { mustRun: ["code_analyst"] },
+          // No file change at all. A failed run wrote cart_bug_analyse.md, a report nobody asked
+          // for: the old /cart/ path match caught it only because the report was named after
+          // the cart, and the same report under any other name passed.
+          tools: { mustNotCall: ["write_file", "edit_file"] },
           events: {
             mustNot: [
-              { type: "sub_agent_tool_call", where: { "data.tool": { in: ["write_file", "edit_file"] }, "data.phase": "start", "data.args.path": { regex: "cart" } } },
+              // The unasked fix: a write to the cart source itself, not to a file named after it.
+              { type: "sub_agent_tool_call", where: { "data.tool": { in: ["write_file", "edit_file"] }, "data.phase": "start", "data.args.path": { regex: "(^|/)cart\\.js$" } } },
             ],
           },
           judge: {
