@@ -10,7 +10,7 @@ import { loadWorkspaceAgents, loadWorkspaceScenes } from "./support/workspace-sh
 const agentsDir = fileURLToPath(new URL("../../../../workspace/agents/", import.meta.url));
 const scenesDir = fileURLToPath(new URL("../../../../workspace/scenes/", import.meta.url));
 
-type AgentCatalog = { subAgents: Record<string, { description?: string; tools?: string[]; systemPrompt?: string }> };
+type AgentCatalog = { subAgents: Record<string, { description?: string; capabilities?: string[]; tools?: string[]; systemPrompt?: string }> };
 type SceneCatalog = { scenes: Record<string, { allowedAgents?: string[]; description?: string }> };
 
 function readJsonFile<T>(path: string): T {
@@ -57,6 +57,28 @@ describe("workspace catalog integrity", () => {
     ]));
     expect(browserAgent?.systemPrompt).toContain("call get_site_credentials before the first navigation step");
     expect(browserAgent?.systemPrompt).toContain("use those saved URLs instead of the homepage or a guessed path");
+  });
+
+  // search_agents ranks agents by an embedding of their catalog text, and the file format is often
+  // the most specific word in a request. document_intake names DOCX as a format it READS, while no
+  // agent that WRITES one said so: content_writer held generate_docx and generate_pptx, and its own
+  // prompt sends DOCX/PPTX to them, but its description and capabilities never named either format.
+  // A request to create a Word document then ranked the reader first and content_writer seventh,
+  // outside the shortlist the orchestrator reads, and the job went to an agent that cannot produce
+  // the file (session fa8bb08b). So each Office format a catalog tool produces is named, in the
+  // description and in the capabilities (the text the embedding and the reranker both read), by at
+  // least one agent that holds its producer.
+  it("names each Office format the catalog can produce on an agent that holds its producer", () => {
+    const catalog = loadAgentCatalog();
+    const unclaimed: string[] = [];
+    for (const [tool, format] of [["generate_docx", "docx"], ["generate_pptx", "pptx"]] as const) {
+      const names = (text: string): boolean => text.toLowerCase().split(/[^a-z0-9]+/).includes(format);
+      const holders = Object.entries(catalog.subAgents).filter(([, agent]) => agent.tools?.includes(tool));
+      expect(holders.length, `no agent holds ${tool}`).toBeGreaterThan(0);
+      const claimed = holders.some(([, agent]) => names(agent.description ?? "") && (agent.capabilities ?? []).some(names));
+      if (!claimed) unclaimed.push(`${format}: held by ${holders.map(([name]) => name).join(", ")}, named by none of them`);
+    }
+    expect(unclaimed).toEqual([]);
   });
 
   it.skipIf(!scenesPresent)("keeps the new scenes present in the workspace catalog", () => {

@@ -251,7 +251,7 @@
           "workspace"
         ],
         "oneLiner": "Also builds content websites (deliverable=website) and reveal.js decks (deliverable=deck); overlaps web_coder on sites, paper_author on docs -- split by the deliverable facet.",
-        "sourceHash": "08bae4b3a304477e",
+        "sourceHash": "0dba07854503dc9e",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
