@@ -272,6 +272,8 @@ interface WebTableMeta {
   rows?: number;
   columns?: string[];
   aggregates?: Record<string, string>;
+  /** The values no single cell states (ComputeSuccess.computed): what the run records for the coverage check. */
+  computed?: string[];
   fetchFailed?: true;
 }
 
@@ -311,6 +313,7 @@ async function finish(result: ComputeResult, meta: WebTableMeta, ctx: ToolContex
         // this; a 4.8 MB header text spanning 40 columns once put 192 MB of page text there.
         columns: result.columns.slice(0, 40).map(shownColumnName),
         aggregates: result.aggregates,
+        computed: result.computed,
       },
     },
   };

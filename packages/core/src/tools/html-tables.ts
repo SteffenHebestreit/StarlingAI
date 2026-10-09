@@ -771,6 +771,12 @@ export interface ComputeSuccess {
   columns: string[];
   /** Each computed value by a short key ("sum(4 Südtal)"), as written in the output. */
   aggregates: Record<string, string>;
+  /**
+   * The values no single cell states: every count, and each sum or average over two numbers or
+   * more. A min or a max is a cell's value, which any listing of the rows states as well; a reply
+   * relaying one of these is relaying the computation (the orchestrator's coverage check).
+   */
+  computed: string[];
   pagesSkipped: Array<{ page: number; reason: string }>;
 }
 
@@ -1077,8 +1083,11 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
 
   const head: string[] = [];
   const aggregates: Record<string, string> = {};
-  const record = (key: string, value: string): void => {
+  const computed: string[] = [];
+  const record = (key: string, value: string, name: AggregateName, numeric?: number): void => {
     if (Object.keys(aggregates).length < 64) aggregates[key] = value;
+    // A min or a max is a cell's value, and so is a sum or an average over one number.
+    if (computed.length < 64 && (name === "count" || ((name === "sum" || name === "avg") && (numeric ?? 0) >= 2))) computed.push(value);
   };
 
   // where: each condition narrows the rows the previous one kept.
@@ -1241,7 +1250,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
     for (const name of wanted) {
       if (name === "count") {
         head.push(`count = ${kept.length}${capNote}`);
-        record("count", String(kept.length));
+        record("count", String(kept.length), "count");
         continue;
       }
       const result = aggregateOver(name, kept);
@@ -1258,7 +1267,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
         if (stated) line += `; the table's footer states ${JSON.stringify(capped(stated, 40))}`;
       }
       head.push(line);
-      record(`${name}(${index + 1} ${capped(displayText(columns[index]!), 40)})`, result.value);
+      record(`${name}(${index + 1} ${capped(displayText(columns[index]!), 40)})`, result.value, name, result.numeric);
     }
     const note = nonNumericNote(kept);
     if (note && needsColumn.length > 0) head.push(note);
@@ -1278,7 +1287,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
         }
         const detail = name === "count" ? "" : ` (${result.numeric} numeric of ${group.positions.length})`;
         head.push(`  ${groupLabel}: ${result.value}${result.at ? ` at ${result.at}` : ""}${detail}`);
-        record(`${name === "count" ? "count" : `${name}(${columnIndex! + 1} ${capped(displayText(columns[columnIndex!]!), 40)})`} [${capped(group.label, 40)}]`, result.value);
+        record(`${name === "count" ? "count" : `${name}(${columnIndex! + 1} ${capped(displayText(columns[columnIndex!]!), 40)})`} [${capped(group.label, 40)}]`, result.value, name, result.numeric);
       }
       if (groups.length > shownGroups.length) head.push(`  … ${groups.length - shownGroups.length} more groups not shown`);
     }
@@ -1311,6 +1320,7 @@ export function computeTables(pages: readonly PageInput[], query: TableQuery, op
     rows: rows.length,
     columns,
     aggregates,
+    computed,
     pagesSkipped,
   };
 }
@@ -1356,6 +1366,7 @@ function extractAll(page: PageInput, options: ComputeOptions): ComputeResult {
     rows: tables.reduce((count, table) => count + table.rows.length, 0),
     columns: tables[0]!.columns,
     aggregates: {},
+    computed: [],
     pagesSkipped: [],
   };
 }

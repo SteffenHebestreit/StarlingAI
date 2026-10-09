@@ -93,7 +93,7 @@ async function runProbe(responses: unknown[], options: { maxIterations: number; 
 const computed = (value: string, url = "http://93.184.215.14/lager.html"): ToolResult => ({
   success: true,
   output: `sum(column 4 "Südtal") = ${value} — all 18 rows, 18 numeric of 18 (whole numbers)\nread: ${url}, table 1, 18 rows × 6 columns`,
-  metadata: { webTable: { source: "url", urls: [url], finalUrls: [url], pagesRead: 1, aggregates: { "sum(4 Südtal)": value } } },
+  metadata: { webTable: { source: "url", urls: [url], finalUrls: [url], pagesRead: 1, aggregates: { "sum(4 Südtal)": value }, computed: [value] } },
 });
 const fetchFailed = (status: number): ToolResult => ({
   success: false,
@@ -226,6 +226,24 @@ describe("web_table in a sub-agent run", () => {
       fakes: { web_fetch: () => ({ success: true, output: "Lagerbestand: 18 Artikel, Südtal-Spalte." }) },
     });
     expect(plain.result).not.toHaveProperty("computedAggregateKeys");
+  }, 30_000);
+
+  it("hands up no key for a min or a max: they are cell values, which any listing of the rows states", async () => {
+    // The coverage check is waived when the reply states one of these keys. Recorded from every
+    // aggregate, the max (180, NW-2104's stock) waived it for a 10-row listing that showed that row.
+    const url = "http://93.184.215.14/lager.html";
+    const { result } = await runProbe([toolCall("t1", "web_table", { url, column: "Südtal" }), text("Südtal: 596 Stück.")], {
+      maxIterations: 4,
+      agentTools: ["web_table"],
+      fakes: {
+        web_table: () => ({
+          success: true,
+          output: "count = 18\nsum(column 4 \"Südtal\") = 596 — all 18 rows",
+          metadata: { webTable: { source: "url", urls: [url], aggregates: { count: "18", "sum(4 Südtal)": "596", "min(4 Südtal)": "0", "max(4 Südtal)": "180", "avg(4 Südtal)": "33,11" }, computed: ["18", "596", "33,11"] } },
+        }),
+      },
+    });
+    expect(result.computedAggregateKeys).toEqual(["18", "596", "3311"]);
   }, 30_000);
 
   it("delegate_to_agent passes the computed keys up in its metadata", async () => {

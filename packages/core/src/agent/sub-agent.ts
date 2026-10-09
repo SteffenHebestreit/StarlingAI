@@ -4234,8 +4234,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // The pages this run has read (web_fetch, browser_navigate and web_table, comparablePageUrl
     // form): after the evidence strip, web_table may compute over these and fetch nothing new.
     const readPageUrls = new Set<string>();
-    // The figure keys of the values web_table computed in this run (at most 32), handed up as
-    // computedAggregateKeys: an aggregate over an 18-row listing is short by construction, and the
+    // The figure keys of the values web_table computed in this run (its counts, sums and averages,
+    // never a min or a max, at most 32), handed up as computedAggregateKeys: an aggregate over an
+    // 18-row listing is short by construction, and the
     // orchestrator's coverage re-synthesis asked for "all 18 items" and got invented rows (E2E
     // 2026-10-09, session 820e1171: 596 became 740).
     const computedAggregateKeys = new Set<string>();
@@ -8083,13 +8084,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           const urlArg = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
           if ((tc.name === "web_fetch" || tc.name === "browser_navigate") && typeof urlArg === "string") readPageUrls.add(comparablePageUrl(urlArg));
           if (tc.name === "web_table") {
-            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; aggregates?: unknown } | undefined;
+            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; computed?: unknown } | undefined;
             for (const list of [webTable?.urls, webTable?.finalUrls]) {
               if (!Array.isArray(list)) continue;
               for (const url of list) if (typeof url === "string") readPageUrls.add(comparablePageUrl(url));
             }
-            if (webTable?.aggregates && typeof webTable.aggregates === "object") {
-              for (const value of Object.values(webTable.aggregates as Record<string, unknown>)) {
+            // Only what web_table computed: a min or a max is a cell's value, and recorded from
+            // every aggregate, a max that a 10-row listing showed waived its coverage check.
+            if (Array.isArray(webTable?.computed)) {
+              for (const value of webTable.computed as unknown[]) {
                 if (typeof value !== "string") continue;
                 const keys = new Set<string>();
                 addFigureKeys(keys, value);

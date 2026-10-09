@@ -170,6 +170,7 @@ describe("web_table source url: pages", () => {
     const meta = r.metadata?.["webTable"] as Record<string, unknown>;
     expect(meta["pagesRead"]).toBe(3);
     expect(meta["aggregates"]).toEqual({ count: "8", "sum(4 Preis)": "227,40" });
+    expect(meta["computed"]).toEqual(["8", "227,40"]);
     expect(meta["fetchFailed"]).toBeUndefined();
   });
 

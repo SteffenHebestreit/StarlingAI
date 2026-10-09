@@ -80,6 +80,18 @@ describe("web_table on the fixture site", () => {
     ]);
   });
 
+  it("names as computed only counts, and sums and averages over two numbers or more: a min, a max or a one-row sum is a cell's value", () => {
+    const result = ok([sitePage(1, "lager.html")], { column: "Südtal" });
+    const a = result.aggregates;
+    expect(Object.keys(a)).toEqual(["count", "sum(4 Südtal)", "min(4 Südtal)", "max(4 Südtal)", "avg(4 Südtal)"]);
+    expect(a["max(4 Südtal)"]).toBe("180");
+    expect(result.computed).toEqual([a["count"], a["sum(4 Südtal)"], a["avg(4 Südtal)"]]);
+
+    const grouped = ok([inlinePage(1, table(["Gruppe", "Wert"], [["A", "10"], ["A", "25"], ["B", "35"]]))], { column: "Wert", aggregates: ["sum", "max", "count"], groupBy: "Gruppe" });
+    expect(grouped.aggregates).toEqual({ "sum(2 Wert) [A]": "35", "sum(2 Wert) [B]": "35", "max(2 Wert) [A]": "25", "max(2 Wert) [B]": "35", "count [A]": "2", "count [B]": "1" });
+    expect(grouped.computed).toEqual(["35", "2", "1"]);
+  });
+
   it("reads NW-3106 at its offer price: the struck list price is shown, never part of the value", () => {
     const page = sitePage(3, "produkte/seite-3.html");
     const nw3106 = page.doc.tables[0]!.rows.find((row) => row[0]!.text === "NW-3106")!;
