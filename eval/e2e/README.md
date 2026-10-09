@@ -96,6 +96,13 @@ waits for them the same way. A turn whose session is gone (`sai wipe`) counts as
 ended once the gateway has restarted since it was sent (`gateway.status` uptime). The run names the lock
 it took such turns from; deleting that file forgets them.
 
+**Workspace files are not reset.** A file a turn writes stays in the account's workspace root for every
+later run. A scenario that needs a file to be absent deletes it in an http step before its first turn:
+`DELETE /api/workspace/file?path=<path>` with `expect: { status: [204, 404] }` (204 removed, 404 not
+there; operator only, one file under `generated/` in the caller's own root, never a directory; any
+other path is refused with 400). See
+guards-no-claimed-update-of-missing-file.
+
 **One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or
 mail purge lands in the other's attempts. A run therefore refuses to start (exit code 2) while another run
 uses the same gateway, from whichever checkout or credentials file. The lock is

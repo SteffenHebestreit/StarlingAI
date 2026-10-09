@@ -1,16 +1,16 @@
 /**
- * Workspace file routes — upload / download / archive / preview / served-site
- * proxy for files under the agent workspace volume. Every path is resolved
+ * Workspace file routes — upload / download / delete / archive / preview /
+ * served-site proxy for files under the agent workspace volume. Every path is resolved
  * through resolvePathWithinWorkspace so a request can never escape the workspace
  * boundary. Extracted verbatim from gateway/index.ts (god-file seam).
  */
 import type { Hono } from "hono";
-import { readFile, writeFile, stat, readdir, mkdir } from "node:fs/promises";
-import { basename, extname, resolve, sep } from "node:path";
+import { readFile, writeFile, stat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
-import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
 import { getConfig } from "../config/loader.js";
-import { resolvePathWithinWorkspace, userWorkspaceRoot, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, userWorkspaceRoot, GENERATED_SUBDIR, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
@@ -347,6 +347,76 @@ export function registerWorkspaceRoutes(app: Hono): void {
         "Content-Disposition": buildContentDisposition(filename, disposition),
         "X-Workspace-Path": relativePath,
       });
+    } catch (error) {
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
+  });
+
+  // ── Workspace file delete ────────────────────────────────────────────────
+  // DELETE /api/workspace/file?path=<rel>
+  // Removes one regular file under generated/ in the caller's own workspace root: 204 when it was
+  // removed, 404 when it is not there, 400 for a directory, a path outside that root, or one
+  // outside generated/. A file a turn wrote by mistake (an E2E run that created the file it was
+  // told not to create) had no way back short of the host filesystem, so the next run started
+  // from the wrong state.
+  const outsideDeleteZone = `Only a file under ${GENERATED_SUBDIR}/ can be deleted`;
+  app.delete("/api/workspace/file", async (c) => {
+    // THE ROLE IS CHECKED HERE TOO. The /api/* gate in gateway/index.ts refuses mutating verbs to
+    // a viewer, but only under multi-user auth and only when this file is mounted behind it. A
+    // delete is not something to leave to that: mounted without the gate, every valid token could
+    // remove files. A token with no role claim counts as operator (normalizeRole), so the
+    // single-operator token keeps working with auth off.
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    if (!caller) return c.json({ error: "Unauthorized" }, 401);
+    if (!userHasRole(caller, "operator")) {
+      logAudit("rbac_denied", {
+        username: caller.username,
+        role: caller.role,
+        method: "DELETE",
+        path: c.req.path,
+      }, { userId: caller.username, severity: "warn" });
+      return c.json({ error: "Operator role required for this action" }, 403);
+    }
+
+    const requestedPath = c.req.query("path")?.trim();
+    if (!requestedPath) {
+      return c.json({ error: "path query parameter is required" }, 400);
+    }
+
+    try {
+      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
+      // ONLY THE ZONE A TURN WRITES TO. The caller's root, which the GET serves, holds more than a
+      // turn's output: the config shards (agents/, jobs/, scenes/) when auth is off and it is the
+      // shared root, and the deployment ledgers and the memory store under the state dir. A
+      // turn's own files land under generated/ (resolveWorkspaceWritePath), so that is the one
+      // zone a delete may reach. Anything else is refused before the filesystem is asked whether
+      // the file exists.
+      if (relativePath.split("/")[0] !== GENERATED_SUBDIR) {
+        return c.json({ error: outsideDeleteZone }, 400);
+      }
+      const fileStat = await stat(resolved);
+      if (!fileStat.isFile()) {
+        return c.json({ error: "Requested workspace path is not a file" }, 400);
+      }
+      // The checks above compare path strings. A directory link inside the caller's root that
+      // points at another account's root passes them, and so does a link inside generated/ that
+      // points back at the root, and unlink would then remove a file out there. So the directory
+      // the file really sits in has to be under generated/ of the real root as well.
+      const [realRoot, realParent] = await Promise.all([
+        realpath(userWorkspaceRoot(getConfig().workspacePath)),
+        realpath(dirname(resolved)),
+      ]);
+      const fromRoot = relative(realRoot, realParent);
+      if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+        return c.json({ error: "Path must stay within the workspace" }, 400);
+      }
+      if (fromRoot.split(sep)[0] !== GENERATED_SUBDIR) {
+        return c.json({ error: outsideDeleteZone }, 400);
+      }
+
+      await unlink(resolved);
+      return c.body(null, 204, { "X-Workspace-Path": relativePath });
     } catch (error) {
       const mapped = mapWorkspaceRouteError(error);
       return c.json({ error: mapped.message }, mapped.status);
