@@ -215,6 +215,14 @@ export interface ToolContext {
    */
   responseToolCalls?: readonly string[];
   /**
+   * Set by the orchestrator's turn loop once per response: the tail asked for a plan before acting
+   * (the multi-domain plan-first nudge, with no correction pending), and the turn, this response
+   * included, has only searched. A routing tool that would tell the model to delegate now names the
+   * agent for the plan's delegate steps instead, so its result does not contradict the nudge.
+   * Undefined or false (a sub-agent, a direct invocation, any other turn) leaves the pointer as it was.
+   */
+  planFirstPending?: boolean;
+  /**
    * This turn's document excerpts ([DOCUMENT CONTEXT]), for the one delegation the runtime
    * dispatches itself on a turn the user directed to an agent (agent/directive-agent.ts). The turn
    * loop sets it for that call alone and clears it when the call returns; delegate_to_agent hands it

@@ -212,6 +212,20 @@ function isStrongRoutingMatch(candidate: { confidence: string }): boolean {
   return candidate.confidence === "high";
 }
 
+/**
+ * The pointer a strong match gets, for every site that emits one. On a turn whose tail asks for a
+ * plan before acting (ToolContext.planFirstPending) it names the agent for the plan's delegate
+ * steps instead of telling the model to delegate now. In session 9991d150 the nudge asked for
+ * record_plan, search_agents' result said "Call delegate_to_agent ... NOW", and the next response
+ * sent two delegations: the second was dropped and no plan was recorded. Any other turn gets the
+ * old line, byte for byte.
+ */
+function strongMatchPointer(agentName: string, ctx: Pick<ToolContext, "planFirstPending">): string {
+  return ctx.planFirstPending === true
+    ? `➡ NEXT ACTION: Use agentName="${agentName}" for the delegate steps of your record_plan.`
+    : `➡ NEXT ACTION: Call delegate_to_agent(agentName="${agentName}", task="<your task>") NOW.`;
+}
+
 // ─── ephemeral-agent / architect factory ──────────────────────────────────────
 // The ephemeral-agent cluster (getEphemeralGenerationSettings, requestArchitectSpec,
 // normalizeArchitectModel, validateEphemeralToolSelection, maybePromoteEphemeral,
@@ -3522,7 +3536,7 @@ registerTool({
 
     const topCandidate = allCandidates[0];
     const nextActionLine = topCandidate && isStrongRoutingMatch(topCandidate)
-      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topCandidate.name}", task="<your task>") NOW.`
+      ? strongMatchPointer(topCandidate.name, ctx)
       : `ℹ Review the candidates below and pick the most relevant, or use create_ephemeral_agent if none fit.`;
 
     return {
@@ -3741,7 +3755,7 @@ registerTool({
           }, { sessionId: ctx.sessionId, channel: "agent-routing" });
           const topAgent = retryResolution.results[0]!;
           const nextActionLine = isStrongRoutingMatch(topAgent)
-            ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+            ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
             : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
           return {
             success: true,
@@ -3808,7 +3822,7 @@ registerTool({
 
           const topAgent = rescued.results[0]!;
           const nextActionLine = isStrongRoutingMatch(topAgent)
-            ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+            ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
             : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below.`;
           return {
             success: true,
@@ -3923,7 +3937,7 @@ registerTool({
     // that cannot write the file format the query asks to have made: no candidate
     // could, or the reorder above would have put that one first.
     const nextActionLine = isStrongRoutingMatch(topAgent) && formatGate.topCanProduce
-      ? `➡ NEXT ACTION: Call delegate_to_agent(agentName="${topAgent.name}", task="<your task>") NOW. Do NOT call search_agents again.`
+      ? `${strongMatchPointer(topAgent.name, ctx)} Do NOT call search_agents again.`
       : `ℹ Best available match is ${topAgent.name} (${topAgent.confidence} confidence, score ${topAgent.score.toFixed(2)}) — review the candidate list below and pick the most relevant agent, or use create_ephemeral_agent if none fit. Do NOT call search_agents again.`;
     return {
       success: true,
