@@ -120,7 +120,7 @@ const KB_EXCERPTS = [
     documentId: "doc-nw-1",
     title: "Dokumentation NW-AS 18",
     url: "http://www.nordlicht-werkzeuge.test/dokumentation.html",
-    text: "Der Akku-Pack NW-3104 ist mit dem Schnellladegerät NW-LG 18 in 38 Minuten von 0 auf 80 % geladen.",
+    text: "Der Akku-Pack NW-3104 (18 V) ist mit dem Schnellladegerät NW-LG 18 in 38 Minuten von 0 % auf 80 % geladen.",
     score: 0.91,
   },
   {
@@ -255,5 +255,75 @@ describe("a source-sensitive turn under stableToolBlock freeze", () => {
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
     expect((searchKnowledgeBaseMock.mock.calls[0]![0] as { id: string }).id).toBe(KB_ID);
     expect(auditTypes()).not.toContain("tool_restriction_refused");
+  }, 60_000);
+});
+
+describe("retrievedKnowledgeBaseContent — what counts as a knowledge-base read that grounds the turn", () => {
+  it("counts a search that returned excerpts and a knowledge-base worker that ran, and nothing else", async () => {
+    const { retrievedKnowledgeBaseContent } = await import("../agent/turn-tool-contribution.js");
+    expect(retrievedKnowledgeBaseContent("search_knowledge_base", { success: true, metadata: { hits: 2, kbId: KB_ID } })).toBe(true);
+    expect(retrievedKnowledgeBaseContent("use_knowledge_base", { success: true, metadata: { kbId: KB_ID } })).toBe(true);
+  });
+
+  it("fails closed: a search that found nothing reports success, and does not count", async () => {
+    const { retrievedKnowledgeBaseContent } = await import("../agent/turn-tool-contribution.js");
+    expect(retrievedKnowledgeBaseContent("search_knowledge_base", { success: true, metadata: { hits: 0, kbId: KB_ID } })).toBe(false);
+    expect(retrievedKnowledgeBaseContent("search_knowledge_base", { success: true })).toBe(false);
+    expect(retrievedKnowledgeBaseContent("search_knowledge_base", { success: true, metadata: { hits: "2" } })).toBe(false);
+    expect(retrievedKnowledgeBaseContent("search_knowledge_base", { success: false, metadata: { hits: 2 } })).toBe(false);
+    expect(retrievedKnowledgeBaseContent("use_knowledge_base", { success: false })).toBe(false);
+    // Discovery is not retrieval: listing the knowledge bases returns names, not content.
+    expect(retrievedKnowledgeBaseContent("list_knowledge_bases", { success: true, metadata: { count: 1 } })).toBe(false);
+    expect(retrievedKnowledgeBaseContent("search_documents", { success: true, metadata: { hits: 2 } })).toBe(false);
+  });
+});
+
+describe("a knowledge-base read that brought content back grounds a source-sensitive turn", () => {
+  // Drawn from the two excerpts, dense in figures, and long enough for the structural ungrounded tier
+  // to judge it. No URL: the citation guard is not what this covers.
+  const GROUNDED_ANSWER = [
+    "Laut der Wissensdatenbank core-ix-nw-doku (Kurzanleitung NW-AS 18):",
+    "Der Akku-Pack NW-3104 (18 V) ist mit dem Schnellladegerät NW-LG 18 in 38 Minuten von 0 % auf 80 % geladen.",
+    "Das Getriebefett des Akku-Schraubers NW-AS 18 soll alle 150 Betriebsstunden geprüft werden.",
+    "Beide Angaben stammen aus den gefundenen Auszügen der Dokumentation; eine Ladezeit über 80 % hinaus",
+    "und weitere Wartungsintervalle nennen diese Auszüge nicht, deshalb gebe ich dazu keine Werte an.",
+  ].join(" ");
+  const GUARDS = { ungroundedFactualAnswerGuard: true, semanticUngroundedFactualGuard: true };
+
+  it("releases the forced orchestration and ships the answer drawn from the excerpts, with no research retry", async () => {
+    // The fixture must be one the ungrounded-draft tiers would reject if the turn counted as unretrieved.
+    const { looksLikeUnsourcedSpecificClaims } = await import("../agent/citation-honesty.js");
+    expect(looksLikeUnsourcedSpecificClaims(GROUNDED_ANSWER)).toBe(true);
+
+    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(GROUNDED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const output = await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(streamOptions()[0]?.["toolChoice"], "the first call was not the forced call").toBe("required");
+    // The search released the requirement, so the next call is an ordinary one...
+    expect(streamOptions()[1]?.["toolChoice"], "the call after the knowledge-base search was still forced").toBeUndefined();
+    // ...whose answer stands: no rejection, no second drafting call, no caveat.
+    const types = auditTypes();
+    expect(types).not.toContain("guardrail_flagged:tool_free_research_answer_rejected");
+    expect(types).not.toContain("guardrail_flagged:semantic_ungrounded_factual_detected");
+    expect(streamMock).toHaveBeenCalledTimes(2);
+    expect(output.response).toContain("38 Minuten");
+    expect(output.response).toContain("150 Betriebsstunden");
+    expect(output.response).not.toContain("NICHT mit aktuellen Online-Quellen");
+  }, 60_000);
+
+  it("a search that found nothing leaves the turn forced", async () => {
+    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: [], retrievalFailed: false, lowConfidence: false });
+    searchThenAnswer(GROUNDED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
+    expect(streamOptions()[1]?.["toolChoice"], "an empty search released the research requirement").toBe("required");
   }, 60_000);
 });

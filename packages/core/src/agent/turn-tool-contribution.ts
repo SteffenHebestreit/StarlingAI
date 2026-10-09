@@ -143,6 +143,30 @@ export function toolResultContribution(
   };
 }
 
+/**
+ * Whether a call the turn made itself brought knowledge-base content back: a search_knowledge_base
+ * that returned excerpts, or a use_knowledge_base whose worker ran. A source-sensitive turn is
+ * forced to retrieve before it answers, and the turn counted only delegations and workflows as
+ * retrieval, so a turn told to "search the knowledge base X" that did exactly that was still forced
+ * on, and its answer from the excerpts was rejected as ungrounded (E2E, 2026-10-08).
+ *
+ * Fails closed. A search that found nothing still reports success, so only a positive `hits` count
+ * counts. Not applied to the calls a tool reports making (readNestedToolCalls): those reports carry
+ * no result metadata, so a nested search that found nothing cannot be told from one that found
+ * something; a turn whose knowledge-base read ran only inside a plan keeps its research requirement.
+ */
+export function retrievedKnowledgeBaseContent(
+  toolName: string,
+  result: { success: boolean; metadata?: Record<string, unknown> },
+): boolean {
+  if (!result.success) return false;
+  if (toolName === "search_knowledge_base") {
+    const hits = result.metadata?.["hits"];
+    return typeof hits === "number" && hits > 0;
+  }
+  return toolName === "use_knowledge_base";
+}
+
 /** One tool call a tool made on the turn's behalf, reported so the turn can account for it. */
 export interface NestedToolCall {
   tool: string;
