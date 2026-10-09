@@ -870,13 +870,30 @@ type CapabilityBearing = (TaxonomyBearing & { tools?: string[] }) | undefined;
 const WORKSPACE_SURFACES: ReadonlySet<string> = new Set(["workspace", "local_sandbox", "swarm_internal"]);
 
 /**
+ * Whether an agent's one way outside the workspace is the page the shared browser tab already
+ * shows: it holds nothing that gathers or delegates (agentCfgIsResearchCapable, which does not
+ * count a snapshot or screenshot of the open tab), and the browser is the only outside surface its
+ * routing taxonomy names. It can read a page but not open one, so it reads whatever the last
+ * navigation left there. On a turn nothing has gathered for yet, that is another turn's page: on
+ * the E2E run of 2026-10-08 (c172d755) a plan named vision_browser_analyst for both of its site
+ * steps, and it read dokumentation.html, which another session had opened, and reported a
+ * headcount and two page visits it never made.
+ */
+function agentCfgOnlyReadsOpenBrowserTab(cfg: CapabilityBearing): boolean {
+  if (!cfg || agentCfgIsResearchCapable(cfg)) return false;
+  const outside = (resolveRoutingTaxonomy(cfg)?.surface ?? []).filter((surface) => !WORKSPACE_SURFACES.has(surface));
+  return outside.length > 0 && outside.every((surface) => surface === "browser");
+}
+
+/**
  * Whether an agent can reach anything outside the workspace: it can gather or delegate (the
  * research gate's own veto, agentCfgIsResearchCapable), or its routing taxonomy names a surface
  * outside the workspace — a mailbox, a calendar, a desktop, remote infrastructure. Read from the
  * taxonomy rather than from tool names, because that is where the catalog already records it
  * (`surface` is derived from the tool list and linted for staleness). An agent with no taxonomy,
  * or an empty surface list, is treated as reaching out: the turn trigger never touches what it
- * cannot classify.
+ * cannot classify. An agent that only reads the open browser tab (agentCfgOnlyReadsOpenBrowserTab)
+ * does not reach out: the page it reads is one another agent opened.
  */
 export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean {
   if (!cfg || agentCfgIsResearchCapable(cfg)) return true;
@@ -884,6 +901,7 @@ export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean
   // routing block can lack `surface` altogether: unclassifiable, not a crash on the delegation path.
   const surfaces = resolveRoutingTaxonomy(cfg)?.surface ?? [];
   if (surfaces.length === 0) return true;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return false;
   return surfaces.some((surface) => !WORKSPACE_SURFACES.has(surface));
 }
 
@@ -891,10 +909,13 @@ export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean
  * Whether an agent works only from the text it is handed: confined to the workspace, and its
  * taxonomy's input is text alone. A builder, writer or generator (web_coder, content_writer,
  * image_creator). An agent that reads a codebase, an uploaded file or a data table has a source of
- * its own and is not this — its step may well be about that source.
+ * its own and is not this — its step may well be about that source. An agent that only reads the
+ * open browser tab is this too, whatever its input: the page is handed to it the way text is, by
+ * whichever agent opened it, and with nothing gathered yet it has nothing to read.
  */
 export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean {
   if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return true;
   const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
   return inputs.length > 0 && inputs.every((input) => input === "text" || input === "none");
 }

@@ -490,6 +490,33 @@ describe("the research gate's turn trigger", () => {
     expect(ran()).toEqual(["researcher", "web_coder"]);
   }, 30_000);
 
+  // ── An agent that only reads the open browser tab ──────────────────────────────────────────────
+  // c172d755 (E2E 2026-10-08): search_agents ranked vision_browser_analyst first, the plan named it
+  // for both site steps, and it read a page another session had left in the shared tab. It holds
+  // browser_snapshot and browser_screenshot only; its taxonomy names the browser as its one surface.
+
+  it("redirects a plan step naming the tab reader to researcher on a turn the judge flagged (c172d755)", async () => {
+    await executePlan("s-tab", plan(GERMAN_OBJECTIVE, [{ id: "s1", kind: "delegate", agent: "vision_browser_analyst", description: GERMAN_STEP }]), turnCtx("s-tab"));
+
+    expect(ran()).toEqual(["researcher"]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("leaves the tab reader on its step behind browser_agent, and on a turn with no verdict", async () => {
+    await executePlan("s-tab-behind", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "delegate", agent: "browser_agent", description: GERMAN_STEP },
+      { id: "s2", kind: "delegate", agent: "vision_browser_analyst", description: "Die geöffnete Seite auslesen und die Angaben belegen.", dependsOn: ["s1"] },
+    ]), turnCtx("s-tab-behind"));
+    const ctx = turnCtx("s-tab-no-verdict");
+    delete ctx.turnEvidence;
+    await executePlan("s-tab-no-verdict", plan(GERMAN_OBJECTIVE, [{ id: "s1", kind: "delegate", agent: "vision_browser_analyst", description: GERMAN_STEP }]), ctx);
+
+    expect(ran()).toEqual(["browser_agent", "vision_browser_analyst", "vision_browser_analyst"]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([]);
+  }, 30_000);
+
   // ── Routed delegations: no agent named, so the router's ranking picks it ──────────────────────
 
   /** The router's ranking for the live step (79dd29e0): the tab reader first, both gatherers right behind it. */
@@ -536,6 +563,13 @@ describe("capability predicates behind the turn trigger", () => {
     expect(agentCfgReachesOutsideWorkspace(AGENTS.code_analyst as never)).toBe(false);
     expect(agentCfgWorksOnlyFromHandedText(AGENTS.code_analyst as never)).toBe(false);
     expect(agentCfgReachesOutsideWorkspace(AGENTS.researcher as never)).toBe(true);
+    // The tab reader: a browser surface, and nothing that opens a page.
+    expect(agentCfgReachesOutsideWorkspace(AGENTS.vision_browser_analyst as never)).toBe(false);
+    expect(agentCfgWorksOnlyFromHandedText(AGENTS.vision_browser_analyst as never)).toBe(true);
+    expect(agentCfgReachesOutsideWorkspace(AGENTS.browser_agent as never)).toBe(true);
+    expect(agentCfgWorksOnlyFromHandedText(AGENTS.browser_agent as never)).toBe(false);
+    // A browser surface beside an outside source of its own still reaches out.
+    expect(agentCfgReachesOutsideWorkspace({ ...AGENTS.vision_browser_analyst, routingGenerated: { ...label("GATHER", "browser", "image"), surface: ["browser", "user_channel"] } } as never)).toBe(true);
     // No taxonomy, no tool list, or no config at all: treated as reaching out — never redirected.
     expect(agentCfgReachesOutsideWorkspace({ tools: ["write_file"] })).toBe(true);
     expect(agentCfgReachesOutsideWorkspace({})).toBe(true);
@@ -555,6 +589,8 @@ describe("capability predicates behind the turn trigger", () => {
     expect(evidenceGatherPoint(["code_analyst", "web_coder"], lookup)).toBe(1);
     expect(evidenceGatherPoint(["researcher", "web_coder"], lookup)).toBe(-1);
     expect(evidenceGatherPoint(["mail_agent", "web_coder"], lookup)).toBe(-1);
+    expect(evidenceGatherPoint(["vision_browser_analyst"], lookup)).toBe(0);
+    expect(evidenceGatherPoint(["browser_agent", "vision_browser_analyst"], lookup)).toBe(-1);
     expect(evidenceGatherPoint([undefined, "web_coder"], lookup)).toBe(-1); // routed step: routing decides
     expect(evidenceGatherPoint(["web_researcher"], lookup)).toBe(-1); // unknown name: routing decides
   });
