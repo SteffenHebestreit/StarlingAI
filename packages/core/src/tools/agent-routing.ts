@@ -1052,7 +1052,10 @@ function agentSatisfiesExecutionCapability(cfg: { tools?: string[] } | undefined
     case "code_exec":
       return tools.some((t) => t.startsWith("mcp__code_sandbox__") || /(?:^|_)(?:run_js|run_ts|run_code|execute_code)$/.test(t));
     case "browser_interaction":
-      return tools.some((t) => t.startsWith("browser_") || t === "site_fill_credentials" || t.startsWith("computer_"));
+      // A view of the open tab (BROWSER_TAB_VIEW_TOOL_NAMES) cannot click, type or submit anything:
+      // vision_browser_analyst, which holds only views, passed here on their browser_ prefix.
+      return tools.some((t) => (t.startsWith("browser_") && !BROWSER_TAB_VIEW_TOOL_NAMES.has(t))
+        || t === "site_fill_credentials" || t.startsWith("computer_"));
   }
 }
 

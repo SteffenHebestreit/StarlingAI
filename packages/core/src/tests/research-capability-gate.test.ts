@@ -271,6 +271,14 @@ describe("explicit-delegation execution guard (research-redirect false positive)
     expect(explicitAgentsCoverTaskExecution(["computer_use_agent"], "research the best providers online with pricing", lookup)).toBe(false);
     expect(explicitAgentsCoverTaskExecution([], loginTask, lookup)).toBe(false);
   });
+
+  it("does not count views of the open tab as browser interaction (vision_browser_analyst cannot log in)", () => {
+    const withTabReader = (name: string) => name === "vision_browser_analyst"
+      ? { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"] }
+      : lookup(name);
+    expect(explicitAgentsCoverTaskExecution(["vision_browser_analyst"], loginTask, withTabReader)).toBe(false);
+    expect(filterCandidatesByExecutionCapability(["vision_browser_analyst", "browser_agent"], loginTask, withTabReader).kept).toEqual(["browser_agent"]);
+  });
 });
 
 /**
