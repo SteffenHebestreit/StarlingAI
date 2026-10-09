@@ -368,6 +368,47 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     expect(modeReadRows()).toMatchObject([{ outcome: "single_pass", choice: "PRODUCE", singlePass: "served", orderAgreed: null }]);
   });
 
+  it("a follow-up is read with the prior exchange", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "chart_designer", confidence: "high" }] } });
+    const session = new loaded.AgentSession({ channel: "test", workspacePath: loaded.workspacePath, systemPrompt: "You are a test agent." });
+    streamMock.mockImplementation(() => textStream("I can draw that Gantt chart for you."));
+    // Without --auto the first turn asks nothing; it only leaves the exchange the follow-up refers to.
+    await loaded.runTurn({ session, userMessage: QUESTIONS[0]! });
+    expect(readoutMock).not.toHaveBeenCalled();
+    readoutMock.mockResolvedValue(modeReading("PRODUCE"));
+    await loaded.runTurn({ session, userMessage: "yes, go ahead", autoApprove: true });
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    const input = readoutMock.mock.calls[0]?.[1] as { userMessage: string; priorTurnDigest?: string };
+    expect(input.userMessage).toBe("yes, go ahead");
+    expect(input.priorTurnDigest).toContain(`User asked: ${QUESTIONS[0]}`);
+    expect(input.priorTurnDigest).toContain("Assistant answered: I can draw that Gantt chart");
+  });
+
+  it("a stopped turn stops the read", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "chart_designer", confidence: "high" }] } });
+    const session = new loaded.AgentSession({ channel: "test", workspacePath: loaded.workspacePath, systemPrompt: "You are a test agent." });
+    streamMock.mockImplementation(() => textStream("Here is how it works."));
+    const stop = new AbortController();
+    let readSignal: AbortSignal | undefined;
+    // Resolves only once its signal fires, as askIntentReadout does on an abort; the turn is stopped
+    // while the read is pending. Through anything but the turn's signal it would end on its own
+    // timeout, 6 s later, as a "timeout".
+    readoutMock.mockImplementation((_provider: unknown, _input: unknown, options: { signal: AbortSignal }) => {
+      readSignal = options.signal;
+      setTimeout(() => stop.abort(), 20);
+      return new Promise((resolve) => {
+        options.signal.addEventListener("abort", () => resolve({ ok: false, reason: "aborted", ms: 1 }), { once: true });
+      });
+    });
+    const started = Date.now();
+    await loaded.runTurn({ session, userMessage: QUESTIONS[0]!, autoApprove: true, signal: stop.signal }).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    expect(readSignal?.aborted).toBe(true);
+    expect(modeReadRows()).toMatchObject([{ outcome: "aborted" }]);
+    expect(Date.now() - started).toBeLessThan(4_000);
+  }, 20_000);
+
   // turn_performance partitions a turn into model time, tool time and named phases. The wait is a
   // phase; counted in llmTimeMs as well, the same seconds were blamed on the model too.
   it("the wait for the read is its own phase and not orchestrator model time", async () => {
