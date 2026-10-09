@@ -926,6 +926,22 @@ describe("e2e environment — the stack's reranker, as e2e:env status reports it
     expect(serviceContainers.serviceContainer(answering({ ok: false, out: "", err: "" }), "starlingai", "reranker")).toEqual({ error: "docker ps failed" });
   });
 
+  it("gives a first model download time before Docker calls the reranker unhealthy", () => {
+    // The reranker's /health loads and runs its model(s) first, and the first healthcheck is what
+    // loads them. After `sai wipe` deletes the model cache that is a download of about 1.2 GB
+    // (2.4 GB with the embedder); with a 20 s start period Docker called it unhealthy about 90 s in.
+    const compose = readFileSync(join(root, "docker-compose.yml"), "utf8");
+    const healthcheck = yamlMapping(compose, ["services", "reranker", "healthcheck"]);
+    expect(healthcheck["test"]).toContain("http://localhost:80/health");
+    const seconds = (duration: string): number => {
+      const parts = [...duration.matchAll(/(\d+(?:\.\d+)?)(ms|h|m|s)/g)];
+      expect(parts.map((part) => part[0]).join(""), duration).toBe(duration);
+      const unit: Record<string, number> = { h: 3600, m: 60, s: 1, ms: 0.001 };
+      return parts.reduce((sum, part) => sum + Number(part[1]) * unit[part[2]!]!, 0);
+    };
+    expect(seconds(healthcheck["start_period"] ?? "")).toBeGreaterThanOrEqual(300);
+  });
+
   it("is what e2e:env status reports as its reranker, a docker that could not be asked included", () => {
     const environment = readFileSync(join(root, "scripts", "e2e-env.mjs"), "utf8");
     expect(environment).toMatch(/^import \{ serviceContainer \} from "\.\/service-container\.mjs";$/m);
