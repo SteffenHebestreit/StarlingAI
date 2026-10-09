@@ -31,7 +31,8 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
-import { isPlanReportResult } from "./turn-tool-contribution.js";
+import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { retrievalEvidenceMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -380,9 +381,15 @@ export class AgentSession {
           // step after the first; at the default 500 it lost the first one too, along with the
           // instruction to synthesize from them. It is the collapsed view that the answer-writing
           // iteration reads, so this is the number that decides what the answer can be based on.
+          // A retrieval result is the passages the answer is to come from, and the frame has already
+          // held it to the retrieval budget (tool-result-format.ts). At the generic 500 the turn that
+          // made the search read only its first few hundred characters (E2E
+          // core-ix-kb-documentation-rag). Once the turn is over it is history like any other result.
           const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
-            : (isDelegation ? 2000 : 500);
+            : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
+              ? retrievalEvidenceMaxChars()
+              : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /

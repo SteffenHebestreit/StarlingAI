@@ -376,6 +376,46 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
   }, 60_000);
 });
 
+describe("the excerpts a search returned reach the model's next call", () => {
+  // E2E 2026-10-09: the crawled page's excerpt opened with its title and navigation, so the charge
+  // time sat at character 1,109 of the result. The frame cut the result to 600 characters and the
+  // collapsed history to 500, and the model searched again for what it had already found.
+  const PAGE_CHROME = [
+    "# Dokumentation NW-AS 18 | Nordlicht Werkzeuge",
+    ...["Startseite", "Produkte", "Akku-Werkzeuge", "Ladegeräte", "Zubehör", "Ersatzteile", "Service", "Downloads",
+      "Händlersuche", "Garantie", "Reparatur", "Schulungen", "Presse", "Karriere", "Lieferstatus", "Kontakt"]
+      .map((label) => `- [${label}](/${label.toLowerCase().replace(/[^a-z]+/g, "-")}.html)`),
+  ].join("\n");
+
+  it("the call after the search reads a passage that sits past character 600 of the result", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    const [charge, grease] = KB_EXCERPTS;
+    searchKnowledgeBaseMock.mockResolvedValue({
+      chunks: [{ ...charge!, text: `${PAGE_CHROME}\n\n${charge!.text}` }, grease!],
+      retrievalFailed: false,
+      lowConfidence: false,
+    });
+    searchThenAnswer("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const toolResults: Array<{ name: string; result: string }> = [];
+    await runTurn({
+      session,
+      userMessage: KB_QUESTION,
+      onToolResult: (_id, name, result) => { toolResults.push({ name, result }); },
+    });
+
+    const search = toolResults.find((entry) => entry.name === "search_knowledge_base");
+    expect(search?.result.indexOf(charge!.text), "the fixture's passage does not sit past character 600").toBeGreaterThan(600);
+    expect(streamMock.mock.calls.length, "the turn made no call after the search").toBeGreaterThanOrEqual(2);
+    const nextCall = (streamMock.mock.calls[1]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain(charge!.text);
+    expect(nextCall).toContain(grease!.text);
+  }, 60_000);
+});
+
 describe("citations in an answer from this turn's knowledge-base read are its sources", () => {
   const PAGE_URL = "http://www.nordlicht-werkzeuge.test/dokumentation.html";
   const CITED_ANSWER = [

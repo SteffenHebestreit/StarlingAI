@@ -5,6 +5,7 @@ import {
   retrievalEvidenceMaxChars,
   truncateForContext,
 } from "../agent/tool-result-format.js";
+import { AgentSession } from "../agent/session.js";
 import { getConfig } from "../config/loader.js";
 
 /**
@@ -112,5 +113,44 @@ describe("the model-visible frame of a retrieval result", () => {
     expect(retrievalEvidenceMaxChars()).toBe(4_321);
     (getConfig().retrieval.documentRag as { maxContextChars?: number }).maxContextChars = undefined;
     expect(retrievalEvidenceMaxChars()).toBe(6_000);
+  });
+});
+
+describe("the collapsed history the turn's prompts are built from", () => {
+  function sessionWithSearch(tool: string, result: string) {
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    session.addMessage({ role: "user", content: "Wie lange lädt der Akku-Pack NW-3104 bis 80 %?" });
+    session.addMessage({
+      role: "assistant",
+      content: "",
+      tool_calls: [{ id: "call_kb", type: "function", function: { name: tool, arguments: JSON.stringify({ knowledge_base: "core-ix-nw-doku", query: "NW-3104 Ladezeit" }) } }],
+    } as never);
+    session.addMessage({ role: "tool", tool_call_id: "call_kb", content: buildModelVisibleToolResult(tool, result, { hits: 1 }) } as never);
+    return session;
+  }
+  const collapsedText = (session: AgentSession) => session.getCollapsedHistory().map((m) => String(m.content)).join("\n");
+
+  it("keeps this turn's search_knowledge_base result whole, the passage past character 500 included", () => {
+    // Both main-loop iterations and the forced synthesis read this view, not the tool message.
+    const collapsed = collapsedText(sessionWithSearch("search_knowledge_base", KB_RESULT));
+    expect(collapsed).toContain(CHARGE_FACT);
+    expect(collapsed).toContain(TABLE);
+    expect(collapsed).not.toContain("snippet summarized for prior-turn history");
+  });
+
+  it("holds it to the generic snippet once the turn is over", () => {
+    const session = sessionWithSearch("search_knowledge_base", KB_RESULT);
+    session.addMessage({ role: "assistant", content: "38 Minuten." });
+    session.addMessage({ role: "user", content: "Und das Getriebefett?" });
+    const collapsed = collapsedText(session);
+    expect(collapsed).not.toContain(CHARGE_FACT);
+    expect(collapsed).toContain("snippet summarized for prior-turn history");
+  });
+
+  it("leaves another tool's result of this turn at the generic snippet", () => {
+    // web_fetch's frame is the 600-character fallback; the snippet then cuts it to 500.
+    const collapsed = collapsedText(sessionWithSearch("web_fetch", KB_RESULT));
+    expect(collapsed).not.toContain("38 Minuten");
+    expect(collapsed).toContain("snippet summarized for prior-turn history");
   });
 });
