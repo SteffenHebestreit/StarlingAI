@@ -72,6 +72,7 @@ export type CoreAuditEventType =
   | "sub_agent_max_iterations"
   | "sub_agent_reasoning"
   | "sub_agent_staged_build_detected"
+  | "sub_agent_unbacked_action_claim"
   | "sub_agent_head"
   | "sub_agent_head_rewarm"
   | "plan_executed"

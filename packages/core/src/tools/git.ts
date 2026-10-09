@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
@@ -26,9 +26,37 @@ async function runGitInSandbox(
   args: string[],
   ctx: ToolContext,
   options?: { network?: boolean; workdir?: string },
-): Promise<{ success: boolean; output: string; error?: string }> {
-  const workspaceMountSource = resolveDockerWorkspaceMountSource(ctx.workspacePath);
+): Promise<{ success: boolean; output: string; error?: string; metadata?: Record<string, unknown> }> {
   const workdir = options?.workdir ?? "/workspace";
+
+  // THE GIT SANDBOX IS NARROWED TO THE CALLER, EXCEPT FOR THE FULL-SCOPE MAINTENANCE AGENT.
+  // These tools run git against the mount, and in the shipped compose deployment the mount source
+  // is the REPO ROOT — which holds every account's workspace. A "full" agent (swarm_maintainer)
+  // maintains the deployment itself, so it keeps the whole-repo mount: git over the shared tree is
+  // its job. Every other caller runs "generated" scope (git_developer and diff_reviewer) or no
+  // scope at all (an unscoped orchestrator git call), and gets the SAME per-caller bind the shell
+  // sandbox already uses (resolveDockerWorkspaceBind with `at: "/workspace"`), so a user-delegated
+  // git agent cannot reach the deployment repo or another account's workspace. When the mount
+  // source is a named volume there is no host path to subdivide, so the narrow fails CLOSED
+  // (requireNarrow → null) rather than silently falling back to the whole tree.
+  let bind: string;
+  let mountScope: "caller" | "repo";
+  if (ctx.workspaceScope === "full") {
+    bind = `${resolveDockerWorkspaceMountSource(ctx.workspacePath)}:/workspace`;
+    mountScope = "repo";
+  } else {
+    const narrowed = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace", requireNarrow: true });
+    if (narrowed === null) {
+      return {
+        success: false,
+        output: "",
+        error: "Git sandbox refused: the workspace mount source is a named volume that cannot be narrowed to this agent's own root, and the agent is not full-scope. Nothing was run.",
+        metadata: { mountScope: "caller" },
+      };
+    }
+    bind = narrowed;
+    mountScope = "caller";
+  }
 
   // Invoke git directly inside the container (no `sh -lc`) so caller-supplied
   // strings cannot be interpreted as shell metacharacters.
@@ -40,11 +68,7 @@ async function runGitInSandbox(
     "--pids-limit=64",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
-    // DELIBERATELY THE REPO, not the workspace: these tools run git, and the repository is the
-    // mount source itself. The two agents that hold them (swarm_maintainer, git_developer) are
-    // the workspaceAccess:"full" pair, which also keeps the shared workspace root — so this is
-    // the one sandbox that is not narrowed to a single account's directory.
-    "-v", `${workspaceMountSource}:/workspace`,
+    "-v", bind,
     "-w", workdir,
     SANDBOX_IMAGE,
     "git", ...args,
@@ -56,14 +80,14 @@ async function runGitInSandbox(
       timeout: EXEC_TIMEOUT_MS,
       maxBuffer: MAX_OUTPUT_BYTES,
     });
-    return { success: true, output: [stdout, stderr].filter(Boolean).join("\n") || "(no output)" };
+    return { success: true, output: [stdout, stderr].filter(Boolean).join("\n") || "(no output)", metadata: { mountScope } };
   } catch (err: unknown) {
     const e = err as { killed?: boolean; code?: number; stdout?: string; stderr?: string; message?: string };
     if (e.killed) {
-      return { success: false, output: e.stdout ?? "", error: `Git command timed out after ${EXEC_TIMEOUT_MS}ms` };
+      return { success: false, output: e.stdout ?? "", error: `Git command timed out after ${EXEC_TIMEOUT_MS}ms`, metadata: { mountScope } };
     }
     const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
-    return { success: false, output, error: `Exit code ${e.code ?? "?"}: ${e.message?.split("\n")[0] ?? "Unknown error"}` };
+    return { success: false, output, error: `Exit code ${e.code ?? "?"}: ${e.message?.split("\n")[0] ?? "Unknown error"}`, metadata: { mountScope } };
   }
 }
 

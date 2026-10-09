@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   UNOBSERVED_FIGURE_MARKER,
   addArgumentFigureKeys,
+  addArgumentIdentifierKeys,
   addFigureKeys,
   addReceivedFigureKeys,
+  addReceivedIdentifierKeys,
+  countUnbackedIdentifiers,
   countUnobservedFigures,
   figureKey,
+  identifierTokens,
   maskUnobservedFigures,
   namedFileSpans,
   numericDateForms,
@@ -234,5 +238,75 @@ describe("masking the figures no input of the run contained", () => {
     addFigureKeys(seen, "Anzahl der Primzahlen: 8392\nSumme der Primzahlen:   1255204276");
     const answer = "Es sind 8.392 Primzahlen, ihre Summe ist 1.255.204.276.";
     expect(maskUnobservedFigures(answer, seen)).toEqual({ text: answer, masked: 0 });
+  });
+});
+
+/**
+ * ACTION IDENTIFIERS (narrated-action-claim shadow check, design §12). A commit/tag hex id or an
+ * http(s) URL, the structural signal for a narrated action — no verb or keyword lists. These are the
+ * primitives the shadow check compares an answer against, so they are unit-tested directly rather
+ * than only through the runner.
+ */
+describe("identifierTokens", () => {
+  it("takes a hex token only when it holds both a digit and an a-f letter", () => {
+    // A commit abbreviation qualifies; a pure-digit run (a figure the other check covers) and an
+    // all-letter word do not. Keyed lowercased.
+    expect(identifierTokens("at 3f9c2ab now")).toEqual(["3f9c2ab"]);
+    expect(identifierTokens("HEAD is 4F3C2A1")).toEqual(["4f3c2a1"]);
+    expect(identifierTokens("count 1234567")).toEqual([]);
+    expect(identifierTokens("the deadbeef cafe")).toEqual([]); // no digit → not an identifier
+    expect(identifierTokens("value feedbac")).toEqual([]); // 7 letters, no digit
+  });
+
+  it("excludes hex that is shorter than 7 or longer than 40, so a 64-char sha256 is no identifier", () => {
+    expect(identifierTokens("short a1b2c3")).toEqual([]); // 6 chars
+    const sha256 = "a".repeat(32) + "0".repeat(16) + "f".repeat(16); // 64 chars, has digit + a-f
+    expect(identifierTokens(`digest ${sha256} end`)).toEqual([]);
+    const forty = "a".repeat(33) + "1234567"; // exactly 40, has digit + a-f
+    expect(identifierTokens(`full ${forty} .`)).toEqual([forty]);
+  });
+
+  it("trims trailing sentence punctuation off a URL and lowercases it", () => {
+    expect(identifierTokens("see https://Example.com/Api/v2).")).toEqual(["https://example.com/api/v2"]);
+    expect(identifierTokens("(ref https://a.co/x/y/z)")).toEqual(["https://a.co/x/y/z"]);
+    expect(identifierTokens("ftp://nope.example only")).toEqual([]); // not http(s)
+    expect(identifierTokens("bare https:// here")).toEqual([]); // nothing past the scheme
+  });
+
+  it("reads identifiers out of nested call arguments the way addReceivedIdentifierKeys does", () => {
+    const into = new Set<string>();
+    addArgumentIdentifierKeys(into, { message: "Revert, see https://g.co/pr/12", nested: ["also 3f9c2ab", 42] });
+    expect(into.has("https://g.co/pr/12")).toBe(true);
+    expect(into.has("3f9c2ab")).toBe(true);
+    expect(into.has("42")).toBe(false); // numbers carry no identifier
+  });
+});
+
+describe("countUnbackedIdentifiers", () => {
+  const received = (...texts: string[]) => {
+    const into = new Set<string>();
+    for (const text of texts) addReceivedIdentifierKeys(into, text);
+    return into;
+  };
+
+  it("backs a hash by a prefix match in EITHER direction (git abbreviates)", () => {
+    // The answer's abbreviation is backed by the input's full hash …
+    expect(countUnbackedIdentifiers("committed 3f9c2ab", received("commit 3f9c2ab1c0ffee0012345678"))).toBe(0);
+    // … and the input's abbreviation backs the answer's full hash.
+    expect(countUnbackedIdentifiers("full 3f9c2ab1c0ffee0012345678", received("short 3f9c2ab"))).toBe(0);
+    // A different hash is not backed by either direction.
+    expect(countUnbackedIdentifiers("tag 9a8b7c6", received("commit 3f9c2ab1c0ffee0012345678"))).toBe(1);
+  });
+
+  it("backs a URL only by an exact key match", () => {
+    expect(countUnbackedIdentifiers("at https://a.co/x", received("fetched https://a.co/x."))).toBe(0);
+    expect(countUnbackedIdentifiers("at https://a.co/x/y", received("fetched https://a.co/x"))).toBe(1);
+  });
+
+  it("counts an invented hash and URL that no input contained", () => {
+    expect(countUnbackedIdentifiers(
+      "Committed 4f3c2a1, see https://github.com/o/r/pull/12.",
+      received("Commit the staged change."),
+    )).toBe(2);
   });
 });

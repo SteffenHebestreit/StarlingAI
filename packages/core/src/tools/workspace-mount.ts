@@ -63,13 +63,25 @@ function mountSourceMapsToWorkspaceRoot(workspacePath: string): boolean {
  */
 export function resolveDockerWorkspaceBind(
   workspacePath: string,
+  options: DockerWorkspaceBindOptions & { requireNarrow: true },
+): string | null;
+export function resolveDockerWorkspaceBind(
+  workspacePath: string,
+  options?: DockerWorkspaceBindOptions,
+): string;
+export function resolveDockerWorkspaceBind(
+  workspacePath: string,
   options: DockerWorkspaceBindOptions = {},
-): string {
+): string | null {
   const source = resolveDockerWorkspaceMountSource(workspacePath, options);
   const at = options.at;
   if (!mountSourceMapsToWorkspaceRoot(workspacePath)) return `${source}:${at ?? workspacePath}`;
   const host = resolveHostPathUnderWorkspace(workspacePath, source);
-  if (!host) return `${source}:${at ?? "/workspace"}`;
+  // A named-volume source has no host path to subdivide, so the only narrow available is the whole
+  // volume. A caller that must not expose another account's tree (requireNarrow) gets null here
+  // and refuses the run, instead of silently binding the whole tree. A host-path source is always
+  // narrowed to the caller's own offset below, so requireNarrow never rejects one.
+  if (!host) return options.requireNarrow ? null : `${source}:${at ?? "/workspace"}`;
   return `${host}:${at ?? workspacePath}`;
 }
 
@@ -87,6 +99,15 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
    * the mount the boundary, because a sandbox has no sibling account in it to reach.
    */
   at?: string;
+  /**
+   * Fail closed instead of binding the whole tree. When the mount SOURCE is a named volume there
+   * is no host path to subdivide, so the only "narrow" available is the whole volume. A caller
+   * that must never expose another account's files (the git sandbox for a non-full agent) passes
+   * requireNarrow and gets `null` back in that case, so it can refuse rather than mount the tree.
+   * A host-path source is always narrowed to the caller's own offset, so requireNarrow never
+   * rejects one.
+   */
+  requireNarrow?: boolean;
 }
 
 /** The host path for a container path under /workspace, or null for a named-volume source. */

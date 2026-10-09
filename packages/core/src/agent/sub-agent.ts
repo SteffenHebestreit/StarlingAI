@@ -34,10 +34,13 @@ import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
-import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
+import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addArgumentFigureKeys,
+  addArgumentIdentifierKeys,
   addReceivedFigureKeys,
+  addReceivedIdentifierKeys,
+  countUnbackedIdentifiers,
   argumentTexts,
   countUnobservedFigures,
   maskFiguresByKey,
@@ -1402,6 +1405,27 @@ export function requiresInProcessExecution(tools: readonly string[] | undefined)
       || GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => t.startsWith(prefix)));
 }
 
+/**
+ * Does this agent resolve to the containerized dispatch path (the fail-loud pre-flight at the
+ * call site below)? This is the single predicate the runtime branch and the shipped-config gate
+ * share, so a change to the rule cannot pass the gate while breaking the runtime, or the reverse.
+ * It is exactly the condition the dispatch comment describes: an agent is containerized when its
+ * tools do not force it in-process AND it either opts in explicitly (`container.enabled`) or runs
+ * under the global opt-out model (`agents.defaultContainerized` on and `container.disabled` not
+ * set). The 15 specialists that used to resolve here now carry `container.disabled: true` and run
+ * in-process (2026-10-09 user decision); the branch and its honest-failure path stay for any
+ * future agent that is containerized by default.
+ */
+export function resolvesToContainerizedDispatch(
+  agentCfg: { tools?: readonly string[]; container?: { enabled?: boolean; disabled?: boolean } },
+  defaultContainerized: boolean,
+): boolean {
+  return !requiresInProcessExecution(agentCfg.tools) && (
+    agentCfg.container?.enabled === true ||
+    (defaultContainerized === true && agentCfg.container?.disabled !== true)
+  );
+}
+
 // Tools whose output is deterministic enough within a single sub-agent run that
 // re-issuing the call with identical arguments is wasted work. The existing
 // `lastToolCallSig` map only catches *consecutive* duplicates (A→A); this set
@@ -2285,6 +2309,10 @@ export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | u
     "exitCode",
     "programOutputChars",
     "timedOut",
+    // Which tree the git sandbox mounted: "caller" (narrowed to this agent's own workspace root)
+    // or "repo" (the whole deployment tree, only for the full-scope maintenance agent). E2E reads
+    // it on the sub_agent_tool_call row to prove a delegated git agent never reached the repo.
+    "mountScope",
   ]) {
     if (key in metadata) {
       summary[key] = metadata[key];
@@ -3124,11 +3152,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // `--network none` isolation breaks mcp__* tools (they reach their MCP
     // servers via the gateway's host-side registry), so MCP-using agents are
     // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
-    const isContainerized =
-      !requiresInProcessExecution(agentCfg.tools) && (
-        agentCfg.container?.enabled === true ||
-        (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
-      );
+    const isContainerized = resolvesToContainerizedDispatch(
+      agentCfg,
+      config.agents.defaultContainerized === true,
+    );
     if (isContainerized) {
       // STATIC PRE-FLIGHT — the same check the worker makes on itself (agent/container-entrypoint.ts),
       // made here before a container is ever started. The agent-worker process registers only the
@@ -3844,6 +3871,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
     const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
       .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
+    // THE NARRATED-ACTION-CLAIM CHECK (orchestration.unbackedActionClaims, design §12; default off,
+    // shadow is audit-only). The consequential tools the run HELD: those whose tier requires
+    // per-call approval and that are not read-only (not IDEMPOTENT_TOOLS). Tier metadata, not a
+    // tool-name list. If the run holds none, no narrated-action claim is possible, so the check is
+    // off for it whatever the mode. When it IS on, the default figure path stays byte-identical:
+    // every added line below is guarded by checksActionClaims, which is false under the "off"
+    // default.
+    const unbackedActionClaimsMode = config.orchestration.unbackedActionClaims;
+    const consequentialToolsHeld = (effectiveToolNames ?? tools.map((tool) => tool.name))
+      .filter((name) => getToolTier(name).requiresPerCallApproval && !IDEMPOTENT_TOOLS.has(name));
+    const checksActionClaims = unbackedActionClaimsMode !== "off" && consequentialToolsHeld.length > 0;
+    // Keys of the action identifiers (commit/tag hashes, http(s) URLs) the run RECEIVED, the same
+    // input set as the figures below. Fed at the same absorb points; stays empty unless the check
+    // is on. And the consequential tools that actually succeeded at least once this run.
+    const receivedIdentifierKeys = new Set<string>();
+    const succeededConsequentialTools = new Set<string>();
     // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
     // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
     // shared or the commands it sent to the sandbox: those are the claims being checked.
@@ -3853,6 +3896,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // The prompt's "Today's date" in the numeric forms an answer writes it in.
       addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
     }
+    if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, systemPrompt);
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
     // into the arguments of its own calls before any input had contained them: the files it
     // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
@@ -3865,18 +3909,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
     // the auto-share below).
     const ownClaimFigureKeys = new Set<string>();
+    // The action-identifier equivalent of ownClaimFigureKeys. A hash or URL the run wrote into a
+    // call's arguments before any input contained it (recordOwnClaims) is still its own claim when a
+    // tool hands it back: a FAILED git_commit returns "Exit code N: Command failed: … git commit -m
+    // <message>", so a URL or hash the model put in its own commit message comes back in the error
+    // text and, absorbed verbatim, would back the answer that narrates the commit as done. read_
+    // shared_facts handing back the run's own share_finding values does the same. So these keys are
+    // skipped when absorbing non-user messages; the user task and the system prompt still count.
+    const ownClaimIdentifierKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
     // would miss a figure the run read early and the trim has since removed. The run's own
     // messages add nothing: their prose and their calls are what it claims.
     let absorbedHistoryLength = 0;
     const absorbNewHistory = (): void => {
-      if (!tracksFigures) return;
+      if (!tracksFigures && !checksActionClaims) return;
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
         if (message.role === "assistant") continue;
         const content = typeof message.content === "string" ? message.content : "";
-        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        // An identifier any non-assistant message holds (the task, a git_log tool result, a system
+        // message) is one the run RECEIVED, so an answer that states it is backed — unless it is one
+        // of the run's OWN claims a tool echoed back (ownClaimIdentifierKeys), which the user's own
+        // messages never carry, the same rule as the figure path above.
+        if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, content, message.role === "user" ? undefined : ownClaimIdentifierKeys);
       }
     };
     /**
@@ -3893,11 +3950,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
      * keeps its figures (see the quoted-code check below).
      */
     const recordOwnClaims = (toolName: string, args: unknown): void => {
-      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
-      const claimed = new Set<string>();
-      addArgumentFigureKeys(claimed, args);
-      for (const key of claimed) {
-        if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+      // A read (IDEMPOTENT_TOOLS) asks for something and claims nothing, for identifiers the same as
+      // for figures: a URL in a web_fetch argument is the run choosing what to fetch, confirmed by
+      // what the fetch returns, not an action it narrates.
+      if (IDEMPOTENT_TOOLS.has(toolName)) return;
+      if (tracksFigures) {
+        const claimed = new Set<string>();
+        addArgumentFigureKeys(claimed, args);
+        for (const key of claimed) {
+          if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+        }
+      }
+      // The same for action identifiers: a hash or URL this call introduces that no input had yet
+      // contained is the run's own, so a failed tool that echoes the argument back cannot back it.
+      if (checksActionClaims) {
+        const claimedIds = new Set<string>();
+        addArgumentIdentifierKeys(claimedIds, args);
+        for (const key of claimedIds) {
+          if (!receivedIdentifierKeys.has(key)) ownClaimIdentifierKeys.add(key);
+        }
       }
     };
     // QUOTED CODE IS NOT A CLAIM. In review, the coder of a broken sandbox reported honestly and
@@ -4000,6 +4071,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
       if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
+    };
+    /**
+     * SHADOW narrated-action-claim check (design §12; audit only, changes nothing). When the run
+     * held consequential tools but NONE of them succeeded this run, an action identifier in the
+     * answer that no input contained — a commit/tag hash or a URL the run invented — is a narrated
+     * action that did not happen ("committed as 3f9c2ab and pushed", no successful git_commit). A
+     * read that quotes a hash (git_log) makes that hash a received input, so it is not flagged; a
+     * successful consequential call means the premise fails and nothing is checked. Writes one
+     * sub_agent_unbacked_action_claim row with counts only; the answer and the outcome are
+     * untouched until an "enforce" mode is added (separate, eval-gated).
+     */
+    const shadowUnbackedActionClaim = (answer: string): void => {
+      if (!checksActionClaims) return;
+      const succeeded = consequentialToolsHeld.filter((name) => succeededConsequentialTools.has(name));
+      if (succeeded.length > 0) return;
+      absorbNewHistory();
+      const identifiers = countUnbackedIdentifiers(answer, receivedIdentifierKeys);
+      if (identifiers === 0) return;
+      logAudit("sub_agent_unbacked_action_claim", {
+        agentName: opts.agentName,
+        mode: unbackedActionClaimsMode,
+        identifiers,
+        consequentialToolsHeld: consequentialToolsHeld.length,
+        consequentialToolsSucceeded: succeeded.length,
+      }, { sessionId: subSessionId, severity: "warn" });
     };
     /**
      * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
@@ -5969,18 +6065,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // bound — only their POSITION changed.
       const nudgeMessage = iterationNudges.join("\n\n");
       // Read what the run has received BEFORE the trim digests, drops or clamps it (see
-      // absorbNewHistory); the nudges count too, since the model reads them as context.
-      if (tracksFigures) {
+      // absorbNewHistory); the nudges count too, since the model reads them as context. The absorb
+      // runs for the action-identifier check as well — design §12.2 absorbs identifiers at the same
+      // input points as figures — or an agent that checks claims but does not track figures (holds
+      // an approval-gated tool, no sandbox tool: a mail/notification/http specialist) would lose a
+      // URL or hash a tool result carried the moment the trim digested that result, and flag the
+      // answer that cites it as unbacked. The nudges stay figure-only: the runtime's own wrap-up
+      // text is context the model reads, never an action identifier it could legitimately cite.
+      if (tracksFigures || checksActionClaims) {
         absorbNewHistory();
-        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
       }
       const trimmed = trimSubAgentHistory(history, {
         systemPromptChars: systemPrompt.length + nudgeMessage.length,
         tools: effectiveTools,
         contextWindow: modelConfig.contextWindow,
       });
-      // The trim shortens history in place, so everything left in it has been read.
-      if (tracksFigures) absorbedHistoryLength = history.length;
+      // The trim shortens history in place, so everything left in it has been read. Reset under the
+      // same combined condition the pre-trim absorb used: left gated on tracksFigures alone,
+      // absorbedHistoryLength would stay past the shrunken length for a claim-checking leaf and the
+      // next absorb would skip the messages appended after this trim.
+      if (tracksFigures || checksActionClaims) absorbedHistoryLength = history.length;
       // A digest is a KV-prefix break (everything behind the rewritten message re-prefills,
       // 10-16 s cold on the audited runs), so each batch is its own row: the log must show
       // how many breaks a run paid, not just how many messages it dropped. The row carries
@@ -6654,6 +6759,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           );
           result = outputScan.redacted;
         }
+
+        // SHADOW: flag a commit/tag hash or URL this answer states that no input backed, when the
+        // run held consequential tools and none of them succeeded. Audit only.
+        shadowUnbackedActionClaim(result);
 
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
@@ -7593,6 +7702,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (result.success) {
           successfulToolCount += 1;
+          // For the narrated-action-claim check: record which consequential tools actually
+          // succeeded, so a run that only ATTEMPTED (or was approval-blocked on) its privileged
+          // tools is distinguished from one that completed one. Gated, so the default path is
+          // byte-identical.
+          if (checksActionClaims) succeededConsequentialTools.add(tc.name);
           // The supervisor's progress counter: a success counts only when it brought back a result
           // this run has not seen (isNovelToolOutcome). Taken from resultContent here, before any
           // note or nudge is appended to the message that carries it.
