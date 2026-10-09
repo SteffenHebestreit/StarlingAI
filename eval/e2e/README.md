@@ -99,7 +99,8 @@ it took such turns from; deleting that file forgets them.
 **Workspace files are not reset.** A file a turn writes stays in the account's workspace root for every
 later run. A scenario that needs a file to be absent deletes it in an http step before its first turn:
 `DELETE /api/workspace/file?path=<path>` with `expect: { status: [204, 404] }` (204 removed, 404 not
-there; operator only, one file in the caller's own root, never a directory). See
+there; operator only, one file under `generated/` in the caller's own root, never a directory; any
+other path is refused with 400). See
 guards-no-claimed-update-of-missing-file.
 
 **One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or
