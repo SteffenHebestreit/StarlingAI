@@ -118,6 +118,11 @@ describe("the research gate's turn trigger", () => {
     turnEvidence: { required: true },
     ...extra,
   });
+  /** A swarm state holding one finished task that ran on `agentName`, as a turn carries it from the one before. */
+  const swarmDrivenBy = (agentName: string): NonNullable<ToolContext["swarmState"]> => ({
+    objective: "t", startedAt: "", updatedAt: "",
+    tasks: { task_prev: { id: "task_prev", title: "Open the account page", status: "completed", dependsOn: [], selectedAgent: agentName, attempts: [{ agentName, status: "completed", startedAt: "" }] } },
+  });
   const plan = (objective: string, steps: TurnPlan["steps"]): TurnPlan => ({
     objective, steps, acceptanceCriteria: [], stopConditions: [], riskTier: "high", wide: false, createdAt: new Date(0).toISOString(),
   });
@@ -517,6 +522,44 @@ describe("the research gate's turn trigger", () => {
     expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([]);
   }, 30_000);
 
+  it("redirects every tab-reader step of the plan, not only its gather point (c172d755)", async () => {
+    // Both of the live plan's site steps named the tab reader. The gather point went to researcher,
+    // which reads with web_fetch and leaves the tab where it was, and the other step ran exempt.
+    await executePlan("s-tab-pair", plan(GERMAN_OBJECTIVE, [
+      { id: "s1", kind: "delegate", agent: "vision_browser_analyst", description: GERMAN_STEP },
+      { id: "s2", kind: "delegate", agent: "vision_browser_analyst", description: "Die Seite http://www.nordlicht-werkzeuge.test/preise.html auslesen und die Preise belegen." },
+    ]), turnCtx("s-tab-pair"));
+
+    expect(ran()).toEqual(["researcher", "researcher"]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("redirects a second call to the tab reader after the first was redirected and shared its facts", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    const ctx = turnCtx("s-tab-again");
+    await getTool("delegate_to_agent")!.execute({ agentName: "vision_browser_analyst", task: GERMAN_STEP }, ctx);
+    await (await import("../swarm/memory.js")).writeSharedFact("s-tab-again", "founding_year", "1987 (impressum)");
+    // A file to write as well: the tab reader renders from the tab, so the render exemption is not its.
+    await getTool("delegate_to_agent")!.execute({ agentName: "vision_browser_analyst", task: "Die Preisseite auslesen und die Preise in preise.md schreiben." }, ctx);
+
+    expect(ran()).toEqual(["researcher", "researcher"]);
+  }, 30_000);
+
+  it("lets the tab reader read a page the session's browser agent opened in the turn before", async () => {
+    // The previous turn's browser_agent task, carried into this turn's swarm state as the runtime does.
+    await (await import("../swarm/memory.js")).writeSharedFact("s-tab-carried", "account_url", "http://www.nordlicht-werkzeuge.test/konto (browser_agent)");
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ agentName: "vision_browser_analyst", task: "Die geöffnete Kontoseite auslesen und den Saldo belegen." },
+      turnCtx("s-tab-carried", { swarmState: swarmDrivenBy("browser_agent") }));
+
+    expect(ran()).toEqual(["vision_browser_analyst"]);
+  }, 30_000);
+
   // ── Routed delegations: no agent named, so the router's ranking picks it ──────────────────────
 
   /** The router's ranking for the live step (79dd29e0): the tab reader first, both gatherers right behind it. */
@@ -605,16 +648,13 @@ describe("the research gate's turn trigger", () => {
     expect(ran()).toEqual(["browser_agent", "researcher"]);
   }, 30_000);
 
-  it("leaves the router's pick alone with no verdict, for an agent with a source of its own, and once the turn has gathered", async () => {
+  it("leaves the router's pick alone with no verdict, and for an agent with a source of its own", async () => {
     const { getTool } = await import("../tools/registry.js");
     routeAs(LIVE_SITE_RANKING);
     await import("../tools/sub-agent.js");
     const noVerdict = turnCtx("s-routed-no-verdict");
     delete noVerdict.turnEvidence;
     await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, noVerdict);
-    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-engaged", { turnEvidence: { required: true, outsideEngaged: "researcher" } }));
-    await (await import("../swarm/memory.js")).writeSharedFact("s-routed-facts", "lager_total", "596 (lager.html)");
-    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-facts"));
     vi.doUnmock("../tools/agent-routing.js");
     vi.resetModules();
     routeAs([{ name: "mail_agent", score: 0.86 }, { name: "researcher", score: 0.81 }]);
@@ -622,8 +662,29 @@ describe("the research gate's turn trigger", () => {
     await import("../tools/sub-agent.js");
     await registry.getTool("delegate_to_agent")!.execute({ task: "Die Rechnung von Nordlicht im Postfach suchen und den Betrag nennen." }, turnCtx("s-routed-mail"));
 
-    expect(ran()).toEqual(["vision_browser_analyst", "vision_browser_analyst", "vision_browser_analyst", "mail_agent"]);
+    expect(ran()).toEqual(["vision_browser_analyst", "mail_agent"]);
     expect(rows("delegation_routing_filtered_research_incapable")).toEqual([]);
+  }, 30_000);
+
+  it("keeps a routed tab reader off the step once the turn has gathered, or the session holds facts, while nothing has driven the browser", async () => {
+    // The turn trigger stands down once the turn reached outside or the session holds facts. That
+    // does not make the shared tab this session's: researcher reads with web_fetch.
+    const { getTool } = await import("../tools/registry.js");
+    routeAs(LIVE_SITE_RANKING);
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-engaged", { turnEvidence: { required: true, outsideEngaged: "researcher" } }));
+    await (await import("../swarm/memory.js")).writeSharedFact("s-routed-facts", "lager_total", "596 (lager.html)");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-facts"));
+    // Once browser_agent has run for the session, the tab shows its page and the tab reader may read it.
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-driven", {
+      turnEvidence: { required: true, outsideEngaged: "browser_agent" }, swarmState: swarmDrivenBy("browser_agent"),
+    }));
+
+    expect(ran()).toEqual(["browser_agent", "browser_agent", "vision_browser_analyst"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["vision_browser_analyst"], redirectedTo: null, trigger: "turn_evidence" }),
+      expect.objectContaining({ droppedAgents: ["vision_browser_analyst"], redirectedTo: null, trigger: "turn_evidence" }),
+    ]);
   }, 30_000);
 
   it("redirects one of two routed builder slices, not both: the first to decide claims the turn's gather", async () => {
@@ -658,6 +719,18 @@ describe("the research gate's turn trigger", () => {
 });
 
 describe("capability predicates behind the turn trigger", () => {
+  it("counts an agent as driving the shared browser only for a browser tool that opens or acts on a page", async () => {
+    const { agentCfgDrivesSharedBrowser } = await import("../tools/agent-routing.js");
+    expect(agentCfgDrivesSharedBrowser(AGENTS.browser_agent)).toBe(true);
+    expect(agentCfgDrivesSharedBrowser({ tools: ["mcp__playwright__browser_navigate"] })).toBe(true);
+    expect(agentCfgDrivesSharedBrowser(AGENTS.vision_browser_analyst)).toBe(false);
+    expect(agentCfgDrivesSharedBrowser({ tools: ["mcp__playwright__browser_snapshot", "mcp__playwright__browser_take_screenshot"] })).toBe(false);
+    expect(agentCfgDrivesSharedBrowser(AGENTS.researcher)).toBe(false);
+    // Inheriting the full set says nothing about whether it opened a page.
+    expect(agentCfgDrivesSharedBrowser({})).toBe(false);
+    expect(agentCfgDrivesSharedBrowser(undefined)).toBe(false);
+  });
+
   it("reads reach from the routing taxonomy and never classifies what it cannot read", async () => {
     const { agentCfgReachesOutsideWorkspace, agentCfgWorksOnlyFromHandedText } = await import("../tools/agent-routing.js");
     expect(agentCfgWorksOnlyFromHandedText(AGENTS.web_coder as never)).toBe(true);

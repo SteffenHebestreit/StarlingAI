@@ -41,6 +41,8 @@ import {
   pickResearchFallbackAgent,
   agentCfgReachesOutsideWorkspace,
   agentCfgWorksOnlyFromHandedText,
+  agentCfgOnlyReadsOpenBrowserTab,
+  agentCfgDrivesSharedBrowser,
   evidenceGatherPoint,
   lookupAgentCapabilities,
   filterCandidatesByExecutionCapability,
@@ -332,6 +334,18 @@ async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether this session's swarm has run an agent that drives the shared browser
+ * (agentCfgDrivesSharedBrowser): a delegation of this turn dispatched one (each dispatch records its
+ * attempt), or a task this turn carried over from the session's previous turn ran on one.
+ */
+function swarmHasDrivenSharedBrowser(ctx: ToolContext): boolean {
+  const config = getConfig();
+  const promoted = readPromotedAgents(config.workspacePath);
+  return Object.values(ctx.swarmState?.tasks ?? {}).some((task) => (task.attempts ?? []).some((attempt) =>
+    agentCfgDrivesSharedBrowser(config.subAgents[attempt.agentName] ?? promoted[attempt.agentName])));
 }
 
 function getEphemeralGenerationSettings() {
@@ -1300,6 +1314,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     && explicitAgentRequested
     && candidateQueue.length > 0
     && candidateQueue.every((name) => agentCfgWorksOnlyFromHandedText(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+  // THE TAB READER — an agent that only reads the page the shared browser tab shows
+  // (agentCfgOnlyReadsOpenBrowserTab). The trigger above stands down once anything this turn has
+  // reached outside, the step is exempt, or the session holds facts, and none of that puts a page of
+  // this session's in the tab. c172d755 named vision_browser_analyst for both of its site steps: the
+  // gather point went to researcher, which reads with web_fetch and leaves the tab where it was, and
+  // the second step ran exempt on a page another session had opened. So on a turn the judge flagged,
+  // a step for tab readers alone is redirected the same way until an agent that drives the browser
+  // has run for this session (swarmHasDrivenSharedBrowser); a step that runs after one keeps it.
+  const tabReaderUnserved = ctx.turnEvidence?.required === true
+    && explicitAgentRequested
+    && candidateQueue.length > 0
+    && candidateQueue.every((name) => agentCfgOnlyReadsOpenBrowserTab(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]))
+    && !swarmHasDrivenSharedBrowser(ctx);
   let renderHasGatheredFacts = true;
   if (textRequiresResearch || turnTriggerCandidate) {
     try {
@@ -1310,10 +1337,12 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     }
   }
   // Re-read after the await: a sibling of this delegation may have taken the turn's one redirect.
-  const turnTriggered = turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged;
+  const turnTriggered = (turnTriggerCandidate && !renderHasGatheredFacts && !ctx.turnEvidence?.outsideEngaged) || tabReaderUnserved;
   const requiresExternalResearch = textRequiresResearch || turnTriggered;
   const researchTrigger = textRequiresResearch ? "task_text" : "turn_evidence";
+  // A tab reader renders from the tab, not from the shared facts, so the render exemption is not its.
   const isArtifactRenderDelegation = renderHasGatheredFacts
+    && !tabReaderUnserved
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
       isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
@@ -1528,11 +1557,16 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             // Re-read after the await, as the explicit path does: a sibling may have engaged one.
             && !ctx.turnEvidence.outsideEngaged;
         }
-        if (routedTurnTriggered && !textRequiresResearch && routingCandidates.length > 0) {
+        // Once the trigger stands down, a routed tab reader is still held to the explicit path's tab
+        // rule (tabReaderUnserved): on a turn the judge flagged, it is dropped until an agent that
+        // drives the browser has run for this session.
+        const tabReadersBarred = !routedTurnTriggered && ctx.turnEvidence?.required === true && !swarmHasDrivenSharedBrowser(ctx);
+        if ((routedTurnTriggered || tabReadersBarred) && !textRequiresResearch && routingCandidates.length > 0) {
           const turnCfg = getConfig();
           const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
+          const unfitForTurn = routedTurnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
           const gatherable = routingCandidates.filter((cand) =>
-            !agentCfgWorksOnlyFromHandedText(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+            !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
           if (gatherable.length < routingCandidates.length) {
             const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
               attemptedAgents,

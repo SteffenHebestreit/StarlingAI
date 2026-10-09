@@ -944,10 +944,21 @@ const WORKSPACE_SURFACES: ReadonlySet<string> = new Set(["workspace", "local_san
  * steps, and it read dokumentation.html, which another session had opened, and reported a
  * headcount and two page visits it never made.
  */
-function agentCfgOnlyReadsOpenBrowserTab(cfg: CapabilityBearing): boolean {
+export function agentCfgOnlyReadsOpenBrowserTab(cfg: CapabilityBearing): boolean {
   if (!cfg || agentCfgIsResearchCapable(cfg)) return false;
   const outside = (resolveRoutingTaxonomy(cfg)?.surface ?? []).filter((surface) => !WORKSPACE_SURFACES.has(surface));
   return outside.length > 0 && outside.every((surface) => surface === "browser");
+}
+
+/**
+ * Whether an agent drives the shared browser: it holds a browser tool that opens a page or acts on
+ * one (browser_navigate, browser_click, the bridged Playwright server's), not only a view of the
+ * open tab (BROWSER_TAB_VIEW_TOOL_NAMES). After such an agent has run, the tab shows a page it
+ * opened. An agent that inherits the full tool set is not counted: nothing says it opened one.
+ */
+export function agentCfgDrivesSharedBrowser(cfg: { tools?: readonly string[] } | undefined): boolean {
+  return (cfg?.tools ?? []).some((toolName) => (toolName.startsWith("browser_") || toolName.startsWith("mcp__playwright__browser_"))
+    && !BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName));
 }
 
 /**
