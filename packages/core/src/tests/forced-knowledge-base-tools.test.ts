@@ -414,6 +414,32 @@ describe("the excerpts a search returned reach the model's next call", () => {
     expect(nextCall).toContain(charge!.text);
     expect(nextCall).toContain(grease!.text);
   }, 60_000);
+
+  it("a low-confidence search says so ahead of its excerpts, so the cut to the retrieval budget keeps the note", async () => {
+    await loadRuntime();
+    const { getTool } = await import("../tools/registry.js");
+    const { buildModelVisibleToolResult } = await import("../agent/tool-result-format.js");
+    const { getConfig } = await import("../config/loader.js");
+    getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Six long excerpts of a crawled site, as the default top-k returns them: past the budget.
+    const chunks = Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `c${i}`,
+      text: `Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks, retrievalFailed: false, lowConfidence: true });
+
+    const result = await getTool("search_knowledge_base")!.execute(
+      { knowledge_base: KB_ID, query: "Wartung NW-AS 18" },
+      { sessionId: "kb-low-confidence", workspacePath: "/workspace" } as never,
+    );
+    expect(result.success).toBe(true);
+    const visible = buildModelVisibleToolResult("search_knowledge_base", result.output, result.metadata);
+    expect(visible, "the fixture does not run past the budget").toMatch(/\[Cut to fit the context budget: /);
+    expect(visible.length).toBeLessThanOrEqual(6000);
+    expect(visible).toContain("retrieval confidence for this query was LOW");
+    expect(visible).toContain("Abschnitt 1:");
+  }, 60_000);
 });
 
 describe("citations in an answer from this turn's knowledge-base read are its sources", () => {

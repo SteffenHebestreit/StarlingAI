@@ -203,12 +203,16 @@ registerTool({
       const label = c.title?.trim() || c.documentId.slice(0, 8);
       return `[${i + 1}] ${label}${c.url ? `\n${c.url}` : ""}\n(score ${c.score.toFixed(3)})\n${c.text.trim()}`;
     });
+    // Ahead of the excerpts, not after them. The model-visible frame holds a long result to the
+    // retrieval budget by cutting from the end (agent/tool-result-format.ts), and the six excerpts
+    // of a crawled site often run past it: a note at the end went with the cut, and the weakest
+    // matches read as authoritative.
     const confidenceNote = lowConfidence
-      ? "\n\nNote: retrieval confidence for this query was LOW — treat these excerpts as possibly-relevant leads and verify against the cited pages before relying on specifics."
+      ? "Note: retrieval confidence for this query was LOW — treat these excerpts as possibly-relevant leads and verify against the cited pages before relying on specifics.\n\n"
       : "";
     return {
       success: true,
-      output: `Top ${chunks.length} excerpt(s) from "${kb.name}":\n\n${blocks.join("\n\n---\n\n")}${confidenceNote}`,
+      output: `Top ${chunks.length} excerpt(s) from "${kb.name}":\n\n${confidenceNote}${blocks.join("\n\n---\n\n")}`,
       // The pages these excerpts came from. The turn's citation guard keeps a citation of one of
       // them and strips any other URL the answer cites (agent/turn-terminal-guards.ts).
       metadata: { hits: chunks.length, kbId: kb.id, lowConfidence, sourceUrls: [...new Set(chunks.flatMap((c) => (c.url ? [c.url] : [])))] },
