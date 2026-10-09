@@ -267,6 +267,32 @@ describe("web_table source url: pages", () => {
     expect(JSON.stringify(r.metadata).length).toBeLessThan(4_000);
   });
 
+  it("requests no further page once the turn is stopped between pages", async () => {
+    // The stop lands after page 1's body was read, in the turn of the event loop the call yields
+    // after parsing a page: no read is in flight, so only the check before each page can see it.
+    const controller = new AbortController();
+    const page1 = fixture("produkte/seite-1.html");
+    const requested = site({
+      [`${PUBLIC}/produkte/seite-1.html`]: () => new Response(new ReadableStream<Uint8Array>({
+        start(stream) {
+          stream.enqueue(new TextEncoder().encode(page1));
+        },
+        pull(stream) {
+          stream.close();
+          setImmediate(() => controller.abort());
+        },
+      }), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }),
+    });
+    const run = ctx({ signal: controller.signal });
+    const r = await webTable({ url: [`${PUBLIC}/produkte/seite-1.html`, `${PUBLIC}/produkte/seite-2.html`], aggregates: ["count"] }, run);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(r.success).toBe(false);
+    expect(r.error).toBe(`stopped: the turn was stopped; 1 of 2 pages had been read (${PUBLIC}/produkte/seite-2.html was not); nothing was computed`);
+    expect(requested).toEqual([`${PUBLIC}/produkte/seite-1.html`]);
+    const { webTablePagesUsed } = await import("../tools/web-table-budget.js");
+    expect(webTablePagesUsed(run.sessionId)).toBe(1);
+  });
+
   it("fails on a 404 page with its status, computing nothing over the error page", async () => {
     site({ [`${PUBLIC}/weg.html`]: () => html(fixture("lager.html"), "text/html", 404) });
     const r = await webTable({ url: `${PUBLIC}/weg.html`, column: "Südtal", aggregates: ["sum"] });

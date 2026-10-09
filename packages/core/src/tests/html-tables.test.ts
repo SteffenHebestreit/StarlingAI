@@ -178,6 +178,20 @@ describe("web_table number rules", () => {
     expect(result.output).toContain("1·1 | A | 3 €");
   });
 
+  it("leaves out a row or cell the page hides (the hidden attribute, display:none), as the browser shows the table", () => {
+    const html = "<table><thead><tr><th>Artikel</th><th>Bestand</th></tr></thead><tbody>"
+      + "<tr><td>A</td><td>10</td></tr>"
+      + "<tr hidden><td>B</td><td>1000</td></tr>"
+      + "<tr><td>C</td><td style=\"color: red; display : none\">500</td><td>20</td></tr>"
+      + "<tr style=\"DISPLAY:none\"><td>D</td><td>7000</td></tr>"
+      + "</tbody></table>";
+    const result = ok([inlinePage(1, html)], { column: "Bestand", aggregates: ["sum", "count"] });
+    expect(result.output.split("\n").slice(0, 2)).toEqual([
+      "sum(column 2 \"Bestand\") = 30 — all 2 rows, 2 numeric of 2 (whole numbers)",
+      "count = 2",
+    ]);
+  });
+
   it("lists <tfoot> rows as footer, never adds them, and shows a stated total beside the computed one", () => {
     const html = "<table><thead><tr><th>Artikel</th><th>Bestand</th></tr></thead><tbody><tr><td>A</td><td>590</td></tr><tr><td>B</td><td>6</td></tr></tbody>"
       + "<tfoot><tr><td>Summe</td><td>596</td></tr></tfoot></table>";

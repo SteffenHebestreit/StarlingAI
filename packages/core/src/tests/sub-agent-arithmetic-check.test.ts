@@ -239,6 +239,38 @@ describe("the arithmetic check on a sub-agent's final answer", () => {
     expect(audit.rows("sub_agent_arithmetic_hold_returned")).toHaveLength(1);
   }, 30_000);
 
+  it("nudge: a failure thrown out of the corrective iteration returns the first answer", async () => {
+    // The caller's progress listener throws on the corrective call's "thinking" event; nothing in
+    // the loop catches it, so only the wrapper's hold can still return the answer the run had.
+    await useMode("nudge");
+    await registerTools({ web_fetch: () => PAGE });
+    script([call("c1", "web_fetch", { url: "http://shop.test/lager.html" }), answer(WRONG), answer(RIGHT)]);
+    const onProgress = (event: { kind: string; iteration: number }) => {
+      if (event.kind === "thinking" && event.iteration >= 3) throw new Error("progress listener failed");
+    };
+    const audit = await captureAudit();
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const result = await runSubAgentWithStats({ agentName: "counter", task: "Wie hoch ist der Gesamtbestand am Standort Südtal?", parentSessionId: "parent-counter", workspacePath: tempDir, approvalCallback: async () => true, onProgress });
+    audit.unsubscribe();
+    expect(completeMock).toHaveBeenCalledTimes(2);
+    expect(result.output).toBe(WRONG);
+    expect(audit.rows("sub_agent_arithmetic_hold_returned")).toEqual([expect.objectContaining({ exitTerminalState: "error", error: "progress listener failed" })]);
+  }, 30_000);
+
+  it("nudge: no corrective iteration for a run stopped while it wrote its answer", async () => {
+    await useMode("nudge");
+    await registerTools({ web_fetch: () => PAGE });
+    const controller = new AbortController();
+    script([call("c1", "web_fetch", { url: "http://shop.test/lager.html" }), () => { controller.abort(); return answer(WRONG); }, answer(RIGHT)]);
+    const audit = await captureAudit();
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const result = await runSubAgentWithStats({ agentName: "counter", task: "Wie hoch ist der Gesamtbestand am Standort Südtal?", parentSessionId: "parent-counter", workspacePath: tempDir, approvalCallback: async () => true, signal: controller.signal });
+    audit.unsubscribe();
+    expect(completeMock).toHaveBeenCalledTimes(2);
+    expect(result.output).toBe(WRONG);
+    expect(audit.rows("sub_agent_arithmetic_mismatch")).toEqual([expect.objectContaining({ nudged: false, skipReason: "stopped" })]);
+  }, 30_000);
+
   it("nudge: an empty corrective answer returns the first answer", async () => {
     await useMode("nudge");
     await registerTools({ web_fetch: () => PAGE });

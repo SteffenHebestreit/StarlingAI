@@ -6826,6 +6826,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           // Variant A needs a tool call and an answer, variant B an answer.
           const variant: "A" | "B" | null = webTableUsable && iterations + 2 < maxIterations ? "A"
             : iterations + 1 < maxIterations ? "B" : null;
+          // Today a call goes out under tool_choice "none" only when the time budget is critical
+          // (caught the line before) or on the last iteration (variant is null), so the
+          // callToolChoice test decides nothing alone; it keeps any later "none" path from nudging.
           const skipReason = arithmeticMode === "shadow" ? "shadow"
             : correctiveAnswer ? "already_nudged"
             : timeBudgetCritical ? "time_critical"

@@ -128,6 +128,37 @@ describe("delegation halts escalation once a substantive partial exists", () => 
     expect(result.metadata?.["partialFallback"]).toBe(true);
   }, 30_000);
 
+  it("passes the figure keys a partial run's web_table computed up with the partial result", async () => {
+    // The orchestrator's coverage check waives its re-synthesis for a reply that relays one of
+    // these keys; a run that ran out of time after computing 596 still computed it.
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: `${RESEARCH_BODY} Gesamtbestand Südtal laut web_table: 596 Stück.`,
+      computedAggregateKeys: ["596"],
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 2,
+        toolNames: ["web_table", "web_fetch"],
+        iterations: 5,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 5,
+        model: "mock",
+        capabilities: [],
+        terminalState: "max_iterations",
+        outcome: "failure",
+      },
+    }));
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const result = await getTool("delegate_to_agent")!.execute(
+      { agentName: "researcher", task: "Wie hoch ist der Gesamtbestand am Standort Südtal?" },
+      { sessionId: "session-partial-keys", workspacePath: "/workspace", swarmState: freshSwarmState() },
+    );
+    expect(result.metadata?.["partialFallback"]).toBe(true);
+    expect(result.metadata?.["computedAggregateKeys"]).toEqual(["596"]);
+  }, 30_000);
+
   it("still escalates past a short failure stub that carries no usable evidence", async () => {
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
       if (args.agentName === "researcher") {
