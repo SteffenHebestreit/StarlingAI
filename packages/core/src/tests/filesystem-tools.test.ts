@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -52,6 +52,21 @@ describe("filesystem tools", () => {
     expect(r.error).toBe(`File not found: generated/e2e-guards/sommeraktion.html\n${MISSING_FILE_IS_NOT_A_CHANGE}`);
     expect(MISSING_FILE_IS_NOT_A_CHANGE).not.toContain("\n");
     expect(MISSING_FILE_IS_NOT_A_CHANGE).toMatch(/report it as missing instead of creating it/);
+  });
+
+  it("edit_file on a missing file says the same, so the direct path to a change carries it too", async () => {
+    // edit_file is the tool for changing a file. A coder told to change a missing file that goes
+    // to it first, rather than to read_file, meets the missing file there.
+    const { getTool } = await import("../tools/registry.js");
+    const { MISSING_FILE_IS_NOT_A_CHANGE } = await import("../tools/filesystem.js");
+    const r = await getTool("edit_file")!.execute(
+      { path: "generated/e2e-guards/sommeraktion.html", old_string: "20 %", new_string: "25 %" },
+      { sessionId: "session-edit-missing", workspacePath: tempDir },
+    );
+    expect(r.success).toBe(false);
+    // The first line, which audit rows and failure lists keep, is what it always was.
+    expect(r.error).toBe(`File not found: generated/e2e-guards/sommeraktion.html\n${MISSING_FILE_IS_NOT_A_CHANGE}`);
+    expect(existsSync(join(tempDir, "generated/e2e-guards/sommeraktion.html"))).toBe(false);
   });
 
   it("reads jsonc files used by workspace agent shards", async () => {
