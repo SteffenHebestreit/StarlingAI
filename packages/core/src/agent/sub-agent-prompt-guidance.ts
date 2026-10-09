@@ -150,15 +150,33 @@ export function taskOwnWordChars(task: string): number {
 }
 
 /**
+ * The size isStagedArtifactBuildRun compares with the threshold, and the audit row reports.
+ *
+ * A run that holds a dedicated builder tool (ARTIFACT_BUILDER_TOOLS) is measured on the whole
+ * task, fenced and quoted text included. What such a run is handed in a fence is often what it
+ * builds: a requirement list the delegator fenced, or a Markdown body to turn into a page or a
+ * deck. Not staging a build that needed it costs the whole run (f08195d2), so a builder keeps
+ * the measure it was staged on before. Any other write-capable run (code_analyst, the
+ * researcher, the summarizer, the coder) is measured on its own words (taskOwnWordChars): what
+ * it is handed in a fence is input it reads, analyses or changes. In the cart assessment a
+ * pasted cart.js made code_analyst's "why" question 681 chars long, and it was told to build a
+ * report file.
+ */
+export function stagedBuildTaskChars(toolNames: readonly string[] | undefined, task: string): number {
+  return holdsArtifactBuilderTool(toolNames) ? task.trim().length : taskOwnWordChars(task);
+}
+
+/**
  * Structural classifier for "this run must build in passes": the agent can both
  * create and amend a file, and the task is a specification rather than an
  * instruction. Capability + size only — no topic words, no language tables.
- * Size is the task's own words (taskOwnWordChars), not the input pasted into it.
+ * Size is stagedBuildTaskChars: the whole task for a run holding a builder tool, the
+ * task's own words for any other.
  */
 export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
   const available = new Set(toolNames ?? []);
   if (!STAGED_BUILD_REQUIRED_TOOLS.every((toolName) => available.has(toolName))) return false;
-  return taskOwnWordChars(task) > STAGED_BUILD_TASK_CHAR_THRESHOLD;
+  return stagedBuildTaskChars(toolNames, task) > STAGED_BUILD_TASK_CHAR_THRESHOLD;
 }
 
 /**

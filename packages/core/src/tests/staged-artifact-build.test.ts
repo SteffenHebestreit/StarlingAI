@@ -10,6 +10,7 @@ import {
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   UNFINISHED_STUB_MARKER,
   isStagedArtifactBuildRun,
+  stagedBuildTaskChars,
   taskOwnWordChars,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildFirstStepInstruction,
@@ -222,6 +223,33 @@ describe("staged artifact build — only the task's own words count", () => {
     const task = `Material:\n\`\`\`\nconst a = 1;\n${PROBE_LARGE_TASK}\n\`\`\`\nconst b = 2;\n\`\`\``;
     expect(taskOwnWordChars(task)).toBe(task.trim().length);
     expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(true);
+  });
+
+  it("measures a run that holds a builder tool on the whole task, so a fenced spec still stages it", () => {
+    // What a builder is handed in a fence is often what it builds: a requirement list the
+    // delegator fenced, or a Markdown body to turn into a page. Measured on its own words
+    // this task is 31 chars, and web_coder would build the whole page in one completion.
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${PROBE_LARGE_TASK}\n\`\`\``;
+    const builderTools = [...WRITE_AND_EDIT, "verify_page"];
+    expect(taskOwnWordChars(fencedSpec)).toBeLessThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+    expect(stagedBuildTaskChars(builderTools, fencedSpec)).toBe(fencedSpec.trim().length);
+    expect(isStagedArtifactBuildRun(builderTools, fencedSpec)).toBe(true);
+    // A run with no builder tool measures its own words: the fence is input to its answer.
+    expect(stagedBuildTaskChars(WRITE_AND_EDIT, fencedSpec)).toBe(taskOwnWordChars(fencedSpec));
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, fencedSpec)).toBe(false);
+  });
+
+  it("gives the shipped builders the whole-task measure and code_analyst its own words", () => {
+    type Agent = { tools?: string[] };
+    const agents = loadWorkspaceAgents<Agent>();
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${PROBE_LARGE_TASK}\n\`\`\``;
+    for (const name of ["web_coder", "content_writer", "backend_coder"]) {
+      expect(isStagedArtifactBuildRun(agents[name]?.tools, fencedSpec), name).toBe(true);
+    }
+    const codeAnalystTools = agents["code_analyst"]?.tools;
+    expect(codeAnalystTools).toEqual(expect.arrayContaining(["write_file", "edit_file"]));
+    expect(isStagedArtifactBuildRun(codeAnalystTools, CART_TASK_FENCE_ON_OWN_LINES)).toBe(false);
+    expect(isStagedArtifactBuildRun(codeAnalystTools, fencedSpec)).toBe(false);
   });
 
   it("still sets material aside when the text places every fence it holds", () => {
@@ -611,6 +639,21 @@ describe("staged artifact build — directive injection", () => {
     expect(logAuditMock).toHaveBeenCalledWith(
       "sub_agent_staged_build_detected",
       expect.objectContaining({ taskChars: RUN_3959F3AC_TASK_CHARS, threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD }),
+      expect.anything(),
+    );
+  });
+
+  it("a builder handed its spec in a fence gets the directive, and the audit reports the whole task", async () => {
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${OBSERVED_BUILD_TASK}\n\`\`\``;
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      fencedSpec,
+      [...WRITE_AND_EDIT, "verify_page"],
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ taskChars: fencedSpec.trim().length, threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD }),
       expect.anything(),
     );
   });
