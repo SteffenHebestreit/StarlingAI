@@ -209,6 +209,37 @@ describe("a scene or job step's turn", () => {
     });
   }
 
+  // The step's turn has no run_workflow, but a coordinator it delegates to keeps one
+  // (mission_coordinator), and a delegated agent's tools get the step turn's execution stack
+  // (tools/sub-agent.ts, agent/sub-agent.ts). With only the job on that stack, the step of
+  // source_grounded_paper_packet ran its own scene nested inside itself (E2E 2026-10-08).
+  it("job: an agent the step delegates to cannot run the step's own scene again", async () => {
+    const { registry, runExecute } = await loadModules();
+    const nested: Array<{ success: boolean; error?: string }> = [];
+    registry.registerTool({
+      name: "delegate_to_agent",
+      description: "delegate",
+      parameters: { type: "object", properties: {} },
+      // The coordinator's own run_workflow call, made under the context the step's delegation hands on.
+      execute: async (_args, ctx) => {
+        nested.push(await registry.getTool("run_workflow")!.execute({ name: "verified_research_brief", workflowType: "scene" }, ctx));
+        return { success: true, output: "mission_coordinator returned the brief.", metadata: { delegationOutcome: "success", agentName: "mission_coordinator" } };
+      },
+    });
+    scriptStepModel();
+
+    await registry.getTool("run_workflow")!.execute(
+      { name: "brief_packet", workflowType: "job" },
+      { sessionId: "chat-nested-scene", workspacePath: "/workspace" },
+    );
+
+    expect(nested).toHaveLength(1);
+    expect(nested[0]!.success).toBe(false);
+    expect(nested[0]!.error).toContain("already running in this execution stack");
+    // The test's own call and the coordinator's refused one; the scene never ran a second time.
+    expect(runExecute).toHaveBeenCalledTimes(2);
+  });
+
   it("control: a chat turn is still offered both catalog tools", async () => {
     const { runtime, session } = await loadModules();
     streamMock.mockImplementation(() => textStream("Hello."));

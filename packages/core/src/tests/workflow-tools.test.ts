@@ -1668,13 +1668,14 @@ describe("workflow catalog tools", () => {
         agentName: "researcher",
         task: expect.stringContaining("Keep the comparison source-grounded."),
         allowedAgents: ["researcher"],
-        _workflowExecutionStack: ["job:source_grounded_paper_packet"],
+        // Each step's own scene is on its stack, under the job (E2E 2026-10-08).
+        _workflowExecutionStack: ["job:source_grounded_paper_packet", "scene:collect_evidence"],
       }));
       expect(runSubAgentMock.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
         agentName: "paper_author",
         task: expect.stringContaining("Draft the comparison for MCP vs A2A"),
         allowedAgents: ["paper_author"],
-        _workflowExecutionStack: ["job:source_grounded_paper_packet"],
+        _workflowExecutionStack: ["job:source_grounded_paper_packet", "scene:draft_paper"],
       }));
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

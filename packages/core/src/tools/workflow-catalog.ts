@@ -1192,6 +1192,12 @@ async function runJobInline(
           agents: allowedAgents,
         }, { sessionId: ctx.sessionId, severity: "info" });
       }
+      // The step runs its own scene, so that scene is on the stack its agents see, as a scene run
+      // on its own puts itself there (runSceneInline). With only the job there, the step of
+      // source_grounded_paper_packet ran its own scene, source_backed_paper, nested inside itself
+      // (E2E 2026-10-08). The step's turn no longer has run_workflow, but a coordinator it delegates
+      // to keeps one (mission_coordinator), and the recursion check reads this stack.
+      const stepExecutionStack = [...workflowExecutionStack, buildWorkflowExecutionKey(step.sceneName, "scene")];
 
       // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)
       // to EVERY step, not just the first. Later steps otherwise never learn the subject:
@@ -1227,7 +1233,7 @@ async function runJobInline(
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
           swarmState: ctx.swarmState,
           onSwarmState: ctx.onSwarmState,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
           // Same as the scene bootstrap: the step's task is the job author's, not the person's.
           ...(ctx.turnUserWords ? { turnUserWords: ctx.turnUserWords } : {}),
         };
@@ -1288,7 +1294,7 @@ async function runJobInline(
           inputCallback: ctx.inputCallback,
           maxIterationsOverride: ctx.maxIterationsOverride,
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
-          _workflowExecutionStack: workflowExecutionStack,
+          _workflowExecutionStack: stepExecutionStack,
           // As in runSceneInline: the step's turn runs the step, it does not look for a workflow.
           _withoutWorkflowCatalog: true,
           onSubAgentProgress: ctx.onSubAgentProgress,
