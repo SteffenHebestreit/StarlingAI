@@ -25,6 +25,8 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
 import { buildWorkflowExecutionKey } from "./workflow-execution-key.js";
+import { workflowStepPipeline } from "./workflow-step-pipeline.js";
+import { getScene } from "../credentials/scenes.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -267,7 +269,10 @@ async function runSingleSceneJob(
     session,
     userMessage: job.payload.task ?? "",
     ...buildTurnHooks(job, controller, counters),
-    ...queuedWorkflowTurnOptions([queuedWorkflowKey(job)]),
+    ...queuedWorkflowTurnOptions(
+      [queuedWorkflowKey(job)],
+      job.definitionType === "job" ? [] : workflowStepPipeline(getScene(job.sceneName)?.task, job.payload.allowedAgents),
+    ),
   });
 }
 
@@ -284,10 +289,19 @@ function queuedWorkflowKey(job: ClaimedSceneJob): string {
  * delegation to its own agents dropped with "Call run_workflow now", and a second miss was rewritten
  * into a run of that scene, nested inside itself, since nothing was on the stack for the recursion
  * check to read. The stack also reaches the agents the turn delegates to, so a coordinator among them
- * cannot start the running workflow again either.
+ * cannot start the running workflow again either. The pipeline is the agents the scene's task names,
+ * read from the scene as its author wrote it (the queued task has its parameters filled in), and keeps
+ * the turn going while some of them have not run (agent/workflow-step-pipeline.ts).
  */
-function queuedWorkflowTurnOptions(workflowExecutionStack: string[]): { _workflowExecutionStack: string[]; _withoutWorkflowCatalog: true } {
-  return { _workflowExecutionStack: workflowExecutionStack, _withoutWorkflowCatalog: true };
+function queuedWorkflowTurnOptions(
+  workflowExecutionStack: string[],
+  pipeline: string[],
+): { _workflowExecutionStack: string[]; _withoutWorkflowCatalog: true; _workflowStepPipeline?: string[] } {
+  return {
+    _workflowExecutionStack: workflowExecutionStack,
+    _withoutWorkflowCatalog: true,
+    ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
+  };
 }
 
 async function runWorkflowJob(
@@ -351,7 +365,10 @@ async function runWorkflowJob(
         currentStep: step.label,
       }),
       // The job and the scene this step runs, as runJobInline stacks them.
-      ...queuedWorkflowTurnOptions([queuedWorkflowKey(job), buildWorkflowExecutionKey(step.sceneName, "scene")]),
+      ...queuedWorkflowTurnOptions(
+        [queuedWorkflowKey(job), buildWorkflowExecutionKey(step.sceneName, "scene")],
+        workflowStepPipeline(getScene(step.sceneName)?.task, step.allowedAgents),
+      ),
     });
 
     outputs.push(output);

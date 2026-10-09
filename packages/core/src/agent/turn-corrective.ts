@@ -88,8 +88,22 @@ export interface CorrectiveContext {
 export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveContext): Promise<string | null> => {
   const { signal, session, userMessage, deliverableIntent, toolContext } = ctx;
   if (ctx.getQaCorrectiveBuildUsed() || signal.aborted) return null;
-  ctx.setQaCorrectiveBuildUsed(true);
   const builderAgent = deliverableIntent.builder;
+  // A scene or job step's turn may delegate only to the step's allowedAgents, and delegate_to_agent
+  // refuses any other agent it knows. The builder is picked from the request's wording, not from that
+  // scope: in the E2E run of 2026-10-09 a source_grounded_paper_packet step's corrective build went to
+  // content_writer, which the scene does not allow, and was refused after a slow round. Such a build
+  // is not delegated. No build ran, so the latch stays as it was.
+  const allowedAgents = toolContext.allowedAgents;
+  if (allowedAgents && !allowedAgents.includes(builderAgent)) {
+    logAudit("guardrail_flagged", {
+      type: "final_qa_corrective_build_out_of_scope",
+      builderAgent,
+      allowedAgents,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    return null;
+  }
+  ctx.setQaCorrectiveBuildUsed(true);
   logAudit("guardrail_flagged", {
     type: "final_qa_corrective_build_delegated",
     builderAgent,

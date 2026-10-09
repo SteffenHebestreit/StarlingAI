@@ -19,8 +19,12 @@
 // to a catalog search (34a1db8), so nothing turns its delegations away from the scene's own agents:
 // researcher, then evidence_analyst, source_verifier or summarizer. A turn that gives up with no
 // specialist's result reports the scene blocked (d1b1f3d). agents.mustNotRun document_intake still
-// guards the old bootstrap: there is no attachment. Whether the model also dispatches a second agent
-// after researcher is model variance; mustRunAny follows the scene's task.
+// guards the old bootstrap: there is no attachment. A second agent after researcher was not model
+// variance: in the next run researcher returned, the runtime required synthesis and forbade another
+// delegation, and the turn wrote the brief itself. The step's turn now keeps going through the agents
+// the task names after the furthest one that has returned (agent/workflow-step-pipeline.ts), so
+// document_intake, passed over once researcher ran, is not offered again. mustRunAny follows the
+// scene's task.
 {
   id: "core-ix-workflow-scene-research-brief",
   title: "Workflow: run the verified_research_brief scene on the fixture site",
