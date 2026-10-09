@@ -116,6 +116,26 @@
         // llama.cpp/LM Studio KV-cache reuse for the stable system-prompt prefix —
         // skips re-prefilling ~12k tokens per turn (audit 0792acf0: 7.6s for "hi").
         "promptCache": true,
+        // FORCED CALLS THAT START INSIDE THE CALL. On this llama.cpp (b11015, Qwen3-Coder handler)
+        // tool_choice "required" lets the model write prose before the call, so a model that wants
+        // to answer itself writes until max_tokens. "qwen-xml" lets the orchestrator start a forced
+        // call with `<tool_call>\n<function=`, which the server continues as the call. The runtime
+        // asks for it on the --agent and build calls only (agent/runtime.ts forcedCallPrefill).
+        // Replayed on the Halo 2026-10-09 with the turn's own requests, 12 per arm: the Mermaid
+        // build called diagram_designer 12 of 12 with it and 0 of 12 without (8 ran prose to the
+        // ceiling); the --agent call kept its route and halved its generation time. Both model ids
+        // above are Qwen3.6 served by llama.cpp with --jinja, the same build on both stations, and
+        // both took the opener (qwen-27b 3 of 3).
+        // Named per id, not as one string, because the ids can be replaced while this key stays:
+        // SAI_PRIMARY_MODEL (the setup wizard writes it for every backend, e.g. lmstudio/qwen2.5:7b
+        // on Ollama), the dashboard's model save, a later shard. An id not named here gets no
+        // opener. A server that continues the trailing message instead of refusing it with a 4xx
+        // (Ollama, per the review of e7da7236) never trips the provider's refusal retry, so a wrong
+        // opener would not be switched off there.
+        "toolCallPrefill": {
+          "lmstudio/qwen": "qwen-xml",
+          "lmstudio/qwen-27b": "qwen-xml"
+        },
         "embeddingModel": "lmstudio/text-embedding-qwen3-embedding-0.6b",
         // Routing tier — the fast lane that answers trivial turns ("hi") without the
         // full prompt + swarm. This pointed at qwen3.5-9b, which reports
