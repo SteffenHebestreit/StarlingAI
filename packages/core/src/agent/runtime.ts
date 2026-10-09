@@ -144,6 +144,7 @@ export { looksLikeRegurgitatedPriorAnswer } from "./runtime-utils.js";
 // plus the small pure text helpers it needs. classifyPostOrchestrationDisposition
 // (which stays here) uses looksLikeDelegatedFailureEvidence from this module.
 import {
+  TOOL_RESULT_NOTICE_OPENER,
   buildModelVisibleToolResult,
   isExplicitDelegationSuccess,
   delegationCarriesOwnEvidence,
@@ -4897,8 +4898,10 @@ async function _runTurn(
             };
           }
 
+          // Opened with the shared constant: the retrieval frame finds the notice by it and keeps it
+          // when it cuts a long result (tool-result-format.ts boundRetrievalEvidence).
           resultText +=
-            `\n\n[System notice: ${tc.name} has returned identical output ${IDENTICAL_OUTPUT_LOOP_THRESHOLD} times in a row. ` +
+            `${TOOL_RESULT_NOTICE_OPENER}${tc.name} has returned identical output ${IDENTICAL_OUTPUT_LOOP_THRESHOLD} times in a row. ` +
             `You are stuck in a loop. Do NOT call this tool again. Summarise what you have found so far and report it to the user, or try a clearly different approach.]`;
           if (loopIntervention) opts.onIntervention?.(loopIntervention);
           _recentOutputsByTool.set(tc.name, []); // reset so alert fires at most once per burst

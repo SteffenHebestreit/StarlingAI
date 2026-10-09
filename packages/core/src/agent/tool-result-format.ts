@@ -8,7 +8,7 @@
  *
  * INVARIANT: this module imports ONLY leaf modules (runtime-utils,
  * runtime-evidence-dump, interrupted-delegation-evidence, container-failure,
- * effort-context, artifact-metadata). It must NEVER import from runtime.js — keep it a true leaf.
+ * effort-context, artifact-metadata, the config loader). It must NEVER import from runtime.js — keep it a true leaf.
  *
  * `looksLikeDelegatedFailureEvidence` is also used by
  * classifyPostOrchestrationDisposition (which stays in runtime.ts), so runtime.ts
@@ -42,7 +42,8 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isPlanReportResult } from "./turn-tool-contribution.js";
+import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
@@ -58,6 +59,47 @@ export function truncatePlainText(value: string, maxChars: number): string {
 
 export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * How the turn loop opens the notice it appends to a tool result (agent/runtime.ts, when a tool
+ * keeps returning identical output). It is the last paragraph of the text the frame receives.
+ */
+export const TOOL_RESULT_NOTICE_OPENER = "\n\n[System notice: ";
+const TRAILING_TOOL_RESULT_NOTICE_RE = new RegExp(`${escapeRegExp(TOOL_RESULT_NOTICE_OPENER)}[^\\n]{1,400}\\]$`);
+
+/** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
+const DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS = 6000;
+
+/**
+ * Ceiling on a retrieval result the model reads (isRetrievalEvidenceResult), in the frame and in the
+ * history snippet of the turn that made the call. It is the budget the deployment already sets for
+ * retrieved passages in a prompt, retrieval.documentRag.maxContextChars: the excerpts the turn
+ * injects on its own are held to it, and a search the model makes itself returns the same kind of
+ * excerpts.
+ */
+export function retrievalEvidenceMaxChars(): number {
+  const configured = getConfig().retrieval?.documentRag?.maxContextChars;
+  return typeof configured === "number" && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS;
+}
+
+/**
+ * A retrieval result held to `maxChars`, newlines and table rows kept. The tools list their passages
+ * most relevant first, so a cut keeps the head and drops the least relevant, and a line in their
+ * place says how much is missing. The turn loop's notice stays after that line: a cut from the end
+ * would otherwise take the loop warning with it.
+ */
+function boundRetrievalEvidence(resultText: string, maxChars: number): string {
+  const text = resultText.trim();
+  if (text.length <= maxChars) return text;
+  const notice = TRAILING_TOOL_RESULT_NOTICE_RE.exec(text)?.[0] ?? "";
+  const body = text.slice(0, text.length - notice.length);
+  const cutLine = (left: number): string =>
+    `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
+  const head = body.slice(0, Math.max(0, maxChars - notice.length - cutLine(body.length).length)).trimEnd();
+  return `${head}${cutLine(body.length - head.length)}${notice}`;
 }
 
 export function stripAgentPrefix(value: string): string {
@@ -634,6 +676,12 @@ function frameToolResult(
       "If the user asked which agents exist or what they can do, list EVERY entry below. Do NOT abbreviate, sample, summarize to a few, or claim the list was cut off.",
       truncatePlainText(resultText, 12_000),
     ].join("\n");
+  }
+
+  // Retrieved passages are the evidence itself, not a summary of work done elsewhere: kept as the
+  // tool wrote them, up to the retrieval budget, instead of the 600-character fallback below.
+  if (isRetrievalEvidenceResult(toolName)) {
+    return boundRetrievalEvidence(resultText, retrievalEvidenceMaxChars());
   }
 
   return fallback;

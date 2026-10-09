@@ -101,6 +101,29 @@ export function isPlanReportResult(toolName: string, metadata: Record<string, un
   return toolName === "execute_plan" || (toolName === "record_plan" && metadata?.["planExecution"] === true);
 }
 
+/**
+ * Tools whose result is retrieved evidence: the passages a store returned for the model's query,
+ * which it is meant to answer from. These are the retrieval tools the orchestrator always has
+ * (agent/default-tools.ts). They had no treatment of their own, so the model-visible frame cut them
+ * to a generic tool result's 600 characters with the newlines collapsed. In E2E
+ * core-ix-kb-documentation-rag (2026-10-09) search_knowledge_base found the right page four times,
+ * but the charge time sat at character 1,109, behind the page's navigation, and the model never saw
+ * it. Every place that sizes a tool result by its tool (the frame, the history snippet) asks this.
+ */
+const RETRIEVAL_EVIDENCE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "search_knowledge_base",
+  "search_documents",
+  "rag_search",
+  "memory_search",
+  // The planning-context pack. Each of its items is already capped by the tool; the pack as a whole
+  // was not, and lost every section after the first few hundred characters.
+  "recall_context",
+]);
+
+export function isRetrievalEvidenceResult(toolName: string): boolean {
+  return RETRIEVAL_EVIDENCE_TOOL_NAMES.has(toolName);
+}
+
 /** What is known BEFORE the call runs, from the tool name alone. */
 export interface ToolCallContribution {
   /** How much this call adds to the turn's delegation tally. */
