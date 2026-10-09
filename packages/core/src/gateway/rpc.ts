@@ -17,7 +17,8 @@ import {
   listSessions,
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
-import { normalizeRole, roleRank } from "./auth.js";
+import { normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
@@ -437,7 +438,7 @@ function formatJobHelpResponse(jobName?: string): string {
   ].join("\n");
 }
 
-export class RpcConnection {
+export class RpcConnection implements AccountConnection {
   readonly connId: string;
   private ws: WebSocket;
   private activeSessionId: string | null = null;
@@ -450,20 +451,70 @@ export class RpcConnection {
    *  Sessions are attributed to this so document-RAG user scope + per-user RBAC
    *  match the same identity uploads use. Undefined only if the token had no sub. */
   private readonly connUserId: string | undefined;
-  /** Authenticated role (JWT `role` claim); admins may manage any session. */
-  private readonly connRole: string | undefined;
+  /** Authenticated role; admins may manage any session. Under multi-user auth it is the role the
+   *  store holds now, read again before every message and every pushed event. */
+  private connRole: string | undefined;
+  /**
+   * Under multi-user auth, the caller as the store resolved it at the handshake. A socket lives for
+   * hours and used to keep the identity and role it opened with: a deleted account kept chatting,
+   * and a demoted admin kept every other account's audit stream. It is checked again before every
+   * message and every pushed event (revalidateAuthenticatedUser), and a caller that no longer
+   * resolves closes the socket with 4401.
+   */
+  private liveUser: AuthenticatedUser | undefined;
+  private revoked = false;
+  private untrackAccount: (() => void) | null = null;
 
-  constructor(ws: WebSocket, connUserId?: string, connRole?: string) {
+  constructor(ws: WebSocket, connUserId?: string, connRole?: string, liveUser?: AuthenticatedUser) {
     this.connId = randomUUID();
     this.ws = ws;
     this.connUserId = connUserId;
     this.connRole = connRole;
+    this.liveUser = liveUser;
+    // Deleting, retiring or renaming the account closes this socket at once (account-connections).
+    if (liveUser?.account) this.untrackAccount = trackAccountConnection(liveUser.account, this);
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
       sessions: this.visibleSessions(),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
+  }
+
+  /**
+   * Whether the caller still signs in as it did at the handshake, its role taken as the store holds
+   * it now. Always true without multi-user auth (no live caller to check); false once revoked.
+   */
+  private callerStillSignedIn(): boolean {
+    if (this.revoked) return false;
+    if (!this.liveUser) return true;
+    const fresh = revalidateAuthenticatedUser(this.liveUser);
+    if (!fresh) return false;
+    this.liveUser = fresh;
+    this.connRole = fresh.role;
+    return true;
+  }
+
+  /** Whether a pushed event may go out: the caller is checked as for a message, and a caller that
+   *  no longer signs in closes the socket instead. */
+  private pushAllowed(): boolean {
+    if (this.callerStillSignedIn()) return true;
+    this.revoke("account no longer signs in");
+    return false;
+  }
+
+  /** Close the socket because its caller no longer signs in (4401, as a refused handshake). */
+  revoke(reason: string): void {
+    if (this.revoked) return;
+    this.revoked = true;
+    this.untrackAccount?.();
+    this.untrackAccount = null;
+    log.info({ connId: this.connId, reason }, "RPC connection revoked: its account no longer signs in");
+    try {
+      this.ws.close(4401, "Unauthorized (account no longer valid)");
+    } catch (err) {
+      log.warn({ err, connId: this.connId }, "Could not close a revoked RPC connection");
+    }
   }
 
   /**
@@ -565,6 +616,13 @@ export class RpcConnection {
 
     const { id, method, params } = req;
     log.debug({ connId: this.connId, method, id }, "RPC request");
+
+    if (!this.callerStillSignedIn()) {
+      // Answered first, so the caller's pending request fails with a reason; then closed.
+      this.sendResponse({ id, ok: false, error: "Unauthorized (account no longer valid)" });
+      this.revoke("account no longer signs in");
+      return;
+    }
 
     try {
       const payload = await this.dispatch(method, params ?? {});
@@ -1501,6 +1559,7 @@ export class RpcConnection {
       case "audit.subscribe": {
         if (this.auditUnsubscribe) this.auditUnsubscribe();
         this.auditUnsubscribe = subscribeToAudit(event => {
+          if (!this.pushAllowed()) return;
           if (!this.mayWatchAuditEvent(event)) return;
           this.sendEvent({ type: "audit.event", data: event });
         });
@@ -1515,6 +1574,7 @@ export class RpcConnection {
       case "notifications.subscribe": {
         this.notificationsUnsubscribe?.();
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
+          if (!this.pushAllowed()) return;
           this.sendEvent({ type: "notification.event", data: notification });
         });
         return { subscribed: true };
@@ -1578,6 +1638,8 @@ export class RpcConnection {
 
   close(options: RpcConnectionCloseOptions = {}): void {
     const shouldAbortInFlightTurns = options.abortInFlightTurns === true;
+    this.untrackAccount?.();
+    this.untrackAccount = null;
     this.auditUnsubscribe?.();
     this.notificationsUnsubscribe?.();
     for (const [id, controller] of this.abortControllers) {

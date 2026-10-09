@@ -9,7 +9,7 @@ import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole } from "./auth.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, authenticatedUserFromToken, userHasRole } from "./auth.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
@@ -3846,20 +3846,36 @@ export function createGateway() {
       return;
     }
 
-    const payload = token ? await verifyToken(token) : null;
-    if (!payload) {
-      recordAuthFailure(ip);
-      ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
-      return;
+    let conn: RpcConnection;
+    if (getConfig().auth?.enabled === true) {
+      // Under multi-user auth the socket's caller is resolved against the stores, as on /api: a
+      // signed token of a deleted account, or one bound to an account id its name no longer holds,
+      // is refused here. The connection keeps the resolved caller and checks it again before every
+      // message and every pushed event, so a socket cannot outlive its account.
+      const user = token ? await authenticatedUserFromToken(token) : null;
+      if (!user) {
+        recordAuthFailure(ip);
+        ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
+        return;
+      }
+      clearAuthFailures(ip);
+      conn = new RpcConnection(ws, user.username, user.role, user);
+    } else {
+      const payload = token ? await verifyToken(token) : null;
+      if (!payload) {
+        recordAuthFailure(ip);
+        ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
+        return;
+      }
+
+      clearAuthFailures(ip);
+
+      // Attribute the connection (and its sessions) to the authenticated user so
+      // document-RAG user scope + RBAC key on the same identity as REST uploads.
+      const connUserId = typeof payload.sub === "string" ? payload.sub : undefined;
+      const connRole = typeof payload.role === "string" ? payload.role : undefined;
+      conn = new RpcConnection(ws, connUserId, connRole);
     }
-
-    clearAuthFailures(ip);
-
-    // Attribute the connection (and its sessions) to the authenticated user so
-    // document-RAG user scope + RBAC key on the same identity as REST uploads.
-    const connUserId = typeof payload.sub === "string" ? payload.sub : undefined;
-    const connRole = typeof payload.role === "string" ? payload.role : undefined;
-    const conn = new RpcConnection(ws, connUserId, connRole);
 
     ws.on("message", async (raw) => {
       await conn.handleMessage(raw.toString());
@@ -3925,7 +3941,13 @@ export function createGateway() {
       const token = url.searchParams.get("token") ?? extractBearerToken(req.headers["authorization"]);
       const rl = checkAuthRateLimit(ip);
       if (!rl.allowed) { socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n"); socket.destroy(); return; }
-      if (!token || !await verifyToken(token)) {
+      // The live browser is reached only through this check, and the token rides in the query
+      // string, past the /api middleware that refuses a revoked account: under multi-user auth the
+      // caller is resolved against the stores here, so a deleted account's token cannot watch it.
+      const vncCallerValid = token
+        ? (getConfig().auth?.enabled === true ? await authenticatedUserFromToken(token) !== null : await verifyToken(token) !== null)
+        : false;
+      if (!vncCallerValid) {
         recordAuthFailure(ip);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();

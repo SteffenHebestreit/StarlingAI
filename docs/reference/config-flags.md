@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:449 | 17 |
 | `accessKeyId` | packages/core/src/config/schema.ts:509 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 106 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 107 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1724 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1755 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -158,7 +158,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:178 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:176 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:174 | 27 |
-| `enabled` | packages/core/src/config/schema.ts:314 | 137 |
+| `enabled` | packages/core/src/config/schema.ts:314 | 138 |
 | `enableThinking` | packages/core/src/config/schema.ts:196 | 21 |
 | `endpoint` | packages/core/src/config/schema.ts:506 | 84 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1722 | 1 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:443 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1430 | 84 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1663 | 167 |
+| `store` | packages/core/src/config/schema.ts:1663 | 168 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:647 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1908 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |

@@ -8,7 +8,7 @@ import type { Hono } from "hono";
 import { readFile, writeFile, stat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
-import { verifyToken, extractBearerToken, authenticatedUser, userHasRole } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, userHasRole } from "./auth.js";
 import { getConfig } from "../config/loader.js";
 import { resolvePathWithinWorkspace, userWorkspaceRoot, GENERATED_SUBDIR, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
@@ -45,6 +45,25 @@ const WORKSPACE_PREVIEW_CSP = [
   "base-uri 'none'",
   "object-src 'none'",
 ].join("; ");
+
+/**
+ * The caller a token in a query string or a cookie names, or null when it names none. The routes
+ * below take their token that way (an iframe, or a page's own sub-resource requests, cannot set an
+ * Authorization header), so the /api middleware, which refuses a signed token whose account is
+ * gone, never sees it. Under multi-user auth the caller is resolved against the stores here the
+ * same way: a deleted account's token, or one bound to an account id its name no longer holds, is
+ * refused. Without multi-user auth the token's signature is all there is to check, as before.
+ */
+async function bareTokenCaller(token: string | undefined | null): Promise<{ userId: string | undefined } | null> {
+  if (!token) return null;
+  if (getConfig().auth?.enabled === true) {
+    const user = await authenticatedUserFromToken(token);
+    return user ? { userId: user.username } : null;
+  }
+  const payload = await verifyToken(token);
+  if (!payload) return null;
+  return { userId: typeof payload.sub === "string" ? payload.sub : undefined };
+}
 
 export function registerWorkspaceRoutes(app: Hono): void {
   /**
@@ -484,14 +503,14 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const queryToken = c.req.query("token")?.trim();
     // THE /api/* MIDDLEWARE NEVER SAW THIS CALLER. It reads the Authorization header, and an
     // iframe cannot set one — which is exactly why the token rides in the query string here.
-    // So the identity is established from the verified payload instead; without it every
+    // So the identity is established from the token itself (bareTokenCaller); without it every
     // per-user path this route resolves resolves as nobody's, and the caller would be served
     // a 404 for their own artifact.
-    const previewPayload = queryToken ? await verifyToken(queryToken) : null;
-    if (!previewPayload) {
+    const previewCaller = await bareTokenCaller(queryToken);
+    if (!previewCaller) {
       return c.text("Unauthorized", 401);
     }
-    const previewUserId = typeof previewPayload.sub === "string" ? previewPayload.sub : undefined;
+    const previewUserId = previewCaller.userId;
 
     const root = c.req.query("root")?.trim();
     const file = c.req.query("file")?.trim() || "index.html";
@@ -555,9 +574,9 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
     // Same reason as the preview route above: a browser fetching a page's own stylesheet sends
     // the cookie, not an Authorization header, so the caller has to be read off the token.
-    const sitePayload = token ? await verifyToken(token) : null;
-    if (!sitePayload) return c.text("Unauthorized", 401);
-    const siteUserId = typeof sitePayload.sub === "string" ? sitePayload.sub : undefined;
+    const siteCaller = await bareTokenCaller(token);
+    if (!siteCaller) return c.text("Unauthorized", 401);
+    const siteUserId = siteCaller.userId;
 
     let root: string;
     try {
@@ -624,7 +643,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     const queryToken = c.req.query("token")?.trim();
     const cookieToken = /(?:^|;\s*)sai_app_token=([^;]+)/.exec(c.req.header("Cookie") ?? "")?.[1];
     const token = queryToken || (cookieToken ? decodeURIComponent(cookieToken) : undefined) || extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.text("Unauthorized", 401);
+    if (!await bareTokenCaller(token)) return c.text("Unauthorized", 401);
 
     const served = getServedApp(id);
     if (!served) return c.text(`No running app '${id}'.`, 404);

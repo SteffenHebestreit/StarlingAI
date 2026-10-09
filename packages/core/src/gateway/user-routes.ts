@@ -22,6 +22,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { getAllSessions } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { closeAccountConnections } from "./account-connections.js";
 import { accountRegistryEntries } from "../runtime/account-registry.js";
 import { accountLedgerPath, appendAccountLedgerEntry, mintBuiltinAccountId } from "../runtime/accounts.js";
 
@@ -207,6 +208,10 @@ export function registerUserRoutes(app: Hono): void {
       }));
       raw["auth"] = auth;
     });
+
+    // Its tokens stop resolving at once (auth.ts finds no record holding the id); its open sockets
+    // close now as well, so one that only listens does not keep receiving until its next push.
+    if (targetUser.id) closeAccountConnections(targetUser.id, "account deleted");
 
     logAudit("auth_user_deleted", { actor: actor.username, username: target, role: targetUser.role }, { userId: actor.username, severity: "warn" });
     return c.json({ ok: true });

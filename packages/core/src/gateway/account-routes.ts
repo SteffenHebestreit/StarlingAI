@@ -11,8 +11,8 @@
  * An OIDC account's username is frozen at its first sign-in (gateway/oidc-accounts.ts): access
  * lists and other people's grants name it, so it changes only when an admin approves, and a name an
  * account held is never handed to anyone else unless an admin releases it. Every change is audited.
- * A renamed or retired account's tokens stop resolving at once, because auth.ts requires the account
- * to be active and to hold the token's username.
+ * Renaming or retiring an account closes its open sockets; its tokens stop resolving at once,
+ * because auth.ts requires the account to be active and to hold the token's username.
  */
 import type { Hono } from "hono";
 import { getConfig } from "../config/loader.js";
@@ -27,6 +27,7 @@ import {
   type AccountRegistryEntry,
 } from "../runtime/account-registry.js";
 import { authenticatedUser, userHasRole } from "./auth.js";
+import { closeAccountConnections } from "./account-connections.js";
 
 const log = childLogger("gateway:account-routes");
 
@@ -87,6 +88,8 @@ export function registerAccountRoutes(app: Hono): void {
       delete entry.requestedUsername;
     });
     if (result.status !== 200) return c.json({ error: result.error }, result.status);
+    // Its tokens name the old username and no longer resolve; its sockets go now, not at their next message.
+    closeAccountConnections(result.entry.id, "account renamed");
     logAudit("auth_account_renamed", { actor: gate.actor.username, account: result.entry.id, from: previous, to: result.entry.username }, { userId: gate.actor.username, severity: "warn" });
     return c.json({ account: result.entry });
   });
@@ -100,6 +103,7 @@ export function registerAccountRoutes(app: Hono): void {
       entry.retiredAt = new Date().toISOString();
     });
     if (result.status !== 200) return c.json({ error: result.error }, result.status);
+    closeAccountConnections(result.entry.id, "account retired");
     logAudit("auth_account_retired", { actor: gate.actor.username, account: result.entry.id, username: result.entry.username }, { userId: gate.actor.username, severity: "warn" });
     return c.json({ account: result.entry });
   });
