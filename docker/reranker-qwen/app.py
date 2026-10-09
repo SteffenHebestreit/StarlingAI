@@ -23,14 +23,20 @@ Endpoints:
   POST /v1/embeddings (also /embeddings)  {"input": str|[str], "model"?}
         -> {"object":"list","data":[{"embedding","index"}],"model","usage"}                  (OpenAI)
 
-Both models load lazily on first request so the container starts fast and a readiness
-probe can gate it. MODEL_NAME / EMBED_MODEL_NAME / USE_FP16 / MAX_LENGTH are env-tunable.
+  GET /health  -> 200 once every configured model has loaded and scored a probe input;
+                  503 while that check runs, or with the error after it failed
+
+Both models load lazily, on the first /health or the first request that needs them, so the
+container starts fast and the healthcheck gates it. MODEL_NAME / EMBED_MODEL_NAME / USE_FP16 /
+MAX_LENGTH are env-tunable.
 """
 
+import math
 import os
 import threading
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-Reranker-0.6B")
@@ -89,6 +95,52 @@ def embed_model():
     return _embed_model
 
 
+# Readiness. /health used to answer 200 without touching a model, so a sidecar whose model
+# could not load (the meta-tensor failure above) or could not run (no C compiler for
+# triton) stayed healthy while every /rerank answered 500. The first /health now starts a
+# check in the background that loads each configured model and scores one probe input, and
+# /health answers 503 until that check has passed. A pass holds for the life of the process.
+# A failed check keeps its error for /health to show and runs again on the next probe, so a
+# transient failure (the first model download) can still recover.
+_ready = False
+_check_error = None
+_check_thread = None
+_check_lock = threading.Lock()
+
+
+def _check_models():
+    """Load every model this sidecar serves and run each once on a probe input. Raises
+    when a model cannot load or answers with anything but finite numbers."""
+    scores = [float(s) for s in model().predict([("readiness probe", "readiness probe")])]
+    if len(scores) != 1 or not math.isfinite(scores[0]):
+        raise RuntimeError(f"reranker scored one pair as {scores!r}")
+    if EMBED_MODEL_NAME:
+        vecs = embed_model().encode(["readiness probe"], convert_to_numpy=True)
+        if len(vecs) != 1 or len(vecs[0]) == 0 or not all(math.isfinite(float(x)) for x in vecs[0]):
+            raise RuntimeError("embedder returned no finite vector for one input")
+
+
+def _run_check():
+    global _ready, _check_error
+    try:
+        _check_models()
+    except Exception as exc:  # any failure means not ready; /health shows it
+        _check_error = f"{type(exc).__name__}: {exc}"
+        return
+    _check_error = None
+    _ready = True
+
+
+def _readiness():
+    """(ready, last error). Starts the check when none has passed and none is running."""
+    global _check_thread
+    with _check_lock:
+        if not _ready and (_check_thread is None or not _check_thread.is_alive()):
+            _check_thread = threading.Thread(target=_run_check, name="readiness", daemon=True)
+            _check_thread.start()
+    return _ready, _check_error
+
+
 class RerankRequest(BaseModel):
     query: str
     # tei callers send `texts`; jina callers send `documents` — accept either
@@ -105,14 +157,20 @@ class EmbeddingRequest(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict:
-    return {
-        "status": "ok",
+def health():
+    ready, error = _readiness()
+    body = {
+        "status": "ok" if ready else ("error" if error else "loading"),
         "model": MODEL_NAME,
         "loaded": _model is not None,
         "embed_model": EMBED_MODEL_NAME or None,
         "embed_loaded": _embed_model is not None,
     }
+    if ready:
+        return body
+    if error:
+        body["error"] = error
+    return JSONResponse(status_code=503, content=body)
 
 
 @app.post("/rerank")
