@@ -2077,6 +2077,13 @@ async function _runTurn(
   if (suppressAgentCatalogTool) {
     allowedToolNames = allowedToolNames.filter((toolName) => toolName !== "list_agents");
   }
+  // A scene or job step runs a workflow that is already running, with the agents its author named.
+  // With the catalog tools it searched for that workflow, which its own task names, tried to run it
+  // again, and ran a different scene in place of its agents (E2E 2026-10-08). load_tool cannot bring
+  // them back: it loads direct tools only, and these are orchestration tools.
+  if (opts._withoutWorkflowCatalog) {
+    allowedToolNames = allowedToolNames.filter((toolName) => !isWorkflowCatalogToolName(toolName));
+  }
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());
   const workflowCatalogSignal = detectWorkflowCatalogSignal(userMessage);

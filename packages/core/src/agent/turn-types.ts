@@ -85,6 +85,9 @@ export interface RunTurnOptions {
   _toolDevSessionId?: string;
   /** Active reusable workflow execution stack for nested workflow/self-reentry guards. Internal. */
   _workflowExecutionStack?: string[];
+  /** The turn runs a step of a workflow that is already running (tools/workflow-catalog.ts), so
+   *  search_workflows and run_workflow are left out of its tools. Internal. */
+  _withoutWorkflowCatalog?: boolean;
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */

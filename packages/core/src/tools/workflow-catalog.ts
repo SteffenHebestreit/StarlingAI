@@ -1090,6 +1090,9 @@ async function runSceneInline(
       maxIterationsOverride: ctx.maxIterationsOverride,
       turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
       _workflowExecutionStack: workflowExecutionStack,
+      // The scene is already selected and its task names its agents: the step's turn gets no
+      // catalog to search it in or to start it, or another scene, from (agent/runtime.ts).
+      _withoutWorkflowCatalog: true,
       onSubAgentProgress: ctx.onSubAgentProgress,
       onComputerAction: ctx.onComputerAction,
       onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1286,6 +1289,8 @@ async function runJobInline(
           maxIterationsOverride: ctx.maxIterationsOverride,
           turnTimeoutOverrideMs: ctx.turnTimeoutOverrideMs,
           _workflowExecutionStack: workflowExecutionStack,
+          // As in runSceneInline: the step's turn runs the step, it does not look for a workflow.
+          _withoutWorkflowCatalog: true,
           onSubAgentProgress: ctx.onSubAgentProgress,
           onComputerAction: ctx.onComputerAction,
           onComputerScreenshot: ctx.onComputerScreenshot,
