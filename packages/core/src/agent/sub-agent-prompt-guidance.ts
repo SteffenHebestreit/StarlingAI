@@ -199,6 +199,28 @@ export function holdsArtifactBuilderTool(toolNames: readonly string[] | undefine
 }
 
 /**
+ * One-shot assemblers: each turns compact authored content (slides, Markdown, a slide or block
+ * list) into the finished deck, Office file or PDF in one call. For a run that holds one, that call
+ * is the build, so a FRESH staged build gets no skeleton directive (sub-agent.ts). In E2E
+ * core-build-artifact-revealjs-deck (2026-10-09) the orchestrator's deck tasks grew to 817-1,349
+ * chars, past the threshold. content_writer was told "SKELETON (first tool call): one write_file",
+ * hand-wrote index.html with UNFINISHED_STUB markers, and never called generate_presentation. Its
+ * deck runs used generate_presentation in 2 of 2 unstaged runs and 1 of 4 staged ones.
+ *
+ * Two emitters are left out. web_coder holds generate_website beside the tools it hand-builds pages
+ * with, and its large builds are what the directive exists for (dfe964f3). generate_document saves
+ * exactly the text it is passed, so it is the document form of write_file, and six specialists
+ * besides content_writer hold it.
+ */
+export const ONE_SHOT_ASSEMBLER_TOOLS: ReadonlySet<string> = new Set([
+  "generate_presentation", "generate_docx", "generate_pptx", "render_pdf",
+]);
+
+export function holdsOneShotAssembler(toolNames: readonly string[] | undefined): boolean {
+  return (toolNames ?? []).some((toolName) => ONE_SHOT_ASSEMBLER_TOOLS.has(toolName));
+}
+
+/**
  * IS THIS UNFINISHED ARTIFACT THIS RUN'S TO FINISH?
  *
  * Resume detection reads the conversation's artifact zone, and the staged-build classifier fires
