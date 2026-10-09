@@ -5,13 +5,17 @@
 // runtime.js), any runtime-private helper is passed in; everything else is imported.
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
+import { askIntentReadout, type IntentFacetRead } from "../decisions/intent-readout.js";
 import { lookupTrajectory } from "../memory/trajectory-cache.js";
+import type { ChatProvider } from "../providers/lmstudio.js";
+import { runWithCallAttribution } from "../runtime/request-context.js";
 import { toSoftRoutingHint, type DynamicTurnGuidance } from "./intent-classifier.js";
 import { userMessageCarriesActionableUrl } from "./citation-honesty.js";
 import type { MainAssistantToolMode } from "./default-tools.js";
 import { prefetchCapabilityCandidates, type DiscoveryCapsuleAgent } from "./discovery-prefetch.js";
 import { noteIntentShadowCapsule } from "./intent-shadow.js";
 import { readPromotedAgents } from "./promoted-agents.js";
+import { resolveRoutingTierProvider, routingTierModelId } from "./routing-tier-provider.js";
 import { timedPhase } from "./turn-metrics.js";
 import { DELIVERABLE_EMITTING_TOOLS } from "../tools/delegation-artifact-classification.js";
 
@@ -107,10 +111,9 @@ export function startDiscoveryPrefetch(params: {
  * also where "high" begins (tools/agent-routing.ts confidenceLabel), so every agent the capsule
  * lists is high. The check filters only the lexical path routing takes without an embedding model,
  * which admits an agent from 0.45. On the deployed stack the condition is the top agent's tools
- * alone, whether or not the request asks for a deliverable: an --auto question about an attached
- * file, or about how a chart works, that routes to an agent holding one of these tools is forced to
- * call a tool until it has delegated. Narrowing that needs a signal that tells those turns apart,
- * calibrated on the routing ledger across many turns.
+ * alone, whether or not the request asks for a deliverable, so it no longer arms the forced call by
+ * itself: it decides whether the turn asks the intent readout (startProduceIntentRead), and only a
+ * reading that the request asks for something to be made or done arms it.
  */
 export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCapsuleAgent[]): boolean {
   const top = agents[0];
@@ -118,6 +121,122 @@ export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCap
   const config = getConfig();
   const agentCfg = config.subAgents[top.name] ?? readPromotedAgents(config.workspacePath)[top.name];
   return (agentCfg?.tools ?? []).some((tool) => DELIVERABLE_EMITTING_TOOLS.has(tool));
+}
+
+/**
+ * The intent readout's `mode` options under which a request asks for an answer, not for something to
+ * be made or done: a reply from general knowledge (converse), findings (GATHER), a verdict on
+ * something that already exists (VERIFY). The other three, PRODUCE, ACT and ORCHESTRATE, are work.
+ */
+export const ASK_MODES: ReadonlySet<string> = new Set(["converse", "GATHER", "VERIFY"]);
+
+/**
+ * Wall-clock bound on the produce-intent read, both option orders together. The readout measured
+ * 0.86-1.16 s a call warm (agent/intent-shadow.ts); the rest leaves room for a cold prefill of its
+ * ~1k-token prefix. Iteration 0 waits for it, so it is well under the shadow's own bound
+ * (INTENT_SHADOW_TIMEOUT_MS, 15 s).
+ */
+export const PRODUCE_INTENT_READ_TIMEOUT_MS = 6_000;
+
+/** What the readout's mode says of the request: something to be made or done, or an answer. */
+export type ProduceIntentVerdict = "produce" | "ask";
+
+/** The readout's mode as a verdict: "ask" for ASK_MODES, "produce" for any other option, null when the facet was not read. Pure. */
+export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice"> | undefined): ProduceIntentVerdict | null {
+  if (!mode) return null;
+  return ASK_MODES.has(mode.choice) ? "ask" : "produce";
+}
+
+const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
+
+/**
+ * Ask the intent readout whether an --auto turn the discovery prefetch routed to a deliverable
+ * emitter (prefetchRoutedToDeliverableEmitter) asks for something to be made or done, before its
+ * first call is forced. On the embedding path that routing reads the top agent's tools and not the request, and
+ * in the E2E window of 2026-10-09 only routing margins kept a question from being forced: for a
+ * question about an attached .docx the emitter on top fell 0.03 short of the admission floor, and
+ * "Tell me how API keys work" put an agent that holds none at 0.846, just ahead of emitters admitted
+ * at 0.817. The readout's mode reads the request itself, in any language, and asks exactly this:
+ * what the request asks the assistant to do, the verb and not the topic. On the bench it read mode
+ * right in 84.8 % of 312 cases with both option orders averaged and in 74.2 % with one, and on real
+ * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked.
+ *
+ * Resolves to "produce", "ask", or null when there is no reading: an Anthropic routing tier (the
+ * readout needs a grammar and token logprobs, which only a llama.cpp server gives, and the shadow
+ * skips it there for the same reason), no provider, a timeout, the turn stopped, a reply without
+ * logprobs, an error, or no mode facet in it. The caller does not force on null: a question is not
+ * to be forced, and without a reading the orchestrator decides as it does on any other turn.
+ *
+ * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
+ * reading the mode's choice, top probability, margin, runner-up and whether the two orders agreed.
+ * Never the user's message, the digest or the readout's restatement. Never rejects.
+ */
+export async function startProduceIntentRead(params: {
+  userMessage: string;
+  /** The prior exchange, as the facet triage and the shadow give it to the readout (buildPriorTurnDigest). */
+  priorTurnDigest?: string;
+  sessionId: string;
+  /** The turn's signal: a stopped turn stops the read. */
+  signal: AbortSignal;
+  timeoutMs?: number;
+}): Promise<ProduceIntentVerdict | null> {
+  const started = Date.now();
+  const record = (outcome: string, mode?: IntentFacetRead, ms?: number): void => {
+    try {
+      logAudit("guardrail_flagged", {
+        type: "auto_artifact_build_mode_read",
+        outcome,
+        ...(mode
+          ? {
+              choice: mode.choice,
+              top: round4(mode.top),
+              margin: round4(mode.margin),
+              runnerUp: mode.runnerUp ?? null,
+              orderAgreed: mode.orders?.agreed ?? null,
+            }
+          : {}),
+        ms: ms ?? Date.now() - started,
+      }, { sessionId: params.sessionId, severity: "info" });
+    } catch {
+      // A row that could not be written costs the measurement, never the turn.
+    }
+  };
+  try {
+    let modelId = "";
+    try {
+      modelId = routingTierModelId();
+    } catch {
+      // unknown: asked, and a reply without logprobs is recorded as that
+    }
+    if (modelId.split("/")[0]?.trim() === "anthropic") {
+      record("no_logprobs_provider");
+      return null;
+    }
+    let provider: ChatProvider;
+    try {
+      provider = resolveRoutingTierProvider();
+    } catch {
+      record("no_provider");
+      return null;
+    }
+    const timeout = AbortSignal.timeout(params.timeoutMs ?? PRODUCE_INTENT_READ_TIMEOUT_MS);
+    const result = await runWithCallAttribution({ callSite: "routing_tier", agentName: "intent_readout" }, () => askIntentReadout(
+      provider,
+      { userMessage: params.userMessage, ...(params.priorTurnDigest ? { priorTurnDigest: params.priorTurnDigest } : {}) },
+      { signal: AbortSignal.any([params.signal, timeout]), bothOrders: true },
+    ));
+    if (!result.ok) {
+      record(params.signal.aborted ? "aborted" : timeout.aborted ? "timeout" : result.reason, undefined, result.ms);
+      return null;
+    }
+    const mode = result.readout.facets.mode;
+    const verdict = produceIntentVerdict(mode);
+    record(verdict ?? "no_mode", mode, result.readout.ms);
+    return verdict;
+  } catch {
+    record("error");
+    return null;
+  }
 }
 
 export interface TrajectoryInjection {
