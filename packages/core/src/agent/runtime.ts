@@ -69,6 +69,8 @@ import {
   toolResultContribution,
   nestedCallContribution,
   readNestedToolCalls,
+  retrievedKnowledgeBaseContent,
+  knowledgeBaseSourceUrls,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
@@ -2218,6 +2220,14 @@ async function _runTurn(
   // F29: Turn-level scorecard accumulators
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
+  // A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent), and the
+  // tool-output screen let it through to the model. It grounds a source-sensitive answer the way a
+  // research delegation does, so it releases the turn's research requirement; see where
+  // requiresDelegatedResearch is read below.
+  let _turnRetrievedKnowledgeBaseContent = false;
+  // The page URLs those reads returned (knowledgeBaseSourceUrls). The citation guard keeps an
+  // answer's citation of one of them and strips every other URL it cites.
+  const _turnKnowledgeBaseSourceUrls = new Set<string>();
   let _forcedSynthesisFired = false;
   // The latest delegation that carried a run record masked figures no tool had returned
   // (agent/delegated-run-record.ts). A later delegation with a record decides again, so a retry
@@ -2846,8 +2856,11 @@ async function _runTurn(
         && deliverableIntent.wantsArtifact;
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
+      // The research requirement is also released by a knowledge-base read that brought content
+      // back: that is the retrieval it asks for. Kept forced, a turn that had just searched the
+      // knowledge base the user named could only go on searching it or delegate the same question.
       const mustOrchestrateBeforeAnswering =
-        (((requiresDelegatedResearch || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
+        ((((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresArtifactDelegation || workflowCatalogRequired || requiresMaintenanceDelegation || autonomousArtifactBuild)
           && _turnDelegationCount === 0)
           || directiveAgentPending)
         && !inWorkflowStep
@@ -3870,10 +3883,13 @@ async function _runTurn(
       // orchestration_only turn that ran NO grounding retrieval this turn (no document RAG, no
       // search_documents / recall_context content call, no shared finding). The structural tier's
       // boolean value is unchanged by factoring this out — same conjunction as before.
+      // A knowledge-base read that brought content back is the same kind of grounding as a
+      // search_documents call, so its draft is not "unretrieved" either.
       const ungroundedDraftIsUnretrieved = activeMainAssistantToolMode === "orchestration_only"
         && !documentRagFoundDocs
         && (_turnToolCallCounts.get("search_documents") ?? 0) === 0
         && (_turnToolCallCounts.get("recall_context") ?? 0) === 0
+        && !_turnRetrievedKnowledgeBaseContent
         && _turnShareFindingCount === 0;
       let requiresUngroundedFactualResearch = getConfig().orchestration?.ungroundedFactualAnswerGuard === true
         && ungroundedDraftIsUnretrieved
@@ -3925,7 +3941,10 @@ async function _runTurn(
           }
         }
       }
-      if (!releasedAfterRoutingNudge && (requiresDelegatedResearch || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
+      // A knowledge-base read that brought content back satisfies the research requirement, as it
+      // does for mustOrchestrateBeforeAnswering. It does not satisfy requiresUrlFetch: the page the
+      // user linked is still unread.
+      if (!releasedAfterRoutingNudge && ((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
           const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
@@ -4089,6 +4108,7 @@ async function _runTurn(
         consecutiveDelegationFailures: _consecutiveDelegationFailures,
         turnToolCallCounts: _turnToolCallCounts,
         turnShareFindingCount: _turnShareFindingCount,
+        turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
         workflowRunCompletedThisTurn,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
@@ -4882,9 +4902,17 @@ async function _runTurn(
         lastToolCallSig: _lastToolCallSig,
         toolResultMessages,
       };
-      // The return value is the inline-era leftover: what reaches the model is what this
+      // The returned text is the inline-era leftover: what reaches the model is what this
       // appends to `toolResultMessages`, and nothing below reads the text again.
-      await postProcessToolResult(resultText, toolResultPostProcessContext);
+      const { outputBlocked } = await postProcessToolResult(resultText, toolResultPostProcessContext);
+      // A knowledge-base read grounds the turn only if its content reached the model. The flag was
+      // set from the raw result, before the screen above, so a search whose excerpts were blocked
+      // (an injection-shaped tag in a crawled page, a moderation block) still released the turn,
+      // and the model answered from memory with only the block error in front of it.
+      if (!outputBlocked && retrievedKnowledgeBaseContent(tc.name, result)) {
+        _turnRetrievedKnowledgeBaseContent = true;
+        for (const url of knowledgeBaseSourceUrls(tc.name, result)) _turnKnowledgeBaseSourceUrls.add(url);
+      }
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -5634,6 +5662,7 @@ async function _runTurn(
     consecutiveDelegationFailures: _consecutiveDelegationFailures,
     turnToolCallCounts: _turnToolCallCounts,
     turnShareFindingCount: _turnShareFindingCount,
+    turnKnowledgeBaseSourceUrls: _turnKnowledgeBaseSourceUrls,
     workflowRunCompletedThisTurn,
     releasedWithoutResearchEvidence: false,
     autoResearchAnswer: null,

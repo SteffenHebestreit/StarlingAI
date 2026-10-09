@@ -10,6 +10,7 @@ import { getSharedFactsEvidenceForFinalSynthesis } from "./evidence-recovery.js"
 import {
   answerPresentsSourceCitations,
   stripFabricatedCitations,
+  stripCitationsOutside,
   prependUnverifiedSourceCaveat,
   userMessageCarriesActionableUrl,
   prependUrlNotFetchedCaveat,
@@ -31,6 +32,8 @@ export interface CitationHonestyGuardParams {
   workflowRunCompletedThisTurn: boolean;
   /** Number of share_finding calls executed this turn. */
   turnShareFindingCount: number;
+  /** The page URLs this turn's knowledge-base reads returned to the model (knowledgeBaseSourceUrls). */
+  turnKnowledgeBaseSourceUrls: ReadonlySet<string>;
   /** Guardrail events array — appended to in place (mutated), mirroring the inline original. */
   guardrailEvents: Array<{ type: string; details: string }>;
 }
@@ -58,6 +61,7 @@ export async function applyCitationHonestyGuard(
     turnDelegationCount,
     workflowRunCompletedThisTurn,
     turnShareFindingCount,
+    turnKnowledgeBaseSourceUrls,
     guardrailEvents,
   } = params;
   let finalResponse = params.finalResponse;
@@ -95,12 +99,25 @@ export async function applyCitationHonestyGuard(
       const hadRealResearch = hadTurnScopedResearch
         || (sessionEvidenceCounts && (sharedFactsForCitation?.itemCount ?? 0) > 0);
 
-      if (presentsCitations && !hadRealResearch) {
-        finalResponse = prependUnverifiedSourceCaveat(stripFabricatedCitations(finalResponse), userMessage);
+      // A knowledge-base search returns its excerpts with the URLs of the crawled pages they came
+      // from, and the tool asks for them to be cited, so a citation of one of those pages is a
+      // source, not a fabrication; stripped, an answer taken from the knowledge base the user named
+      // would lose its source link and carry the unverified caveat. Only those pages are kept. An
+      // exemption for the whole answer, once any read had returned a page, let a made-up datasheet
+      // link beside the real page ship, so every other URL is stripped as before, and the caveat
+      // goes on when one was. A turn whose knowledge-base reads returned no page URL is handled
+      // exactly as before. Nor does a kept page stand in for reading a URL the user gave: the
+      // branch below still asks for that.
+      const knowledgeBaseCitationStrip = presentsCitations && !hadRealResearch && turnKnowledgeBaseSourceUrls.size > 0
+        ? stripCitationsOutside(finalResponse, turnKnowledgeBaseSourceUrls)
+        : null;
+      if (presentsCitations && !hadRealResearch && (knowledgeBaseCitationStrip === null || knowledgeBaseCitationStrip.stripped > 0)) {
+        finalResponse = prependUnverifiedSourceCaveat(knowledgeBaseCitationStrip?.text ?? stripFabricatedCitations(finalResponse), userMessage);
         guardrailEvents.push({ type: "guardrail_flagged", details: "fabricated_citations_stripped" });
         logAudit("guardrail_flagged", {
           type: "fabricated_citations_stripped",
           trigger: "structural_url_citation_without_research",
+          ...(knowledgeBaseCitationStrip ? { knowledgeBaseSourceUrls: turnKnowledgeBaseSourceUrls.size } : {}),
         }, { sessionId, severity: "warn" });
       } else if (userGaveUrlToRead && !hadRealResearch) {
         // A URL the user gave was never fetched (no delegation / web tool / research this turn),

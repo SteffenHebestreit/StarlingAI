@@ -143,6 +143,48 @@ export function toolResultContribution(
   };
 }
 
+/**
+ * Whether a call the turn made itself brought knowledge-base content back: a search_knowledge_base
+ * that returned excerpts, or a use_knowledge_base whose worker ran. A source-sensitive turn is
+ * forced to retrieve before it answers, and the turn counted only delegations and workflows as
+ * retrieval, so a turn told to "search the knowledge base X" that did exactly that was still forced
+ * on, and its answer from the excerpts was rejected as ungrounded (E2E, 2026-10-08).
+ *
+ * Fails closed. A search that found nothing still reports success, so only a positive `hits` count
+ * counts. The turn asks only after the tool-output screen, and not for a result the screen blocked:
+ * the model saw the block error, not the excerpts. Not applied to the calls a tool reports making
+ * (readNestedToolCalls): those reports carry no result metadata, so a nested search that found
+ * nothing cannot be told from one that found something; a turn whose knowledge-base read ran only
+ * inside a plan keeps its research requirement.
+ */
+export function retrievedKnowledgeBaseContent(
+  toolName: string,
+  result: { success: boolean; metadata?: Record<string, unknown> },
+): boolean {
+  if (!result.success) return false;
+  if (toolName === "search_knowledge_base") {
+    const hits = result.metadata?.["hits"];
+    return typeof hits === "number" && hits > 0;
+  }
+  return toolName === "use_knowledge_base";
+}
+
+/**
+ * The page URLs a knowledge-base read that counts (retrievedKnowledgeBaseContent) returned, as the
+ * tool reported them in `sourceUrls`: the pages a search's excerpts came from, or the URLs a
+ * knowledge-base worker's result names. An answer citing one of them is citing its source; any
+ * other URL it cites is stripped as a fabrication (applyCitationHonestyGuard). Empty for every
+ * other call, and for a report that is not a list of strings.
+ */
+export function knowledgeBaseSourceUrls(
+  toolName: string,
+  result: { success: boolean; metadata?: Record<string, unknown> },
+): string[] {
+  if (!retrievedKnowledgeBaseContent(toolName, result)) return [];
+  const urls = result.metadata?.["sourceUrls"];
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string" && url.length > 0) : [];
+}
+
 /** One tool call a tool made on the turn's behalf, reported so the turn can account for it. */
 export interface NestedToolCall {
   tool: string;

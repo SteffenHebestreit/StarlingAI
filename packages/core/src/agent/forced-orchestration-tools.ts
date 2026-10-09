@@ -39,6 +39,17 @@ const FORCE_ORCHESTRATION_TOOLS = new Set([
   // planned turn the most, and the one call a forced iteration could not make: the model
   // recorded a plan, was forced to delegate, and had to re-issue the plan's first step by hand.
   "execute_plan",
+  // The knowledge-base reads are source retrieval, which is what a source-sensitive turn is
+  // forced to go and get: list_knowledge_bases finds the corpus the way search_agents finds the
+  // agent, search_knowledge_base returns its cited excerpts, and use_knowledge_base hands the
+  // task to the KB's own worker. Left out, "search the knowledge base X: ..." could not be done
+  // at all on such a turn: under stableToolBlock "freeze" the model called list_knowledge_bases
+  // twice, both were refused as must_orchestrate, and the turn was cut off into a synthesis with
+  // no evidence that told the user the knowledge base was blocked (E2E, 2026-10-08). The KB
+  // mutations (create_knowledge_base, manage_knowledge_base) stay out: they retrieve nothing.
+  "list_knowledge_bases",
+  "search_knowledge_base",
+  "use_knowledge_base",
 ]);
 
 /** Keep only orchestration/delegation tools so a forced tool call can ONLY be
