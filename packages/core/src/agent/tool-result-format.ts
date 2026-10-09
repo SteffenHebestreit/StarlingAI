@@ -61,12 +61,17 @@ export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * How the turn loop opens the notice it appends to a tool result (agent/runtime.ts, when a tool
- * keeps returning identical output). It is the last paragraph of the text the frame receives.
- */
-export const TOOL_RESULT_NOTICE_OPENER = "\n\n[System notice: ";
-const TRAILING_TOOL_RESULT_NOTICE_RE = new RegExp(`${escapeRegExp(TOOL_RESULT_NOTICE_OPENER)}[^\\n]{1,400}\\]$`);
+/** What the turn loop knows about a tool result that the result's text does not say. */
+export interface ToolResultFrameContext {
+  /**
+   * The text the turn loop appended to the result itself (agent/runtime.ts: its identical-output
+   * notice), exactly as appended. A retrieval result cut to its budget keeps it after the cut line.
+   * Only this is kept there. A closing "[System notice: …]" paragraph the TOOL returned is retrieved
+   * content, which a crawled page or a stored memory can carry, and goes with the cut: lifted past
+   * the harness's own cut line it would read as the runtime speaking.
+   */
+  readonly runtimeNote?: string;
+}
 
 /** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
 const DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS = 6000;
@@ -88,13 +93,15 @@ export function retrievalEvidenceMaxChars(): number {
 /**
  * A retrieval result held to `maxChars`, newlines and table rows kept. The tools list their passages
  * most relevant first, so a cut keeps the head and drops the least relevant, and a line in their
- * place says how much is missing. The turn loop's notice stays after that line: a cut from the end
- * would otherwise take the loop warning with it.
+ * place says how much is missing. The note the turn loop appended stays after that line, when the
+ * text still ends with exactly that note: a cut from the end would otherwise take the loop warning
+ * with it. Anything else at the end of the text is the tool's and is cut with the rest.
  */
-function boundRetrievalEvidence(resultText: string, maxChars: number): string {
+function boundRetrievalEvidence(resultText: string, maxChars: number, runtimeNote = ""): string {
   const text = resultText.trim();
   if (text.length <= maxChars) return text;
-  const notice = TRAILING_TOOL_RESULT_NOTICE_RE.exec(text)?.[0] ?? "";
+  const note = runtimeNote.trimEnd();
+  const notice = note && text.endsWith(note) ? note : "";
   const body = text.slice(0, text.length - notice.length);
   const cutLine = (left: number): string =>
     `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
@@ -326,9 +333,10 @@ export function buildModelVisibleToolResult(
   toolName: string,
   resultText: string,
   metadata?: Record<string, unknown>,
+  frameContext?: ToolResultFrameContext,
 ): string {
   const stop: { line?: string } = {};
-  const frame = frameToolResult(toolName, resultText, metadata, stop);
+  const frame = frameToolResult(toolName, resultText, metadata, stop, frameContext);
   // run_workflow names its files in its own instruction; a second list would repeat them.
   if (toolName === "run_workflow") return frame;
   const record = formatDelegatedRunRecord(metadata, stop.line);
@@ -359,6 +367,7 @@ function frameToolResult(
   metadata?: Record<string, unknown>,
   /** Set to the run-stop line when the frame's instruction points at it (the record carries it). */
   stop: { line?: string } = {},
+  frameContext?: ToolResultFrameContext,
 ): string {
   const fallback = truncateForContext(resultText, 600);
 
@@ -681,7 +690,7 @@ function frameToolResult(
   // Retrieved passages are the evidence itself, not a summary of work done elsewhere: kept as the
   // tool wrote them, up to the retrieval budget, instead of the 600-character fallback below.
   if (isRetrievalEvidenceResult(toolName)) {
-    return boundRetrievalEvidence(resultText, retrievalEvidenceMaxChars());
+    return boundRetrievalEvidence(resultText, retrievalEvidenceMaxChars(), frameContext?.runtimeNote);
   }
 
   return fallback;

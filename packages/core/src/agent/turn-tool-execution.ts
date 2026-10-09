@@ -37,6 +37,9 @@ export interface ToolResultPostProcessContext {
   readonly intervention: InterventionNotice | null;
   readonly argsSig: string;
   readonly session: AgentSession;
+  /** The note the turn loop appended to the result text itself, handed to the frame beside it
+   *  (tool-result-format.ts ToolResultFrameContext). */
+  readonly runtimeNote?: string;
 
   // --- enclosing `opts` callbacks (passed through, never imported) ---
   readonly onIntervention?: (notice: InterventionNotice) => void;
@@ -142,7 +145,7 @@ export const postProcessToolResult = async (
 
   if (ctx.onToolResult) ctx.onToolResult(tc.id, tc.name, resultText, result.metadata);
 
-  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata);
+  const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata, { runtimeNote: ctx.runtimeNote });
 
   ctx.toolResultMessages.push({
     role: "tool",

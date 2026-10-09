@@ -442,6 +442,58 @@ describe("the excerpts a search returned reach the model's next call", () => {
   }, 60_000);
 });
 
+describe("the turn loop's own notes on a retrieval result survive its cut to the budget", () => {
+  const SEARCH_ARGS = { knowledge_base: KB_ID, query: "Ladezeit NW-3104 NW-LG 18 0 auf 80 %" };
+  const CUT_LINE = /\[Cut to fit the context budget: the remaining \d+ characters of this result are not shown\.\]/;
+
+  type ScriptedCall = [callId: string, toolName: string, args: Record<string, unknown>];
+
+  /** The model sends each iteration's calls in one response, and answers after the last. */
+  function callsThenAnswer(iterations: ScriptedCall[][], answer: string) {
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      const calls = iterations[call];
+      call += 1;
+      if (!calls) return textStream(answer);
+      return (async function* () {
+        for (const [callId, toolName, args] of calls) {
+          yield { type: "tool_call_start", toolCallId: callId, toolName };
+          yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
+        }
+        yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      })();
+    });
+  }
+
+  /** What the turn stored as the model-visible result of one call. */
+  const storedResult = (session: { getHistory(): readonly unknown[] }, callId: string): string | undefined =>
+    (session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .find((message) => message.role === "tool" && message.tool_call_id === callId)?.content ?? undefined;
+
+  it("a search that keeps failing the same way keeps the identical-output notice after the cut line", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 500;
+    // The store's error, echoed whole, runs past the budget. A failed call is not served from the
+    // identical-arguments cache, so the third one runs and gets the loop's notice. The listing in the
+    // second iteration succeeds: two iterations whose every call failed end the turn first.
+    searchKnowledgeBaseMock.mockRejectedValue(new Error(`engram search failed: ${"upstream connection reset by peer; ".repeat(20)}`));
+    callsThenAnswer([
+      [["kb1", "search_knowledge_base", SEARCH_ARGS]],
+      [["kb2", "search_knowledge_base", SEARCH_ARGS], ["list1", "list_knowledge_bases", {}]],
+      [["kb3", "search_knowledge_base", SEARCH_ARGS]],
+    ], "Die Wissensdatenbank ist gerade nicht erreichbar.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(3);
+    const third = storedResult(session, "kb3");
+    expect(third, "the third search left no result").toBeDefined();
+    expect(third).toMatch(CUT_LINE);
+    expect(third).toMatch(/not shown\.\]\n\n\[System notice: search_knowledge_base has returned identical output 3 times in a row\. You are stuck in a loop\. [^\n]*\]$/);
+  }, 60_000);
+});
+
 describe("citations in an answer from this turn's knowledge-base read are its sources", () => {
   const PAGE_URL = "http://www.nordlicht-werkzeuge.test/dokumentation.html";
   const CITED_ANSWER = [
