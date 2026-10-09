@@ -99,8 +99,18 @@ export function startDiscoveryPrefetch(params: {
  * Bestellablauf als Mermaid-Flussdiagramm" matched none of their verbs or nouns, so the turn was
  * not forced, and the model drew the diagram inline while the capsule it had been given named
  * diagram_designer [high] (E2E core-build-artifact-mermaid). Routing reads the request in any
- * language, and the turn has already paid for it. Only the top agent counts, only at high
- * confidence, and an agent the configuration does not know holds no tool.
+ * language, and the turn has already paid for it. Only the top agent counts, and an agent the
+ * configuration does not know holds no tool.
+ *
+ * The confidence check narrows less than it reads. With an embedding model configured, as on the
+ * deployed stack, the prefetch admits an agent only at a semantic score of 0.72 or more, and 0.72 is
+ * also where "high" begins (tools/agent-routing.ts confidenceLabel), so every agent the capsule
+ * lists is high. The check filters only the lexical path routing takes without an embedding model,
+ * which admits an agent from 0.45. On the deployed stack the condition is the top agent's tools
+ * alone, whether or not the request asks for a deliverable: an --auto question about an attached
+ * file, or about how a chart works, that routes to an agent holding one of these tools is forced to
+ * call a tool until it has delegated. Narrowing that needs a signal that tells those turns apart,
+ * calibrated on the routing ledger across many turns.
  */
 export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCapsuleAgent[]): boolean {
   const top = agents[0];

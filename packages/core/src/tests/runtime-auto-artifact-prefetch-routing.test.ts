@@ -11,6 +11,10 @@
  * tool arms the same forced call. Nothing else changes: a medium-confidence top agent, a top agent
  * that only writes files, a late prefetch, no prefetch, no --auto, or the flag off all leave the
  * turn as it was.
+ *
+ * A medium-confidence top agent comes only from the lexical routing used without an embedding
+ * model. With one, every agent the prefetch admits is high, so the top agent's tools are the whole
+ * condition; discovery-prefetch-semantic-arming.test.ts runs that path with real routing.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,7 +200,9 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     expect(options?.toolChoice).toBe("required");
   });
 
-  it("a small-talk --auto turn whose top agent is only medium confidence is not forced", async () => {
+  // Reachable only on the lexical path (no embedding model configured), which admits an agent from
+  // 0.45; on the embedding path the floor is 0.72, where "high" begins.
+  it("on the lexical path, an --auto turn whose top agent is only medium confidence is not forced", async () => {
     const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "medium" }] } });
     expect(await firstCallOptions(loaded, SMALL_TALK, true)).toBeUndefined();
     expect(prefetchCalls.count).toBe(1);

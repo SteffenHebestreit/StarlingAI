@@ -1858,9 +1858,10 @@ async function _runTurn(
   // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
   // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
   // On an --auto turn under orchestration.autonomousModeAntiRefusal the capsule's routing is also
-  // read back: a top agent admitted at high confidence that emits deliverables arms the same
-  // forced first tool call as an artifact request the word lists recognise (autonomousArtifactBuild
-  // below). Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a
+  // read back: a top agent that holds a deliverable-emitting tool arms the same forced first tool
+  // call as an artifact request the word lists recognise (autonomousArtifactBuild below). With an
+  // embedding model every agent the prefetch admits is high confidence, so on the deployed stack
+  // that is the whole condition (prefetchRoutedToDeliverableEmitter). Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a
   // late or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and
   // autoApprove are not checked again for it below, so every other turn starts the prefetch exactly
   // as before and can never be armed by it.
