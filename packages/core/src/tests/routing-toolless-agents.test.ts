@@ -22,6 +22,12 @@ import { join } from "node:path";
 const connectMcpServer = vi.hoisted(() => vi.fn(async (name: string) => { throw new Error(`getaddrinfo ENOTFOUND ${name}`); }));
 vi.mock("../mcp/client.js", () => ({ connectMcpServer, cleanupConfiguredDockerMcpContainers: async () => undefined }));
 
+const audit = vi.hoisted(() => vi.fn());
+vi.mock("../audit/logger.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../audit/logger.js")>();
+  return { ...actual, logAudit: (...args: Parameters<typeof actual.logAudit>) => { audit(...args); return actual.logAudit(...args); } };
+});
+
 /** process_memory_keeper's declared tools, verbatim from the local 60-processmem shard. */
 const PROCESSMEM_TOOLS = [
   "mcp__processmem__open_process", "mcp__processmem__transition_process", "mcp__processmem__attach_subprocess",
@@ -55,6 +61,7 @@ let tempDir: string | undefined;
 /** Routes over `agents` in a fresh process. `connectMcp` runs the gateway's MCP connect pass first, as every serving process does. */
 async function routeWith(agents: Record<string, unknown>, extraConfig: Record<string, unknown> = {}, { connectMcp = true } = {}) {
   vi.resetModules();
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-toolless-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
@@ -80,6 +87,8 @@ async function routeWith(agents: Record<string, unknown>, extraConfig: Record<st
 
 afterEach(async () => {
   connectMcpServer.mockClear();
+  audit.mockClear();
+  vi.unstubAllGlobals();
   delete process.env["SAI_CONFIG_PATH"];
   (await import("../config/loader.js")).resetConfigForTests();
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
@@ -152,6 +161,30 @@ describe("routing an agent whose tools are all unusable", () => {
 
     expect("toollessAgents" in resolution).toBe(false);
   });
+});
+
+describe("search_agents", () => {
+  /** The agent_routing_evaluated row search_agents writes for its own query. */
+  const searchRow = async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("search_agents")!.execute({ query: QUERY, minConfidence: "low" }, { sessionId: "s-search", workspacePath: tempDir! });
+    const row = audit.mock.calls.find((call) => call[0] === "agent_routing_evaluated" && (call[1] as Record<string, unknown>)["query"] === QUERY);
+    audit.mockClear();
+    return row?.[1] as Record<string, unknown> | undefined;
+  };
+
+  it("says on its routing row which agents it left out for want of a tool, and adds no field when there were none", async () => {
+    // No model endpoint: a restatement retry fails at once instead of reaching for one.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 404 })));
+    await routeWith(AGENTS);
+    expect(await searchRow()).toEqual(expect.objectContaining({ toollessAgents: ["process_memory_keeper"], trippedAgents: [] }));
+
+    await routeWith({ browser_agent: AGENTS.browser_agent, researcher: AGENTS.researcher });
+    const clean = await searchRow();
+    expect(clean).toBeDefined();
+    expect(clean && "toollessAgents" in clean).toBe(false);
+  }, 30_000);
 });
 
 describe("the predicate", () => {

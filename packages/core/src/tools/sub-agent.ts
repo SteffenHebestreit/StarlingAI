@@ -3614,6 +3614,7 @@ registerTool({
       weakCount: resolution.weakCandidates.length,
       gated: resolution.gated,
       trippedAgents: resolution.trippedAgents,
+      ...(resolution.toollessAgents ? { toollessAgents: resolution.toollessAgents } : {}),
       excludedAgents: resolution.excludedAgents ?? [],
       allLowConfidence: resolution.allLowConfidence,
       topResult: resolution.results[0]?.name ?? null,
