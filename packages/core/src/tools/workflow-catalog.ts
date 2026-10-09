@@ -5,6 +5,7 @@ import { archiveSession, createSession, type AgentSession, type SessionHistoryMe
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 import { buildWorkflowExecutionKey } from "../agent/workflow-execution-key.js";
+import { firstMentionOfAgent, workflowStepPipeline } from "../agent/workflow-step-pipeline.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments, classifyPostOrchestrationDisposition } from "../agent/runtime.js";
 import type { TurnOutput } from "../agent/turn-types.js";
@@ -619,14 +620,7 @@ function resolveSceneBootstrapAgent(
 
 /** Whether `task` names an allowed agent other than `leadAgent` as a whole identifier. */
 function taskNamesOtherAgents(task: string, leadAgent: string, allowedAgents: string[] | undefined): boolean {
-  const isIdentifierChar = (ch: string | undefined) => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
-  return (allowedAgents ?? []).some((agent) => {
-    if (agent === leadAgent) return false;
-    for (let at = task.indexOf(agent); at !== -1; at = task.indexOf(agent, at + 1)) {
-      if (!isIdentifierChar(task[at - 1]) && !isIdentifierChar(task[at + agent.length])) return true;
-    }
-    return false;
-  });
+  return (allowedAgents ?? []).some((agent) => agent !== leadAgent && firstMentionOfAgent(task, agent) !== -1);
 }
 
 function stripCoordinatorBootstrapInstruction(task: string, agentName: string): string {
@@ -1117,6 +1111,9 @@ async function runSceneInline(
       };
     }
 
+    // The agents the scene's task names, in its order, from the task as its author wrote it: the turn
+    // keeps going while some of them have not run (agent/workflow-step-pipeline.ts).
+    const pipeline = workflowStepPipeline(scene.task, allowedAgents);
     const result = await runTurn({
       session,
       userMessage: task,
@@ -1135,6 +1132,7 @@ async function runSceneInline(
       // The scene is already selected and its task names its agents: the step's turn gets no
       // catalog to search it in or to start it, or another scene, from (agent/runtime.ts).
       _withoutWorkflowCatalog: true,
+      ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
       onSubAgentProgress: ctx.onSubAgentProgress,
       onComputerAction: ctx.onComputerAction,
       onComputerScreenshot: ctx.onComputerScreenshot,
@@ -1327,6 +1325,9 @@ async function runJobInline(
           stepResponse = `${stepResponse}\n\n${MASKED_STEP_NOTE}`.trim();
         }
       } else {
+        // As in runSceneInline, from the step's scene as its author wrote it: step.task has the job's
+        // parameters filled in.
+        const pipeline = workflowStepPipeline(getScene(step.sceneName)?.task, allowedAgents);
         const result = await runTurn({
           session,
           userMessage: stepTask,
@@ -1341,6 +1342,7 @@ async function runJobInline(
           _workflowExecutionStack: stepExecutionStack,
           // As in runSceneInline: the step's turn runs the step, it does not look for a workflow.
           _withoutWorkflowCatalog: true,
+          ...(pipeline.length > 0 ? { _workflowStepPipeline: pipeline } : {}),
           onSubAgentProgress: ctx.onSubAgentProgress,
           onComputerAction: ctx.onComputerAction,
           onComputerScreenshot: ctx.onComputerScreenshot,

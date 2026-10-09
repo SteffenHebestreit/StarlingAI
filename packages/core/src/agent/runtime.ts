@@ -74,6 +74,7 @@ import {
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
+import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective } from "./workflow-step-pipeline.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -2349,6 +2350,10 @@ async function _runTurn(
   // delegation; the synthesis-required guard rejected it, and the turn shipped a forced partial
   // answer (review of 0b5089e/a3773aa, 2026-10-08).
   let directiveAgentRan = false;
+  // The agents of a workflow step's pipeline (opts._workflowStepPipeline) whose delegations returned this
+  // turn, read from the results the way directiveAgentRan is. Empty, and never written, on any other turn.
+  const workflowStepPipeline = opts._workflowStepPipeline ?? [];
+  const workflowStepAgentsReturned = new Set<string>();
   // This turn's document excerpts for the delegation the runtime dispatched itself, keyed by that
   // call's id: handed to it beside its arguments when it runs (ToolContext.delegationDocuments).
   let directiveDispatchDocuments: { toolCallId: string; documents: string } | undefined;
@@ -4674,6 +4679,11 @@ async function _runTurn(
       if (directiveAgent !== undefined && delegationRanAgent(tc.name, result.metadata, directiveAgent)) {
         directiveAgentRan = true;
       }
+      if (result.success) {
+        for (const agent of workflowStepPipeline) {
+          if (delegationRanAgent(tc.name, result.metadata, agent)) workflowStepAgentsReturned.add(agent);
+        }
+      }
 
       // execute_plan delegates from INSIDE one tool call, so the loop above never sees those
       // delegations and the turn ended believing it had orchestrated nothing: the shared-facts
@@ -4693,6 +4703,11 @@ async function _runTurn(
         // not say who ran: routing within it may find no match, and the architect fallback, which
         // no grant binds, then answers with an ephemeral agent (directive-agent.ts).
         if (directiveAgent !== undefined && nestedCallRanAgent(nested, directiveAgent)) directiveAgentRan = true;
+        if (nested.success) {
+          for (const agent of workflowStepPipeline) {
+            if (nestedCallRanAgent(nested, agent)) workflowStepAgentsReturned.add(agent);
+          }
+        }
       }
 
       pendingSearchAgentSuggestion = tc.name === "search_agents"
@@ -5047,17 +5062,19 @@ async function _runTurn(
         if (getConfig().orchestration?.planDrivenContinuation ?? false) {
           const continuationPlan = await loadTurnPlan(session.id);
           const delegateCap = getConfig().orchestration?.perTurnCaps?.["delegate_to_agent"] ?? 5;
+          // A `reuse` step that ran is progress against the plan, but the delegation counter
+          // deliberately does not count run_workflow at call time (a workflow that never ran
+          // must not read as executed orchestration — audit 1303e254). The success-gated flag is
+          // the honest half of that pair, so it is added HERE, where the question is only
+          // "has the plan progressed", and not to the signal the honesty chain reads.
+          const executedDelegations = _turnDelegationCount + (workflowRunCompletedThisTurn ? 1 : 0);
+          // A step whose figures were made up is not a step the next one may build on.
+          const lastDelegationSucceeded = maskedDelegatedRuns.length === 0;
           const planDecision = decidePlanContinuation({
             plan: continuationPlan,
-            // A `reuse` step that ran is progress against the plan, but the delegation counter
-            // deliberately does not count run_workflow at call time (a workflow that never ran
-            // must not read as executed orchestration — audit 1303e254). The success-gated flag is
-            // the honest half of that pair, so it is added HERE, where the question is only
-            // "has the plan progressed", and not to the signal the honesty chain reads.
-            executedDelegations: _turnDelegationCount + (workflowRunCompletedThisTurn ? 1 : 0),
+            executedDelegations,
             delegationCap: delegateCap,
-            // A step whose figures were made up is not a step the next one may build on.
-            lastDelegationSucceeded: maskedDelegatedRuns.length === 0,
+            lastDelegationSucceeded,
             enabled: true,
           });
           if (planDecision.continue && continuationPlan) {
@@ -5071,6 +5088,34 @@ async function _runTurn(
               content: renderPlanContinuationDirective(continuationPlan, planDecision.done, planDecision.total),
             });
             continue;
+          }
+          // A workflow step's turn records no plan of its own, and the agents its task names stand in
+          // for one (agent/workflow-step-pipeline.ts). Without them the turn ended at its first
+          // delegation that returned: the scene's researcher ran, and the agents named after it were
+          // forbidden by the synthesis requirement below (E2E 2026-10-08). A plan the turn did record
+          // is its own reading of the task and is followed instead, above.
+          if (!continuationPlan && workflowStepPipeline.length > 0) {
+            const remainingStepAgents = remainingWorkflowStepAgents({
+              pipeline: workflowStepPipeline,
+              returned: workflowStepAgentsReturned,
+              executedDelegations,
+              delegationCap: delegateCap,
+              lastDelegationSucceeded,
+            });
+            if (remainingStepAgents.length > 0) {
+              logAudit("guardrail_flagged", {
+                type: "plan_driven_continuation",
+                source: "workflow_step",
+                done: workflowStepPipeline.length - remainingStepAgents.length,
+                total: workflowStepPipeline.length,
+                remaining: remainingStepAgents,
+              }, { sessionId: session.id, channel: session.channel, severity: "info" });
+              session.addMessage({
+                role: "system",
+                content: renderWorkflowStepContinuationDirective(remainingStepAgents),
+              });
+              continue;
+            }
           }
         }
         // Cost-center 2 (audit 5d51862f): if this turn's ONLY orchestration was a single
