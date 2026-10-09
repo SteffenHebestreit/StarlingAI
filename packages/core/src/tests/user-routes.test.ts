@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ACCOUNT_ID_RE } from "../runtime/accounts.js";
 
 /**
  * Creating and deleting accounts was operator-only, and operator is every account's default role.
@@ -16,8 +17,8 @@ import { join } from "node:path";
 
 const DUMMY_HASH = "$2b$10$0123456789abcdefghijklmno";
 
-function account(username: string, role: string): Record<string, unknown> {
-  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z" };
+function account(username: string, role: string, id?: string): Record<string, unknown> {
+  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z", ...(id ? { id } : {}) };
 }
 
 const tempDirs: string[] = [];
@@ -62,7 +63,8 @@ async function boot(auth: Record<string, unknown>) {
   });
   const usernames = () => loader.getConfig().auth.users.map((u) => u.username);
   const passwordHashOf = (username: string) => loader.getConfig().auth.users.find((u) => u.username === username)?.passwordHash;
-  return { app, tokenFor, create, remove, resetPassword, usernames, passwordHashOf, session, authModule };
+  const idOf = (username: string) => loader.getConfig().auth.users.find((u) => u.username === username)?.id;
+  return { app, tokenFor, create, remove, resetPassword, usernames, passwordHashOf, idOf, session, authModule };
 }
 
 afterEach(async () => {
@@ -206,5 +208,69 @@ describe("a new account never takes a name someone else already holds", () => {
     // The roster says so, for the Users page to hide account creation.
     const roster = await app.request("/api/auth/users", { headers: { Authorization: admin } });
     expect(((await roster.json()) as { provider: string }).provider).toBe("oidc");
+  });
+});
+
+/**
+ * Per-account storage is keyed by an immutable account id, not the username: the id is minted when
+ * the account is created and must survive every later change to the roster. The DELETE route
+ * rewrote every remaining record with five named fields, so each delete stripped every other
+ * account's id.
+ */
+describe("account ids", () => {
+  const ALICE_ID = "alice-0123456789abcdef";
+  const ROOT_ID = "root-fedcba9876543210";
+  const ledgerLines = (): Array<Record<string, unknown>> => {
+    const path = join(tempDir!, ".starlingai", "account-migrations.ndjson");
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+
+  it("mints a random id for a new account and records it in the account ledger", async () => {
+    const { tokenFor, create, remove, idOf } = await boot({ enabled: true, users: [account("root", "admin", ROOT_ID)] });
+    const root = await tokenFor("root", "admin");
+    expect((await create(root, "carol")).status).toBe(200);
+    const first = idOf("carol");
+    expect(first).toMatch(ACCOUNT_ID_RE);
+    expect(first).toMatch(/^carol-[0-9a-f]{16}$/);
+    const [created] = ledgerLines();
+    expect(created).toEqual({ event: "created", id: first, username: "carol", at: expect.any(String) });
+
+    // A name deleted and created again is a new account: a new id, so none of the old storage.
+    expect((await remove(root, "carol")).status).toBe(200);
+    expect((await create(root, "carol")).status).toBe(200);
+    const second = idOf("carol");
+    expect(second).toMatch(ACCOUNT_ID_RE);
+    expect(second).not.toBe(first);
+    expect(ledgerLines().map((entry) => entry["id"])).toEqual([first, second]);
+  });
+
+  it("creates no account when the id cannot be recorded", async () => {
+    const { tokenFor, create, usernames } = await boot({ enabled: true, users: [account("root", "admin", ROOT_ID)] });
+    // The state directory is a file: the ledger cannot be written.
+    writeFileSync(join(tempDir!, ".starlingai"), "not a directory");
+    const refused = await create(await tokenFor("root", "admin"), "carol");
+    expect(refused.status).toBe(500);
+    expect(usernames()).toEqual(["root"]);
+  });
+
+  it("keeps every other account's id when one is deleted", async () => {
+    const { tokenFor, remove, idOf, usernames } = await boot({
+      enabled: true,
+      users: [account("root", "admin", ROOT_ID), account("alice", "operator", ALICE_ID), account("bob", "operator", "bob-1111111111111111")],
+    });
+    expect((await remove(await tokenFor("root", "admin"), "bob")).status).toBe(200);
+    expect(usernames()).toEqual(["root", "alice"]);
+    expect(idOf("alice")).toBe(ALICE_ID);
+    expect(idOf("root")).toBe(ROOT_ID);
+  });
+
+  it("keeps the id when an admin sets a new password", async () => {
+    const { tokenFor, resetPassword, idOf } = await boot({
+      enabled: true,
+      users: [account("root", "admin", ROOT_ID), account("alice", "operator", ALICE_ID)],
+    });
+    expect((await resetPassword(await tokenFor("root", "admin"), "alice", "brand-new-password")).status).toBe(200);
+    expect(idOf("alice")).toBe(ALICE_ID);
   });
 });

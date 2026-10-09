@@ -21,7 +21,8 @@
  * erased by) any other auth.users. Setup therefore refuses while another shard, or the runtime
  * overlay, defines accounts — and writes nothing.
  *
- * Idempotent: accounts already in place whose passwords still verify are kept as they are.
+ * Idempotent: accounts already in place whose passwords still verify are kept as they are; one
+ * written before account ids existed gets an id (auth.users[].id) and keeps its password.
  * `--remove` deletes the three files and rebuilds. Passwords are never printed.
  *
  * SAI_CONFIG_PATH (a config directory) and SAI_WORKSPACE_CONFIG_PATH point setup at another
@@ -35,6 +36,7 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import bcrypt from "bcryptjs";
 import { hashPassword } from "../gateway/auth.js";
+import { ACCOUNT_ID_RE, mintBuiltinAccountId, reservedAccountIdProblem, sameAccountId } from "../runtime/accounts.js";
 import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
 import { isRecord } from "./gateway-client.js";
 import type { E2EIdentity } from "./scenario.js";
@@ -231,21 +233,48 @@ function readJsonRecord(path: string, json5 = false): Record<string, unknown> | 
   }
 }
 
-/** Both files exist, name both accounts with their roles, and every password verifies. */
-async function accountsInPlace(paths: SetupPaths): Promise<boolean> {
+/** Both files exist, name both accounts with their roles, and every password verifies: the shard's
+ *  account records then, null otherwise. */
+async function accountsInPlace(paths: SetupPaths): Promise<Array<Record<string, unknown>> | null> {
   const shard = readJsonRecord(paths.shardPath, true);
   const credentials = readJsonRecord(paths.credentialsPath);
   const auth = shard && isRecord(shard["auth"]) ? shard["auth"] : null;
   const users = auth && Array.isArray(auth["users"]) ? auth["users"].filter(isRecord) : [];
-  if (!credentials || users.length !== E2E_ACCOUNTS.length) return false;
+  if (!credentials || users.length !== E2E_ACCOUNTS.length) return null;
   for (const account of E2E_ACCOUNTS) {
     const entry = credentials[account.identity];
     const user = users.find((candidate) => candidate["username"] === account.username);
-    if (!isRecord(entry) || entry["username"] !== account.username || typeof entry["password"] !== "string") return false;
-    if (!user || user["role"] !== account.role || typeof user["passwordHash"] !== "string") return false;
-    if (!await bcrypt.compare(entry["password"], user["passwordHash"])) return false;
+    if (!isRecord(entry) || entry["username"] !== account.username || typeof entry["password"] !== "string") return null;
+    if (!user || user["role"] !== account.role || typeof user["passwordHash"] !== "string") return null;
+    if (!await bcrypt.compare(entry["password"], user["passwordHash"])) return null;
   }
-  return true;
+  return users;
+}
+
+/**
+ * Gives every record without a usable account id a fresh one, in place, and names those records.
+ * Usable: well formed, not the bootstrap token's segment, not the other account's (the gateway
+ * refuses to load a roster that breaks any of these). Accounts that predate ids keep their
+ * passwords: only the id is new.
+ */
+function ensureAccountIds(users: Array<Record<string, unknown>>): string[] {
+  const held: string[] = [];
+  const minted: string[] = [];
+  for (const user of users) {
+    const id = user["id"];
+    const usable = typeof id === "string" && ACCOUNT_ID_RE.test(id) && !reservedAccountIdProblem(id)
+      && !held.some((other) => sameAccountId(other, id));
+    if (usable) {
+      held.push(id);
+      continue;
+    }
+    const username = String(user["username"]);
+    const fresh = mintBuiltinAccountId(username, held);
+    user["id"] = fresh;
+    held.push(fresh);
+    minted.push(username);
+  }
+  return minted;
 }
 
 function isolationText(): string {
@@ -348,9 +377,18 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
   }
 
   let action: SetupResult["action"];
-  if (await accountsInPlace(paths)) {
+  const inPlace = await accountsInPlace(paths);
+  if (inPlace) {
     action = "kept";
-    log(`The e2e accounts in ${show(paths.shardPath)} are in place and match ${show(paths.credentialsPath)}; kept.`);
+    // Accounts written before account ids existed: each gets one, and keeps its password, so the
+    // credentials file stays valid and nothing else changes.
+    const minted = ensureAccountIds(inPlace);
+    if (minted.length > 0) {
+      writeFileSync(paths.shardPath, shardText(inPlace), "utf8");
+      log(`The e2e accounts in ${show(paths.shardPath)} are in place; gave ${minted.join(" and ")} an account id, passwords unchanged.`);
+    } else {
+      log(`The e2e accounts in ${show(paths.shardPath)} are in place and match ${show(paths.credentialsPath)}; kept.`);
+    }
   } else {
     const createdAt = (opts.now?.() ?? new Date()).toISOString();
     const users: Array<Record<string, unknown>> = [];
@@ -360,6 +398,7 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
       users.push({ username: account.username, passwordHash: await hashPassword(password), displayName: account.displayName, role: account.role, createdAt });
       credentials[account.identity] = { username: account.username, password };
     }
+    ensureAccountIds(users);
     mkdirSync(dirname(paths.shardPath), { recursive: true });
     mkdirSync(dirname(paths.credentialsPath), { recursive: true });
     writeFileSync(paths.shardPath, shardText(users), "utf8");

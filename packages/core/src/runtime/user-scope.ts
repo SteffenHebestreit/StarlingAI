@@ -12,32 +12,15 @@
  */
 import { resolve } from "node:path";
 import { readdirSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { currentUserId, currentUserScopeSegment } from "./request-context.js";
 import { getConfig } from "../config/loader.js";
+import { safeUserSegment } from "./accounts.js";
 
 const USERS_SUBDIR = "users";
 
-/**
- * Filesystem-safe, INJECTIVE segment for a userId (JWT `sub` / username).
- *
- * The readable prefix is for human/debug legibility only; the appended hash of the RAW
- * userId is what guarantees uniqueness. A pure char-replace (the previous implementation)
- * is LOSSY: `a.b` and `a_b` both collapse to `a_b`, and an 80-char truncation collides on a
- * shared prefix — so two DISTINCT valid accounts (builtin `alice.smith` vs `alice_smith`,
- * or IdP-controlled preferred_usernames that normalise together) silently shared ONE
- * durable-memory / personality / user-model bucket. The hash suffix makes distinct ids map
- * to distinct buckets, and also guarantees the segment can never BE a Windows reserved
- * device name (CON, PRN, NUL, …). NOTE: not reversible — sweeps that need to target an
- * existing bucket pass its on-disk segment via RequestContext.userScopeSegment, never back
- * through this function (which would double-hash).
- */
-export function safeUserSegment(userId: string): string {
-  const raw = userId.trim();
-  const prefix = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48).replace(/^-+/, "") || "u";
-  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  return `${prefix}-${hash}`;
-}
+// The formula lives with the account ids (runtime/accounts.ts), which the config schema imports
+// to validate them; this module imports the config, so it could not. Same function, same output.
+export { safeUserSegment };
 
 /** Per-user partitioning only applies under active multi-user auth. */
 function partitioningEnabled(): boolean {

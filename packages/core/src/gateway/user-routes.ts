@@ -21,6 +21,10 @@ import { authenticatedUser, hashPassword, roleRank, userHasRole, type AuthRole }
 import { getConfig, updateConfig } from "../config/loader.js";
 import { getAllSessions } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
+import { childLogger } from "../logger.js";
+import { accountLedgerPath, appendAccountLedgerEntry, mintBuiltinAccountId } from "../runtime/accounts.js";
+
+const log = childLogger("gateway:user-routes");
 
 /**
  * Why a new account may not take this name, or undefined when it may.
@@ -96,11 +100,23 @@ export function registerUserRoutes(app: Hono): void {
 
     const passwordHash = await hashPassword(password);
     const createdAt = new Date().toISOString();
+    // The account's storage key, minted here and never derived from the name: a name deleted and
+    // created again gets a new id, so nothing the old account left is the new one's. The ledger
+    // entry tells an account created now from one that predates ids, whose data a migration may
+    // move only when an admin names the pair. It is written first; when it cannot be, no account
+    // is made, so every id this route hands out is on record.
+    const id = mintBuiltinAccountId(username, getConfig().auth.users.flatMap((u) => (u.id ? [u.id] : [])));
+    try {
+      appendAccountLedgerEntry(accountLedgerPath(getConfig().workspacePath), { event: "created", id, username, at: createdAt });
+    } catch (err) {
+      log.error({ err, username }, "Could not record the new account's id; the account was not created");
+      return c.json({ error: "Could not record the new account's id; nothing was created" }, 500);
+    }
 
     updateConfig((raw) => {
       const auth = (raw["auth"] = (raw["auth"] as Record<string, unknown>) ?? {});
       const users = (auth["users"] = (auth["users"] as unknown[] | undefined) ?? []);
-      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt });
+      (users as unknown[]).push({ username, passwordHash, displayName, role, createdAt, id });
       // Auto-enable so the first added user makes the feature usable.
       if (auth["enabled"] !== true) auth["enabled"] = true;
     });
@@ -172,12 +188,15 @@ export function registerUserRoutes(app: Hono): void {
 
     updateConfig((raw) => {
       const auth = (raw["auth"] as Record<string, unknown>) ?? {};
+      // Every remaining record keeps its id. The remap names its fields, and without this one each
+      // delete stripped every other account's id, which keys that account's storage.
       auth["users"] = remaining.map((u) => ({
         username: u.username,
         passwordHash: u.passwordHash,
         role: u.role,
         ...(u.displayName ? { displayName: u.displayName } : {}),
         ...(u.createdAt ? { createdAt: u.createdAt } : {}),
+        ...(u.id ? { id: u.id } : {}),
       }));
       raw["auth"] = auth;
     });
