@@ -1854,8 +1854,14 @@ async function _runTurn(
   // prompt assembly it began only after the judge's wait and the document retrieval, and its
   // embedding round-trip (capped at DISCOVERY_PREFETCH_BUDGET_MS) sat on the path to the first
   // orchestrator token instead of behind them. Never rejects; iteration 0 awaits it.
+  // A step that runs without the catalog tools (below) gets a capsule that names no workflow.
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
-    ? startDiscoveryPrefetch({ userMessage, sessionId: session.id, ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}) })
+    ? startDiscoveryPrefetch({
+      userMessage,
+      sessionId: session.id,
+      ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
+      ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
+    })
     : undefined;
 
   // ── Facet triage (orchestration.routingTriage) ──────────────────────────────

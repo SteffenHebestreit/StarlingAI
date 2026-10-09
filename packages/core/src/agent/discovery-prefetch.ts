@@ -76,6 +76,12 @@ export async function prefetchCapabilityCandidates(
      * candidate list the turn actually had (agent/intent-shadow.ts).
      */
     onAgents?: (names: readonly string[]) => void;
+    /**
+     * The turn has no catalog tools (a scene or job step, agent/runtime.ts). No workflow is looked
+     * up or named: the capsule would point the turn at run_workflow, which it cannot call, and at
+     * the workflow it is running, which its own task matches.
+     */
+    withoutWorkflows?: boolean;
   },
 ): Promise<string> {
   const q = query.trim();
@@ -93,7 +99,9 @@ export async function prefetchCapabilityCandidates(
     // semanticOutlier: only surface a workflow when its embedding score is a clear
     // standout from the ~0.5 baseline — never steer the model into a deliverable-shape
     // workflow the request did not clearly call for (audit 7839e153). Pure semantic.
-    searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
+    opts?.withoutWorkflows
+      ? Promise.resolve([])
+      : searchWorkflowCandidates(q, { limit: maxWorkflows, semanticOutlier: true }).catch(() => []),
   ]);
 
   // Log the routing decision on EVERY prefetch, including the empty ones. The capsule is

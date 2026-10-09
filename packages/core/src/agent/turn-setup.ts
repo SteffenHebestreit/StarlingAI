@@ -36,6 +36,8 @@ export function startDiscoveryPrefetch(params: {
   sessionId: string;
   /** The turn's agent grant (a scene, a restricted session): unscoped, the capsule named agents the turn could not call. */
   allowedAgents?: readonly string[];
+  /** The turn has no catalog tools: the capsule names no workflow (prefetchCapabilityCandidates). */
+  withoutWorkflows?: boolean;
   budgetMs?: number;
 }): Promise<string> {
   const budgetMs = params.budgetMs ?? DISCOVERY_PREFETCH_BUDGET_MS;
@@ -49,6 +51,7 @@ export function startDiscoveryPrefetch(params: {
       const capsule = await Promise.race([
         prefetchCapabilityCandidates(params.userMessage, {
           ...(params.allowedAgents ? { allowedAgents: [...params.allowedAgents] } : {}),
+          ...(params.withoutWorkflows ? { withoutWorkflows: true } : {}),
           sessionId: params.sessionId,
           onAgents: (names) => { capsuleAgents = names; },
         }),

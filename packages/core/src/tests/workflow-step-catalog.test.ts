@@ -10,6 +10,16 @@ import { join } from "node:path";
 // the real run_workflow and the real step turn, with the model scripted.
 
 const streamMock = vi.hoisted(() => vi.fn());
+// The discovery prefetch's options, per turn, for the test that turns the prefetch on.
+const prefetchOptions = vi.hoisted(() => [] as Array<{ withoutWorkflows?: boolean }>);
+
+vi.mock("../agent/discovery-prefetch.js", () => ({
+  formatDiscoveryCapsule: () => "",
+  prefetchCapabilityCandidates: async (_query: string, opts?: { withoutWorkflows?: boolean }) => {
+    prefetchOptions.push({ ...(opts?.withoutWorkflows !== undefined ? { withoutWorkflows: opts.withoutWorkflows } : {}) });
+    return "";
+  },
+}));
 
 vi.mock("../providers/index.js", () => {
   const provider = {
@@ -58,11 +68,12 @@ vi.mock("../audit/logger.js", () => ({
 
 const BRIEF_AGENTS = ["researcher", "evidence_analyst", "source_verifier", "summarizer"];
 
-function writeTempConfig(): { tempDir: string; configPath: string } {
+function writeTempConfig(orchestration: Record<string, unknown> = {}): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-workflow-step-catalog-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
     agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+    orchestration,
     scenes: {
       verified_research_brief: {
         description: "Produce a concise fact-checked research brief with named sources.",
@@ -114,11 +125,12 @@ afterEach(() => {
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   tempDir = undefined;
   streamMock.mockReset();
+  prefetchOptions.length = 0;
   vi.resetModules();
 });
 
-async function loadModules() {
-  const written = writeTempConfig();
+async function loadModules(orchestration: Record<string, unknown> = {}) {
+  const written = writeTempConfig(orchestration);
   tempDir = written.tempDir;
   process.env["SAI_CONFIG_PATH"] = written.configPath;
   vi.resetModules();
@@ -209,5 +221,25 @@ describe("a scene or job step's turn", () => {
     const offered = offeredToolNames();
     expect(offered.length).toBeGreaterThan(0);
     expect(offered[0]).toEqual(expect.arrayContaining(["search_workflows", "run_workflow", "delegate_to_agent"]));
+  });
+
+  // The capsule the prefetch puts before the first call named workflows for the turn to "consider
+  // run_workflow" on, and a step's task matches the workflow it is running.
+  it("asks the discovery prefetch for no workflow, where a chat turn's asks as before", async () => {
+    const { registry, runtime, session } = await loadModules({ discoveryPrefetch: true });
+    scriptStepModel();
+    await registry.getTool("run_workflow")!.execute(
+      { name: "verified_research_brief", workflowType: "scene" },
+      { sessionId: "chat-prefetch", workspacePath: "/workspace" },
+    );
+    expect(prefetchOptions).toEqual([{ withoutWorkflows: true }]);
+
+    prefetchOptions.length = 0;
+    streamMock.mockImplementation(() => textStream("Hello."));
+    await runtime.runTurn({
+      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      userMessage: "Write a verified research brief about the history of the city archive.",
+    });
+    expect(prefetchOptions).toEqual([{}]);
   });
 });

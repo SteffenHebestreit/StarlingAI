@@ -25,6 +25,7 @@ vi.mock("../tools/agent-routing.js", () => ({
 vi.mock("../tools/workflow-catalog.js", () => ({ searchWorkflowCandidates: vi.fn(async () => []) }));
 
 import { prefetchCapabilityCandidates } from "../agent/discovery-prefetch.js";
+import { searchWorkflowCandidates } from "../tools/workflow-catalog.js";
 
 describe("prefetchCapabilityCandidates onAgents", () => {
   it("names exactly the capsule's agents, in its order", async () => {
@@ -41,5 +42,28 @@ describe("prefetchCapabilityCandidates onAgents", () => {
     expect(seen).toEqual([["researcher", "web_coder"]]);
     const capsule = await prefetchCapabilityCandidates("build me a site", { onAgents: () => { throw new Error("observer"); } });
     expect(capsule).toContain("- researcher");
+  });
+});
+
+// A scene or job step's turn runs without search_workflows and run_workflow (agent/runtime.ts). Its
+// task matches the workflow it is running, so a capsule with workflows told it to "consider
+// run_workflow" for that very workflow, with a tool it cannot call.
+describe("prefetchCapabilityCandidates withoutWorkflows", () => {
+  const RUNNING = { name: "verified_research_brief", workflowType: "scene", description: "Fact-checked brief." };
+
+  it("looks up and names no workflow", async () => {
+    vi.mocked(searchWorkflowCandidates).mockClear();
+    vi.mocked(searchWorkflowCandidates).mockResolvedValue([RUNNING] as never);
+    const capsule = await prefetchCapabilityCandidates("write the brief", { withoutWorkflows: true });
+    expect(searchWorkflowCandidates).not.toHaveBeenCalled();
+    expect(capsule).not.toContain("run_workflow");
+    expect(capsule).not.toContain("verified_research_brief");
+    expect(capsule).toContain("- researcher");
+  });
+
+  it("control: without it the capsule names the matched workflow", async () => {
+    vi.mocked(searchWorkflowCandidates).mockResolvedValue([RUNNING] as never);
+    const capsule = await prefetchCapabilityCandidates("write the brief");
+    expect(capsule).toContain("- verified_research_brief (scene)");
   });
 });
