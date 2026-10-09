@@ -45,6 +45,8 @@ import { formatUserModelGuidance } from "../user-model/service.js";
 import { buildMemoryCapsule } from "./receptionist.js";
 import { startDiscoveryPrefetch, turnContextInjected } from "./turn-setup.js";
 import { buildUserProfileEvidence } from "./user-profile-prefetch.js";
+import { AGENT_DISCOVERY_TOOL_NAMES } from "./delegation-response-collapse.js";
+import { loadTurnPlan } from "./turn-plan.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
@@ -82,6 +84,13 @@ export interface AssembleTurnSystemMessagesParams {
   /** The agent the user directed this turn to (`--agent`), until that agent has run: the line that
    *  names it. Empty otherwise. */
   directiveAgentPrompt?: string;
+  /**
+   * Every tool the turn has called so far, with how often (the runtime's per-turn tally), and the
+   * delegations it has dispatched. Read after iteration 0 only, to decide whether the plan-first
+   * nudge still applies (turnIsStillDiscovering). Absent, it is never re-armed.
+   */
+  turnToolCallCounts?: ReadonlyMap<string, number>;
+  turnDelegationCount?: number;
   injectedSkillSlugs: string[];
   heldOutSkillSlugs: string[];
   applyRoutingTone: (text: string) => string;
@@ -147,6 +156,27 @@ export function composeTurnMessages(
 export function foldedSystemText(messages: readonly LLMMessage[]): string {
   const first = normalizeMessagesForModel(messages, "")[0];
   return first && first.role === "system" && typeof first.content === "string" ? first.content : "";
+}
+
+/**
+ * Whether a turn is still only looking around: it has made at least one call, every call so far
+ * searched for an agent, a workflow or a tool (AGENT_DISCOVERY_TOOL_NAMES), and it has delegated
+ * nothing. That is the state the plan-first nudge leaves a turn in before record_plan, so the nudge
+ * stays in the tail while it holds. A count of zero is a call the runtime gave back, not one that
+ * ran. Without both inputs the answer is no.
+ */
+export function turnIsStillDiscovering(
+  toolCallCounts: ReadonlyMap<string, number> | undefined,
+  delegationCount: number | undefined,
+): boolean {
+  if (!toolCallCounts || delegationCount !== 0) return false;
+  let called = false;
+  for (const [tool, count] of toolCallCounts) {
+    if (count <= 0) continue;
+    if (!AGENT_DISCOVERY_TOOL_NAMES.has(tool)) return false;
+    called = true;
+  }
+  return called;
 }
 
 export async function assembleTurnSystemMessages(
@@ -402,7 +432,23 @@ export async function assembleTurnSystemMessages(
     // response's only call runs the plan itself and returns the results. Telling the model to call
     // execute_plan after it would spend the very round the fold removes, so the nudge follows the flag.
     const planRoundFold = getConfig().orchestration?.planRoundFold ?? true;
-    if (iterationCount === 0 && (getConfig().orchestration?.planFirst ?? true)) {
+    // THE NUDGE LASTS UNTIL THE TURN ACTS (2026-10-09). It was armed on iteration 0 only, but its own
+    // multi-domain text sends iteration 0 to search_workflows, so when no strong workflow match is
+    // noted, record_plan can come at iteration 1 at the earliest, and by then the tail had been
+    // rebuilt without the nudge. In session 9991d150, iteration 0 searched workflows and agents,
+    // search_agents' result said to delegate now, and iteration 1 did that with two delegations.
+    // The second was dropped, no plan was recorded, and the plan round fold had nothing to fold. In
+    // c172d755 the same prompt happened to plan. The same text now stays in the tail while every call
+    // the turn has made was a discovery call, nothing has been delegated, and no plan is stored. The
+    // first call that acts ends it. It is tail text, so the head does not move. A plan store that
+    // cannot be read counts as holding a plan, so the nudge is not repeated over a plan it cannot see.
+    const planFirst = getConfig().orchestration?.planFirst ?? true;
+    const planNudgeArmed = planFirst && (
+      iterationCount === 0
+      || (turnIsStillDiscovering(params.turnToolCallCounts, params.turnDelegationCount)
+        && (await loadTurnPlan(session.id).then((plan) => plan === null, () => false)))
+    );
+    if (planNudgeArmed) {
       planGuidance = looksMultiDomainResearch(userMessage)
         ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step NAMING it (workflow: <name>); otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only. "
           + (planRoundFold

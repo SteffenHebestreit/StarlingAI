@@ -2775,6 +2775,8 @@ async function _runTurn(
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
       directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
+      turnToolCallCounts: _turnToolCallCounts,
+      turnDelegationCount: _turnDelegationCount,
       injectedSkillSlugs,
       heldOutSkillSlugs,
       applyRoutingTone,
