@@ -120,12 +120,26 @@ export function deliverableParameterSchema(): Record<string, unknown> {
 }
 
 /**
- * The verb test the pre-run gates steer work by — the routing filter, the render exemption from the
- * research redirect, the cached-evidence guard and the inline-document harvest — and the routing
- * reorder for requested file formats (agent-routing.ts requestedOutputFormats). It reads verbs
- * only: a negated one ("do not change anything") and one in pasted material ("add 20% tax" in a
- * docstring) count, and a German verb with a leading umlaut ("Ändere") never matches, because \b
- * is ASCII. No verdict on a run reads it: that is the declaration's (DelegationDeliverable).
+ * Before a delegation runs, does it ask for a file? Read by the gates that steer the work — the
+ * routing filter, the render exemption from the research redirect, the cached-evidence guard and
+ * the inline-document harvest. A declaration decides: "answer" switches every one of them off,
+ * whatever verbs the task contains. An UNDECLARED delegation keeps the verb test these gates were
+ * built on, because each guards against a loss that costs a whole build (a website routed to a
+ * read-only reviewer, 2d810e7d; a deck bounced to the researcher, 6b382964; a build served cached
+ * research, 2d810e7d; an app pasted inline and lost, 1ac79471). The verdict on a finished run does
+ * not use this: it reads the declaration alone (looksLikeArtifactDeliverableMiss).
+ */
+export function delegationAsksForFile(task: string, deliverable: DelegationDeliverable | undefined): boolean {
+  if (deliverable) return deliverable === "file";
+  return WORKSPACE_MUTATION_TASK_RE.test(task.trim());
+}
+
+/**
+ * The verb test the pre-run gates fall back on for an undeclared delegation (delegationAsksForFile)
+ * and the routing reorder for requested file formats (agent-routing.ts requestedOutputFormats).
+ * It reads verbs only: a negated one ("do not change anything") and one in pasted material ("add
+ * 20% tax" in a docstring) count, and a German verb with a leading umlaut ("Ändere") never matches,
+ * because \b is ASCII. No verdict on a run reads it.
  */
 export const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|build|generate|produce|draft|compose|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstell(?:e|en)?|erzeug(?:e|en|ung)?|generier(?:e|en)?|bau(?:e|en)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
 export const WORKSPACE_MUTATION_TOOL_NAMES = new Set(["write_file", "edit_file", "create_dir", "delete_file", "shell_exec"]);
@@ -283,19 +297,21 @@ export function looksLikeArtifactDeliverableMiss(
   return true;
 }
 
-// Routing-time gate. If the task asks for a deliverable (write/create/edit/
-// erstelle/...) the candidate agent must be able to either produce one
-// directly (artifact tool) or fan out via a productive coordinator tool.
-// Without this gate, swarm routing was sending CPSA-F "erzeuge mir eine
-// Lernwebsite" to `quality_supervisor` (session 2d810e7d, 2026-05-28) — a
-// read/audit-only agent that has no write_file/edit_file/shell_exec — and
-// the agent narrated a review of nothing while burning the delegation
-// budget.
+// Routing-time gate. If the delegation asks for a file (delegationAsksForFile:
+// its declaration, else the verb test) the candidate agent must be able to
+// either produce one directly (artifact tool) or fan out via a productive
+// coordinator tool. Without this gate, swarm routing was sending CPSA-F
+// "erzeuge mir eine Lernwebsite" to `quality_supervisor` (session 2d810e7d,
+// 2026-05-28) — a read/audit-only agent that has no write_file/edit_file/
+// shell_exec — and the agent narrated a review of nothing while burning the
+// delegation budget. A delegation declared "answer" is never filtered here,
+// so "draft a reply to Tom, do not change any file" keeps mail_agent.
 export function agentCfgCanFulfillArtifactTask(
   task: string,
   cfg: { tools?: string[] } | undefined,
+  deliverable?: DelegationDeliverable,
 ): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  if (!delegationAsksForFile(task, deliverable)) return true;
   if (!cfg) return true; // unknown agent — let the downstream attempt fail loudly rather than silently filtering
   const tools = cfg.tools ?? [];
   return tools.some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))

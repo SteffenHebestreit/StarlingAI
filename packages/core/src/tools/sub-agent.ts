@@ -63,9 +63,9 @@ import {
   parseFinalAnswerTag,
   carriesConcreteEvidence,
   everyWorkToolCallFailed,
-  WORKSPACE_MUTATION_TASK_RE,
   ARTIFACT_PRODUCING_TOOLS,
   agentCfgCanFulfillArtifactTask,
+  delegationAsksForFile,
   deliverableParameterSchema,
   readDelegationDeliverable,
   type DelegationDeliverable,
@@ -251,7 +251,7 @@ interface DelegationRequest {
    * What the dispatching call declared the delegation must hand back (DelegationDeliverable in
    * ./delegation-artifact-classification.ts): the model's `deliverable` argument, or "file" from
    * the runtime's own corrective build. Only "file" lets a run that wrote nothing be judged a
-   * missed deliverable.
+   * missed deliverable; the pre-run gates read it through delegationAsksForFile.
    */
   deliverable?: DelegationDeliverable;
 }
@@ -761,14 +761,14 @@ async function findReusableSessionEvidence(
   ctx: ToolContext,
   agentCfg?: { tools?: string[]; capabilities?: string[] },
 ): Promise<{ output: string; factCount: number; partialCount: number } | null> {
-  // If the task asks for an artifact (write/create/erstelle/...) and this
-  // agent has artifact-producing tools, do NOT short-circuit on cached
-  // research evidence — the cached facts won't satisfy the deliverable.
-  // Session 2d810e7d (2026-05-28) reused research findings as a "success"
-  // for content_writer asked to build a multi-file website, so the website
-  // never got written.
+  // If the delegation asks for a file (delegationAsksForFile: its declaration,
+  // else the verb test) and this agent has artifact-producing tools, do NOT
+  // short-circuit on cached research evidence — the cached facts won't satisfy
+  // the deliverable. Session 2d810e7d (2026-05-28) reused research findings as
+  // a "success" for content_writer asked to build a multi-file website, so the
+  // website never got written.
   if (
-    WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())
+    delegationAsksForFile(request.task, request.deliverable)
     && (agentCfg?.tools ?? []).some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))
   ) {
     return null;
@@ -830,28 +830,32 @@ async function findReusableSessionEvidence(
 
 function agentCanFulfillArtifactTask(
   agentName: string,
-  task: string,
+  request: Pick<DelegationRequest, "task" | "deliverable">,
   _ctx: ToolContext,
 ): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  if (!delegationAsksForFile(request.task, request.deliverable)) return true;
   const config = getConfig();
   const promotedAgents = readPromotedAgents(config.workspacePath);
   const cfg = config.subAgents[agentName] ?? promotedAgents[agentName];
-  return agentCfgCanFulfillArtifactTask(task, cfg);
+  return agentCfgCanFulfillArtifactTask(request.task, cfg, request.deliverable);
 }
 
 /**
- * True when a delegation is a RENDER/ARTIFACT step: the task asks to produce a
- * concrete deliverable (write the file / create the deck / generate the site) AND the
- * target agent can actually produce it. Such a step consumes already-gathered shared
- * facts; it must NOT be hijacked by the source-sensitive research-incapable redirect,
- * even when the brief carries research wording ("cite the official sources", "use the
- * verified URLs"). Audit 6b382964: a reveal.js write delegation to content_writer was
- * bounced to researcher, which narrated and never wrote the deck.
+ * True when a delegation is a RENDER/ARTIFACT step: it asks for a file
+ * (delegationAsksForFile: its declaration, else the verb test) AND the target agent can
+ * actually produce it. Such a step consumes already-gathered shared facts; it must NOT be
+ * hijacked by the source-sensitive research-incapable redirect, even when the brief carries
+ * research wording ("cite the official sources", "use the verified URLs"). Audit 6b382964: a
+ * reveal.js write delegation to content_writer was bounced to researcher, which narrated and
+ * never wrote the deck.
  */
-export function isArtifactRenderTask(task: string, cfg: { tools?: string[] } | undefined): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
-  return agentCfgCanFulfillArtifactTask(task, cfg);
+export function isArtifactRenderTask(
+  task: string,
+  cfg: { tools?: string[] } | undefined,
+  deliverable?: DelegationDeliverable,
+): boolean {
+  if (!delegationAsksForFile(task, deliverable)) return false;
+  return agentCfgCanFulfillArtifactTask(task, cfg, deliverable);
 }
 
 function getKnownDelegationAgentNames(workspacePath?: string): Set<string> {
@@ -1367,7 +1371,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     && !tabReaderUnserved
     && candidateQueue.length > 0
     && candidateQueue.every((name) =>
-      isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]));
+      isArtifactRenderTask(request.task, renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name], request.deliverable));
   if (isArtifactRenderDelegation && requiresExternalResearch) {
     logAudit("delegation_render_research_redirect_skipped", {
       taskTitle: title,
@@ -1521,7 +1525,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // Drop candidates that cannot produce the deliverable the task asks
         // for. See agentCanFulfillArtifactTask for the regression context.
         let routingCandidates = allRoutingCandidates.filter((cand) =>
-          agentCanFulfillArtifactTask(cand.name, request.task, ctx)
+          agentCanFulfillArtifactTask(cand.name, request, ctx)
         );
         if (routingCandidates.length === 0 && allRoutingCandidates.length > 0) {
           logAudit("delegation_routing_filtered_artifact_incapable", {
@@ -1726,7 +1730,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         const shortened = shortenOverspecifiedRoutingQuery(request.task);
         if (shortened) {
           const shortlisted = (await routeAgentCandidates(shortened, ctx, excludedFromRouting()))
-            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request.task, ctx));
+            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request, ctx));
           const top = shortlisted[0];
           if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {
             bestAutoMatchScore = top.score;
@@ -1757,7 +1761,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
         const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
-        let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request.task, ctx));
+        let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request, ctx));
         if (bids.length === 0 && rawBids.length > 0) {
           logAudit("delegation_bidding_filtered_artifact_incapable", {
             taskTitle: title,
@@ -2466,8 +2470,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // its completion cap cut the write_file call). The expensive content exists —
       // write it NOW so the deliverable survives, instead of classifying around the
       // loss. Mirrors the runtime's corrective-build harvest one level down, covering
-      // EVERY delegated builder.
-      if (artifacts.length === 0 && WORKSPACE_MUTATION_TASK_RE.test(request.task.trim())) {
+      // EVERY delegated builder. A delegation declared "answer" is never harvested:
+      // its HTML is the material it was asked about, and a page quoted back in a
+      // diagnosis is not a build (delegationAsksForFile).
+      if (artifacts.length === 0 && delegationAsksForFile(request.task, request.deliverable)) {
         const inlineDoc = extractInlineHtmlDocument(output);
         if (inlineDoc) {
           try {
