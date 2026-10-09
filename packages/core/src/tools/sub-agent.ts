@@ -327,6 +327,9 @@ export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyA
   return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
 }
 
+/** An absolute web address in a task: a page the step has to open from outside the workspace. */
+const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
 /** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
 async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
   try {
@@ -1565,8 +1568,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           const turnCfg = getConfig();
           const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
           const unfitForTurn = routedTurnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
-          const gatherable = routingCandidates.filter((cand) =>
+          let gatherable = routingCandidates.filter((cand) =>
             !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+          // A step that names a web address has to be read from outside, so a candidate whose source
+          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
+          // outside, when the router offered one. A routed step names no agent whose source it is
+          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
+          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
+          // cannot open the page either. Without a web address such a candidate keeps its rank.
+          if (routedTurnTriggered && WEB_ADDRESS_RE.test(request.task)) {
+            const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+            if (reaching.length > 0) gatherable = reaching;
+          }
           if (gatherable.length < routingCandidates.length) {
             const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
               attemptedAgents,

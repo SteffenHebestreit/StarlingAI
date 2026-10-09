@@ -64,6 +64,7 @@ const AGENTS = {
   mail_agent: { tools: ["mail_search", "mail_read", "read_shared_facts", "share_finding"], routingGenerated: label("ACT", "user_channel", "live_system") },
   code_analyst: { tools: ["read_file", "grep_files", "read_shared_facts", "share_finding"], routingGenerated: label("GATHER", "workspace", "codebase") },
   vision_browser_analyst: { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"], routingGenerated: label("GATHER", "browser", "image") },
+  data_analyst: { tools: ["read_file", "spreadsheet_read", "json_query", "read_shared_facts", "share_finding", "write_file"], routingGenerated: label("GATHER", "workspace", "structured_data") },
 } as const;
 
 /** The live 2f31f387 plan, verbatim. */
@@ -626,6 +627,23 @@ describe("the research gate's turn trigger", () => {
     expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
       expect.objectContaining({ droppedAgents: ["web_coder"], redirectedTo: null, trigger: "turn_evidence" }),
       expect.objectContaining({ droppedAgents: ["web_coder", "content_writer"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("routes a step that names a web address past an agent with a workspace source of its own, to one that reaches outside", async () => {
+    // The live step's shape with data_analyst ranked between the tab reader and browser_agent: the
+    // sum made it a match, but it reads files already collected and cannot open the page.
+    routeAs([{ name: "vision_browser_analyst", score: 0.8555 }, { name: "data_analyst", score: 0.85 }, { name: "browser_agent", score: 0.8453 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-data-url"));
+    // The same ranking for a step about a file already in the workspace keeps data_analyst.
+    await getTool("delegate_to_agent")!.execute({ task: "Die Tabelle lager.csv im Arbeitsbereich auswerten und den Lagerbestand zusammenzählen." }, turnCtx("s-routed-data-file"));
+
+    expect(ran()).toEqual(["browser_agent", "data_analyst"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["vision_browser_analyst", "data_analyst"], redirectedTo: null, trigger: "turn_evidence" }),
+      expect.objectContaining({ droppedAgents: ["vision_browser_analyst"], redirectedTo: null, trigger: "turn_evidence" }),
     ]);
   }, 30_000);
 
