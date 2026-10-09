@@ -404,6 +404,8 @@ describe("gateway HTTP bridge", () => {
 
     writeFileSync(configPath, JSON.stringify({
       gateway: { port, jwtSecret: "f".repeat(32) },
+      // Its own: the bootstrap token below is recorded in <workspace>/.starlingai/accounts.json.
+      workspacePath: tempDir,
       auth: { enabled: true, users },
     }), "utf8");
 
