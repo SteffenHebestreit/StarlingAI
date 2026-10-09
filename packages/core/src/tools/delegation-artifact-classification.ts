@@ -9,6 +9,8 @@
  */
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
+import { claimsArtifactWrittenButUnproduced } from "../agent/deliverable-intent.js";
+import { NARRATED_TOOL_TEXT_RE } from "../agent/sanitize-response.js";
 
 // ── Concrete evidence in a result's OWN text (2026-10-05) ──────────────────────────────────
 // Units of measure and currencies: symbols, not words of any language. Durations are left out
@@ -76,30 +78,84 @@ export function looksLikePlanningOnlyResult(result: string): boolean {
   return !terminalMarker;
 }
 
+// ── What a delegation was asked to hand back (2026-10-09) ─────────────────────────────────
+/**
+ * What a delegation was DECLARED to hand back by the call that dispatched it: the `deliverable`
+ * argument of delegate_to_agent, swarm_delegate, a parallel_delegate task, a run_task_graph node,
+ * a record_plan step (delegate steps) or create_ephemeral_agent — or the runtime, for a delegation
+ * it dispatches itself (the corrective build, the artifact repair). "file": the task is to create
+ * or change a file in the workspace. "answer": the reply is the result. Undeclared counts as
+ * "answer" for the missed-file verdict; a run whose own output claims a write it never made fails
+ * whatever was declared (looksLikeClaimedWriteMiss).
+ *
+ * WHY A DECLARATION. Whether a run that wrote nothing MISSED its deliverable used to be read off
+ * the task text with WORKSPACE_MUTATION_TASK_RE, a table of ~50 English and German verbs. In E2E
+ * session 7c4cbb28 (2026-10-09) the user pasted two Python files and asked for a diagnosis; the
+ * orchestrator delegated "Statische Code-Analyse (kein Ausführen, kein Ändern): Identifiziere …"
+ * to code_analyst, which answered in prose with no tool call, as it should. The table found a verb
+ * anyway: it reads neither a negation ("do not change anything" counts) nor whose words a verb is
+ * (the pasted docstring's "add 20% tax" counts). code_analyst holds write_file, so the delegation
+ * failed as "narrative-only", every candidate failed and the user got an error.
+ *
+ * The other signals the runtime holds were measured, and none carries it. The turn's deliverable
+ * intent (agent/deliverable-intent.ts) is a verb+noun table over the USER's message, for the
+ * whole turn: a diagnosis request whose pasted code writes a report (`f.write` to report.txt)
+ * reads as "wants a file", 2d810e7d's "erzeuge mir eine vollumfängliche Lernwebsite" does not,
+ * and a turn that does want a file cannot tell its research step from its build step. The
+ * staged-build classification measures size, not a request. A file named in the task is as often
+ * the input as the output. The delegator, which read the request in whatever language it came,
+ * is the one that knows; it says so here.
+ */
+export type DelegationDeliverable = "file" | "answer";
+
+/** A declared deliverable from loosely typed tool arguments; anything but "file"/"answer" is undeclared. */
+export function readDelegationDeliverable(value: unknown): DelegationDeliverable | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized === "file" || normalized === "answer" ? normalized : undefined;
+}
+
+/**
+ * The `deliverable` parameter, one definition for every tool that dispatches a delegation. Model-
+ * facing on six orchestration tools, so every word costs on every turn: `scope: "delegate_step"`
+ * (record_plan) adds only that a step of another kind ignores it.
+ */
+export function deliverableParameterSchema(scope?: "delegate_step"): Record<string, unknown> {
+  return {
+    type: "string",
+    enum: ["file", "answer"],
+    description: "\"file\" if the task must create or change a workspace file (a run that writes none fails); \"answer\" if the reply is the result (an analysis, a diagnosis, findings). Omitted, no file is required."
+      + (scope === "delegate_step" ? " Delegate steps only." : ""),
+  };
+}
+
+/**
+ * Before a delegation runs, does it ask for a file? Read by the gates that steer the work — the
+ * routing filter, the render exemption from the research redirect, the cached-evidence guard and
+ * the inline-document harvest. A declaration decides: "answer" switches every one of them off,
+ * whatever verbs the task contains. An UNDECLARED delegation keeps the verb test these gates were
+ * built on, because each guards against a loss that costs a whole build (a website routed to a
+ * read-only reviewer, 2d810e7d; a deck bounced to the researcher, 6b382964; a build served cached
+ * research, 2d810e7d; an app pasted inline and lost, 1ac79471). The verdict on a finished run does
+ * not use this: it reads the declaration (looksLikeArtifactDeliverableMiss) and what the run's own
+ * output claims (looksLikeClaimedWriteMiss), never the verb table.
+ */
+export function delegationAsksForFile(task: string, deliverable: DelegationDeliverable | undefined): boolean {
+  if (deliverable) return deliverable === "file";
+  return WORKSPACE_MUTATION_TASK_RE.test(task.trim());
+}
+
+/**
+ * The verb test the pre-run gates fall back on for an undeclared delegation (delegationAsksForFile)
+ * and the routing reorder for requested file formats (agent-routing.ts requestedOutputFormats).
+ * It reads verbs only: a negated one ("do not change anything") and one in pasted material ("add
+ * 20% tax" in a docstring) count, and a German verb with a leading umlaut ("Ändere") never matches,
+ * because \b is ASCII. No verdict on a run reads it.
+ */
 export const WORKSPACE_MUTATION_TASK_RE = /\b(?:update|modify|edit|write|patch|save|create|add|change|set|switch|configure|implement|apply|fix|adjust|build|generate|produce|draft|compose|anpass(?:en|ung|ungen)?|angepasst|pass(?:e|en|t)\b[\s\S]{0,80}\ban|aendere|ändere|ändern|aktualisier(?:e|en|ung)?|bearbeit(?:e|en)|schreib(?:e|en)?|erstell(?:e|en)?|erzeug(?:e|en|ung)?|generier(?:e|en)?|bau(?:e|en)?|hinzuf(?:ue|ü)gen|setz(?:e|en)?|konfigurier(?:e|en)|umstell(?:e|en))\b/i;
-export const WORKSPACE_MUTATION_CONTEXT_RE = /\b(?:starlingai|workspace|repo|repository|agent|agents|scene|scenes|job|jobs|workflow|workflows|config|configuration|prompt|prompts|tool|tools|model|routing|self[- ]?improvement|selbstverbesserung|konfiguration|modell|agenten|szene|szenen|wartung)\b/i;
 export const WORKSPACE_MUTATION_TOOL_NAMES = new Set(["write_file", "edit_file", "create_dir", "delete_file", "shell_exec"]);
 export const READ_ONLY_CONTEXT_TOOL_NAMES = new Set([
   "read_file", "list_files", "workspace_search", "read_shared_facts", "search_agents", "agent_catalog", "git_status", "git_diff",
 ]);
-
-export function looksLikeWorkspaceMutationTask(
-  task: string,
-  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
-  agentName: string,
-): boolean {
-  const text = task.trim();
-  if (!text || !WORKSPACE_MUTATION_TASK_RE.test(text)) return false;
-  const tags = new Set((agentCfg?.tags ?? []).map((tag) => tag.toLowerCase()));
-  const maintenanceAgent = agentName === "swarm_maintainer"
-    || tags.has("swarm")
-    || tags.has("maintenance")
-    || tags.has("selfimprovement")
-    || tags.has("agents")
-    || tags.has("prompts")
-    || tags.has("workflow");
-  return maintenanceAgent || WORKSPACE_MUTATION_CONTEXT_RE.test(text);
-}
 
 export function hasWorkspaceMutationTool(stats: { toolNames: string[] } | undefined): boolean {
   return (stats?.toolNames ?? []).some((toolName) => WORKSPACE_MUTATION_TOOL_NAMES.has(toolName));
@@ -129,14 +185,19 @@ export function looksLikeRawWorkspaceConfigDump(result: string): boolean {
     && /\b(?:agents\/|10-core-agents\.jsonc|2\d-[a-z-]+\.jsonc|"subAgents"|"agents")\b/i.test(text);
 }
 
+/**
+ * A delegation declared to change a file that only read context or dumped the configuration it
+ * read. Decided by the declaration (DelegationDeliverable), not by the task's words: this used to
+ * fire on a mutation verb plus a workspace word ("agent", "config", "tool", "model", …) or a
+ * maintenance agent's tags, so "review the agent config, do not change anything" answered from
+ * read_file alone was a failure.
+ */
 export function looksLikeReadOnlyMutationMiss(
   output: string,
-  task: string,
   stats: { toolCount: number; toolNames: string[] } | undefined,
-  agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
-  agentName: string,
+  deliverable: DelegationDeliverable | undefined,
 ): boolean {
-  if (!looksLikeWorkspaceMutationTask(task, agentCfg, agentName)) return false;
+  if (deliverable !== "file") return false;
   if (hasWorkspaceMutationTool(stats)) return false;
   return usedOnlyReadOnlyContextTools(stats) || looksLikeRawWorkspaceConfigDump(output);
 }
@@ -203,11 +264,20 @@ export const PRODUCTIVE_COORDINATOR_TOOLS = new Set([
   "run_workflow", "create_ephemeral_agent", "swarm_delegate",
 ]);
 
+/**
+ * The run was declared to produce a file (`deliverable: "file"`), held a tool that writes one,
+ * and called none — nor, for an agent that can delegate, handed the work on. Without that
+ * declaration a run that answers in prose has not missed anything, whatever tools it holds:
+ * nearly every specialist holds write_file and edit_file to keep notes, and code_analyst's prose
+ * diagnosis of pasted code is the deliverable (E2E 7c4cbb28; see DelegationDeliverable).
+ */
 export function looksLikeArtifactDeliverableMiss(
   task: string,
   stats: { toolCount: number; toolNames: string[] } | undefined,
   agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  deliverable: DelegationDeliverable | undefined,
 ): boolean {
+  if (deliverable !== "file") return false;
   if (!agentCfg) return false;
   // We can only fire this check when stats are present — without them we
   // don't know which tools the agent actually called, and treating absent
@@ -220,15 +290,17 @@ export function looksLikeArtifactDeliverableMiss(
   // embedded build verb branded a successful 8.8KB sourced report a failure
   // because it never called write_file (audit b5107ae4) — which then cascaded
   // into an architect-built ephemeral that re-researched ONE component and
-  // shipped that as the whole answer.
+  // shipped that as the whole answer. The slice keeps its exemption even when
+  // the delegation it was cut from declared a file: the research-first rewrite
+  // replaces the build with a gather, and a gather's deliverable is evidence.
   if (isCanonicalResearchSliceTask(task)) return false;
   // NOTE: do NOT skip on `toolCount === 0 && toolNames.length === 0`. The
   // earlier "treat empty stats as a mock signal" shortcut let real
   // production failures through: session 25f55376 (2026-05-28) had
   // mission_coordinator generate 4096 tokens of "I'll write it in one go"
   // narrative with literally zero tool calls and get marked as success.
-  // That is the strongest narrative-only signal we have; we must catch it.
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return false;
+  // On a delegation declared to produce a file that is the strongest
+  // narrative-only signal we have; we must catch it.
 
   const availableArtifactTools = (agentCfg.tools ?? []).filter((t) => ARTIFACT_PRODUCING_TOOLS.has(t));
   if (availableArtifactTools.length === 0) return false;
@@ -249,19 +321,64 @@ export function looksLikeArtifactDeliverableMiss(
   return true;
 }
 
-// Routing-time gate. If the task asks for a deliverable (write/create/edit/
-// erstelle/...) the candidate agent must be able to either produce one
-// directly (artifact tool) or fan out via a productive coordinator tool.
-// Without this gate, swarm routing was sending CPSA-F "erzeuge mir eine
-// Lernwebsite" to `quality_supervisor` (session 2d810e7d, 2026-05-28) — a
-// read/audit-only agent that has no write_file/edit_file/shell_exec — and
-// the agent narrated a review of nothing while burning the delegation
-// budget.
+/**
+ * The run wrote nothing: no artifact was recorded, and no file-writing tool call it made went
+ * through (`failedToolNames`, when known, takes out the ones that failed).
+ */
+function runWroteNothing(
+  stats: { toolNames: string[] } | undefined,
+  artifacts: readonly unknown[],
+  failedToolNames: readonly string[] | undefined,
+): boolean {
+  if (artifacts.length > 0) return false;
+  const fileCalls = (stats?.toolNames ?? []).filter((name) => ARTIFACT_PRODUCING_TOOLS.has(name)).length;
+  const failedFileCalls = (failedToolNames ?? []).filter((name) => ARTIFACT_PRODUCING_TOOLS.has(name)).length;
+  return fileCalls <= failedFileCalls;
+}
+
+/** The output carries a file tool's call as text — the model wrote the call instead of making it. */
+function narratesFileToolCall(output: string): boolean {
+  const head = output.slice(0, 4_000);
+  return NARRATED_TOOL_TEXT_RE.test(head) && [...ARTIFACT_PRODUCING_TOOLS].some((name) => head.includes(name));
+}
+
+/**
+ * A run that wrote nothing whose own output says it did: a completed-write claim about a file or
+ * an artifact ("I wrote research/notes.md …", "Der Projektplan wurde als plan.md gespeichert"), or
+ * a file tool's call emitted as text (31612733). Judged whatever the delegation declared, because
+ * the claim is false either way, and relayed it tells the orchestrator a file exists.
+ *
+ * The claim is read with the completion grammar of the turn's false-completion guard
+ * (claimsArtifactWrittenButUnproduced) with one difference: a file the output only NAMES is not
+ * counted ("laut esp32-s3_datasheet.pdf …"). A specialist names the files it read as often as the
+ * ones it would have written; the turn-level guard still checks such pointers against the
+ * workspace. An honest prose answer — 7c4cbb28's diagnosis — claims nothing and passes.
+ */
+export function looksLikeClaimedWriteMiss(
+  output: string,
+  stats: { toolNames: string[] } | undefined,
+  artifacts: readonly unknown[] = [],
+  failedToolNames?: readonly string[],
+): boolean {
+  if (!output.trim() || !runWroteNothing(stats, artifacts, failedToolNames)) return false;
+  return narratesFileToolCall(output) || claimsArtifactWrittenButUnproduced(output, { fileExists: () => true });
+}
+
+// Routing-time gate. If the delegation asks for a file (delegationAsksForFile:
+// its declaration, else the verb test) the candidate agent must be able to
+// either produce one directly (artifact tool) or fan out via a productive
+// coordinator tool. Without this gate, swarm routing was sending CPSA-F
+// "erzeuge mir eine Lernwebsite" to `quality_supervisor` (session 2d810e7d,
+// 2026-05-28) — a read/audit-only agent that has no write_file/edit_file/
+// shell_exec — and the agent narrated a review of nothing while burning the
+// delegation budget. A delegation declared "answer" is never filtered here,
+// so "draft a reply to Tom, do not change any file" keeps mail_agent.
 export function agentCfgCanFulfillArtifactTask(
   task: string,
   cfg: { tools?: string[] } | undefined,
+  deliverable?: DelegationDeliverable,
 ): boolean {
-  if (!WORKSPACE_MUTATION_TASK_RE.test(task.trim())) return true;
+  if (!delegationAsksForFile(task, deliverable)) return true;
   if (!cfg) return true; // unknown agent — let the downstream attempt fail loudly rather than silently filtering
   const tools = cfg.tools ?? [];
   return tools.some((t) => ARTIFACT_PRODUCING_TOOLS.has(t))
@@ -331,10 +448,14 @@ export function looksLikeProseFailureResult(result: string): boolean {
   return looksLikePlanningOnlyResult(result);
 }
 
-/** What a sub-agent run left behind that is not prose — the inputs to a structural verdict. */
+/** What a sub-agent run left behind that is not prose, and what its dispatch declared — the
+ *  inputs to a structural verdict. */
 export interface DelegationRunSignals {
   /** The run closed with its own `<final_answer status="…">…</final_answer>` (parseFinalAnswerTag). */
   readonly explicitVerdict?: boolean;
+  /** What the delegation was declared to hand back (DelegationDeliverable). "file" makes a run that
+   *  wrote nothing a missed deliverable; undeclared or "answer", only a write its output claims is. */
+  readonly deliverable?: DelegationDeliverable;
   /** Tool names of THIS run's calls that ran and failed — one entry per failed call; a nested
    *  specialist's failures and the person's declines excluded. Preferred over the count. */
   readonly failedToolNames?: readonly string[];
@@ -625,16 +746,19 @@ export function classifyDelegationResult(
     // independent tell of a no-op. Keep the length/planning guard for the case
     // where the coordinator DID call some non-work tool (e.g. discovery) but
     // never delegated or shared evidence.
-    // Restrict the zero-tool extension to PURE orchestration coordinators
-    // (delegation/read tools only). A coordinator that also owns artifact tools
-    // (write_file, generate_*, shell_exec, browser_*) narrating "I'll build this"
-    // without calling them must stay an artifact-deliverable-miss failure below,
-    // which carries the "expected write_file" hint — so don't pre-empt it here.
+    // A coordinator that also owns artifact tools (write_file, generate_*,
+    // shell_exec, browser_*) and was declared to produce a file, narrating
+    // "I'll build this" without calling them, must stay an artifact-
+    // deliverable-miss failure below, which carries the "expected write_file"
+    // hint — so don't pre-empt it here. Without that declaration the miss
+    // check does not fire, and a zero-tool coordinator is a no-op like any
+    // other (it was exempt only so the miss check could name the tool).
     const hasArtifactTools = (agentCfg?.tools ?? []).some((name) =>
       /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
     );
+    const leftToArtifactMiss = hasArtifactTools && run.deliverable === "file";
     const calledNoTools =
-      !hasArtifactTools && (stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0;
+      !leftToArtifactMiss && (stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0;
     if (!actuallyWorked && (calledNoTools || output.trim().length < 80 || planningOnly)) {
       return "coordinator_noop";
     }
@@ -644,17 +768,23 @@ export function classifyDelegationResult(
     return "failure";
   }
 
-  if (looksLikeReadOnlyMutationMiss(output, task, stats, agentCfg, agentName)) {
+  if (looksLikeReadOnlyMutationMiss(output, stats, run.deliverable)) {
     return "failure";
   }
 
   // Language-agnostic fallback: the agent had artifact-producing tools
-  // (write_file, generate_website, …) AND the task asks for a deliverable
-  // AND the agent called none of them AND, for coordinators, didn't
-  // delegate either. Catches "Let me build this as a complete single-file
-  // HTML application" / "Die Website wurde erstellt" / "This is a
-  // substantial deliverable…" — phrasings the planning-only regex misses.
-  if (looksLikeArtifactDeliverableMiss(task, stats, agentCfg)) {
+  // (write_file, generate_website, …) AND the delegation was declared to
+  // produce a file AND the agent called none of them AND, for coordinators,
+  // didn't delegate either. Catches "Let me build this as a complete
+  // single-file HTML application" / "Die Website wurde erstellt" / "This is
+  // a substantial deliverable…" — phrasings the planning-only regex misses.
+  if (looksLikeArtifactDeliverableMiss(task, stats, agentCfg, run.deliverable)) {
+    return "failure";
+  }
+
+  // Not asked for a file (or asked and the check above could not judge it), wrote none, and says
+  // it did.
+  if (looksLikeClaimedWriteMiss(output, stats, artifacts, run.failedToolNames)) {
     return "failure";
   }
 
@@ -731,10 +861,15 @@ export function isNarrativeOnlyDeliverableFailure(
   task: string,
   stats: { toolCount: number; toolNames: string[] } | undefined,
   agentCfg: import("../config/schema.js").SubAgentConfig | undefined,
+  deliverable: DelegationDeliverable | undefined,
+  run: { artifacts?: readonly unknown[]; failedToolNames?: readonly string[] } = {},
 ): boolean {
   if (classification !== "failure") return false;
   if (looksLikeContainerLevelFailure(output)) return false;
-  return looksLikePlanningOnlyResult(output) || looksLikeArtifactDeliverableMiss(task, stats, agentCfg);
+  return looksLikePlanningOnlyResult(output)
+    || looksLikeArtifactDeliverableMiss(task, stats, agentCfg, deliverable)
+    // Pasted back as the error, the claim would tell the orchestrator the file exists.
+    || looksLikeClaimedWriteMiss(output, stats, run.artifacts ?? [], run.failedToolNames);
 }
 
 export function formatArtifactReferencesForSharedContext(

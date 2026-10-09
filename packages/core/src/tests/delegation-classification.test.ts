@@ -7,6 +7,7 @@ import {
   isWorkToolName,
   looksLikePlanningOnlyResult,
   parseFinalAnswerTag,
+  readDelegationDeliverable,
 } from "../tools/delegation-artifact-classification.js";
 
 const baseStats = {
@@ -396,6 +397,9 @@ describe("classifyDelegationResult — D14", () => {
       } as never,
       "mission_coordinator",
       "Erstelle eine vollständige, interaktive Lernwebsite für die iSAQB CPSA-F Zertifizierung.",
+      [],
+      // The build request, as the delegation declares it (DelegationDeliverable).
+      { deliverable: "file" },
     );
     expect(r).toBe<DelegationClassification>("failure");
   });
@@ -408,7 +412,7 @@ describe("classifyDelegationResult — D14", () => {
   // workspace-mutation task is the strongest narrative-only signal — must
   // be a failure.
   it("returns failure when an artifact-capable agent calls zero tools on a mutation task", () => {
-    const r = classifyDelegationResult(
+    const classify = (run: { deliverable?: "file" | "answer" }) => classifyDelegationResult(
       "This is a substantial single-file deliverable with 7+ content sections, interactive quiz, dark/light theme, and accessibility features. I'll orchestrate this directly.\n\nLet me build the complete CPSA-F learning website. Given the size (~15KB+), I'll write it in one go.",
       "success",
       {
@@ -426,8 +430,14 @@ describe("classifyDelegationResult — D14", () => {
       } as never,
       "mission_coordinator",
       "Erstelle eine vollständige Single-Page Lernwebsite als HTML-Datei zur Vorbereitung auf die iSAQB CPSA-F Zertifizierung.",
+      [],
+      run,
     );
-    expect(r).toBe<DelegationClassification>("failure");
+    // The build request, as the delegation declares it: a missed deliverable.
+    expect(classify({ deliverable: "file" })).toBe<DelegationClassification>("failure");
+    // Undeclared, the miss check does not fire, and a coordinator that called no tool at all
+    // is a no-op (audit 3a0fd176) — still never a success.
+    expect(classify({})).toBe<DelegationClassification>("coordinator_noop");
   });
 
   // Regression (audit b5107ae4): the runtime's source-sensitive rewrite wraps
@@ -461,6 +471,9 @@ describe("classifyDelegationResult — D14", () => {
       } as never,
       "researcher",
       researchSliceTask,
+      [],
+      // Declared by the delegation the slice was cut from: the slice is still a gather.
+      { deliverable: "file" },
     );
     expect(r).toBe<DelegationClassification>("success");
   });
@@ -483,6 +496,8 @@ describe("classifyDelegationResult — D14", () => {
       } as never,
       "researcher",
       "Erstelle eine vollständige Bauanleitung als Markdown-Datei und speichere sie im Workspace.",
+      [],
+      { deliverable: "file" },
     );
     expect(r).toBe<DelegationClassification>("failure");
   });
@@ -508,6 +523,8 @@ describe("classifyDelegationResult — D14", () => {
       } as never,
       "mission_coordinator",
       "Erstelle eine vollständige Lernwebsite für die CPSA-F Zertifizierung.",
+      [],
+      { deliverable: "file" },
     );
     expect(r).toBe<DelegationClassification>("success");
   });
@@ -565,6 +582,8 @@ describe("classifyDelegationResult — D14", () => {
       { tags: ["prompts", "agents"] } as never,
       "prompt_optimizer",
       "Passe browser_agent und vision_browser_analyst auf lmstudio/qwen/qwen3.5-9b an.",
+      [],
+      { deliverable: "file" },
     );
 
     expect(r).toBe<DelegationClassification>("failure");
@@ -583,6 +602,8 @@ describe("classifyDelegationResult — D14", () => {
       { tags: ["swarm", "maintenance"] } as never,
       "swarm_maintainer",
       "Update the apply_jobs scene definition.",
+      [],
+      { deliverable: "file" },
     );
     expect(r).toBe<DelegationClassification>("success");
   });
@@ -809,6 +830,7 @@ describe("isNarrativeOnlyDeliverableFailure — container crashes are not 'narra
       "Erstelle die Projektstruktur für die CPSA-F Lernplattform und schreibe package.json.",
       { toolCount: 0, toolNames: [] },
       coderCfg,
+      "file",
     );
     expect(flagged).toBe(false);
   });
@@ -820,6 +842,7 @@ describe("isNarrativeOnlyDeliverableFailure — container crashes are not 'narra
       "Erstelle das Frontend public/index.html für die Lernplattform.",
       { toolCount: 0, toolNames: [] },
       coderCfg,
+      "file",
     );
     expect(flagged).toBe(false);
   });
@@ -831,6 +854,7 @@ describe("isNarrativeOnlyDeliverableFailure — container crashes are not 'narra
       "Erstelle eine vollständige Single-Page Lernwebsite als HTML-Datei.",
       { toolCount: 2, toolNames: ["read_shared_facts", "memory_search"] },
       coderCfg,
+      "file",
     );
     expect(flagged).toBe(true);
   });
@@ -843,7 +867,156 @@ describe("isNarrativeOnlyDeliverableFailure — container crashes are not 'narra
         "Erstelle package.json.",
         { toolCount: 0, toolNames: [] },
         coderCfg,
+        "file",
       ),
     ).toBe(false);
+  });
+});
+
+// E2E 2026-10-09, core-build-code-twin-bug, session 7c4cbb28. The user pasted two Python files and
+// asked only for a diagnosis. The orchestrator delegated "Statische Code-Analyse (kein Ausführen,
+// kein Ändern): …" with the code to code_analyst, which answered in prose with zero tool calls —
+// correct, the code was in the task. The verb table WORKSPACE_MUTATION_TASK_RE found a verb in the
+// task ("add 20% tax" in the pasted docstring; in English, the negated "do not change"), code_analyst
+// holds write_file, so the run was "narrative-only", every candidate failed and the user got an
+// error. Whether a file was wanted is now what the delegation DECLARES (DelegationDeliverable).
+describe("classifyDelegationResult — a file is missed only when the delegation asked for one (7c4cbb28)", () => {
+  // code_analyst's tools in the shipped roster (workspace/agents/10-core-agents.jsonc).
+  const codeAnalyst = {
+    tags: ["code-analysis", "static-review", "bug-diagnosis"],
+    tools: [
+      "read_file", "list_files", "workspace_search", "glob_files", "grep_files", "write_file", "edit_file",
+      "regex_test", "text_diff", "read_shared_facts", "share_finding",
+    ],
+  } as never;
+  const zeroTools = { toolCount: 0, toolNames: [] as string[], terminalState: "completed", outcome: "success" as const };
+  const pastedCode = [
+    "# invoices.py",
+    "```python",
+    "def invoice_total(line_items):",
+    "    \"\"\"Sum the line items and add 20% tax, returning the amount in whole units.\"\"\"",
+    "    subtotal = sum(item[\"price\"] * item[\"qty\"] for item in line_items)",
+    "    return int(subtotal + subtotal * 0.2)",
+    "```",
+  ].join("\n");
+  const germanTask = "Statische Code-Analyse (kein Ausführen, kein Ändern): Identifiziere das fehlerhafte Konstrukt in "
+    + "invoice_total (invoices.py) und nenne jede weitere Stelle im Code, an der derselbe Fehler steckt.\n\n" + pastedCode;
+  const englishTask = "Static code analysis — do not run anything and do not change anything: name the faulty construct "
+    + "in invoice_total (invoices.py) and every other place the same defect occurs.\n\n" + pastedCode;
+  const diagnosis = "Das fehlerhafte Konstrukt ist int(subtotal + tax) in invoice_total (invoices.py): int() schneidet die "
+    + "Nachkommastellen ab, statt zu runden, deshalb fällt die Summe um bis zu einen Cent zu niedrig aus. Dieselbe "
+    + "Stelle steckt in receipt_total in receipts.py.";
+
+  it("a prose diagnosis from an agent that holds write_file is a success when no file was asked for", () => {
+    for (const task of [germanTask, englishTask]) {
+      // Undeclared, or declared an answer: either way the reply is the deliverable.
+      for (const run of [{}, { deliverable: "answer" as const }]) {
+        const classification = classifyDelegationResult(diagnosis, "success", zeroTools, codeAnalyst, "code_analyst", task, [], run);
+        expect(classification, `${task.slice(0, 40)} ${JSON.stringify(run)}`).toBe<DelegationClassification>("success");
+        expect(isNarrativeOnlyDeliverableFailure(
+          "failure", diagnosis, task, zeroTools, codeAnalyst, run.deliverable,
+        )).toBe(false);
+      }
+    }
+  });
+
+  it("a real build request answered with narration is still a missed deliverable (25f55376 shape)", () => {
+    const narration = "This is a substantial single-file deliverable with a quiz, a dark theme and seven sections. "
+      + "Given the size (~15KB+), I'll write it in one go.";
+    const builder = { tools: ["write_file", "edit_file", "generate_website", "read_shared_facts"] } as never;
+    const task = "Erstelle eine vollständige Single-Page Lernwebsite als HTML-Datei zur Vorbereitung auf CPSA-F.";
+    expect(looksLikePlanningOnlyResult(narration)).toBe(false); // only the declared-file check can catch it
+    expect(classifyDelegationResult(
+      narration, "success", zeroTools, builder, "content_writer", task, [], { deliverable: "file" },
+    )).toBe<DelegationClassification>("failure");
+    expect(isNarrativeOnlyDeliverableFailure("failure", narration, task, zeroTools, builder, "file")).toBe(true);
+    // Declared an answer, the same run is taken at its word.
+    expect(classifyDelegationResult(
+      narration, "success", zeroTools, builder, "content_writer", task, [], { deliverable: "answer" },
+    )).toBe<DelegationClassification>("success");
+  });
+
+  it("a read-only review of the agent config is not a missed edit when no change was asked for", () => {
+    // looksLikeReadOnlyMutationMiss read a mutation verb ("change") plus a workspace word ("agent",
+    // "config") or a maintenance agent's tags. A review that read the files and answered was a failure.
+    const reviewStats = { toolCount: 3, toolNames: ["list_files", "read_file", "read_file"], terminalState: "completed", outcome: "success" as const };
+    const review = "browser_agent and vision_browser_analyst both run on the 35B model; vision_browser_analyst sets no "
+      + "fallback, so a model outage leaves it without one. Nothing else in the two definitions conflicts.";
+    const task = "Review the browser_agent and vision_browser_analyst agent config. Do not change anything.";
+    const maintainer = { tags: ["swarm", "maintenance"] } as never;
+    expect(classifyDelegationResult(review, "success", reviewStats, maintainer, "swarm_maintainer", task))
+      .toBe<DelegationClassification>("success");
+    // Declared a change, the same read-only run missed it.
+    expect(classifyDelegationResult(review, "success", reviewStats, maintainer, "swarm_maintainer", task, [], { deliverable: "file" }))
+      .toBe<DelegationClassification>("failure");
+  });
+
+  it("reads the declaration from loosely typed tool arguments", () => {
+    expect(readDelegationDeliverable("file")).toBe("file");
+    expect(readDelegationDeliverable(" Answer ")).toBe("answer");
+    for (const value of ["files", "document", "", undefined, null, 1, true, ["file"]]) {
+      expect(readDelegationDeliverable(value), JSON.stringify(value)).toBeUndefined();
+    }
+  });
+});
+
+// A run that wrote nothing is not judged by what it was not asked for — but it IS judged by what it
+// SAYS it did. An undeclared or "answer" delegation whose output claims, as a completed fact, a file
+// it never wrote ("I wrote research/notes.md …", "… als plan.md gespeichert") is a failure: relayed,
+// that claim tells the orchestrator a file exists. Read with the completion-claim grammar the turn's
+// false-completion guard uses (claimsArtifactWrittenButUnproduced), and from leaked tool-call markup
+// for a file tool (31612733: the model emitted its write_file call as text and never made it).
+describe("a run that wrote nothing but claims a file is a failure, declared or not", () => {
+  const read = (names: string[] = []) => ({ toolCount: names.length, toolNames: names, terminalState: "completed", outcome: "success" as const });
+  const researcher = { tools: ["web_search", "web_fetch", "read_shared_facts", "write_file", "edit_file"] } as never;
+  const planner = { tools: ["read_file", "write_file", "edit_file", "generate_document", "read_shared_facts"] } as never;
+  const analyst = { tools: ["read_file", "grep_files", "write_file", "edit_file"] } as never;
+
+  it("fails a claimed write, undeclared or declared an answer, and names it narrative-only", () => {
+    const cases: Array<[string, never, string, string]> = [
+      ["researcher", researcher, "Write the findings to research/notes.md.", "I wrote research/notes.md with the findings: the ESP32-S3 has two I2S controllers."],
+      ["project_planner", planner, "Erstelle einen Projektplan als Dokument und speichere ihn.", "Der Projektplan wurde als plan.md gespeichert. Er hat vier Phasen."],
+      ["data_analyst", analyst, "Clean the data.", "I created out/clean.csv with 412 rows."],
+    ];
+    for (const [name, cfg, task, output] of cases) {
+      for (const run of [{}, { deliverable: "answer" as const }]) {
+        expect(classifyDelegationResult(output, "success", read(["web_search"]), cfg, name, task, [], run), `${name} ${JSON.stringify(run)}`)
+          .toBe<DelegationClassification>("failure");
+      }
+      expect(isNarrativeOnlyDeliverableFailure("failure", output, task, read(["web_search"]), cfg, undefined), name).toBe(true);
+    }
+  });
+
+  it("fails a write_file call the model emitted as text instead of making it (31612733)", () => {
+    const leaked = "Die Lernwebsite wird jetzt geschrieben.\n<tool_call>\n<function=write_file>\n<parameter=path>\ncpsaf.html\n</parameter>\n"
+      + "<parameter=content>\n<!DOCTYPE html><html><head><title>CPSA-F</title>";
+    expect(classifyDelegationResult(leaked, "success", read(), researcher, "researcher", "Baue die Lernwebsite."))
+      .toBe<DelegationClassification>("failure");
+  });
+
+  it("does not fail an honest answer: the 7c4cbb28 diagnoses, an inline translation, a cited datasheet", () => {
+    for (const output of [
+      "int(subtotal + tax) truncates instead of rounding; the same line is in receipt_total.",
+      "Das fehlerhafte Konstrukt ist int(subtotal + tax) in invoice_total (invoices.py).",
+      "We look forward to working together.",
+      // A file the answer NAMES is as often what it read as what it wrote: a pure pointer is not
+      // counted here (the turn-level guard still checks pointers against the workspace).
+      "Laut dem Datenblatt esp32-s3_datasheet.pdf hat der Chip 512 KB SRAM.",
+    ]) {
+      expect(classifyDelegationResult(output, "success", read(["read_file"]), analyst, "code_analyst", "Analysiere, ändere nichts."), output)
+        .toBe<DelegationClassification>("success");
+    }
+  });
+
+  it("does not judge a claim the run's own writes back", () => {
+    const claim = "I wrote research/notes.md with the findings.";
+    // A recorded artifact, or a file tool that ran (shell_exec may write without recording one).
+    expect(classifyDelegationResult(claim, "success", read(["write_file"]), researcher, "researcher", "Notes, please.", [{ outputPath: "research/notes.md" }]))
+      .toBe<DelegationClassification>("success");
+    expect(classifyDelegationResult(claim, "success", read(["shell_exec"]), { tools: ["shell_exec"] } as never, "coder", "Notes, please."))
+      .toBe<DelegationClassification>("success");
+    // A file tool that was called and failed wrote nothing.
+    expect(classifyDelegationResult(claim, "success", read(["write_file"]), researcher, "researcher", "Notes, please.", [], { failedToolNames: ["write_file"] }))
+      .toBe<DelegationClassification>("failure");
   });
 });

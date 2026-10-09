@@ -11,6 +11,7 @@
  * human-facing context.
  */
 import { writeTurnPlan, readTurnPlan, clearTurnPlan, PLAN_VALUE_MAX } from "../swarm/memory.js";
+import { readDelegationDeliverable, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
 import { rootSessionOf } from "./session-ids.js";
 import { childLogger } from "../logger.js";
 
@@ -57,6 +58,13 @@ export interface TurnPlanStep {
   parallelGroup?: number;
   /** Ids of steps that must complete first. */
   dependsOn?: string[];
+  /**
+   * What a delegate step must hand back (DelegationDeliverable): passed to delegate_to_agent by
+   * execute_plan, so a plan's build step is judged as one and its research step is not. The step's
+   * task carries the turn's OBJECTIVE, so a verb test over it read every step of a build plan as
+   * the build.
+   */
+  deliverable?: DelegationDeliverable;
 }
 
 /** What became of one step. `pending` steps have not been attempted this turn. */
@@ -224,6 +232,8 @@ export function normalizeTurnPlan(rawInput: Record<string, unknown>): TurnPlan {
     if (typeof group === "number" && Number.isFinite(group)) step.parallelGroup = group;
     const deps = clampStringList(obj["dependsOn"] ?? obj["depends_on"], MAX_STEPS);
     if (deps.length > 0) step.dependsOn = deps;
+    const deliverable = readDelegationDeliverable(obj["deliverable"]);
+    if (deliverable) step.deliverable = deliverable;
     steps.push(step);
   }
 

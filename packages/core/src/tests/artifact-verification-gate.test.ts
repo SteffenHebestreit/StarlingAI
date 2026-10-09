@@ -112,6 +112,9 @@ describe("runArtifactVerificationGate", () => {
     expect(toolName).toBe("delegate_to_agent");
     expect(String((args as Record<string, unknown>)["task"])).toMatch(/ARTIFACT REPAIR/);
     expect(String((args as Record<string, unknown>)["task"])).toMatch(/cv\.pdf/);
+    // A rebuild exists to write the file: declared, so a repair that only narrates is judged a
+    // missed deliverable (DelegationDeliverable), as the corrective build is.
+    expect((args as Record<string, unknown>)["deliverable"]).toBe("file");
   });
 
   it("reports fail — never silently ships — when the rebuild does not fix it", async () => {

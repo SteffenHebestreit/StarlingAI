@@ -35,6 +35,18 @@ function defaultResearchFallbackAgentsFor(agentName: string | undefined, guidanc
     .filter((candidate) => chooseConfiguredAgent([candidate]) === candidate);
 }
 
+/**
+ * The args of a delegation the research-first rewrite turned into a research task, without the
+ * `deliverable` the orchestrator declared (DelegationDeliverable in tools/delegation-artifact-
+ * classification.ts). That declaration described the build it wrote, not the research task that
+ * replaces it: carried along, a "file" would hold the research run to a file and steer the pre-run
+ * gates (routing filter, render exemption, cached-evidence guard, inline harvest) as for a build.
+ */
+function asResearchTaskArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const { deliverable: _declaredForTheBuild, ...rest } = args;
+  return rest;
+}
+
 function withDefaultResearchFallbackAgents(
   args: Record<string, unknown>,
   guidance: DynamicTurnGuidance | null | undefined,
@@ -204,7 +216,7 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
       }
       const focus = deriveSourceSensitiveDelegationFocus(originalTask, userMessage);
       nextArgs = withDefaultResearchFallbackAgents(
-        stripUntrustedDelegationContext({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) }),
+        stripUntrustedDelegationContext(asResearchTaskArgs({ ...originalArgs, task: buildSourceSensitiveOriginalRequestTask(userMessage, undefined, focus) })),
         guidance,
       );
     }
@@ -223,14 +235,14 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
             return stripUntrustedDelegationContext({ ...taskSpec });
           }
           return withDefaultResearchFallbackAgents(
-            stripUntrustedDelegationContext({
+            stripUntrustedDelegationContext(asResearchTaskArgs({
               ...taskSpec,
               task: buildSourceSensitiveOriginalRequestTask(
                 userMessage,
                 `SLICE ${index + 1}/${rawTasks.length}`,
                 deriveSourceSensitiveDelegationFocus(typeof taskSpec["task"] === "string" ? String(taskSpec["task"]) : "", userMessage),
               ),
-            }),
+            })),
             guidance,
           );
         }),
@@ -251,14 +263,14 @@ export function enforceSourceSensitiveOriginalRequestOnToolCall(
             return stripUntrustedDelegationContext({ ...node });
           }
           return withDefaultResearchFallbackAgents(
-            stripUntrustedDelegationContext({
+            stripUntrustedDelegationContext(asResearchTaskArgs({
               ...node,
               task: buildSourceSensitiveOriginalRequestTask(
                 userMessage,
                 `GRAPH NODE ${index + 1}/${rawNodes.length}`,
                 deriveSourceSensitiveDelegationFocus(typeof node["task"] === "string" ? String(node["task"]) : "", userMessage),
               ),
-            }),
+            })),
             guidance,
           );
         }),

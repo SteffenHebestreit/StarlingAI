@@ -1317,6 +1317,308 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  // E2E 7c4cbb28 (2026-10-09): code_analyst answered a pasted-code diagnosis in prose with no tool
+  // call; the verb table found "change" in "do not change anything" (and "add" in the pasted
+  // docstring), code_analyst holds write_file, and the delegation failed as narrative-only. Whether a
+  // file was wanted is what the call declares, carried from delegate_to_agent's arguments to the verdict.
+  it("judges a run that wrote no file by the deliverable its delegation declared, not by the task's verbs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-swarm-deliverable-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        code_analyst: {
+          description: "Static code analysis.",
+          tools: ["read_file", "list_files", "grep_files", "write_file", "edit_file"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const diagnosis = "int(subtotal + tax) truncates instead of rounding; the same line is in receipt_total.";
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: diagnosis,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 0,
+        toolNames: [],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4,
+        model: "mock",
+        capabilities: [],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+    const task = "Static code analysis — do not run anything and do not change anything: why does invoice_total "
+      + "come out a cent low?\n```python\ndef invoice_total(items):\n    \"\"\"Sum the items and add 20% tax.\"\"\"\n"
+      + "    return int(sum(items) * 1.2)\n```";
+    const run = (sessionId: string, extra: Record<string, unknown>) => delegate!.execute({ agentName: "code_analyst", task, ...extra }, {
+      sessionId,
+      workspacePath: tempDir,
+      swarmState: { objective: "diagnose", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+    });
+
+    // Undeclared, or declared an answer: the prose diagnosis IS the deliverable.
+    for (const [sessionId, extra] of [["deliverable-undeclared", {}], ["deliverable-answer", { deliverable: "answer" }]] as const) {
+      const answered = await run(sessionId, extra);
+      expect(answered.success, sessionId).toBe(true);
+      expect(answered.output).toContain(diagnosis);
+      expect(answered.metadata?.["attemptedAgents"]).toEqual(["code_analyst"]);
+    }
+
+    // Declared a file, the same zero-tool run missed it.
+    const missed = await run("deliverable-file", { deliverable: "file" });
+    expect(missed.success).toBe(false);
+    expect(String(missed.error)).toContain("narrative-only");
+    expect(String(missed.error)).toContain("write_file");
+  }, 30_000);
+
+  // Undeclared, a run that wrote nothing is not a miss — unless its own output claims the file. The
+  // claim must not reach the orchestrator as the error text either: it would read as "the file exists".
+  // Its one write_file call failed, so the run's failed calls must reach the check as well.
+  it("fails an undeclared run that claims a file it never wrote, with the narrative-only reason", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-swarm-claimed-write-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        researcher: { description: "Research.", tools: ["web_search", "web_fetch", "write_file", "edit_file"], maxIterations: 4 },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    const claim = "I wrote research/notes.md with the findings.";
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: claim,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 2,
+        toolNames: ["web_search", "write_file"],
+        iterations: 2,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4,
+        model: "mock",
+        capabilities: [],
+        outcome: "success",
+        terminalState: "completed",
+      },
+      toolFailures: [{ agent: args.agentName, tool: "write_file", error: "EACCES: research/notes.md" }],
+    }));
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const result = await getTool("delegate_to_agent")!.execute({ agentName: "researcher", task: "Collect the I2S facts." }, {
+      sessionId: "claimed-write-undeclared",
+      workspacePath: tempDir,
+      swarmState: { objective: "notes", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+    });
+    expect(result.success).toBe(false);
+    expect(String(result.error)).toContain("narrative-only");
+    expect(String(result.error)).not.toContain(claim);
+  }, 30_000);
+
+  // ── The declared deliverable reaches every gate that reads it ─────────────────────────────
+  // Each gate reads the request's declaration first and the verb table only for an undeclared
+  // delegation (delegationAsksForFile). The tasks below name no table verb where a declared "file"
+  // must count, and do name one where a declared "answer" must win, so a gate handed the task text
+  // alone decides the other way.
+  const deliverableConfig = (name: string, subAgents: Record<string, unknown>) => {
+    const tempDir = mkdtempSync(join(tmpdir(), `starlingai-swarm-${name}-`));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "mock-model" } } }, subAgents }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+    return tempDir;
+  };
+  const statsWith = (args: SubAgentRunOptions, toolNames: string[]): SubAgentRunResult["stats"] => ({
+    agentName: args.agentName,
+    sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+    promptChars: 0,
+    userContentChars: String(args.task ?? "").length,
+    toolCount: toolNames.length,
+    toolNames,
+    iterations: 1,
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    maxIterations: 4,
+    model: "mock",
+    capabilities: [],
+    outcome: "success",
+    terminalState: "completed",
+  });
+  const freshState = (objective: string): SwarmState => ({
+    objective, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {},
+  });
+
+  it("the cached-evidence guard follows the declaration: \"file\" runs the agent, \"answer\" may reuse", async () => {
+    const workspace = deliverableConfig("reuse", {
+      researcher: {
+        description: "Research specialist.",
+        tools: ["web_search", "web_fetch", "write_file"],
+        capabilities: ["research", "documentation lookup"],
+        maxIterations: 4,
+      },
+    });
+    const memory = await import("../swarm/memory.js");
+    for (const sessionId of ["reuse-declared-file", "reuse-declared-answer"]) {
+      await memory.writeSharedFact(sessionId, "a2a_protocol_sources",
+        "A2A Protocol Primary Sources: official specification https://a2a-protocol.org/latest/specification/ and repository https://github.com/a2aproject/A2A");
+      await memory.appendPartialResult({
+        sessionId, taskId: "task_a2a_sources", agentName: "researcher",
+        content: "A2A official specification: https://a2a-protocol.org/latest/specification/ ; GitHub repository: https://github.com/a2aproject/A2A",
+        ts: new Date().toISOString(),
+      });
+    }
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: "Wrote the source list.", stats: statsWith(args, ["write_file"]),
+      artifacts: [{ outputPath: "generated/a2a-sources.md", sourceTool: "write_file" }],
+    }));
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const delegate = getTool("delegate_to_agent")!;
+    const routingQuery = "A2A protocol official specification primary sources";
+
+    // No table verb; declared a file, so the cached facts cannot stand in for it.
+    const asked = await delegate.execute({
+      agentName: "researcher", routingQuery, deliverable: "file",
+      task: "Find citation-grade primary sources for the A2A protocol and summarize the official specification.",
+    }, { sessionId: "reuse-declared-file", workspacePath: workspace, swarmState: freshState("a2a") });
+    expect(asked.metadata?.["reusedFromSessionMemory"]).toBeUndefined();
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+
+    // A table verb ("write"); declared an answer, so the cached facts may serve it.
+    const answered = await delegate.execute({
+      agentName: "researcher", routingQuery, deliverable: "answer",
+      task: "Find citation-grade primary sources for the A2A protocol and write a summary of the official specification.",
+    }, { sessionId: "reuse-declared-answer", workspacePath: workspace, swarmState: freshState("a2a") });
+    expect(answered.metadata?.["reusedFromSessionMemory"]).toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("run_task_graph hands each node's declared deliverable to its delegation", async () => {
+    const workspace = deliverableConfig("graph", {
+      code_analyst: { description: "Static code analysis.", tools: ["read_file", "write_file", "edit_file"], maxIterations: 4 },
+    });
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: "int(subtotal + tax) truncates instead of rounding.", stats: statsWith(args, []),
+    }));
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const swarmState = freshState("graph");
+    await getTool("run_task_graph")!.execute({
+      nodes: [
+        { id: "asked_for_file", agentName: "code_analyst", task: "The rounding defect in invoices.py.", deliverable: "file" },
+        { id: "asked_nothing", agentName: "code_analyst", task: "The rounding defect in receipts.py." },
+      ],
+    }, { sessionId: "graph-deliverable", workspacePath: workspace, swarmState });
+    expect(swarmState.tasks["asked_for_file"]?.status).toBe("failed");
+    expect(swarmState.tasks["asked_nothing"]?.status).toBe("completed");
+  }, 30_000);
+
+  it("swarm_delegate hands its declaration to routing: a \"file\" drops the agent that cannot write one", async () => {
+    const workspace = deliverableConfig("routing", {
+      rounding_reader: {
+        description: "Reads invoice totals and explains rounding defects in invoice totals.",
+        capabilities: ["invoice totals", "rounding defects"],
+        tools: ["read_file"],
+        maxIterations: 4,
+      },
+      chart_writer: {
+        description: "Draws bar charts of weekly visitor numbers into HTML files.",
+        tools: ["read_file", "write_file"],
+        maxIterations: 4,
+      },
+    });
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => (
+      args.agentName === "chart_writer"
+        ? { output: "Saved the report.", stats: statsWith(args, ["write_file"]), artifacts: [{ outputPath: "generated/rounding.md", sourceTool: "write_file" }] }
+        : { output: "int() truncates the invoice total instead of rounding it.", stats: statsWith(args, ["read_file"]) }
+    ));
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const swarm = getTool("swarm_delegate")!;
+    const task = "Invoice totals rounding defects, explained.";
+    const ran = () => runSubAgentWithStatsMock.mock.calls.map(([args]) => args.agentName);
+
+    await swarm.execute({ task, skillMatchThreshold: 0 }, { sessionId: "routing-undeclared", workspacePath: workspace, swarmState: freshState("r") });
+    expect(ran()[0]).toBe("rounding_reader");
+
+    runSubAgentWithStatsMock.mockClear();
+    await swarm.execute({ task, skillMatchThreshold: 0, deliverable: "file" }, { sessionId: "routing-declared", workspacePath: workspace, swarmState: freshState("r") });
+    // Nothing else matches the task well enough, so what runs instead is the architect fallback;
+    // the point is that the agent with no file tool is not dispatched.
+    expect(ran().length).toBeGreaterThan(0);
+    expect(ran()).not.toContain("rounding_reader");
+  }, 30_000);
+
+  it("the render exemption follows the declaration: a declared file is rendered, not bounced to research", async () => {
+    const workspace = deliverableConfig("render", {
+      researcher: { description: "Research specialist.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
+      deck_writer: { description: "Builds slide decks.", tools: ["read_shared_facts", "write_file", "generate_presentation"], maxIterations: 4 },
+    });
+    const memory = await import("../swarm/memory.js");
+    await memory.writeSharedFact("render-declared", "dresden_zwinger", "The Zwinger was built 1710-1728 (https://www.der-dresdner-zwinger.de/).");
+    await memory.writeSharedFact("render-undeclared", "dresden_zwinger", "The Zwinger was built 1710-1728 (https://www.der-dresdner-zwinger.de/).");
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: `${args.agentName} done.`, stats: statsWith(args, ["write_file"]),
+      artifacts: [{ outputPath: "generated/dresden/index.html", sourceTool: "write_file" }],
+    }));
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const delegate = getTool("delegate_to_agent")!;
+    // Research wording (the marker), no table verb.
+    const task = "SOURCE-SENSITIVE DELEGATION\nSlides on Dresden architecture from the verified facts; cite the official sources.";
+    const ran = () => runSubAgentWithStatsMock.mock.calls.map(([args]) => args.agentName);
+
+    await delegate.execute({ agentName: "deck_writer", task, deliverable: "file" }, { sessionId: "render-declared", workspacePath: workspace, swarmState: freshState("d") });
+    expect(ran()).toEqual(["deck_writer"]);
+
+    runSubAgentWithStatsMock.mockClear();
+    await delegate.execute({ agentName: "deck_writer", task }, { sessionId: "render-undeclared", workspacePath: workspace, swarmState: freshState("d") });
+    expect(ran()[0]).toBe("researcher");
+  }, 30_000);
+
+  it("offers the deliverable declaration on every tool that dispatches a delegation", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+      import("../tools/turn-plan-tool.js"),
+    ]);
+    type Schema = { properties?: Record<string, { enum?: unknown; description?: string; items?: Schema }> & { [key: string]: unknown } };
+    const props = (name: string): Schema["properties"] => (getTool(name)?.parameters as Schema | undefined)?.properties;
+    const itemProps = (name: string, field: string): Schema["properties"] => props(name)?.[field]?.items?.properties;
+    for (const [label, properties] of [
+      ["delegate_to_agent", props("delegate_to_agent")],
+      ["swarm_delegate", props("swarm_delegate")],
+      ["create_ephemeral_agent", props("create_ephemeral_agent")],
+      ["parallel_delegate.tasks[]", itemProps("parallel_delegate", "tasks")],
+      ["run_task_graph.nodes[]", itemProps("run_task_graph", "nodes")],
+      ["record_plan.steps[]", itemProps("record_plan", "steps")],
+    ] as const) {
+      expect(properties?.["deliverable"]?.enum, label).toEqual(["file", "answer"]);
+      // What leaving it out means, and, on a plan step, that only a delegate step reads it.
+      const description = String(properties?.["deliverable"]?.description);
+      expect(description, label).toContain("Omitted, no file is required.");
+      expect(description.includes("Delegate steps only."), label).toBe(label === "record_plan.steps[]");
+    }
+  }, 30_000);
+
   it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-maintainer-"));
     tempDirs.push(workspacePath);

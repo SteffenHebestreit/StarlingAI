@@ -269,6 +269,65 @@ describe("create_ephemeral_agent policy", () => {
     expect(result.success).toBe(true);
   }, 15000);
 
+  // The narrative-only guard (31612733) judged an ephemeral run by the verbs of its task. It now runs
+  // when the delegation declares a file, or — declaring nothing — when the agent was granted a tool
+  // that renders a document (ARTIFACT_BUILDER_TOOLS), or when the run's own output claims a write it
+  // never made. A declared "answer" is taken at its word unless the output claims a write.
+  describe("the narrative-only guard: declared, a builder tool granted, or a claimed write", () => {
+    const run = async (args: Record<string, unknown>, output: string, toolNames: string[] = []) => {
+      runSubAgentWithStatsMock.mockImplementationOnce(async (opts: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+        output,
+        stats: {
+          agentName: opts.agentName,
+          sessionId: `sub:${opts.parentSessionId}:${opts.agentName}:test`,
+          promptChars: 0,
+          userContentChars: 0,
+          toolCount: toolNames.length,
+          toolNames,
+          iterations: 1,
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          maxIterations: 5,
+          model: "mock",
+          capabilities: [],
+          terminalState: "completed",
+        },
+      }));
+      const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+      return getTool("create_ephemeral_agent")!.execute({
+        agentName: "memo_writer",
+        description: "Writes a memo from inline context.",
+        systemPrompt: "Write what the task asks for.",
+        ...args,
+      }, { sessionId: "ephemeral-guard", workspacePath: "/workspace" });
+    };
+    const narration = "This is a substantial memo with five sections. Given its size, I'll write it in one go.";
+    const prose = "The pitch deck argues for a two-sided marketplace; its unit economics rest on a 14-month payback.";
+
+    it("fails an undeclared run granted a document builder that only narrated", async () => {
+      const result = await run({ tools: ["read_file", "generate_document"], task: "The investor memo." }, narration);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["narrativeOnly"]).toBe(true);
+    }, 15000);
+
+    it("passes an undeclared prose answer from a run granted only write_file", async () => {
+      const result = await run({ tools: ["read_file", "write_file"], task: "Summarize the pitch deck; change nothing." }, prose);
+      expect(result.success).toBe(true);
+    }, 15000);
+
+    it("fails an undeclared run granted only write_file whose output claims a file it never wrote", async () => {
+      const result = await run({ tools: ["read_file", "write_file"], task: "Summarize the pitch deck." }, "I saved the memo as memo.md. " + prose);
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["narrativeOnly"]).toBe(true);
+    }, 15000);
+
+    it("takes a declaration at its word: \"file\" fails a write_file-only narration, \"answer\" passes a builder's prose", async () => {
+      const asked = await run({ tools: ["read_file", "write_file"], task: "The investor memo.", deliverable: "file" }, narration);
+      expect(asked.success).toBe(false);
+      const answered = await run({ tools: ["read_file", "generate_document"], task: "The investor memo.", deliverable: "answer" }, prose);
+      expect(answered.success).toBe(true);
+    }, 15000);
+  });
+
   it("hands back each run under it that masked figures, with its own files (agent/delegated-run-record.ts)", async () => {
     // Its delegation's files are every run's; the turn names only the masked run's as unrun.
     const MASKED = { attempted: 1, failed: 1, succeededWithOutput: 0, unobservedFigures: 2 };

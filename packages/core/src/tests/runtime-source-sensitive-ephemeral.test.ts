@@ -133,3 +133,55 @@ describe("enforceSourceSensitiveOriginalRequestOnToolCall — parallel build sli
     expect(events.length).toBeGreaterThan(0);
   });
 });
+
+// The research-first rewrite turns a delegation into a research task. A `deliverable: "file"` the
+// orchestrator declared for the build it wrote does not describe the research task that replaces it:
+// carried along, it would hold the research run to a file and steer the pre-run gates as for a
+// build (routing filter, render exemption, cached-evidence guard, inline harvest). A slice or node
+// that keeps its own build task keeps its declaration.
+describe("enforceSourceSensitiveOriginalRequestOnToolCall — the declared deliverable", () => {
+  const rewrite = (call: ToolCall) => {
+    enforceSourceSensitiveOriginalRequestOnToolCall(call, "Recherchiere X und baue dann eine WebApp.", SOURCE_SENSITIVE, "sess", []);
+    return call.arguments as Record<string, unknown>;
+  };
+
+  it("drops it from a delegation rewritten into the research task", () => {
+    for (const name of ["delegate_to_agent", "swarm_delegate"]) {
+      const args = rewrite({
+        id: "d", type: "function", name,
+        arguments: { agentName: "content_writer", task: BUILD_TASK, deliverable: "file" },
+      } as ToolCall);
+      expect(String(args["task"]), name).toContain("SOURCE-SENSITIVE DELEGATION");
+      expect(args, name).not.toHaveProperty("deliverable");
+    }
+  });
+
+  it("keeps it on a coordinator, which still decomposes and builds", () => {
+    const args = rewrite({
+      id: "c", type: "function", name: "delegate_to_agent",
+      arguments: { agentName: "mission_coordinator", task: BUILD_TASK, deliverable: "file" },
+    } as ToolCall);
+    expect(args["deliverable"]).toBe("file");
+  });
+
+  it("drops it from rewritten research slices and graph nodes, and keeps it on build ones", () => {
+    const sliced = rewrite(parallel([
+      { agentName: "researcher", task: "Recherchiere den Fragekatalog.", deliverable: "file" },
+      { agentName: "content_writer", task: BUILD_TASK, deliverable: "file" },
+    ]));
+    const tasks = sliced["tasks"] as Array<Record<string, unknown>>;
+    expect(tasks[0]).not.toHaveProperty("deliverable");
+    expect(tasks[1]!["deliverable"]).toBe("file");
+
+    const graphed = rewrite({
+      id: "g", type: "function", name: "run_task_graph",
+      arguments: { nodes: [
+        { id: "research", agentName: "researcher", task: "Recherchiere den Fragekatalog.", deliverable: "file" },
+        { id: "build", agentName: "web_coder", task: BUILD_TASK, deliverable: "file", dependsOn: ["research"] },
+      ] },
+    } as ToolCall);
+    const nodes = graphed["nodes"] as Array<Record<string, unknown>>;
+    expect(nodes[0]).not.toHaveProperty("deliverable");
+    expect(nodes[1]!["deliverable"]).toBe("file");
+  });
+});

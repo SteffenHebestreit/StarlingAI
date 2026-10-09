@@ -158,7 +158,11 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
   }
   return {
     tool: "delegate_to_agent",
-    args: { ...(step.agent ? { agentName: step.agent } : {}), task: buildStepTask(plan, step, results) },
+    args: {
+      ...(step.agent ? { agentName: step.agent } : {}),
+      task: buildStepTask(plan, step, results),
+      ...(step.deliverable ? { deliverable: step.deliverable } : {}),
+    },
   };
 }
 

@@ -211,7 +211,8 @@ async function attemptRepair(deps: ArtifactVerificationDeps, failures: string, a
   try {
     const result = await executeTool(
       "delegate_to_agent",
-      { agentName, task: buildRepairTask(failures) },
+      // The runtime knows what it asked for: a rebuild that writes no file has missed it.
+      { agentName, task: buildRepairTask(failures), deliverable: "file" },
       // NOT allowDelegationAfterOperatorStop. That flag does more than exempt one
       // call — it CLEARS the session's operator-Stop latch, and its safety argument
       // in sub-agent.ts is explicitly that the agent it unblocks holds no delegate

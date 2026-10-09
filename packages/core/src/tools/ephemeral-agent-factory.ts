@@ -29,7 +29,13 @@ import { buildAgentIndex } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
-import { parseFinalAnswerTag } from "./delegation-artifact-classification.js";
+import {
+  deliverableParameterSchema,
+  looksLikeClaimedWriteMiss,
+  parseFinalAnswerTag,
+  readDelegationDeliverable,
+} from "./delegation-artifact-classification.js";
+import { holdsArtifactBuilderTool } from "../agent/sub-agent-prompt-guidance.js";
 
 const log = childLogger("tool:sub-agent");
 
@@ -673,6 +679,7 @@ registerTool({
         type: "string",
         description: "Optional background context to pass to the agent",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["agentName", "systemPrompt", "tools", "task"],
   },
@@ -872,9 +879,20 @@ registerTool({
     // <tool_call> block as TEXT (never actually called write_file), and this
     // path returned success: true with the hallucination as the output — the
     // orchestrator dutifully told the user "Die Lernwebsite wurde erfolgreich
-    // erstellt" when no file existed.
+    // erstellt" when no file existed. Judged against the declared deliverable
+    // (DelegationDeliverable). Declaring nothing, the agent was still built to produce a file
+    // when it was granted a tool that renders one (ARTIFACT_BUILDER_TOOLS: generate_document,
+    // render_pdf) — granted write_file says only what it MAY do, and an ephemeral analyst that
+    // answers in prose has missed nothing. Whatever was declared, a run whose own output claims
+    // a write it never made has missed the file it claims (looksLikeClaimedWriteMiss).
     const ephemeralCfg = { tools };
-    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never);
+    const declaredDeliverable = readDelegationDeliverable(args["deliverable"]);
+    const ephemeralDeliverable = declaredDeliverable ?? (holdsArtifactBuilderTool(tools) ? "file" : undefined);
+    const ephemeralFailedTools = (runResult.toolFailures ?? [])
+      .filter((failure) => !failure.declinedByUser && (failure.agent ?? ephemeralName) === ephemeralName)
+      .map((failure) => failure.tool);
+    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never, ephemeralDeliverable)
+      || looksLikeClaimedWriteMiss(result, ephemeralStats, runResult.artifacts ?? [], ephemeralFailedTools);
     if (narrativeOnly) {
       const expectedTools = tools.filter((name) =>
         /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)

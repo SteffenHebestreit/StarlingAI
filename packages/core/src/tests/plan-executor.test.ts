@@ -555,6 +555,21 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(tasks[0]?.startsWith("STEP s1")).toBe(true);
   });
 
+  it("hands a delegate step's declared deliverable to delegate_to_agent, and none when it declares none", async () => {
+    // DelegationDeliverable: the verdict on a run that wrote nothing reads the declaration, and a
+    // step's task opens with the step but carries the turn's objective, whose verbs said nothing
+    // about which step builds.
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "gather the syllabus", kind: "delegate", agent: "researcher" },
+      { id: "s2", description: "build the site", kind: "delegate", agent: "web_coder", deliverable: "file", dependsOn: ["s1"] },
+    ]));
+
+    await run();
+    expect(calls.map((c) => c.name)).toEqual(["delegate_to_agent", "delegate_to_agent"]);
+    expect(calls[0]?.args).not.toHaveProperty("deliverable");
+    expect(calls[1]?.args["deliverable"]).toBe("file");
+  });
+
   it("reports only THIS call's delegations, so a resume does not re-count them", async () => {
     // The turn ADDS this to its delegation total. Reporting every done step again on resume counted
     // the same delegation two and three times — into the scorecard, the shared-facts gate and the

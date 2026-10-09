@@ -171,6 +171,8 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     const buildResult = await executeTool("delegate_to_agent", {
       agentName: builderAgent,
       task: buildTask,
+      // The runtime knows what it asked for: a build that writes no file has missed it.
+      deliverable: "file",
       ...(buildContextWithSpec ? { context: buildContextWithSpec.slice(0, 10_000) } : {}),
       // Operator Stop means "build now from what we gathered," so this one bounded
       // build delegation runs even when the stop latch is set (audit 453a263e).
