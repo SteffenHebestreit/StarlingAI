@@ -84,6 +84,8 @@ const QUESTIONS = [
 const MERMAID_REQUEST = "Zeichne den folgenden Bestellablauf als Mermaid-Flussdiagramm: Bestellung geht ein → "
   + "Zahlung prüfen → wenn bezahlt: Ware kommissionieren → Versand → Zustellung; wenn nicht bezahlt: "
   + "Zahlungserinnerung senden → nach 14 Tagen ohne Zahlung: Bestellung stornieren.";
+/** Questions about making something, which the word lists fire on as on a request to make it. */
+const WORD_LIST_QUESTIONS = ["Wie erstelle ich eine Präsentation in PowerPoint?", "How do I build a website with Hugo?"];
 const SMALL_TALK = "how was your weekend?";
 const WEBSITE_REQUEST = "build me a website about local bird species";
 
@@ -298,7 +300,7 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     // One row: the reading, rounded, and never the message or the readout's restatement.
     const rows = modeReadRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ outcome: "produce", choice: "PRODUCE", top: 0.9123, margin: 0.8346, runnerUp: "GATHER", orderAgreed: true });
+    expect(rows[0]).toMatchObject({ outcome: "produce", arm: "routing", choice: "PRODUCE", top: 0.9123, margin: 0.8346, runnerUp: "GATHER", orderAgreed: true });
     expect(JSON.stringify(rows[0])).not.toContain("Bestellablauf");
     expect(JSON.stringify(rows[0])).not.toContain("restatement");
   });
@@ -478,21 +480,18 @@ describe("no other turn asks the readout", () => {
   // The flag and autoApprove are checked once per arm: where the prefetch starts for the routing
   // arm (the two cases above), and in autonomousArtifactBuild for the word-list arm (this case).
   it("the word-list arm keeps its own gates: a request the lists see is forced only on --auto with the flag on", async () => {
+    readoutMock.mockResolvedValue(modeReading("PRODUCE"));
     const onAuto = await load({});
     expect(onAuto.deliverableIntent.classifyDeliverableIntent(WEBSITE_REQUEST).wantsArtifact).toBe(true);
     expect((await firstCallOptions(onAuto, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    readoutMock.mockClear();
     streamMock.mockReset();
     const withoutAuto = await load({});
     expect(await firstCallOptions(withoutAuto, WEBSITE_REQUEST, false)).toBeUndefined();
     streamMock.mockReset();
     const flagOff = await load({ antiRefusal: false });
     expect(await firstCallOptions(flagOff, WEBSITE_REQUEST, true)).toBeUndefined();
-  });
-
-  it("a request the word lists see is forced by them, routed to an emitter or not, and asks no readout", async () => {
-    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
-    readoutMock.mockResolvedValue(modeReading("converse"));
-    expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
     expect(readoutMock).not.toHaveBeenCalled();
   });
 
@@ -543,6 +542,101 @@ describe("no other turn asks the readout", () => {
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(readoutMock).not.toHaveBeenCalled();
   }, 20_000);
+});
+
+describe("an --auto turn the word lists see asks the readout too, and a question is not forced", () => {
+  it("a question the word lists fire on is not forced when the readout reads an answer", async () => {
+    for (const question of WORD_LIST_QUESTIONS) {
+      for (const choice of ["converse", "GATHER", "VERIFY"]) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        readoutCallSites.length = 0;
+        auditMock.mockClear();
+        // No prefetch: the word-list arm asks on its own, before and without any routing.
+        const loaded = await load({ discoveryPrefetch: false });
+        expect(loaded.deliverableIntent.classifyDeliverableIntent(question).wantsArtifact, question).toBe(true);
+        readoutMock.mockResolvedValue(modeReading(choice));
+        expect(await firstCallOptions(loaded, question, true), `${question} / ${choice}`).toBeUndefined();
+        expect(prefetchCalls.count).toBe(0);
+        expect(readoutMock).toHaveBeenCalledTimes(1);
+        const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string }, { bothOrders?: boolean; concurrentOrders?: boolean; signal?: AbortSignal }];
+        expect(input).toEqual({ userMessage: question });
+        expect(readoutOptions).toMatchObject({ bothOrders: true, concurrentOrders: true });
+        expect(readoutOptions.signal).toBeInstanceOf(AbortSignal);
+        expect(readoutCallSites).toEqual([{ callSite: "routing_tier", agentName: "intent_readout" }]);
+        expect(modeReadRows()).toMatchObject([{ outcome: "ask", choice, arm: "word_list" }]);
+      }
+    }
+  });
+
+  it("a build the word lists see is forced when the readout reads work, routed to an emitter or not, and is read once", async () => {
+    for (const capsule of [undefined, { agents: [{ name: "diagram_designer", confidence: "high" }] }]) {
+      for (const choice of ["PRODUCE", "ACT", "ORCHESTRATE"]) {
+        streamMock.mockReset();
+        readoutMock.mockReset();
+        auditMock.mockClear();
+        const loaded = await load({ ...(capsule ? { capsule } : {}) });
+        readoutMock.mockResolvedValue(modeReading(choice));
+        expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice, choice).toBe("required");
+        // Asked by the word-list arm alone: the routing arm does not ask again for a request the lists see.
+        expect(readoutMock, choice).toHaveBeenCalledTimes(1);
+        expect(modeReadRows()).toMatchObject([{ outcome: "produce", choice, arm: "word_list" }]);
+      }
+    }
+  });
+
+  // A Claude routing tier or a server without token logprobs never gives a reading; on such a
+  // deployment every --auto build would otherwise be left to answer inline.
+  it("without a reading the word lists decide as before: the build is forced", async () => {
+    const reading = modeReading("converse");
+    const noReading = [
+      { ok: false, reason: "no_logprobs", ms: 12 },
+      { ok: false, reason: "error", ms: 12, error: "500" },
+      { ...reading, readout: { ...reading.readout, facets: {} } },
+      { ...reading, readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "converse", singlePass: "served" } } } } },
+    ];
+    for (const result of noReading) {
+      streamMock.mockReset();
+      readoutMock.mockReset();
+      auditMock.mockClear();
+      const loaded = await load({});
+      readoutMock.mockResolvedValue(result);
+      expect((await firstCallOptions(loaded, WEBSITE_REQUEST, true))?.toolChoice, JSON.stringify(result).slice(0, 80)).toBe("required");
+      expect(readoutMock).toHaveBeenCalledTimes(1);
+      expect(modeReadRows()).toHaveLength(1);
+      expect(modeReadRows()[0]).toMatchObject({ arm: "word_list" });
+      expect(["no_logprobs", "error", "no_mode", "single_pass"]).toContain(modeReadRows()[0]!["outcome"]);
+    }
+    streamMock.mockReset();
+    readoutMock.mockReset();
+    auditMock.mockClear();
+    const claude = await load({ routingTier: "anthropic/claude-haiku-4-5" });
+    expect((await firstCallOptions(claude, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider", arm: "word_list" }]);
+  });
+
+  it("no read is asked, and nothing changes, without --auto, with the flag off, on a workflow step or on an --agent directive turn", async () => {
+    readoutMock.mockResolvedValue(modeReading("converse"));
+    const withoutAuto = await load({});
+    expect(await firstCallOptions(withoutAuto, WORD_LIST_QUESTIONS[0]!, false)).toBeUndefined();
+    streamMock.mockReset();
+    const flagOff = await load({ antiRefusal: false });
+    expect(await firstCallOptions(flagOff, WORD_LIST_QUESTIONS[0]!, true)).toBeUndefined();
+    streamMock.mockReset();
+    const workflow = await load({});
+    expect(await firstCallOptions(workflow, WEBSITE_REQUEST, true, "workflow")).toBeUndefined();
+    expect(readoutMock).not.toHaveBeenCalled();
+
+    streamMock.mockReset();
+    const directive = await load({});
+    streamMock.mockImplementation(() => textStream("Here is the site."));
+    const session = new directive.AgentSession({ channel: "test", workspacePath: directive.workspacePath, systemPrompt: "You are a test agent." });
+    await directive.runTurn({ session, userMessage: WEBSITE_REQUEST, autoApprove: true, directiveAgent: "diagram_designer", allowedAgents: ["diagram_designer"] });
+    expect((streamMock.mock.calls[0]?.[3] as { toolChoice?: unknown } | undefined)?.toolChoice).toBe("required");
+    expect(readoutMock).not.toHaveBeenCalled();
+    expect(modeReadRows()).toEqual([]);
+  });
 });
 
 describe("startProduceIntentRead", () => {

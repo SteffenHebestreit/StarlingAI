@@ -197,8 +197,12 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * logprobs, an error, or no mode facet in it. A mode only one of the two orders read is no reading
  * either: askIntentReadout still answers when the reversed call failed or missed the slot, with the
  * served pass alone (or the reversed pass alone), and one order is the reading that was rejected
- * for this decision. The caller does not force on null: a question is not to be forced, and without
- * a reading the orchestrator decides as it does on any other turn.
+ * for this decision. The routing arm does not force on null: a question is not to be forced, and
+ * without a reading the orchestrator decides as it does on any other turn.
+ *
+ * The word-list arm asks the same read (`arm: "word_list"`): the deliverable-intent word lists fire
+ * on a question about making something as on a request to make it. There "ask" releases the forced
+ * call and null leaves it to the word lists, as before (agent/runtime.ts says why).
  *
  * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
  * reading the mode's choice, top probability, margin, runner-up, each order's own choice and whether
@@ -213,6 +217,11 @@ export async function startProduceIntentRead(params: {
   /** The turn's signal: a stopped turn stops the read. */
   signal: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Which --auto arm asked, for the row: the deliverable-intent word lists, which force without a
+   * reading, or the prefetch's routing, which does not (agent/runtime.ts autonomousArtifactBuild).
+   */
+  arm?: "word_list" | "routing";
 }): Promise<ProduceIntentVerdict | null> {
   const started = Date.now();
   const record = (outcome: string, mode?: IntentFacetRead, ms?: number): void => {
@@ -220,6 +229,7 @@ export async function startProduceIntentRead(params: {
       logAudit("guardrail_flagged", {
         type: "auto_artifact_build_mode_read",
         outcome,
+        ...(params.arm ? { arm: params.arm } : {}),
         ...(mode
           ? {
               choice: mode.choice,

@@ -1859,6 +1859,46 @@ async function _runTurn(
   // lists do not already see.
   const deliverableIntent = classifyDeliverableIntent(userMessage);
 
+  // ── The --auto forced first call and the intent readout ─────────────────────
+  // Under orchestration.autonomousModeAntiRefusal an --auto turn that asks for an artifact has its
+  // first tool call forced (autonomousArtifactBuild below). Two arms say a turn is one: the
+  // deliverable-intent word lists, here, and the discovery prefetch's routing, below. Neither reads
+  // what the request asks the assistant to do. The word lists match verbs and nouns, so "Wie
+  // erstelle ich eine Präsentation in PowerPoint?" was forced exactly like "Erstelle eine
+  // Präsentation …", and a question is never to be forced (decision of 2026-10-09). So the word-list
+  // arm asks the intent readout too (startProduceIntentRead, the same read as the routing arm's),
+  // started here, the moment the lists have fired, so its two calls overlap the judge, the document
+  // retrieval and the prompt assembly. A reading that the request asks for an answer (converse,
+  // GATHER, VERIFY) releases this arm. Without a reading the word lists decide as they always did:
+  // a Claude routing tier, or a server without token logprobs, never gives one, and on such a
+  // deployment every --auto build would otherwise lose the call that keeps it from being answered
+  // inline; on the Halo the read, both orders at once and the mode line alone, came back on all
+  // 151 probe reads outside a short server outage, so a timeout there is rare. The routing arm,
+  // whose own signal is the top agent's tools rather than anything in the request, forces only on
+  // a reading of work. Neither arm asks on a workflow step, which is never forced, or on an
+  // --agent directive turn, whose directive forces the call until its agent has run (see the
+  // routing arm below); there the word lists decide as before. With the flag off or without
+  // --auto nothing is asked.
+  const autoArtifactArmed = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+    && opts.autoApprove === true;
+  // Typed by assertion: it may be assigned inside the prefetch's callback, which narrowing does
+  // not follow.
+  let produceIntentRead = null as Promise<ProduceIntentVerdict | null> | null;
+  let intentReadVerdict: ProduceIntentVerdict | null = null;
+  const startIntentRead = (arm: "word_list" | "routing"): void => {
+    const priorTurnDigest = buildPriorTurnDigest(session);
+    produceIntentRead = startProduceIntentRead({
+      userMessage,
+      ...(priorTurnDigest ? { priorTurnDigest } : {}),
+      sessionId: session.id,
+      signal,
+      arm,
+    });
+  };
+  if (autoArtifactArmed && deliverableIntent.wantsArtifact && session.channel !== "workflow" && directiveAgent === undefined) {
+    startIntentRead("word_list");
+  }
+
   // ── Discovery prefetch: STARTED here, consumed by the first prompt assembly ──
   // It reads only the user's message and the turn's agent grant, so like the judge above it starts
   // the moment the fast lane has declined the turn (finding 2026-10-05). Started inside the first
@@ -1874,41 +1914,30 @@ async function _runTurn(
   // two calls overlap the document retrieval and the prompt assembly: only a reading that the
   // request asks for something to be made or done arms the same forced first tool call as an
   // artifact request the word lists recognise (autonomousArtifactBuild below). A request the word
-  // lists see is forced by them already, and a workflow step is never forced, so neither asks. Nor
-  // does an --agent directive turn: the directive forces the call until its agent has run, and the
-  // delegation that runs it releases this arm, so the verdict would change nothing and its wait
-  // would only delay the first token. (A plan step that attempted the agent and failed releases the
-  // directive without counting as a delegation; that turn is left to the orchestrator, as a turn
-  // without a reading is.)
+  // lists see has had the read started for it above, and a workflow step is never forced, so
+  // neither asks here. Nor does an --agent directive turn: the directive forces the call until its
+  // agent has run, and the delegation that runs it releases this arm, so the verdict would change
+  // nothing and its wait would only delay the first token. (A plan step that attempted the agent
+  // and failed releases the directive without counting as a delegation; that turn is left to the
+  // orchestrator, as a turn without a reading is.)
   // Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a late
-  // or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and autoApprove
+  // or failed prefetch. autoArtifactArmed is the one gate on this path: the flag and autoApprove
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
   // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
-  // Typed by assertion: it is assigned only inside the callback, which narrowing does not follow.
-  let produceIntentRead = null as Promise<ProduceIntentVerdict | null> | null;
-  let prefetchAskedToProduce: ProduceIntentVerdict | null = null;
-  const readPrefetchRouting = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-    && opts.autoApprove === true;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
       userMessage,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
-      ...(readPrefetchRouting
+      ...(autoArtifactArmed
         ? {
             onCapsuleAgents: (agents) => {
               prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
               if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
                 && directiveAgent === undefined) {
-                const priorTurnDigest = buildPriorTurnDigest(session);
-                produceIntentRead = startProduceIntentRead({
-                  userMessage,
-                  ...(priorTurnDigest ? { priorTurnDigest } : {}),
-                  sessionId: session.id,
-                  signal,
-                });
+                startIntentRead("routing");
               }
             },
           }
@@ -2864,15 +2893,15 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "info" });
     }
 
-    // The intent readout's verdict for the --auto routing arm (autonomousArtifactBuild below),
-    // awaited once, on the first iteration it is pending. It is timed as its own phase, and awaited
+    // The intent readout's verdict for the --auto arms (autonomousArtifactBuild below), awaited
+    // once, on the first iteration it is pending. It is timed as its own phase, and awaited
     // here, before llmStartedAt, because turn_performance counts a phase outside llmTimeMs: awaited
     // inside the call's window, the same seconds were counted in both, and a slow turn's SLO alert
     // named the model and this wait for one stretch of wall-clock.
     if (produceIntentRead) {
       const pendingRead = produceIntentRead;
       produceIntentRead = null;
-      prefetchAskedToProduce = await timedPhase("produceIntentReadWait", () => pendingRead);
+      intentReadVerdict = await timedPhase("produceIntentReadWait", () => pendingRead);
     }
 
     let llmResponse: LLMResponse;
@@ -2935,20 +2964,22 @@ async function _runTurn(
       // artifact request also forces the first tool call, even if the narrower
       // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
       // wantsArtifact); no topic/keywords.
+      // The word lists also fire on a question about making one ("Wie erstelle ich eine
+      // Präsentation in PowerPoint?"), so the intent readout is asked as well (started where the
+      // lists fired), and its reading that the request asks for an answer releases the arm; without
+      // a reading the lists decide as before.
       // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable): the word
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
-      // first. That signal is gated once, where the prefetch starts (readPrefetchRouting: the same
+      // first. That signal is gated once, where the prefetch starts (autoArtifactArmed: the same
       // flag and autoApprove), and is true only when that gate passed. It reads the top agent's
       // tools, not the request, so it forces only with the intent readout's word that the request
       // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
       // a question is not forced, and without a reading the orchestrator decides as on any turn.
       // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
-        ((getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-          && opts.autoApprove === true
-          && deliverableIntent.wantsArtifact)
-        || (prefetchRoutedToDeliverable && prefetchAskedToProduce === "produce");
+        (autoArtifactArmed && deliverableIntent.wantsArtifact && intentReadVerdict !== "ask")
+        || (prefetchRoutedToDeliverable && intentReadVerdict === "produce");
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
       // The research requirement is also released by a knowledge-base read that brought content
