@@ -220,4 +220,37 @@ describe("e2e scenario files", () => {
       expect(judge(reply), reply).not.toEqual([]);
     }
   });
+
+  // The table scenarios accept a web_table call as reading the page: its row, as sub-agent.ts logs
+  // it, carries the call's own arguments, and the catalogue's pages come as a list of URLs.
+  it("the table scenarios count a web_table call as reading the page, its URL given as a list", () => {
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const expectationOf = (id: string) => {
+      const turn = scenarios.find((entry) => entry.scenario.id === id)?.scenario.steps.find((step) => step.kind === "turn");
+      expect(turn?.kind, id).toBe("turn");
+      return turn?.kind === "turn" ? turn.expect : undefined;
+    };
+    const site = "http://www.nordlicht-werkzeuge.test";
+    const row = (args: Record<string, unknown>, tool = "web_table") => ({
+      type: "sub_agent_tool_call",
+      sessionId: "sub:s:researcher:1",
+      data: { agentName: "researcher", tool, phase: "done", success: true, args },
+    });
+    const pages = [`${site}/produkte/`, `${site}/produkte/seite-1.html`, `${site}/produkte/seite-2.html`, `${site}/produkte/seite-3.html`];
+    for (const id of ["core-build-site-catalogue-sum-under-50", "core-build-site-cheapest-per-category"]) {
+      expect(evaluateEventExpectations(expectationOf(id), [row({ url: pages, column: "Preis", aggregates: ["sum"] })]), id).toEqual([]);
+      expect(evaluateEventExpectations(expectationOf(id), [row({ url: [`${site}/lager.html`], aggregates: ["count"] })]), id).not.toEqual([]);
+      expect(evaluateEventExpectations(expectationOf(id), [row({ url: pages }, "web_search")]), id).not.toEqual([]);
+    }
+    const stock = expectationOf("core-build-site-stock-sum");
+    expect(evaluateEventExpectations(stock, [row({ url: `${site}/lager.html`, column: "Südtal", aggregates: ["sum"] })])).toEqual([]);
+    expect(stock?.judge?.rubric).toContain("596");
+
+    // The new scenario's reply check: the current prices sum to 227,40 €; adding the struck list
+    // price of NW-3106 gives 235,40 €, and counting page 1 twice 289,80 €.
+    const sum = expectationOf("core-build-site-catalogue-sum-under-50");
+    expect(checkReply(sum!.reply!, "Die acht Artikel unter 50 € kosten zusammen 227,40 €.")).toEqual([]);
+    expect(checkReply(sum!.reply!, "Zusammen kosten sie 235,40 €.")).not.toEqual([]);
+    expect(checkReply(sum!.reply!, "Zusammen kosten sie 289,80 €.")).not.toEqual([]);
+  });
 });
