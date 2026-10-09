@@ -57,7 +57,7 @@
     title: "Listing a path that is a file says it is a file",
     group: "guards",
     tags: ["tools", "workspace"],
-    description: "Protects the list_files fix (tools/filesystem.ts:366-376). A FILE path used to answer \"(empty directory — no files yet…)\" because readdir threw on it and the catch swallowed the error. Now the tool answers \"<path> is a file (N bytes), not a directory\". Setup: a turn writes generated/e2e-guards/inventur (write_file overwrites by default, so the step repeats safely), and HTTP confirms it in the eval account's workspace. The name has no extension on purpose: as inventur.txt the request itself said it was a file, so the swarm planned a read and list_files never ran (2026-10-09). Then a fresh session, so the answer cannot come from the conversation, asks to list that path as a folder. list_files must report a file (sub_agent_tool_call resultPreview, agent/sub-agent.ts:2384-2388), and the reply must say it is a file, or give its content as the content of a file, not an empty folder. The file stays in the eval workspace; each run overwrites it.",
+    description: "Protects the list_files fix (tools/filesystem.ts:366-376). A FILE path used to answer \"(empty directory — no files yet…)\" because readdir threw on it and the catch swallowed the error. Now the tool answers \"<path> is a file (N bytes), not a directory\". Setup: a turn writes generated/e2e-guards/inventur (write_file overwrites by default, so the step repeats safely), and HTTP confirms it in the eval account's workspace. The name has no extension on purpose: as inventur.txt the request itself said it was a file, so the swarm planned a read and list_files never ran (2026-10-09). Then a fresh session, so the answer cannot come from the conversation, asks to list that path as a folder. list_files must report a file (sub_agent_tool_call resultPreview, agent/sub-agent.ts:2384-2388), and the reply must say it is a file, or relay the content step 1 wrote, not an empty folder. The file stays in the eval workspace; each run overwrites it.",
     requires: ["model"],
     timeoutMs: 1500000,
     steps: [
@@ -86,12 +86,13 @@
             // States that the path is a file: "ist kein Ordner, sondern eine Datei", "handelt es sich
             // um eine Textdatei", "liegt eine Datei", "sondern die Datei", "ist kein Verzeichnis",
             // "is a text file", "not a directory". "Es ist kein Ordner vorhanden" does NOT count: it
-            // says not found. Or it gives what is in the path as a file's content: "Der Inhalt der
-            // Datei … lautet", "the content of the file" (list_files tells the agent to read the file,
-            // and the run then relays it). That counts only in a sentence with no negation, so "den
-            // Inhalt der Datei konnte ich nicht lesen" fails. Gaps skip dots inside a path.
+            // says not found. Or it relays what step 1 wrote, "Regal 4, Fach 9": list_files tells the
+            // agent to read the file, and the run then gives its content. The datum is the signal,
+            // not the words around it, so "Die Datei … enthält", "In … steht" and "The file …
+            // contains" all count, and a reply that could not get the content has no datum to give.
+            // Gaps skip dots inside a path.
             matches: [
-              "\\b(?:ist|is|it's|handelt es sich|verweist|zeigt|liegt|steht)\\b(?:[^.!?\\n]|[.!?](?=\\S)){0,40}?\\b(?:eine|a)\\s+(?:[^\\s.!?,]+\\s+){0,2}?[^\\s.!?,]*?(?:datei|file)\\b|\\bsondern\\s+(?:um\\s+)?(?:eine|die)\\s+(?:[^\\s.!?,]+\\s+)?[^\\s.!?,]*?datei\\b|\\bist\\s+kein(?:e|en)?\\s+(?:ordner|verzeichnis)\\b(?!(?:[^.!?\\n]|[.!?](?=\\S)){0,30}?(?:vorhanden|gefunden))|\\b(?:not|isn't)\\s+a\\s+(?:directory|folder)\\b|(?:^|[.!?](?=\\s)|\\n)(?:(?!\\b(?:nicht|nichts|kein\\w*|not|no|never)\\b|n't\\b)(?:[^.!?\\n]|[.!?](?=\\S)))*?\\b(?:inhalt|content)\\s+(?:der|of\\s+the)\\s+(?:[^\\s.!?,]+\\s+)?[^\\s.!?,]*?(?:datei|file)\\b(?:(?!\\b(?:nicht|nichts|kein\\w*|not|no|never)\\b|n't\\b)(?:[^.!?\\n]|[.!?](?=\\S)))*(?:[.!?](?=\\s|$)|\\n|$)",
+              "\\b(?:ist|is|it's|handelt es sich|verweist|zeigt|liegt|steht)\\b(?:[^.!?\\n]|[.!?](?=\\S)){0,40}?\\b(?:eine|a)\\s+(?:[^\\s.!?,]+\\s+){0,2}?[^\\s.!?,]*?(?:datei|file)\\b|\\bsondern\\s+(?:um\\s+)?(?:eine|die)\\s+(?:[^\\s.!?,]+\\s+)?[^\\s.!?,]*?datei\\b|\\bist\\s+kein(?:e|en)?\\s+(?:ordner|verzeichnis)\\b(?!(?:[^.!?\\n]|[.!?](?=\\S)){0,30}?(?:vorhanden|gefunden))|\\b(?:not|isn't)\\s+a\\s+(?:directory|folder)\\b|\\bregal\\W{1,6}4\\W{1,6}fach\\W{1,6}9\\b",
             ],
             // The old wrong answer: an empty folder.
             excludes: ["ist leer", "is empty", "leerer Ordner", "leeren Ordner", "leeres Verzeichnis", "empty directory", "empty folder"],

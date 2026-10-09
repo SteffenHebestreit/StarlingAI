@@ -159,7 +159,7 @@ describe("e2e scenario files", () => {
     }
   });
 
-  it("the list-a-file scenario lists a path whose name does not say it is a file, and takes its content relayed as a file's as honest", async () => {
+  it("the list-a-file scenario lists a path whose name does not say it is a file, and takes the content the setup wrote, in any words, as honest", async () => {
     // As inventur.txt the request itself said the path was a file: the swarm planned a read,
     // list_files never ran, and the scenario could not reach the fix it protects (2026-10-09).
     const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
@@ -175,12 +175,15 @@ describe("e2e scenario files", () => {
     expect(extname(written)).toBe("");
     expect(named(turns[0]!.message)).toBe(written);
     expect(named(listing!.message)).toBe(written);
+    // The content the setup turn asks for, after "...Inhalt (...):" and before the --auto flag.
+    const content = /\):\s*(.+?)\s+--auto\s*$/.exec(turns[0]!.message)?.[1] ?? "";
+    expect(content).not.toBe("");
 
     // What list_files answers for that path, as the row sub-agent.ts logs it.
     const ws = mkdtempSync(join(tmpdir(), "sai-e2e-list-a-file-"));
     try {
       mkdirSync(dirname(join(ws, written)), { recursive: true });
-      writeFileSync(join(ws, written), "Inventur Westmark: Regal 4, Fach 9", "utf8");
+      writeFileSync(join(ws, written), content, "utf8");
       await import("../tools/filesystem.js");
       const { getTool } = await import("../tools/registry.js");
       const result = await getTool("list_files")!.execute({ path: written }, { sessionId: "s", workspacePath: ws });
@@ -191,11 +194,21 @@ describe("e2e scenario files", () => {
     }
 
     const judge = (reply: string) => checkReply(listing!.expect!.reply!, reply);
-    // The 2026-10-09 run's answer once it had read the file, and the plain statements.
-    expect(judge(`Der Inhalt der Datei \`${written}\` lautet:\n\n\`\`\`\nInventur Westmark: Regal 4, Fach 9\n\`\`\``)).toEqual([]);
-    expect(judge(`The content of the file ${written} is: Inventur Westmark: Regal 4, Fach 9`)).toEqual([]);
-    expect(judge(`${written} ist kein Ordner, sondern eine Datei.`)).toEqual([]);
-    // An empty folder, a path not found, or a content it says it could not get.
+    // The 2026-10-09 run's answer once it had read the file, the same content in other words (a
+    // "kein" about the folder must not cost the content), and the plain statement.
+    for (const reply of [
+      `Der Inhalt der Datei \`${written}\` lautet:\n\n\`\`\`\n${content}\n\`\`\``,
+      `The content of the file ${written} is: ${content}`,
+      `Die Datei \`${written}\` enthält: ${content}`,
+      `Hier ist der Inhalt von \`${written}\`:\n\n${content}`,
+      `In \`${written}\` steht: ${content}`,
+      `The file ${written} contains: ${content}`,
+      `Kein Ordner, aber der Inhalt der Datei lautet: ${content}`,
+      `${written} ist kein Ordner, sondern eine Datei.`,
+    ]) {
+      expect(judge(reply), reply).toEqual([]);
+    }
+    // An empty folder, a path not found, or no content because it could not get it.
     for (const reply of [
       `Der Ordner ${written} ist leer.`,
       `Der Ordner ${written} wurde nicht gefunden.`,
