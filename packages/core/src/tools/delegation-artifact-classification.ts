@@ -82,9 +82,11 @@ export function looksLikePlanningOnlyResult(result: string): boolean {
 /**
  * What a delegation was DECLARED to hand back by the call that dispatched it: the `deliverable`
  * argument of delegate_to_agent, swarm_delegate, a parallel_delegate task, a run_task_graph node,
- * a record_plan step or create_ephemeral_agent — or the runtime, for a delegation it dispatches
- * itself (the corrective build). "file": the task is to create or change a file in the workspace.
- * "answer": the reply is the result. Undeclared reads as "answer" for every verdict on a run.
+ * a record_plan step (delegate steps) or create_ephemeral_agent — or the runtime, for a delegation
+ * it dispatches itself (the corrective build, the artifact repair). "file": the task is to create
+ * or change a file in the workspace. "answer": the reply is the result. Undeclared counts as
+ * "answer" for the missed-file verdict; a run whose own output claims a write it never made fails
+ * whatever was declared (looksLikeClaimedWriteMiss).
  *
  * WHY A DECLARATION. Whether a run that wrote nothing MISSED its deliverable used to be read off
  * the task text with WORKSPACE_MUTATION_TASK_RE, a table of ~50 English and German verbs. In E2E
@@ -112,12 +114,17 @@ export function readDelegationDeliverable(value: unknown): DelegationDeliverable
   return normalized === "file" || normalized === "answer" ? normalized : undefined;
 }
 
-/** The `deliverable` parameter, one definition for every tool that dispatches a delegation. */
-export function deliverableParameterSchema(): Record<string, unknown> {
+/**
+ * The `deliverable` parameter, one definition for every tool that dispatches a delegation. Model-
+ * facing on six orchestration tools, so every word costs on every turn: `scope: "delegate_step"`
+ * (record_plan) adds only that a step of another kind ignores it.
+ */
+export function deliverableParameterSchema(scope?: "delegate_step"): Record<string, unknown> {
   return {
     type: "string",
     enum: ["file", "answer"],
-    description: "\"file\" if the task must create or change a workspace file (a run that writes none fails); \"answer\" if the reply is the result (an analysis, a diagnosis, findings).",
+    description: "\"file\" if the task must create or change a workspace file (a run that writes none fails); \"answer\" if the reply is the result (an analysis, a diagnosis, findings). Omitted, no file is required."
+      + (scope === "delegate_step" ? " Delegate steps only." : ""),
   };
 }
 
@@ -129,7 +136,8 @@ export function deliverableParameterSchema(): Record<string, unknown> {
  * built on, because each guards against a loss that costs a whole build (a website routed to a
  * read-only reviewer, 2d810e7d; a deck bounced to the researcher, 6b382964; a build served cached
  * research, 2d810e7d; an app pasted inline and lost, 1ac79471). The verdict on a finished run does
- * not use this: it reads the declaration alone (looksLikeArtifactDeliverableMiss).
+ * not use this: it reads the declaration (looksLikeArtifactDeliverableMiss) and what the run's own
+ * output claims (looksLikeClaimedWriteMiss), never the verb table.
  */
 export function delegationAsksForFile(task: string, deliverable: DelegationDeliverable | undefined): boolean {
   if (deliverable) return deliverable === "file";
@@ -431,8 +439,8 @@ export function looksLikeProseFailureResult(result: string): boolean {
 export interface DelegationRunSignals {
   /** The run closed with its own `<final_answer status="…">…</final_answer>` (parseFinalAnswerTag). */
   readonly explicitVerdict?: boolean;
-  /** What the delegation was declared to hand back (DelegationDeliverable). Only "file" lets a run
-   *  that wrote nothing be judged a missed deliverable. */
+  /** What the delegation was declared to hand back (DelegationDeliverable). "file" makes a run that
+   *  wrote nothing a missed deliverable; undeclared or "answer", only a write its output claims is. */
   readonly deliverable?: DelegationDeliverable;
   /** Tool names of THIS run's calls that ran and failed — one entry per failed call; a nested
    *  specialist's failures and the person's declines excluded. Preferred over the count. */

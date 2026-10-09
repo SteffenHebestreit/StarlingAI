@@ -1600,7 +1600,7 @@ describe("swarm orchestration tools", () => {
       import("../tools/sub-agent.js"),
       import("../tools/turn-plan-tool.js"),
     ]);
-    type Schema = { properties?: Record<string, { enum?: unknown; items?: Schema }> & { [key: string]: unknown } };
+    type Schema = { properties?: Record<string, { enum?: unknown; description?: string; items?: Schema }> & { [key: string]: unknown } };
     const props = (name: string): Schema["properties"] => (getTool(name)?.parameters as Schema | undefined)?.properties;
     const itemProps = (name: string, field: string): Schema["properties"] => props(name)?.[field]?.items?.properties;
     for (const [label, properties] of [
@@ -1612,6 +1612,10 @@ describe("swarm orchestration tools", () => {
       ["record_plan.steps[]", itemProps("record_plan", "steps")],
     ] as const) {
       expect(properties?.["deliverable"]?.enum, label).toEqual(["file", "answer"]);
+      // What leaving it out means, and, on a plan step, that only a delegate step reads it.
+      const description = String(properties?.["deliverable"]?.description);
+      expect(description, label).toContain("Omitted, no file is required.");
+      expect(description.includes("Delegate steps only."), label).toBe(label === "record_plan.steps[]");
     }
   }, 30_000);
 

@@ -250,8 +250,9 @@ interface DelegationRequest {
   /**
    * What the dispatching call declared the delegation must hand back (DelegationDeliverable in
    * ./delegation-artifact-classification.ts): the model's `deliverable` argument, or "file" from
-   * the runtime's own corrective build. Only "file" lets a run that wrote nothing be judged a
-   * missed deliverable; the pre-run gates read it through delegationAsksForFile.
+   * the runtime's own corrective build and artifact repair. "file" makes a run that wrote nothing
+   * a missed deliverable; undeclared or "answer", only a write the run's output claims is judged
+   * (looksLikeClaimedWriteMiss). The pre-run gates read it through delegationAsksForFile.
    */
   deliverable?: DelegationDeliverable;
 }

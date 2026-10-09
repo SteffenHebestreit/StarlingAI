@@ -452,7 +452,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:741 | 4 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:469 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:443 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1404 | 81 |
+| `steps` | packages/core/src/config/schema.ts:1404 | 82 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
 | `store` | packages/core/src/config/schema.ts:1637 | 164 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:645 | 2 |

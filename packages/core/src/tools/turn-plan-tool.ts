@@ -59,7 +59,7 @@ registerTool({
             toolArgs: { type: "object", description: "Arguments for `tool`. Literal values only — a tool takes structured arguments, so it cannot receive an earlier step's output; make a step that needs one a delegate step." },
             parallelGroup: { type: "number", description: "Steps sharing a parallelGroup are independent and may run concurrently." },
             dependsOn: { type: "array", items: { type: "string" }, description: "Ids of steps that must finish first." },
-            deliverable: deliverableParameterSchema(),
+            deliverable: deliverableParameterSchema("delegate_step"),
           },
           required: ["description", "kind"],
         },
