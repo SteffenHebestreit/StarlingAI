@@ -17,7 +17,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:710 | 1 |
 | `admin` | packages/core/src/config/schema.ts:395 | 32 |
-| `agents` | packages/core/src/config/schema.ts:1719 | 183 |
+| `agents` | packages/core/src/config/schema.ts:1719 | 184 |
 | `alertmanager` | packages/core/src/config/schema.ts:1159 | 1 |
 | `all` | packages/core/src/config/schema.ts:1312 | 300 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1332 | 31 |
@@ -96,7 +96,7 @@ Every public schema field, where it is declared, and how many production files r
 | `configRemovals` | packages/core/src/config/schema.ts:1715 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1542 | 1 |
-| `container` | packages/core/src/config/schema.ts:716 | 80 |
+| `container` | packages/core/src/config/schema.ts:716 | 81 |
 | `contextWindow` | packages/core/src/config/schema.ts:122 | 14 |
 | `control` | packages/core/src/config/schema.ts:1690 | 57 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:896 | 4 |

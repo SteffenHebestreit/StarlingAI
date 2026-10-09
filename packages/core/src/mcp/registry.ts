@@ -18,6 +18,13 @@ const log = childLogger("mcp:registry");
 
 const _connections = new Map<string, McpClientConnection>();
 const _serverToolNames = new Map<string, string[]>();
+/**
+ * Moves on each time a server is torn down or bridged. Connecting a server takes a while (a
+ * docker server starts a container first), and a sync, a shutdown or another reconnect can
+ * change the server in that time; a reconnect reads this when its connection comes back, so it
+ * can tell its connection is no longer wanted.
+ */
+const _serverEpoch = new Map<string, number>();
 
 export async function initMcpServers(): Promise<void> {
   await syncMcpServers();
@@ -51,12 +58,7 @@ export async function syncMcpServers(): Promise<void> {
       desiredEntries.map(async ([name, cfg]) => {
           await teardownServer(name);
           const conn = await connectMcpServer(name, cfg);
-          _connections.set(name, conn);
-          const toolNames: string[] = [];
-          for (const tool of conn.tools) {
-            toolNames.push(_registerBridgedTool(name, tool.name, tool.description, tool.inputSchema, conn));
-          }
-          _serverToolNames.set(name, toolNames);
+          await _bridgeServer(name, conn);
           return { name, toolCount: conn.tools.length };
         })
     );
@@ -109,7 +111,10 @@ export async function syncMcpServers(): Promise<void> {
 }
 
 export async function shutdownMcpServers(): Promise<void> {
-  for (const name of [..._connections.keys()]) {
+  // A server that a reconnect is still connecting is not in _connections, so it is torn down
+  // by name as well: that moves its epoch, and the reconnect closes what it opened instead of
+  // bridging it after the shutdown.
+  for (const name of new Set([..._connections.keys(), ..._serverEpoch.keys()])) {
     await teardownServer(name);
   }
 }
@@ -178,6 +183,12 @@ function _registerBridgedTool(
             if (Date.now() - last >= MCP_RECONNECT_THROTTLE_MS) {
               _reconnectThrottle.set(serverName, Date.now());
               const reconnected = await reconnectServer(serverName);
+              // The server came back with the tools it lists now, which need not include this one;
+              // its tool is unregistered then, and the call is not retried on a server that no
+              // longer offers it.
+              if (reconnected && !reconnected.tools.some((tool) => tool.name === mcpToolName)) {
+                return { success: false, output: "", error: `MCP call failed: ${String(err)}. After reconnecting, ${serverName} no longer offers ${mcpToolName}.` };
+              }
               if (reconnected) {
                 try { return await runCall(reconnected); }
                 catch (retryErr) { return { success: false, output: "", error: `MCP call failed after reconnect: ${String(retryErr)}` }; }
@@ -231,23 +242,78 @@ async function guardBrowserCall(mcpToolName: string, args: Record<string, unknow
 const _reconnectThrottle = new Map<string, number>();
 const MCP_RECONNECT_THROTTLE_MS = 10_000;
 
-/** Reconnect a SINGLE bridged server (not the whole fleet) after a failed call. */
+/**
+ * Reconnect a SINGLE bridged server (not the whole fleet) after a failed call.
+ *
+ * The teardown unregisters the server's mcp__<server>__* tools, and the reconnect used to set only
+ * the new connection: agents lost those tools until the next sync or a gateway restart. A
+ * reconnect that succeeds now bridges the server again as a sync does, with the tools the server
+ * lists now and the browser guard on the playwright ones. One that does not succeed leaves the
+ * server torn down, with none of its tools registered: the connect failed, the config no longer
+ * starts the server, or a sync, a shutdown or another reconnect changed the server while this
+ * one was connecting, in which case the new connection is closed. When this reconnect's connection
+ * comes back first and a sync that tore the server down is still connecting, the sync's bridge
+ * replaces and closes it when the sync's own connection comes back.
+ */
 async function reconnectServer(name: string): Promise<McpClientConnection | null> {
-  const cfg = getConfig().mcp?.servers?.[name];
-  if (!cfg) return null;
   await teardownServer(name);
+  const epoch = _serverEpoch.get(name);
+  const cfg = getConfig().mcp?.servers?.[name];
+  if (!cfg?.autoStart) return null;
+  let conn: McpClientConnection;
   try {
-    const conn = await connectMcpServer(name, cfg);
-    _connections.set(name, conn);
-    log.info({ server: name }, "MCP server reconnected after a failed tool call");
-    return conn;
+    conn = await connectMcpServer(name, cfg);
   } catch (err) {
     log.warn({ err, server: name }, "MCP server reconnect failed");
     return null;
   }
+  if (_serverEpoch.get(name) !== epoch || !getConfig().mcp?.servers?.[name]?.autoStart) {
+    try {
+      await conn.disconnect();
+    } catch (err) {
+      log.warn({ err, server: name }, "Error disconnecting MCP server");
+    }
+    log.info({ server: name }, "MCP server changed while it was reconnecting; the new connection was closed");
+    return null;
+  }
+  await _bridgeServer(name, conn);
+  log.info({ server: name, tools: conn.tools.length }, "MCP server reconnected after a failed tool call");
+  return conn;
+}
+
+/**
+ * Makes `conn` the server's connection and registers the tools it lists as mcp__<server>__*.
+ *
+ * A sync bridges the server as soon as its connect comes back, and in that time a reconnect, or
+ * another sync, may have bridged the server already. That connection used to be overwritten and
+ * never closed, so a docker server's container kept running, and a tool that only it listed stayed
+ * registered. Now the connection already there is replaced in one step: its tools are unregistered
+ * before this connection's are registered, and it is closed afterwards.
+ */
+async function _bridgeServer(name: string, conn: McpClientConnection): Promise<void> {
+  const replaced = _connections.get(name);
+  for (const toolName of _serverToolNames.get(name) ?? []) {
+    unregisterTool(toolName);
+  }
+  _connections.set(name, conn);
+  const toolNames: string[] = [];
+  for (const tool of conn.tools) {
+    toolNames.push(_registerBridgedTool(name, tool.name, tool.description, tool.inputSchema, conn));
+  }
+  _serverToolNames.set(name, toolNames);
+  _serverEpoch.set(name, (_serverEpoch.get(name) ?? 0) + 1);
+  if (replaced && replaced !== conn) {
+    try {
+      await replaced.disconnect();
+      log.info({ server: name }, "MCP server's earlier connection closed; a newer one replaced it");
+    } catch (err) {
+      log.warn({ err, server: name }, "Error disconnecting MCP server");
+    }
+  }
 }
 
 async function teardownServer(name: string): Promise<void> {
+  _serverEpoch.set(name, (_serverEpoch.get(name) ?? 0) + 1);
   const conn = _connections.get(name);
   if (conn) {
     try {
@@ -256,6 +322,12 @@ async function teardownServer(name: string): Promise<void> {
     } catch (err) {
       log.warn({ err, server: name }, "Error disconnecting MCP server");
     }
+    // Closing takes a while (a docker server's container is removed), and a sync can bridge the
+    // server in that time. This teardown then removed that newer connection and its tools, leaving
+    // the connection open with nothing holding it. The bridge has already replaced this connection
+    // and unregistered its tools, and another teardown that took it out has done the same, so
+    // what the server has now is left alone.
+    if (_connections.get(name) !== conn) return;
     _connections.delete(name);
   }
 
