@@ -31,8 +31,8 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
-import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
-import { retrievalEvidenceMaxChars } from "./tool-result-format.js";
+import { isKnowledgeBaseWorkerResult, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -374,7 +374,11 @@ export class AgentSession {
           // Delegation results carry sub-agent evidence that the orchestrator must
           // relay faithfully.  A 500-char cap truncated evidence and caused
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
-          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
+          // A knowledge-base worker's report is a delegated result too (use_knowledge_base runs the
+          // worker agent): at the generic 500 a later turn kept little more than the tool's own
+          // relay instruction, which takes over 200 of them.
+          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name)
+            || isKnowledgeBaseWorkerResult(call.function.name);
           // execute_plan's result stands in for a WHOLE PLAN — every step's evidence at once, and
           // the only channel a `direct` or `reuse` step's output has, since those run as nested
           // calls that never become tool messages of their own. At the delegation cap it lost every
@@ -386,11 +390,16 @@ export class AgentSession {
           // than the whole budget allowed here. At the generic 500 the turn that made the search read
           // only its first few hundred characters (E2E core-ix-kb-documentation-rag). Once the turn
           // is over it is history like any other result.
+          // A knowledge-base worker's report is what the turn is told to relay as-is, and the frame
+          // has already held it to the budget of a delegated result relayed verbatim. On the turn
+          // that made the call it keeps that budget; afterwards it gets the delegation snippet.
           const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
             : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
               ? retrievalEvidenceMaxChars()
-              : (isDelegation ? 2000 : 500);
+              : isKnowledgeBaseWorkerResult(call.function.name) && i > currentTurnStart
+                ? knowledgeBaseWorkerReportMaxChars()
+                : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /

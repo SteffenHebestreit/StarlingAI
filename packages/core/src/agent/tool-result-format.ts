@@ -42,7 +42,7 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { isKnowledgeBaseWorkerResult, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
 import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
@@ -114,13 +114,25 @@ export function retrievalEvidenceAllowance(charsShown: number): number {
 }
 
 /**
- * A retrieval result held to `maxChars`, newlines and table rows kept. The tools list their passages
- * most relevant first, so a cut keeps the head and drops the least relevant, and a line in their
- * place says how much is missing. The note the turn loop appended stays after that line, when the
- * text still ends with exactly that note: a cut from the end would otherwise take the loop warning
- * with it. Anything else at the end of the text is the tool's and is cut with the rest.
+ * What one knowledge-base worker's report (isKnowledgeBaseWorkerResult) may show the model, in
+ * characters, in the frame and in the history snippet of the turn that made the call. The report is
+ * a delegated result that the tool tells the model to relay as-is, so it gets the budget a delegated
+ * result relayed verbatim gets (delegate_to_agent's long-deliverable frame): the effort-scaled
+ * maxDelegatedResultChars, 10,000 characters by default.
  */
-function boundRetrievalEvidence(resultText: string, maxChars: number, runtimeNote = ""): string {
+export function knowledgeBaseWorkerReportMaxChars(): number {
+  return effectiveMaxDelegatedResultChars();
+}
+
+/**
+ * A result held to `maxChars`, newlines and table rows kept. A cut keeps the head: a retrieval tool
+ * lists its passages most relevant first, and a knowledge-base worker's report opens with the tool's
+ * instruction and the worker's findings. A line in place of the rest says how much is missing. The
+ * note the turn loop appended stays after that line, when the text still ends with exactly that
+ * note: a cut from the end would otherwise take the loop warning with it. Anything else at the end of
+ * the text is the tool's and is cut with the rest.
+ */
+function holdToBudget(resultText: string, maxChars: number, runtimeNote = ""): string {
   const text = resultText.trim();
   if (text.length <= maxChars) return text;
   const note = runtimeNote.trimEnd();
@@ -715,9 +727,19 @@ function frameToolResult(
   // 600-character fallback below.
   if (isRetrievalEvidenceResult(toolName)) {
     const shown = frameContext?.retrievalShown;
-    const framed = boundRetrievalEvidence(resultText, retrievalEvidenceAllowance(shown?.chars ?? 0), frameContext?.runtimeNote);
+    const framed = holdToBudget(resultText, retrievalEvidenceAllowance(shown?.chars ?? 0), frameContext?.runtimeNote);
     if (shown) shown.chars += framed.length;
     return framed;
+  }
+
+  // A knowledge-base worker's report is a delegated result whose own first line already tells the
+  // model to relay it as-is: kept as the tool wrote it, up to the budget of a delegated result relayed
+  // verbatim, instead of the 600-character fallback below. It is not retrieved passages, so it does
+  // not draw on the turn's retrieval budget. Nor does it get delegate_to_agent's prose failure sniff:
+  // the tool judged the worker's run itself, and a worker that could not run comes back as an
+  // "Error: …" result, which this keeps as written too.
+  if (isKnowledgeBaseWorkerResult(toolName)) {
+    return holdToBudget(resultText, knowledgeBaseWorkerReportMaxChars(), frameContext?.runtimeNote);
   }
 
   return fallback;

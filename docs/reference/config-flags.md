@@ -253,7 +253,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxConsolidatedPerSession` | packages/core/src/config/schema.ts:1531 | 1 |
 | `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 4 |
 | `maxCrawlMs` | packages/core/src/config/schemas/retrieval.ts:198 | 1 |
-| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1891 | 1 |
+| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1891 | 2 |
 | `maxDelegationDepth` | packages/core/src/config/schemas/effort.ts:27 | 2 |
 | `maxDepthCap` | packages/core/src/config/schemas/retrieval.ts:188 | 1 |
 | `maxDiscoveredPeers` | packages/core/src/config/schema.ts:637 | 1 |
