@@ -442,14 +442,34 @@ export async function assembleTurnSystemMessages(
     // the turn has made was a discovery call, nothing has been delegated, and no plan is stored. The
     // first call that acts ends it. It is tail text, so the head does not move. A plan store that
     // cannot be read counts as holding a plan, so the nudge is not repeated over a plan it cannot see.
+    // Only the multi-domain variant is repeated, and never beside a correction (review of 0623d139).
+    // The multi-domain text is the one that sends iteration 0 to a search before record_plan. The
+    // single-domain text asks for the plan before any tool, so repeating it after search_agents or
+    // search_tools asked a turn that had already found its agent or tool for a plan of direct steps,
+    // which cost a round. A correction the runtime has pending (the no-match fallback, a required
+    // workflow run, the agent the user directed) names the one call the next response must make. The
+    // nudge beside it asked for a different call, and a record_plan is not held to the fallback route.
     const planFirst = getConfig().orchestration?.planFirst ?? true;
+    const multiDomainPlan = looksMultiDomainResearch(userMessage);
+    const correctionPending = [
+      delegatedResearchEnforcementPrompt,
+      searchAgentsNoMatchFallbackPrompt,
+      maintenanceDelegationEnforcementPrompt,
+      unresolvedDelegationEnforcementPrompt,
+      workflowCatalogEnforcementPrompt,
+      approvedRunCandidateEnforcementPrompt,
+      workflowExecutionEnforcementPrompt,
+      directiveAgentPrompt,
+    ].some((prompt) => prompt.length > 0);
     const planNudgeArmed = planFirst && (
       iterationCount === 0
-      || (turnIsStillDiscovering(params.turnToolCallCounts, params.turnDelegationCount)
+      || (multiDomainPlan
+        && !correctionPending
+        && turnIsStillDiscovering(params.turnToolCallCounts, params.turnDelegationCount)
         && (await loadTurnPlan(session.id).then((plan) => plan === null, () => false)))
     );
     if (planNudgeArmed) {
-      planGuidance = looksMultiDomainResearch(userMessage)
+      planGuidance = multiDomainPlan
         ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step NAMING it (workflow: <name>); otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only. "
           + (planRoundFold
             ? "Make record_plan the ONLY call in that response: it then runs the plan itself — the steps in dependency order, a parallelGroup concurrently, each step's result passed to the steps that depend on it — and returns every result plus any `direct` steps for you to do. Call execute_plan afterwards only if that report lists steps as YOURS TO DO or FAILED."

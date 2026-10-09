@@ -120,9 +120,13 @@ function textStream(text: string) {
   })();
 }
 
+/** Shaped like the E2E message: 300+ characters and three questions, so the multi-domain nudge. */
 const USER_MESSAGE =
-  "Visit the shop's website: find the employee count on the home page, the express shipping price on the pricing page "
-  + "and the torque setting in the documentation. Plan the steps briefly, then work through the plan.";
+  "For a short company note I need three details from the website of the Nordlicht tools company:\n"
+  + "1. How many employees does the company have according to the home page?\n"
+  + "2. What does express shipping cost there?\n"
+  + "3. Which torque level is the NW-AS 18 cordless screwdriver set to at the factory, according to the documentation?\n"
+  + "Plan the steps briefly, then work through the plan. Summarise the three details in at most four sentences.";
 
 const messagesOfCall = (index: number): LLMMessage[] => (streamMock.mock.calls[index]?.[0] ?? []) as LLMMessage[];
 const toolNamesOfCall = (index: number): string[] =>

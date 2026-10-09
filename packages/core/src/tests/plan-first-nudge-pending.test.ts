@@ -8,9 +8,10 @@
  * now, iteration 1 sent two delegations, no plan was recorded, and the plan round fold had nothing
  * to fold.
  *
- * These pin the rule: after iteration 0 the same nudge is repeated while every call the turn has
- * made was a discovery call, nothing has been delegated and no plan is stored, and the head does not
- * move. Anything else, and a config with planFirst off, leaves the prompt as it was.
+ * These pin the rule: after iteration 0 the multi-domain nudge is repeated while every call the turn
+ * has made was a discovery call, nothing has been delegated, no plan is stored and no correction is
+ * pending, and the head does not move. Anything else, the single-domain nudge, and a config with
+ * planFirst off leave the prompt as it was.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -78,21 +79,42 @@ afterAll(() => {
   rmSync(configDir, { recursive: true, force: true });
 });
 
+/** Shaped like the E2E message: 300+ characters and three questions, so the multi-domain nudge. */
 const USER_MESSAGE =
+  "For a short company note I need three details from the website of the Nordlicht tools company:\n"
+  + "1. How many employees does the company have according to the home page?\n"
+  + "2. What does express shipping cost there?\n"
+  + "3. Which torque level is the NW-AS 18 cordless screwdriver set to at the factory, according to the documentation?\n"
+  + "Plan the steps briefly, then work through the plan. Summarise the three details in at most four sentences.";
+
+/** Under 300 characters, so the single-domain nudge. */
+const SINGLE_DOMAIN_MESSAGE =
   "Visit the shop's website: find the employee count on the home page, the express shipping price on the pricing page "
   + "and the torque setting in the documentation. Plan the steps briefly, then work through the plan.";
 
+/** Every correction the runtime can have pending, each of which names the next call itself. */
+const CORRECTIONS = [
+  "delegatedResearchEnforcementPrompt",
+  "searchAgentsNoMatchFallbackPrompt",
+  "maintenanceDelegationEnforcementPrompt",
+  "unresolvedDelegationEnforcementPrompt",
+  "workflowCatalogEnforcementPrompt",
+  "approvedRunCandidateEnforcementPrompt",
+  "workflowExecutionEnforcementPrompt",
+  "directiveAgentPrompt",
+] as const;
+
 type Params = Parameters<typeof import("../agent/turn-system-prompt.js")["assembleTurnSystemMessages"]>[0];
 
-function setUp(orchestration: Record<string, unknown> = {}) {
+function setUp(orchestration: Record<string, unknown> = {}, userMessage = USER_MESSAGE) {
   writeConfig(orchestration);
   mod.resetConfigForTests();
   const session = new mod.AgentSession({ channel: "test", workspacePath: configDir, systemPrompt: "You are a test agent." });
-  session.addMessage({ role: "user", content: USER_MESSAGE });
+  session.addMessage({ role: "user", content: userMessage });
   const assemble = async (iterationCount: number, extra: Partial<Params> = {}) => (await mod.prompt.assembleTurnSystemMessages({
     session,
     iterationCount,
-    userMessage: USER_MESSAGE,
+    userMessage,
     initialDynamicGuidance: null,
     documentRagFoundDocs: false,
     trajectoryInjectionContext: "",
@@ -202,6 +224,32 @@ describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0"
     const { assemble } = setUp();
     planStore.failReads = true;
     expect(planNudge(await assemble(1, searchedOnly))).toBeUndefined();
+  });
+
+  it("repeats only the multi-domain nudge, whose own text sends iteration 0 to a search", async () => {
+    const { assemble } = setUp({}, SINGLE_DOMAIN_MESSAGE);
+    const first = planNudge(await assemble(0));
+    expect(first, "iteration 0 carries the single-domain nudge").toBeDefined();
+    expect(first).not.toBe(planNudge(await setUp().assemble(0)));
+    expect(planNudge(await assemble(1, searchedOnly))).toBeUndefined();
+    expect(planNudge(await assemble(1, { turnToolCallCounts: new Map([["search_tools", 1]]), turnDelegationCount: 0 }))).toBeUndefined();
+  });
+
+  it("is not repeated beside a pending correction, which names the next call itself", async () => {
+    const { assemble } = setUp();
+    // The no-match fallback from the review: search_agents found no usable agent on a turn that
+    // must delegate research, and the runtime now requires one named delegation.
+    const fallback = "COMPLIANCE CORRECTION: You MUST call delegate_to_agent now with agentName='researcher'.";
+    const withFallback = await assemble(1, { ...searchedOnly, searchAgentsNoMatchFallbackPrompt: fallback });
+    expect(planNudge(withFallback)).toBeUndefined();
+    expect(withFallback.some((message) => message.content === fallback)).toBe(true);
+    for (const correction of CORRECTIONS) {
+      expect(planNudge(await assemble(1, { ...searchedOnly, [correction]: "COMPLIANCE CORRECTION: x" })), correction).toBeUndefined();
+    }
+    // Iteration 0 is as it was: the nudge goes out whatever is pending.
+    for (const correction of CORRECTIONS) {
+      expect(planNudge(await assemble(0, { [correction]: "COMPLIANCE CORRECTION: x" })), correction).toBeDefined();
+    }
   });
 
   it("stays off after iteration 0 when the caller passes no tally, as before", async () => {
