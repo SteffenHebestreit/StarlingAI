@@ -2334,6 +2334,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // translation, and the user's words must reach the specialist untouched by any of them.
         // Every tool-level delegation passes through here, execute_plan's steps included.
         turnUserWords: ctx.turnUserWords,
+        // The declaration reaches the run too: one declared "answer" is never a staged build
+        // (agent/sub-agent.ts stagedBuildCandidate).
+        ...(request.deliverable ? { deliverable: request.deliverable } : {}),
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
