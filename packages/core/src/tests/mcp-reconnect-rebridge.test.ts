@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 // A fake MCP client: each connect makes a new connection with its own number, listing the tools
 // the test queued for that server (or the server's usual ones), and a connection the test marks
-// dead throws on every call, as a client whose server went away does.
+// dead throws on every call, as a client whose server went away does. A disconnect the test holds
+// waits until the test lets it finish, as closing a docker server's container takes a while.
 const fake = vi.hoisted(() => {
   const USUAL: Record<string, string[]> = {
     playwright: ["browser_navigate", "browser_snapshot", "browser_screenshot", "browser_evaluate"],
@@ -19,6 +20,7 @@ const fake = vi.hoisted(() => {
     client: { callTool: (input: { name: string; arguments: Record<string, unknown> }) => Promise<unknown> };
     disconnect: () => Promise<void>;
     disconnects: number;
+    disconnectHolds: Array<() => Promise<void>>;
   };
   const made: Connection[] = [];
   const calls: string[] = [];
@@ -40,8 +42,12 @@ const fake = vi.hoisted(() => {
           return { content: [{ type: "text", text: answers[input.name] ?? "" }] };
         },
       },
-      disconnect: async () => { conn.disconnects++; },
+      disconnect: async () => {
+        conn.disconnects++;
+        await conn.disconnectHolds.shift()?.();
+      },
       disconnects: 0,
+      disconnectHolds: [],
     };
     made.push(conn);
     return conn;
@@ -105,6 +111,15 @@ describe("an MCP server reconnected after a failed call is bridged again", () =>
     const reached = new Promise<void>((resolve) => { entered = resolve; });
     const gate = new Promise<string[]>((resolve) => { release = resolve; });
     (fake.queued[server] ??= []).push(async () => { entered(); return gate; });
+    return { reached, release };
+  };
+  /** The next disconnect of `conn` waits for `release`. */
+  const holdNextDisconnect = (conn: (typeof fake.made)[number]) => {
+    let entered!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    conn.disconnectHolds.push(async () => { entered(); await gate; });
     return { reached, release };
   };
   /** A Playwright MCP answer for a page at `url`. */
@@ -278,6 +293,77 @@ describe("an MCP server reconnected after a failed call is bridged again", () =>
     expect(fake.made.at(-1)).toMatchObject({ serverName: "reader", disconnects: 1 });
     expect(live("reader")).toBe(synced);
     expect(synced.disconnects).toBe(0);
+    expect(bridged("reader")).toEqual(names("reader", fake.USUAL["reader"]!));
+  });
+
+  it("closes the reconnected connection when a sync that started first connects the server after it", async () => {
+    // The order the test above mirrors: the reconnect's connect comes back first and bridges the
+    // server, and the sync's comes back after it.
+    const handler = tools.getTool("mcp__reader__read_page")!;
+    const syncConnect = holdNextConnect("reader");
+    const reconnectConnect = holdNextConnect("reader");
+    const old = live("reader")!;
+    const sync = registry.syncMcpServers();
+    await syncConnect.reached;
+    old.dead = true;
+    const pending = handler.execute({}, ctx);
+    await reconnectConnect.reached;
+    reconnectConnect.release(["read_page", "write_page"]);
+    expect(await pending).toMatchObject({ success: true });
+    const reconnected = live("reader")!;
+    expect(reconnected.tools.map((tool) => tool.name)).toEqual(["read_page", "write_page"]);
+    expect(fake.calls).toEqual([`#${reconnected.id} read_page`]);
+
+    syncConnect.release(fake.USUAL["reader"]!);
+    await sync;
+
+    const synced = live("reader")!;
+    expect(synced).toBe(fake.made.at(-1));
+    expect(synced.id).not.toBe(reconnected.id);
+    expect(synced.disconnects).toBe(0);
+    expect(reconnected.disconnects).toBe(1);
+    expect(bridged("reader")).toEqual(names("reader", fake.USUAL["reader"]!));
+  });
+
+  it("closes the connection of a later sync when an earlier sync connects the server after it", async () => {
+    const earlier = holdNextConnect("reader");
+    const later = holdNextConnect("reader");
+    const first = registry.syncMcpServers();
+    await earlier.reached;
+    const second = registry.syncMcpServers();
+    await later.reached;
+    later.release(["read_page", "write_page"]);
+    await second;
+    const fromSecond = live("reader")!;
+    expect(fromSecond.tools.map((tool) => tool.name)).toEqual(["read_page", "write_page"]);
+
+    earlier.release(fake.USUAL["reader"]!);
+    await first;
+
+    expect(live("reader")).toBe(fake.made.at(-1));
+    expect(live("reader")!.disconnects).toBe(0);
+    expect(fromSecond.disconnects).toBe(1);
+    expect(bridged("reader")).toEqual(names("reader", fake.USUAL["reader"]!));
+  });
+
+  it("does not take out a connection bridged while a teardown was still closing the one before it", async () => {
+    // Two syncs close the same connection; the second one's close comes back first, and that
+    // sync connects and bridges the server while the first one's close is still under way.
+    const old = live("reader")!;
+    const slowClose = holdNextDisconnect(old);
+    const first = registry.syncMcpServers();
+    await slowClose.reached;
+    await registry.syncMcpServers();
+    const fromSecond = live("reader")!;
+    expect(fromSecond.id).not.toBe(old.id);
+
+    slowClose.release();
+    await first;
+
+    const fromFirst = live("reader")!;
+    expect(fromFirst).toBe(fake.made.at(-1));
+    expect(fromFirst.disconnects).toBe(0);
+    expect(fromSecond.disconnects).toBe(1);
     expect(bridged("reader")).toEqual(names("reader", fake.USUAL["reader"]!));
   });
 
