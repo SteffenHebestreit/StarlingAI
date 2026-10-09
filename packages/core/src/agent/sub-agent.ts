@@ -2306,6 +2306,10 @@ export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | u
     "exitCode",
     "programOutputChars",
     "timedOut",
+    // Which tree the git sandbox mounted: "caller" (narrowed to this agent's own workspace root)
+    // or "repo" (the whole deployment tree, only for the full-scope maintenance agent). E2E reads
+    // it on the sub_agent_tool_call row to prove a delegated git agent never reached the repo.
+    "mountScope",
   ]) {
     if (key in metadata) {
       summary[key] = metadata[key];

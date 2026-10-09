@@ -11,6 +11,10 @@ vi.mock("node:child_process", () => {
 
 vi.mock("../tools/workspace-mount.js", () => ({
   resolveDockerWorkspaceMountSource: vi.fn((workspacePath: string) => workspacePath),
+  // git.ts now narrows the sandbox per caller via resolveDockerWorkspaceBind. For these tests the
+  // workspace path is a bare host path (not under /workspace), where the real helper returns
+  // `<path>:<at>` — mirror that so the -v spec these assertions expect is unchanged.
+  resolveDockerWorkspaceBind: vi.fn((workspacePath: string, options?: { at?: string }) => `${workspacePath}:${options?.at ?? workspacePath}`),
 }));
 
 describe("git tools", () => {
