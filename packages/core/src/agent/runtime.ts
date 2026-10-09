@@ -2992,6 +2992,15 @@ async function _runTurn(
       // record_plan, run_workflow or execute_plan 12 times in 12 and delegated 0 times, against 7
       // of 12 without it. The provider sends the opener only where the model config names the
       // syntax; unasked, nothing changes.
+      // A build's plan call is not followed by an unprefilled dispatch when its step runs. With the
+      // prefill the chart build recorded a one-step chart_designer plan 12 times in 12 (7 without).
+      // record_plan alone runs a plan with a delegate step in its own call (planRoundFold), so the
+      // delegation happens there, and one that succeeds releases the force. A forced call with the
+      // plan in place is left only after a failed delegation, or after a plan of direct steps (one
+      // website build in 12, either way). Replayed on 2026-10-09, 12 per arm, sent unprefilled as
+      // here: after the prefilled chart plan whose step failed, a valid call 12 times in 12; after
+      // the one-direct-step website plan, 10 of 12; none ran to the ceiling. Prefilled, the latter
+      // picked execute_plan 12 times in 12, a no-op for that plan.
       const forcedCallPrefill: { tool?: string } | undefined = directiveAgentPending
         ? { tool: "delegate_to_agent" }
         : (requiresArtifactDelegation || autonomousArtifactBuild) && forcedPlanState?.planRecorded === false
