@@ -28,6 +28,7 @@ probe can gate it. MODEL_NAME / EMBED_MODEL_NAME / USE_FP16 / MAX_LENGTH are env
 """
 
 import os
+import threading
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -41,19 +42,28 @@ MAX_LENGTH = int(os.environ.get("MAX_LENGTH", "512"))
 app = FastAPI(title="engram qwen reranker + embedding sidecar")
 _model = None
 _embed_model = None
+# Loads run one at a time. The gateway's first requests arrive as a burst, and each used
+# to load its own copy of the model at the same moment. With sentence-transformers 6.1 and
+# transformers 5.19 those parallel loads left lm_head on the meta device: every request in
+# the burst failed with "Cannot copy out of meta tensor", and so did every later load in
+# the process, while /health stayed green. One lock serves both models, so the embedder
+# never loads beside the reranker either.
+_load_lock = threading.Lock()
 
 
 def model():
     """Load the CrossEncoder reranker once, on first use (keeps startup cheap)."""
     global _model
     if _model is None:
-        import torch
-        from sentence_transformers import CrossEncoder
+        with _load_lock:
+            if _model is None:
+                import torch
+                from sentence_transformers import CrossEncoder
 
-        kwargs = {"max_length": MAX_LENGTH}
-        if USE_FP16 and torch.cuda.is_available():
-            kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
-        _model = CrossEncoder(MODEL_NAME, **kwargs)
+                kwargs = {"max_length": MAX_LENGTH}
+                if USE_FP16 and torch.cuda.is_available():
+                    kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+                _model = CrossEncoder(MODEL_NAME, **kwargs)
     return _model
 
 
@@ -65,15 +75,17 @@ def embed_model():
             raise HTTPException(
                 status_code=503, detail="embeddings disabled (EMBED_MODEL_NAME unset)"
             )
-        import torch
-        from sentence_transformers import SentenceTransformer
+        with _load_lock:
+            if _embed_model is None:
+                import torch
+                from sentence_transformers import SentenceTransformer
 
-        kwargs = {}
-        if torch.cuda.is_available():
-            kwargs["device"] = "cuda"
-            if USE_FP16:
-                kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
-        _embed_model = SentenceTransformer(EMBED_MODEL_NAME, **kwargs)
+                kwargs = {}
+                if torch.cuda.is_available():
+                    kwargs["device"] = "cuda"
+                    if USE_FP16:
+                        kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+                _embed_model = SentenceTransformer(EMBED_MODEL_NAME, **kwargs)
     return _embed_model
 
 
