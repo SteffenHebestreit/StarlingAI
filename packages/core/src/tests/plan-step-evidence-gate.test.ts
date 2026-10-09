@@ -626,6 +626,24 @@ describe("the research gate's turn trigger", () => {
     expect(rows("delegation_routing_filtered_research_incapable")).toEqual([]);
   }, 30_000);
 
+  it("redirects one of two routed builder slices, not both: the first to decide claims the turn's gather", async () => {
+    // Both slices route to web_coder. Each decides after its own awaits (routing, the fact read), and
+    // the dispatch that used to claim the turn's outside source comes after more (lease, budget,
+    // admission), so both decided first and both were sent to research: the build never ran.
+    routeAs([{ name: "web_coder", score: 0.86 }, { name: "researcher", score: 0.81 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("parallel_delegate")!.execute({ tasks: [
+      { task: FRENCH_BUILD },
+      { task: "Construire une deuxième page avec ces informations." },
+    ] }, turnCtx("s-routed-pair"));
+
+    expect(ran().sort()).toEqual(["researcher", "web_coder"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["web_coder"], redirectedTo: null, trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
   it("leaves a routed builder slice alone when a sibling slice names its gatherer", async () => {
     routeAs([{ name: "web_coder", score: 0.86 }, { name: "researcher", score: 0.81 }]);
     const { getTool } = await import("../tools/registry.js");

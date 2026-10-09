@@ -1629,6 +1629,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             candidateQueue.push(topCandidate.name);
           }
         }
+        // Claimed here, synchronously after the decision, as the explicit path claims its pick. The
+        // dispatch below claims it too, but only after the lease, budget and admission waits: two
+        // routed builder slices of one parallel_delegate each decided before either got there, both
+        // dropped web_coder, and the build never ran.
+        if (routedTurnTriggered && ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]) {
+          const pickConfig = getConfig();
+          const pick = candidateQueue[0];
+          if (agentCfgReachesOutsideWorkspace(pickConfig.subAgents[pick] ?? readPromotedAgents(pickConfig.workspacePath)[pick])) {
+            ctx.turnEvidence.outsideEngaged = pick;
+          }
+        }
       }
 
       // ── Step 1b: shortened-query recovery for verbose task-only delegations ──
