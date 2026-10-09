@@ -5095,12 +5095,16 @@ async function _runTurn(
             });
             continue;
           }
-          // A workflow step's turn records no plan of its own, and the agents its task names stand in
+          // A workflow step's turn usually records no plan of its own, and the agents its task names stand in
           // for one (agent/workflow-step-pipeline.ts). Without them the turn ended at its first
           // delegation that returned: the scene's researcher ran, and the agents named after it were
           // forbidden by the synthesis requirement below (E2E 2026-10-09). A plan the turn did record
-          // is its own reading of the task and is followed instead, above.
-          if (!continuationPlan && workflowStepPipeline.length > 0) {
+          // is followed first, above, while it has steps left. Once it has none the pipeline still
+          // applies: a step's turn that recorded a plan of researcher alone ran it inside record_plan's
+          // own call (orchestration.planRoundFold), the finished plan did not continue, and the agents
+          // named after researcher were forbidden again (review, 2026-10-09). The agents a plan ran
+          // are read from its nested calls above, so they are not offered again.
+          if (workflowStepPipeline.length > 0) {
             const remainingStepAgents = remainingWorkflowStepAgents({
               pipeline: workflowStepPipeline,
               returned: workflowStepAgentsReturned,

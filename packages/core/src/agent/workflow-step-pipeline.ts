@@ -5,10 +5,10 @@
  * A step that is not run by one agent directly runs as an orchestrator turn of its own
  * (tools/workflow-catalog.ts, agent/scene-worker.ts), and that turn ended after its first delegation
  * that returned evidence: the runtime then requires synthesis ("Do NOT delegate again") unless a
- * recorded plan still has steps left, and a step's turn records none. In the E2E run of 2026-10-09,
- * source_grounded_paper_packet ran researcher and its fan-out to the rest of the scene's agents was
- * rejected, and verified_research_brief wrote the brief itself after researcher. Neither reached the
- * agents the scene's author had named, in order, in the task.
+ * recorded plan still has steps left, and a step's turn records none, or one it has finished. In the
+ * E2E run of 2026-10-09, source_grounded_paper_packet ran researcher and its fan-out to the rest of
+ * the scene's agents was rejected, and verified_research_brief wrote the brief itself after researcher.
+ * Neither reached the agents the scene's author had named, in order, in the task.
  *
  * The pipeline is handed to the step's turn rather than recorded as its plan. A recorded plan is read
  * by execute_plan, which runs every step of it, and a scene's task names agents it calls for only

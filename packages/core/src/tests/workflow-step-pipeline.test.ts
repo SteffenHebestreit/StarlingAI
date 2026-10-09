@@ -294,6 +294,49 @@ describe("a scene or job step's turn runs the agents its task names, in the task
     expect(directives[0]).not.toContain("document_intake");
   });
 
+  // Step turns still get record_plan, and a plan recorded alone runs in the same call
+  // (orchestration.planRoundFold). A finished plan does not continue, and the pipeline was consulted
+  // only when no plan existed, so a one-step plan of researcher ended the turn as before (review of
+  // 5564404b, 2026-10-09).
+  it("a plan the step's turn recorded and finished does not end it before the agents named after the plan's", async () => {
+    const { registry, delegated } = await loadModules();
+    await import("../tools/plan-executor.js");
+    await import("../tools/turn-plan-tool.js");
+    const directives: string[] = [];
+    let call = 0;
+    streamMock.mockImplementation((messages: LLMMessage[]) => {
+      call += 1;
+      if (call === 1) {
+        return toolCallStream("p1", "record_plan", {
+          objective: "Write the sourced brief.",
+          steps: [{ id: "s1", description: "Find the sources.", kind: "delegate", agent: "researcher" }],
+        });
+      }
+      const directive = lastDirective(messages);
+      if (directive) directives.push(directive);
+      if (directive?.startsWith(CONTINUE)) {
+        const next = PIPELINE
+          .map((agent) => ({ agent, at: directive.indexOf(agent) }))
+          .filter((mention) => mention.at !== -1)
+          .sort((a, b) => a.at - b.at)[0]?.agent;
+        if (next) return toolCallStream(`d${call}`, "delegate_to_agent", { agentName: next, task: "Do your part of the brief." });
+      }
+      return textStream("Brief: founded 1987, 146 employees, warehouses Nordhafen, Südtal and Westmark.");
+    });
+
+    const result = await registry.getTool("run_workflow")!.execute(
+      { name: "sourced_brief", workflowType: "scene" },
+      { sessionId: "chat-pipeline-plan", workspacePath: "/workspace" },
+    );
+
+    expect(result.success).toBe(true);
+    // researcher ran inside record_plan's call, and is not offered again.
+    expect(delegated).toEqual(PIPELINE);
+    expect(directives.map(directiveKind)).toEqual(["continue", "continue", "synthesis"]);
+    expect(directives[0]).toContain("evidence_analyst, summarizer");
+    expect(directives[0]).not.toContain("researcher");
+  });
+
   it("control: a step whose task names no agent ends at its first delegation, as before", async () => {
     const { registry, delegated } = await loadModules();
     const directives = scriptDirectiveFollowingModel("researcher");
