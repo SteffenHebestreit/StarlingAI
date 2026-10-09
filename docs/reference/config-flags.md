@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:395 | 32 |
 | `agents` | packages/core/src/config/schema.ts:1719 | 185 |
 | `alertmanager` | packages/core/src/config/schema.ts:1159 | 1 |
-| `all` | packages/core/src/config/schema.ts:1312 | 302 |
+| `all` | packages/core/src/config/schema.ts:1312 | 303 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1332 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1275 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 77 |
 | `bucket` | packages/core/src/config/schema.ts:482 | 25 |
-| `budget` | packages/core/src/config/schema.ts:1655 | 95 |
+| `budget` | packages/core/src/config/schema.ts:1655 | 96 |
 | `budgets` | packages/core/src/config/schema.ts:543 | 16 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:932 | 48 |
@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:731 | 120 |
 | `http` | packages/core/src/config/schema.ts:776 | 91 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1333 | 20 |
-| `id` | packages/core/src/config/schema.ts:585 | 299 |
+| `id` | packages/core/src/config/schema.ts:585 | 300 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1380 | 2 |
 | `image` | packages/core/src/config/schema.ts:704 | 102 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -347,7 +347,7 @@ Every public schema field, where it is declared, and how many production files r
 | `plugins` | packages/core/src/config/schema.ts:1985 | 15 |
 | `points` | packages/core/src/config/schemas/decisions.ts:56 | 54 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
-| `port` | packages/core/src/config/schema.ts:327 | 40 |
+| `port` | packages/core/src/config/schema.ts:327 | 41 |
 | `primary` | packages/core/src/config/schema.ts:111 | 70 |
 | `profiles` | packages/core/src/config/schema.ts:1112 | 10 |
 | `progressVerifierSemantic` | packages/core/src/config/schemas/orchestration.ts:673 | 2 |
@@ -492,7 +492,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:295 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:654 | 2 |
-| `tools` | packages/core/src/config/schema.ts:945 | 234 |
+| `tools` | packages/core/src/config/schema.ts:945 | 235 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |
@@ -509,7 +509,7 @@ Every public schema field, where it is declared, and how many production files r
 | `url` | packages/core/src/config/schema.ts:587 | 154 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:130 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
-| `urls` | packages/core/src/config/schema.ts:810 | 12 |
+| `urls` | packages/core/src/config/schema.ts:810 | 13 |
 | `userAgent` | packages/core/src/config/schema.ts:1173 | 3 |
 | `username` | packages/core/src/config/schema.ts:376 | 54 |
 | `usernameClaim` | packages/core/src/config/schema.ts:416 | 1 |

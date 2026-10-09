@@ -24,6 +24,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import { coerceJsonArrayArg } from "./json-arg-coercion.js";
+import { chargeWebTablePages, WEB_TABLE_PAGES_PER_RUN, webTablePagesUsed } from "./web-table-budget.js";
 import {
   AGGREGATES,
   computeTables,
@@ -45,7 +46,7 @@ const log = childLogger("tool:web_table");
 
 export const WEB_TABLE_LIMITS = Object.freeze({
   pagesPerCall: 10,
-  pagesPerRun: 40,
+  pagesPerRun: WEB_TABLE_PAGES_PER_RUN,
   pageBytes: 5 * 1024 * 1024,
   callBytes: 10 * 1024 * 1024,
   /** Redirects per page: a table page needs no long sign-in chain (web_fetch follows 20). */
@@ -55,8 +56,6 @@ export const WEB_TABLE_LIMITS = Object.freeze({
   /** What the tab source reads of the page: at most this many top-level tables and characters. */
   tabTables: 50,
   tabChars: 2_000_000,
-  /** Sessions whose page counts are kept; the oldest is dropped past this, as a backstop. */
-  sessions: 1_024,
 });
 
 /** The call deadline. The registry's own 120 s timeout is a race that does not stop the handler. */
@@ -68,29 +67,9 @@ export function setWebTableDeadlineForTests(ms?: number): void {
 }
 
 // ─── Pages per run ────────────────────────────────────────────────────────────
+// Counted in tools/web-table-budget.ts, which the sub-agent loop clears at run end.
 
-/** Pages read per session (a sub-agent run's own id), in insertion order for the LRU backstop. */
-const pagesBySession = new Map<string, number>();
-
-function pagesUsed(sessionId: string): number {
-  return pagesBySession.get(sessionId) ?? 0;
-}
-
-function chargePages(sessionId: string, pages: number): void {
-  const used = pagesUsed(sessionId) + pages;
-  pagesBySession.delete(sessionId);
-  pagesBySession.set(sessionId, used);
-  while (pagesBySession.size > WEB_TABLE_LIMITS.sessions) {
-    const oldest = pagesBySession.keys().next().value;
-    if (oldest === undefined) break;
-    pagesBySession.delete(oldest);
-  }
-}
-
-/** Forget a run's page count; called when a sub-agent run ends, as clearSearchSessionState is. */
-export function clearWebTableSessionState(sessionId: string): void {
-  pagesBySession.delete(sessionId);
-}
+export { clearWebTableSessionState } from "./web-table-budget.js";
 
 // ─── Arguments ────────────────────────────────────────────────────────────────
 
@@ -343,7 +322,7 @@ async function fromUrls(request: Request, ctx: ToolContext): Promise<ToolResult>
     const refused = await web.checkUrlSsrf(url);
     if (refused) return fetchFailure(`${url}: ${refused}; nothing was fetched`, meta);
   }
-  const used = pagesUsed(ctx.sessionId);
+  const used = webTablePagesUsed(ctx.sessionId);
   if (used + request.urls.length > WEB_TABLE_LIMITS.pagesPerRun) {
     return {
       success: false,
@@ -369,7 +348,7 @@ async function fromUrls(request: Request, ctx: ToolContext): Promise<ToolResult>
       if (ctx.signal?.aborted) throw new Stopped("aborted");
       const left = deadline - Date.now();
       if (left <= 0) throw new Stopped("deadline");
-      chargePages(ctx.sessionId, 1);
+      chargeWebTablePages(ctx.sessionId, 1);
       const fetching = web.safeFetchFinal(url, Math.min(WEB_TABLE_LIMITS.requestMs, left), { headers: REQUEST_HEADERS }, WEB_TABLE_LIMITS.redirects, left);
       // An answer that arrives after the call stopped waiting is not read.
       fetching.then(({ res }) => {
@@ -447,8 +426,8 @@ async function fromTab(request: Request, ctx: ToolContext): Promise<ToolResult> 
     return argumentError("source \"tab\" reads the page this agent opened in the browser, and this agent has no browser tool that opens pages; give the page's URL instead (source \"url\")");
   }
   if (!getMcpConnections().has("playwright")) return fetchFailure("the browser is not connected; give the page's URL instead (source \"url\")", meta);
-  if (pagesUsed(ctx.sessionId) + 1 > WEB_TABLE_LIMITS.pagesPerRun) {
-    return { success: false, output: "", error: `this run has read ${pagesUsed(ctx.sessionId)} pages with web_table, its limit is ${WEB_TABLE_LIMITS.pagesPerRun}; compute from what was read` };
+  if (webTablePagesUsed(ctx.sessionId) + 1 > WEB_TABLE_LIMITS.pagesPerRun) {
+    return { success: false, output: "", error: `this run has read ${webTablePagesUsed(ctx.sessionId)} pages with web_table, its limit is ${WEB_TABLE_LIMITS.pagesPerRun}; compute from what was read` };
   }
   const web = await import("./web.js");
   const { callPlaywrightTool } = await import("./multimodal.js");
@@ -469,7 +448,7 @@ async function fromTab(request: Request, ctx: ToolContext): Promise<ToolResult> 
 }`;
   let report: string;
   try {
-    chargePages(ctx.sessionId, 1);
+    chargeWebTablePages(ctx.sessionId, 1);
     report = await bounded(callPlaywrightTool("browser_evaluate", { function: script }), deadline, ctx.signal);
   } catch (err) {
     if (err instanceof Stopped) return fetchFailure(`${stoppedText(err.why)}; the browser tab's tables were not read`, meta);

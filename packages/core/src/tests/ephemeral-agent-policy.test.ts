@@ -243,6 +243,32 @@ describe("create_ephemeral_agent policy", () => {
     expect(result.metadata?.["suggestedTools"]).toEqual(expect.arrayContaining(["web_search"]));
   }, 15000);
 
+  // web_table is grantable and reaches the web: a temporary agent asked for a total over a table
+  // at a URL holds web_table alone, and the URL-task check accepts it.
+  it("grants web_table to an ephemeral agent whose task names a URL", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+
+    const createEphemeralAgent = getTool("create_ephemeral_agent");
+    const toolsParameter = (createEphemeralAgent!.parameters as { properties: { tools: { description: string } } }).properties.tools;
+    expect(toolsParameter.description).toMatch(/Allowed values: .*\bweb_table\b/);
+
+    const result = await createEphemeralAgent!.execute({
+      agentName: "stock_total_reader",
+      description: "Reads one stock table and totals a column.",
+      systemPrompt: "Compute the requested total from the page's table with web_table.",
+      tools: ["web_table"],
+      task: "Wie hoch ist der Gesamtbestand am Standort Südtal laut http://www.nordlicht-werkzeuge.test/lager.html?",
+    }, {
+      sessionId: "test-session",
+      workspacePath: "/workspace",
+    });
+
+    expect(result.success, result.error).toBe(true);
+  }, 15000);
+
   it("accepts non-research ephemeral agents without web tools", async () => {
     // The validator must NOT fire on agents whose description is pure
     // analysis / writing / refactoring — only when the spec explicitly

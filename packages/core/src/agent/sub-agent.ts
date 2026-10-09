@@ -118,6 +118,8 @@ import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swa
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
 import { inferCompletedRunOutcome, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
+import { coerceJsonArrayArg } from "../tools/json-arg-coercion.js";
+import { clearWebTableSessionState } from "../tools/web-table-budget.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -358,6 +360,59 @@ const ROUTING_METADATA_TOOL_NAMES = new Set([
 const FETCH_PRODUCTIVITY_TOOL_NAMES = new Set(["web_fetch", "url_inspect", "browser_navigate"]);
 const NON_PRODUCTIVE_FETCH_STREAK_LIMIT = 4;
 const NON_PRODUCTIVE_FETCH_RE = /could not be extracted|document-extraction service is unavailable|page not found|404 not found|\b403 forbidden\b|\b429\b|too many requests|access denied|rate.?limit|no content|empty (?:page|response)/i;
+
+/**
+ * A page address as the run's read set holds it: parsed (host case, default port) and without its
+ * fragment, which is never sent. Text that is not a URL is kept as it is, minus the fragment.
+ */
+export function comparablePageUrl(url: string): string {
+  const trimmed = url.trim();
+  let text = trimmed;
+  try {
+    text = new URL(trimmed).href;
+  } catch {
+    // compared as given
+  }
+  const hash = text.indexOf("#");
+  return hash < 0 ? text : text.slice(0, hash);
+}
+
+/**
+ * Whether a web_table call may run after the evidence strip withdrew the gathering tools. web_table
+ * is not a gathering tool (it reads no page without a table), so the strip leaves it callable, and
+ * a run told "write the final answer now" could fetch ten new pages with it. Computing over pages
+ * the run has already read is exactly what it should do at that point: a call is allowed when it
+ * computes (aggregates, where or group_by, or reads the open browser tab) and every URL it names is
+ * one the run read (`readUrls`, comparablePageUrl form). Anything else is refused as the strip
+ * refuses a gathering tool.
+ */
+export function webTableCallAllowedAfterEvidenceStrip(args: Record<string, unknown> | undefined, readUrls: ReadonlySet<string>): boolean {
+  const given = (value: unknown): boolean => {
+    if (value === undefined || value === null) return false;
+    const coerced = coerceJsonArrayArg(value);
+    if (Array.isArray(coerced)) return coerced.length > 0;
+    return typeof coerced === "string" ? coerced.trim().length > 0 : true;
+  };
+  const tab = args?.["source"] === "tab";
+  if (!tab && !given(args?.["aggregates"]) && !given(args?.["where"]) && !given(args?.["group_by"])) return false;
+  const rawUrls = coerceJsonArrayArg(args?.["url"]);
+  const urls = (Array.isArray(rawUrls) ? rawUrls : rawUrls === undefined || rawUrls === null || rawUrls === "" ? [] : [rawUrls])
+    .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+  if (tab) return urls.every((url) => readUrls.has(comparablePageUrl(url)));
+  return urls.length > 0 && urls.every((url) => readUrls.has(comparablePageUrl(url)));
+}
+
+/**
+ * Whether a call reads state that can change between two identical calls, so the consecutive-
+ * duplicate cache may not answer it: a browser or computer tool, and web_table reading the browser
+ * tab (source "tab"), whose page a click between two identical calls can change. That cache is
+ * keyed by tool name and survives the click, so a browser_agent paging through a table with the
+ * tab source would get page 1's computed lines back as page 2's. web_table over URLs reads the
+ * same pages again and is still answered from the cache.
+ */
+export function readsLiveState(name: string, args: Record<string, unknown> | undefined): boolean {
+  return isLiveStateTool(name) || (name === "web_table" && args?.["source"] === "tab");
+}
 
 /** True when a fetch result carried no usable content (cost-center 3, audit 5d51862f). */
 export function fetchResultIsNonProductive(success: boolean, content: string): boolean {
@@ -1172,6 +1227,9 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_snapshot: 8,
   web_search: 14,
   web_fetch: 16,
+  // A web_table call reads up to 10 pages (40 per run, tools/web-table-budget.ts), so 8 calls
+  // bound a run at 240 requests counting redirects, under web_fetch's 16 × 21.
+  web_table: 8,
   // KB retrieval can honestly loop like web_search; lifecycle calls cannot.
   search_knowledge_base: 12,
   list_knowledge_bases: 4,
@@ -2285,6 +2343,9 @@ export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | u
     "exitCode",
     "programOutputChars",
     "timedOut",
+    // web_table's one namespaced key (pages, table, computed values, fetchFailed): flat fields
+    // would collide with other tools' keys, and any key not listed here is dropped.
+    "webTable",
   ]) {
     if (key in metadata) {
       summary[key] = metadata[key];
@@ -4112,6 +4173,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // E21: Source-diversity — detect when research plateaus on repeated domains
     const visitedSourceDomains = new Set<string>();
     let consecutiveStaleDomainFetches = 0;
+    // The pages this run has read (web_fetch, browser_navigate and web_table, comparablePageUrl
+    // form): after the evidence strip, web_table may compute over these and fetch nothing new.
+    const readPageUrls = new Set<string>();
     // Cost-center 3 (audit 5d51862f): consecutive fetches that returned NO usable content
     // (404 / blocked / non-extractable PDF / error page). These slip past the success-only
     // stale-domain plateau, so the model keeps guessing alternate URLs for the same document
@@ -6990,6 +7054,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           });
           continue;
         }
+        if (tc.name === "web_table" && sufficiencyToolsStripped && !webTableCallAllowedAfterEvidenceStrip(tc.arguments, readPageUrls)) {
+          logAudit(
+            "sub_agent_tool_blocked",
+            { agentName: opts.agentName, tool: tc.name, reason: "evidence_cap_enforced" },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+          toolResults.push({
+            role: "tool",
+            content: `${describeRunBlockedTool(tc.name, "evidence_cap_enforced")} `
+              + "web_table may still compute (aggregates, where, group_by) over pages this run has already read.",
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
 
         if (!isToolAllowed(tc.name)) {
           toolResults.push({
@@ -7329,7 +7407,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
-        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
+        if (prev && prev.args === argsSig && !readsLiveState(tc.name, tc.arguments) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
           if (loopBrakeRefuses(prev.result)) continue;
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
@@ -7872,6 +7950,24 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           } else {
             nonProductiveFetchStreak = 0;
           }
+        } else if (tc.name === "web_table") {
+          // Not by fetchResultIsNonProductive: its text scan would count a computed 429 or a row
+          // value as a dead fetch, and an argument error as a failed one. The tool says which
+          // failures reached no page (fetchFailed); an argument error leaves the streak alone.
+          const webTable = result.metadata?.["webTable"] as { fetchFailed?: unknown } | undefined;
+          if (webTable?.fetchFailed === true) nonProductiveFetchStreak += 1;
+          else if (result.success) nonProductiveFetchStreak = 0;
+        }
+        if (result.success) {
+          const urlArg = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
+          if ((tc.name === "web_fetch" || tc.name === "browser_navigate") && typeof urlArg === "string") readPageUrls.add(comparablePageUrl(urlArg));
+          if (tc.name === "web_table") {
+            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown } | undefined;
+            for (const list of [webTable?.urls, webTable?.finalUrls]) {
+              if (!Array.isArray(list)) continue;
+              for (const url of list) if (typeof url === "string") readPageUrls.add(comparablePageUrl(url));
+            }
+          }
         }
 
         // When web_search reports degraded/hard-blocked, block it at the call site for the
@@ -7972,7 +8068,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // replay it: live-state tools, NEVER_REPLAYED_TOOLS and a write that just emptied the
         // caches are never answered from one, so the brake never sees them either.
         if (loopBrakeEnabled && (idempotentCallCache.has(idemKey)
-          || (lastToolCallSig.get(tc.name)?.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
+          || (lastToolCallSig.get(tc.name)?.args === argsSig && !readsLiveState(tc.name, tc.arguments) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
           replaysSinceWrite.set(idemKey, { calls: 1, answers: [executedAnswer] });
         }
       }
@@ -8873,6 +8969,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Clean up per-session search circuit-breaker state to avoid memory leaks.
     const clearSearch = await getSearchCleanup();
     clearSearch(subSessionId);
+    clearWebTableSessionState(subSessionId);
 
     // Transfer any computer sessions the sub-agent created back to the parent
     // so the orchestrator can reuse them if it falls back to direct tool calls.

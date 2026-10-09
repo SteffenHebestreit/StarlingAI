@@ -739,11 +739,13 @@ const COORDINATION_TOOL_NAMES = new Set<string>([
 ]);
 
 /** True for a tool name that can reach the open web (real config tool names,
- *  not just the ephemeral mcp__playwright__ grants in RESEARCH_CAPABLE_TOOL_NAMES). */
+ *  not just the ephemeral mcp__playwright__ grants in RESEARCH_CAPABLE_TOOL_NAMES). web_table
+ *  fetches pages, so a URL task's validator and a plan step's outside reach count it. */
 export function isWebReachingToolName(toolName: string): boolean {
   if (RESEARCH_CAPABLE_TOOL_NAMES.has(toolName)) return true;
   return toolName === "web_search"
     || toolName === "web_fetch"
+    || toolName === "web_table"
     || toolName === "fetch_image"
     || toolName === "url_inspect"
     || toolName.startsWith("browser_");
@@ -777,6 +779,9 @@ const BROWSER_TAB_VIEW_TOOL_NAMES = new Set<string>([
  */
 export function isWebGatheringToolName(toolName: string): boolean {
   if (toolName === "url_inspect" || BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName)) return false;
+  // web_table reads a page's tables and nothing else: given a page without one it returns no
+  // text. An agent holding only web_table would be handed "read this page" tasks it cannot do.
+  if (toolName === "web_table") return false;
   return isWebReachingToolName(toolName);
 }
 

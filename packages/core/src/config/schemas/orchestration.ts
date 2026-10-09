@@ -888,7 +888,7 @@ export const OrchestrationSchema = z.object({
   durableApprovals: z.boolean().default(false),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
-   *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
+   *  Built-in: web_search=14, web_fetch=16, web_table=8, write_file=3, … */
   subAgentToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
   /** Per-call caps specifically for the mission_coordinator sub-agent.
    *  Coordinator overrides layer on top of subAgentToolCaps overrides.

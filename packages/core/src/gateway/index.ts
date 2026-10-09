@@ -1827,7 +1827,7 @@ export function createGateway() {
       config: getConfig().orchestration,
       defaults: {
         maxParallelSlices: 2,
-        subAgentToolCaps: { web_search: 14, web_fetch: 16, write_file: 3, delegate_to_agent: 3, computer_snapshot: 8 },
+        subAgentToolCaps: { web_search: 14, web_fetch: 16, web_table: 8, write_file: 3, delegate_to_agent: 3, computer_snapshot: 8 },
         coordinatorToolCaps: { delegate_to_agent: 6, swarm_delegate: 6, web_search: 20, web_fetch: 25 },
         perTurnCaps: { delegate_to_agent: 5, computer_click: 8, computer_type: 6, computer_hotkey: 6, computer_snapshot: 3 },
       },
