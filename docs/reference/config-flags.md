@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 29 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1093 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1091 | 1 |
-| `label` | packages/core/src/config/schema.ts:273 | 147 |
+| `label` | packages/core/src/config/schema.ts:273 | 148 |
 | `labeledAt` | packages/core/src/config/schema.ts:927 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:926 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 96 |
@@ -276,7 +276,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxSteps` | packages/core/src/config/schema.ts:1565 | 4 |
 | `maxStreamTotalMs` | packages/core/src/config/schema.ts:167 | 4 |
 | `maxTemplateOutputChars` | packages/core/src/config/schema.ts:1567 | 2 |
-| `maxTokens` | packages/core/src/config/schema.ts:143 | 24 |
+| `maxTokens` | packages/core/src/config/schema.ts:143 | 25 |
 | `maxTokensPerTask` | packages/core/src/config/schema.ts:1936 | 1 |
 | `maxToolCalls` | packages/core/src/config/schema.ts:1660 | 3 |
 | `maxToolCallsPerTask` | packages/core/src/config/schema.ts:1938 | 1 |

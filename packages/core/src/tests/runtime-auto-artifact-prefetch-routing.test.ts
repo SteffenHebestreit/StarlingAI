@@ -284,11 +284,15 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     const options = await firstCallOptions(loaded, MERMAID_REQUEST, true);
     expect(prefetchCalls.count).toBe(1);
     expect(options?.toolChoice).toBe("required");
-    // Asked once for the whole turn, in both option orders, under the turn's signal, as routing-tier work.
+    // Asked once for the whole turn, in both option orders at once and only as far as the mode line,
+    // under the turn's signal, as routing-tier work.
     expect(readoutMock).toHaveBeenCalledTimes(1);
-    const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string; priorTurnDigest?: string }, { bothOrders?: boolean; signal?: AbortSignal }];
+    const [, input, readoutOptions] = readoutMock.mock.calls[0] as [unknown, { userMessage: string; priorTurnDigest?: string }, { bothOrders?: boolean; concurrentOrders?: boolean; maxTokens?: number; signal?: AbortSignal }];
     expect(input).toEqual({ userMessage: MERMAID_REQUEST });
     expect(readoutOptions.bothOrders).toBe(true);
+    expect(readoutOptions.concurrentOrders).toBe(true);
+    expect(readoutOptions.maxTokens).toBe(loaded.turnSetup.PRODUCE_INTENT_READ_MAX_TOKENS);
+    expect(loaded.turnSetup.PRODUCE_INTENT_READ_MAX_TOKENS).toBeLessThan(10);
     expect(readoutOptions.signal).toBeInstanceOf(AbortSignal);
     expect(readoutCallSites).toEqual([{ callSite: "routing_tier", agentName: "intent_readout" }]);
     // One row: the reading, rounded, and never the message or the readout's restatement.

@@ -131,12 +131,27 @@ export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCap
 export const ASK_MODES: ReadonlySet<string> = new Set(["converse", "GATHER", "VERIFY"]);
 
 /**
- * Wall-clock bound on the produce-intent read, both option orders together. The readout measured
- * 0.86-1.16 s a call warm (agent/intent-shadow.ts); the rest leaves room for a cold prefill of its
- * ~1k-token prefix. Iteration 0 waits for it, so it is well under the shadow's own bound
- * (INTENT_SHADOW_TIMEOUT_MS, 15 s).
+ * Wall-clock bound on the produce-intent read, both option orders together. Iteration 0 waits for
+ * it, so it is well under the shadow's own bound (INTENT_SHADOW_TIMEOUT_MS, 15 s). The shadow's
+ * 0.86-1.16 s a call is not what a turn saw: on the Halo (2026-10-09) the two orders one after the
+ * other, each writing its whole reply, ran past this bound on 16 of 46 probe reads, and on every
+ * one after the server's slots had been overwritten. Asked as now, both at once and the mode line
+ * alone (PRODUCE_INTENT_READ_MAX_TOKENS), a new message took p50 2.3 s alone and 3.1 s with the
+ * source judge's call beside it; after the slots had been overwritten, 3.6 s (p90 4.7 s). None of
+ * 151 such reads outside a short server outage reached the bound.
  */
 export const PRODUCE_INTENT_READ_TIMEOUT_MS = 6_000;
+
+/**
+ * The produce-intent read's output cap: the reply's first line and no more. The verdict reads the
+ * mode facet alone, and mode is the line the grammar writes first, so nothing after it can change
+ * it: the six other letters and the English restatement were tokens the turn's first call waited
+ * for, 43 to 54 a pass, decoded at about 42 a second a stream on the Halo (2026-10-09). `mode: C`
+ * is three tokens on Qwen's tokenizer (a cap of two read no mode); three more leave room for a
+ * tokenizer that splits the label. A reply cut there reads the mode as the whole reply does and the
+ * other facets as missing (parseIntentReadout).
+ */
+export const PRODUCE_INTENT_READ_MAX_TOKENS = 6;
 
 /** What the readout's mode says of the request: something to be made or done, or an answer. */
 export type ProduceIntentVerdict = "produce" | "ask";
@@ -159,7 +174,9 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * at 0.817. The readout's mode reads the request itself, in any language, and asks exactly this:
  * what the request asks the assistant to do, the verb and not the topic. On the bench it read mode
  * right in 84.8 % of 312 cases with both option orders averaged and in 74.2 % with one, and on real
- * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked.
+ * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked,
+ * at once (askIntentReadout concurrentOrders) and only as far as the mode line
+ * (PRODUCE_INTENT_READ_MAX_TOKENS): the turn's first call waits for them.
  *
  * Resolves to "produce", "ask", or null when there is no reading: an Anthropic routing tier (the
  * readout needs a grammar and token logprobs, which only a llama.cpp server gives, and the shadow
@@ -228,7 +245,7 @@ export async function startProduceIntentRead(params: {
     const result = await runWithCallAttribution({ callSite: "routing_tier", agentName: "intent_readout" }, () => askIntentReadout(
       provider,
       { userMessage: params.userMessage, ...(params.priorTurnDigest ? { priorTurnDigest: params.priorTurnDigest } : {}) },
-      { signal: AbortSignal.any([params.signal, timeout]), bothOrders: true },
+      { signal: AbortSignal.any([params.signal, timeout]), bothOrders: true, concurrentOrders: true, maxTokens: PRODUCE_INTENT_READ_MAX_TOKENS },
     ));
     if (!result.ok) {
       record(params.signal.aborted ? "aborted" : timeout.aborted ? "timeout" : result.reason, undefined, result.ms);
