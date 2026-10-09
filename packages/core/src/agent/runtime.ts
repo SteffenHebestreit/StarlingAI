@@ -4267,7 +4267,8 @@ async function _runTurn(
     // The tail asked for a plan before acting, and with this response's calls the turn has still only
     // searched: a strong routing match names the agent for the plan's delegate steps instead of
     // saying to delegate now (ToolContext.planFirstPending). Counted as the next iteration's nudge
-    // counts them, so the pointer and the nudge that follows it agree.
+    // counts them. planFirstPending holds only while the nudge is in this prompt, which is on
+    // iterations 0 and 1, so from iteration 2 a strong match says to delegate now again.
     toolContext.planFirstPending = planFirstPending && turnIsStillDiscovering(
       llmResponse.tool_calls.reduce(
         (tally, call) => tally.set(call.name, (tally.get(call.name) ?? 0) + 1),

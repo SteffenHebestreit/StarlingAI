@@ -136,6 +136,7 @@ import {
   isStagedArtifactBuildRun,
   stagedBuildTaskChars,
   ownsResumeEvidence,
+  holdsOneShotAssembler,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildResumeGuidance,
   buildStagedBuildFirstStepInstruction,
@@ -3395,7 +3396,13 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       && (findUnfilledStubFiles(opts.workspacePath, conversationScope).count > 0
         || (await findBrokenBuiltPages(opts.workspacePath, conversationScope)).length > 0);
     const isStagedBuild = stagedBuildCandidate && !stagedBuildWithheld;
-    const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true
+    // A FRESH build by a run that holds a one-shot assembler (ONE_SHOT_ASSEMBLER_TOOLS) gets no
+    // skeleton directive, no first-step line in the user turn, and no skeleton in the burn
+    // correction: one generate_* call is its build, and "one write_file" sent content_writer past
+    // generate_presentation to a hand-written deck. A resume is unchanged, and so is the rest of the
+    // staged-build handling (marker and page corrections, salvage, the honest outcome).
+    const assemblerBuild = isStagedBuild && !isResumeBuild && holdsOneShotAssembler(effectiveToolNames);
+    const stagedBuildGuidance = isStagedBuild && stagedBuildFlags.stagedArtifactBuildDirective === true && !assemblerBuild
       ? (isResumeBuild
           ? buildStagedBuildResumeGuidance(stagedResume.files, stagedResume.count, stagedResume.markers, brokenPages)
           : buildStagedArtifactBuildGuidance())
@@ -6407,7 +6414,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           });
           history.push({
             role: "user",
-            content: buildReasoningBurnCorrection(burnReasoningChars, isStagedBuild),
+            content: buildReasoningBurnCorrection(burnReasoningChars, isStagedBuild && !assemblerBuild),
           });
           // Answer this burn once. Without the rebase the supervisor re-reads the same
           // 45,000 characters on its very next sample and winds the corrected run down

@@ -457,7 +457,9 @@ export const OrchestrationSchema = z.object({
    *  on the planning pass to ~100-1,300 per fill pass) — but it landed off backend_coder's
    *  own hand-copied staging paragraph, which only 4 of the 39 write+edit-capable agents
    *  carry. The other 35, and every ephemeral, still had nothing. It is inert unless
-   *  stagedArtifactBuilds is also true.
+   *  stagedArtifactBuilds is also true. A fresh build by a run that holds a one-shot assembler
+   *  (ONE_SHOT_ASSEMBLER_TOOLS: generate_presentation, generate_docx, generate_pptx, render_pdf)
+   *  gets no directive, because its generate_* call is the build.
    *
    *  THE SCHEMA DEFAULT IS WHAT A FORK INHERITS, and this is a PROMPT change: it rewrites the
    *  system prompt of every write+edit-capable agent whose task passes the size threshold — 39

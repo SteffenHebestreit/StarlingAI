@@ -12,6 +12,11 @@
  * has made was a discovery call, nothing has been delegated, no plan is stored and no correction is
  * pending, and the head does not move. Anything else, the single-domain nudge, and a config with
  * planFirst off leave the prompt as it was.
+ *
+ * It is repeated once, on iteration 1, and without the search it asked for on iteration 0 (E2E
+ * new-delegation-routing-bounded-fanout, sessions 28598150 and 4396301e): repeated word for word, it
+ * sent the local model back to search_workflows on every iteration until the per-turn cap of 2 ended
+ * the turn in the all-capped synthesis with nothing delegated.
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -151,6 +156,11 @@ function planNudge(messages: readonly LLMMessage[]): string | undefined {
 
 const searchedOnly = { turnToolCallCounts: new Map([["search_workflows", 1], ["search_agents", 1]]), turnDelegationCount: 0 };
 
+/** The iteration-0 instruction to search the workflow catalog first. */
+const SEARCH_FIRST = "call search_workflows ONCE";
+/** Where the reuse clause ends and the record_plan instructions begin, in both forms of the nudge. */
+const PLAN_PART = "Then call record_plan once";
+
 describe("turnIsStillDiscovering", () => {
   it("holds for a turn whose every call so far was a discovery call", () => {
     expect(mod.prompt.turnIsStillDiscovering(new Map([["search_workflows", 1]]), 0)).toBe(true);
@@ -178,22 +188,45 @@ describe("turnIsStillDiscovering", () => {
 });
 
 describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0", () => {
-  it("repeats the iteration-0 nudge, unchanged, on iteration 1 of a turn that has only searched", async () => {
+  it("repeats the nudge on iteration 1 of a turn that has only searched, without asking for the search again", async () => {
     const { assemble } = setUp();
     const first = await assemble(0);
     const nudge = planNudge(first);
     expect(nudge, "iteration 0 carries the nudge").toBeDefined();
+    expect(nudge).toContain(SEARCH_FIRST);
 
     const second = await assemble(1, searchedOnly);
-    expect(planNudge(second)).toBe(nudge);
+    const repeated = planNudge(second);
+    expect(repeated, "iteration 1 carries the nudge").toBeDefined();
+    expect(repeated).not.toContain(SEARCH_FIRST);
+    expect(repeated).toContain("The search has already run this turn — do not call search_workflows or search_agents again");
+    // The plan it asks for is the iteration-0 plan, word for word.
+    expect(repeated!.slice(repeated!.indexOf(PLAN_PART))).toBe(nudge!.slice(nudge!.indexOf(PLAN_PART)));
     // In the tail, after the history: the person's message comes before it.
     const userIndex = second.findIndex((message) => message.role === "user" && message.content === USER_MESSAGE);
-    const nudgeIndex = second.findIndex((message) => message.content === nudge);
+    const nudgeIndex = second.findIndex((message) => message.content === repeated);
     expect(userIndex).toBeGreaterThanOrEqual(0);
     expect(nudgeIndex).toBeGreaterThan(userIndex);
     // The head is the cache key and does not move.
     expect(mod.prompt.foldedSystemText(second)).toBe(mod.prompt.foldedSystemText(first));
     expect(mod.prompt.foldedSystemText(second)).not.toContain("PLAN FIRST");
+  });
+
+  it("is repeated once: not on iteration 2 or later, though the turn has still only searched", async () => {
+    const { assemble } = setUp();
+    expect(planNudge(await assemble(1, searchedOnly))).toBeDefined();
+    const searchedTwice = { turnToolCallCounts: new Map([["search_workflows", 2], ["search_agents", 1]]), turnDelegationCount: 0 };
+    expect(planNudge(await assemble(2, searchedTwice))).toBeUndefined();
+    expect(planNudge(await assemble(3, searchedTwice))).toBeUndefined();
+  });
+
+  it("does not ask for the search once search_workflows has run, even on iteration 0", async () => {
+    const { assemble } = setUp();
+    const nudge = planNudge(await assemble(0, { turnToolCallCounts: new Map([["search_workflows", 1]]), turnDelegationCount: 0 }));
+    expect(nudge).toBeDefined();
+    expect(nudge).not.toContain(SEARCH_FIRST);
+    // A search of the agents alone leaves the iteration-0 text as it was.
+    expect(planNudge(await assemble(0, { turnToolCallCounts: new Map([["search_agents", 1]]), turnDelegationCount: 0 }))).toContain(SEARCH_FIRST);
   });
 
   it("is not repeated once a plan is stored", async () => {
@@ -273,6 +306,12 @@ describe("assembleTurnSystemMessages — planFirstPending, for the routing point
     const { assembleResult } = setUp();
     expect((await assembleResult(0)).planFirstPending).toBe(true);
     expect((await assembleResult(1, searchedOnly)).planFirstPending).toBe(true);
+  });
+
+  it("does not hold from iteration 2 on, where the nudge is no longer repeated", async () => {
+    const { assembleResult } = setUp();
+    const searchedTwice = { turnToolCallCounts: new Map([["search_workflows", 2], ["search_agents", 1]]), turnDelegationCount: 0 };
+    expect((await assembleResult(2, searchedTwice)).planFirstPending).toBe(false);
   });
 
   it("does not hold for the single-domain nudge, which asks for no search first", async () => {

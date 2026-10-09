@@ -115,7 +115,8 @@ export interface AssembleTurnSystemMessagesResult {
    * The multi-domain plan-first nudge went out in this prompt with no correction pending: the tail
    * asks for record_plan before the turn acts. The runtime hands it to the response's routing tools
    * (ToolContext.planFirstPending) so their pointer does not tell the model to delegate now. False
-   * when the budget trimmer dropped the nudge.
+   * when the budget trimmer dropped the nudge, and from iteration 2 on, where the nudge is no longer
+   * repeated.
    */
   planFirstPending: boolean;
 }
@@ -169,8 +170,8 @@ export function foldedSystemText(messages: readonly LLMMessage[]): string {
  * Whether a turn is still only looking around: it has made at least one call, every call so far
  * searched for an agent, a workflow or a tool (AGENT_DISCOVERY_TOOL_NAMES), and it has delegated
  * nothing. That is the state the plan-first nudge leaves a turn in before record_plan, so the nudge
- * stays in the tail while it holds. A count of zero is a call the runtime gave back, not one that
- * ran. Without both inputs the answer is no.
+ * stays in the tail for one more round while it holds. A count of zero is a call the runtime gave
+ * back, not one that ran. Without both inputs the answer is no.
  */
 export function turnIsStillDiscovering(
   toolCallCounts: ReadonlyMap<string, number> | undefined,
@@ -445,10 +446,11 @@ export async function assembleTurnSystemMessages(
     // rebuilt without the nudge. In session 9991d150, iteration 0 searched workflows and agents,
     // search_agents' result said to delegate now, and iteration 1 did that with two delegations.
     // The second was dropped, no plan was recorded, and the plan round fold had nothing to fold. In
-    // c172d755 the same prompt happened to plan. The same text now stays in the tail while every call
-    // the turn has made was a discovery call, nothing has been delegated, and no plan is stored. The
-    // first call that acts ends it. It is tail text, so the head does not move. A plan store that
-    // cannot be read counts as holding a plan, so the nudge is not repeated over a plan it cannot see.
+    // c172d755 the same prompt happened to plan. The nudge now stays in the tail for one more round
+    // (see below) while every call the turn has made was a discovery call, nothing has been
+    // delegated, and no plan is stored. The first call that acts ends it. It is tail text, so the
+    // head does not move. A plan store that cannot be read counts as holding a plan, so the nudge is
+    // not repeated over a plan it cannot see.
     // Only the multi-domain variant is repeated, and never beside a correction (review of 0623d139).
     // The multi-domain text is the one that sends iteration 0 to a search before record_plan. The
     // single-domain text asks for the plan before any tool, so repeating it after search_agents or
@@ -456,6 +458,14 @@ export async function assembleTurnSystemMessages(
     // which cost a round. A correction the runtime has pending (the no-match fallback, a required
     // workflow run, the agent the user directed) names the one call the next response must make. The
     // nudge beside it asked for a different call, and a record_plan is not held to the fallback route.
+    // ONE EXTRA ROUND, AND NO SECOND SEARCH (E2E new-delegation-routing-bounded-fanout, 2026-10-09).
+    // Repeated word for word, the nudge told iteration 1 to "call search_workflows ONCE" again. The
+    // local model did so on every iteration it was repeated. The third call hit search_workflows'
+    // per-turn cap of 2, and the turn ended in the all-capped synthesis with nothing delegated
+    // (sessions 28598150, 4396301e). The repeated nudge now says the search has run and goes on to
+    // the plan. It is repeated on iteration 1 only, so a turn that still has not planned is back on
+    // the old path from iteration 2: no nudge, and search_agents' pointer says to delegate now
+    // (planFirstPending below is false once the nudge is gone).
     const planFirst = getConfig().orchestration?.planFirst ?? true;
     const multiDomainPlan = looksMultiDomainResearch(userMessage);
     const correctionPending = [
@@ -470,14 +480,20 @@ export async function assembleTurnSystemMessages(
     ].some((prompt) => prompt.length > 0);
     const planNudgeArmed = planFirst && (
       iterationCount === 0
-      || (multiDomainPlan
+      || (iterationCount === 1
+        && multiDomainPlan
         && !correctionPending
         && turnIsStillDiscovering(params.turnToolCallCounts, params.turnDelegationCount)
         && (await loadTurnPlan(session.id).then((plan) => plan === null, () => false)))
     );
     if (planNudgeArmed) {
+      const searchAlreadyRan = iterationCount > 0 || (params.turnToolCallCounts?.get("search_workflows") ?? 0) > 0;
       planGuidance = multiDomainPlan
-        ? "PLAN FIRST: this spans several steps/areas. Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step NAMING it (workflow: <name>); otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only. "
+        ? "PLAN FIRST: this spans several steps/areas. "
+          + (searchAlreadyRan
+            ? "The search has already run this turn — do not call search_workflows or search_agents again: if a fitting scene/job was found or noted, plan a reuse step NAMING it (workflow: <name>); otherwise decompose into agents. "
+            : "Before fanning out, CONSIDER REUSABLE WORKFLOWS: if a 'Strong reusable match' scene/job is noted this turn, plan a reuse step NAMING it (workflow: <name>); otherwise call search_workflows ONCE to check whether an existing scene or job already fits before decomposing into agents. ")
+          + "Then call record_plan once with a short plan — objective; the few steps (each tagged reuse | delegate | direct, with agentName for delegate steps and a parallelGroup for genuinely independent work); the acceptance criteria the answer must meet; and stop conditions. Prefer a reuse step over decomposing into agents when one fits. Do not over-fan-out — keep parallel work to independent steps only. "
           + (planRoundFold
             ? "Make record_plan the ONLY call in that response: it then runs the plan itself — the steps in dependency order, a parallelGroup concurrently, each step's result passed to the steps that depend on it — and returns every result plus any `direct` steps for you to do. Call execute_plan afterwards only if that report lists steps as YOURS TO DO or FAILED."
             : "Then call execute_plan ONCE: it runs the steps in dependency order, runs a parallelGroup concurrently, passes each step's result to the steps that depend on it, and hands back any `direct` steps for you to do.")

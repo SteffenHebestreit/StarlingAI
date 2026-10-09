@@ -14,6 +14,7 @@ import {
   taskOwnWordChars,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildFirstStepInstruction,
+  ONE_SHOT_ASSEMBLER_TOOLS,
 } from "../agent/sub-agent-prompt-guidance.js";
 
 /**
@@ -157,6 +158,21 @@ const CART_CLOSING = "Gebe die Ursache des Fehlers präzise an und zeige die Kor
 const CART_TASK_FENCE_ON_OWN_LINES = `${CART_QUESTION}\n\`\`\`javascript\n${CART_JS}\n\`\`\`\n${CART_CLOSING}`;
 const CART_TASK_FENCE_IN_LINE = `${CART_QUESTION} \`\`\`javascript\n${CART_JS}\n\`\`\` ${CART_CLOSING}`;
 const WRITE_AND_EDIT = ["read_file", "write_file", "edit_file", "list_files", "grep_files"];
+
+/**
+ * A deck delegation the size of the ones that failed in E2E core-build-artifact-revealjs-deck
+ * (817-1,349 chars): with `deliverable` in its schema the orchestrator restates the file format and
+ * the design, and the task crosses the staged-build threshold.
+ */
+const DECK_TASK = [
+  "Erstelle eine reveal.js-Präsentation zum Thema \"Digitaler Wartungsplan für Produktionsanlagen\" als einzelne HTML-Datei.",
+  "Verwende reveal.js über das CDN und ein ruhiges, helles Theme mit einer Akzentfarbe in Dunkelblau.",
+  "Folien: 1) Titelfolie mit Untertitel und Datum. 2) Ausgangslage: ungeplante Stillstände, Papierlisten, fehlende Historie.",
+  "3) Ziele: planbare Wartung, weniger Ausfallzeit, nachvollziehbare Prüfungen. 4) Aufbau des Plans: Anlagen, Intervalle, Verantwortliche.",
+  "5) Ablauf einer Wartung vom Auftrag bis zur Freigabe. 6) Kennzahlen: MTBF, MTTR, Termintreue. 7) Einführung in drei Phasen.",
+  "8) Risiken und Gegenmaßnahmen. 9) Nächste Schritte mit Terminen. 10) Abschlussfolie mit Kontakt.",
+  "Halte jede Folie kurz, höchstens fünf Stichpunkte, und lege die Sprechernotizen in die Notizen der Folien.",
+].join("\n");
 
 describe("staged artifact build — only the task's own words count", () => {
   it("does not stage a question about pasted code, whichever way the fence is written", () => {
@@ -725,6 +741,128 @@ describe("staged artifact build — directive injection", () => {
 
     expect(firstUserTurn).not.toContain("THIS TURN:");
     expect(firstUserTurn).toContain(OBSERVED_BUILD_TASK.trim().slice(0, 80));
+  });
+
+  it("gives a FRESH build no skeleton directive when the run holds a one-shot assembler", async () => {
+    // E2E core-build-artifact-revealjs-deck: content_writer, handed a deck task past the threshold,
+    // was told "SKELETON (first tool call): one write_file" and hand-wrote index.html instead of
+    // calling generate_presentation. Its shipped tool set, the same deck task.
+    expect(DECK_TASK.trim().length).toBeGreaterThan(800);
+    expect(DECK_TASK.trim().length).toBeLessThan(1000);
+    const contentWriterTools = loadWorkspaceAgents<{ tools?: string[] }>()["content_writer"]?.tools ?? [];
+    expect(contentWriterTools).toEqual(expect.arrayContaining(["write_file", "edit_file", "generate_presentation"]));
+    expect(isStagedArtifactBuildRun(contentWriterTools, DECK_TASK)).toBe(true);
+
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      DECK_TASK,
+      contentWriterTools,
+    );
+
+    expect(prompt).toContain("You build files.");
+    expect(prompt).not.toContain("STAGED BUILD");
+    expect(firstUserTurn).toContain(DECK_TASK.slice(0, 60));
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    // Still classified, so the audit row and the rest of the staged-build handling are unchanged.
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ mode: "fresh", directiveInjected: false }),
+      expect.anything(),
+    );
+  });
+
+  it("still gives the same deck task the directive in a run without an assembler", async () => {
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      DECK_TASK,
+      WRITE_AND_EDIT,
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(firstUserTurn).toContain("THIS TURN:");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ mode: "fresh", directiveInjected: true }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps the directive for web_coder, which hand-builds pages beside generate_website", async () => {
+    const webCoderTools = loadWorkspaceAgents<{ tools?: string[] }>()["web_coder"]?.tools ?? [];
+    expect(webCoderTools).toEqual(expect.arrayContaining(["write_file", "edit_file", "generate_website"]));
+    expect(webCoderTools.some((tool) => ONE_SHOT_ASSEMBLER_TOOLS.has(tool))).toBe(false);
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      OBSERVED_BUILD_TASK,
+      webCoderTools,
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(firstUserTurn).toContain("THIS TURN:");
+  });
+
+  it("still RESUMES an unfinished build in a run that holds a one-shot assembler", async () => {
+    const seeded = mkdtempSync(join(tmpdir(), "sai-staged-resume-assembler-"));
+    mkdirSync(join(seeded, "generated", "deck"), { recursive: true });
+    writeFileSync(
+      join(seeded, "generated", "deck", "index.html"),
+      `<script>throw new Error("${UNFINISHED_STUB_MARKER}: slides");</script>`,
+      "utf8",
+    );
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      DECK_TASK,
+      [...WRITE_AND_EDIT, "generate_presentation"],
+      seeded,
+    );
+    expect(prompt).toContain("RESUME AN EXISTING BUILD");
+    rmSync(seeded, { recursive: true, force: true });
+  });
+
+  it("does not ask an assembler run for a skeleton after a reasoning burn", async () => {
+    // The burn correction names the skeleton for a staged build. Without the directive, that line
+    // would be the run's only skeleton instruction, and it points at write_file again.
+    const burnThenDone = async (tools: string[]): Promise<string> => {
+      // Writes the agent's config; the answer it is given here is replaced below.
+      await runAndCaptureSystemPrompt(
+        { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+        DECK_TASK,
+        tools,
+      );
+      let calls = 0;
+      const userTurns: string[] = [];
+      completeMock.mockReset();
+      completeMock.mockImplementation((messages: Array<{ role: string; content: string }>) => {
+        calls++;
+        userTurns.push(messages.filter((m) => m.role === "user").at(-1)?.content ?? "");
+        return calls === 1
+          ? {
+              content: null,
+              reasoning: "r".repeat(45_000),
+              tool_calls: [],
+              usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+              finishReason: "length",
+              truncatedBy: "reasoning_burn",
+            }
+          : { content: "Done.", tool_calls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, finishReason: "stop" };
+      });
+      const workspace = mkdtempSync(join(tmpdir(), "sai-staged-burn-"));
+      const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+      await runSubAgentWithStats({
+        agentName: "staged_builder",
+        task: DECK_TASK,
+        parentSessionId: `parent-${Math.random().toString(36).slice(2)}`,
+        workspacePath: workspace,
+      });
+      rmSync(workspace, { recursive: true, force: true });
+      expect(calls).toBeGreaterThanOrEqual(2);
+      return userTurns[1] ?? "";
+    };
+
+    const assemblerCorrection = await burnThenDone([...WRITE_AND_EDIT, "generate_presentation"]);
+    expect(assemblerCorrection).toContain("STOP PLANNING");
+    expect(assemblerCorrection).not.toContain("skeleton");
+    const plainCorrection = await burnThenDone(WRITE_AND_EDIT);
+    expect(plainCorrection).toContain("STOP PLANNING");
+    expect(plainCorrection).toContain("skeleton");
   });
 
   it("keeps the agent's own prompt LAST so its finish contract outranks the directive", async () => {
