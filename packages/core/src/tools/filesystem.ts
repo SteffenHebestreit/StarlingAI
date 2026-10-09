@@ -214,6 +214,21 @@ function countLines(text: string): number {
   return text.split("\n").length;
 }
 
+/**
+ * The line read_file and edit_file add when the file they were asked for does not exist.
+ *
+ * In the E2E guards scenario the coder was told to change generated/e2e-guards/sommeraktion.html
+ * and not to create a new file. read_file reported the file missing, and glob_files and
+ * list_files confirmed it. The coder then wrote the file with write_file, and the reply had to
+ * admit that it had gone against the instruction. A missing file is where that choice gets made,
+ * so the result says it there. edit_file says it too: it is the tool for changing a file, so a
+ * run that goes to it first meets the missing file there. It sits on its own line after
+ * "File not found: <path>", so the first line, which audit rows and failure lists keep, is
+ * unchanged.
+ */
+export const MISSING_FILE_IS_NOT_A_CHANGE =
+  "Creating this file is a different action from changing it: if your task is to change it, report it as missing instead of creating it.";
+
 registerTool({
   name: "read_file",
   description: "Read the contents of a file within the workspace directory. A file over ~16 KB comes back as head+tail — pass offset/limit to read any other window of it.",
@@ -239,7 +254,7 @@ registerTool({
       return { success: false, output: "", error: "Path escapes workspace boundary" };
     }
     if (!existsSync(resolved)) {
-      return { success: false, output: "", error: `File not found: ${path}` };
+      return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
     }
 
     const stat = statSync(resolved);
@@ -762,7 +777,7 @@ registerTool({
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
-    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };
+    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
 
     const stat = statSync(resolved);
     if (stat.size > MAX_TEXT_FILE_BYTES) {

@@ -62,14 +62,121 @@ export const STAGED_BUILD_REQUIRED_TOOLS = ["write_file", "edit_file"] as const;
 export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
 
 /**
+ * A line that opens a fenced block: a run of three or more backticks or tildes, then at
+ * most one info word ("javascript") and the end of the line. A longer info string
+ * (```js title="a.js") is not read as an opener, and the task is then measured whole.
+ */
+const FENCE_OPENER_LINE = /^\s*(`{3,}|~{3,})[ \t]*[^\s`]*\s*$/;
+/**
+ * The same run after text on its line ("Analyse this fragment: ```js"): a delegating model
+ * writes it there as often as at the start of a line. Here it must follow whitespace and
+ * touch its info word, so neither the closing run of an inline ```span``` nor a run named
+ * in prose ("wrap it in ``` fences") opens a block.
+ */
+const FENCE_OPENER_TRAILING = /\s(`{3,}|~{3,})[^\s`]*\s*$/;
+/**
+ * A line that starts with a fence run standing alone: nothing after it, or whitespace and
+ * then the task's own words again ("``` Then name the cause."). It closes a block opened
+ * by the same character with a run no longer than its own. A run touching a word
+ * ("```js") opens a nested block in the material and closes nothing.
+ */
+const FENCE_CLOSER = /^\s*(`{3,}|~{3,})(?=\s|$)(.*)$/;
+/** Any run of three or more backticks or tildes, wherever it sits on a line. */
+const FENCE_RUN = /`{3,}|~{3,}/g;
+/** A quoted line, as Markdown and mail both write it: `>` after at most three spaces. */
+const QUOTED_LINE = /^ {0,3}>/;
+
+/**
+ * How long a task is in its delegator's OWN words: fenced blocks and quoted lines do not
+ * count. They are material the specialist works from, not requirements it has to plan.
+ *
+ * In the cart assessment the user pasted cart.js and asked why its total goes negative.
+ * The orchestrator copied the code into the delegation, which made the task 681 chars,
+ * about 420 of them code. That crossed the 600-char threshold, so code_analyst, which
+ * holds write_file and edit_file, was told to build in passes. It wrote a report file
+ * with four markers, and the progress verifier then sent it back to fill them. The
+ * question itself was about 260 chars long.
+ *
+ * Material is set aside only when the text places every fence it holds: each block it
+ * opens is closed, and no run of three backticks or tildes is left over, whether in
+ * prose, glued to the word before it, under an info string this does not read, beside
+ * another run on an opening or closing line, or inside a block where it could have been
+ * that block's end. Any other text is measured whole, as it was before this. One fence
+ * read wrongly pairs the next one wrongly, and what lies between two blocks is then set
+ * aside as material, which in such a task is usually its instructions: a task with a
+ * ```js title="a.js" block, twelve numbered requirements and a second block measured 57
+ * of its 1,175 chars. A task with nothing fenced or quoted is measured exactly as
+ * before: its trimmed length. One pass over the lines, because a delegation task has no
+ * length cap.
+ */
+export function taskOwnWordChars(task: string): number {
+  const whole = task.trim().length;
+  const own: string[] = [];
+  let open: { run: string; before: string } | null = null;
+  for (const line of task.split("\n")) {
+    const runs = line.match(FENCE_RUN) ?? [];
+    if (open) {
+      const openRun = open.run;
+      const closer = FENCE_CLOSER.exec(line);
+      const run = closer?.[1];
+      if (run !== undefined && run[0] === openRun[0] && run.length >= openRun.length) {
+        // A second run on the closing line is a fence this cannot place.
+        if (runs.length > 1) return whole;
+        // The words around the block on its opening and closing lines are the task's own.
+        if (open.before.trim()) own.push(open.before.trimEnd());
+        if (closer?.[2]?.trim()) own.push(closer[2].trimStart());
+        open = null;
+        continue;
+      }
+      // A run of the block's own character, at least as long as its opener, that does not
+      // close it: the block's end written after code on its line, or the next block's start.
+      // Shorter runs, and runs of the other character, are the material's own nested fences.
+      if (runs.some((other) => other[0] === openRun[0] && other.length >= openRun.length)) return whole;
+      continue;
+    }
+    if (QUOTED_LINE.test(line)) continue;
+    if (runs.length === 0) {
+      own.push(line);
+      continue;
+    }
+    const opener = FENCE_OPENER_LINE.exec(line) ?? FENCE_OPENER_TRAILING.exec(line);
+    if (!opener?.[1] || runs.length > 1) return whole;
+    const runStart = opener.index + opener[0].indexOf(opener[1]);
+    open = { run: opener[1], before: line.slice(0, runStart) };
+  }
+  // A block nothing closes: its intended end may have been read as an earlier block's.
+  if (open) return whole;
+  return own.join("\n").trim().length;
+}
+
+/**
+ * The size isStagedArtifactBuildRun compares with the threshold, and the audit row reports.
+ *
+ * A run that holds a dedicated builder tool (ARTIFACT_BUILDER_TOOLS) is measured on the whole
+ * task, fenced and quoted text included. What such a run is handed in a fence is often what it
+ * builds: a requirement list the delegator fenced, or a Markdown body to turn into a page or a
+ * deck. Not staging a build that needed it costs the whole run (f08195d2), so a builder keeps
+ * the measure it was staged on before. Any other write-capable run (code_analyst, the
+ * researcher, the summarizer, the coder) is measured on its own words (taskOwnWordChars): what
+ * it is handed in a fence is input it reads, analyses or changes. In the cart assessment a
+ * pasted cart.js made code_analyst's "why" question 681 chars long, and it was told to build a
+ * report file.
+ */
+export function stagedBuildTaskChars(toolNames: readonly string[] | undefined, task: string): number {
+  return holdsArtifactBuilderTool(toolNames) ? task.trim().length : taskOwnWordChars(task);
+}
+
+/**
  * Structural classifier for "this run must build in passes": the agent can both
  * create and amend a file, and the task is a specification rather than an
  * instruction. Capability + size only — no topic words, no language tables.
+ * Size is stagedBuildTaskChars: the whole task for a run holding a builder tool, the
+ * task's own words for any other.
  */
 export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
   const available = new Set(toolNames ?? []);
   if (!STAGED_BUILD_REQUIRED_TOOLS.every((toolName) => available.has(toolName))) return false;
-  return task.trim().length > STAGED_BUILD_TASK_CHAR_THRESHOLD;
+  return stagedBuildTaskChars(toolNames, task) > STAGED_BUILD_TASK_CHAR_THRESHOLD;
 }
 
 /**

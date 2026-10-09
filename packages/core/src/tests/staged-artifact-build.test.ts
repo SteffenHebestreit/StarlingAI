@@ -10,6 +10,8 @@ import {
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   UNFINISHED_STUB_MARKER,
   isStagedArtifactBuildRun,
+  stagedBuildTaskChars,
+  taskOwnWordChars,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildFirstStepInstruction,
 } from "../agent/sub-agent-prompt-guidance.js";
@@ -123,6 +125,154 @@ describe("staged artifact build — detection", () => {
   it("measures the trimmed task, so whitespace padding cannot trip it", () => {
     const padded = `${PROBE_SMALL_TASK}${" ".repeat(2_000)}`;
     expect(isStagedArtifactBuildRun(["write_file", "edit_file"], padded)).toBe(false);
+  });
+});
+
+/**
+ * The cart assessment (E2E core-build-code-assessment-no-edit). The user pasted cart.js and
+ * asked why its total goes negative; the orchestrator copied the code into the delegation.
+ * That made the task 681 chars, about 420 of them code. code_analyst holds write_file and
+ * edit_file, so it was told to build in passes and wrote a report file nobody asked for.
+ * Both shapes below are what a delegating model writes: the fence on its own lines, and the
+ * fence opened after a colon and closed in front of the next sentence.
+ */
+const CART_JS = [
+  "// Shopping cart totals.",
+  "",
+  "function applyDiscount(subtotal, percent) {",
+  "  // percent is used as a fraction here, but callers pass whole numbers (20 for 20%).",
+  "  return subtotal - subtotal * percent;",
+  "}",
+  "",
+  "function cartTotal(items, discountPercent) {",
+  "  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);",
+  "  return applyDiscount(subtotal, discountPercent);",
+  "}",
+  "",
+  "module.exports = { applyDiscount, cartTotal };",
+].join("\n");
+const CART_QUESTION = "Erkläre, warum cartTotal für einen Warenkorb von 50 $ mit 20 % Rabatt einen negativen Betrag "
+  + "statt 40 $ liefert. Analysiere das folgende Code-Fragment, Zeile für Zeile, mit den Werten aus der Frage:";
+const CART_CLOSING = "Gebe die Ursache des Fehlers präzise an und zeige die Korrektur auf. Antworte auf Deutsch.";
+const CART_TASK_FENCE_ON_OWN_LINES = `${CART_QUESTION}\n\`\`\`javascript\n${CART_JS}\n\`\`\`\n${CART_CLOSING}`;
+const CART_TASK_FENCE_IN_LINE = `${CART_QUESTION} \`\`\`javascript\n${CART_JS}\n\`\`\` ${CART_CLOSING}`;
+const WRITE_AND_EDIT = ["read_file", "write_file", "edit_file", "list_files", "grep_files"];
+
+describe("staged artifact build — only the task's own words count", () => {
+  it("does not stage a question about pasted code, whichever way the fence is written", () => {
+    for (const task of [CART_TASK_FENCE_ON_OWN_LINES, CART_TASK_FENCE_IN_LINE]) {
+      // The precondition that fired in the run: the whole task is past the threshold...
+      expect(task.trim().length).toBeGreaterThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+      // ...while the question itself is well short of it.
+      expect(taskOwnWordChars(task)).toBe(`${CART_QUESTION}\n${CART_CLOSING}`.length);
+      expect(taskOwnWordChars(task)).toBeLessThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+      expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(false);
+    }
+  });
+
+  it("still counts the same code when nothing marks it as pasted", () => {
+    // No fence, so nothing says where the task's words end: it is measured as before.
+    const unfenced = `${CART_QUESTION}\n${CART_JS}\n${CART_CLOSING}`;
+    expect(taskOwnWordChars(unfenced)).toBe(unfenced.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, unfenced)).toBe(true);
+  });
+
+  it("still stages a specification that brings code along", () => {
+    const specWithCode = `${PROBE_LARGE_TASK}\nThe current loop, for reference:\n\`\`\`js\n${CART_JS}\n\`\`\``;
+    expect(taskOwnWordChars(specWithCode)).toBe(`${PROBE_LARGE_TASK}\nThe current loop, for reference:`.length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, specWithCode)).toBe(true);
+  });
+
+  it("does not count quoted lines, and counts the same lines unquoted", () => {
+    const quoted = `Summarise what this message asks of us.\n${PROBE_LARGE_TASK.split("\n").map((line) => `> ${line}`).join("\n")}`;
+    expect(taskOwnWordChars(quoted)).toBe("Summarise what this message asks of us.".length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, quoted)).toBe(false);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, quoted.replace(/^> /gm, ""))).toBe(true);
+  });
+
+  it("counts a fence that is never closed, lines and all", () => {
+    const unclosed = `Fix this:\n\`\`\`js\n${PROBE_LARGE_TASK}`;
+    expect(taskOwnWordChars(unclosed)).toBe(unclosed.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, unclosed)).toBe(true);
+  });
+
+  it("measures the whole task when it holds a fence opener it does not read", () => {
+    // An info string of more than one word, and a run glued to the word before it. Neither
+    // was read as an opener, so the first block's bare closing ``` opened a block instead,
+    // which ran to the end of the second block: the requirements between the two were set
+    // aside as material, and the task measured 57 and 27 chars.
+    for (const opening of ["Fix the bug in this file:\n```js title=\"a.js\"", "Fix the bug in this file:```js"]) {
+      const task = `${opening}\nconst a = 1;\n\`\`\`\n${PROBE_LARGE_TASK}\nFor reference the helper:\n\`\`\`js\nconst b = 2;\n\`\`\``;
+      expect(taskOwnWordChars(task), opening).toBe(task.trim().length);
+      expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task), opening).toBe(true);
+    }
+  });
+
+  it("measures the whole task when a block holds a run that could have been its end", () => {
+    // The first block's end is written after code on its line, so it closes nothing; the
+    // reader went on through the requirements and closed the block at the end of the second.
+    const task = `Fix this:\n\`\`\`js\nconst a = 1; \`\`\`\n${PROBE_LARGE_TASK}\n\`\`\`js\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(true);
+  });
+
+  it("measures the whole task when a block is left open, whatever it set aside before it", () => {
+    // The first block is never closed, so its intended end pairs with the next block's
+    // start: the requirements in between are read as code, and the last ``` opens a block
+    // that nothing closes. Counting only that last block measured the task at 26 chars.
+    const task = `Material:\n\`\`\`\nconst a = 1;\n${PROBE_LARGE_TASK}\n\`\`\`\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(true);
+  });
+
+  it("measures a run that holds a builder tool on the whole task, so a fenced spec still stages it", () => {
+    // What a builder is handed in a fence is often what it builds: a requirement list the
+    // delegator fenced, or a Markdown body to turn into a page. Measured on its own words
+    // this task is 31 chars, and web_coder would build the whole page in one completion.
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${PROBE_LARGE_TASK}\n\`\`\``;
+    const builderTools = [...WRITE_AND_EDIT, "verify_page"];
+    expect(taskOwnWordChars(fencedSpec)).toBeLessThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+    expect(stagedBuildTaskChars(builderTools, fencedSpec)).toBe(fencedSpec.trim().length);
+    expect(isStagedArtifactBuildRun(builderTools, fencedSpec)).toBe(true);
+    // A run with no builder tool measures its own words: the fence is input to its answer.
+    expect(stagedBuildTaskChars(WRITE_AND_EDIT, fencedSpec)).toBe(taskOwnWordChars(fencedSpec));
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, fencedSpec)).toBe(false);
+  });
+
+  it("gives the shipped builders the whole-task measure and code_analyst its own words", () => {
+    type Agent = { tools?: string[] };
+    const agents = loadWorkspaceAgents<Agent>();
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${PROBE_LARGE_TASK}\n\`\`\``;
+    for (const name of ["web_coder", "content_writer", "backend_coder"]) {
+      expect(isStagedArtifactBuildRun(agents[name]?.tools, fencedSpec), name).toBe(true);
+    }
+    const codeAnalystTools = agents["code_analyst"]?.tools;
+    expect(codeAnalystTools).toEqual(expect.arrayContaining(["write_file", "edit_file"]));
+    expect(isStagedArtifactBuildRun(codeAnalystTools, CART_TASK_FENCE_ON_OWN_LINES)).toBe(false);
+    expect(isStagedArtifactBuildRun(codeAnalystTools, fencedSpec)).toBe(false);
+  });
+
+  it("still sets material aside when the text places every fence it holds", () => {
+    // Two blocks, each opened and closed, with the requirements between them.
+    const task = `Fix the bug in this file:\n\`\`\`js\nconst a = 1;\n\`\`\`\n${PROBE_LARGE_TASK}\nFor reference the helper:\n\`\`\`js\nconst b = 2;\n\`\`\``;
+    expect(taskOwnWordChars(task)).toBe(`Fix the bug in this file:\n${PROBE_LARGE_TASK}\nFor reference the helper:`.length);
+  });
+
+  it("measures a task with nothing fenced or quoted exactly as before", () => {
+    for (const task of [PROBE_SMALL_TASK, PROBE_LARGE_TASK, OBSERVED_BUILD_TASK, `  ${PROBE_SMALL_TASK}\r\n\r\n`]) {
+      expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    }
+    // Backticks in prose open nothing: an inline span, a run named in a sentence.
+    const prose = "Wrap each snippet in ``` fences.\nUse ```inline``` spans for names.\n```";
+    expect(taskOwnWordChars(prose)).toBe(prose.trim().length);
+  });
+
+  it("closes a block only with a run of its own character, at least as long", () => {
+    // A four-backtick block quoting Markdown that itself holds a ``` block; and a tilde block.
+    const nested = "Review this README:\n````md\n# Title\n```sh\nnpm test\n```\n````\nList what is missing.";
+    expect(taskOwnWordChars(nested)).toBe("Review this README:\nList what is missing.".length);
+    const tilde = "Explain:\n~~~\n```\nnot a closer\n~~~\nBriefly.";
+    expect(taskOwnWordChars(tilde)).toBe("Explain:\nBriefly.".length);
   });
 });
 
@@ -458,6 +608,52 @@ describe("staged artifact build — directive injection", () => {
         maxIterations: RUN_3959F3AC_MAX_ITERATIONS,
         directiveInjected: true,
       }),
+      expect.anything(),
+    );
+  });
+
+  it("REGRESSION cart assessment — a question about pasted code gets no staged directive", async () => {
+    // code_analyst held write_file and edit_file and received a 681-char "why" question,
+    // about 420 chars of it cart.js. The directive and its user-turn line ("produce only the
+    // skeleton — one write_file call") made it write a report file with four markers.
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      CART_TASK_FENCE_IN_LINE,
+      WRITE_AND_EDIT,
+    );
+    expect(prompt).toContain("You build files.");
+    expect(prompt).not.toContain("STAGED BUILD");
+    expect(firstUserTurn).toContain("cartTotal");
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    expect(logAuditMock.mock.calls.some((args) => args[0] === "sub_agent_staged_build_detected")).toBe(false);
+  });
+
+  it("the audit reports the size the classifier compared, not the code pasted with it", async () => {
+    const specWithCode = `${OBSERVED_BUILD_TASK}\n\`\`\`js\n${CART_JS}\n\`\`\``;
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      specWithCode,
+      WRITE_AND_EDIT,
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ taskChars: RUN_3959F3AC_TASK_CHARS, threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD }),
+      expect.anything(),
+    );
+  });
+
+  it("a builder handed its spec in a fence gets the directive, and the audit reports the whole task", async () => {
+    const fencedSpec = `Build the page described below.\n\`\`\`\n${OBSERVED_BUILD_TASK}\n\`\`\``;
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      fencedSpec,
+      [...WRITE_AND_EDIT, "verify_page"],
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ taskChars: fencedSpec.trim().length, threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD }),
       expect.anything(),
     );
   });

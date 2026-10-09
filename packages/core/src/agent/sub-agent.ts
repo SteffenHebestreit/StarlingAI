@@ -133,6 +133,7 @@ import {
   buildSubAgentAgentDiscoveryGuidance,
   sanitizeSubAgentTask,
   isStagedArtifactBuildRun,
+  stagedBuildTaskChars,
   ownsResumeEvidence,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildResumeGuidance,
@@ -3286,15 +3287,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // (rather than an instruction) reasons for tens of thousands of characters and never
     // reaches a tool call — the measured f08195d2 failure: 20,129 completion tokens,
     // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
-    // classifier is structural (holds write_file AND edit_file; task longer than
-    // STAGED_BUILD_TASK_CHAR_THRESHOLD) so no topic words decide it, and it is split
-    // across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
+    // classifier is structural (holds write_file AND edit_file; the task longer than
+    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input excluded unless the run
+    // holds a builder tool: stagedBuildTaskChars) so no topic words decide it, and it is
+    // split across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
     // record and the on-disk salvage reporting on the interrupted paths — while
-    // `stagedArtifactBuildDirective` is what actually changes the prompt the model
-    // sees. BOTH default ON: run 3959f3ac measured the staged shape working (13
-    // iterations, 5 files, reasoning collapsed from 23,876 chars on the plan pass to
-    // ~100-1,300 per fill pass) while `directiveInjected: false` proved the directive
-    // itself had never reached the model.
+    // `stagedArtifactBuildDirective` is what actually changes the prompt the model sees.
+    // BOTH default ON: run 3959f3ac measured the staged shape working (13 iterations, 5
+    // files, reasoning collapsed from 23,876 chars on the plan pass to ~100-1,300 per fill
+    // pass) while `directiveInjected: false` proved the directive itself had never reached
+    // the model.
     const stagedBuildFlags = effectiveOrchestration();
     const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
       && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
@@ -3371,7 +3373,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         "sub_agent_staged_build_detected",
         {
           agentName: opts.agentName,
-          taskChars: sanitizedTask.trim().length,
+          // The size the classifier compared with the threshold (stagedBuildTaskChars).
+          taskChars: stagedBuildTaskChars(effectiveToolNames, sanitizedTask),
           threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD,
           maxIterations,
           directiveInjected: stagedBuildGuidance.length > 0,

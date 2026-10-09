@@ -434,11 +434,12 @@ export const OrchestrationSchema = z.object({
    *  cannot be disabled on this endpoint (every documented switch measured inert) and
    *  tool_choice:"required" makes it worse, so the only controlling variable is TASK SIZE IN
    *  ONE COMPLETION. When true, the runner classifies such runs structurally (agent holds BOTH
-   *  write_file and edit_file AND the task exceeds STAGED_BUILD_TASK_CHAR_THRESHOLD — capability
-   *  + size only, never topic words), emits a staged_artifact_build_detected audit record, and
-   *  reports the files a cut-off build actually left on disk in its partial output instead of
-   *  discarding them. Purely additive: no prompt text, no routing, no tool-list change — so it
-   *  ships default ON. The prompt half is a separate flag below. */
+   *  write_file and edit_file AND the task exceeds STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced
+   *  and quoted input excluded unless the agent holds a builder tool: stagedBuildTaskChars —
+   *  capability + size only, never topic words), emits a staged_artifact_build_detected audit
+   *  record, and reports the files a cut-off build actually left on disk in its partial output
+   *  instead of discarding them. Purely additive: no prompt text, no routing, no tool-list
+   *  change — so it ships default ON. The prompt half is a separate flag below. */
   stagedArtifactBuilds: z.boolean().default(true),
   /** Staged artifact builds — PROMPT half (sub-agent.ts system-prompt assembly). When true, a
    *  run classified by `stagedArtifactBuilds` above also receives a staged-build directive in
