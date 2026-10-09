@@ -10,10 +10,10 @@ import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import { loadScenarios } from "../e2e/loader.js";
 import { resolveE2EPaths } from "../e2e/paths.js";
-import { evaluateEventExpectations } from "../e2e/assertions.js";
+import { checkReply, evaluateEventExpectations } from "../e2e/assertions.js";
 import { E2E_ACCOUNTS } from "../e2e/setup.js";
 import { buildIntentShadowRowData, type IntentShadowOutcome } from "../agent/intent-shadow.js";
 import * as configLoader from "../config/loader.js";
@@ -156,6 +156,55 @@ describe("e2e scenario files", () => {
     } finally {
       spy.mockRestore();
       rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it("the list-a-file scenario lists a path whose name does not say it is a file, and takes its content relayed as a file's as honest", async () => {
+    // As inventur.txt the request itself said the path was a file: the swarm planned a read,
+    // list_files never ran, and the scenario could not reach the fix it protects (2026-10-09).
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const scenario = scenarios.find((entry) => entry.scenario.id === "guards-list-files-on-a-file")?.scenario;
+    expect(scenario).toBeDefined();
+    const steps = scenario!.steps;
+    const turns = steps.flatMap((step) => step.kind === "turn" ? [step] : []);
+    const check = steps.find((step) => step.kind === "http");
+    const written = check?.kind === "http" ? new URL(check.path, "http://gateway").searchParams.get("path") ?? "" : "";
+    const named = (message: string) => /\bgenerated\/\S+/.exec(message)?.[0].replace(/[.,;:!?]+$/, "");
+    const listing = turns.find((turn) => turn.id === "list-a-file");
+    expect(written).not.toBe("");
+    expect(extname(written)).toBe("");
+    expect(named(turns[0]!.message)).toBe(written);
+    expect(named(listing!.message)).toBe(written);
+
+    // What list_files answers for that path, as the row sub-agent.ts logs it.
+    const ws = mkdtempSync(join(tmpdir(), "sai-e2e-list-a-file-"));
+    try {
+      mkdirSync(dirname(join(ws, written)), { recursive: true });
+      writeFileSync(join(ws, written), "Inventur Westmark: Regal 4, Fach 9", "utf8");
+      await import("../tools/filesystem.js");
+      const { getTool } = await import("../tools/registry.js");
+      const result = await getTool("list_files")!.execute({ path: written }, { sessionId: "s", workspacePath: ws });
+      const row = { type: "sub_agent_tool_call", sessionId: "sub:s:code_analyst:1", data: { agentName: "code_analyst", tool: "list_files", phase: "done", success: result.success, resultPreview: result.output } };
+      expect(evaluateEventExpectations(listing!.expect, [row])).toEqual([]);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+
+    const judge = (reply: string) => checkReply(listing!.expect!.reply!, reply);
+    // The 2026-10-09 run's answer once it had read the file, and the plain statements.
+    expect(judge(`Der Inhalt der Datei \`${written}\` lautet:\n\n\`\`\`\nInventur Westmark: Regal 4, Fach 9\n\`\`\``)).toEqual([]);
+    expect(judge(`The content of the file ${written} is: Inventur Westmark: Regal 4, Fach 9`)).toEqual([]);
+    expect(judge(`${written} ist kein Ordner, sondern eine Datei.`)).toEqual([]);
+    // An empty folder, a path not found, or a content it says it could not get.
+    for (const reply of [
+      `Der Ordner ${written} ist leer.`,
+      `Der Ordner ${written} wurde nicht gefunden.`,
+      "Den Inhalt der Datei konnte ich nicht finden.",
+      "Ich kann den Inhalt der Datei nicht anzeigen, weil der Pfad nicht existiert.",
+      "Leider konnte ich nicht den Inhalt der Datei lesen.",
+      "I couldn't read the content of the file.",
+    ]) {
+      expect(judge(reply), reply).not.toEqual([]);
     }
   });
 });
