@@ -63,6 +63,7 @@ const AGENTS = {
   content_writer: { tools: ["read_file", "write_file", "generate_document", "read_shared_facts", "share_finding"], routingGenerated: label("PRODUCE", "workspace", "text") },
   mail_agent: { tools: ["mail_search", "mail_read", "read_shared_facts", "share_finding"], routingGenerated: label("ACT", "user_channel", "live_system") },
   code_analyst: { tools: ["read_file", "grep_files", "read_shared_facts", "share_finding"], routingGenerated: label("GATHER", "workspace", "codebase") },
+  vision_browser_analyst: { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"], routingGenerated: label("GATHER", "browser", "image") },
 } as const;
 
 /** The live 2f31f387 plan, verbatim. */
@@ -99,6 +100,7 @@ describe("the research gate's turn trigger", () => {
   });
 
   afterEach(async () => {
+    vi.doUnmock("../tools/agent-routing.js");
     delete process.env["SAI_CONFIG_PATH"];
     (await import("../config/loader.js")).resetConfigForTests();
     await (await import("../swarm/memory.js")).resetSharedMemoryForTests();
@@ -486,6 +488,41 @@ describe("the research gate's turn trigger", () => {
     }, turnCtx("s-graph-order"));
 
     expect(ran()).toEqual(["researcher", "web_coder"]);
+  }, 30_000);
+
+  // ── Routed delegations: no agent named, so the router's ranking picks it ──────────────────────
+
+  /** The router's ranking for the live step (79dd29e0): the tab reader first, both gatherers right behind it. */
+  const LIVE_SITE_RANKING = [
+    { name: "vision_browser_analyst", score: 0.8555 },
+    { name: "browser_agent", score: 0.8453 },
+    { name: "researcher", score: 0.8099 },
+  ];
+  /** Stands in for the embedding router, which this file does not run: every pass returns `ranked`, minus the agents it excludes. */
+  const routeAs = (ranked: ReadonlyArray<{ name: string; score: number }>) => vi.doMock("../tools/agent-routing.js", async (importOriginal) => {
+    const actual = await importOriginal<typeof import("../tools/agent-routing.js")>();
+    return {
+      ...actual,
+      resolveAgentRouting: async (query: string, opts?: { minConfidence?: "high" | "medium" | "low"; excludeAgents?: string[] }) => ({
+        query, minConfidence: opts?.minConfidence ?? "medium", mode: "hybrid" as const,
+        results: ranked.filter((entry) => !(opts?.excludeAgents ?? []).includes(entry.name)).map((entry) => ({
+          name: entry.name, description: `${entry.name} test agent`, model: "mock", confidence: "high" as const,
+          score: entry.score, matchedTerms: [], capabilities: [], tags: [],
+        })),
+        weakCandidates: [], gated: false, trippedAgents: [], allLowConfidence: false, nearMisses: [],
+      }),
+    };
+  });
+
+  it("routes an English fetch-the-site task past the tab reader to browser_agent (the task's words arm the gate)", async () => {
+    routeAs(LIVE_SITE_RANKING);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    const ctx = turnCtx("s-routed-en");
+    delete ctx.turnEvidence;
+    await getTool("delegate_to_agent")!.execute({ task: "Fetch http://www.nordlicht-werkzeuge.test/lager.html and find the stock figures on the website." }, ctx);
+
+    expect(ran()).toEqual(["browser_agent"]);
   }, 30_000);
 });
 

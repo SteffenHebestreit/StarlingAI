@@ -684,6 +684,16 @@ export function isWebReachingToolName(toolName: string): boolean {
 }
 
 /**
+ * Browser tools that only look at the page the shared browser tab already shows, in both the
+ * gateway's own names and the bridged Playwright server's. None of them opens a URL, so they
+ * read whatever page the last navigation left there, which may be another session's.
+ */
+const BROWSER_TAB_VIEW_TOOL_NAMES = new Set<string>([
+  "browser_snapshot", "browser_screenshot", "browser_take_screenshot",
+  "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
+]);
+
+/**
  * True for a tool that can GATHER fresh external evidence (search + fetch page
  * content + drive a browser). This is the narrower cousin of isWebReachingToolName:
  * it excludes url_inspect, which only probes a URL you already have (headers,
@@ -691,9 +701,16 @@ export function isWebReachingToolName(toolName: string): boolean {
  * only "web" tool is url_inspect cannot do PRIMARY research — evidence_analyst
  * (url_inspect only, no web_search/web_fetch) was wrongly classed research-capable
  * and dead-looped url_inspect on a 404 after being handed a gather task (audit 687a224b).
+ *
+ * It excludes the browser tab views (BROWSER_TAB_VIEW_TOOL_NAMES) for the same reason. The
+ * browser_ prefix credited them, so vision_browser_analyst, which holds only browser_snapshot
+ * and browser_screenshot, counted as a gatherer. Routing gave it "die URL … abrufen" steps
+ * ahead of browser_agent and researcher, and it snapshotted a tab an earlier session had left on
+ * another page nine times, then answered from that page (E2E 2026-10-08, 79dd29e0, 3c91cb68,
+ * c172d755). A browser tool that drives the page (browser_navigate, browser_click, …) still counts.
  */
 export function isWebGatheringToolName(toolName: string): boolean {
-  if (toolName === "url_inspect") return false;
+  if (toolName === "url_inspect" || BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName)) return false;
   return isWebReachingToolName(toolName);
 }
 
@@ -701,7 +718,8 @@ export function isWebGatheringToolName(toolName: string): boolean {
  * Pure capability check against an agent's tool list. Research-capable means it can
  * GATHER from the web directly (web_search/web_fetch/browser_*) or is a coordinator
  * that can delegate to one that does. url_inspect alone does NOT qualify (it only
- * probes a known URL, cannot search/fetch). An undefined tool list means "inherit all
+ * probes a known URL, cannot search/fetch), and neither do browser tab views alone
+ * (browser_snapshot/browser_screenshot read the open page, cannot open one). An undefined tool list means "inherit all
  * tools" → qualifies. Undefined cfg (unknown/ephemeral) → not blocked.
  */
 export function agentCfgIsResearchCapable(cfg: { tools?: string[] } | undefined): boolean {

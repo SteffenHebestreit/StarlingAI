@@ -349,3 +349,57 @@ describe("direct-gathering ranking key (session 00b3675d)", () => {
     expect(agentCfgIsResearchCapable({ tools: ["delegate_to_agent", "swarm_delegate"] })).toBe(true);
   });
 });
+
+/**
+ * A view of the open browser tab is not gathering (E2E 2026-10-08: 79dd29e0, 3c91cb68, c172d755).
+ * vision_browser_analyst holds browser_snapshot and browser_screenshot and nothing that opens a
+ * page. The browser_ prefix counted both as gathering, so the agent passed every research check,
+ * routing ranked it above browser_agent and researcher for "die URL … abrufen", and it read
+ * whatever page an earlier session had left in the shared tab. A browser tool that drives the
+ * page still counts.
+ */
+describe("browser tab views are not gathering", () => {
+  // Deployed tool lists, verbatim from workspace/agents/20-primary-agents.jsonc and 10-core-agents.jsonc.
+  const visionBrowserAnalyst = { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"] };
+  const browserAgent = { tools: [
+    "web_search", "list_knowledge_bases", "search_knowledge_base", "get_site_credentials", "site_fill_credentials",
+    "browser_navigate", "browser_click", "browser_type", "browser_snapshot", "browser_screenshot", "browser_select_option",
+    "browser_wait_for", "request_human_assist", "read_shared_facts", "share_finding", "write_file", "edit_file",
+  ] };
+  const researcher = { tools: ["web_search", "web_fetch", "url_inspect", "read_shared_facts", "share_finding"] };
+  const imageSourcer = { tools: ["web_search", "web_fetch", "fetch_image", "url_inspect", "browser_navigate", "browser_screenshot", "analyze_image"] };
+
+  it("does not count a snapshot or screenshot of the open tab as gathering, in either naming", () => {
+    for (const view of [
+      "browser_snapshot", "browser_screenshot", "browser_take_screenshot",
+      "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
+    ]) {
+      expect(isWebGatheringToolName(view)).toBe(false);
+    }
+    for (const driver of ["browser_navigate", "browser_click", "browser_type", "mcp__playwright__browser_navigate", "mcp__playwright__browser_click"]) {
+      expect(isWebGatheringToolName(driver)).toBe(true);
+    }
+  });
+
+  it("takes vision_browser_analyst out of the research checks and leaves browser_agent and researcher in", () => {
+    expect(agentCfgIsResearchCapable(visionBrowserAnalyst)).toBe(false);
+    expect(agentCfgGathersDirectly(visionBrowserAnalyst)).toBe(false);
+    for (const gatherer of [browserAgent, researcher, imageSourcer]) {
+      expect(agentCfgIsResearchCapable(gatherer)).toBe(true);
+      expect(agentCfgGathersDirectly(gatherer)).toBe(true);
+    }
+  });
+
+  it("ranks browser_agent and researcher above it for a research query, as routing scored them live (79dd29e0)", () => {
+    const c = (name: string): AgentRoutingCandidate => ({ name } as AgentRoutingCandidate);
+    const cfgs: Record<string, { tools: string[] }> = { vision_browser_analyst: visionBrowserAnalyst, browser_agent: browserAgent, researcher };
+    const gathers = (name: string) => agentCfgGathersDirectly(cfgs[name]);
+    const { results, needsFallback } = reorderByResearchCapability(
+      [c("vision_browser_analyst"), c("browser_agent"), c("researcher")], true, gathers,
+    );
+    expect(results.map((r) => r.name)).toEqual(["browser_agent", "researcher", "vision_browser_analyst"]);
+    expect(needsFallback).toBe(false);
+    // Alone, it no longer satisfies a research query: the caller prepends the researcher.
+    expect(reorderByResearchCapability([c("vision_browser_analyst")], true, gathers).needsFallback).toBe(true);
+  });
+});
