@@ -111,6 +111,13 @@ export interface AssembleTurnSystemMessagesResult {
    * invalidated by the turn's outcome (turn-success-finalize.ts).
    */
   trajectoryShown: boolean;
+  /**
+   * The multi-domain plan-first nudge went out in this prompt with no correction pending: the tail
+   * asks for record_plan before the turn acts. The runtime hands it to the response's routing tools
+   * (ToolContext.planFirstPending) so their pointer does not tell the model to delegate now. False
+   * when the budget trimmer dropped the nudge.
+   */
+  planFirstPending: boolean;
 }
 
 /**
@@ -785,5 +792,7 @@ export async function assembleTurnSystemMessages(
       heldOutSkillSlugs,
       // In the prompt as SENT: injected on iteration 0 and not dropped by the budget trimmer above.
       trajectoryShown: iterationCount === 0 && Boolean(activeTrajectoryInjectionContext),
+      // In the prompt as SENT, like the line above.
+      planFirstPending: planGuidance.length > 0 && multiDomainPlan && !correctionPending,
     };
 }

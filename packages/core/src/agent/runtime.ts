@@ -20,7 +20,7 @@ import { runArtifactVerificationGate, buildFailureCaveat, buildUnverifiableCavea
 import { applyActiveModelPreset, createChatProvider, getChatProvider, getChatProviderForTier, getChatProviderWithOverride, tierModelDefaults } from "../providers/index.js";
 import { DeadlineAbort, salvageToolCallArguments } from "../providers/lmstudio.js";
 import type { ChatProvider, LLMMessage, LLMResponse, StreamChunk } from "../providers/lmstudio.js";
-import { assembleTurnSystemMessages, buildDirectiveAgentPrompt } from "./turn-system-prompt.js";
+import { assembleTurnSystemMessages, buildDirectiveAgentPrompt, turnIsStillDiscovering } from "./turn-system-prompt.js";
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
@@ -2752,6 +2752,7 @@ async function _runTurn(
       injectedSkillSlugs: assembledInjectedSkillSlugs,
       heldOutSkillSlugs: assembledHeldOutSkillSlugs,
       trajectoryShown,
+      planFirstPending,
     } = await assembleTurnSystemMessages({
       session,
       iterationCount,
@@ -4229,6 +4230,17 @@ async function _runTurn(
     // folds the plan's execution into its own call only when it was the response's one call
     // (orchestration.planRoundFold, ToolContext.responseToolCalls).
     toolContext.responseToolCalls = llmResponse.tool_calls.map((call) => call.name);
+    // The tail asked for a plan before acting, and with this response's calls the turn has still only
+    // searched: a strong routing match names the agent for the plan's delegate steps instead of
+    // saying to delegate now (ToolContext.planFirstPending). Counted as the next iteration's nudge
+    // counts them, so the pointer and the nudge that follows it agree.
+    toolContext.planFirstPending = planFirstPending && turnIsStillDiscovering(
+      llmResponse.tool_calls.reduce(
+        (tally, call) => tally.set(call.name, (tally.get(call.name) ?? 0) + 1),
+        new Map(_turnToolCallCounts),
+      ),
+      _turnDelegationCount,
+    );
 
     for (const tc of llmResponse.tool_calls) {
       if (signal.aborted) break;

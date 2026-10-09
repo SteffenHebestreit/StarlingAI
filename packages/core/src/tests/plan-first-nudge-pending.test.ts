@@ -37,9 +37,9 @@ vi.mock("../agent/turn-plan.js", async (importOriginal) => {
 const configDir = mkdtempSync(join(tmpdir(), "sai-plan-nudge-"));
 const configPath = join(configDir, "starlingai.json");
 
-function writeConfig(orchestration: Record<string, unknown> = {}): void {
+function writeConfig(orchestration: Record<string, unknown> = {}, performance: Record<string, unknown> = {}): void {
   writeFileSync(configPath, JSON.stringify({
-    agents: { performance: { leanContextInjection: true } },
+    agents: { performance: { leanContextInjection: true, ...performance } },
     orchestration: { discoveryPrefetch: false, ...orchestration },
   }), "utf8");
 }
@@ -106,12 +106,12 @@ const CORRECTIONS = [
 
 type Params = Parameters<typeof import("../agent/turn-system-prompt.js")["assembleTurnSystemMessages"]>[0];
 
-function setUp(orchestration: Record<string, unknown> = {}, userMessage = USER_MESSAGE) {
-  writeConfig(orchestration);
+function setUp(orchestration: Record<string, unknown> = {}, userMessage = USER_MESSAGE, performance: Record<string, unknown> = {}) {
+  writeConfig(orchestration, performance);
   mod.resetConfigForTests();
   const session = new mod.AgentSession({ channel: "test", workspacePath: configDir, systemPrompt: "You are a test agent." });
   session.addMessage({ role: "user", content: userMessage });
-  const assemble = async (iterationCount: number, extra: Partial<Params> = {}) => (await mod.prompt.assembleTurnSystemMessages({
+  const assembleResult = async (iterationCount: number, extra: Partial<Params> = {}) => mod.prompt.assembleTurnSystemMessages({
     session,
     iterationCount,
     userMessage,
@@ -137,8 +137,9 @@ function setUp(orchestration: Record<string, unknown> = {}, userMessage = USER_M
     buildTemporalContextPrompt: () => "Today is the test day.",
     lastPromptMetrics: mod.measurePrompt([], []),
     ...extra,
-  })).messages;
-  return { session, assemble };
+  });
+  const assemble = async (iterationCount: number, extra: Partial<Params> = {}) => (await assembleResult(iterationCount, extra)).messages;
+  return { session, assemble, assembleResult };
 }
 
 /** The plan-first nudge in a message list, or undefined. Both variants open with "PLAN FIRST". */
@@ -264,5 +265,40 @@ describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0"
     expect(planNudge(plain0)).toBeUndefined();
     expect(JSON.stringify(await assemble(0, searchedOnly))).toBe(JSON.stringify(plain0));
     expect(JSON.stringify(await assemble(1, searchedOnly))).toBe(JSON.stringify(plain1));
+  });
+});
+
+describe("assembleTurnSystemMessages — planFirstPending, for the routing pointer", () => {
+  it("holds when the multi-domain nudge goes out, on iteration 0 and when it is repeated", async () => {
+    const { assembleResult } = setUp();
+    expect((await assembleResult(0)).planFirstPending).toBe(true);
+    expect((await assembleResult(1, searchedOnly)).planFirstPending).toBe(true);
+  });
+
+  it("does not hold for the single-domain nudge, which asks for no search first", async () => {
+    const { assembleResult } = setUp({}, SINGLE_DOMAIN_MESSAGE);
+    const first = await assembleResult(0);
+    expect(planNudge(first.messages)).toBeDefined();
+    expect(first.planFirstPending).toBe(false);
+  });
+
+  it("does not hold beside a pending correction, even on iteration 0", async () => {
+    const { assembleResult } = setUp();
+    for (const correction of CORRECTIONS) {
+      const result = await assembleResult(0, { [correction]: "COMPLIANCE CORRECTION: x" });
+      expect(planNudge(result.messages), correction).toBeDefined();
+      expect(result.planFirstPending, correction).toBe(false);
+    }
+  });
+
+  it("does not hold when no nudge went out", async () => {
+    // planFirst off.
+    expect((await setUp({ planFirst: false }).assembleResult(0)).planFirstPending).toBe(false);
+    // The turn has delegated.
+    expect((await setUp().assembleResult(1, { turnToolCallCounts: new Map([["search_agents", 1]]), turnDelegationCount: 1 })).planFirstPending).toBe(false);
+    // The budget trimmer dropped the nudge.
+    const trimmed = await setUp({}, USER_MESSAGE, { promptBudgetChars: 1000 }).assembleResult(0);
+    expect(planNudge(trimmed.messages)).toBeUndefined();
+    expect(trimmed.planFirstPending).toBe(false);
   });
 });

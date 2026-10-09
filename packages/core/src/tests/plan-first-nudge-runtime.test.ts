@@ -5,6 +5,9 @@
  *
  * Run under stableToolBlock "freeze": the head and the tool block must not move between the two
  * iterations, and record_plan, which the nudge asks for, must be on the wire both times.
+ *
+ * It also hands each response's routing tools ToolContext.planFirstPending, so search_agents does not
+ * tell the model to delegate now while that nudge asks for a plan (tools/sub-agent.ts).
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,12 +56,15 @@ vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => 
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
 
 const tempDirs: string[] = [];
+/** ToolContext.planFirstPending as each search_agents call of the turn saw it. */
+const pointerFlags: Array<boolean | undefined> = [];
 
 afterEach(() => {
   streamMock.mockReset();
   completeMock.mockClear();
   delete process.env["SAI_CONFIG_PATH"];
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  pointerFlags.length = 0;
 });
 
 async function loadRuntime() {
@@ -92,6 +98,19 @@ async function loadRuntime() {
     execute: async () => ({ success: true, output: "No reusable workflow matches this request.", metadata: { workflowMatches: [] } }),
   });
   registerTool({
+    name: "search_agents",
+    description: "search the agent catalog",
+    parameters: { type: "object", properties: { query: { type: "string" } } },
+    execute: async (_args, ctx) => {
+      pointerFlags.push(ctx.planFirstPending);
+      return {
+        success: true,
+        output: "**browser_agent** high confidence",
+        metadata: { resultCount: 1, topResult: "browser_agent", topResultConfidence: "high" },
+      };
+    },
+  });
+  registerTool({
     name: "delegate_to_agent",
     description: "delegate a task",
     parameters: { type: "object", properties: { agentName: { type: "string" }, task: { type: "string" } } },
@@ -109,6 +128,16 @@ function toolCallStream(callId: string, toolName: string, args: Record<string, u
   return (async function* () {
     yield { type: "tool_call_start", toolCallId: callId, toolName };
     yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
+    yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+  })();
+}
+
+function toolCallsStream(calls: Array<[callId: string, toolName: string, args: Record<string, unknown>]>) {
+  return (async function* () {
+    for (const [callId, toolName, args] of calls) {
+      yield { type: "tool_call_start", toolCallId: callId, toolName };
+      yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
+    }
     yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
   })();
 }
@@ -167,5 +196,63 @@ describe("the plan-first nudge across iterations of a real turn", () => {
     expect(streamMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(planNudge(messagesOfCall(0))).toBeDefined();
     expect(planNudge(messagesOfCall(1))).toBeUndefined();
+  });
+});
+
+/** Under 300 characters, so the single-domain nudge, which asks for no search first. */
+const SINGLE_DOMAIN_MESSAGE =
+  "Visit the shop's website: find the employee count on the home page, the express shipping price on the pricing page "
+  + "and the torque setting in the documentation. Plan the steps briefly, then work through the plan.";
+
+describe("the routing pointer's plan-first flag across a real turn", () => {
+  it("is set for a response that only searches under the multi-domain nudge", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallsStream([
+        ["w1", "search_workflows", { query: "visit a website and extract facts" }],
+        ["a1", "search_agents", { query: "browse a website and read pages" }],
+      ]))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE });
+
+    expect(pointerFlags).toEqual([true]);
+  });
+
+  it("stays set on iteration 1 while the turn has still only searched", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallStream("w1", "search_workflows", { query: "visit a website and extract facts" }))
+      .mockImplementationOnce(() => toolCallStream("a1", "search_agents", { query: "browse a website and read pages" }))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE });
+
+    expect(pointerFlags).toEqual([true]);
+  });
+
+  it("is not set for the single-domain nudge", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallStream("a1", "search_agents", { query: "browse a website and read pages" }))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: SINGLE_DOMAIN_MESSAGE });
+
+    expect(pointerFlags).toEqual([false]);
+  });
+
+  it("is not set when the same response also acts", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock
+      .mockImplementationOnce(() => toolCallsStream([
+        ["a1", "search_agents", { query: "browse a website and read pages" }],
+        ["p1", "record_plan", { objective: "Report three facts", steps: [{ id: "s1", description: "Write the note", kind: "direct" }] }],
+      ]))
+      .mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE });
+
+    expect(pointerFlags).toEqual([false]);
   });
 });
