@@ -2858,6 +2858,17 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "info" });
     }
 
+    // The intent readout's verdict for the --auto routing arm (autonomousArtifactBuild below),
+    // awaited once, on the first iteration it is pending. It is timed as its own phase, and awaited
+    // here, before llmStartedAt, because turn_performance counts a phase outside llmTimeMs: awaited
+    // inside the call's window, the same seconds were counted in both, and a slow turn's SLO alert
+    // named the model and this wait for one stretch of wall-clock.
+    if (produceIntentRead) {
+      const pendingRead = produceIntentRead;
+      produceIntentRead = null;
+      prefetchAskedToProduce = await timedPhase("produceIntentReadWait", () => pendingRead);
+    }
+
     let llmResponse: LLMResponse;
     const llmStartedAt = Date.now();
     llmCalls += 1;
@@ -2926,12 +2937,7 @@ async function _runTurn(
       // tools, not the request, so it forces only with the intent readout's word that the request
       // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
       // a question is not forced, and without a reading the orchestrator decides as on any turn.
-      // The read is awaited once, on the first iteration it is pending, and timed as its own phase.
-      if (produceIntentRead) {
-        const pendingRead = produceIntentRead;
-        produceIntentRead = null;
-        prefetchAskedToProduce = await timedPhase("produceIntentReadWait", () => pendingRead);
-      }
+      // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
         ((getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
           && opts.autoApprove === true

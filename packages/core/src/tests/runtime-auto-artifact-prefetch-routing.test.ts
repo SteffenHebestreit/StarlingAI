@@ -353,6 +353,22 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     expect(readoutMock).not.toHaveBeenCalled();
     expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider" }]);
   });
+
+  // turn_performance partitions a turn into model time, tool time and named phases. The wait is a
+  // phase; counted in llmTimeMs as well, the same seconds were blamed on the model too.
+  it("the wait for the read is its own phase and not orchestrator model time", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "chart_designer", confidence: "high" }] } });
+    readoutMock.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      return modeReading("GATHER");
+    });
+    expect(await firstCallOptions(loaded, QUESTIONS[0]!, true)).toBeUndefined();
+    const performance = auditMock.mock.calls.find(([event]) => event === "turn_performance")?.[1] as
+      { llmTimeMs: number; phaseTimingsMs?: Record<string, number> } | undefined;
+    const waitMs = performance?.phaseTimingsMs?.["produceIntentReadWait"] ?? 0;
+    expect(waitMs).toBeGreaterThanOrEqual(400);
+    expect(performance?.llmTimeMs).toBeLessThan(waitMs / 2);
+  });
 });
 
 describe("no other turn asks the readout", () => {
