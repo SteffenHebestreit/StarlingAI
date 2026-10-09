@@ -74,7 +74,7 @@ import {
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
-import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective } from "./workflow-step-pipeline.js";
+import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -2092,6 +2092,12 @@ async function _runTurn(
   // them back: it loads direct tools only, and these are orchestration tools.
   if (opts._withoutWorkflowCatalog) {
     allowedToolNames = allowedToolNames.filter((toolName) => !isWorkflowCatalogToolName(toolName));
+  }
+  // A step whose task names its agents runs those agents (agent/workflow-step-pipeline.ts). Agent and
+  // skill discovery spent its model calls and proposed agents its scene does not allow. A step whose
+  // task names none keeps them.
+  if (opts._workflowStepPipeline?.length) {
+    allowedToolNames = allowedToolNames.filter((toolName) => !WORKFLOW_STEP_DISCOVERY_TOOL_NAMES.has(toolName));
   }
   const allowedToolNameSet = new Set(allowedToolNames);
   const recentWorkflowAuthoringMaintenanceContext = hasRecentWorkflowAuthoringMaintenanceContext(session.getHistory());

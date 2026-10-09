@@ -27,6 +27,15 @@ import { getConfig } from "../config/loader.js";
  */
 const FAN_OUT_TOOL_NAMES = new Set(["parallel_delegate", "run_task_graph", "run_workflow", "swarm_delegate"]);
 
+/**
+ * The discovery tools a step's turn goes without once its task names its agents. The scene's author
+ * has picked them, so there is nothing to look for, and a search proposes agents the scene does not
+ * allow: verified_research_brief spent six of its eight model calls on search_agents and search_skills,
+ * then delegated to browser_agent and was refused it (E2E 2026-10-08). list_agents is the same
+ * discovery as search_agents, and the runtime withholds the two together after a no-match.
+ */
+export const WORKFLOW_STEP_DISCOVERY_TOOL_NAMES: ReadonlySet<string> = new Set(["search_agents", "list_agents", "search_skills"]);
+
 const isIdentifierChar = (ch: string | undefined): boolean => ch !== undefined && /[A-Za-z0-9_]/.test(ch);
 
 /** Where `task` first names `agent` as a whole identifier, or -1. "researchers" does not name researcher. */

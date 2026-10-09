@@ -141,6 +141,8 @@ async function loadModules() {
   const session = await import("../agent/session.js");
   const runtime = await import("../agent/runtime.js");
   await import("../tools/workflow-catalog.js");
+  // search_skills, which the gateway registers with the rest of the tools.
+  await import("../tools/skills.js");
   const pipeline = await import("../agent/workflow-step-pipeline.js");
   // The step's delegations, recorded rather than run.
   const delegated: string[] = [];
@@ -159,6 +161,14 @@ async function loadModules() {
     },
   });
   return { registry, runtime, session, pipeline, delegated };
+}
+
+const DISCOVERY = ["search_agents", "list_agents", "search_skills"];
+
+/** The tool names each model call of the turn was offered. */
+function offeredToolNames(): string[][] {
+  return streamMock.mock.calls.map((call) => ((call[1] ?? []) as Array<{ function?: { name?: string }; name?: string }>)
+    .map((tool) => tool.function?.name ?? tool.name ?? ""));
 }
 
 function directiveKind(directive: string): "continue" | "synthesis" {
@@ -314,6 +324,44 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   });
 });
 
+// verified_research_brief spent six of its eight model calls on search_agents and search_skills, then
+// delegated to browser_agent, which the search had proposed and the scene does not allow (E2E 2026-10-08).
+describe("a scene or job step's turn whose task names its agents goes without agent and skill discovery", () => {
+  for (const workflow of [
+    { name: "sourced_brief", workflowType: "scene" },
+    { name: "sourced_brief_packet", workflowType: "job" },
+  ] as const) {
+    it(`${workflow.workflowType}: none of them is offered on any call`, async () => {
+      const { registry } = await loadModules();
+      scriptDirectiveFollowingModel("researcher");
+
+      await registry.getTool("run_workflow")!.execute({ ...workflow }, { sessionId: `chat-discovery-${workflow.workflowType}`, workspacePath: "/workspace" });
+
+      const offered = offeredToolNames();
+      expect(offered.length).toBeGreaterThan(0);
+      for (const names of offered) {
+        expect(names).toContain("delegate_to_agent");
+        for (const tool of DISCOVERY) expect(names).not.toContain(tool);
+      }
+    });
+  }
+
+  it("control: a step whose task names no agent, and a chat turn, are offered them as before", async () => {
+    const { registry, runtime, session } = await loadModules();
+    scriptDirectiveFollowingModel("researcher");
+    await registry.getTool("run_workflow")!.execute({ name: "open_brief", workflowType: "scene" }, { sessionId: "chat-discovery-open", workspacePath: "/workspace" });
+    expect(offeredToolNames()[0]).toEqual(expect.arrayContaining(DISCOVERY));
+
+    streamMock.mockReset();
+    scriptDirectiveFollowingModel("researcher");
+    await runtime.runTurn({
+      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      userMessage: "Use researcher for the sources, evidence_analyst to weigh them, and summarizer to write the brief.",
+    });
+    expect(offeredToolNames()[0]).toEqual(expect.arrayContaining(DISCOVERY));
+  });
+});
+
 // The dashboard and webhook triggers, `/job` over RPC and channel triggers queue a scene or job, and the
 // scene worker runs it as a turn on channel "scene" (agent/scene-worker.ts).
 describe("a scene or job queued through the scene worker", () => {
@@ -349,6 +397,9 @@ describe("a scene or job queued through the scene worker", () => {
 
     expect(job.status).toBe("completed");
     expect(delegated).toEqual(PIPELINE);
+    for (const names of offeredToolNames()) {
+      for (const tool of DISCOVERY) expect(names).not.toContain(tool);
+    }
   });
 
   it("job: each step's turn does the same", async () => {

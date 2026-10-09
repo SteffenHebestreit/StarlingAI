@@ -88,8 +88,9 @@ export interface RunTurnOptions {
   /** The turn runs a step of a workflow that is already running (tools/workflow-catalog.ts), so
    *  search_workflows and run_workflow are left out of its tools. Internal. */
   _withoutWorkflowCatalog?: boolean;
-  /** The agents the step's task names, in its order (agent/workflow-step-pipeline.ts). While some of
-   *  them have not run, a delegation that returned keeps the turn going instead of ending it. Internal. */
+  /** The agents the step's task names, in its order (agent/workflow-step-pipeline.ts). The turn goes
+   *  without agent and skill discovery, and while some of them have not run, a delegation that
+   *  returned keeps the turn going instead of ending it. Internal. */
   _workflowStepPipeline?: string[];
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;

@@ -142,7 +142,7 @@ Every public schema field, where it is declared, and how many production files r
 | `disabled` | packages/core/src/config/schema.ts:833 | 110 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2016 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:2018 | 3 |
-| `discovery` | packages/core/src/config/schema.ts:624 | 40 |
+| `discovery` | packages/core/src/config/schema.ts:624 | 42 |
 | `discoveryPrefetch` | packages/core/src/config/schemas/orchestration.ts:614 | 6 |
 | `displayName` | packages/core/src/config/schema.ts:380 | 16 |
 | `distillSharedFacts` | packages/core/src/config/schemas/orchestration.ts:693 | 1 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1488 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:846 | 1 |
 | `mode` | packages/core/src/config/schema.ts:495 | 141 |
-| `model` | packages/core/src/config/schema.ts:1258 | 276 |
+| `model` | packages/core/src/config/schema.ts:1258 | 277 |
 | `modelModeration` | packages/core/src/config/schema.ts:1254 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1726 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1741 | 4 |
