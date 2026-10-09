@@ -352,3 +352,95 @@ describe("a scene or job queued through the scene worker", () => {
     }));
   });
 });
+
+// A step's orchestrated turn that gives up (the warden after failed delegations, every tool call
+// refused, the iteration cap) ends with a forced synthesis and blocked:false. Its step was reported
+// completed though no specialist had returned anything: in the E2E run of
+// source_grounded_paper_packet no specialist ran anywhere and run_workflow came back "completed".
+describe("a scene or job step whose turn gave up", () => {
+  const failedDelegation = (agentName: string) => ({
+    success: false,
+    output: "",
+    error: `Delegation failed: ${agentName} could not reach the site.`,
+    metadata: { delegationSucceeded: false, attemptedAgents: [agentName] },
+  });
+  const deliveredDelegation = (agentName: string) => ({
+    success: true,
+    output: `${agentName} returned the sourced findings: founded 1987, 146 employees, warehouses Nordhafen, Südtal and Westmark, 18 articles in six categories.`,
+    metadata: { delegationOutcome: "success", delegationSucceeded: true, agentName },
+  });
+
+  /** Runs the workflow with the step's delegations answered in order (the last answer repeats). */
+  async function runWithDelegations(
+    workflow: { name: string; workflowType: "scene" | "job" },
+    answers: Array<(agentName: string) => object>,
+    ctxExtra: Record<string, unknown> = {},
+  ) {
+    const { registry, logAudit } = await loadModules();
+    let delegations = 0;
+    registry.registerTool({
+      name: "delegate_to_agent",
+      description: "delegate",
+      parameters: { type: "object", properties: {} },
+      execute: async (args) => answers[Math.min(delegations++, answers.length - 1)]!(String(args["agentName"])) as never,
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("d1", "delegate_to_agent", { agentName: "researcher", task: "Find authoritative sources." });
+      if (call === 2) return toolCallStream("d2", "delegate_to_agent", { agentName: "evidence_analyst", task: "Weigh the evidence." });
+      return textStream("The brief could not be completed.");
+    });
+    const result = await registry.getTool("run_workflow")!.execute(workflow, { sessionId: `chat-gave-up-${workflow.workflowType}`, workspacePath: "/workspace", ...ctxExtra });
+    const flagged = logAudit.mock.calls
+      .map((c) => c[1] as Record<string, unknown>)
+      .filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");
+    return { result, flagged };
+  }
+
+  for (const workflow of [
+    { name: "verified_research_brief", workflowType: "scene" },
+    { name: "brief_packet", workflowType: "job" },
+  ] as const) {
+    it(`${workflow.workflowType}: after its delegations failed back to back, is reported blocked`, async () => {
+      const { result, flagged } = await runWithDelegations(workflow, [failedDelegation]);
+
+      expect(result.success).toBe(false);
+      expect(result.metadata?.["blocked"]).toBe(true);
+      expect(result.output).toContain(`Workflow ${workflow.name} [${workflow.workflowType}] blocked.`);
+      expect(flagged).toEqual([expect.objectContaining({ workflow: workflow.name, finishReason: "delegation_failures_terminal" })]);
+    });
+  }
+
+  it("job: at the iteration cap with no specialist's result, is reported blocked", async () => {
+    const { result, flagged } = await runWithDelegations({ name: "brief_packet", workflowType: "job" }, [failedDelegation], { maxIterationsOverride: 1 });
+
+    expect(result.metadata?.["blocked"]).toBe(true);
+    expect(flagged).toEqual([expect.objectContaining({ step: "Brief", finishReason: "max_tool_iterations" })]);
+  });
+
+  it("job: with every tool call refused, is reported blocked", async () => {
+    const { registry, logAudit } = await loadModules();
+    let call = 0;
+    // run_workflow is not among the step turn's tools, so each call is refused before it runs.
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call <= 4) return toolCallStream(`r${call}`, "run_workflow", { name: `other_scene_${call}`, workflowType: "scene" });
+      return textStream("The brief could not be completed.");
+    });
+
+    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-refused", workspacePath: "/workspace" });
+
+    expect(result.metadata?.["blocked"]).toBe(true);
+    const flagged = logAudit.mock.calls.map((c) => c[1] as Record<string, unknown>).filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");
+    expect(flagged).toEqual([expect.objectContaining({ finishReason: "all_tool_calls_blocked" })]);
+  });
+
+  it("control: at the iteration cap after its specialist returned, completes", async () => {
+    const { result, flagged } = await runWithDelegations({ name: "brief_packet", workflowType: "job" }, [deliveredDelegation], { maxIterationsOverride: 1 });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Workflow brief_packet [job] completed.");
+    expect(flagged).toEqual([]);
+  });
+});
