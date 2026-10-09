@@ -1281,6 +1281,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       wardenStop?: SubAgentWardenStop;
       executions?: DelegatedExecutionRecord;
       maskedRuns?: MaskedDelegatedRun[];
+      computedAggregateKeys?: string[];
     }
     | undefined;
   /** Routing metadata for agents that were auto-selected by resolveAgentRouting. */
@@ -2405,6 +2406,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // And each run under it that masked figures, by name, when the run delegated (a coordinator):
       // passed up as maskedRuns, so the turn names that run and its files only.
       let runMaskedRuns: MaskedDelegatedRun[] = [];
+      // The figure keys of the aggregates the run computed with web_table, passed up so the turn's
+      // coverage check leaves a reply that states one of them alone (agent/runtime.ts).
+      let runComputedAggregateKeys: string[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2425,6 +2429,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             .map((failure) => failure.tool);
           runExecutions = readExecutionRecord(maybeResult.executions) ?? undefined;
           runMaskedRuns = readMaskedRuns(maybeResult.maskedRuns);
+          runComputedAggregateKeys = Array.isArray(maybeResult.computedAggregateKeys)
+            ? maybeResult.computedAggregateKeys.filter((key): key is string => typeof key === "string").slice(0, 32)
+            : [];
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
           if (runLoopEnforced || runWardenStop) {
@@ -2593,6 +2600,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             ...(runWardenStop ? { wardenStop: runWardenStop } : {}),
             ...(runExecutions ? { executions: runExecutions } : {}),
             ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
+            ...(runComputedAggregateKeys.length > 0 ? { computedAggregateKeys: runComputedAggregateKeys } : {}),
           };
         }
         publishSwarmState(ctx);
@@ -2736,6 +2744,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // What the run executed: read by the frame, the relay and the turn's scorecard.
           ...(runExecutions ? { specialistExecutions: runExecutions } : {}),
           ...(runMaskedRuns.length > 0 ? { maskedRuns: runMaskedRuns } : {}),
+          ...(runComputedAggregateKeys.length > 0 ? { computedAggregateKeys: runComputedAggregateKeys } : {}),
           ...(routingInfo && { routingReason: { confidence: routingInfo.confidence, matchedTerms: routingInfo.matchedTerms, score: routingInfo.score } }),
         },
       };
@@ -2851,6 +2860,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         ...(bestPartialResult.wardenStop ? { wardenStop: bestPartialResult.wardenStop } : {}),
         ...(bestPartialResult.executions ? { specialistExecutions: bestPartialResult.executions } : {}),
         ...(bestPartialResult.maskedRuns ? { maskedRuns: bestPartialResult.maskedRuns } : {}),
+        ...(bestPartialResult.computedAggregateKeys ? { computedAggregateKeys: bestPartialResult.computedAggregateKeys } : {}),
         ...(bestPartialResult.routingInfo
           ? {
             routingReason: {

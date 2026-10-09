@@ -36,6 +36,7 @@ import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloM
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
+  addFigureKeys,
   addArgumentFigureKeys,
   addReceivedFigureKeys,
   argumentTexts,
@@ -2689,6 +2690,10 @@ export interface SubAgentRunResult {
    *  name and files (the delegated ones as they came back, and this run when its own account did),
    *  so its delegation can tell the turn which run that was. See MaskedDelegatedRun. */
   maskedRuns?: MaskedDelegatedRun[];
+  /** Present only when the run computed aggregates with web_table: the figure keys (figureKey, two
+   *  digits or more) of the values it computed, at most 32. A reply that states one of them is not
+   *  re-synthesized for coverage (agent/runtime.ts enforceDelegateCoverage). */
+  computedAggregateKeys?: string[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -4229,6 +4234,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // The pages this run has read (web_fetch, browser_navigate and web_table, comparablePageUrl
     // form): after the evidence strip, web_table may compute over these and fetch nothing new.
     const readPageUrls = new Set<string>();
+    // The figure keys of the values web_table computed in this run (at most 32), handed up as
+    // computedAggregateKeys: an aggregate over an 18-row listing is short by construction, and the
+    // orchestrator's coverage re-synthesis asked for "all 18 items" and got invented rows (E2E
+    // 2026-10-09, session 820e1171: 596 became 740).
+    const computedAggregateKeys = new Set<string>();
     // Cost-center 3 (audit 5d51862f): consecutive fetches that returned NO usable content
     // (404 / blocked / non-extractable PDF / error page). These slip past the success-only
     // stale-domain plateau, so the model keeps guessing alternate URLs for the same document
@@ -4508,6 +4518,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
         ...(executions ? { executions } : {}),
         ...(maskedRuns ? { maskedRuns } : {}),
+        ...(computedAggregateKeys.size > 0 ? { computedAggregateKeys: [...computedAggregateKeys] } : {}),
       };
     };
 
@@ -8072,10 +8083,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           const urlArg = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
           if ((tc.name === "web_fetch" || tc.name === "browser_navigate") && typeof urlArg === "string") readPageUrls.add(comparablePageUrl(urlArg));
           if (tc.name === "web_table") {
-            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown } | undefined;
+            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; aggregates?: unknown } | undefined;
             for (const list of [webTable?.urls, webTable?.finalUrls]) {
               if (!Array.isArray(list)) continue;
               for (const url of list) if (typeof url === "string") readPageUrls.add(comparablePageUrl(url));
+            }
+            if (webTable?.aggregates && typeof webTable.aggregates === "object") {
+              for (const value of Object.values(webTable.aggregates as Record<string, unknown>)) {
+                if (typeof value !== "string") continue;
+                const keys = new Set<string>();
+                addFigureKeys(keys, value);
+                for (const key of keys) if (computedAggregateKeys.size < 32) computedAggregateKeys.add(key);
+              }
             }
           }
         }

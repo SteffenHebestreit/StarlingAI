@@ -212,6 +212,46 @@ describe("web_table in a sub-agent run", () => {
     ]);
   }, 60_000);
 
+  it("hands up the figure keys of the aggregates web_table computed, and nothing for a run that computed none", async () => {
+    const { result } = await runProbe([toolCall("t1", "web_table", { url: "http://93.184.215.14/lager.html", column: "Südtal", aggregates: ["sum"] }), text("Südtal: 596 Stück.")], {
+      maxIterations: 4,
+      agentTools: ["web_table"],
+      fakes: { web_table: () => computed("596") },
+    });
+    expect(result.computedAggregateKeys).toEqual(["596"]);
+
+    const plain = await runProbe([toolCall("f1", "web_fetch", { url: "http://93.184.215.14/lager.html" }), text("Südtal: 596 Stück.")], {
+      maxIterations: 4,
+      agentTools: ["web_fetch"],
+      fakes: { web_fetch: () => ({ success: true, output: "Lagerbestand: 18 Artikel, Südtal-Spalte." }) },
+    });
+    expect(plain.result).not.toHaveProperty("computedAggregateKeys");
+  }, 30_000);
+
+  it("delegate_to_agent passes the computed keys up in its metadata", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-web-table-delegate-"));
+    writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      subAgents: { [AGENT]: { description: "Probe specialist that reads web tables.", systemPrompt: "Read the tables, then answer.", tools: ["web_table"], maxIterations: 4 } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
+    vi.resetModules();
+    const queue = [toolCall("t1", "web_table", { url: "http://93.184.215.14/lager.html", column: "Südtal", aggregates: ["sum"] }), text("Gesamtbestand Südtal: 596 Stück.")];
+    responseQueue.mockImplementation(() => queue.shift() ?? text("Fallback answer."));
+    await import("../tools/sub-agent.js");
+    const { registerTool, getTool } = await import("../tools/registry.js");
+    registerTool({ name: "web_table", description: "web_table", parameters: { type: "object", properties: {} }, async execute() { return computed("596"); } });
+    try {
+      const result = await getTool("delegate_to_agent")!.execute(
+        { agentName: AGENT, task: "Wie hoch ist der Gesamtbestand am Standort Südtal?" },
+        { sessionId: "s-web-table-delegate", workspacePath: tempDir, swarmState: { objective: "test", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} } },
+      );
+      expect(result.success).toBe(true);
+      expect(result.metadata?.["computedAggregateKeys"]).toEqual(["596"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("forgets the run's web_table page count when the run ends", async () => {
     let session = "";
     const budget = { used: -1 };

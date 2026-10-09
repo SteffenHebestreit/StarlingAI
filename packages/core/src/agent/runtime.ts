@@ -38,6 +38,7 @@ import {
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
+import { addFigureKeys } from "./figure-provenance.js";
 import { getConfig } from "../config/loader.js";
 import {
   runWithEffortContext,
@@ -760,6 +761,25 @@ async function enforceDelegateCoverage(
   const lengthShortfall = initialCoverage.lengthShortfall;
 
   if (!itemShortfall && !lengthShortfall) return finalResponse;
+
+  // A computed aggregate is short by construction. The delegated run computed it with web_table
+  // (computedAggregateKeys), the reply states that very figure, and the evidence it falls short of
+  // is the listing the figure was computed over. Re-synthesizing "for all 18 items" turned a
+  // correct 596 into 740 with four invented rows (E2E 2026-10-09, session 820e1171). Figure identity
+  // against a value the tool computed, not text matching: a reply stating another total, or none,
+  // is still checked for coverage.
+  if (evidence.computedAggregateKeys && evidence.computedAggregateKeys.length > 0) {
+    const stated = new Set<string>();
+    addFigureKeys(stated, finalResponse);
+    if (evidence.computedAggregateKeys.some((key) => stated.has(key))) {
+      logAudit(
+        "guardrail_flagged",
+        { type: "coverage_shortfall_waived_computed_aggregate", evidenceItems: evidence.itemCount, finalItems },
+        { sessionId: session.id, channel: session.channel, severity: "info" },
+      );
+      return finalResponse;
+    }
+  }
 
   // A15: Action-task exemption. Delete, move, archive, send, and similar
   // mutation tasks produce short confirmation responses that legitimately
