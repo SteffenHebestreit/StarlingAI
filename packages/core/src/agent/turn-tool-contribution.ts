@@ -133,9 +133,16 @@ export function isRetrievalEvidenceResult(toolName: string): boolean {
  * model a worker's two-fact answer of 368 to 554 characters lost its second fact in the snippet in
  * three runs of three, and in the frame in one (probe, 2026-10-09). Every place that sizes a tool
  * result by its tool (the frame, the history snippet) asks this.
+ *
+ * Only a report counts, and the tool says which results are one: it returns the knowledge base's id
+ * (metadata.kbId) with the worker's findings and no metadata with a failure. A worker that could not
+ * run comes back as "Error: The knowledge-base worker could not run: …" followed by whatever the
+ * worker emitted, a partial transcript or a provider's error page among it. That is no report to
+ * relay, and at a report's budget it reached the model at up to 10,000 characters instead of 600, so
+ * it keeps a generic tool result's treatment.
  */
-export function isKnowledgeBaseWorkerResult(toolName: string): boolean {
-  return toolName === "use_knowledge_base";
+export function isKnowledgeBaseWorkerReport(toolName: string, metadata: Record<string, unknown> | undefined): boolean {
+  return toolName === "use_knowledge_base" && typeof metadata?.["kbId"] === "string";
 }
 
 /** What is known BEFORE the call runs, from the tool name alone. */

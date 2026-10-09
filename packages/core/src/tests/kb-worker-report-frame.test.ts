@@ -57,6 +57,20 @@ const OUTPUT = toolOutput(REPORT);
 const METADATA = { kbId: "core-ix-nw-doku", grantedTools: ["search_knowledge_base", "list_knowledge_bases"], rejectedTools: [], sourceUrls: [PAGE_URL] };
 const CUT_LINE_AT_END = /\[Cut to fit the context budget: the remaining (\d+) characters of this result are not shown\.\]$/;
 
+/**
+ * What the turn loop makes of a worker that could not run: the tool fails with "The knowledge-base
+ * worker could not run: " and whatever the worker emitted (tools/knowledge-bases.ts), with no
+ * metadata, and the loop prefixes the error with "Error: " (agent/runtime.ts). Here the worker timed
+ * out while its searches kept hitting a provider's error page, which its partial transcript repeats.
+ */
+const FAILED_TAIL = "Letzter Stand vor dem Abbruch: keine Antwort des Modells nach 600 s.";
+const FAILED = `Error: The knowledge-base worker could not run: ${[
+  "Partial progress before interruption:",
+  ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) =>
+    `- search_knowledge_base (Versuch ${n}): HTTP 502 <html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center></body></html>`),
+  FAILED_TAIL,
+].join("\n")}`;
+
 let savedMaxDelegatedResultChars: number;
 beforeEach(() => {
   savedMaxDelegatedResultChars = getConfig().agents.performance.maxDelegatedResultChars;
@@ -128,10 +142,22 @@ describe("the model-visible frame of a knowledge-base worker's report", () => {
     buildModelVisibleToolResult("use_knowledge_base", OUTPUT, METADATA, { retrievalShown: shown });
     expect(shown.chars).toBe(0);
   });
+
+  it("keeps a worker that could not run on the 600-character fallback, byte for byte", () => {
+    // Within a report's budget, so only telling a failure from a report keeps it at 600.
+    expect(FAILED.length).toBeGreaterThan(600);
+    expect(FAILED.length).toBeLessThan(knowledgeBaseWorkerReportMaxChars());
+    expect(FAILED.indexOf(FAILED_TAIL)).toBeGreaterThan(600);
+
+    const visible = buildModelVisibleToolResult("use_knowledge_base", FAILED, undefined);
+    expect(visible).toBe(truncateForContext(FAILED, 600));
+    expect(visible).not.toContain(FAILED_TAIL);
+  });
 });
 
 describe("the collapsed history the turn's prompts are built from", () => {
-  function sessionWithWorker(tool: string, output: string) {
+  /** The turn loop stores the framed result with the tool's metadata (agent/turn-tool-execution.ts). */
+  function sessionWithWorker(tool: string, output: string, metadata: Record<string, unknown> | undefined) {
     const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
     session.addMessage({ role: "user", content: "Wie lange lädt der Akku-Pack NW-3104 bis 80 %, und wann wird das Getriebefett geprüft?" });
     session.addMessage({
@@ -139,22 +165,28 @@ describe("the collapsed history the turn's prompts are built from", () => {
       content: "",
       tool_calls: [{ id: "call_kbw", type: "function", function: { name: tool, arguments: JSON.stringify({ knowledge_base: "core-ix-nw-doku", task: "Ladezeit NW-3104 und Getriebefett-Intervall NW-AS 18" }) } }],
     } as never);
-    session.addMessage({ role: "tool", tool_call_id: "call_kbw", content: buildModelVisibleToolResult(tool, output, METADATA) } as never);
+    session.addMessage({ role: "tool", tool_call_id: "call_kbw", content: buildModelVisibleToolResult(tool, output, metadata), metadata } as never);
     return session;
   }
+  /** The generic 500-character snippet of the framed failure, marker and all. */
+  const genericFailureSnippet = (): string => {
+    const framed = buildModelVisibleToolResult("use_knowledge_base", FAILED, undefined);
+    expect(framed.length).toBeGreaterThan(500);
+    return `${framed.substring(0, 500)} [snippet summarized for prior-turn history; full result preserved in the original tool call above, ${framed.length} chars total]`;
+  };
   const collapsedText = (session: AgentSession) => session.getCollapsedHistory().map((m) => String(m.content)).join("\n");
 
   it("keeps this turn's report whole, the finding past the delegation snippet's 2,000 characters included", () => {
     // Both main-loop iterations and the forced synthesis read this view, not the tool message.
     expect(OUTPUT.indexOf(GREASE_ROW)).toBeGreaterThan(2_000);
-    const collapsed = collapsedText(sessionWithWorker("use_knowledge_base", OUTPUT));
+    const collapsed = collapsedText(sessionWithWorker("use_knowledge_base", OUTPUT, METADATA));
     expect(collapsed).toContain(CHARGE_FACT);
     expect(collapsed).toContain(GREASE_ROW);
     expect(collapsed).not.toContain("snippet summarized for prior-turn history");
   });
 
   it("holds it to the delegation snippet once the turn is over", () => {
-    const session = sessionWithWorker("use_knowledge_base", OUTPUT);
+    const session = sessionWithWorker("use_knowledge_base", OUTPUT, METADATA);
     session.addMessage({ role: "assistant", content: "38 Minuten; Getriebefett alle 150 Betriebsstunden." });
     session.addMessage({ role: "user", content: "Und die Vollladung?" });
     const collapsed = collapsedText(session);
@@ -167,8 +199,20 @@ describe("the collapsed history the turn's prompts are built from", () => {
   });
 
   it("leaves another tool's result of this turn at the generic snippet", () => {
-    const collapsed = collapsedText(sessionWithWorker("web_fetch", OUTPUT));
+    const collapsed = collapsedText(sessionWithWorker("web_fetch", OUTPUT, METADATA));
     expect(collapsed).not.toContain("38 Minuten");
     expect(collapsed).toContain("snippet summarized for prior-turn history");
+  });
+
+  it("keeps a worker that could not run at the generic snippet on the turn that made the call", () => {
+    const collapsed = collapsedText(sessionWithWorker("use_knowledge_base", FAILED, undefined));
+    expect(collapsed).toContain(genericFailureSnippet());
+  });
+
+  it("and on the turns after it, where a report gets the delegation snippet", () => {
+    const session = sessionWithWorker("use_knowledge_base", FAILED, undefined);
+    session.addMessage({ role: "assistant", content: "Die Wissensdatenbank war nicht erreichbar." });
+    session.addMessage({ role: "user", content: "Versuch es noch einmal." });
+    expect(collapsedText(session)).toContain(genericFailureSnippet());
   });
 });

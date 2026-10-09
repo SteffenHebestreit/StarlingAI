@@ -42,7 +42,7 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isKnowledgeBaseWorkerResult, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
 import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
@@ -114,7 +114,7 @@ export function retrievalEvidenceAllowance(charsShown: number): number {
 }
 
 /**
- * What one knowledge-base worker's report (isKnowledgeBaseWorkerResult) may show the model, in
+ * What one knowledge-base worker's report (isKnowledgeBaseWorkerReport) may show the model, in
  * characters, in the frame and in the history snippet of the turn that made the call. The report is
  * a delegated result that the tool tells the model to relay as-is, so it gets the budget a delegated
  * result relayed verbatim gets (delegate_to_agent's long-deliverable frame): the effort-scaled
@@ -736,9 +736,10 @@ function frameToolResult(
   // model to relay it as-is: kept as the tool wrote it, up to the budget of a delegated result relayed
   // verbatim, instead of the 600-character fallback below. It is not retrieved passages, so it does
   // not draw on the turn's retrieval budget. Nor does it get delegate_to_agent's prose failure sniff:
-  // the tool judged the worker's run itself, and a worker that could not run comes back as an
-  // "Error: …" result, which this keeps as written too.
-  if (isKnowledgeBaseWorkerResult(toolName)) {
+  // the tool judged the worker's run itself. A worker that could not run is no report: its "Error: …"
+  // result carries whatever the worker emitted, a partial transcript or a provider's error page, and
+  // no metadata, so it stays on the fallback, as it was before the report had a frame of its own.
+  if (isKnowledgeBaseWorkerReport(toolName, metadata)) {
     return holdToBudget(resultText, knowledgeBaseWorkerReportMaxChars(), frameContext?.runtimeNote);
   }
 

@@ -31,7 +31,7 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
-import { isKnowledgeBaseWorkerResult, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
 import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
@@ -376,9 +376,11 @@ export class AgentSession {
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
           // A knowledge-base worker's report is a delegated result too (use_knowledge_base runs the
           // worker agent): at the generic 500 a later turn kept little more than the tool's own
-          // relay instruction, which takes over 200 of them.
+          // relay instruction, which takes over 200 of them. A worker that could not run is no
+          // report: its "Error: …" result keeps the generic 500, on this turn and later ones.
+          const kbWorkerReport = isKnowledgeBaseWorkerReport(call.function.name, resultMetadata.get(call.id));
           const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name)
-            || isKnowledgeBaseWorkerResult(call.function.name);
+            || kbWorkerReport;
           // execute_plan's result stands in for a WHOLE PLAN — every step's evidence at once, and
           // the only channel a `direct` or `reuse` step's output has, since those run as nested
           // calls that never become tool messages of their own. At the delegation cap it lost every
@@ -397,7 +399,7 @@ export class AgentSession {
             ? (i > currentTurnStart ? 12000 : 2000)
             : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
               ? retrievalEvidenceMaxChars()
-              : isKnowledgeBaseWorkerResult(call.function.name) && i > currentTurnStart
+              : kbWorkerReport && i > currentTurnStart
                 ? knowledgeBaseWorkerReportMaxChars()
                 : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
