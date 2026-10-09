@@ -630,6 +630,25 @@ describe("the research gate's turn trigger", () => {
     ]);
   }, 30_000);
 
+  it("does not count a browser agent that failed as having opened the tab for the next routing round", async () => {
+    // The turn reached outside before this delegation, so the trigger stands down and only the tab
+    // rule holds the router. browser_agent fails; its page did not load, so the tab is still not
+    // this session's, and the next round must not hand the step to the tab reader.
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const failed = args.agentName === "browser_agent";
+      return {
+        output: failed ? "browser_agent: the page did not load." : `${args.agentName}: done`,
+        stats: { ...statsFor(args), ...(failed ? { outcome: "failure" as const } : {}) },
+      };
+    });
+    routeAs([{ name: "vision_browser_analyst", score: 0.8555 }, { name: "browser_agent", score: 0.8453 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-driver-failed", { turnEvidence: { required: true, outsideEngaged: "researcher" } }));
+
+    expect(ran()).toEqual(["browser_agent", "researcher"]);
+  }, 30_000);
+
   it("routes a step that names a web address past an agent with a workspace source of its own, to one that reaches outside", async () => {
     // The live step's shape with data_analyst ranked between the tab reader and browser_agent: the
     // sum made it a match, but it reads files already collected and cannot open the page.

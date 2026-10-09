@@ -341,14 +341,16 @@ async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
 
 /**
  * Whether this session's swarm has run an agent that drives the shared browser
- * (agentCfgDrivesSharedBrowser): a delegation of this turn dispatched one (each dispatch records its
- * attempt), or a task this turn carried over from the session's previous turn ran on one.
+ * (agentCfgDrivesSharedBrowser) to the end without failing: an attempt of this turn, or of a task
+ * this turn carried over from the session's previous turn. One still running may not have opened its
+ * page yet, and one that failed may never have: a tab reader would read the tab as it was before.
  */
 function swarmHasDrivenSharedBrowser(ctx: ToolContext): boolean {
   const config = getConfig();
   const promoted = readPromotedAgents(config.workspacePath);
   return Object.values(ctx.swarmState?.tasks ?? {}).some((task) => (task.attempts ?? []).some((attempt) =>
-    agentCfgDrivesSharedBrowser(config.subAgents[attempt.agentName] ?? promoted[attempt.agentName])));
+    (attempt.status === "completed" || attempt.status === "partial")
+    && agentCfgDrivesSharedBrowser(config.subAgents[attempt.agentName] ?? promoted[attempt.agentName])));
 }
 
 function getEphemeralGenerationSettings() {
