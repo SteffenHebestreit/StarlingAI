@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ToolContext } from "../tools/registry.js";
 
 // A scene or job step runs as an orchestrator turn of its own (tools/workflow-catalog.ts). That turn
 // kept search_workflows and run_workflow: it searched for the scene it was running, which its own
@@ -143,7 +144,8 @@ async function loadModules(orchestration: Record<string, unknown> = {}) {
   const audit = await import("../audit/logger.js");
   vi.mocked(audit.logAudit).mockClear();
   // The step's delegation, recorded rather than run: which agent the step's turn sent work to.
-  const delegateExecute = vi.fn(async (args: Record<string, unknown>) => ({
+  // Its second argument is the tool context the delegated agent's own tools would get.
+  const delegateExecute = vi.fn(async (args: Record<string, unknown>, _ctx?: ToolContext) => ({
     success: true,
     output: `${String(args["agentName"])} returned the sourced findings.`,
     metadata: { delegationOutcome: "success", agentName: args["agentName"] },
@@ -272,5 +274,81 @@ describe("a scene or job step's turn", () => {
       userMessage: "Write a verified research brief about the history of the city archive.",
     });
     expect(prefetchOptions).toEqual([{}]);
+  });
+});
+
+// The dashboard and webhook triggers, `/job` over RPC and channel triggers queue a scene or job, and
+// the scene worker runs its task, and each job step's task, as a turn on channel "scene"
+// (agent/scene-worker.ts). That turn had neither of what a step run from chat gets: it kept the
+// catalog tools, was held to its catalog search like a chat turn, and had nothing on the execution
+// stack for the recursion check to read.
+describe("a scene or job queued through the scene worker", () => {
+  async function runQueued(input: { sceneName: string; definitionType: "scene" | "job"; task?: string; steps?: unknown[]; allowedAgents?: string[] }) {
+    const jobs = await import("../agent/jobs.js");
+    const worker = await import("../agent/scene-worker.js");
+    try {
+      const queued = await jobs.createJob({ ...input, userId: "operator", turnTimeoutMs: 60_000 } as Parameters<typeof jobs.createJob>[0]);
+      await worker.runSceneJobWorkerTick();
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        const job = await jobs.getJob(queued.id);
+        if (job && ["completed", "failed", "cancelled"].includes(job.status)) return job;
+        if (Date.now() > deadline) throw new Error(`Job ${queued.id} did not finish (${job?.status})`);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      await worker.stopSceneJobWorker();
+      await jobs.resetJobsForTests();
+    }
+  }
+
+  it("scene: its turn neither searches for nor re-runs the scene, runs its agents, and stacks the scene", async () => {
+    const { delegateExecute, searchExecute, runExecute } = await loadModules();
+    scriptStepModel();
+
+    const job = await runQueued({
+      sceneName: "verified_research_brief",
+      definitionType: "scene",
+      task: "Use researcher for broad source discovery, evidence_analyst to reconcile the evidence ledger, source_verifier to flag unsupported claims, and summarizer to produce the final brief.",
+      allowedAgents: BRIEF_AGENTS,
+    });
+
+    expect(job.status).toBe("completed");
+    const offered = offeredToolNames();
+    expect(offered.length).toBeGreaterThan(0);
+    for (const names of offered) {
+      expect(names).not.toContain("search_workflows");
+      expect(names).not.toContain("run_workflow");
+    }
+    expect(searchExecute).not.toHaveBeenCalled();
+    expect(runExecute).not.toHaveBeenCalled();
+    expect(delegateExecute).toHaveBeenCalledTimes(1);
+    expect(delegateExecute.mock.calls[0]![0]).toEqual(expect.objectContaining({ agentName: "researcher" }));
+    // What the step's delegated agents run under: a coordinator among them is refused the scene.
+    expect(delegateExecute.mock.calls[0]![1]).toEqual(expect.objectContaining({ _workflowExecutionStack: ["scene:verified_research_brief"] }));
+  });
+
+  it("job: each step's turn is the same, with the job and the step's scene stacked", async () => {
+    const { delegateExecute, searchExecute, runExecute } = await loadModules();
+    scriptStepModel();
+    const { getJobDefinition, resolveJobSteps } = await import("../credentials/jobs.js");
+
+    const job = await runQueued({
+      sceneName: "brief_packet",
+      definitionType: "job",
+      steps: resolveJobSteps(getJobDefinition("brief_packet")!),
+    });
+
+    expect(job.status).toBe("completed");
+    for (const names of offeredToolNames()) {
+      expect(names).not.toContain("search_workflows");
+      expect(names).not.toContain("run_workflow");
+    }
+    expect(searchExecute).not.toHaveBeenCalled();
+    expect(runExecute).not.toHaveBeenCalled();
+    expect(delegateExecute).toHaveBeenCalledTimes(1);
+    expect(delegateExecute.mock.calls[0]![1]).toEqual(expect.objectContaining({
+      _workflowExecutionStack: ["job:brief_packet", "scene:verified_research_brief"],
+    }));
   });
 });

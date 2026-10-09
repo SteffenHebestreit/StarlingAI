@@ -17,7 +17,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:710 | 1 |
 | `admin` | packages/core/src/config/schema.ts:395 | 32 |
-| `agents` | packages/core/src/config/schema.ts:1719 | 181 |
+| `agents` | packages/core/src/config/schema.ts:1719 | 182 |
 | `alertmanager` | packages/core/src/config/schema.ts:1159 | 1 |
 | `all` | packages/core/src/config/schema.ts:1312 | 300 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1332 | 29 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1261 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:545 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:707 | 11 |
-| `name` | packages/core/src/config/schema.ts:1997 | 372 |
+| `name` | packages/core/src/config/schema.ts:1997 | 373 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 57 |
 | `node` | packages/core/src/config/schema.ts:1066 | 240 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:759 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:575 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1245 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1355 | 81 |
+| `scene` | packages/core/src/config/schema.ts:1355 | 82 |
 | `scopes` | packages/core/src/config/schema.ts:414 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
@@ -492,7 +492,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:295 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:651 | 2 |
-| `tools` | packages/core/src/config/schema.ts:945 | 228 |
+| `tools` | packages/core/src/config/schema.ts:945 | 229 |
 | `topK` | packages/core/src/config/schema.ts:169 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:168 | 4 |

@@ -4,6 +4,7 @@ import { requestApprovalViaChannel } from "../approval/index.js";
 import { archiveSession, createSession, type AgentSession } from "../agent/session.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+import { buildWorkflowExecutionKey } from "../agent/workflow-execution-key.js";
 import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
@@ -33,10 +34,6 @@ interface WorkflowSearchCandidate {
   semanticScore: number;
   combinedScore: number;
   matchedTerms: string[];
-}
-
-function buildWorkflowExecutionKey(name: string, workflowType: WorkflowType): string {
-  return `${workflowType}:${name}`;
 }
 
 const COORDINATOR_BOOTSTRAP_TOOL_NAMES = new Set([
