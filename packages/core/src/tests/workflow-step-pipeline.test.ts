@@ -7,7 +7,7 @@ import type { LLMMessage } from "../providers/lmstudio.js";
 // A scene or job step runs as an orchestrator turn of its own (tools/workflow-catalog.ts,
 // agent/scene-worker.ts). That turn ended at its first delegation that returned: the runtime required
 // synthesis ("Do NOT delegate again") because the turn had recorded no plan, so the agents the scene's
-// task names after researcher never ran (E2E 2026-10-08, verified_research_brief and
+// task names after researcher never ran (E2E 2026-10-09, verified_research_brief and
 // source_grounded_paper_packet). These run the real run_workflow and the real step turn, with the model
 // scripted to follow whatever the runtime tells it.
 
@@ -325,7 +325,7 @@ describe("a scene or job step's turn runs the agents its task names, in the task
 });
 
 // verified_research_brief spent six of its eight model calls on search_agents and search_skills, then
-// delegated to browser_agent, which the search had proposed and the scene does not allow (E2E 2026-10-08).
+// delegated to browser_agent, which the search had proposed and the scene does not allow (E2E 2026-10-09).
 describe("a scene or job step's turn whose task names its agents goes without agent and skill discovery", () => {
   for (const workflow of [
     { name: "sourced_brief", workflowType: "scene" },

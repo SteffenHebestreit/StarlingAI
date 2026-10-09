@@ -5,7 +5,7 @@
  * A step that is not run by one agent directly runs as an orchestrator turn of its own
  * (tools/workflow-catalog.ts, agent/scene-worker.ts), and that turn ended after its first delegation
  * that returned evidence: the runtime then requires synthesis ("Do NOT delegate again") unless a
- * recorded plan still has steps left, and a step's turn records none. In the E2E run of 2026-10-08,
+ * recorded plan still has steps left, and a step's turn records none. In the E2E run of 2026-10-09,
  * source_grounded_paper_packet ran researcher and its fan-out to the rest of the scene's agents was
  * rejected, and verified_research_brief wrote the brief itself after researcher. Neither reached the
  * agents the scene's author had named, in order, in the task.
@@ -31,7 +31,7 @@ const FAN_OUT_TOOL_NAMES = new Set(["parallel_delegate", "run_task_graph", "run_
  * The discovery tools a step's turn goes without once its task names its agents. The scene's author
  * has picked them, so there is nothing to look for, and a search proposes agents the scene does not
  * allow: verified_research_brief spent six of its eight model calls on search_agents and search_skills,
- * then delegated to browser_agent and was refused it (E2E 2026-10-08). list_agents is the same
+ * then delegated to browser_agent and was refused it (E2E 2026-10-09). list_agents is the same
  * discovery as search_agents, and the runtime withholds the two together after a no-match.
  */
 export const WORKFLOW_STEP_DISCOVERY_TOOL_NAMES: ReadonlySet<string> = new Set(["search_agents", "list_agents", "search_skills"]);

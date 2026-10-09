@@ -5098,7 +5098,7 @@ async function _runTurn(
           // A workflow step's turn records no plan of its own, and the agents its task names stand in
           // for one (agent/workflow-step-pipeline.ts). Without them the turn ended at its first
           // delegation that returned: the scene's researcher ran, and the agents named after it were
-          // forbidden by the synthesis requirement below (E2E 2026-10-08). A plan the turn did record
+          // forbidden by the synthesis requirement below (E2E 2026-10-09). A plan the turn did record
           // is its own reading of the task and is followed instead, above.
           if (!continuationPlan && workflowStepPipeline.length > 0) {
             const remainingStepAgents = remainingWorkflowStepAgents({
