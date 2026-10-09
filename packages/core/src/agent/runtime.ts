@@ -2219,9 +2219,10 @@ async function _runTurn(
   // F29: Turn-level scorecard accumulators
   let _turnDelegationCount = 0;
   let _turnShareFindingCount = 0;
-  // A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent). It
-  // grounds a source-sensitive answer the way a research delegation does, so it releases the
-  // turn's research requirement; see where requiresDelegatedResearch is read below.
+  // A knowledge-base read this turn brought content back (retrievedKnowledgeBaseContent), and the
+  // tool-output screen let it through to the model. It grounds a source-sensitive answer the way a
+  // research delegation does, so it releases the turn's research requirement; see where
+  // requiresDelegatedResearch is read below.
   let _turnRetrievedKnowledgeBaseContent = false;
   let _forcedSynthesisFired = false;
   // The latest delegation that carried a run record masked figures no tool had returned
@@ -4644,7 +4645,6 @@ async function _runTurn(
       } else if (toolResultContribution(tc.name, result).workflowCompleted) {
         workflowRunCompletedThisTurn = true;
       }
-      if (retrievedKnowledgeBaseContent(tc.name, result)) _turnRetrievedKnowledgeBaseContent = true;
       // tc.name is read here, after the agent-name-as-tool rewrite, so the agent called by its own
       // name counts as the delegation it became.
       if (directiveAgent !== undefined && delegationRanAgent(tc.name, result.metadata, directiveAgent)) {
@@ -4898,9 +4898,14 @@ async function _runTurn(
         lastToolCallSig: _lastToolCallSig,
         toolResultMessages,
       };
-      // The return value is the inline-era leftover: what reaches the model is what this
+      // The returned text is the inline-era leftover: what reaches the model is what this
       // appends to `toolResultMessages`, and nothing below reads the text again.
-      await postProcessToolResult(resultText, toolResultPostProcessContext);
+      const { outputBlocked } = await postProcessToolResult(resultText, toolResultPostProcessContext);
+      // A knowledge-base read grounds the turn only if its content reached the model. The flag was
+      // set from the raw result, before the screen above, so a search whose excerpts were blocked
+      // (an injection-shaped tag in a crawled page, a moderation block) still released the turn,
+      // and the model answered from memory with only the block error in front of it.
+      if (!outputBlocked && retrievedKnowledgeBaseContent(tc.name, result)) _turnRetrievedKnowledgeBaseContent = true;
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);

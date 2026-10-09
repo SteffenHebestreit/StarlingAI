@@ -151,9 +151,11 @@ export function toolResultContribution(
  * on, and its answer from the excerpts was rejected as ungrounded (E2E, 2026-10-08).
  *
  * Fails closed. A search that found nothing still reports success, so only a positive `hits` count
- * counts. Not applied to the calls a tool reports making (readNestedToolCalls): those reports carry
- * no result metadata, so a nested search that found nothing cannot be told from one that found
- * something; a turn whose knowledge-base read ran only inside a plan keeps its research requirement.
+ * counts. The turn asks only after the tool-output screen, and not for a result the screen blocked:
+ * the model saw the block error, not the excerpts. Not applied to the calls a tool reports making
+ * (readNestedToolCalls): those reports carry no result metadata, so a nested search that found
+ * nothing cannot be told from one that found something; a turn whose knowledge-base read ran only
+ * inside a plan keeps its research requirement.
  */
 export function retrievedKnowledgeBaseContent(
   toolName: string,

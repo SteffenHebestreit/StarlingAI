@@ -48,17 +48,27 @@ export interface ToolResultPostProcessContext {
   readonly toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }>;
 }
 
+/** What the post-processing left of one tool result. */
+export interface ToolResultPostProcessOutcome {
+  /** The possibly-redacted or blocked text, as the inline code left it. */
+  readonly resultText: string;
+  /** The injection screen or the moderation model replaced the output with a block error, so the
+   *  model never saw what the tool returned. A redaction keeps the output and is not a block. */
+  readonly outputBlocked: boolean;
+}
+
 /**
  * Runs the tool-output post-processing tail for ONE tool call. `resultText` is passed in
  * (the already-computed result string, possibly amended by upstream loop-detection notices)
  * and the possibly-redacted/blocked final value is returned so the caller can read it back
- * exactly as the inline code left it. All side effects (guardrail events, signature cache,
- * message append, callbacks) happen on the shared context references.
+ * exactly as the inline code left it, with whether a screen blocked it. All side effects
+ * (guardrail events, signature cache, message append, callbacks) happen on the shared context
+ * references.
  */
 export const postProcessToolResult = async (
   resultText: string,
   ctx: ToolResultPostProcessContext,
-): Promise<string> => {
+): Promise<ToolResultPostProcessOutcome> => {
   const { toolCall: tc, result, intervention, argsSig, session, guardrailEvents } = ctx;
 
   // Redact any secrets that leaked into the tool output before the LLM ever sees it
@@ -76,7 +86,9 @@ export const postProcessToolResult = async (
 
   // Prevent indirect prompt injection from tool output payloads
   const outCheck = checkToolOutput(resultText);
+  let outputBlocked = false;
   if (!outCheck.allowed) {
+    outputBlocked = true;
     const blockedIntervention = classifyToolIntervention({
       toolName: tc.name,
       success: false,
@@ -99,6 +111,7 @@ export const postProcessToolResult = async (
   if (outCheck.allowed) {
     const moderatedToolResult = await moderateToolResultText(resultText);
     if (moderatedToolResult?.blocked) {
+      outputBlocked = true;
       logAudit("tool_output_blocked", {
         tool: tc.name,
         reason: `Model moderation blocked tool output: ${moderatedToolResult.summary}`,
@@ -138,5 +151,5 @@ export const postProcessToolResult = async (
     metadata: result.metadata,
   });
 
-  return resultText;
+  return { resultText, outputBlocked };
 };

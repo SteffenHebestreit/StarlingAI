@@ -30,6 +30,9 @@ const routingCompleteMock = vi.hoisted(() => vi.fn(async () => ({
   finishReason: "stop",
 })));
 const auditMock = vi.hoisted(() => vi.fn());
+/** The tool-output screens. Each lets everything through unless a test says otherwise. */
+const checkToolOutputMock = vi.hoisted(() => vi.fn((_text: string): { allowed: boolean; reason?: string } => ({ allowed: true })));
+const moderateToolResultTextMock = vi.hoisted(() => vi.fn(async (_text: string): Promise<Record<string, unknown> | null> => null));
 
 vi.mock("../providers/index.js", () => {
   const provider = {
@@ -54,11 +57,11 @@ vi.mock("../providers/index.js", () => {
 vi.mock("../guardrails/rate-limiter.js", () => ({ checkRateLimit: vi.fn(async () => ({ allowed: true })) }));
 vi.mock("../guardrails/input.js", () => ({
   checkInput: vi.fn(() => ({ allowed: true, detectedPatterns: [] })),
-  checkToolOutput: vi.fn(() => ({ allowed: true })),
+  checkToolOutput: (text: string) => checkToolOutputMock(text),
 }));
 vi.mock("../guardrails/moderation.js", () => ({
   moderateInputText: vi.fn(async () => null),
-  moderateToolResultText: vi.fn(async () => null),
+  moderateToolResultText: (text: string) => moderateToolResultTextMock(text),
 }));
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: auditMock }));
@@ -210,6 +213,8 @@ afterEach(async () => {
   routingCompleteMock.mockClear();
   auditMock.mockClear();
   searchKnowledgeBaseMock.mockReset();
+  checkToolOutputMock.mockImplementation(() => ({ allowed: true }));
+  moderateToolResultTextMock.mockImplementation(async () => null);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   vi.resetModules();
   (await import("../config/loader.js")).resetConfigForTests();
@@ -325,6 +330,42 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
 
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
     expect(streamOptions()[1]?.["toolChoice"], "an empty search released the research requirement").toBe("required");
+  }, 60_000);
+
+  // Crawled pages are untrusted, and a page about chat templates or LLM tooling can carry the very
+  // tags the injection screen blocks. Such a search has hits, but the model sees only the block error.
+  const blocksTheExcerpts = (text: string) => text.includes("38 Minuten");
+  it.each([
+    ["the prompt-injection screen", () => {
+      checkToolOutputMock.mockImplementation((text) => (blocksTheExcerpts(text)
+        ? { allowed: false, reason: "suspicious payload" }
+        : { allowed: true }));
+    }],
+    ["the moderation model", () => {
+      moderateToolResultTextMock.mockImplementation(async (text) => (blocksTheExcerpts(text)
+        ? { blocked: true, flagged: true, categories: ["test"], summary: "blocked in test" }
+        : null));
+    }],
+  ])("a search whose excerpts %s blocked leaves the turn forced", async (_screen, block) => {
+    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
+    block();
+    searchThenAnswer(GROUNDED_ANSWER);
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const toolResults: Array<{ name: string; result: string }> = [];
+    await runTurn({
+      session,
+      userMessage: KB_QUESTION,
+      onToolResult: (_id, name, result) => { toolResults.push({ name, result }); },
+    });
+
+    // The search found the excerpts, and the model was handed the block error in their place.
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
+    const search = toolResults.find((entry) => entry.name === "search_knowledge_base");
+    expect(search?.result).toMatch(/^Error: Tool output blocked/);
+    expect(auditTypes()).toContain("tool_output_blocked");
+    expect(streamOptions()[1]?.["toolChoice"], "a blocked search released the research requirement").toBe("required");
   }, 60_000);
 });
 
