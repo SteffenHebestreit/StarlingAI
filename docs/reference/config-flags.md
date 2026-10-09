@@ -479,7 +479,7 @@ Every public schema field, where it is declared, and how many production files r
 | `temperature` | packages/core/src/config/schema.ts:129 | 32 |
 | `temperatures` | packages/core/src/config/schemas/decisions.ts:156 | 8 |
 | `terraformBinary` | packages/core/src/config/schema.ts:1088 | 1 |
-| `threshold` | packages/core/src/config/schemas/decisions.ts:24 | 45 |
+| `threshold` | packages/core/src/config/schemas/decisions.ts:24 | 46 |
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:259 | 39 |
 | `timeoutMs` | packages/core/src/config/schema.ts:69 | 103 |

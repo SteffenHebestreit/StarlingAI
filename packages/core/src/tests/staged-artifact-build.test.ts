@@ -10,6 +10,7 @@ import {
   STAGED_BUILD_TASK_CHAR_THRESHOLD,
   UNFINISHED_STUB_MARKER,
   isStagedArtifactBuildRun,
+  taskOwnWordChars,
   buildStagedArtifactBuildGuidance,
   buildStagedBuildFirstStepInstruction,
 } from "../agent/sub-agent-prompt-guidance.js";
@@ -123,6 +124,92 @@ describe("staged artifact build — detection", () => {
   it("measures the trimmed task, so whitespace padding cannot trip it", () => {
     const padded = `${PROBE_SMALL_TASK}${" ".repeat(2_000)}`;
     expect(isStagedArtifactBuildRun(["write_file", "edit_file"], padded)).toBe(false);
+  });
+});
+
+/**
+ * The cart assessment (E2E core-build-code-assessment-no-edit). The user pasted cart.js and
+ * asked why its total goes negative; the orchestrator copied the code into the delegation.
+ * That made the task 681 chars, about 420 of them code. code_analyst holds write_file and
+ * edit_file, so it was told to build in passes and wrote a report file nobody asked for.
+ * Both shapes below are what a delegating model writes: the fence on its own lines, and the
+ * fence opened after a colon and closed in front of the next sentence.
+ */
+const CART_JS = [
+  "// Shopping cart totals.",
+  "",
+  "function applyDiscount(subtotal, percent) {",
+  "  // percent is used as a fraction here, but callers pass whole numbers (20 for 20%).",
+  "  return subtotal - subtotal * percent;",
+  "}",
+  "",
+  "function cartTotal(items, discountPercent) {",
+  "  const subtotal = items.reduce((sum, it) => sum + it.price * it.qty, 0);",
+  "  return applyDiscount(subtotal, discountPercent);",
+  "}",
+  "",
+  "module.exports = { applyDiscount, cartTotal };",
+].join("\n");
+const CART_QUESTION = "Erkläre, warum cartTotal für einen Warenkorb von 50 $ mit 20 % Rabatt einen negativen Betrag "
+  + "statt 40 $ liefert. Analysiere das folgende Code-Fragment, Zeile für Zeile, mit den Werten aus der Frage:";
+const CART_CLOSING = "Gebe die Ursache des Fehlers präzise an und zeige die Korrektur auf. Antworte auf Deutsch.";
+const CART_TASK_FENCE_ON_OWN_LINES = `${CART_QUESTION}\n\`\`\`javascript\n${CART_JS}\n\`\`\`\n${CART_CLOSING}`;
+const CART_TASK_FENCE_IN_LINE = `${CART_QUESTION} \`\`\`javascript\n${CART_JS}\n\`\`\` ${CART_CLOSING}`;
+const WRITE_AND_EDIT = ["read_file", "write_file", "edit_file", "list_files", "grep_files"];
+
+describe("staged artifact build — only the task's own words count", () => {
+  it("does not stage a question about pasted code, whichever way the fence is written", () => {
+    for (const task of [CART_TASK_FENCE_ON_OWN_LINES, CART_TASK_FENCE_IN_LINE]) {
+      // The precondition that fired in the run: the whole task is past the threshold...
+      expect(task.trim().length).toBeGreaterThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+      // ...while the question itself is well short of it.
+      expect(taskOwnWordChars(task)).toBe(`${CART_QUESTION}\n${CART_CLOSING}`.length);
+      expect(taskOwnWordChars(task)).toBeLessThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
+      expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, task)).toBe(false);
+    }
+  });
+
+  it("still counts the same code when nothing marks it as pasted", () => {
+    // No fence, so nothing says where the task's words end: it is measured as before.
+    const unfenced = `${CART_QUESTION}\n${CART_JS}\n${CART_CLOSING}`;
+    expect(taskOwnWordChars(unfenced)).toBe(unfenced.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, unfenced)).toBe(true);
+  });
+
+  it("still stages a specification that brings code along", () => {
+    const specWithCode = `${PROBE_LARGE_TASK}\nThe current loop, for reference:\n\`\`\`js\n${CART_JS}\n\`\`\``;
+    expect(taskOwnWordChars(specWithCode)).toBe(`${PROBE_LARGE_TASK}\nThe current loop, for reference:`.length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, specWithCode)).toBe(true);
+  });
+
+  it("does not count quoted lines, and counts the same lines unquoted", () => {
+    const quoted = `Summarise what this message asks of us.\n${PROBE_LARGE_TASK.split("\n").map((line) => `> ${line}`).join("\n")}`;
+    expect(taskOwnWordChars(quoted)).toBe("Summarise what this message asks of us.".length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, quoted)).toBe(false);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, quoted.replace(/^> /gm, ""))).toBe(true);
+  });
+
+  it("counts a fence that is never closed, lines and all", () => {
+    const unclosed = `Fix this:\n\`\`\`js\n${PROBE_LARGE_TASK}`;
+    expect(taskOwnWordChars(unclosed)).toBe(unclosed.trim().length);
+    expect(isStagedArtifactBuildRun(WRITE_AND_EDIT, unclosed)).toBe(true);
+  });
+
+  it("measures a task with nothing fenced or quoted exactly as before", () => {
+    for (const task of [PROBE_SMALL_TASK, PROBE_LARGE_TASK, OBSERVED_BUILD_TASK, `  ${PROBE_SMALL_TASK}\r\n\r\n`]) {
+      expect(taskOwnWordChars(task)).toBe(task.trim().length);
+    }
+    // Backticks in prose open nothing: an inline span, a run named in a sentence.
+    const prose = "Wrap each snippet in ``` fences.\nUse ```inline``` spans for names.\n```";
+    expect(taskOwnWordChars(prose)).toBe(prose.trim().length);
+  });
+
+  it("closes a block only with a run of its own character, at least as long", () => {
+    // A four-backtick block quoting Markdown that itself holds a ``` block; and a tilde block.
+    const nested = "Review this README:\n````md\n# Title\n```sh\nnpm test\n```\n````\nList what is missing.";
+    expect(taskOwnWordChars(nested)).toBe("Review this README:\nList what is missing.".length);
+    const tilde = "Explain:\n~~~\n```\nnot a closer\n~~~\nBriefly.";
+    expect(taskOwnWordChars(tilde)).toBe("Explain:\nBriefly.".length);
   });
 });
 
@@ -458,6 +545,37 @@ describe("staged artifact build — directive injection", () => {
         maxIterations: RUN_3959F3AC_MAX_ITERATIONS,
         directiveInjected: true,
       }),
+      expect.anything(),
+    );
+  });
+
+  it("REGRESSION cart assessment — a question about pasted code gets no staged directive", async () => {
+    // code_analyst held write_file and edit_file and received a 681-char "why" question,
+    // about 420 chars of it cart.js. The directive and its user-turn line ("produce only the
+    // skeleton — one write_file call") made it write a report file with four markers.
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      CART_TASK_FENCE_IN_LINE,
+      WRITE_AND_EDIT,
+    );
+    expect(prompt).toContain("You build files.");
+    expect(prompt).not.toContain("STAGED BUILD");
+    expect(firstUserTurn).toContain("cartTotal");
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    expect(logAuditMock.mock.calls.some((args) => args[0] === "sub_agent_staged_build_detected")).toBe(false);
+  });
+
+  it("the audit reports the size the classifier compared, not the code pasted with it", async () => {
+    const specWithCode = `${OBSERVED_BUILD_TASK}\n\`\`\`js\n${CART_JS}\n\`\`\``;
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      specWithCode,
+      WRITE_AND_EDIT,
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ taskChars: RUN_3959F3AC_TASK_CHARS, threshold: STAGED_BUILD_TASK_CHAR_THRESHOLD }),
       expect.anything(),
     );
   });

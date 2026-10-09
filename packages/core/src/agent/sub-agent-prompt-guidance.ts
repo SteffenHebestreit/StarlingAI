@@ -62,14 +62,82 @@ export const STAGED_BUILD_REQUIRED_TOOLS = ["write_file", "edit_file"] as const;
 export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
 
 /**
+ * A line that opens a fenced block: a run of three or more backticks or tildes, then at
+ * most one info word ("javascript") and the end of the line.
+ */
+const FENCE_OPENER_LINE = /^\s*(`{3,}|~{3,})[ \t]*[^\s`]*\s*$/;
+/**
+ * The same run after text on its line ("Analyse this fragment: ```js"): a delegating model
+ * writes it there as often as at the start of a line. Here it must follow whitespace and
+ * touch its info word, so neither the closing run of an inline ```span``` nor a run named
+ * in prose ("wrap it in ``` fences") opens a block.
+ */
+const FENCE_OPENER_TRAILING = /\s(`{3,}|~{3,})[^\s`]*\s*$/;
+/**
+ * A line that starts with a fence run standing alone: nothing after it, or whitespace and
+ * then the task's own words again ("``` Then name the cause."). It closes a block opened
+ * by the same character with a run no longer than its own. A run touching a word
+ * ("```js") opens a nested block in the material and closes nothing.
+ */
+const FENCE_CLOSER = /^\s*(`{3,}|~{3,})(?=\s|$)(.*)$/;
+/** A quoted line, as Markdown and mail both write it: `>` after at most three spaces. */
+const QUOTED_LINE = /^ {0,3}>/;
+
+/**
+ * How long a task is in its delegator's OWN words: fenced blocks and quoted lines do not
+ * count. They are material the specialist works from, not requirements it has to plan.
+ *
+ * In the cart assessment the user pasted cart.js and asked why its total goes negative.
+ * The orchestrator copied the code into the delegation, which made the task 681 chars,
+ * about 420 of them code. That crossed the 600-char threshold, so code_analyst, which
+ * holds write_file and edit_file, was told to build in passes. It wrote a report file
+ * with four markers, and the progress verifier then sent it back to fill them. The
+ * question itself was about 260 chars long.
+ *
+ * Only a block the text itself closes is set aside. A fence that is never closed is
+ * counted, lines and all, so a malformed task is measured as it was before this, and a
+ * task with nothing fenced or quoted is measured exactly as before: its trimmed length.
+ * One pass over the lines, because a delegation task has no length cap.
+ */
+export function taskOwnWordChars(task: string): number {
+  const own: string[] = [];
+  let open: { run: string; before: string; lines: string[] } | null = null;
+  for (const line of task.split("\n")) {
+    if (open) {
+      open.lines.push(line);
+      const closer = FENCE_CLOSER.exec(line);
+      const run = closer?.[1];
+      if (run !== undefined && run[0] === open.run[0] && run.length >= open.run.length) {
+        // The words around the block on its opening and closing lines are the task's own.
+        if (open.before.trim()) own.push(open.before.trimEnd());
+        if (closer?.[2]?.trim()) own.push(closer[2].trimStart());
+        open = null;
+      }
+      continue;
+    }
+    if (QUOTED_LINE.test(line)) continue;
+    const opener = FENCE_OPENER_LINE.exec(line) ?? FENCE_OPENER_TRAILING.exec(line);
+    if (opener?.[1]) {
+      const runStart = opener.index + opener[0].indexOf(opener[1]);
+      open = { run: opener[1], before: line.slice(0, runStart), lines: [line] };
+      continue;
+    }
+    own.push(line);
+  }
+  if (open) own.push(...open.lines);
+  return own.join("\n").trim().length;
+}
+
+/**
  * Structural classifier for "this run must build in passes": the agent can both
  * create and amend a file, and the task is a specification rather than an
  * instruction. Capability + size only — no topic words, no language tables.
+ * Size is the task's own words (taskOwnWordChars), not the input pasted into it.
  */
 export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
   const available = new Set(toolNames ?? []);
   if (!STAGED_BUILD_REQUIRED_TOOLS.every((toolName) => available.has(toolName))) return false;
-  return task.trim().length > STAGED_BUILD_TASK_CHAR_THRESHOLD;
+  return taskOwnWordChars(task) > STAGED_BUILD_TASK_CHAR_THRESHOLD;
 }
 
 /**
