@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as configLoader from "../config/loader.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
-import { userScopedDir, safeUserSegment } from "../runtime/user-scope.js";
+import { listUserScopeSegments, userScopedDir, safeUserSegment } from "../runtime/user-scope.js";
 import { userHasRole, roleRank } from "../gateway/auth.js";
 import type { AuthenticatedUser } from "../gateway/auth.js";
 import {
@@ -82,6 +82,20 @@ describe("user-scope partitioning", () => {
       // Resolves to that exact bucket — NOT safeUserSegment(segment) (a double hash).
       expect(userScopedDir(base)).toBe(resolve(base, "users", segment));
     });
+  });
+
+  it("enumerates buckets, never a dot-directory such as the archive of deleted accounts", () => {
+    // The sleep-time sweep writes to every bucket it lists; users/.retired holds archived buckets.
+    const root = mkdtempSync(join(tmpdir(), "sai-scope-list-"));
+    try {
+      const alice = safeUserSegment("alice");
+      mkdirSync(join(root, "users", alice), { recursive: true });
+      mkdirSync(join(root, "users", ".retired", `${safeUserSegment("bob")}-20261009T120000Z`), { recursive: true });
+      writeFileSync(join(root, "users", "stray-file"), "");
+      expect(listUserScopeSegments(root)).toEqual([alice]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -115,11 +115,14 @@ export function canReadRecord(reader: RecordReader, account: string | undefined)
  * The per-user store segments that exist under `<base>/users` — for background
  * drivers / admin surfaces that must enumerate every user's bucket rather than
  * only the ambient one. Returns the on-disk (already-safe) segment names.
+ *
+ * A dot-directory is never a bucket: no segment starts with a dot, and `users/.retired` holds the
+ * archived buckets of deleted accounts, which no sweep may write to again.
  */
 export function listUserScopeSegments(base: string): string[] {
   try {
     return readdirSync(resolve(base, USERS_SUBDIR), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
       .map((entry) => entry.name);
   } catch {
     return [];
