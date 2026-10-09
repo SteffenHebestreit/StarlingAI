@@ -133,12 +133,16 @@ export const ASK_MODES: ReadonlySet<string> = new Set(["converse", "GATHER", "VE
 /**
  * Wall-clock bound on the produce-intent read, both option orders together. Iteration 0 waits for
  * it, so it is well under the shadow's own bound (INTENT_SHADOW_TIMEOUT_MS, 15 s). The shadow's
- * 0.86-1.16 s a call is not what a turn saw: on the Halo (2026-10-09) the two orders one after the
- * other, each writing its whole reply, ran past this bound on 16 of 46 probe reads, and on every
- * one after the server's slots had been overwritten. Asked as now, both at once and the mode line
- * alone (PRODUCE_INTENT_READ_MAX_TOKENS), a new message took p50 2.3 s alone and 3.1 s with the
- * source judge's call beside it; after the slots had been overwritten, 3.6 s (p90 4.7 s). None of
- * 151 such reads outside a short server outage reached the bound.
+ * 0.86-1.16 s a call is not what a turn saw. Probed on the Halo (2026-10-09) with a new message for
+ * every read and the four ways of asking interleaved in one run, 24 reads each alone and 24 with
+ * the source judge's call beside it, as a turn sends it, and 20 with the judge after every slot of
+ * the server had been overwritten: the two orders one after the other, each writing its whole
+ * reply, took p50 3.8 s alone and 5.3 s beside the judge, and ran past this bound on all 20 reads
+ * after the overwrite. Asked as now, both at once and the mode line alone
+ * (PRODUCE_INTENT_READ_MAX_TOKENS), the read took p50 1.9 s alone (p90 2.0 s), 2.7 s beside the
+ * judge (p90 3.1 s) and 5.1 s after the overwrite (p90 and max 5.1 s). None of those 68 reached the
+ * bound, but after the overwrite less than a second was left: a turn that finds the server's slots
+ * taken by other prompts is the one to watch.
  */
 export const PRODUCE_INTENT_READ_TIMEOUT_MS = 6_000;
 

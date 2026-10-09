@@ -64,10 +64,12 @@
  * sequence an abort between them keeps the second from being sent at all. A caller that holds the
  * turn's first call until the reading is in asks for them together (`concurrentOrders`): one after
  * the other, the produce-intent read timed out at its 6 s bound on all three E2E attempts of the
- * Mermaid build (2026-10-09). On that server (the Halo, qwen3.6-35b-a3b, four slots) the pair with
- * the whole reply took p50 4.8 s in sequence and 3.0 s together, and with the source judge's call
- * beside it, as in a turn, 4.8 s and 4.3 s. Its readings are INTENT_READOUT_BOTH_ORDERS_VERSION's
- * either way, never counted with one order's.
+ * Mermaid build (2026-10-09). On that server (the Halo, qwen3.6-35b-a3b, four slots), a new
+ * message each time, the pair with the whole reply took p50 3.8 s in sequence and 2.5 s together,
+ * with the source judge's call beside it, as in a turn, 5.3 s and 3.5 s, and after every slot had
+ * been overwritten ran past the 6 s bound on 20 of 20 reads in sequence and 6 of 20 together
+ * (agent/turn-setup.ts PRODUCE_INTENT_READ_TIMEOUT_MS). Its readings are
+ * INTENT_READOUT_BOTH_ORDERS_VERSION's either way, never counted with one order's.
  *
  * The sampling temperature defaults to 0. A slot's top list is the raw distribution whatever the
  * sampler does (logit-readout.ts), but each later slot is conditioned on the letter SAMPLED before

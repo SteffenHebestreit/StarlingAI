@@ -1884,8 +1884,9 @@ async function _runTurn(
   // that is an exception to the decision of 2026-10-09, kept until the user rules on it. A Claude
   // routing tier, or a server without token logprobs, never gives a reading, and on such a
   // deployment every --auto build would otherwise lose the call that keeps it from being answered
-  // inline; on the Halo the read, both orders at once and the mode line alone, came back on all
-  // 151 probe reads outside a short server outage, so a timeout there is rare. The routing arm,
+  // inline; on the Halo the read, both orders at once and the mode line alone, came back in time
+  // on all 68 probe reads of new messages, with less than a second to spare after the server's
+  // slots had been overwritten (PRODUCE_INTENT_READ_TIMEOUT_MS). The routing arm,
   // whose own signal is the top agent's tools rather than anything in the request, forces only on
   // a reading of work. Neither arm asks on a workflow step, which is never forced, or on an
   // --agent directive turn, whose directive forces the call until its agent has run (see the
