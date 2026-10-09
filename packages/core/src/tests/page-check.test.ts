@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBuiltPage, collectScripts, collectDeclaredElements, collectElementIds, runScripts, runScriptsIsolated } from "../tools/page-check.js";
 import { judgeCanvasPainting } from "../tools/canvas-geometry.js";
+import { getTool, type ToolContext } from "../tools/registry.js";
+import "../tools/website.js";
 
 const SHIPPED = `<!DOCTYPE html><html><body>
 <canvas id="board-canvas" width="320" height="640"></canvas>
@@ -248,5 +250,100 @@ describe("page execution is isolated from the gateway process", () => {
     const cwd = (report?.consoleErrors[0] ?? "").toLowerCase();
     expect(cwd.length).toBeGreaterThan(0);
     expect(cwd).not.toContain("starlingai");   // a relative write cannot reach the repo/workspace
+  }, 40_000);
+});
+
+/**
+ * A LIBRARY FROM A CDN IS NOT A BUG IN THE PAGE.
+ *
+ * This check never fetches a remote <script src>. generate_presentation loads reveal.js from
+ * jsDelivr and then calls Reveal.initialize inline, so every deck it built failed here with
+ * "ReferenceError: Reveal is not defined". The staged build then resumed content_writer to "fix"
+ * a correct deck, and once the artifact gate probed the deck's index.html it would have failed
+ * every deck too. These pin both sides: what a remote script would define is not counted, and
+ * everything else a page gets wrong still is.
+ */
+describe("verify_page — globals a remote script would define", () => {
+  const ws = () => mkdtempSync(join(tmpdir(), "sai-pagecheck-remote-"));
+  const run = (html: string) => {
+    const { scripts } = collectScripts(html, "/w/index.html");
+    return runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+  };
+  const CDN = '<script src="https://cdn.jsdelivr.net/npm/lib@1/dist/lib.js"></script>';
+
+  it("passes the reveal.js deck generate_presentation builds", async () => {
+    const root = ws();
+    const ctx = { sessionId: "t", workspacePath: root } as unknown as ToolContext;
+    const result = await getTool("generate_presentation")!.execute({
+      outputDir: "wartungsplan",
+      title: "Digitaler Wartungsplan",
+      slides: [
+        { title: "Ziel", content: "Ein **digitaler** Plan." },
+        { title: "Schritte", bullets: ["Erfassen", "Planen", "Prüfen"], notes: "Kurz halten." },
+      ],
+    }, ctx);
+    expect(result.success).toBe(true);
+    const page = join(root, "generated", "wartungsplan", "index.html");
+
+    const verdict = await checkBuiltPage(page, "generated/wartungsplan/index.html");
+    expect(verdict).toEqual({ ok: true, detail: "" });
+
+    // The worker names what it did not run past, so verify_page can say so.
+    const html = readFileSync(page, "utf8");
+    const { scripts } = collectScripts(html, page);
+    const report = await runScriptsIsolated(scripts, collectElementIds(html), collectDeclaredElements(html));
+    expect(report?.errors).toEqual([]);
+    expect(report?.remoteGlobals).toEqual(["Reveal"]);
+    const tool = await getTool("verify_page")!.execute({ path: "generated/wartungsplan/index.html" }, ctx);
+    expect(tool.success).toBe(true);
+    expect(tool.output).toContain("not run past Reveal");
+  }, 40_000);
+
+  it("does not count a global the remote script before it would define, in a script or a frame", () => {
+    const inScript = run(`<html><body>${CDN}<script>Lib.init({ hash: true });</script></body></html>`);
+    expect(inScript.errors).toEqual([]);
+    expect(inScript.remoteGlobals).toEqual(["Lib"]);
+
+    const inFrame = run(`<html><body>${CDN}<script>function loop(){ Lib.tick(); } requestAnimationFrame(loop);</script></body></html>`);
+    expect(inFrame.errors).toEqual([]);
+    expect(inFrame.remoteGlobals).toEqual(["Lib"]);
+  });
+
+  it("still counts the same error where no remote script could have defined the name", () => {
+    // No remote script at all: a misspelt name is the page's own bug, and the request is unchanged.
+    const page = `<html><body><script>Lib.init();</script></body></html>`;
+    expect(collectScripts(page, "/w/index.html").scripts.some((s2) => "afterRemote" in s2)).toBe(false);
+    expect(run(page).errors.join(" ")).toMatch(/ReferenceError: Lib is not defined/);
+    expect(run(page).remoteGlobals).toBeUndefined();
+
+    // The remote script comes AFTER the code that needs it, so a browser throws here too.
+    expect(run(`<html><body><script>Lib.init();</script>${CDN}</body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: Lib is not defined/);
+
+    // A deferred, async or module script runs after the parser has moved on, so top-level code
+    // after it cannot use its globals in a browser either.
+    for (const attr of ["defer", "async", 'type="module"']) {
+      const deferred = `<html><body><script src="https://cdn.example/lib.js" ${attr}></script><script>Lib.init();</script></body></html>`;
+      expect(run(deferred).errors.join(" "), attr).toMatch(/ReferenceError: Lib is not defined/);
+    }
+    // ...and a URL that merely contains the word is not the attribute.
+    expect(run(`<html><body><script src="https://cdn.example/defer/async.js"></script><script>Lib.init();</script></body></html>`).errors)
+      .toEqual([]);
+  });
+
+  it("still fails a page after a remote script when the page itself is broken", async () => {
+    // Any other error is the page's: an element the HTML does not define, a let read too early.
+    expect(run(`<html><body>${CDN}<script>document.getElementById("nope").textContent = "x";</script></body></html>`).errors.join(" "))
+      .toMatch(/TypeError/);
+    expect(run(`<html><body>${CDN}<script>count++; let count = 0;</script></body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: Cannot access 'count' before initialization/);
+
+    // And the same through the isolated worker, the path the artifact gate takes.
+    const root = ws();
+    const broken = join(root, "broken.html");
+    writeFileSync(broken, `<html><body>${CDN}<div id="app"></div><script>document.getElementById("ap").textContent = "x";</script></body></html>`);
+    const verdict = await checkBuiltPage(broken, "broken.html");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/TypeError/);
   }, 40_000);
 });

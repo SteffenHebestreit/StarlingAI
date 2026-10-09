@@ -28,6 +28,25 @@ const FRAMES_TO_PUMP = 2;
 export interface ScriptSource {
   label: string;
   code: string;
+  /**
+   * A remote <script src> that runs in document order (no defer, async or type="module") comes
+   * before this script. Remote scripts are never fetched here, so whatever globals that script
+   * defines are missing in this check while a browser has them (see runScripts). Absent, never
+   * false, so a page without one sends the worker the same request as before.
+   */
+  afterRemote?: true;
+}
+
+/**
+ * Does a remote script with these attributes run before the scripts that follow it? A classic
+ * script does; `defer`, `async` and `type="module"` all let the parser go on, so code after such
+ * a script cannot rely on its globals at top level in a browser either. Quoted values are
+ * removed first, so a URL like ".../defer.js" is not read as the attribute.
+ */
+function runsInDocumentOrder(attrs: string, type: string | undefined): boolean {
+  if (type === "module") return false;
+  const names = attrs.replace(/"[^"]*"|'[^']*'/g, "").toLowerCase().split(/[\s=/]+/);
+  return !names.includes("defer") && !names.includes("async");
 }
 
 /** Inline <script> bodies plus same-directory <script src> files, in document order. */
@@ -37,6 +56,7 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
   const tagRe = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
   let match: RegExpExecArray | null;
   let index = 0;
+  let remoteBefore = false;
   while ((match = tagRe.exec(html)) !== null) {
     index++;
     const attrs = match[1] ?? "";
@@ -45,11 +65,19 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
     const typeMatch = /type\s*=\s*["']([^"']+)["']/i.exec(attrs);
     const type = typeMatch?.[1]?.toLowerCase();
     if (type && !/javascript|module/.test(type)) continue;
+    const order = remoteBefore ? { afterRemote: true as const } : {};
 
     const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs);
     if (srcMatch?.[1]) {
       const ref = srcMatch[1];
-      if (/^(https?:)?\/\//i.test(ref)) continue; // remote — out of scope, never fetched
+      if (/^(https?:)?\/\//i.test(ref)) {
+        // Remote — out of scope, never fetched. What it would define still matters to the
+        // scripts after it: generate_presentation loads reveal.js from a CDN and then calls
+        // Reveal.initialize inline, so every deck it built failed this check with
+        // "Reveal is not defined" and was sent back for a repair it did not need.
+        if (runsInDocumentOrder(attrs, type)) remoteBefore = true;
+        continue;
+      }
       // THE REF IS MODEL-CONTROLLED, SO IT IS NOT A PATH UNTIL IT IS CHECKED.
       //
       // The tool's own `path` argument goes through resolvePathWithinWorkspace, but the
@@ -71,13 +99,13 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
         continue;
       }
       if (existsSync(abs) && statSync(abs).isFile()) {
-        scripts.push({ label: ref, code: readFileSync(abs, "utf-8") });
+        scripts.push({ label: ref, code: readFileSync(abs, "utf-8"), ...order });
       } else {
         externalMisses.push(ref);
       }
       continue;
     }
-    if (body.trim()) scripts.push({ label: `inline script #${index}`, code: body });
+    if (body.trim()) scripts.push({ label: `inline script #${index}`, code: body, ...order });
   }
   return { scripts, externalMisses };
 }
@@ -157,11 +185,30 @@ export interface RunReport {
    * that moment as about the page, so it is never held (page-check.ts checkBuiltPage).
    */
   timedOut?: boolean;
+  /**
+   * Globals a script reached for that a remote script earlier in the page would have defined
+   * (ScriptSource.afterRemote). They are not in `errors`: the page is not broken, this check
+   * just never fetched the library. The script stopped at that point, so the code after it in
+   * that script was not run. Present only when there is at least one.
+   */
+  remoteGlobals?: string[];
 }
 
 /** vm's timeout, read from the error's code rather than its message. */
 function isExecutionTimeout(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT";
+}
+
+/**
+ * The identifier in V8's `ReferenceError: <name> is not defined`, the error for a name that
+ * resolves to nothing at all. null for any other error, including the other ReferenceErrors
+ * (a `let` read before its declaration is the page's own bug). Read off the error object, which
+ * comes from the vm context's realm, so by its fields rather than by instanceof.
+ */
+function undefinedGlobalOf(err: unknown): string | null {
+  const e = err as { name?: unknown; message?: unknown } | null;
+  if (!e || e.name !== "ReferenceError" || typeof e.message !== "string") return null;
+  return /^([\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*) is not defined$/u.exec(e.message)?.[1] ?? null;
 }
 
 /**
@@ -329,6 +376,18 @@ export function runScripts(
   // `globalThis` inside the context must be the context itself, so top-level `var`/function
   // declarations in one script are visible to the next exactly as they are in a browser.
   const context = createContext(sandbox);
+  // A name that resolves to nothing, in a script that runs after a remote script, or in a frame
+  // (frames run once the whole page has loaded), is a library this check never fetched, not a
+  // defect of the page. The same name before any remote script, or after only a deferred one,
+  // still counts as an error, and so does every other error.
+  const anyAfterRemote = scripts.some((script) => script.afterRemote === true);
+  const recordRemoteGlobal = (err: unknown, afterRemote: boolean): boolean => {
+    const name = afterRemote ? undefinedGlobalOf(err) : null;
+    if (!name) return false;
+    report.remoteGlobals ??= [];
+    if (!report.remoteGlobals.includes(name)) report.remoteGlobals.push(name);
+    return true;
+  };
 
   for (const script of scripts) {
     try {
@@ -340,6 +399,7 @@ export function runScripts(
         filename: SCRIPT_VM_FILENAME,
       });
     } catch (err) {
+      if (recordRemoteGlobal(err, script.afterRemote === true)) continue;
       if (isExecutionTimeout(err)) report.timedOut = true;
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       report.errors.push(`${script.label} — ${message}${describeErrorSite(err, script.code)}`);
@@ -368,6 +428,7 @@ export function runScripts(
       runInContext("__pendingFrame(0)", context, { timeout: SCRIPT_TIMEOUT_MS });
       report.framesRun++;
     } catch (err) {
+      if (recordRemoteGlobal(err, anyAfterRemote)) break;
       if (isExecutionTimeout(err)) report.timedOut = true;
       const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
       report.errors.push(`animation frame ${i + 1} — ${message}${describeErrorSite(err, scripts.map(s2 => s2.code).join("\n"))}`);

@@ -194,7 +194,7 @@ export async function runScriptsIsolated(
     try {
       const parsed = JSON.parse(result.stdout) as {
         errors: string[]; consoleErrors: string[]; framesRun: number;
-        canvases: Array<[string, CanvasPaintReport]>; timedOut?: boolean;
+        canvases: Array<[string, CanvasPaintReport]>; timedOut?: boolean; remoteGlobals?: string[];
       };
       workerCommand = argv;
       return {
@@ -203,6 +203,9 @@ export async function runScriptsIsolated(
         framesRun: parsed.framesRun ?? 0,
         canvasPainting: new Map((parsed.canvases ?? []).map(([id, report]) => [id, () => report])),
         ...(parsed.timedOut === true ? { timedOut: true } : {}),
+        ...(Array.isArray(parsed.remoteGlobals) && parsed.remoteGlobals.length > 0
+          ? { remoteGlobals: parsed.remoteGlobals.map(String) }
+          : {}),
       };
     } catch {
       lastStderr = result.stderr || result.stdout.slice(0, 500);
@@ -260,6 +263,8 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
   // The check could not run; that is not a defect — and not a verdict to hold either.
   if (!report) return { ok: true, detail: "" };
 
+  // report.remoteGlobals are deliberately not problems: a library the page loads from a CDN is
+  // missing here and present in a browser (page-check-runner.ts runScripts).
   const problems = [...report.errors, ...report.consoleErrors.map((c) => `console.error — ${c}`)];
   // A REF THIS PROBE CANNOT OPEN IS NOT PROOF THE PAGE IS BROKEN.
   //
@@ -414,6 +419,10 @@ registerTool({
       output: `PASS — '${rel}' runs: ${scripts.length} script(s) executed, ${report.framesRun} animation frame(s) survived, no uncaught errors.`
         + (canvasVerdicts.length > 0
           ? "\n" + canvasVerdicts.map((v) => `  - ${v.detail}`).join("\n")
+          : "")
+        // Said, not hidden: the script stopped there, so the code after it was not run.
+        + (report.remoteGlobals
+          ? `\n  - not run past ${report.remoteGlobals.join(", ")}: defined by a remote <script src> this check does not fetch (not a defect).`
           : "")
         + "\n(Logic and drawing-geometry check. It does not judge colour, layout or whether the result looks GOOD — "
         + "if you can render or screenshot the page, look at it before calling it done.)",
