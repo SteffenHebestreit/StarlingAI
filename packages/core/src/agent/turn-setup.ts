@@ -164,12 +164,16 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * Resolves to "produce", "ask", or null when there is no reading: an Anthropic routing tier (the
  * readout needs a grammar and token logprobs, which only a llama.cpp server gives, and the shadow
  * skips it there for the same reason), no provider, a timeout, the turn stopped, a reply without
- * logprobs, an error, or no mode facet in it. The caller does not force on null: a question is not
- * to be forced, and without a reading the orchestrator decides as it does on any other turn.
+ * logprobs, an error, or no mode facet in it. A mode only one of the two orders read is no reading
+ * either: askIntentReadout still answers when the reversed call failed or missed the slot, with the
+ * served pass alone (or the reversed pass alone), and one order is the reading that was rejected
+ * for this decision. The caller does not force on null: a question is not to be forced, and without
+ * a reading the orchestrator decides as it does on any other turn.
  *
  * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
- * reading the mode's choice, top probability, margin, runner-up and whether the two orders agreed.
- * Never the user's message, the digest or the readout's restatement. Never rejects.
+ * reading the mode's choice, top probability, margin, runner-up, whether the two orders agreed, and
+ * which pass read it when only one did. Never the user's message, the digest or the readout's
+ * restatement. Never rejects.
  */
 export async function startProduceIntentRead(params: {
   userMessage: string;
@@ -193,6 +197,7 @@ export async function startProduceIntentRead(params: {
               margin: round4(mode.margin),
               runnerUp: mode.runnerUp ?? null,
               orderAgreed: mode.orders?.agreed ?? null,
+              ...(mode.orders?.singlePass ? { singlePass: mode.orders.singlePass } : {}),
             }
           : {}),
         ms: ms ?? Date.now() - started,
@@ -230,6 +235,10 @@ export async function startProduceIntentRead(params: {
       return null;
     }
     const mode = result.readout.facets.mode;
+    if (mode?.orders?.singlePass) {
+      record("single_pass", mode, result.readout.ms);
+      return null;
+    }
     const verdict = produceIntentVerdict(mode);
     record(verdict ?? "no_mode", mode, result.readout.ms);
     return verdict;

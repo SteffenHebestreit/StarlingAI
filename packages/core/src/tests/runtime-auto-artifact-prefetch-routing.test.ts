@@ -354,6 +354,20 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     expect(modeReadRows()).toMatchObject([{ outcome: "no_logprobs_provider" }]);
   });
 
+  // askIntentReadout returns a reading when only one of the two passes read the facet: the
+  // reversed call failed, or missed the slot. One order alone is the reading the design rejected.
+  it("a mode only one option order read does not force, and the row names the pass", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
+    const reading = modeReading("PRODUCE");
+    readoutMock.mockResolvedValue({
+      ...reading,
+      readout: { ...reading.readout, facets: { mode: { ...reading.readout.facets.mode, orders: { served: "PRODUCE", singlePass: "served" } } } },
+    });
+    expect(await firstCallOptions(loaded, MERMAID_REQUEST, true)).toBeUndefined();
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+    expect(modeReadRows()).toMatchObject([{ outcome: "single_pass", choice: "PRODUCE", singlePass: "served", orderAgreed: null }]);
+  });
+
   // turn_performance partitions a turn into model time, tool time and named phases. The wait is a
   // phase; counted in llmTimeMs as well, the same seconds were blamed on the model too.
   it("the wait for the read is its own phase and not orchestrator model time", async () => {
