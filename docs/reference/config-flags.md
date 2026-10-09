@@ -330,7 +330,7 @@ Every public schema field, where it is declared, and how many production files r
 | `passwordHash` | packages/core/src/config/schema.ts:378 | 4 |
 | `passwordSelector` | packages/core/src/config/schema.ts:812 | 5 |
 | `path` | packages/core/src/config/schemas/decisions.ts:111 | 306 |
-| `pattern` | packages/core/src/config/schema.ts:1378 | 59 |
+| `pattern` | packages/core/src/config/schema.ts:1378 | 60 |
 | `patterns` | packages/core/src/config/schema.ts:1315 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 25 |
 | `peers` | packages/core/src/config/schema.ts:609 | 15 |
@@ -506,7 +506,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:988 | 466 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 3 |
-| `url` | packages/core/src/config/schema.ts:587 | 149 |
+| `url` | packages/core/src/config/schema.ts:587 | 150 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:130 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:810 | 10 |

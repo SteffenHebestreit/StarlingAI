@@ -8,7 +8,7 @@
  */
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, posix, resolve, sep } from "node:path";
 import { childLogger } from "../logger.js";
 import { validateArtifactBytes, checkFormatMatchesExtension, validateHtmlText, extensionOf } from "./artifact-validators.js";
 import type { QaJudgeArtifactRef } from "./qa-tool-judge.js";
@@ -320,9 +320,39 @@ async function probeReferencedAssets(
   return receipts;
 }
 
-async function probeFile(workspacePath: string, location: string): Promise<ArtifactProbeReceipt[]> {
+/**
+ * A FOLDER IS PROBED THROUGH THE PAGE IT SERVES.
+ *
+ * generate_website and generate_presentation record the folder they wrote as outputPath, with
+ * indexPath beside it, and this probe used to stat that folder and hard-fail it as "not a file"
+ * (sessions daa170fc and 67ea4742). Both sites were fine. The repair could not succeed, because
+ * the recheck collected the same folder again, and it overwrote the tool's output with a smaller
+ * hand-written one. Both tools write <folder>/index.html, the file their indexPath names, so that
+ * page is probed instead, with every check a page gets. A folder with no index.html has not been
+ * shown to be broken, only not checked: a soft unverifiable receipt, never a rebuild.
+ */
+async function probeFolder(workspacePath: string, location: string, started: number): Promise<ArtifactProbeReceipt[]> {
+  const index = posix.join(location.replace(/\\/g, "/"), "index.html");
+  // followFolder false: one level only, whatever is on disk.
+  if (await stat(resolve(workspacePath, index)).then((info) => info.isFile(), () => false)) {
+    return probeFile(workspacePath, index, false);
+  }
+  return [{
+    target: location,
+    probe: "exists",
+    status: "unverifiable",
+    severity: "soft",
+    detail: `${location} is a folder with no index.html, so the files in it were NOT checked`,
+    durationMs: Date.now() - started,
+  }];
+}
+
+async function probeFile(workspacePath: string, location: string, followFolder = true): Promise<ArtifactProbeReceipt[]> {
   const started = Date.now();
   const absolute = resolve(workspacePath, location);
+  if (followFolder && await stat(absolute).then((info) => info.isDirectory(), () => false)) {
+    return probeFolder(workspacePath, location, started);
+  }
   const receipts: ArtifactProbeReceipt[] = [];
   let content: Buffer;
   try {
@@ -461,10 +491,15 @@ export async function probeArtifacts(
       log.warn({ probed: receipts.length, total: refs.length }, "Artifact probe budget exhausted — remaining refs unprobed");
       break;
     }
+    // A folder is probed through its index.html (probeFolder), and the turn may have recorded
+    // that page on its own as well. It is probed and reported once, whichever comes first.
+    const probedTargets = new Set(receipts.map((receipt) => receipt.target));
+    if (ref.kind === "file" && probedTargets.has(ref.location)) continue;
     try {
-      receipts.push(...(ref.kind === "file"
+      const fresh = ref.kind === "file"
         ? await withTimeout(probeFile(opts.workspacePath, ref.location), PER_PROBE_TIMEOUT_MS * 2, `probe ${ref.location}`)
-        : await probeUrl(ref.location, ref.external === true)));
+        : await probeUrl(ref.location, ref.external === true);
+      receipts.push(...fresh.filter((receipt) => !probedTargets.has(receipt.target)));
     } catch (error) {
       // A probe that ERRORED proved nothing about the artifact — soft, not a defect.
       receipts.push({ target: ref.location, probe: "exists", status: "fail", severity: "soft", detail: `probe error: ${error instanceof Error ? error.message.slice(0, 120) : String(error)}`, durationMs: 0 });

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBuiltPage, collectScripts, collectDeclaredElements, collectElementIds, runScripts, runScriptsIsolated } from "../tools/page-check.js";
 import { judgeCanvasPainting } from "../tools/canvas-geometry.js";
+import { _setTypeScriptForTests } from "../tools/page-check-runner.js";
+import { getTool, type ToolContext } from "../tools/registry.js";
+import "../tools/website.js";
 
 const SHIPPED = `<!DOCTYPE html><html><body>
 <canvas id="board-canvas" width="320" height="640"></canvas>
@@ -249,4 +252,223 @@ describe("page execution is isolated from the gateway process", () => {
     expect(cwd.length).toBeGreaterThan(0);
     expect(cwd).not.toContain("starlingai");   // a relative write cannot reach the repo/workspace
   }, 40_000);
+});
+
+/**
+ * A LIBRARY FROM A CDN IS NOT A BUG IN THE PAGE.
+ *
+ * This check never fetches a remote <script src>. generate_presentation loads reveal.js from
+ * jsDelivr and then calls Reveal.initialize inline, so every deck it built failed here with
+ * "ReferenceError: Reveal is not defined". The staged build then resumed content_writer to "fix"
+ * a correct deck, and once the artifact gate probed the deck's index.html it would have failed
+ * every deck too. These pin both sides: what a remote script would define is not counted, and
+ * everything else a page gets wrong still is.
+ */
+describe("verify_page — globals a remote script would define", () => {
+  const ws = () => mkdtempSync(join(tmpdir(), "sai-pagecheck-remote-"));
+  const run = (html: string) => {
+    const { scripts } = collectScripts(html, "/w/index.html");
+    return runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+  };
+  const CDN = '<script src="https://cdn.jsdelivr.net/npm/lib@1/dist/lib.js"></script>';
+
+  it("passes the reveal.js deck generate_presentation builds", async () => {
+    const root = ws();
+    const ctx = { sessionId: "t", workspacePath: root } as unknown as ToolContext;
+    const result = await getTool("generate_presentation")!.execute({
+      outputDir: "wartungsplan",
+      title: "Digitaler Wartungsplan",
+      slides: [
+        { title: "Ziel", content: "Ein **digitaler** Plan." },
+        { title: "Schritte", bullets: ["Erfassen", "Planen", "Prüfen"], notes: "Kurz halten." },
+      ],
+    }, ctx);
+    expect(result.success).toBe(true);
+    const page = join(root, "generated", "wartungsplan", "index.html");
+
+    const verdict = await checkBuiltPage(page, "generated/wartungsplan/index.html");
+    expect(verdict).toEqual({ ok: true, detail: "" });
+
+    // The worker names what it did not run past, so verify_page can say so.
+    const html = readFileSync(page, "utf8");
+    const { scripts } = collectScripts(html, page);
+    const report = await runScriptsIsolated(scripts, collectElementIds(html), collectDeclaredElements(html));
+    expect(report?.errors).toEqual([]);
+    expect(report?.remoteGlobals).toEqual(["Reveal"]);
+    const tool = await getTool("verify_page")!.execute({ path: "generated/wartungsplan/index.html" }, ctx);
+    expect(tool.success).toBe(true);
+    expect(tool.output).toContain("not run past Reveal");
+    // Said as an assumption the agent can check, not as a verdict that the name is fine.
+    expect(tool.output).toMatch(/not run past Reveal: not declared by this page's own scripts.*if no library the page loads defines it, that is a bug/);
+  }, 40_000);
+
+  it("does not count a global the remote script before it would define, in a script or a frame", () => {
+    const inScript = run(`<html><body>${CDN}<script>Lib.init({ hash: true });</script></body></html>`);
+    expect(inScript.errors).toEqual([]);
+    expect(inScript.remoteGlobals).toEqual(["Lib"]);
+
+    const inFrame = run(`<html><body>${CDN}<script>function loop(){ Lib.tick(); } requestAnimationFrame(loop);</script></body></html>`);
+    expect(inFrame.errors).toEqual([]);
+    expect(inFrame.remoteGlobals).toEqual(["Lib"]);
+  });
+
+  it("still counts the same error where no remote script could have defined the name", () => {
+    // No remote script at all: a misspelt name is the page's own bug, and the request is unchanged.
+    const page = `<html><body><script>Lib.init();</script></body></html>`;
+    expect(collectScripts(page, "/w/index.html").scripts.some((s2) => "afterRemote" in s2)).toBe(false);
+    expect(run(page).errors.join(" ")).toMatch(/ReferenceError: Lib is not defined/);
+    expect(run(page).remoteGlobals).toBeUndefined();
+
+    // The remote script comes AFTER the code that needs it, so a browser throws here too.
+    expect(run(`<html><body><script>Lib.init();</script>${CDN}</body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: Lib is not defined/);
+
+    // A deferred, async or module script runs after the parser has moved on, so top-level code
+    // after it cannot use its globals in a browser either.
+    for (const attr of ["defer", "async", 'type="module"']) {
+      const deferred = `<html><body><script src="https://cdn.example/lib.js" ${attr}></script><script>Lib.init();</script></body></html>`;
+      expect(run(deferred).errors.join(" "), attr).toMatch(/ReferenceError: Lib is not defined/);
+    }
+    // ...and a URL that merely contains the word is not the attribute.
+    expect(run(`<html><body><script src="https://cdn.example/defer/async.js"></script><script>Lib.init();</script></body></html>`).errors)
+      .toEqual([]);
+  });
+
+  it("still fails a page after a remote script when the page itself is broken", async () => {
+    // Any other error is the page's: an element the HTML does not define, a let read too early.
+    expect(run(`<html><body>${CDN}<script>document.getElementById("nope").textContent = "x";</script></body></html>`).errors.join(" "))
+      .toMatch(/TypeError/);
+    expect(run(`<html><body>${CDN}<script>count++; let count = 0;</script></body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: Cannot access 'count' before initialization/);
+
+    // And the same through the isolated worker, the path the artifact gate takes.
+    const root = ws();
+    const broken = join(root, "broken.html");
+    writeFileSync(broken, `<html><body>${CDN}<div id="app"></div><script>document.getElementById("ap").textContent = "x";</script></body></html>`);
+    const verdict = await checkBuiltPage(broken, "broken.html");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/TypeError/);
+  }, 40_000);
+
+  /**
+   * The exemption is for a name nothing in the page defines. A page that loads three.js or the
+   * Tailwind CDN and declares `const state` inside init() but reads `state.x` in its draw loop has
+   * its own scoping bug, the one the `runs` probe was added for; it passed once a CDN tag stood
+   * before it, and verify_page called it "not a defect".
+   */
+  it("still counts a name the page's own code binds, read where that binding is out of scope", async () => {
+    const STATE = 'function init() { const state = { x: 10 }; }\n'
+      + 'function draw() { document.getElementById("c").getContext("2d").fillRect(state.x, 0, 5, 5); }';
+    // In a script after the remote one, and in a frame.
+    for (const tail of ["init(); draw();", "init(); requestAnimationFrame(draw);"]) {
+      const r = run(`<html><body>${CDN}<canvas id="c"></canvas><script>${STATE}\n${tail}</script></body></html>`);
+      expect(r.errors.join(" "), tail).toMatch(/ReferenceError: state is not defined/);
+      expect(r.remoteGlobals, tail).toBeUndefined();
+    }
+
+    // Any binding of the name counts, in any of the page's own scripts, before or after the remote one.
+    for (const binds of [
+      "function f(state) {}",
+      "const f = ({ state }) => 0;",
+      "function f() { let [a, state] = [1, 2]; return a; }",
+      "function f() { var state; }",
+      "function f() { function state() {} }",
+      "function f() { class state {} }",
+      "try { throw 1; } catch (state) {}",
+      "function f() { state = 1; }",
+    ]) {
+      const r = run(`<html><body>${CDN}<script>${binds}\nstate.x;</script></body></html>`);
+      expect(r.errors.join(" "), binds).toMatch(/ReferenceError: state is not defined/);
+    }
+    expect(run(`<html><body><script>function f(state) {}</script>${CDN}<script>state.x;</script></body></html>`).errors.join(" "))
+      .toMatch(/ReferenceError: state is not defined/);
+
+    // Through the isolated worker: the artifact gate's `runs` probe and verify_page both fail it.
+    const root = ws();
+    const ctx = { sessionId: "t", workspacePath: root } as unknown as ToolContext;
+    mkdirSync(join(root, "spiel"), { recursive: true });
+    const page = join(root, "spiel", "index.html");
+    writeFileSync(page, `<html><head>${CDN}</head><body><canvas id="c"></canvas><script>${STATE}\ninit(); requestAnimationFrame(draw);</script></body></html>`);
+    const verdict = await checkBuiltPage(page, "spiel/index.html");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toMatch(/ReferenceError: state is not defined/);
+    const tool = await getTool("verify_page")!.execute({ path: "spiel/index.html" }, ctx);
+    expect(tool.success).toBe(false);
+    expect(tool.error).toMatch(/ReferenceError: state is not defined/);
+  }, 40_000);
+
+  it("counts the error when it cannot tell whether the page binds the name", () => {
+    _setTypeScriptForTests(null);
+    try {
+      expect(run(`<html><body>${CDN}<script>Lib.init();</script></body></html>`).errors.join(" "))
+        .toMatch(/ReferenceError: Lib is not defined/);
+    } finally {
+      _setTypeScriptForTests(undefined);
+    }
+    expect(run(`<html><body>${CDN}<script>Lib.init();</script></body></html>`).errors).toEqual([]);
+  });
+});
+
+/**
+ * AN ES MODULE THAT IMPORTS CANNOT RUN HERE, AND THAT IS NOT A DEFECT OF THE PAGE.
+ *
+ * This check runs every script as a classic script and never loads a module graph. A module
+ * script with an import therefore failed with "SyntaxError: Cannot use import statement outside a
+ * module" before a line of it ran: generate_website with includeMermaid writes exactly that, so
+ * the artifact gate hard-failed a correct site and sent it for a repair. A module script that does
+ * compile as a classic script still runs, and a broken one still counts.
+ */
+describe("verify_page — a module script this check cannot run", () => {
+  const run = (html: string) => {
+    const { scripts } = collectScripts(html, "/w/index.html");
+    return runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+  };
+  const MERMAID = '<script type="module">\n'
+    + '  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";\n'
+    + '  mermaid.initialize({ startOnLoad: true, theme: "default" });\n'
+    + "</script>";
+
+  it("does not count a module script that fails only because it imports, and says it did not run it", async () => {
+    const page = `<html><body><div id="app"></div>${MERMAID}<script>document.getElementById("app").textContent = "ok";</script></body></html>`;
+    const r = run(page);
+    expect(r.errors).toEqual([]);
+    expect(r.modulesNotRun).toEqual(["inline script #1"]);
+
+    // Through the worker, the artifact gate's path and verify_page's.
+    const root = mkdtempSync(join(tmpdir(), "sai-pagecheck-module-"));
+    writeFileSync(join(root, "index.html"), page);
+    expect(await checkBuiltPage(join(root, "index.html"), "index.html")).toEqual({ ok: true, detail: "" });
+    const tool = await getTool("verify_page")!.execute({ path: "index.html" }, { sessionId: "t", workspacePath: root } as unknown as ToolContext);
+    expect(tool.success).toBe(true);
+    expect(tool.output).toContain("runs: 1 script(s) executed");
+    expect(tool.output).toContain("not run: inline script #1");
+  }, 40_000);
+
+  it("still counts a module script's runtime error, and a module script that does not parse", () => {
+    // No import: it compiles as a classic script, so it runs as before, and what it throws counts.
+    expect(run('<html><body><script type="module">document.getElementById("nope").textContent = "x";</script></body></html>').errors.join(" "))
+      .toMatch(/TypeError/);
+    expect(run('<html><body><script type="module">JSON.parse("{");</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError/);
+    // An import, and the module is cut off: a browser cannot run it either.
+    expect(run('<html><body><script type="module">import m from "https://x.example/m.mjs"; m.init({</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError/);
+    // An import in a classic script is the page's bug.
+    expect(run('<html><body><script>import m from "https://x.example/m.mjs"; m.init();</script></body></html>').errors.join(" "))
+      .toMatch(/SyntaxError: Cannot use import statement outside a module/);
+    // A page without a module script sends the worker the same request as before.
+    expect(collectScripts("<html><body><script>let a = 1;</script></body></html>", "/w/index.html").scripts.some((s2) => "module" in s2))
+      .toBe(false);
+  });
+
+  it("counts the module script when it cannot tell a module from a broken script", () => {
+    _setTypeScriptForTests(null);
+    try {
+      expect(run(`<html><body>${MERMAID}</body></html>`).errors.join(" "))
+        .toMatch(/SyntaxError: Cannot use import statement outside a module/);
+    } finally {
+      _setTypeScriptForTests(undefined);
+    }
+    expect(run(`<html><body>${MERMAID}</body></html>`).errors).toEqual([]);
+  });
 });

@@ -3,7 +3,11 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { checkStructuralCompleteness, findLocalAssetRefs, probeArtifacts, probeHtmlStructure } from "../agent/artifact-probes.js";
+import { checkStructuralCompleteness, findLocalAssetRefs, probeArtifacts, probeHtmlStructure, summarizeProbeFailures } from "../agent/artifact-probes.js";
+import { extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
+import { collectJudgeableArtifactRefs } from "../agent/qa-tool-judge.js";
+import { getTool, type ToolContext } from "../tools/registry.js";
+import "../tools/website.js";
 
 // Temp workspace, not process.cwd(): vitest runs from packages/core, so rooting
 // the fixtures at cwd/tmp wrote into the source tree — and the old afterAll only
@@ -254,4 +258,122 @@ describe("artifact probe — follows what the page loads", () => {
 
     expect(report.receipts.some((r) => r.target.includes("passwd"))).toBe(false);
   });
+});
+
+/**
+ * A FOLDER DELIVERABLE IS PROBED THROUGH ITS index.html.
+ *
+ * generate_website and generate_presentation record the folder they wrote as outputPath (with
+ * indexPath beside it), and the probe hard-failed that folder as "not a file" (sessions daa170fc
+ * and 67ea4742). Both sites were correct; the repair could not succeed, since the recheck
+ * collected the same folder, and it replaced the tool's output with a hand-written one. These run
+ * the real tools and send their metadata down the gate's own path: tool result, attachments,
+ * judgeable refs, probes.
+ */
+describe("artifact probe — a folder deliverable is probed through its index.html", () => {
+  const fresh = () => mkdtempSync(join(tmpdir(), "sai-probe-folder-"));
+  /** The delegate_to_agent result the gate reads: the producing tool's metadata, nested. */
+  const refsFor = (metadata: Record<string, unknown>, sourceTool: string) => {
+    const attachments: Array<Record<string, unknown>> = [];
+    extractArtifactsFromMetadata({ artifacts: [{ ...metadata, sourceTool }] }, attachments, new Set());
+    return collectJudgeableArtifactRefs(attachments);
+  };
+
+  it("passes the site generate_website records as a folder", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_website")!.execute({
+      outputDir: "generated/baeckerei-morgenrot",
+      title: "Bäckerei Morgenrot",
+      pages: [
+        { path: "index.html", title: "Start", content: "# Willkommen\n\nFrisches Brot ab 6:30." },
+        { path: "kontakt.html", title: "Kontakt", content: "Mo-Fr 6:30-18:00, Sa 7:00-13:00" },
+      ],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    const refs = refsFor(result.metadata!, "generate_website");
+    expect(refs).toEqual([{ kind: "file", location: "generated/baeckerei-morgenrot" }]);
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    expect(report.receipts.some((r) => r.detail === "not a file")).toBe(false);
+    const page = report.receipts.filter((r) => r.target === "generated/baeckerei-morgenrot/index.html");
+    expect(page.map((r) => r.probe)).toEqual(expect.arrayContaining(["exists", "html_structure", "runs"]));
+  }, 40_000);
+
+  it("passes the site generate_website writes with includeMermaid, whose module script imports", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_website")!.execute({
+      outputDir: "generated/ablauf",
+      title: "Ablauf",
+      includeMermaid: true,
+      pages: [{ path: "index.html", title: "Ablauf", content: "# Ablauf\n\n```mermaid\ngraph TD; A-->B;\n```" }],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    expect(readFileSync(join(ws, "generated", "ablauf", "index.html"), "utf8")).toMatch(/<script type="module">\s*import mermaid/);
+    const refs = refsFor(result.metadata!, "generate_website");
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    const runs = report.receipts.find((r) => r.target === "generated/ablauf/index.html" && r.probe === "runs");
+    expect(runs?.status).toBe("pass");
+  }, 40_000);
+
+  it("passes the reveal.js deck generate_presentation records as a folder", async () => {
+    const ws = fresh();
+    const result = await getTool("generate_presentation")!.execute({
+      outputDir: "digitaler-wartungsplan",
+      title: "Digitaler Wartungsplan",
+      slides: [
+        { title: "Ziel", content: "Wartung **planbar** machen.", notes: "Einstieg." },
+        { title: "Schritte", bullets: ["Erfassen", "Planen", "Prüfen"] },
+      ],
+    }, { sessionId: "t", workspacePath: ws } as unknown as ToolContext);
+    expect(result.success).toBe(true);
+    const refs = refsFor(result.metadata!, "generate_presentation");
+    expect(refs.map((r) => r.location)).toEqual(["generated/digitaler-wartungsplan", "generated/digitaler-wartungsplan/notes.md"]);
+
+    const report = await probeArtifacts(refs, { workspacePath: ws });
+
+    expect(report.status, summarizeProbeFailures(report)).toBe("pass");
+    const runs = report.receipts.find((r) => r.target === "generated/digitaler-wartungsplan/index.html" && r.probe === "runs");
+    expect(runs?.status).toBe("pass");
+  }, 40_000);
+
+  it("reports a folder with no index.html as unverifiable, never as a defect", async () => {
+    const ws = fresh();
+    await mkdir(join(ws, "generated", "bilder"), { recursive: true });
+    await writeFile(join(ws, "generated", "bilder", "a.txt"), "text");
+
+    const report = await probeArtifacts([{ kind: "file", location: "generated/bilder" }], { workspacePath: ws });
+
+    expect(report.status).toBe("unverifiable");
+    expect(report.receipts).toHaveLength(1);
+    expect(report.receipts[0]).toMatchObject({ target: "generated/bilder", status: "unverifiable", severity: "soft" });
+    expect(summarizeProbeFailures(report)).toBe("");
+  });
+
+  it("still fails a folder whose index.html is really broken, and names that page once", async () => {
+    const ws = fresh();
+    await mkdir(join(ws, "generated", "spiel"), { recursive: true });
+    await writeFile(
+      join(ws, "generated", "spiel", "index.html"),
+      '<!doctype html><html><body><canvas id="board-canvas"></canvas>'
+      + '<script>const board = document.getElementById("board"); board.getContext("2d");</script></body></html>',
+    );
+
+    // The folder and its page, recorded separately, in both orders: one probe of the page.
+    for (const refs of [
+      [{ kind: "file" as const, location: "generated/spiel" }, { kind: "file" as const, location: "generated/spiel/index.html" }],
+      [{ kind: "file" as const, location: "generated/spiel/index.html" }, { kind: "file" as const, location: "generated/spiel" }],
+    ]) {
+      const report = await probeArtifacts(refs, { workspacePath: ws });
+      expect(report.status).toBe("fail");
+      const failing = report.receipts.filter((r) => r.status === "fail" && r.severity !== "soft");
+      expect(failing).toHaveLength(1);
+      expect(failing[0]).toMatchObject({ target: "generated/spiel/index.html", probe: "runs" });
+      expect(failing[0]!.detail).toMatch(/TypeError/);
+    }
+  }, 40_000);
 });
