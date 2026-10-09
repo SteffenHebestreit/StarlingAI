@@ -61,7 +61,7 @@ Every public schema field, where it is declared, and how many production files r
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 75 |
 | `bucket` | packages/core/src/config/schema.ts:482 | 25 |
 | `budget` | packages/core/src/config/schema.ts:1655 | 92 |
-| `budgets` | packages/core/src/config/schema.ts:543 | 14 |
+| `budgets` | packages/core/src/config/schema.ts:543 | 15 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:932 | 48 |
 | `capabilityCacheTtlMs` | packages/core/src/config/schema.ts:615 | 1 |
@@ -92,7 +92,7 @@ Every public schema field, where it is declared, and how many production files r
 | `confidenceDemotion` | packages/core/src/config/schemas/retrieval.ts:133 | 1 |
 | `confidenceMinScoreGap` | packages/core/src/config/schemas/retrieval.ts:139 | 1 |
 | `confidenceMinTopRerank` | packages/core/src/config/schemas/retrieval.ts:147 | 1 |
-| `config` | packages/core/src/config/schema.ts:1230 | 284 |
+| `config` | packages/core/src/config/schema.ts:1230 | 285 |
 | `configRemovals` | packages/core/src/config/schema.ts:1715 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1542 | 1 |
@@ -107,7 +107,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:541 | 11 |
 | `customInstructions` | packages/core/src/config/schema.ts:296 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:544 | 2 |
-| `default` | packages/core/src/config/schema.ts:1288 | 283 |
+| `default` | packages/core/src/config/schema.ts:1288 | 284 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1156 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1755 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1178 | 1 |
@@ -166,7 +166,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:698 | 127 |
-| `evidence` | packages/core/src/config/schema.ts:1682 | 103 |
+| `evidence` | packages/core/src/config/schema.ts:1682 | 105 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:296 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:276 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:550 | 3 |
@@ -251,7 +251,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxConcurrentSessions` | packages/core/src/config/schema.ts:1425 | 3 |
 | `maxConsecutiveDriven` | packages/core/src/config/schemas/decisions.ts:92 | 1 |
 | `maxConsolidatedPerSession` | packages/core/src/config/schema.ts:1531 | 1 |
-| `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 3 |
+| `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 4 |
 | `maxCrawlMs` | packages/core/src/config/schemas/retrieval.ts:198 | 1 |
 | `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1891 | 1 |
 | `maxDelegationDepth` | packages/core/src/config/schemas/effort.ts:27 | 2 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:443 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1404 | 81 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1637 | 164 |
+| `store` | packages/core/src/config/schema.ts:1637 | 165 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:645 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1882 | 2 |
 | `subAgentMaxIterations` | packages/core/src/config/schemas/effort.ts:25 | 2 |

@@ -8,7 +8,7 @@
  *
  * INVARIANT: this module imports ONLY leaf modules (runtime-utils,
  * runtime-evidence-dump, interrupted-delegation-evidence, container-failure,
- * effort-context, artifact-metadata). It must NEVER import from runtime.js — keep it a true leaf.
+ * effort-context, artifact-metadata, the config loader). It must NEVER import from runtime.js — keep it a true leaf.
  *
  * `looksLikeDelegatedFailureEvidence` is also used by
  * classifyPostOrchestrationDisposition (which stays in runtime.ts), so runtime.ts
@@ -42,7 +42,8 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isPlanReportResult } from "./turn-tool-contribution.js";
+import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
   const normalized = collapseWhitespace(value);
@@ -58,6 +59,77 @@ export function truncatePlainText(value: string, maxChars: number): string {
 
 export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** What the turn loop knows about a tool result that the result's text does not say. */
+export interface ToolResultFrameContext {
+  /**
+   * The text the turn loop appended to the result itself (agent/runtime.ts: its identical-output
+   * notice, its cached-result note), exactly as appended. A retrieval result cut to its budget keeps
+   * it after the cut line, and only it. A closing "[System notice: …]" paragraph the TOOL returned
+   * is retrieved content, which a crawled page or a stored memory can carry, and goes with the cut:
+   * lifted past the harness's own cut line it would read as the runtime speaking.
+   */
+  readonly runtimeNote?: string;
+  /**
+   * The turn's tally of the retrieval evidence its frames have shown the model, in characters
+   * (agent/runtime.ts keeps one per turn). A retrieval result is held to what the tally leaves of
+   * the turn's budget (retrievalEvidenceAllowance) and adds what it shows. Without a tally the
+   * result is allowed the whole budget.
+   */
+  readonly retrievalShown?: { chars: number };
+}
+
+/** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
+const DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS = 6000;
+
+/**
+ * The retrieval results (isRetrievalEvidenceResult) one turn shows the model, in characters: a
+ * total for the turn, not a ceiling per result. It is retrieval.documentRag.maxContextChars, the cap
+ * on the document excerpts a turn injects on its own; a search the model makes itself returns the
+ * same kind of excerpts. One result is never allowed more, in the frame or in the history snippet of
+ * the turn that made the call.
+ */
+export function retrievalEvidenceMaxChars(): number {
+  const configured = getConfig().retrieval?.documentRag?.maxContextChars;
+  return typeof configured === "number" && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_RETRIEVAL_EVIDENCE_MAX_CHARS;
+}
+
+/** A result the turn's earlier ones have left less than this share of the budget gets this share. */
+const RETRIEVAL_EVIDENCE_FLOOR_DIVISOR = 4;
+
+/**
+ * What one retrieval result may show, after the turn's earlier retrieval results have shown
+ * `charsShown`: what they left of the turn's budget, and no less than a quarter of it. Every result
+ * is sent again with each later prompt of the turn, and the history trim steps in only once a
+ * prompt is already over the window's budget, so a budget granted to each result let a turn of
+ * several searches carry several budgets into every prompt after them. The floor keeps a later
+ * search readable, the head of its best-ranked passages, once earlier ones have used the budget up.
+ */
+export function retrievalEvidenceAllowance(charsShown: number): number {
+  const budget = retrievalEvidenceMaxChars();
+  return Math.max(Math.floor(budget / RETRIEVAL_EVIDENCE_FLOOR_DIVISOR), budget - Math.max(0, charsShown));
+}
+
+/**
+ * A retrieval result held to `maxChars`, newlines and table rows kept. The tools list their passages
+ * most relevant first, so a cut keeps the head and drops the least relevant, and a line in their
+ * place says how much is missing. The note the turn loop appended stays after that line, when the
+ * text still ends with exactly that note: a cut from the end would otherwise take the loop warning
+ * with it. Anything else at the end of the text is the tool's and is cut with the rest.
+ */
+function boundRetrievalEvidence(resultText: string, maxChars: number, runtimeNote = ""): string {
+  const text = resultText.trim();
+  if (text.length <= maxChars) return text;
+  const note = runtimeNote.trimEnd();
+  const notice = note && text.endsWith(note) ? note : "";
+  const body = text.slice(0, text.length - notice.length);
+  const cutLine = (left: number): string =>
+    `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
+  const head = body.slice(0, Math.max(0, maxChars - notice.length - cutLine(body.length).length)).trimEnd();
+  return `${head}${cutLine(body.length - head.length)}${notice}`;
 }
 
 export function stripAgentPrefix(value: string): string {
@@ -284,9 +356,10 @@ export function buildModelVisibleToolResult(
   toolName: string,
   resultText: string,
   metadata?: Record<string, unknown>,
+  frameContext?: ToolResultFrameContext,
 ): string {
   const stop: { line?: string } = {};
-  const frame = frameToolResult(toolName, resultText, metadata, stop);
+  const frame = frameToolResult(toolName, resultText, metadata, stop, frameContext);
   // run_workflow names its files in its own instruction; a second list would repeat them.
   if (toolName === "run_workflow") return frame;
   const record = formatDelegatedRunRecord(metadata, stop.line);
@@ -317,6 +390,7 @@ function frameToolResult(
   metadata?: Record<string, unknown>,
   /** Set to the run-stop line when the frame's instruction points at it (the record carries it). */
   stop: { line?: string } = {},
+  frameContext?: ToolResultFrameContext,
 ): string {
   const fallback = truncateForContext(resultText, 600);
 
@@ -634,6 +708,16 @@ function frameToolResult(
       "If the user asked which agents exist or what they can do, list EVERY entry below. Do NOT abbreviate, sample, summarize to a few, or claim the list was cut off.",
       truncatePlainText(resultText, 12_000),
     ].join("\n");
+  }
+
+  // Retrieved passages are the evidence itself, not a summary of work done elsewhere: kept as the
+  // tool wrote them, up to what the turn's retrieval budget allows them, instead of the
+  // 600-character fallback below.
+  if (isRetrievalEvidenceResult(toolName)) {
+    const shown = frameContext?.retrievalShown;
+    const framed = boundRetrievalEvidence(resultText, retrievalEvidenceAllowance(shown?.chars ?? 0), frameContext?.runtimeNote);
+    if (shown) shown.chars += framed.length;
+    return framed;
   }
 
   return fallback;

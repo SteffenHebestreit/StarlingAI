@@ -2199,6 +2199,9 @@ async function _runTurn(
   const _rejectedCallsGivenBack = new Set<string>();
   const _lastToolResultByName = new Map<string, string>();
   const _lastToolCallSig = new Map<string, { args: string; result: string; metadata?: Record<string, unknown>; success?: boolean }>();
+  // The retrieval evidence this turn's frames have shown the model, in characters: the turn's
+  // retrieval results share one budget (tool-result-format.ts retrievalEvidenceAllowance).
+  const _turnRetrievalShown = { chars: 0 };
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -4542,7 +4545,10 @@ async function _runTurn(
         && cachedToolCall.args === argsSig
         && cachedToolCall.success !== false
       ) {
-        const cachedResultText = `${cachedToolCall.result}\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        // The note goes to the frame beside the text as well, so a retrieval result cut to its
+        // budget keeps it (tool-result-format.ts ToolResultFrameContext).
+        const cachedNote = `\n\n[Note: This is a cached result — you already called '${tc.name}' with identical arguments earlier in this turn. Do NOT call it again. Use this result and move to a different step.]`;
+        const cachedResultText = `${cachedToolCall.result}${cachedNote}`;
         _lastToolResultByName.set(tc.name, cachedToolCall.result);
 
         logAudit("tool_call_completed", {
@@ -4562,7 +4568,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
@@ -4823,6 +4829,9 @@ async function _runTurn(
 
       // ── Identical output loop detection ──────────────────────────────────
       // Track BOTH successes and failures — repeated errors are loops too.
+      // The notice it appends goes to the frame beside the text as well, so a retrieval result cut
+      // to its budget keeps it (tool-result-format.ts ToolResultFrameContext).
+      let runtimeNote: string | undefined;
       {
         const outputFingerprint = buildRepeatedOutputFingerprint(tc.name, tc.arguments, resultText);
         const prev = _recentOutputsByTool.get(tc.name) ?? [];
@@ -4897,9 +4906,10 @@ async function _runTurn(
             };
           }
 
-          resultText +=
+          runtimeNote =
             `\n\n[System notice: ${tc.name} has returned identical output ${IDENTICAL_OUTPUT_LOOP_THRESHOLD} times in a row. ` +
             `You are stuck in a loop. Do NOT call this tool again. Summarise what you have found so far and report it to the user, or try a clearly different approach.]`;
+          resultText += runtimeNote;
           if (loopIntervention) opts.onIntervention?.(loopIntervention);
           _recentOutputsByTool.set(tc.name, []); // reset so alert fires at most once per burst
         }
@@ -4916,6 +4926,8 @@ async function _runTurn(
         intervention,
         argsSig,
         session,
+        runtimeNote,
+        retrievalShown: _turnRetrievalShown,
         onIntervention: opts.onIntervention,
         onToolResult: opts.onToolResult,
         guardrailEvents,

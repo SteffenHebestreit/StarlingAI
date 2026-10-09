@@ -376,6 +376,206 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
   }, 60_000);
 });
 
+describe("the excerpts a search returned reach the model's next call", () => {
+  // E2E 2026-10-09: the crawled page's excerpt opened with its title and navigation, so the charge
+  // time sat at character 1,109 of the result. The frame cut the result to 600 characters and the
+  // collapsed history to 500, and the model searched again for what it had already found.
+  const PAGE_CHROME = [
+    "# Dokumentation NW-AS 18 | Nordlicht Werkzeuge",
+    ...["Startseite", "Produkte", "Akku-Werkzeuge", "Ladegeräte", "Zubehör", "Ersatzteile", "Service", "Downloads",
+      "Händlersuche", "Garantie", "Reparatur", "Schulungen", "Presse", "Karriere", "Lieferstatus", "Kontakt"]
+      .map((label) => `- [${label}](/${label.toLowerCase().replace(/[^a-z]+/g, "-")}.html)`),
+  ].join("\n");
+
+  it("the call after the search reads a passage that sits past character 600 of the result", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    const [charge, grease] = KB_EXCERPTS;
+    searchKnowledgeBaseMock.mockResolvedValue({
+      chunks: [{ ...charge!, text: `${PAGE_CHROME}\n\n${charge!.text}` }, grease!],
+      retrievalFailed: false,
+      lowConfidence: false,
+    });
+    searchThenAnswer("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const toolResults: Array<{ name: string; result: string }> = [];
+    await runTurn({
+      session,
+      userMessage: KB_QUESTION,
+      onToolResult: (_id, name, result) => { toolResults.push({ name, result }); },
+    });
+
+    const search = toolResults.find((entry) => entry.name === "search_knowledge_base");
+    expect(search?.result.indexOf(charge!.text), "the fixture's passage does not sit past character 600").toBeGreaterThan(600);
+    expect(streamMock.mock.calls.length, "the turn made no call after the search").toBeGreaterThanOrEqual(2);
+    const nextCall = (streamMock.mock.calls[1]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain(charge!.text);
+    expect(nextCall).toContain(grease!.text);
+  }, 60_000);
+
+  it("a low-confidence search says so ahead of its excerpts, so the cut to the retrieval budget keeps the note", async () => {
+    await loadRuntime();
+    const { getTool } = await import("../tools/registry.js");
+    const { buildModelVisibleToolResult } = await import("../agent/tool-result-format.js");
+    const { getConfig } = await import("../config/loader.js");
+    getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Six long excerpts of a crawled site, as the default top-k returns them: past the budget.
+    const chunks = Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `c${i}`,
+      text: `Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks, retrievalFailed: false, lowConfidence: true });
+
+    const result = await getTool("search_knowledge_base")!.execute(
+      { knowledge_base: KB_ID, query: "Wartung NW-AS 18" },
+      { sessionId: "kb-low-confidence", workspacePath: "/workspace" } as never,
+    );
+    expect(result.success).toBe(true);
+    const visible = buildModelVisibleToolResult("search_knowledge_base", result.output, result.metadata);
+    expect(visible, "the fixture does not run past the budget").toMatch(/\[Cut to fit the context budget: /);
+    expect(visible.length).toBeLessThanOrEqual(6000);
+    expect(visible).toContain("retrieval confidence for this query was LOW");
+    expect(visible).toContain("Abschnitt 1:");
+  }, 60_000);
+});
+
+describe("the turn loop's own notes on a retrieval result survive its cut to the budget", () => {
+  const SEARCH_ARGS = { knowledge_base: KB_ID, query: "Ladezeit NW-3104 NW-LG 18 0 auf 80 %" };
+  const CUT_LINE = /\[Cut to fit the context budget: the remaining \d+ characters of this result are not shown\.\]/;
+
+  type ScriptedCall = [callId: string, toolName: string, args: Record<string, unknown>];
+
+  /** The model sends each iteration's calls in one response, and answers after the last. */
+  function callsThenAnswer(iterations: ScriptedCall[][], answer: string) {
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      const calls = iterations[call];
+      call += 1;
+      if (!calls) return textStream(answer);
+      return (async function* () {
+        for (const [callId, toolName, args] of calls) {
+          yield { type: "tool_call_start", toolCallId: callId, toolName };
+          yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
+        }
+        yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+      })();
+    });
+  }
+
+  /** What the turn stored as the model-visible result of one call. */
+  const storedResult = (session: { getHistory(): readonly unknown[] }, callId: string): string | undefined =>
+    (session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .find((message) => message.role === "tool" && message.tool_call_id === callId)?.content ?? undefined;
+
+  it("a search that keeps failing the same way keeps the identical-output notice after the cut line", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 500;
+    // The store's error, echoed whole, runs past the budget. A failed call is not served from the
+    // identical-arguments cache, so the third one runs and gets the loop's notice. The listing in the
+    // second iteration succeeds: two iterations whose every call failed end the turn first.
+    searchKnowledgeBaseMock.mockRejectedValue(new Error(`engram search failed: ${"upstream connection reset by peer; ".repeat(20)}`));
+    callsThenAnswer([
+      [["kb1", "search_knowledge_base", SEARCH_ARGS]],
+      [["kb2", "search_knowledge_base", SEARCH_ARGS], ["list1", "list_knowledge_bases", {}]],
+      [["kb3", "search_knowledge_base", SEARCH_ARGS]],
+    ], "Die Wissensdatenbank ist gerade nicht erreichbar.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(3);
+    const third = storedResult(session, "kb3");
+    expect(third, "the third search left no result").toBeDefined();
+    expect(third).toMatch(CUT_LINE);
+    expect(third).toMatch(/not shown\.\]\n\n\[System notice: search_knowledge_base has returned identical output 3 times in a row\. You are stuck in a loop\. [^\n]*\]$/);
+  }, 60_000);
+
+  it("a repeated search served from the cache keeps the cached-result note after the cut line", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Six long excerpts of a crawled site, as the default top-k returns them: past the budget.
+    const chunks = Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `c${i}`,
+      text: `Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock.mockResolvedValue({ chunks, retrievalFailed: false, lowConfidence: false });
+    callsThenAnswer([
+      [["kb1", "search_knowledge_base", SEARCH_ARGS]],
+      [["kb2", "search_knowledge_base", SEARCH_ARGS]],
+    ], "Die Auszüge nennen keine Ladezeit.");
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    // The repeat was served from the cache, not searched again.
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
+    const repeat = storedResult(session, "kb2");
+    expect(repeat, "the repeated search left no result").toBeDefined();
+    expect(repeat).toMatch(CUT_LINE);
+    const cachedNote = /not shown\.\]\n\n\[Note: This is a cached result — you already called 'search_knowledge_base' with identical arguments earlier in this turn\. Do NOT call it again\. [^\n]*\]/;
+    expect(repeat).toMatch(new RegExp(`${cachedNote.source}$`));
+    // The first search used the turn's retrieval budget up, so the copy is held to a quarter of it.
+    expect(repeat!.length).toBeLessThanOrEqual(1500);
+    // And the call after the repeat reads it.
+    expect(streamMock.mock.calls.length, "the turn made no call after the repeat").toBeGreaterThanOrEqual(3);
+    const nextCall = (streamMock.mock.calls[2]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toMatch(cachedNote);
+  }, 60_000);
+});
+
+describe("a turn's retrieval results share the retrieval budget", () => {
+  it("a second search over budget gets what the first left, at least a quarter of the budget", async () => {
+    const { AgentSession, runTurn } = await loadRuntime();
+    (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
+    // Two searches for two parts of the question, each returning six long excerpts of a crawled site.
+    const sixExcerpts = (topic: string) => Array.from({ length: 6 }, (_, i) => ({
+      ...KB_EXCERPTS[0]!,
+      chunkId: `${topic}-${i}`,
+      text: `${topic} Abschnitt ${i + 1}: ${"Wartungshinweis zum Akku-Schrauber NW-AS 18. ".repeat(30)}`,
+    }));
+    searchKnowledgeBaseMock
+      .mockResolvedValueOnce({ chunks: sixExcerpts("LADEN"), retrievalFailed: false, lowConfidence: false })
+      .mockResolvedValueOnce({ chunks: sixExcerpts("FETT"), retrievalFailed: false, lowConfidence: false });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return toolCallStream("kb1", "search_knowledge_base", { knowledge_base: KB_ID, query: "Ladezeit NW-3104" });
+      if (call === 2) return toolCallStream("kb2", "search_knowledge_base", { knowledge_base: KB_ID, query: "Getriebefett NW-AS 18" });
+      return textStream("Die Auszüge nennen weder Ladezeit noch Prüfintervall.");
+    });
+
+    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    await runTurn({ session, userMessage: KB_QUESTION });
+
+    expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(2);
+    const results = new Map((session.getHistory() as ReadonlyArray<{ role: string; tool_call_id?: string; content?: string | null }>)
+      .filter((message) => message.role === "tool")
+      .map((message) => [message.tool_call_id, message.content ?? ""]));
+    const first = results.get("kb1") ?? "";
+    const second = results.get("kb2") ?? "";
+    expect(first).toContain("LADEN Abschnitt 1:");
+    expect(first.length).toBeLessThanOrEqual(6000);
+    // The first used the budget up, so the second is held to a quarter of it: the head of its best
+    // excerpt and the line saying how much is missing.
+    expect(first.length).toBeGreaterThan(6000 - 1500);
+    expect(second.length).toBeLessThanOrEqual(1500);
+    expect(second).toContain("FETT Abschnitt 1:");
+    expect(second).toMatch(/\[Cut to fit the context budget: the remaining \d+ characters of this result are not shown\.\]$/);
+    // And that is what the call after them reads.
+    const nextCall = (streamMock.mock.calls[2]![0] as Array<{ content?: unknown }>)
+      .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content ?? "")))
+      .join("\n");
+    expect(nextCall).toContain("FETT Abschnitt 1:");
+    expect(nextCall).not.toContain("FETT Abschnitt 2:");
+  }, 60_000);
+});
+
 describe("citations in an answer from this turn's knowledge-base read are its sources", () => {
   const PAGE_URL = "http://www.nordlicht-werkzeuge.test/dokumentation.html";
   const CITED_ANSWER = [
