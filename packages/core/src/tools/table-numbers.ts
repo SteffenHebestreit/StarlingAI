@@ -219,6 +219,28 @@ export function figureValue(raw: string, sign: 1 | -1, reading: ColumnReading): 
   return { units: BigInt(sign) * BigInt(digits), scale: [...fraction].length };
 }
 
+/**
+ * A figure's value when it is well formed under a decimal convention, else null: at most one
+ * decimal separator, after every grouping separator and followed by digits, and grouping
+ * separators (the other one of "," and ".", ' ’ and the no-break spaces) that group exactly three
+ * digits after a lead of one to three. "1,5" is null under "point" and "1.234,50" too, where
+ * figureValue would read them anyway; the arithmetic check needs to know which conventions a
+ * chain can be read under at all.
+ */
+export function strictFigureValue(raw: string, sign: 1 | -1, convention: DecimalConvention): Scaled | null {
+  const decimal = convention === "comma" ? "," : ".";
+  const grouping = convention === "comma" ? /[.'\u2019\u00a0\u202f]/u : /[,'\u2019\u00a0\u202f]/u;
+  const at = raw.indexOf(decimal);
+  if (at !== raw.lastIndexOf(decimal)) return null;
+  const integerPart = at < 0 ? raw : raw.slice(0, at);
+  const fraction = at < 0 ? "" : raw.slice(at + 1);
+  if (at >= 0 && !/^\p{Nd}+$/u.test(fraction)) return null;
+  const groups = integerPart.split(grouping);
+  if (groups.some((group) => !/^\p{Nd}+$/u.test(group))) return null;
+  if (groups.length > 1 && ([...groups[0]!].length > 3 || groups.slice(1).some((group) => [...group].length !== 3))) return null;
+  return { units: BigInt(sign) * BigInt(digitsOf(groups.join("") + fraction)), scale: [...fraction].length };
+}
+
 function rescale(value: Scaled, scale: number): bigint {
   return value.units * 10n ** BigInt(scale - value.scale);
 }

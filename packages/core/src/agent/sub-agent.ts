@@ -120,6 +120,7 @@ import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripE
 import { inferCompletedRunOutcome, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
 import { coerceJsonArrayArg } from "../tools/json-arg-coercion.js";
 import { clearWebTableSessionState } from "../tools/web-table-budget.js";
+import { describeChain, findArithmeticMismatches, type ArithmeticMismatch } from "./arithmetic-check.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -2693,6 +2694,48 @@ export interface SubAgentRunResult {
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
 }
 
+/**
+ * The first answer of a run the arithmetic check sent back for one corrective iteration
+ * (orchestration.subAgentArithmeticCheck "nudge"). It is created by runSubAgentWithStats because
+ * several exits of the loop never pass through withArtifacts (a suspicious answer, a rescue, the
+ * timeout synthesis), so the wrapper is the one point every exit passes. `settled` is set when the
+ * corrective answer is a real one; until then any exit returns the held answer instead.
+ */
+interface ArithmeticHold {
+  answer?: SubAgentRunResult;
+  settled: boolean;
+}
+
+/**
+ * The held answer in place of an exit the corrective iteration ended in: its output and outcome,
+ * with the usage and iteration count the run actually spent. The exit's own completion audit and
+ * ledger row stay as written; this row explains the substitution.
+ */
+function releaseArithmeticHold(hold: ArithmeticHold, exit: SubAgentRunResult | undefined, failure?: unknown): SubAgentRunResult {
+  const held = hold.answer!;
+  logAudit("guardrail_flagged", {
+    type: "sub_agent_arithmetic_hold_returned",
+    agentName: held.stats.agentName,
+    exitTerminalState: exit?.stats.terminalState ?? "error",
+    ...(failure !== undefined ? { error: (failure instanceof Error ? failure.message : String(failure)).slice(0, 200) } : {}),
+  }, { sessionId: held.stats.sessionId, severity: "warn" });
+  if (!exit) return held;
+  return { ...held, stats: { ...held.stats, usage: { ...exit.stats.usage }, iterations: exit.stats.iterations } };
+}
+
+/**
+ * The arithmetic nudge (pass^k-relevant). With web_table at hand it does not state the sum of the
+ * written terms: 604 replacing 609 is still wrong when a term was misread (Südtal is 596), and
+ * would then look consistent. Without a computing tool that exact sum is the only exact fact the
+ * runtime has, and checking each term comes first.
+ */
+function arithmeticNudgeText(mismatch: ArithmeticMismatch, webTable: boolean): string {
+  const chain = `${describeChain(mismatch)} (${mismatch.terms.length} terms) does not come to ${mismatch.stated}`;
+  return webTable
+    ? `ARITHMETIC CHECK: in your answer, ${chain}. Take that total from web_table over the page instead of adding it yourself, then give your complete final answer again.`
+    : `ARITHMETIC CHECK: in your answer, ${chain}; those terms add up to ${mismatch.computed}. Check each term against your sources, then give your complete final answer again with the corrected figures.`;
+}
+
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
   // Dual-emit native `starlingai.*` attrs AND standard `gen_ai.*` semconv attrs
   // (with the `invoke_agent {name}` span name + token usage) so a GenAI-aware
@@ -2720,7 +2763,17 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           // the parent's would attribute every sub-agent call to the parent turn.
           sessionId: undefined,
         },
-        () => runSubAgentWithStatsInner(opts),
+        async () => {
+          const hold: ArithmeticHold = { settled: false };
+          let exit: SubAgentRunResult;
+          try {
+            exit = await runSubAgentWithStatsInner(opts, hold);
+          } catch (err) {
+            if (hold.answer && !hold.settled) return releaseArithmeticHold(hold, undefined, err);
+            throw err;
+          }
+          return hold.answer && !hold.settled ? releaseArithmeticHold(hold, exit) : exit;
+        },
       );
       span.setAttribute("starlingai.agent.iterations", result.stats.iterations);
       span.setAttribute("starlingai.agent.toolCount", result.stats.toolCount);
@@ -2734,7 +2787,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
   );
 }
 
-async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
+async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHold: ArithmeticHold = { settled: false }): Promise<SubAgentRunResult> {
   const config = getConfig();
   const agentCfg = opts.inlineConfig ?? config.subAgents[opts.agentName];
   const runStartedAt = Date.now();
@@ -6732,6 +6785,63 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
         if (suspicious) {
           return suspicious;
+        }
+
+        // THE ARITHMETIC CHECK (orchestration.subAgentArithmeticCheck, agent/arithmetic-check.ts).
+        // E2E 2026-10-09: browser_agent wrote "17 + 9 + … + 73 = **609**", 18 terms that come to 604,
+        // and a single delegation's long answer is relayed verbatim, so the check sits here, on the
+        // text the run would return: after the mask and the redaction above. "shadow" (the default)
+        // writes one audit row and changes nothing. "nudge" sends the run back once, holding this
+        // answer, under every guard the row's skipReason names: no second nudge, an "auto" call with
+        // room left for the variant, no stop, no figures the provenance mask is checking (the nudge
+        // would hand the model's own figures to observedFigureKeys), and a real answer.
+        const correctiveAnswer = arithmeticHold.answer !== undefined && !arithmeticHold.settled;
+        if (correctiveAnswer) {
+          // The answer to the nudge replaces the held one only when it is a real answer. An empty
+          // or recovered one ends the run here, and the wrapper returns the held answer instead.
+          if (result === "Sub-agent produced no final response." || recovered.forcedOutcome || truncationRecovered.forcedOutcome) {
+            return withArtifacts({ output: result, stats });
+          }
+          arithmeticHold.settled = true;
+        }
+        const arithmeticMode = getConfig().orchestration?.subAgentArithmeticCheck ?? "shadow";
+        const mismatch = arithmeticMode === "off" ? undefined : findArithmeticMismatches(result)[0];
+        if (mismatch) {
+          const holdsWebTable = (effectiveToolNames ?? tools.map((tool) => tool.name)).includes("web_table");
+          const webTableCap = resolveSubAgentToolCap("web_table", isCoordinatorAgent);
+          const webTableUsable = holdsWebTable && !blockedToolReasons.has("web_table") && !sufficiencyToolsStripped
+            && (webTableCap === undefined || (perToolCallCount.get("web_table") ?? 0) < webTableCap);
+          // Variant A needs a tool call and an answer, variant B an answer.
+          const variant: "A" | "B" | null = webTableUsable && iterations + 2 < maxIterations ? "A"
+            : iterations + 1 < maxIterations ? "B" : null;
+          const skipReason = arithmeticMode === "shadow" ? "shadow"
+            : correctiveAnswer ? "already_nudged"
+            : timeBudgetCritical ? "time_critical"
+            : callToolChoice !== "auto" || variant === null ? "no_iterations"
+            : lrgOperatorStop || supervisorStop || signal?.aborted || longRunningGenerationManager.isStopRequested(subSessionId) ? "stopped"
+            : tracksFigures && noExecutionCompleted(executionRecord) ? "figures_unverified"
+            : recovered.forcedOutcome || truncationRecovered.forcedOutcome ? "forced_outcome"
+            : undefined;
+          logAudit("guardrail_flagged", {
+            type: "sub_agent_arithmetic_mismatch",
+            agentName: opts.agentName,
+            mode: arithmeticMode,
+            stated: mismatch.stated,
+            computed: mismatch.computed,
+            terms: mismatch.terms.length,
+            excerpt: mismatch.excerpt,
+            holdsWebTable,
+            nudged: skipReason === undefined,
+            ...(skipReason !== undefined ? { skipReason } : {}),
+            ...(correctiveAnswer ? { secondMismatch: true } : {}),
+          }, { sessionId: subSessionId, severity: "warn" });
+          if (skipReason === undefined) {
+            arithmeticHold.answer = withArtifacts({ output: result, stats });
+            history.push({ role: "assistant", content: result });
+            history.push({ role: "user", content: arithmeticNudgeText(mismatch, variant === "A") });
+            iterations++;
+            continue;
+          }
         }
 
         history.push({ role: "assistant", content: result });

@@ -404,6 +404,13 @@ export const OrchestrationSchema = z.object({
   /** Max consistency repair rounds (each = one check + one fix call). Low — a consistency
    *  fix is usually one shot, and every round is extra slow-model latency. */
   deliverableConsistencyQaMaxRounds: z.number().int().min(1).max(3).default(1),
+  /** Arithmetic-chain check on a sub-agent's final answer (agent/arithmetic-check.ts): an explicit
+   *  "a + b + … = N" whose terms do not come to N under either decimal convention. "shadow" logs
+   *  guardrail_flagged {type: "sub_agent_arithmetic_mismatch", nudged: false} and changes nothing.
+   *  "nudge" also gives the run one corrective iteration, with the first answer held and returned on
+   *  any other exit. Default "shadow": the false-positive rate is measured on real runs first, and
+   *  "nudge" stays off until pass^k. */
+  subAgentArithmeticCheck: z.enum(["off", "shadow", "nudge"]).default("shadow"),
   /** When true, the one bounded corrective build RESUMES a partial deliverable instead
    *  of regenerating it. If an earlier build attempt THIS turn left a file that genuinely
    *  looks cut off mid-document (artifactFileLooksTruncated: HTML missing </html>, JSON that
