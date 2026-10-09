@@ -1317,6 +1317,98 @@ describe("swarm orchestration tools", () => {
     expect(tasks[0]?.status).toBe("completed");
   }, 30_000);
 
+  // E2E 7c4cbb28 (2026-10-09): code_analyst answered a pasted-code diagnosis in prose with no tool
+  // call; the verb table found "change" in "do not change anything" (and "add" in the pasted
+  // docstring), code_analyst holds write_file, and the delegation failed as narrative-only. Whether a
+  // file was wanted is what the call declares, carried from delegate_to_agent's arguments to the verdict.
+  it("judges a run that wrote no file by the deliverable its delegation declared, not by the task's verbs", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-swarm-deliverable-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        code_analyst: {
+          description: "Static code analysis.",
+          tools: ["read_file", "list_files", "grep_files", "write_file", "edit_file"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const diagnosis = "int(subtotal + tax) truncates instead of rounding; the same line is in receipt_total.";
+    runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
+      output: diagnosis,
+      stats: {
+        agentName: args.agentName,
+        sessionId: `sub:${args.parentSessionId}:${args.agentName}:test`,
+        promptChars: 0,
+        userContentChars: String(args.task ?? "").length,
+        toolCount: 0,
+        toolNames: [],
+        iterations: 1,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: 4,
+        model: "mock",
+        capabilities: [],
+        outcome: "success",
+        terminalState: "completed",
+      },
+    }));
+
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+    ]);
+    const delegate = getTool("delegate_to_agent");
+    expect(delegate).toBeDefined();
+    const task = "Static code analysis — do not run anything and do not change anything: why does invoice_total "
+      + "come out a cent low?\n```python\ndef invoice_total(items):\n    \"\"\"Sum the items and add 20% tax.\"\"\"\n"
+      + "    return int(sum(items) * 1.2)\n```";
+    const run = (sessionId: string, extra: Record<string, unknown>) => delegate!.execute({ agentName: "code_analyst", task, ...extra }, {
+      sessionId,
+      workspacePath: tempDir,
+      swarmState: { objective: "diagnose", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+    });
+
+    // Undeclared, or declared an answer: the prose diagnosis IS the deliverable.
+    for (const [sessionId, extra] of [["deliverable-undeclared", {}], ["deliverable-answer", { deliverable: "answer" }]] as const) {
+      const answered = await run(sessionId, extra);
+      expect(answered.success, sessionId).toBe(true);
+      expect(answered.output).toContain(diagnosis);
+      expect(answered.metadata?.["attemptedAgents"]).toEqual(["code_analyst"]);
+    }
+
+    // Declared a file, the same zero-tool run missed it.
+    const missed = await run("deliverable-file", { deliverable: "file" });
+    expect(missed.success).toBe(false);
+    expect(String(missed.error)).toContain("narrative-only");
+    expect(String(missed.error)).toContain("write_file");
+  }, 30_000);
+
+  it("offers the deliverable declaration on every tool that dispatches a delegation", async () => {
+    const [{ getTool }] = await Promise.all([
+      import("../tools/registry.js"),
+      import("../tools/sub-agent.js"),
+      import("../tools/turn-plan-tool.js"),
+    ]);
+    type Schema = { properties?: Record<string, { enum?: unknown; items?: Schema }> & { [key: string]: unknown } };
+    const props = (name: string): Schema["properties"] => (getTool(name)?.parameters as Schema | undefined)?.properties;
+    const itemProps = (name: string, field: string): Schema["properties"] => props(name)?.[field]?.items?.properties;
+    for (const [label, properties] of [
+      ["delegate_to_agent", props("delegate_to_agent")],
+      ["swarm_delegate", props("swarm_delegate")],
+      ["create_ephemeral_agent", props("create_ephemeral_agent")],
+      ["parallel_delegate.tasks[]", itemProps("parallel_delegate", "tasks")],
+      ["run_task_graph.nodes[]", itemProps("run_task_graph", "nodes")],
+      ["record_plan.steps[]", itemProps("record_plan", "steps")],
+    ] as const) {
+      expect(properties?.["deliverable"]?.enum, label).toEqual(["file", "answer"]);
+    }
+  }, 30_000);
+
   it("adds maintenance fallbacks automatically for swarm_maintainer", async () => {
     const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-swarm-maintainer-"));
     tempDirs.push(workspacePath);

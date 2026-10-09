@@ -16,6 +16,7 @@ import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan,
 import { planHasDispatchableStep } from "./plan-executor.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
+import { deliverableParameterSchema } from "./delegation-artifact-classification.js";
 
 const log = childLogger("tool:record_plan");
 
@@ -58,6 +59,7 @@ registerTool({
             toolArgs: { type: "object", description: "Arguments for `tool`. Literal values only — a tool takes structured arguments, so it cannot receive an earlier step's output; make a step that needs one a delegate step." },
             parallelGroup: { type: "number", description: "Steps sharing a parallelGroup are independent and may run concurrently." },
             dependsOn: { type: "array", items: { type: "string" }, description: "Ids of steps that must finish first." },
+            deliverable: deliverableParameterSchema(),
           },
           required: ["description", "kind"],
         },

@@ -66,6 +66,9 @@ import {
   WORKSPACE_MUTATION_TASK_RE,
   ARTIFACT_PRODUCING_TOOLS,
   agentCfgCanFulfillArtifactTask,
+  deliverableParameterSchema,
+  readDelegationDeliverable,
+  type DelegationDeliverable,
   looksLikeInfrastructureFailure,
   looksLikeOnlyFailureStubs,
   partialResultHasSubstantiveEvidence,
@@ -85,7 +88,9 @@ export {
   classifyDelegationResult,
   isNarrativeOnlyDeliverableFailure,
   formatArtifactReferencesForSharedContext,
+  readDelegationDeliverable,
   type DelegationClassification,
+  type DelegationDeliverable,
 } from "./delegation-artifact-classification.js";
 import { extractInlineHtmlDocument, looksLikeCompleteHtmlDocument } from "../agent/deliverable-intent.js";
 import { getConfig } from "../config/loader.js";
@@ -242,6 +247,13 @@ interface DelegationRequest {
    * nodes (caller-pinned ids) leave this off so distinct nodes are never cross-matched.
    */
   allowSignatureReuse?: boolean;
+  /**
+   * What the dispatching call declared the delegation must hand back (DelegationDeliverable in
+   * ./delegation-artifact-classification.ts): the model's `deliverable` argument, or "file" from
+   * the runtime's own corrective build. Only "file" lets a run that wrote nothing be judged a
+   * missed deliverable.
+   */
+  deliverable?: DelegationDeliverable;
 }
 
 interface TaskGraphNodeInput {
@@ -254,6 +266,8 @@ interface TaskGraphNodeInput {
   fallbackAgents?: string[];
   routingQuery?: string;
   skillMatchThreshold?: number;
+  /** Raw model argument; read with readDelegationDeliverable. */
+  deliverable?: unknown;
 }
 
 const DEFAULT_MAX_AGENT_CALLS_PER_TURN = 2;
@@ -2483,6 +2497,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         {
           explicitVerdict: Boolean(parsedOutcome?.status),
           ...(runOwnFailedToolNames !== undefined ? { failedToolNames: runOwnFailedToolNames } : {}),
+          ...(request.deliverable ? { deliverable: request.deliverable } : {}),
         },
       );
       // The result's own evidence, judged once here where the task is known (figures echoed from
@@ -2509,7 +2524,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // structured reason that names what was missing so the orchestrator
         // can adjust its next move.
         const narrativeOnly = isNarrativeOnlyDeliverableFailure(
-          classification, output, request.task, stats, agentCfg,
+          classification, output, request.task, stats, agentCfg, request.deliverable,
         );
         if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
@@ -3115,6 +3130,7 @@ registerTool({
             fallbackAgents: { type: "array", items: { type: "string" }, description: "Configured agent names to try in order if the first choice fails. Never invent names." },
             routingQuery: { type: "string", description: "Short phrase describing the CAPABILITY this node needs, used for routing when agentName is omitted. Describe the skill, not the request." },
             skillMatchThreshold: { type: "number", description: "Minimum routing similarity (0-1) before this node falls back to an ephemeral agent." },
+            deliverable: deliverableParameterSchema(),
           },
           required: ["id", "task"],
         },
@@ -3330,6 +3346,7 @@ registerTool({
           taskId: node.id,
           taskTitle: node.title,
           dependsOn: node.dependsOn,
+          deliverable: readDelegationDeliverable(node.deliverable),
         }, withTurnGatherRole(delegatedCtx, node.id === gatherNodeId))).then((result) => ({ node, result })));
       }
     };
@@ -4173,6 +4190,7 @@ registerTool({
         type: "number",
         description: "Optional 0-1 threshold. If the best auto-selected specialist scores below this value, generate an ephemeral agent instead.",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["task"],
   },
@@ -4241,6 +4259,7 @@ registerTool({
       routingQuery,
       skillMatchThreshold,
       taskTitle,
+      deliverable: readDelegationDeliverable(args["deliverable"]),
     }, ctx);
   },
 });
@@ -4276,6 +4295,7 @@ registerTool({
         type: "number",
         description: "Optional 0–1 threshold. If the best-matched specialist scores below this value an ephemeral agent is synthesised instead. Defaults to the swarm's global threshold.",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["task"],
   },
@@ -4302,6 +4322,7 @@ registerTool({
       routingQuery,
       skillMatchThreshold,
       taskTitle,
+      deliverable: readDelegationDeliverable(args["deliverable"]),
     }, ctx);
   },
 });
@@ -4420,6 +4441,7 @@ registerTool({
             fallbackAgents: { type: "array", items: { type: "string" }, description: "Optional fallback agents for this task" },
             routingQuery: { type: "string", description: "Optional routing query for self-healing fallback selection" },
             skillMatchThreshold: { type: "number", description: "Optional 0-1 threshold for generating an ephemeral agent when no specialist matches strongly enough" },
+            deliverable: deliverableParameterSchema(),
           },
           required: ["task"],
         },
@@ -4430,7 +4452,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const tasks = Array.isArray(args["tasks"])
-      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string; skillMatchThreshold?: number }>)
+      ? (args["tasks"] as Array<{ agentName?: string; task: string; context?: string; fallbackAgents?: string[]; routingQuery?: string; skillMatchThreshold?: number; deliverable?: unknown }>)
       : [];
 
     if (tasks.length === 0) return { success: false, output: "", error: "tasks array must not be empty" };
@@ -4460,6 +4482,7 @@ registerTool({
         ...taskSpec,
         agentName: primaryValidation.valid[0],
         fallbackAgents: fallbackValidation.valid.length > 0 ? fallbackValidation.valid : undefined,
+        deliverable: readDelegationDeliverable(taskSpec.deliverable),
       };
     });
 
@@ -4475,6 +4498,7 @@ registerTool({
       fallbackAgents: string[] | undefined;
       routingQuery?: string;
       skillMatchThreshold?: number;
+      deliverable?: DelegationDeliverable;
     }> = [];
     for (const taskSpec of normalizedTasks) {
       if ("error" in taskSpec) {

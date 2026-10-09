@@ -185,6 +185,21 @@ describe("turn plan — normalization", () => {
     expect(plan.wide).toBe(true);
   });
 
+  it("keeps what a step declares it must hand back, and drops a value that is not one", () => {
+    // DelegationDeliverable: execute_plan hands it to delegate_to_agent, so a plan's build step is
+    // judged as a build and its research step is not. Each step's task carries the turn's objective,
+    // so the verb test over it read every step of a build plan as the build.
+    const plan = normalizeTurnPlan({
+      objective: "Build the CPSA-F learning site from the syllabus.",
+      steps: [
+        { id: "s1", description: "Gather the syllabus topics", agent: "researcher", deliverable: "answer" },
+        { id: "s2", description: "Build the site", agent: "web_coder", deliverable: "File", dependsOn: ["s1"] },
+        { id: "s3", description: "Review it", agent: "quality_supervisor", deliverable: "website" },
+      ],
+    });
+    expect(plan.steps.map((step) => step.deliverable)).toEqual(["answer", "file", undefined]);
+  });
+
   it("falls back to an empty-but-valid plan for junk input (never throws)", () => {
     const plan = normalizeTurnPlan({});
     expect(plan.steps).toEqual([]);

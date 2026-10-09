@@ -30,6 +30,9 @@ type Cfg = import("../config/schema.js").SubAgentConfig;
 const agent = (tools: string[]): Cfg => ({ tools } as unknown as Cfg);
 
 const DELIVERABLE_TASK = "Erstelle ein Bild eines Sonnenuntergangs am Strand.";
+// The delegation asked for the image as a file (DelegationDeliverable): only then is a run that
+// wrote none a miss.
+const ASKED_FOR_FILE = "file" as const;
 
 describe("generators that write into the workspace", () => {
   it("counts every workspace-writing generator as artifact-producing", () => {
@@ -54,18 +57,18 @@ describe("generators that write into the workspace", () => {
 
   it("no longer calls a successful image generation a deliverable MISS", () => {
     const stats = { toolCount: 1, toolNames: ["generate_image"], terminalState: "completed", outcome: "success" };
-    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "write_file"]))).toBe(false);
+    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "write_file"]), ASKED_FOR_FILE)).toBe(false);
   });
 
   it("still catches an agent that narrated and called NOTHING — the control that matters", () => {
     // This is the behaviour the set exists for, and widening it must not blunt it.
     const stats = { toolCount: 0, toolNames: [], terminalState: "completed", outcome: "success" };
-    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "write_file"]))).toBe(true);
+    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "write_file"]), ASKED_FOR_FILE)).toBe(true);
   });
 
   it("still catches an agent that only READ when asked to produce", () => {
     const stats = { toolCount: 2, toolNames: ["read_file", "analyze_image"], terminalState: "completed", outcome: "success" };
-    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "read_file", "analyze_image"]))).toBe(true);
+    expect(looksLikeArtifactDeliverableMiss(DELIVERABLE_TASK, stats, agent(["generate_image", "read_file", "analyze_image"]), ASKED_FOR_FILE)).toBe(true);
   });
 
   it("classifies the session-2c6bdb30 delegation as SUCCESS, not failure", () => {
@@ -82,7 +85,7 @@ describe("generators that write into the workspace", () => {
 
     const verdict = classifyDelegationResult(
       output, "success", stats, agent(["generate_image", "analyze_image", "write_file"]),
-      "image_creator", "Generiere ein Bild eines Sonnenuntergangs am Strand.", artifacts,
+      "image_creator", "Generiere ein Bild eines Sonnenuntergangs am Strand.", artifacts, { deliverable: ASKED_FOR_FILE },
     );
 
     expect(verdict).toBe("success");
@@ -100,6 +103,7 @@ describe("generators that write into the workspace", () => {
       const verdict = classifyDelegationResult(
         `Fertig, gespeichert unter generated/out-${tool}.bin`, "success", stats,
         agent([tool, "write_file"]), name, task, [{ sourceTool: tool, outputPath: "generated/out.bin" }],
+        { deliverable: ASKED_FOR_FILE },
       );
       expect(verdict, `${tool} should classify as success`).toBe("success");
     }

@@ -132,10 +132,10 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:48 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:203 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:613 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:910 | 59 |
+| `deliverable` | packages/core/src/config/schema.ts:910 | 60 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
-| `description` | packages/core/src/config/schema.ts:589 | 183 |
+| `description` | packages/core/src/config/schema.ts:589 | 184 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:427 | 2 |
 | `digest` | packages/core/src/config/schema.ts:1998 | 56 |
 | `dir` | packages/core/src/config/schema.ts:1987 | 59 |
@@ -309,9 +309,9 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:1997 | 373 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:708 | 57 |
-| `node` | packages/core/src/config/schema.ts:1066 | 240 |
+| `node` | packages/core/src/config/schema.ts:1066 | 241 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:574 | 3 |
-| `notes` | packages/core/src/config/schema.ts:814 | 56 |
+| `notes` | packages/core/src/config/schema.ts:814 | 57 |
 | `oneLiner` | packages/core/src/config/schema.ts:923 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
 | `operator` | packages/core/src/config/schema.ts:396 | 118 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:760 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:575 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1245 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1355 | 82 |
+| `scene` | packages/core/src/config/schema.ts:1355 | 81 |
 | `scopes` | packages/core/src/config/schema.ts:414 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |

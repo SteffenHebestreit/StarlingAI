@@ -29,7 +29,7 @@ import { buildAgentIndex } from "../providers/embeddings.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
-import { parseFinalAnswerTag } from "./delegation-artifact-classification.js";
+import { deliverableParameterSchema, parseFinalAnswerTag, readDelegationDeliverable } from "./delegation-artifact-classification.js";
 
 const log = childLogger("tool:sub-agent");
 
@@ -673,6 +673,7 @@ registerTool({
         type: "string",
         description: "Optional background context to pass to the agent",
       },
+      deliverable: deliverableParameterSchema(),
     },
     required: ["agentName", "systemPrompt", "tools", "task"],
   },
@@ -872,9 +873,13 @@ registerTool({
     // <tool_call> block as TEXT (never actually called write_file), and this
     // path returned success: true with the hallucination as the output — the
     // orchestrator dutifully told the user "Die Lernwebsite wurde erfolgreich
-    // erstellt" when no file existed.
+    // erstellt" when no file existed. Judged against the declared deliverable only
+    // (DelegationDeliverable): granted write_file says what the agent MAY do, and an
+    // ephemeral analyst that answers in prose has missed nothing.
     const ephemeralCfg = { tools };
-    const narrativeOnly = looksLikeArtifactDeliverableMiss(task, ephemeralStats, ephemeralCfg as never);
+    const narrativeOnly = looksLikeArtifactDeliverableMiss(
+      task, ephemeralStats, ephemeralCfg as never, readDelegationDeliverable(args["deliverable"]),
+    );
     if (narrativeOnly) {
       const expectedTools = tools.filter((name) =>
         /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
