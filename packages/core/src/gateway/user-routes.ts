@@ -12,9 +12,9 @@
  * workspace and memory are all keyed by username, so that was a takeover of the other person's
  * identity — past the admin-only session rule, which assumes a username names one person.
  *
- * Bootstrap is unchanged: `sai token` mints an admin token (and so does the token the gateway
- * prints with auth off), and auth.ts resolves such a token by its claims while the store is empty
- * and after, so the first account is created the way it always was.
+ * Bootstrap: `sai token` mints a bootstrap token (the `bst` claim), which auth.ts resolves by its
+ * claims while the store is empty and after, so the first account is created the way it always was.
+ * With auth off the gateway prints a plain admin token, which needs no store at all.
  */
 import type { Hono } from "hono";
 import { authenticatedUser, hashPassword, roleRank, userHasRole, type AuthRole } from "./auth.js";
@@ -22,6 +22,7 @@ import { getConfig, updateConfig } from "../config/loader.js";
 import { getAllSessions } from "../agent/session.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { accountRegistryEntries } from "../runtime/account-registry.js";
 import { accountLedgerPath, appendAccountLedgerEntry, mintBuiltinAccountId } from "../runtime/accounts.js";
 
 const log = childLogger("gateway:user-routes");
@@ -83,8 +84,10 @@ export function registerUserRoutes(app: Hono): void {
     const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
     const password = typeof body.password === "string" ? body.password : "";
     const displayName = typeof body.displayName === "string" ? body.displayName : undefined;
-    // Never admin: auth.ts treats an admin claim with no account behind it as a bootstrap token,
-    // so a deleted admin account's token would outlive the account.
+    // Never admin. The rule came from auth.ts taking any admin claim with no account behind it for a
+    // bootstrap token, so a deleted admin account's token outlived the account. Bootstrap tokens now
+    // carry their own claim, but whether this route may make admins is a decision of its own, so the
+    // rule stays.
     const role: AuthRole = body.role === "viewer" ? "viewer" : "operator";
     if (!username || !/^[a-z0-9_.-]+$/.test(username)) {
       return c.json({ error: "username must be alphanumeric/_/-/." }, 400);
@@ -105,7 +108,11 @@ export function registerUserRoutes(app: Hono): void {
     // entry tells an account created now from one that predates ids, whose data a migration may
     // move only when an admin names the pair. It is written first; when it cannot be, no account
     // is made, so every id this route hands out is on record.
-    const id = mintBuiltinAccountId(username, getConfig().auth.users.flatMap((u) => (u.id ? [u.id] : [])));
+    const id = mintBuiltinAccountId(username, [
+      ...getConfig().auth.users.flatMap((u) => (u.id ? [u.id] : [])),
+      // Identity-provider accounts hold ids in the same space (mixed mode signs both in).
+      ...accountRegistryEntries().map((entry) => entry.id),
+    ]);
     try {
       appendAccountLedgerEntry(accountLedgerPath(getConfig().workspacePath), { event: "created", id, username, at: createdAt });
     } catch (err) {

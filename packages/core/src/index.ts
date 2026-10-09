@@ -18,6 +18,7 @@ import { initMcpServers, shutdownMcpServers, syncMcpServers } from "./mcp/regist
 import { stopManagedChannels, syncAllChannels } from "./channels/runtime.js";
 import { runChannelHealthChecks } from "./channels/registry.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./runtime/status.js";
+import { loadAccountRegistry } from "./runtime/account-registry.js";
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
@@ -111,6 +112,11 @@ export async function main() {
 
   // Seed in-process session cache from Redis (multi-instance session sharding).
   await initSessionRedis();
+
+  // The account registry (identity-provider accounts), read now so a file that cannot be read is
+  // reported at boot rather than at the first sign-in. Only under multi-user auth, which is the
+  // only mode that consults it.
+  if (getConfig().auth?.enabled === true) loadAccountRegistry();
 
   // Check LLM provider health
   await initProviders();

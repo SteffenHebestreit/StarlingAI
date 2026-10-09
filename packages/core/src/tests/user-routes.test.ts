@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ACCOUNT_ID_RE } from "../runtime/accounts.js";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * Creating and deleting accounts was operator-only, and operator is every account's default role.
@@ -17,8 +18,8 @@ import { ACCOUNT_ID_RE } from "../runtime/accounts.js";
 
 const DUMMY_HASH = "$2b$10$0123456789abcdefghijklmno";
 
-function account(username: string, role: string, id?: string): Record<string, unknown> {
-  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z", ...(id ? { id } : {}) };
+function account(username: string, role: string, id: string = testAccountId(username)): Record<string, unknown> {
+  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z", id };
 }
 
 const tempDirs: string[] = [];
@@ -46,7 +47,12 @@ async function boot(auth: Record<string, unknown>) {
   ]);
   const app = new Hono();
   registerUserRoutes(app);
-  const tokenFor = async (username: string, role: string) => `Bearer ${await authModule.createToken(username, { role })}`;
+  // An account's token names its id, as /api/auth/login mints it; a name with no record gets a
+  // bootstrap token, as `sai token` mints it.
+  const tokenFor = async (username: string, role: string) => {
+    const id = loader.getConfig().auth.users.find((u) => u.username === username)?.id;
+    return `Bearer ${await authModule.createToken(username, id ? { role, aid: id } : { role, bst: true })}`;
+  };
   const create = async (as: string, username: string) => app.request("/api/auth/users", {
     method: "POST",
     headers: { Authorization: as, "content-type": "application/json" },
@@ -110,7 +116,8 @@ describe("account management is admin-only", () => {
   });
 
   it("still creates the first account with the bootstrap token, auth on or off", async () => {
-    // `sai token` mints { sub: "admin", role: "admin" }; with no accounts yet it resolves by its claims.
+    // `sai token` mints { sub: "admin", role: "admin", bst: true }: a bootstrap token, which resolves
+    // with no accounts yet and after.
     const enabled = await boot({ enabled: true, users: [] });
     expect((await enabled.create(await enabled.tokenFor("admin", "admin"), "steffen")).status).toBe(200);
     expect(enabled.usernames()).toEqual(["steffen"]);

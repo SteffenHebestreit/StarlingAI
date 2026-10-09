@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * Multi-user authentication (Wave A) — verifies the username/password
@@ -21,6 +22,7 @@ function writeAuthConfig(extra: Record<string, unknown> = {}): string {
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
     gateway: { jwtSecret: SHARED_JWT_SECRET },
+    workspacePath: tempDir,
     auth: { enabled: false, users: [] },
     ...extra,
   }), "utf8");
@@ -31,60 +33,27 @@ function writeAuthConfig(extra: Record<string, unknown> = {}): string {
 
 // A config user record for tokens minted directly in tests. authenticatedUser now
 // re-checks the live user store on every request, so a token's subject must exist
-// there — an absent/deleted user is (correctly) rejected. The password hash is a
-// dummy (login isn't exercised for these directly-minted tokens).
+// there — an absent/deleted user is (correctly) rejected — and the token must name the
+// record's account id (the aid claim). The password hash is a dummy (login isn't
+// exercised for these directly-minted tokens).
 const DUMMY_HASH = "$2b$10$0123456789abcdefghijklmno";
 function userRec(username: string, role: string, displayName?: string): Record<string, unknown> {
-  return { username, role, passwordHash: DUMMY_HASH, ...(displayName ? { displayName } : {}), createdAt: "2026-01-01T00:00:00Z" };
+  return { username, role, passwordHash: DUMMY_HASH, ...(displayName ? { displayName } : {}), createdAt: "2026-01-01T00:00:00Z", id: testAccountId(username) };
+}
+/** The claims of a session token for the account of `username`, as /api/auth/login mints them. */
+function accountClaims(username: string, claims: Record<string, unknown>): Record<string, unknown> {
+  return { ...claims, aid: testAccountId(username) };
 }
 
 async function buildAuthApp(): Promise<Hono> {
-  const auth = await import("../gateway/auth.js");
-  const { getConfig } = await import("../config/loader.js");
-  const { logAudit } = await import("../audit/logger.js");
+  const { registerAuthRoutes } = await import("../gateway/auth-routes.js");
   const { registerUserRoutes } = await import("../gateway/user-routes.js");
 
   const app = new Hono();
 
-  app.post("/api/auth/login", async (c) => {
-    const ip = c.req.header("X-Forwarded-For") ?? "test";
-    const rate = auth.checkAuthRateLimit(ip);
-    if (!rate.allowed) return c.json({ error: "Too many failed attempts" }, 429);
-
-    let body: { username?: unknown; password?: unknown };
-    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    if (!username || !password) return c.json({ error: "Username and password are required" }, 400);
-
-    const cfg = getConfig().auth;
-    if (!cfg.enabled) return c.json({ error: "disabled" }, 503);
-
-    const user = cfg.users.find((u) => u.username.toLowerCase() === username);
-    if (!user) {
-      auth.recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-    const ok = await auth.verifyPassword(password, user.passwordHash);
-    if (!ok) {
-      auth.recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-    auth.clearAuthFailures(ip);
-    const role: "operator" | "viewer" = user.role === "viewer" ? "viewer" : "operator";
-    const token = await auth.createToken(user.username, {
-      role,
-      ...(user.displayName ? { displayName: user.displayName } : {}),
-    });
-    logAudit("auth_success", { username: user.username, role }, { userId: user.username });
-    return c.json({ token, username: user.username, displayName: user.displayName, role });
-  });
-
-  app.get("/api/auth/me", async (c) => {
-    const me = await auth.authenticatedUser(c.req.header("Authorization"));
-    if (!me) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(me);
-  });
+  // The REAL sign-in routes (gateway/auth-routes.ts). A copy of the login route lived here and
+  // capped every role at operator, which the real route never did.
+  registerAuthRoutes(app);
 
   // The REAL account routes. A copy of the old operator-gated POST lived here and kept asserting
   // the contract the admin gate replaced (see user-routes.ts).
@@ -127,7 +96,7 @@ describe("multi-user auth — login flow", () => {
     const auth = await import("../gateway/auth.js");
     const hash = await auth.hashPassword("correct-horse");
     tempDir = writeAuthConfig({
-      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z" }] },
+      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") }] },
     });
     vi.resetModules();
     const app = await buildAuthApp();
@@ -143,7 +112,7 @@ describe("multi-user auth — login flow", () => {
     const auth = await import("../gateway/auth.js");
     const hash = await auth.hashPassword("correct-horse");
     tempDir = writeAuthConfig({
-      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z" }] },
+      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") }] },
     });
     vi.resetModules();
     const app = await buildAuthApp();
@@ -161,7 +130,7 @@ describe("multi-user auth — login flow", () => {
     tempDir = writeAuthConfig({
       auth: {
         enabled: true,
-        users: [{ username: "alice", passwordHash: hash, displayName: "Alice Smith", createdAt: "2026-04-28T00:00:00Z" }],
+        users: [{ username: "alice", passwordHash: hash, displayName: "Alice Smith", createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") }],
       },
     });
     vi.resetModules();
@@ -193,7 +162,7 @@ describe("multi-user auth — login flow", () => {
     const auth = await import("../gateway/auth.js");
     const hash = await auth.hashPassword("correct-horse");
     tempDir = writeAuthConfig({
-      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z" }] },
+      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") }] },
     });
     vi.resetModules();
     const app = await buildAuthApp();
@@ -236,7 +205,7 @@ describe("multi-user auth — /api/auth/me", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator", "Alice")] } });
     vi.resetModules();
     const auth2 = await import("../gateway/auth.js");
-    const token = await auth2.createToken("alice", { role: "operator", displayName: "Alice" });
+    const token = await auth2.createToken("alice", accountClaims("alice", { role: "operator", displayName: "Alice" }));
     const app = await buildAuthApp();
     const res = await app.request("/api/auth/me", { headers: { Authorization: `Bearer ${token}` } });
     expect(res.status).toBe(200);
@@ -270,7 +239,7 @@ describe("multi-user auth — user creation", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "admin")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const actorToken = await auth.createToken("admin", { role: "admin" });
+    const actorToken = await auth.createToken("admin", accountClaims("admin", { role: "admin" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -301,7 +270,7 @@ describe("multi-user auth — user creation", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("admin", "admin")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const actorToken = await auth.createToken("admin", { role: "admin" });
+    const actorToken = await auth.createToken("admin", accountClaims("admin", { role: "admin" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -316,11 +285,11 @@ describe("multi-user auth — user creation", () => {
     const auth = await import("../gateway/auth.js");
     const hash = await auth.hashPassword("12345678");
     tempDir = writeAuthConfig({
-      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, role: "admin", createdAt: "2026-04-28T00:00:00Z" }] },
+      auth: { enabled: true, users: [{ username: "alice", passwordHash: hash, role: "admin", createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") }] },
     });
     vi.resetModules();
     const auth2 = await import("../gateway/auth.js");
-    const actorToken = await auth2.createToken("alice", { role: "admin" });
+    const actorToken = await auth2.createToken("alice", accountClaims("alice", { role: "admin" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -357,8 +326,8 @@ describe("multi-user auth Wave B — role gating", () => {
       auth: {
         enabled: true,
         users: [
-          { username: "alice", passwordHash: opHash, role: "operator", createdAt: "2026-04-28T00:00:00Z" },
-          { username: "bob", passwordHash: viewerHash, role: "viewer", createdAt: "2026-04-28T00:00:00Z" },
+          { username: "alice", passwordHash: opHash, role: "operator", createdAt: "2026-04-28T00:00:00Z", id: testAccountId("alice") },
+          { username: "bob", passwordHash: viewerHash, role: "viewer", createdAt: "2026-04-28T00:00:00Z", id: testAccountId("bob") },
         ],
       },
     });
@@ -389,7 +358,7 @@ describe("multi-user auth Wave B — role gating", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("eve", "viewer")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const viewerToken = await auth.createToken("eve", { role: "viewer" });
+    const viewerToken = await auth.createToken("eve", accountClaims("eve", { role: "viewer" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -406,7 +375,7 @@ describe("multi-user auth Wave B — role gating", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const operatorToken = await auth.createToken("alice", { role: "operator" });
+    const operatorToken = await auth.createToken("alice", accountClaims("alice", { role: "operator" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -421,7 +390,7 @@ describe("multi-user auth Wave B — role gating", () => {
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("root", "admin")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const adminToken = await auth.createToken("root", { role: "admin" });
+    const adminToken = await auth.createToken("root", accountClaims("root", { role: "admin" }));
     const app = await buildAuthApp();
 
     const res = await app.request("/api/auth/users", {
@@ -448,11 +417,11 @@ describe("multi-user auth Wave B — role gating", () => {
 
   it("resolves a user's role from the live store, defaulting to operator", async () => {
     // A stored user whose record omits an explicit role defaults to operator.
-    tempDir = writeAuthConfig({ auth: { enabled: true, users: [{ username: "legacy_admin", passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z" }] } });
+    tempDir = writeAuthConfig({ auth: { enabled: true, users: [{ username: "legacy_admin", passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z", id: testAccountId("legacy_admin") }] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
     // Token carries no role claim; the role now comes from the live user record.
-    const token = await auth.createToken("legacy_admin", {});
+    const token = await auth.createToken("legacy_admin", accountClaims("legacy_admin", {}));
     const me = await auth.authenticatedUser(`Bearer ${token}`);
     expect(me?.role).toBe("operator");
   });
@@ -507,12 +476,12 @@ describe("multi-user auth — zero-users bootstrap window", () => {
 
   it("keeps the bootstrap admin token valid after the first account exists", async () => {
     // The admin who bootstraps a deployment must be able to keep administering in
-    // the same session (add more users, tune prompts/models) — admin-claim tokens
+    // the same session (add more users, tune prompts/models) — bootstrap tokens (bst)
     // are TTL-bound instance credentials, not store-backed sessions.
     tempDir = writeAuthConfig({ auth: { enabled: true, users: [userRec("alice", "operator")] } });
     vi.resetModules();
     const auth = await import("../gateway/auth.js");
-    const token = await auth.createToken("admin", { role: "admin" });
+    const token = await auth.createToken("admin", { role: "admin", bst: true });
     const me = await auth.authenticatedUser(`Bearer ${token}`);
     expect(me?.username).toBe("admin");
     expect(me?.role).toBe("admin");

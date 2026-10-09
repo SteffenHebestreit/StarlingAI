@@ -12,6 +12,8 @@
  */
 import { resolve } from "node:path";
 import { readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { PRODUCT } from "../product/index.js";
 import { currentUserId, currentUserScopeSegment } from "./request-context.js";
 import { getConfig } from "../config/loader.js";
 import { safeUserSegment } from "./accounts.js";
@@ -66,6 +68,16 @@ export function activeUserScopeSegment(userId: string | undefined = currentUserI
 
 /** The `users` directory name, shared with the workspace zone resolver. */
 export { USERS_SUBDIR };
+
+/**
+ * The base of the per-user state files (the dialectic user-model, the personality override) before
+ * partitioning: `$SAI_USER_MEMORY_PATH`, else `~/.starlingai/state`.
+ */
+export function userStateBaseDir(): string {
+  return process.env["SAI_USER_MEMORY_PATH"]?.trim()
+    ? resolve(process.env["SAI_USER_MEMORY_PATH"])
+    : resolve(homedir(), PRODUCT.stateDirName, "state");
+}
 
 // ── Records of a store every account writes to ────────────────────────────────
 // The agent outcome ledger and flow memory are one file for the whole deployment. Each record

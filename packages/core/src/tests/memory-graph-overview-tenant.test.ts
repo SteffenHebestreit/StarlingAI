@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { int, Node, Relationship } from "neo4j-driver";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * THE GRAPH INSPECTOR SHOWS AN ACCOUNT ITS OWN MEMORY AND THE SHARED MEMORY (found 2026-10-08).
@@ -29,6 +30,7 @@ process.env["SAI_CONFIG_PATH"] = configPath;
 
 const account = (username: string, role: string) => ({
   username, role, passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-08T00:00:00Z",
+  id: testAccountId(username),
 });
 
 async function load(authEnabled: boolean) {
@@ -55,7 +57,7 @@ async function load(authEnabled: boolean) {
   });
   routes.registerMemoryGraphRoutes(app);
   const overview = async (username: string, role: string, query = "") => {
-    const token = await auth.createToken(username, { role });
+    const token = await auth.createToken(username, { role, aid: testAccountId(username) });
     return app.request(`/api/graph/overview${query}`, { headers: { Authorization: `Bearer ${token}` } });
   };
   return { overview, scope };

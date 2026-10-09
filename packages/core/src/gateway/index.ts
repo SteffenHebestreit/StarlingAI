@@ -24,6 +24,7 @@ import { registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
 import { registerAuthRoutes } from "./auth-routes.js";
+import { registerAccountRoutes } from "./account-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
 import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
@@ -187,12 +188,12 @@ export function createGateway() {
     // routes that gate on bare verifyToken cannot keep honoring a revoked token for its
     // full ~24h TTL. A request with NO token falls through untouched, so public/pre-auth
     // routes (login, /api/auth/mode, oidc, health) and each route's own 401 still work.
-    // Token classes that legitimately resolve outside the user store and are NOT
-    // rejected here: bootstrap admin tokens (TTL-bound instance credentials — see
-    // authenticatedUser), any signed token while auth.users[] is still empty (the
-    // bootstrap window; without it the first account could never be created), and
-    // OIDC tokens, which resolve via validated IdP claims (their revocation lag is
-    // a separate, documented limitation).
+    // Token classes that legitimately resolve outside an account and are NOT rejected
+    // here: bootstrap tokens (the `bst` claim; TTL-bound instance credentials — see
+    // authenticatedUser) and any signed token while the deployment holds no account
+    // (the bootstrap window; without it the first account could never be created).
+    // Every other token names its account id (`aid`), builtin or identity-provider, and
+    // resolves only while that account holds it.
     if (!user) {
       const token = extractBearerToken(authHeader);
       if (token && await verifyToken(token)) {
@@ -974,6 +975,8 @@ export function createGateway() {
 
   // ── User management (roster, create, delete) — extracted to ./user-routes.ts ──
   registerUserRoutes(app);
+  // Identity-provider accounts (rename, retire, release, decline legacy data), admin-only.
+  registerAccountRoutes(app);
 
   // Federation routes — gated at request time on federation.enabled, so
   // toggling the config flag takes effect without a gateway restart.

@@ -313,6 +313,17 @@ export type CoreAuditEventType =
   | "auth_user_deleted"
   | "auth_user_password_reset"
   | "rbac_denied"
+  // Account ids: sign-ins refused because of the account they would be, and the admin's account changes
+  | "auth_account_refused"
+  | "auth_oidc_account_refused"
+  | "auth_oidc_unverified_email"
+  | "auth_oidc_invalid_username"
+  | "auth_oidc_username_conflict"
+  | "auth_oidc_username_change_requested"
+  | "auth_account_renamed"
+  | "auth_account_retired"
+  | "auth_account_username_released"
+  | "auth_account_legacy_declined"
   // Plugin SDK
   | "plugin_loaded"
   | "plugin_unloaded"

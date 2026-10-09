@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * The document and knowledge-base routes and the session id a request names (found in review,
@@ -72,6 +73,7 @@ vi.mock("../retrieval/kb-crawler.js", async (importActual) => ({
 
 const account = (username: string) => ({
   username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-09T00:00:00Z",
+  id: testAccountId(username),
 });
 
 const dirs: string[] = [];
@@ -123,7 +125,7 @@ async function deployment(authEnabled: boolean): Promise<Deployment> {
   const aliceSession = session.createSession({ channel: "webchat", userId: "alice" }).id;
 
   const request: Deployment["request"] = async (as, path, init = {}) => {
-    const headers: Record<string, string> = { Authorization: `Bearer ${await auth.createToken(as, { role: "operator" })}` };
+    const headers: Record<string, string> = { Authorization: `Bearer ${await auth.createToken(as, { role: "operator", aid: testAccountId(as) })}` };
     if (init.json !== undefined) headers["Content-Type"] = "application/json";
     return app.request(path, {
       method: init.method ?? "GET",
