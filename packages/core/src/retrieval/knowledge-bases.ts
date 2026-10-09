@@ -143,6 +143,10 @@ export interface KnowledgeBaseRecord {
   scope?: KbScope;
   /** Owning user (set when scope === "user") — access is restricted to this user. */
   ownerId?: string;
+  /** The owning account's immutable id, beside `ownerId` (set when scope === "user" and the owner
+   *  is an account). `ownerId` is a username, which an account created again under the same name
+   *  shares with the old one; `ownerId` stays for display. */
+  ownerAccount?: string;
   /** Owning session (set when scope === "session") — access is restricted to this conversation. */
   sessionId?: string;
   /** The ephemeral agent that works with this KB (see KbWorkerSpec). */
@@ -416,6 +420,8 @@ export interface CreateKnowledgeBaseInput {
   scope?: KbScope;
   /** Owner identity, used to stamp ownership for user-scoped KBs (and attribution). */
   ownerId?: string;
+  /** The owner's account id, stamped beside `ownerId` on a user-scoped KB. */
+  ownerAccount?: string;
   /** Session identity, used to stamp ownership for session-scoped KBs. */
   sessionId?: string;
   /** Per-KB worker template. */
@@ -518,6 +524,7 @@ export async function createKnowledgeBase(input: CreateKnowledgeBaseInput): Prom
     ambientRetrieval: input.ambientRetrieval === true,
     scope,
     ...(scope === "user" && input.ownerId ? { ownerId: input.ownerId } : {}),
+    ...(scope === "user" && input.ownerId && input.ownerAccount ? { ownerAccount: input.ownerAccount } : {}),
     ...(scope === "session" && input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(worker.value ? { worker: worker.value } : {}),
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
@@ -591,6 +598,8 @@ export interface UpdateKnowledgeBaseInput {
   /** Change visibility scope. session→needs sessionId; user→needs ownerId (passed alongside). */
   scope?: KbScope;
   ownerId?: string;
+  /** The account id of `ownerId`, when it names an account; replaces the stamp with `ownerId`. */
+  ownerAccount?: string;
   sessionId?: string;
   /** Replace the worker template (null clears it). */
   worker?: KbWorkerSpec | null;
@@ -650,13 +659,18 @@ export async function updateKnowledgeBase(id: string, patch: UpdateKnowledgeBase
       if (patch.scope === "session") {
         const sid = patch.sessionId ?? kb.sessionId;
         if (!sid) return { ok: false as const, error: "session scope requires a sessionId" };
-        kb.scope = "session"; kb.sessionId = sid; delete kb.ownerId;
+        kb.scope = "session"; kb.sessionId = sid; delete kb.ownerId; delete kb.ownerAccount;
       } else if (patch.scope === "user") {
         const oid = patch.ownerId ?? kb.ownerId;
         if (!oid) return { ok: false as const, error: "user scope requires an ownerId" };
         kb.scope = "user"; kb.ownerId = oid; delete kb.sessionId;
+        // A new owner brings its own account stamp (or none); the same owner keeps the one it has.
+        if (patch.ownerId !== undefined) {
+          if (patch.ownerAccount) kb.ownerAccount = patch.ownerAccount;
+          else delete kb.ownerAccount;
+        }
       } else {
-        kb.scope = "workspace"; delete kb.ownerId; delete kb.sessionId;
+        kb.scope = "workspace"; delete kb.ownerId; delete kb.ownerAccount; delete kb.sessionId;
       }
     }
 

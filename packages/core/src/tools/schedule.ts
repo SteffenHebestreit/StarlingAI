@@ -5,7 +5,8 @@
  * turn pipeline via createJob, and the schedule is PERSISTED so it survives restarts.
  */
 import { randomBytes } from "node:crypto";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, toolCallIdentity, type ToolContext, type ToolResult } from "./registry.js";
+import type { ScheduledTaskRecord } from "../runtime/scheduled-tasks.js";
 import { addAndActivateScheduledTask, removeScheduledTask } from "../runtime/scheduled-task-runner.js";
 import { listScheduledTaskRecords } from "../runtime/scheduled-tasks.js";
 import { childLogger } from "../logger.js";
@@ -49,7 +50,8 @@ registerTool({
       cron,
       label,
       task,
-      ...(ctx.userId ? { userId: ctx.userId } : {}),
+      // The owner whole: its account id (or principal kind) with its name, so each run is theirs.
+      ...scheduleOwner(ctx),
       createdAt: new Date().toISOString(),
     });
     log.info({ id, cron, label, sessionId: ctx.sessionId }, "schedule_task");
@@ -90,3 +92,14 @@ registerTool({
     return { success: true, output: `Scheduled task ${id} removed.`, metadata: { scheduleId: id } };
   },
 });
+
+/** Who a new schedule belongs to: the caller of schedule_task, whole, when it names one. */
+function scheduleOwner(ctx: ToolContext): Pick<ScheduledTaskRecord, "userId" | "account" | "principal"> {
+  if (!ctx.userId) return {};
+  const owner = toolCallIdentity(ctx);
+  if (!owner?.userId) return { userId: ctx.userId };
+  return {
+    userId: owner.userId,
+    ...(owner.account ? { account: owner.account } : owner.principal ? { principal: owner.principal } : {}),
+  };
+}

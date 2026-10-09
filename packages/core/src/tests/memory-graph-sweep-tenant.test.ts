@@ -2,6 +2,10 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testAccount, testAccountId } from "./support/test-account.js";
+
+/** Alice as a signed-in request carries her: her account id with her name. */
+const ALICE = { userId: "alice", account: testAccountId("alice") };
 
 /**
  * THE SLEEP-TIME SWEEP KEEPS THE ACCOUNT OF A NODE IT MERGES INTO (found in review, 2026-10-08).
@@ -67,7 +71,7 @@ describe("the sleep-time sweep and the account of a merged memory node", () => {
     writeFileSync(configPath, JSON.stringify({
       workspacePath,
       auth: authEnabled
-        ? { enabled: true, users: [{ username: "alice", passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-10-08T00:00:00Z" }] }
+        ? { enabled: true, users: [testAccount("alice").record] }
         : { enabled: false },
     }), "utf8");
     // Sequential: these modules import each other, and parallel first imports can deadlock.
@@ -84,7 +88,7 @@ describe("the sleep-time sweep and the account of a merged memory node", () => {
 
   /** Two near-duplicate preferences of Alice's, stored as Alice; the ids of their nodes. */
   async function seedAlice(context: Awaited<ReturnType<typeof load>>["context"], memory: Awaited<ReturnType<typeof load>>["memory"]) {
-    return context.runWithRequestContext({ userId: "alice" }, async () => [
+    return context.runWithRequestContext({ identity: ALICE }, async () => [
       memory.storeUserMemoryRecord(workspacePath, {
         key: "quality_summary", subject: "Quality goal", content: "Prefer retrieval precision over raw memory volume.", kind: "preference",
       }).id,
@@ -111,7 +115,8 @@ describe("the sleep-time sweep and the account of a merged memory node", () => {
   it("under multi-user auth, the node the duplicates merge into stays the account's own", async () => {
     const { context, memory, driver, graph } = await load(true);
     const ids = await seedAlice(context, memory);
-    expect(ids.map((id) => nodes.get(id)?.["tenant"])).toEqual(["alice", "alice"]);
+    // A user-scope node is keyed by the account id, not the username.
+    expect(ids.map((id) => nodes.get(id)?.["tenant"])).toEqual([ALICE.account, ALICE.account]);
 
     // The sweep runs with no request context, as its interval does.
     const swept = await driver.runMemoryConsolidationSweep(workspacePath);
@@ -120,9 +125,9 @@ describe("the sleep-time sweep and the account of a merged memory node", () => {
     await vi.waitFor(() => expect(nodes.size).toBe(1));
     const [survivor] = [...nodes.values()];
     expect(ids).toContain(survivor!["id"]);
-    expect(survivor!["tenant"]).toBe("alice");
+    expect(survivor!["tenant"]).toBe(ALICE.account);
     // Readable by its account under the rule of the graph inspector and graph_query.
-    const aliceReader = context.runWithRequestContext({ userId: "alice" }, () => graph.graphMemoryReader())!;
+    const aliceReader = context.runWithRequestContext({ identity: ALICE }, () => graph.graphMemoryReader())!;
     expect(graph.isGraphMemoryReadable(["MemoryRecord"], survivor!, aliceReader)).toBe(true);
   });
 

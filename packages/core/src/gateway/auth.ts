@@ -10,7 +10,8 @@ import { logAudit } from "../audit/logger.js";
 
 import { PRODUCT } from "../product/index.js";
 import { getExtensionRole, getExtensionAuthProvider } from "../extension/index.js";
-import { extensionAccountId, sameAccountId, type PrincipalKind } from "../runtime/accounts.js";
+import { extensionAccountId, sameAccountId, type Identity, type PrincipalKind } from "../runtime/accounts.js";
+import { principalIdentity } from "../runtime/user-scope.js";
 import {
   accountRegistryEntryById,
   accountRegistryHoldsAccounts,
@@ -210,6 +211,21 @@ export interface AuthenticatedUser {
   /** Under multi-user auth, set instead of `account` for a bootstrap token: an instance credential,
    *  never an account, whatever its `sub`. */
   principal?: PrincipalKind;
+}
+
+/**
+ * The identity a resolved caller acts as, whole: its username with its account id, or with the
+ * bootstrap kind. Under multi-user auth a caller with neither holds a token from the empty-store
+ * window, which no account can hold: an instance credential like a bootstrap token, and it acts as
+ * one (a name alone would be a session from before account ids, which runs no turn). With one
+ * operator the caller is its username alone, as every caller was before account ids. The caller
+ * itself is left as it resolved, so the window still shuts on an open socket.
+ */
+export function callerIdentity(user: AuthenticatedUser | null | undefined): Identity | undefined {
+  if (!user) return undefined;
+  if (user.account) return { userId: user.username, account: user.account };
+  if (user.principal) return { userId: user.username, principal: user.principal };
+  return principalIdentity(user.username, "bootstrap");
 }
 
 export function normalizeRole(value: unknown): AuthRole {

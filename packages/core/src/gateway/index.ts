@@ -9,7 +9,7 @@ import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, authenticatedUserFromToken, userHasRole } from "./auth.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
@@ -123,7 +123,7 @@ import {
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
-import { recordAccount } from "../runtime/user-scope.js";
+import { principalIdentity, recordAccount } from "../runtime/user-scope.js";
 import { presentProposal, requestTextReader } from "./config-assistant-visibility.js";
 
 
@@ -200,7 +200,9 @@ export function createGateway() {
         return c.json({ error: "Unauthorized (account no longer valid)" }, 401);
       }
     }
-    return runWithRequestContext({ userId: user?.username }, () => next());
+    // The caller's identity, whole: its account id (or bootstrap kind) travels with its name, and
+    // every per-user store derives from it (runtime/user-scope.ts segmentFor).
+    return runWithRequestContext({ identity: callerIdentity(user) }, () => next());
   });
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
   const currentMultimodalConfig = () => getConfig().multimodal;
@@ -3130,7 +3132,8 @@ export function createGateway() {
     // chat. Webhook-key triggers have no user → fall back to the scene identity
     // (which only resolves credentials that aren't user-scoped).
     const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
-    const runUserId = triggeredBy?.username ?? `scene:${sceneName}`;
+    // Whole: the caller's account (or bootstrap kind) runs with its name, else the scene's principal.
+    const runIdentity = callerIdentity(triggeredBy) ?? principalIdentity(`scene:${sceneName}`, "synthetic");
 
     // Read optional params from request body to apply template substitution
     let bodyParams: Record<string, string> = {};
@@ -3157,7 +3160,7 @@ export function createGateway() {
     const job = await createJob({
       sceneName,
       definitionType: "scene",
-      userId: runUserId,
+      ...runIdentity,
       task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
@@ -3232,7 +3235,7 @@ export function createGateway() {
     // Run identity: authenticated operator → their username (per-user RBAC
     // resolves their credentials); webhook key → synthetic job identity.
     const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
-    const runUserId = triggeredBy?.username ?? `job:${jobName}`;
+    const runIdentity = callerIdentity(triggeredBy) ?? principalIdentity(`job:${jobName}`, "synthetic");
 
     let bodyParams: Record<string, string> = {};
     try {
@@ -3254,7 +3257,7 @@ export function createGateway() {
     const queued = await createJob({
       sceneName: jobName,
       definitionType: "job",
-      userId: runUserId,
+      ...runIdentity,
       steps,
       turnTimeoutMs,
     });
@@ -3670,7 +3673,7 @@ export function createGateway() {
             res.end(JSON.stringify({ error: "Unauthorized" }));
             return;
           }
-          await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role });
+          await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role, identity: callerIdentity(aguiUser) });
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
@@ -3753,7 +3756,7 @@ export function createGateway() {
           const { callerScopedSessionId } = await import("../a2a/server.js");
           const multiUser = getConfig().auth?.enabled === true;
           const sessId = rpc.params?.["sessionId"]
-            ? callerScopedSessionId(String(rpc.params["sessionId"]), a2aCaller)
+            ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
           const autoApprove = rpc.params?.["autoApprove"] === true;
 
@@ -3766,17 +3769,17 @@ export function createGateway() {
             // the shared root a memory stored with the default 'workspace' scope is the shared
             // root's, and every account reads it.
             workspacePath: a2aUser
-              ? userWorkspaceRoot(getConfig().workspacePath, a2aUser.username)
+              ? userWorkspaceRoot(getConfig().workspacePath, callerIdentity(a2aUser))
               : getConfig().workspacePath,
             approvalCallback: autoApprove
               ? async () => true
               : undefined,
             // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
             // request context the run's own memory reads take their account from.
-            ...(a2aUser ? { userId: a2aUser.username } : {}),
+            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser) } : {}),
           };
           const result = a2aUser
-            ? await runWithRequestContext({ userId: a2aUser.username }, () => runSubAgent(runOptions))
+            ? await runWithRequestContext({ identity: callerIdentity(a2aUser) }, () => runSubAgent(runOptions))
             : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });

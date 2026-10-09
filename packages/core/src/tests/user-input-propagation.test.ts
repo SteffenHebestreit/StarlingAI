@@ -135,7 +135,7 @@ describe("structured user input inside delegated runs", () => {
     });
     // What runTurn sets for an interactive dashboard turn; everything below inherits it.
     const inTurn = <T>(fn: () => Promise<T>) => requestContext.runWithRequestContext(
-      { userId: "alice", sessionId: ROOT, agentName: "main", userInput: { rootSessionId: ROOT, turnId: TURN, mode: "interactive" } },
+      { identity: { userId: "alice" }, sessionId: ROOT, agentName: "main", userInput: { rootSessionId: ROOT, turnId: TURN, mode: "interactive" } },
       fn,
     );
     return { getTool, inTurn };

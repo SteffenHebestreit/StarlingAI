@@ -15,6 +15,7 @@ import {
   onJobQueued,
   recoverStaleSceneJobs,
   saveWorkflowCheckpoint,
+  sceneJobIdentity,
   updateJobProgress,
   type ClaimedSceneJob,
   type SceneJobProgress,
@@ -27,6 +28,7 @@ import { publishNotification } from "../runtime/notifications.js";
 import { buildWorkflowExecutionKey } from "./workflow-execution-key.js";
 import { workflowStepPipeline } from "./workflow-step-pipeline.js";
 import { getScene } from "../credentials/scenes.js";
+import { principalIdentity } from "../runtime/user-scope.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -143,10 +145,13 @@ async function monitorActiveJobs(): Promise<void> {
 }
 
 async function processJob(job: ClaimedSceneJob, controller: AbortController): Promise<void> {
+  // The run's owner, whole, as the enqueuer stamped it (its account id or principal kind with its
+  // name), else the scene's own principal. A job queued before account ids carries its name alone.
+  const owner = sceneJobIdentity({ userId: job.userId, account: job.account, principal: job.principal ?? job.payload.principal });
   const session = createSession({
     sessionId: job.sessionId,
     channel: "scene",
-    userId: job.userId ?? `scene:${job.sceneName}`,
+    ...(owner ?? principalIdentity(`scene:${job.sceneName}`, "synthetic")),
   });
 
   const counters = {

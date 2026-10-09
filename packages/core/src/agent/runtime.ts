@@ -164,6 +164,7 @@ import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstru
 // closure; runtime.ts imports them back (one-directional edge, no cycle).
 import {
   blocked,
+  prepareLegacySession,
   prepareRateLimit,
   prepareCostBudget,
   prepareInputGuardrails,
@@ -1119,11 +1120,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   let intentShadow: IntentShadowHandle | undefined;
   let delivered: TurnOutput | undefined;
   try {
-    // Run the ENTIRE turn under the authenticated user's request context so that
-    // prompt assembly, personality, the user-model, and durable memory all see the
-    // ambient userId and resolve to that user's per-user store (multi-user auth).
-    // When auth is off the session has no userId → single shared path (back-compat).
-    // The per-tool wrap in tools/registry.ts re-sets the same userId for each tool.
+    // Run the ENTIRE turn under the session's identity so that prompt assembly, personality, the
+    // user-model, and durable memory all resolve to its owner's per-user store (multi-user auth):
+    // the account by its id, a principal by its own segment. When auth is off nothing is
+    // partitioned (back-compat). The per-tool wrap in tools/registry.ts re-sets the same identity
+    // for each tool.
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
     // sessionId/agentName/callSite are ATTRIBUTION, not scoping: they let the two
@@ -1144,6 +1145,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
       sessionId: opts.session.id,
       turnId,
       ...(opts.session.userId ? { userId: opts.session.userId } : {}),
+      ...(opts.session.identity() ? { identity: opts.session.identity() } : {}),
       channel: opts.session.channel,
       userMessage: opts.userMessage,
       // Read now, before the turn records its message: the same digest the facet triage reads.
@@ -1153,7 +1155,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     });
     delivered = await runWithRequestContext(
       {
-        userId: opts.session.userId,
+        identity: opts.session.identity(),
         sessionId: opts.session.id,
         agentName: "main",
         callSite: "main_turn",
@@ -1761,6 +1763,10 @@ async function _runTurn(
     toolSchemasChars: 0,
   };
 
+  // ── A conversation that predates account ids runs no turn (multi-user auth) ─
+  const legacyRefused = prepareLegacySession(session);
+  if (legacyRefused) return legacyRefused;
+
   // ── Rate limit check ──────────────────────────────────────────────────────
   const rateLimited = await prepareRateLimit(session);
   if (rateLimited) return rateLimited;
@@ -2179,6 +2185,7 @@ async function _runTurn(
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
+    identity: session.identity(),
     userRole: session.userRole,
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
@@ -6099,6 +6106,7 @@ async function runQaDeliveryGate(
         parentSessionId: session.id,
         workspacePath: session.getWorkspacePath(),
         userId: session.userId,
+        identity: session.identity(),
         signal,
         maxIterationsOverride: 5,
         turnTimeoutOverrideMs: 120_000,

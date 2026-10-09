@@ -93,7 +93,7 @@ describe("session search is scoped to the requesting user", () => {
     withAuth(true);
     seedAll();
     const t = await tool("search_sessions", "../tools/session-search.js");
-    const r = await runWithRequestContext({ userId: "bob" }, () =>
+    const r = await runWithRequestContext({ identity: { userId: "bob" } }, () =>
       t.execute({ query: MARKER, limit: 10 }, { sessionId: "sub:current:researcher:1", workspacePath: workspaces[0]! }));
     expect(sessionIds(r.metadata)).toEqual([BOB]);
   });

@@ -132,6 +132,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
         ...(scope ? { scope } : {}),
         ...(user?.username ? { ownerId: user.username } : {}),
+        ...(user?.account ? { ownerAccount: user.account } : {}),
         ...(sessionId ? { sessionId } : {}),
         ...(body["worker"] !== undefined ? { worker: body["worker"] as never } : {}),
         ...(user?.username ? { createdBy: user.username } : {}),
@@ -177,6 +178,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
         ...(scope ? { scope } : {}),
         ...(user?.username ? { ownerId: user.username } : {}),
+        ...(user?.account ? { ownerAccount: user.account } : {}),
         ...(typeof body["sessionId"] === "string" ? { sessionId: body["sessionId"] } : {}),
         ...(body["worker"] !== undefined ? { worker: (body["worker"] as never) } : {}),
       });

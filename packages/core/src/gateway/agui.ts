@@ -28,6 +28,7 @@ import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from 
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { roleRank } from "./auth.js";
+import type { Identity } from "../runtime/accounts.js";
 import { clientMayCreateSessionId } from "./session-route-access.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 
@@ -68,7 +69,7 @@ function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
 export async function handleAguiStream(
   res: ServerResponse,
   body: { sessionId?: string; message: string },
-  caller?: { userId?: string; role?: string },
+  caller?: { userId?: string; role?: string; identity?: Identity },
 ): Promise<void> {
   const { message, sessionId } = body;
   const userId = caller?.userId;
@@ -167,7 +168,8 @@ export async function handleAguiStream(
     session = createSession({
       ...(sessionId ? { sessionId } : {}),
       channel: "webchat:agui",
-      ...(userId ? { userId } : {}),
+      // The caller's identity whole (its account id travels with its name), or its name alone.
+      ...(caller?.identity ?? (userId ? { userId } : {})),
       ...(caller?.role ? { userRole: caller.role } : {}),
     });
   }

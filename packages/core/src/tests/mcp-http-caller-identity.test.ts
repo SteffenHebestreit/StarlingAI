@@ -223,8 +223,8 @@ describe("/mcp and the workspace root a call runs in", () => {
 
     expect(scene.isError).toBe(false);
     const { getConfig } = await import("../config/loader.js");
-    const { safeUserSegment } = await import("../runtime/user-scope.js");
-    const aliceRoot = resolve(getConfig().workspacePath, "users", safeUserSegment("alice"));
+    // The account's own root is keyed by its id, not by the username a re-created account shares.
+    const aliceRoot = resolve(getConfig().workspacePath, "users", testAccountId("alice"));
     expect(runs).toEqual([
       { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },
       { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },

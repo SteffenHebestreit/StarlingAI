@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-zones.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";

@@ -5,7 +5,7 @@
  * list_agents       — enumerate configured sub-agents (so the orchestrator can pick)
  */
 
-import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, toolCallIdentity, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
 import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
@@ -1999,6 +1999,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         const mission = await (await getMissionStore()).getOrCreateMissionForSession({
           rootSessionId: deriveSharedSessionId(ctx.sessionId),
           userId: ctx.userId,
+          ...missionOwnerAccount(ctx),
           workspacePath: ctx.workspacePath,
         });
         const reserve = await reserveMissionBudget(mission.id, defaultChildReserve());
@@ -2340,6 +2341,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         parentSessionId: ctx.sessionId,
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
+        identity: ctx.identity,
         allowedAgents: ctx.allowedAgents,
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,
@@ -4710,3 +4712,9 @@ registerTool({
     };
   },
 });
+
+/** The account id a mission started by this call is stamped with, when its owner is an account. */
+function missionOwnerAccount(ctx: ToolContext): { account?: string } {
+  const owner = ctx.userId ? toolCallIdentity(ctx) : undefined;
+  return owner?.account ? { account: owner.account } : {};
+}

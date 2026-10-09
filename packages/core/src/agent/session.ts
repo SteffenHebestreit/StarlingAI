@@ -13,7 +13,9 @@ import {
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
-import { deploymentWorkspaceRoot, userWorkspaceRoot } from "../tools/workspace-path.js";
+import { deploymentWorkspaceRoot, stripUserWorkspaceRoots, userWorkspaceRoot } from "../tools/workspace-path.js";
+import { ACCOUNT_ID_RE, principalSegment, type Identity, type PrincipalKind } from "../runtime/accounts.js";
+import { isLegacyIdentity, USERS_SUBDIR } from "../runtime/user-scope.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { buildReplyLanguageRule } from "./reply-language.js";
@@ -90,6 +92,12 @@ export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
   userId?: string;
+  /** The account the session belongs to, by its immutable id; set together with `userId` from one
+   *  identity (runtime/accounts.ts), never alongside `principal`. */
+  account?: string;
+  /** Set instead of `account` when the session belongs to a principal: a bootstrap token, a channel
+   *  sender, an A2A peer, a scene, job or workflow run. */
+  principal?: PrincipalKind;
   /** Authenticated role (JWT `role` claim) of the user that owns this session, when
    *  under active multi-user auth. Threaded into the turn's ToolContext so tools can
    *  gate mutating actions by role (e.g. operator-only knowledge-base management),
@@ -179,6 +187,10 @@ export interface PersistedSessionRecord {
   id: string;
   channel: string;
   userId?: string;
+  /** The owner's account id or principal kind. A record with a userId and neither was written
+   *  before account ids existed (a legacy record): it restores with its stored root. */
+  account?: string;
+  principal?: PrincipalKind;
   userRole?: string;
   createdAt: string;
   updatedAt: string;
@@ -200,6 +212,8 @@ export class AgentSession {
   readonly id: string;
   readonly channel: string;
   readonly userId: string | undefined;
+  readonly account: string | undefined;
+  readonly principal: PrincipalKind | undefined;
   readonly userRole: string | undefined;
   readonly createdAt: Date;
 
@@ -243,10 +257,14 @@ export class AgentSession {
     turnCount?: number;
     history?: SessionHistoryMessage[];
     earlierSummary?: string;
+    /** The working root as fromRecord settled it, taken as it is: a restore never derives. */
+    restoredWorkspacePath?: string;
   }) {
     this.id = opts.sessionId ?? randomUUID();
     this.channel = opts.channel;
     this.userId = opts.userId;
+    this.account = opts.account;
+    this.principal = opts.account ? undefined : opts.principal;
     this.userRole = opts.userRole;
     this.createdAt = opts.createdAt ?? new Date();
     // THE ROOT IS THE USER'S. Everything a turn does with files hangs off this — the
@@ -254,7 +272,10 @@ export class AgentSession {
     // partitioning HERE keeps one turn's work in one place. Config zones and the deployment's
     // own state stay at the shared root, which the two workspaceAccess:"full" agents keep (see
     // agent/sub-agent.ts) and which the config loader always reads directly.
-    this.workspacePath = userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, opts.userId);
+    // The root comes from the session's identity, whole (the ambient one when the session names
+    // nobody). A restored session's root was settled by fromRecord and is not derived again.
+    this.workspacePath = opts.restoredWorkspacePath
+      ?? userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, this.identity());
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt();
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
@@ -275,14 +296,30 @@ export class AgentSession {
     }
   }
 
+  /**
+   * RESTORING NEVER DERIVES. It runs at import, before the account registry is loaded, and for
+   * records written before account ids existed: the identity guard (runtime/user-scope.ts
+   * segmentFor) must not run here, and a legacy record must not be moved into a bucket worked out
+   * from its username, which is exactly the guess that lets a re-created name inherit.
+   *
+   * - An account's or a principal's record restores to `<deployment root>/users/<segment>`, the
+   *   segment its identity names. Any `users/<segment>` levels at the end of the stored root are
+   *   taken off first, whichever segment they name: a root stored under the username's old segment
+   *   comes back under the account's id, and one nested by an earlier restore comes back flat.
+   * - A legacy record (a userId and no kind) and an ownerless one keep their stored root verbatim.
+   * - With multi-user auth off every record keeps its stored root, as it always did.
+   */
   static fromRecord(record: PersistedSessionRecord): AgentSession {
     return new AgentSession({
       sessionId: record.id,
       channel: record.channel,
       userId: record.userId,
+      ...(record.account ? { account: record.account } : {}),
+      ...(record.principal ? { principal: record.principal } : {}),
       userRole: record.userRole,
       systemPrompt: record.systemPrompt,
       workspacePath: record.workspacePath,
+      restoredWorkspacePath: restoredWorkspaceRoot(record),
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
       archivedAt: record.archivedAt ? new Date(record.archivedAt) : undefined,
@@ -292,6 +329,25 @@ export class AgentSession {
       earlierSummary: record.earlierSummary,
       settings: record.settings,
     });
+  }
+
+  /**
+   * Who the session belongs to, as one value for the context its turns run in; undefined for a
+   * session that names nobody. Never assembled from another identity's fields.
+   */
+  identity(): Identity | undefined {
+    if (this.userId === undefined && this.account === undefined) return undefined;
+    return {
+      ...(this.userId !== undefined ? { userId: this.userId } : {}),
+      ...(this.account ? { account: this.account } : {}),
+      ...(this.principal ? { principal: this.principal } : {}),
+    };
+  }
+
+  /** A session written before account ids existed: it names a user and neither an account nor a
+   *  principal kind, so no storage can be derived for it without guessing. */
+  isLegacy(): boolean {
+    return isLegacyIdentity(this.identity());
   }
 
   getHistory(): readonly SessionHistoryMessage[] {
@@ -671,6 +727,9 @@ export class AgentSession {
       id: this.id,
       channel: this.channel,
       userId: this.userId,
+      // Only when set: a record without either is written exactly as before account ids.
+      ...(this.account ? { account: this.account } : {}),
+      ...(this.principal ? { principal: this.principal } : {}),
       ...(this.userRole ? { userRole: this.userRole } : {}),
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
@@ -1177,6 +1236,20 @@ let _storeWriteBlocked = false;
   const holder = globalThis as unknown as Record<symbol, (() => void) | undefined>;
   if (!holder[slot]) process.once("exit", () => holder[slot]?.());
   holder[slot] = flushSessionStoreSync;
+}
+
+/**
+ * The root a stored record restores to (see AgentSession.fromRecord). Never runs the identity
+ * guard and never reads the account registry: only the record and the auth switch.
+ */
+function restoredWorkspaceRoot(record: PersistedSessionRecord): string {
+  if (!record.account && !record.principal) return record.workspacePath;
+  if (getConfig().auth?.enabled !== true) return record.workspacePath;
+  const segment = record.account ?? (record.userId !== undefined ? principalSegment(record.userId) : undefined);
+  // An account id that is not segment-shaped is never joined into a path; the root stays as stored
+  // and every derivation from the identity refuses it.
+  if (!segment || !ACCOUNT_ID_RE.test(segment)) return record.workspacePath;
+  return resolve(stripUserWorkspaceRoots(record.workspacePath), USERS_SUBDIR, segment);
 }
 
 loadPersistedSessions();

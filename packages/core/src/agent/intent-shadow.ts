@@ -85,6 +85,7 @@ import { resolveRoutingTierProvider, routingTierModelId } from "./routing-tier-p
 import { detectTextLanguage } from "./text-language.js";
 import { nestedCallContribution, readNestedToolCalls, toolResultContribution } from "./turn-tool-contribution.js";
 import type { TurnOutput } from "./turn-types.js";
+import type { Identity } from "../runtime/accounts.js";
 
 const log = childLogger("agent:intent-shadow");
 
@@ -157,6 +158,8 @@ export interface IntentShadowTurnInput {
   sessionId: string;
   turnId: string;
   userId?: string;
+  /** The turn's identity, whole; its context carries this rather than a bare userId. */
+  identity?: Identity;
   channel: string;
   userMessage: string;
   /** Read only for a turn that is shadowed, BEFORE the turn records its message. */
@@ -169,6 +172,7 @@ interface CollectingTurn {
   readonly sessionId: string;
   readonly turnId: string;
   readonly userId: string | undefined;
+  readonly identity: Identity | undefined;
   readonly userMessage: string;
   readonly priorTurnDigest: string | undefined;
   readonly startedAt: number;
@@ -373,6 +377,7 @@ export function intentShadowTurnStarted(input: IntentShadowTurnInput): IntentSha
     sessionId: input.sessionId,
     turnId: input.turnId,
     userId: input.userId,
+    identity: input.identity,
     userMessage: input.userMessage,
     priorTurnDigest,
     startedAt: Date.now(),
@@ -520,7 +525,7 @@ async function askShadowReadings(turn: CollectingTurn, outcome: IntentShadowOutc
   const context = {
     sessionId: turn.sessionId,
     turnId: turn.turnId,
-    ...(turn.userId ? { userId: turn.userId } : {}),
+    ...(turn.identity ? { identity: turn.identity } : turn.userId ? { identity: { userId: turn.userId } } : {}),
     callSite: "intent_shadow" as const,
   };
   // Both option orders, averaged: two calls in sequence, both under `signal`.

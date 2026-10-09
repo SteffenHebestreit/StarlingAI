@@ -320,7 +320,7 @@ describe("gateway HTTP bridge", () => {
     try {
       await waitForHealth(`${baseUrl}/healthz`);
       const sessionId = "steer-route-session";
-      sessions.createSession({ sessionId, channel: "webchat", userId: "alice" });
+      sessions.createSession({ sessionId, channel: "webchat", userId: "alice", account: testAccountId("alice") });
       const steer = async (user: string, message: string, clientMessageId?: string, requestId?: string) => fetch(`${baseUrl}/api/sessions/${sessionId}/steer`, {
         method: "POST",
         headers: {
@@ -431,7 +431,7 @@ describe("gateway HTTP bridge", () => {
     try {
       await waitForHealth(`${baseUrl}/healthz`);
       const sessionId = "facts-route-session";
-      sessions.createSession({ sessionId, channel: "webchat", userId: "alice" });
+      sessions.createSession({ sessionId, channel: "webchat", userId: "alice", account: testAccountId("alice") });
       await swarmMemory.writeSharedFact(sessionId, "hero_image", "workspace/generated/alice-hero.png");
       const get = async (user: string, role: string, path: string) => fetch(`${baseUrl}${path}`, {
         headers: { Authorization: `Bearer ${await auth.createToken(user, user === "root" ? { role, bst: true } : { role, aid: testAccountId(user) })}` },

@@ -15,7 +15,7 @@
 import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { basename, extname, relative } from "node:path";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, toolCallIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { engramConfigured } from "../retrieval/engram.js";
@@ -40,7 +40,8 @@ function scopeOf(args: Record<string, unknown>, fallback: DocumentScope = "sessi
 }
 
 function ragCtx(ctx: ToolContext): RagScopeContext {
-  return { sessionId: ctx.sessionId, ...(ctx.userId ? { userId: ctx.userId } : {}) };
+  const identity = ctx.userId ? toolCallIdentity(ctx) : undefined;
+  return { sessionId: ctx.sessionId, ...(ctx.userId ? { userId: ctx.userId } : {}), ...(identity ? { identity } : {}) };
 }
 
 // Best-effort MIME from extension — the file-conversion service keys off the

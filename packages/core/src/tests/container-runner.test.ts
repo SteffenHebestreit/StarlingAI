@@ -133,7 +133,7 @@ describe("the container payload carries the owning user", () => {
   it("falls back to the ambient turn user when the caller did not thread one", () => {
     // The same fallback the in-process runner uses (tools/registry.ts), so a call site that
     // predates the userId option still hands the container the real owner.
-    const payload = runWithRequestContext({ userId: "bob" }, () => build(opts()));
+    const payload = runWithRequestContext({ identity: { userId: "bob" } }, () => build(opts()));
     expect(payload.userId).toBe("bob");
   });
 
@@ -142,7 +142,7 @@ describe("the container payload carries the owning user", () => {
   });
 
   it("never lets an ambient user override an explicit one", () => {
-    const payload = runWithRequestContext({ userId: "bob" }, () => build(opts({ userId: "alice" })));
+    const payload = runWithRequestContext({ identity: { userId: "bob" } }, () => build(opts({ userId: "alice" })));
     expect(payload.userId).toBe("alice");
   });
 });

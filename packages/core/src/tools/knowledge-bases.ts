@@ -15,7 +15,7 @@
  * retrieval.knowledgeBases is disabled.
  */
 import { getConfig } from "../config/loader.js";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, toolCallIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { engramConfigured } from "../retrieval/engram.js";
 import { callerCanAccessKb, KnowledgeBaseRegistryUnreadableError, type KbAccessContext } from "../retrieval/knowledge-bases.js";
 
@@ -258,6 +258,8 @@ registerTool({
     const workerTools = Array.isArray(args["worker_tools"]) ? (args["worker_tools"] as string[]) : undefined;
     const worker = workerInstructions || workerTools ? { ...(workerInstructions ? { instructions: workerInstructions } : {}), ...(workerTools ? { tools: workerTools } : {}) } : undefined;
 
+    // The caller's account id beside its name, so the KB stays theirs if the name is reused.
+    const owner = ctx.userId ? toolCallIdentity(ctx) : undefined;
     const created = await createKnowledgeBase({
       name: String(args["name"] ?? ""),
       seedUrls: Array.isArray(args["seed_urls"]) ? (args["seed_urls"] as string[]) : [],
@@ -269,6 +271,7 @@ registerTool({
       ...(Array.isArray(args["exclude_patterns"]) ? { excludePatterns: args["exclude_patterns"] as string[] } : {}),
       scope,
       ...(ctx.userId ? { ownerId: ctx.userId } : {}),
+      ...(owner?.account ? { ownerAccount: owner.account } : {}),
       ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
       ...(worker ? { worker } : {}),
       ...(ctx.userId ? { createdBy: ctx.userId } : {}),

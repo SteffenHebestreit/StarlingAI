@@ -27,15 +27,41 @@ function turnTimeoutMs(): number {
   return getConfig().gateway?.turnTimeoutMs ?? 900_000;
 }
 
+// Legacy schedules already reported as skipped, so a schedule that fires every minute logs once.
+const _legacySkipsLogged = new Set<string>();
+
+/**
+ * Under multi-user auth a schedule that names a user but neither an account nor a principal kind
+ * was created before account ids existed. Its run would derive storage from the username alone,
+ * which is the bucket an account kept before ids or the one a deleted account of that name left:
+ * the derivation refuses it (runtime/user-scope.ts), and the job would fail every time it fires.
+ * It is skipped instead, and logged once, until the account migration stamps it.
+ */
+function legacyScheduleSkipped(rec: ScheduledTaskRecord): boolean {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed */ }
+  if (!multiUser || !rec.userId || rec.account || rec.principal) return false;
+  if (!_legacySkipsLogged.has(rec.id)) {
+    _legacySkipsLogged.add(rec.id);
+    log.warn({ scheduleId: rec.id, label: rec.label }, "Scheduled task skipped: it predates account ids and runs again once the account migration stamps it");
+  }
+  return true;
+}
+
 /** Register the in-memory cron job that runs a scheduled task as a real turn. */
 function register(rec: ScheduledTaskRecord): string {
   const job = createCronJob(rec.cron, rec.label, `scheduled task: ${rec.task}`, async () => {
+    if (legacyScheduleSkipped(rec)) return;
     try {
       const queued = await createJob({
         sceneName: rec.label,
         definitionType: "scene",
         task: rec.task,
         ...(rec.userId ? { userId: rec.userId } : {}),
+        ...(rec.userId && rec.account ? { account: rec.account } : {}),
+        ...(rec.userId && !rec.account && rec.principal ? { principal: rec.principal } : {}),
         turnTimeoutMs: turnTimeoutMs(),
       });
       log.info({ scheduleId: rec.id, label: rec.label, queuedJobId: queued.id }, "scheduled task fired — queued a real turn");
@@ -81,4 +107,5 @@ export function activeScheduledTaskCount(): number {
 export function _resetScheduledTaskRuntimeForTests(): void {
   for (const cronId of _cronIdByRecord.values()) removeCronJob(cronId);
   _cronIdByRecord.clear();
+  _legacySkipsLogged.clear();
 }

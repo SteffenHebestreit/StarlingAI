@@ -42,7 +42,7 @@ async function load(authEnabled: boolean) {
   const run = (name: string, args: Record<string, unknown>) => registry.executeTool(name, args, ctx);
   /** As `run`, inside a request whose account rides only the request context, not the tool call. */
   const runInRequestOf = async (userId: string, name: string, args: Record<string, unknown>) =>
-    (await import("../runtime/request-context.js")).runWithRequestContext({ userId }, () => run(name, args));
+    (await import("../runtime/request-context.js")).runWithRequestContext({ identity: { userId } }, () => run(name, args));
   return { run, runInRequestOf };
 }
 

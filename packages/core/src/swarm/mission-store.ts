@@ -31,6 +31,9 @@ export interface MissionRecord {
   rootSessionId: string;
   tenantId: string;
   userId?: string;
+  /** The owning account's immutable id (the account_id column), when the owner is an account.
+   *  A principal's mission is owned through its root session. */
+  account?: string;
   workspacePath?: string;
   objective: string;
   status: MissionStatus;
@@ -56,6 +59,8 @@ export interface MissionScope {
   rootSessionId: string;
   tenantId?: string;
   userId?: string;
+  /** With `userId`, from one identity: the owner's account id. */
+  account?: string;
   workspacePath?: string;
   objective?: string;
 }
@@ -135,6 +140,7 @@ class LocalMissionStore implements MissionStore {
       rootSessionId: scope.rootSessionId,
       tenantId: scope.tenantId?.trim() || "default",
       ...(scope.userId ? { userId: scope.userId } : {}),
+      ...(scope.userId && scope.account ? { account: scope.account } : {}),
       ...(scope.workspacePath ? { workspacePath: scope.workspacePath } : {}),
       objective: scope.objective ?? "",
       status: "active",
@@ -316,6 +322,7 @@ class PostgresMissionStore implements MissionStore {
       rootSessionId: String(row["root_session_id"]),
       tenantId: String(row["tenant_id"]),
       ...(row["user_id"] ? { userId: String(row["user_id"]) } : {}),
+      ...(row["account_id"] ? { account: String(row["account_id"]) } : {}),
       ...(row["workspace_path"] ? { workspacePath: String(row["workspace_path"]) } : {}),
       objective: String(row["objective"] ?? ""),
       status: String(row["status"]) as MissionStatus,
@@ -342,11 +349,11 @@ class PostgresMissionStore implements MissionStore {
     try {
       await client.query("BEGIN");
       const inserted = await client.query(
-        `INSERT INTO missions (id, root_session_id, tenant_id, user_id, workspace_path, objective, version, event_count)
-         VALUES ($1, $2, $3, $4, $5, $6, 1, 1)
+        `INSERT INTO missions (id, root_session_id, tenant_id, user_id, workspace_path, objective, version, event_count, account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, 1, 1, $7)
          ON CONFLICT (root_session_id) DO NOTHING
          RETURNING id`,
-        [id, scope.rootSessionId, scope.tenantId?.trim() || "default", scope.userId ?? null, scope.workspacePath ?? null, scope.objective ?? ""],
+        [id, scope.rootSessionId, scope.tenantId?.trim() || "default", scope.userId ?? null, scope.workspacePath ?? null, scope.objective ?? "", (scope.userId && scope.account) || null],
       );
       if (inserted.rows.length > 0) {
         await client.query(

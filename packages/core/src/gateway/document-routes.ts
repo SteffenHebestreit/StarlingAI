@@ -11,7 +11,7 @@
  * document-leak fix. Legacy single-operator mode keeps the flat instance-wide view.
  */
 import type { Hono } from "hono";
-import { verifyToken, extractBearerToken, authenticatedUser, type AuthenticatedUser } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, callerIdentity, type AuthenticatedUser } from "./auth.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import { getConfig } from "../config/loader.js";
 
@@ -38,7 +38,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const user = await authenticatedUser(c.req.header("Authorization"));
     const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
     try {
-      const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource, callerManageableSources }] = await Promise.all([
+      const [{ engramListDocuments }, { listRegistry }, { parseScopeFromSource, callerManageableSources, callerUserSources }] = await Promise.all([
         import("../retrieval/engram.js"),
         import("../retrieval/document-registry.js"),
         import("../retrieval/document-rag.js"),
@@ -52,7 +52,7 @@ export function registerDocumentRoutes(app: Hono): void {
       // Multi-user mode: never list another user's / another session's documents.
       // Legacy single-operator mode (auth disabled) keeps the flat instance-wide view.
       const manageable = getConfig().auth.enabled
-        ? callerManageableSources({ userId: user?.username, sessionId })
+        ? callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) })
         : null;
       const inScope = manageable
         ? withoutKbOnly.filter((d) => d.sources.some((s) => manageable.has(s)))
@@ -82,7 +82,13 @@ export function registerDocumentRoutes(app: Hono): void {
           };
         }),
       }));
-      return c.json({ documents, engramAvailable: docs !== null, currentUser: user?.username ?? null });
+      // Under multi-user auth, the caller's own user corpora by source (its own and any it adopted):
+      // there the source is keyed by the account id, not by the name the page shows. With one
+      // operator the reply is as it was.
+      const currentUserSources = manageable && user?.username
+        ? { currentUserSources: callerUserSources({ userId: user.username, identity: callerIdentity(user) }) }
+        : {};
+      return c.json({ documents, engramAvailable: docs !== null, currentUser: user?.username ?? null, ...currentUserSources });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
@@ -111,7 +117,12 @@ export function registerDocumentRoutes(app: Hono): void {
       const { basename } = await import("node:path");
       const safe = basename(uploadedFile.name).replace(/[^\w.-]+/g, "_").slice(-180) || "upload";
       // Scope-specific upload folder so files are grouped + cleaned with their scope.
-      const dirKey = scope === "session" ? sessionId : scope === "user" ? `user-${user!.username}` : "workspace";
+      // A user's folder is named by the corpus key (an account's id under multi-user auth, its name
+      // with one operator), so a name reused by another account never shares a folder.
+      const { callerUserSource } = await import("../retrieval/document-rag.js");
+      const userKey = scope === "user" ? callerUserSource({ userId: user!.username, identity: callerIdentity(user) })?.slice("user:".length) : undefined;
+      if (scope === "user" && !userKey) return c.json({ error: "user scope requires authentication" }, 400);
+      const dirKey = scope === "session" ? sessionId : scope === "user" ? `user-${userKey}` : "workspace";
       const finalName = `${Date.now()}-${safe}`;
       const relativePath = `uploads/${dirKey}/${finalName}`;
       const bytes = Buffer.from(await uploadedFile.arrayBuffer());
@@ -131,7 +142,7 @@ export function registerDocumentRoutes(app: Hono): void {
         filename: uploadedFile.name,
         contentType: uploadedFile.type || "application/octet-stream",
         scope,
-        ctx: { sessionId, ...(user?.username ? { userId: user.username } : {}) },
+        ctx: { sessionId, ...(user?.username ? { userId: user.username, identity: callerIdentity(user) } : {}) },
         relativePath,
       });
       if (!outcome.ok) return c.json({ error: outcome.error }, 502);
@@ -165,7 +176,7 @@ export function registerDocumentRoutes(app: Hono): void {
         const { engramListDocuments } = await import("../retrieval/engram.js");
         const docs = await engramListDocuments();
         const doc = docs?.find((d) => d.id === id);
-        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        const manageable = callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) });
         const owned = doc ? doc.sources.filter((s) => manageable.has(s)) : [];
         // No visible stake → same not-found shape as DELETE (no existence disclosure).
         if (!doc || owned.length === 0) return c.json({ error: "Document not found" }, 404);
@@ -190,7 +201,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const scopeRaw = c.req.query("scope");
     const scope = scopeRaw && ["session", "user", "workspace"].includes(scopeRaw) ? scopeRaw as "session" | "user" | "workspace" : undefined;
     const sessionId = usableSessionId(user, c.req.query("sessionId") ?? "");
-    const ctx = { sessionId, ...(user?.username ? { userId: user.username } : {}) };
+    const ctx = { sessionId, ...(user?.username ? { userId: user.username, identity: callerIdentity(user) } : {}) };
     try {
       const { forgetDocument, callerManageableSources, resolveScopeSource, parseScopeFromSource } =
         await import("../retrieval/document-rag.js");
@@ -201,7 +212,7 @@ export function registerDocumentRoutes(app: Hono): void {
         const { engramListDocuments } = await import("../retrieval/engram.js");
         const docs = await engramListDocuments();
         const doc = docs?.find((d) => d.id === id);
-        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        const manageable = callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) });
         const owned = doc ? doc.sources.filter((s) => manageable.has(s)) : [];
         if (!doc || owned.length === 0) return c.json({ error: "Document not found" }, 404);
         const targets = scope
@@ -234,7 +245,7 @@ export function registerDocumentRoutes(app: Hono): void {
         ]);
         const docs = await engramListDocuments();
         const doc = docs?.find((d) => d.id === id);
-        const manageable = callerManageableSources({ userId: user?.username, sessionId });
+        const manageable = callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) });
         if (!doc || !doc.sources.some((s) => manageable.has(s))) {
           return c.json({ error: "No original file is stored for this document" }, 404);
         }

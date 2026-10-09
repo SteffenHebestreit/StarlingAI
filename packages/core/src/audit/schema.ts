@@ -57,6 +57,9 @@ export type CoreAuditEventType =
   | "anthropic_models_refreshed"
   | "agent_message_sent"
   | "channel_delivery_failed"
+  // A channel message refused because its sender may not be served under multi-user auth (an
+  // account's username, an auth provider's user id): no session, no reply
+  | "channel_sender_refused"
   | "agent_routing_evaluated"
   | "credential_accessed"
   | "credential_fill"

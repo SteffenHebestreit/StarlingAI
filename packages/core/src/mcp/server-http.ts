@@ -29,7 +29,8 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { authenticatedUser, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import type { Identity } from "../runtime/accounts.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { createStarlingMcpServer, type ExposeContext } from "./server.js";
@@ -78,6 +79,7 @@ export async function handleMcpHttpRequest(
   // token's role so the MCP RBAC matches the REST gate (viewers → read-only).
   let role: AuthRole = "operator";
   let userId: string | undefined;
+  let identity: Identity | undefined;
   if (expose.http.requireAuth) {
     const headerToken = req.headers["authorization"]
       ? extractBearerToken(req.headers["authorization"] as string)
@@ -107,6 +109,7 @@ export async function handleMcpHttpRequest(
       caller = user.username;
       role = user.role;
       userId = user.username;
+      identity = callerIdentity(user);
     } else {
       caller = (verified as { sub?: string }).sub ?? "authenticated";
       role = normalizeRole((verified as { role?: unknown }).role);
@@ -169,7 +172,7 @@ export async function handleMcpHttpRequest(
       res.end(JSON.stringify({ error: "Method not allowed for new MCP session" }));
       return true;
     }
-    session = await createHttpSession({ caller, role, ...(userId ? { userId } : {}) });
+    session = await createHttpSession({ caller, role, ...(userId ? { userId, identity } : {}) });
     created = session;
   }
 

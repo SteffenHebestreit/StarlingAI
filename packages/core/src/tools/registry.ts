@@ -5,7 +5,9 @@ import type { TurnUserWords } from "../agent/delegation-user-words.js";
 import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
 import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
-import { runWithRequestContext, currentUserId, currentRequestContext } from "../runtime/request-context.js";
+import { runWithRequestContext, currentRequestContext } from "../runtime/request-context.js";
+import { pairedIdentity } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 import { getConfig } from "../config/loader.js";
@@ -124,6 +126,20 @@ export interface SwarmState {
   tasks: Record<string, SwarmTaskState>;
 }
 
+
+/**
+ * The identity a ToolContext carries: its `identity` when that names the same user as `userId`
+ * (or `userId` is unset), else `userId` alone, with no kind. Never mixed from the two.
+ */
+export function toolContextIdentity(ctx: Pick<ToolContext, "userId" | "identity">): Identity | undefined {
+  if (ctx.identity && (ctx.userId === undefined || ctx.identity.userId === ctx.userId)) return ctx.identity;
+  return ctx.userId !== undefined ? { userId: ctx.userId } : undefined;
+}
+
+/** The identity a tool call with this ToolContext runs as: see pairedIdentity. */
+export function toolCallIdentity(ctx: Pick<ToolContext, "userId" | "identity">): Identity | undefined {
+  return pairedIdentity(toolContextIdentity(ctx));
+}
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;
@@ -134,6 +150,14 @@ export interface ToolContext {
    * nodes) via guardResourceAccess — undefined means "no multi-user scoping".
    */
   userId?: string;
+  /**
+   * Who owns this turn, whole: `userId` with the account id or the principal kind it belongs to
+   * (runtime/accounts.ts). Per-user storage derives from it (runtime/user-scope.ts segmentFor), so it
+   * travels with `userId` and never apart: a context that sets one sets the other from the same
+   * source. Absent where only `userId` was threaded; the tool wrap then pairs the name with the
+   * ambient identity (toolContextIdentity, pairedIdentity).
+   */
+  identity?: Identity;
   /**
    * Authenticated role (JWT `role` claim) of the user that owns this turn, when under
    * active multi-user auth. Tools gate mutating actions by role (e.g. operator-only
@@ -897,10 +921,12 @@ export async function executeTool(
               // model call issued inside a tool handler produced a NULL-session
               // provider row — the exact gap the attribution was added to close.
               ...(currentRequestContext() ?? {}),
-              // Fall back to the ambient turn userId so a delegated sub-agent whose
-              // ToolContext didn't thread userId still resolves per-user stores to
-              // the owning user (never clobber the turn's userId to undefined).
-              userId: context.userId ?? currentUserId(),
+              // The identity this call acts as, whole: the ambient one when the ToolContext names
+              // nobody or the ambient user (a delegated sub-agent whose ToolContext did not thread
+              // it still resolves per-user stores to the owning user; never clobbered to nobody),
+              // else the ToolContext's own. Never its name with the ambient account: a
+              // `workflow:<x>` run inside alice's turn would read and write alice's storage.
+              identity: toolCallIdentity(context),
               workspaceScope: context.workspaceScope,
               // Always this call's own id (or none): an inherited one would pin a question raised
               // by a nested run's call to the call that started that run.

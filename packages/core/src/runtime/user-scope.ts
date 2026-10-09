@@ -14,11 +14,21 @@ import { resolve } from "node:path";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { PRODUCT } from "../product/index.js";
-import { currentUserId, currentUserScopeSegment } from "./request-context.js";
+import { currentIdentity, currentUserScopeSegment } from "./request-context.js";
 import { getConfig } from "../config/loader.js";
-import { safeUserSegment } from "./accounts.js";
+import { childLogger } from "../logger.js";
+import {
+  ACCOUNT_ID_RE,
+  principalSegment,
+  safeUserSegment,
+  sameAccountId,
+  type Identity,
+  type PrincipalKind,
+} from "./accounts.js";
+import { accountRegistryEntries, accountRegistryUsernameHolder } from "./account-registry.js";
+import { USERS_SUBDIR } from "../tools/workspace-zones.js";
 
-const USERS_SUBDIR = "users";
+const log = childLogger("runtime:user-scope");
 
 // The formula lives with the account ids (runtime/accounts.ts), which the config schema imports
 // to validate them; this module imports the config, so it could not. Same function, same output.
@@ -30,40 +40,134 @@ function partitioningEnabled(): boolean {
 }
 
 /**
- * Partition a user-scope store directory by the ambient authenticated user.
- * `<base>/users/<safeUserId>/` when multi-user auth is on AND a userId is
- * present; `<base>` unchanged otherwise — so single-operator / auth-disabled
- * installs (the default) keep their original shared path (fully back-compat).
- * Pass an explicit `userId` (e.g. from a background sweep) to target a specific
- * user's bucket instead of the ambient one.
+ * Partition a user-scope store directory by the ambient (or given) identity.
+ * `<base>/users/<segment>/` when multi-user auth is on AND there is someone to partition by;
+ * `<base>` unchanged otherwise — so single-operator / auth-disabled installs (the default) keep
+ * their original shared path (fully back-compat). Pass an explicit identity (e.g. a session's) to
+ * target that identity's bucket instead of the ambient one.
  */
-export function userScopedDir(base: string, userId: string | undefined = currentUserId()): string {
-  const segment = activeUserScopeSegment(userId);
+export function userScopedDir(base: string, who: Identity | undefined = currentIdentity()): string {
+  const segment = segmentFor(who);
   return segment ? resolve(base, USERS_SUBDIR, segment) : base;
 }
 
 /**
- * The on-disk bucket segment for the ambient (or given) user, or `undefined` when this store
- * must stay shared.
+ * Thrown when work that names a username, but neither the account nor the principal kind it
+ * belongs to, would derive storage from that name, and the name is one an account holds.
  *
- * `undefined` means BOTH of the ways partitioning can be off: multi-user auth disabled, and
- * auth enabled but no user in the ambient context. That second case matters — gating a
- * partition on the auth FLAG alone would send an unattended run, an inbound MCP call or any
- * other path with no ambient user into a `users/undefined`-shaped bucket, or worse, split one
- * logical store across two locations depending on which entry point wrote it. A partition is
- * only ever applied when there is a specific user to apply it to.
- *
- * Exported so callers that need the SEGMENT rather than a directory — a workspace-relative
- * zone path, say — derive it from the same single rule as every user-scoped store.
+ * Every account's storage is keyed by its immutable id, and every principal's (a bootstrap token,
+ * a channel sender, a scene run) by its raw name. An identity that carries only a name is one some
+ * entry point did not thread whole. For most names that is harmless (a principal's bucket is the
+ * one its name always had), but for an account's username it is the bucket the account kept
+ * before ids existed, or the one a deleted account of that name left behind. Rather than read or
+ * write it on a guess, the derivation fails, loudly, and only there.
  */
-export function activeUserScopeSegment(userId: string | undefined = currentUserId()): string | undefined {
+export class AccountNotThreadedError extends Error {
+  readonly userId: string;
+
+  constructor(userId: string, reason: string) {
+    super(`The identity '${userId}' carries no account id or principal kind, and that name ${reason}: no storage is derived from it`);
+    this.name = "AccountNotThreadedError";
+    this.userId = userId;
+  }
+}
+
+/**
+ * Why `raw` may not stand for a principal under multi-user auth, or undefined when it may.
+ *
+ * A name is held when a builtin account has it, when an identity-provider account holds it in any
+ * status (a retired one's too, until an admin releases it; while the registry cannot be read every
+ * name counts as held), or when the segment its raw name derives to is an account's id. A name
+ * with control characters is never one. Names compare without case: a mail address or an IdP
+ * username is the same person in any case, and the closed direction is to refuse it.
+ */
+export function reservedUsernameProblem(raw: string): string | undefined {
+  // eslint-disable-next-line no-control-regex -- control characters are what is refused here
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return "holds control characters";
+  const name = raw.trim().toLowerCase();
+  const roster = getConfig().auth?.users ?? [];
+  if (roster.some((user) => user.username.toLowerCase() === name)) return "is a builtin account's username";
+  const holder = accountRegistryUsernameHolder(name);
+  if (holder === "unreadable") return "cannot be checked against the account registry, which cannot be read";
+  if (holder) return "is held by an identity-provider account";
+  const segment = principalSegment(raw);
+  const ids = [
+    ...roster.flatMap((user) => (user.id ? [user.id] : [])),
+    ...accountRegistryEntries().map((entry) => entry.id),
+  ];
+  if (ids.some((id) => sameAccountId(id, segment))) return "derives to an account's id";
+  return undefined;
+}
+
+/**
+ * THE ONE RULE for which on-disk bucket an identity's user-scoped storage lives in, or `undefined`
+ * when the storage stays shared. Every user-scoped store, path, record stamp and graph tenant
+ * derives from it.
+ *
+ *   1. multi-user auth off            -> undefined (one operator, one shared store; unchanged)
+ *   2. a sweep's pre-resolved segment -> that segment, verbatim (never re-derived: the hash is lossy)
+ *   3. an account                     -> its id, which IS its segment
+ *   4. a principal                    -> the segment its raw name always had
+ *   5. a name with no kind            -> the same, unless the name is an account's: then
+ *                                        AccountNotThreadedError (reservedUsernameProblem)
+ *   6. nobody                         -> undefined
+ *
+ * `undefined` covers both ways partitioning can be off: auth disabled, and auth enabled with
+ * nobody in the context. Gating on the auth FLAG alone would send an unattended run, an inbound
+ * MCP call or any other path with no ambient user into a `users/undefined`-shaped bucket, or split
+ * one logical store across two locations depending on which entry point wrote it.
+ *
+ * An account id comes from a store that validated it (the roster, the account registry, a session
+ * record written from one). One that is not segment-shaped is refused rather than joined into a
+ * path.
+ */
+export function segmentFor(who: Identity | undefined = currentIdentity()): string | undefined {
   if (!partitioningEnabled()) return undefined;
-  // A sweep enumerating existing buckets supplies the exact on-disk segment — use it
-  // verbatim rather than re-deriving (and double-hashing) it from a userId.
   const preResolved = currentUserScopeSegment();
   if (preResolved) return preResolved;
-  if (!userId) return undefined;
-  return safeUserSegment(userId);
+  if (!who) return undefined;
+  if (who.account) {
+    if (!ACCOUNT_ID_RE.test(who.account)) throw new Error(`'${who.account}' is not an account id`);
+    return who.account;
+  }
+  if (!who.userId) return undefined;
+  if (who.principal) return principalSegment(who.userId);
+  const problem = reservedUsernameProblem(who.userId);
+  if (problem) throw new AccountNotThreadedError(who.userId, problem);
+  return principalSegment(who.userId);
+}
+
+/**
+ * The identity of a principal: a bootstrap token, a channel sender, an A2A peer, a scene, job or
+ * workflow run. The kind is recorded only under multi-user auth, where it decides storage and
+ * ownership; with one operator there is neither, and every record stays exactly as it was written
+ * before kinds existed. A config that cannot be read counts as multi-user.
+ */
+export function principalIdentity(raw: string, kind: PrincipalKind): Identity {
+  let multiUser = true;
+  try {
+    multiUser = partitioningEnabled();
+  } catch { /* fail closed: keep the kind */ }
+  return multiUser ? { userId: raw, principal: kind } : { userId: raw };
+}
+
+/**
+ * The identity a call acts as, given the identity it was handed (`own`, from a ToolContext or run
+ * options) and the ambient one: the ambient identity when the call names nobody or the same name,
+ * else the call's own, whole. Never one field from each: a `workflow:<x>` name paired with the
+ * ambient account would read and write that account's storage. When both name the same user, the
+ * one that carries a kind wins, the ambient first.
+ */
+export function pairedIdentity(own: Identity | undefined, ambient: Identity | undefined = currentIdentity()): Identity | undefined {
+  if (!own?.userId) return ambient ?? own;
+  if (own.userId !== ambient?.userId) return own;
+  return ambient.account || ambient.principal ? ambient : own;
+}
+
+/** Whether an identity names a user but neither an account nor a principal kind: written before
+ *  account ids existed, or by a path that did not thread one. */
+export function isLegacyIdentity(who: Identity | undefined): boolean {
+  return Boolean(who?.userId) && !who?.account && !who?.principal;
 }
 
 /** The `users` directory name, shared with the workspace zone resolver. */
@@ -84,13 +188,18 @@ export function userStateBaseDir(): string {
 // carries the user-scope segment of the account it was written for (never the raw user id), so a
 // reader that shows a record's text can keep to the caller's own.
 
-/** The segment to stamp on a record written now: under multi-user auth that of `userId`, or of the
- *  ambient user when none is given; none otherwise. None too when the config cannot be read; such a
- *  record is then shown to no one. */
-export function recordAccount(userId?: string): string | undefined {
+/** The segment to stamp on a record written now: under multi-user auth that of `who`, or of the
+ *  ambient identity when none is given; none otherwise. None too when the config cannot be read;
+ *  such a record is then shown to no one. An identity that was not threaded (the guard in
+ *  segmentFor) is logged: the record it stamps none on becomes invisible, which must not be
+ *  silent. */
+export function recordAccount(who?: Identity): string | undefined {
   try {
-    return activeUserScopeSegment(userId);
-  } catch {
+    return segmentFor(who);
+  } catch (err) {
+    if (err instanceof AccountNotThreadedError) {
+      log.warn({ err, userId: err.userId }, "A record was written for an identity with no account or principal kind; it carries no account and nobody can read it");
+    }
     return undefined;
   }
 }
@@ -110,9 +219,12 @@ export interface RecordReader {
 export function recordReader(): RecordReader {
   try {
     if (!partitioningEnabled()) return { all: true };
-    const segment = activeUserScopeSegment();
+    const segment = segmentFor();
     return segment ? { all: false, segment } : { all: false };
-  } catch {
+  } catch (err) {
+    if (err instanceof AccountNotThreadedError) {
+      log.warn({ err, userId: err.userId }, "A reader with no account or principal kind is shown no account's records");
+    }
     return { all: false };
   }
 }

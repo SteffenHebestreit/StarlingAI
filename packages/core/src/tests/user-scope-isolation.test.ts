@@ -15,7 +15,9 @@ import {
 
 function mockAuth(enabled: boolean): void {
   vi.spyOn(configLoader, "getConfig").mockReturnValue(
-    { auth: { enabled } } as unknown as ReturnType<typeof configLoader.getConfig>,
+    // A workspace with no account registry in it: no account holds any name, so a bare name
+      // is a principal's, in the bucket it always had.
+      { auth: { enabled, users: [] }, workspacePath: resolve(tmpdir(), "sai-scope-no-registry") } as unknown as ReturnType<typeof configLoader.getConfig>,
   );
 }
 
@@ -49,19 +51,19 @@ describe("user-scope partitioning", () => {
 
   it("auth OFF keeps the single shared path even with a userId (back-compat)", () => {
     mockAuth(false);
-    runWithRequestContext({ userId: "alice" }, () => {
+    runWithRequestContext({ identity: { userId: "alice" } }, () => {
       expect(userScopedDir(base)).toBe(base);
     });
   });
 
   it("auth ON + userId partitions into <base>/users/<segment>", () => {
     mockAuth(true);
-    runWithRequestContext({ userId: "alice" }, () => {
+    runWithRequestContext({ identity: { userId: "alice" } }, () => {
       expect(userScopedDir(base)).toBe(resolve(base, "users", safeUserSegment("alice")));
     });
     // Distinct users get distinct buckets.
-    const a = runWithRequestContext({ userId: "alice" }, () => userScopedDir(base));
-    const b = runWithRequestContext({ userId: "bob" }, () => userScopedDir(base));
+    const a = runWithRequestContext({ identity: { userId: "alice" } }, () => userScopedDir(base));
+    const b = runWithRequestContext({ identity: { userId: "bob" } }, () => userScopedDir(base));
     expect(a).not.toBe(b);
   });
 
@@ -72,7 +74,7 @@ describe("user-scope partitioning", () => {
 
   it("accepts an explicit userId for background sweeps", () => {
     mockAuth(true);
-    expect(userScopedDir(base, "carol")).toBe(resolve(base, "users", safeUserSegment("carol")));
+    expect(userScopedDir(base, { userId: "carol" })).toBe(resolve(base, "users", safeUserSegment("carol")));
   });
 
   it("uses a pre-resolved segment VERBATIM (sweep round-trip must not double-hash)", () => {
@@ -135,7 +137,7 @@ describe("personality: global default + per-user override", () => {
     expect(existsSync(join(dir, "main-assistant-personality.json"))).toBe(true);
 
     // 2. Alice, with no override yet, sees the global persona.
-    runWithRequestContext({ userId: "alice" }, () => {
+    runWithRequestContext({ identity: { userId: "alice" } }, () => {
       expect(loadMainAssistantPersonality().identity.name).toBe("Global");
       // 3. Alice saves her own override.
       saveMainAssistantPersonality(editable("Alice"), { updatedBy: "user" });
@@ -144,12 +146,12 @@ describe("personality: global default + per-user override", () => {
     });
 
     // 4. Bob still sees the global persona — Alice's override is isolated.
-    runWithRequestContext({ userId: "bob" }, () => {
+    runWithRequestContext({ identity: { userId: "bob" } }, () => {
       expect(loadMainAssistantPersonality().identity.name).toBe("Global");
     });
 
     // 5. Alice resets → override cleared → back to the global persona.
-    runWithRequestContext({ userId: "alice" }, () => {
+    runWithRequestContext({ identity: { userId: "alice" } }, () => {
       expect(clearMainAssistantPersonalityOverride()).toBe(true);
       expect(loadMainAssistantPersonality().identity.name).toBe("Global");
     });

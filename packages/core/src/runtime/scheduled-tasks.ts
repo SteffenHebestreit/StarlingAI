@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import type { PrincipalKind } from "./accounts.js";
 
 const log = childLogger("scheduled-tasks");
 
@@ -26,6 +27,11 @@ export interface ScheduledTaskRecord {
   task: string;
   /** Owner — scopes the scheduled run to a user (auth-on deployments). */
   userId?: string;
+  /** With `userId`, from one identity: the owner's account id, or (instead) its principal kind.
+   *  Under multi-user auth a schedule with a userId and neither predates account ids, and the
+   *  runner skips it (scheduled-task-runner.ts). */
+  account?: string;
+  principal?: PrincipalKind;
   createdAt: string;
 }
 

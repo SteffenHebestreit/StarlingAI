@@ -166,7 +166,7 @@ describe("a dashboard socket checks its caller before every message", () => {
   it("takes the role the store holds now, on the next message", async () => {
     const adminAlice = testAccount("alice", "admin");
     configure({ enabled: true, users: [adminAlice.record, testAccount("bob").record] });
-    const bobs = mods.sessions.createSession({ channel: "webchat", userId: "bob", workspacePath: workspace });
+    const bobs = mods.sessions.createSession({ channel: "webchat", userId: "bob", account: testAccount("bob").id, workspacePath: workspace });
     const tab = await openSocket("alice", adminAlice.claims);
     const ids = async () => ((await tab.call("session.list")).payload as Array<{ id: string }>).map((summary) => summary.id);
     expect(await ids()).toContain(bobs.id);
@@ -196,7 +196,7 @@ describe("a dashboard socket checks its caller before every message", () => {
     // Removed from the store some other way: the next push finds it gone.
     configure({ enabled: true, users: [root.record, alice.record] });
     const watcher = await openSocket("alice", alice.claims);
-    const own = mods.sessions.createSession({ channel: "webchat", userId: "alice", workspacePath: workspace });
+    const own = mods.sessions.createSession({ channel: "webchat", userId: "alice", account: alice.id, workspacePath: workspace });
     expect((await watcher.call("audit.subscribe")).ok).toBe(true);
     mods.audit.logAudit("tool_call_requested", { tool: "probe" }, { sessionId: own.id, userId: "alice" });
     expect(watcher.sent.some((message) => message["type"] === "audit.event")).toBe(true);

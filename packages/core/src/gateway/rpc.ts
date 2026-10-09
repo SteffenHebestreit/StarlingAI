@@ -17,7 +17,9 @@ import {
   listSessions,
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
-import { normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import { principalIdentity } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
@@ -518,6 +520,15 @@ export class RpcConnection implements AccountConnection {
   }
 
   /**
+   * Who this connection's caller is, whole: under multi-user auth the account (or bootstrap kind)
+   * the store resolved, with its name; without it the token's subject alone, as before.
+   */
+  private connIdentity(): Identity | undefined {
+    if (this.liveUser) return callerIdentity(this.liveUser);
+    return this.connUserId ? { userId: this.connUserId } : undefined;
+  }
+
+  /**
    * Admins may access any session. By role RANK of admin, not operator: operator is the role every
    * account gets by default, so an operator exemption exempted everyone, and any user could read,
    * drive, rewind or delete another user's session. The HTTP session routes draw the same line.
@@ -676,8 +687,9 @@ export class RpcConnection implements AccountConnection {
           channel: String(params["channel"] ?? "webchat"),
           // Attribute the session to the authenticated connection user (so the
           // document-RAG user scope + RBAC match the identity uploads use). The
-          // server-derived identity wins over any client-supplied userId.
-          userId: this.connUserId ?? (params["userId"] ? String(params["userId"]) : undefined),
+          // server-derived identity wins over any client-supplied userId, and travels whole:
+          // the account id with the name.
+          ...(this.connIdentity() ?? (params["userId"] ? { userId: String(params["userId"]) } : {})),
           ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
         });
@@ -988,7 +1000,7 @@ export class RpcConnection implements AccountConnection {
               // As the signed-in user, like the REST route: their run, listed, read and cancelled as
               // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
               // connection with no user runs it as the job itself.
-              userId: this.connUserId ?? `job:${jobName}`,
+              ...(this.connIdentity() ?? principalIdentity(`job:${jobName}`, "synthetic")),
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });

@@ -8,7 +8,8 @@ import type { Hono } from "hono";
 import { readFile, writeFile, stat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
-import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, userHasRole } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
+import type { Identity } from "../runtime/accounts.js";
 import { getConfig } from "../config/loader.js";
 import { resolvePathWithinWorkspace, userWorkspaceRoot, GENERATED_SUBDIR, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
@@ -54,15 +55,15 @@ const WORKSPACE_PREVIEW_CSP = [
  * same way: a deleted account's token, or one bound to an account id its name no longer holds, is
  * refused. Without multi-user auth the token's signature is all there is to check, as before.
  */
-async function bareTokenCaller(token: string | undefined | null): Promise<{ userId: string | undefined } | null> {
+async function bareTokenCaller(token: string | undefined | null): Promise<{ identity: Identity | undefined } | null> {
   if (!token) return null;
   if (getConfig().auth?.enabled === true) {
     const user = await authenticatedUserFromToken(token);
-    return user ? { userId: user.username } : null;
+    return user ? { identity: callerIdentity(user) } : null;
   }
   const payload = await verifyToken(token);
   if (!payload) return null;
-  return { userId: typeof payload.sub === "string" ? payload.sub : undefined };
+  return { identity: typeof payload.sub === "string" ? { userId: payload.sub } : undefined };
 }
 
 export function registerWorkspaceRoutes(app: Hono): void {
@@ -80,7 +81,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
   app.use("/api/workspace/*", async (c, next) => {
     if (currentUserId()) return next();
     const caller = await authenticatedUser(c.req.header("Authorization"));
-    return runWithRequestContext({ userId: caller?.username }, () => next());
+    return runWithRequestContext({ identity: callerIdentity(caller) }, () => next());
   });
 
   function guessWorkspaceContentType(filePath: string): string {
@@ -510,7 +511,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     if (!previewCaller) {
       return c.text("Unauthorized", 401);
     }
-    const previewUserId = previewCaller.userId;
+    const previewIdentity = previewCaller.identity;
 
     const root = c.req.query("root")?.trim();
     const file = c.req.query("file")?.trim() || "index.html";
@@ -521,7 +522,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     let rootResolved: string;
     let fileResolved: string;
     try {
-      const rootTarget = runWithRequestContext({ userId: previewUserId }, () => resolveWorkspaceTarget(root));
+      const rootTarget = runWithRequestContext({ identity: previewIdentity }, () => resolveWorkspaceTarget(root));
       rootResolved = rootTarget.resolved;
 
       // Resolve the requested file within the root (not the workspace) to
@@ -576,7 +577,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
     // the cookie, not an Authorization header, so the caller has to be read off the token.
     const siteCaller = await bareTokenCaller(token);
     if (!siteCaller) return c.text("Unauthorized", 401);
-    const siteUserId = siteCaller.userId;
+    const siteIdentity = siteCaller.identity;
 
     let root: string;
     try {
@@ -598,7 +599,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
     let fileResolved: string;
     try {
-      const rootTarget = runWithRequestContext({ userId: siteUserId }, () => resolveWorkspaceTarget(root));
+      const rootTarget = runWithRequestContext({ identity: siteIdentity }, () => resolveWorkspaceTarget(root));
       const candidate = resolve(rootTarget.resolved, file.replace(/^\/+/, ""));
       if (!candidate.startsWith(rootTarget.resolved + sep) && candidate !== rootTarget.resolved) {
         return c.text("File path escapes root directory", 400);

@@ -18,6 +18,7 @@ import {
   UnboundRelationship,
 } from "neo4j-driver";
 import type { ToolContext, ToolHandler } from "../tools/registry.js";
+import { testAccount, testAccountId } from "./support/test-account.js";
 
 /**
  * GRAPH_QUERY KEEPS ANOTHER ACCOUNT'S MEMORY OUT OF ITS ANSWER (found 2026-10-08).
@@ -41,9 +42,7 @@ const tempDir = mkdtempSync(join(tmpdir(), "starlingai-graph-query-tenant-"));
 const configPath = join(tempDir, "starlingai.json");
 process.env["SAI_CONFIG_PATH"] = configPath;
 
-const account = (username: string) => ({
-  username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-08T00:00:00Z",
-});
+const account = (username: string) => testAccount(username).record;
 
 async function load(authEnabled: boolean) {
   writeFileSync(configPath, JSON.stringify({
@@ -63,8 +62,10 @@ async function load(authEnabled: boolean) {
     return handler;
   };
   const ctx = {} as unknown as ToolContext;
+  // The caller as a signed-in request carries it: the account id with the name (with auth off the
+  // name alone, as every caller was before account ids).
   const run = (userId: string, name: string, args: Record<string, unknown>) =>
-    context.runWithRequestContext({ userId }, () => tool(name).execute(args, ctx));
+    context.runWithRequestContext({ identity: authEnabled ? { userId, account: testAccountId(userId) } : { userId } }, () => tool(name).execute(args, ctx));
   return { run, scope };
 }
 
@@ -91,10 +92,10 @@ function boltMap(entries: Array<[string, unknown]>): Record<string, unknown> {
 
 function memories(aliceSegment: string, bobSegment: string) {
   return {
-    alicePreference: node(["MemoryRecord"], { id: "mem-alice-user", scope: "user", kind: "preference", tenant: "alice", content: "Alice trinkt Polarstern-Rooibos." }),
+    alicePreference: node(["MemoryRecord"], { id: "mem-alice-user", scope: "user", kind: "preference", tenant: aliceSegment, content: "Alice trinkt Polarstern-Rooibos." }),
     aliceNote: node(["MemoryRecord"], { id: "mem-alice-ws", scope: "workspace", kind: "fact", tenant: aliceSegment, content: "Lager Nordhafen ist voll." }),
     sharedDecision: node(["MemoryRecord"], { id: "mem-shared", scope: "workspace", kind: "decision", tenant: "shared", content: "Release am Freitag." }),
-    bobPreference: node(["MemoryRecord"], { id: "mem-bob-user", scope: "user", kind: "preference", tenant: "bob", content: "Bob trinkt Earl Grey.", embedding: [0.125, 0.375] }),
+    bobPreference: node(["MemoryRecord"], { id: "mem-bob-user", scope: "user", kind: "preference", tenant: bobSegment, content: "Bob trinkt Earl Grey.", embedding: [0.125, 0.375] }),
     bobNote: node(["MemoryRecord"], { id: "mem-bob-ws", scope: "workspace", kind: "fact", tenant: bobSegment, content: "Lager Suedhafen ist leer." }),
     ownerless: node(["MemoryRecord"], { id: "fact:researcher:budget", scope: "workspace", kind: "fact", content: "budget = 40000", previousContent: "budget = 35000" }),
   };
@@ -112,8 +113,8 @@ afterAll(async () => {
 
 describe("graph_query under multi-user auth", () => {
   it("returns each account its own and the shared memory nodes, and only the id, kind and scope of any other", async () => {
-    const { run, scope } = await load(true);
-    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { run } = await load(true);
+    const m = memories(testAccountId("alice"), testAccountId("bob"));
     answer(Object.values(m).map((memory) => ({ m: memory })));
     const cypher = "MATCH (m:MemoryRecord) RETURN m LIMIT 50";
 
@@ -133,8 +134,8 @@ describe("graph_query under multi-user auth", () => {
   });
 
   it("finds another account's node inside a list, a map and a path", async () => {
-    const { run, scope } = await load(true);
-    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { run } = await load(true);
+    const m = memories(testAccountId("alice"), testAccountId("bob"));
     const researcher = node(["Agent"], { name: "researcher" });
     const wrote = new Relationship(int(900), researcher.identity, m.bobPreference.identity, "WROTE", {}, "900", researcher.elementId, m.bobPreference.elementId);
     answer([{
@@ -153,8 +154,8 @@ describe("graph_query under multi-user auth", () => {
   });
 
   it("refuses an answer holding a map whose __proto__ key became its prototype", async () => {
-    const { run, scope } = await load(true);
-    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { run } = await load(true);
+    const m = memories(testAccountId("alice"), testAccountId("bob"));
     // A query that names __proto__ is refused before it runs (below); these answers stand for one
     // that reaches the graph some other way, and the reducer has to hold on its own.
     const crafted = [
@@ -181,8 +182,8 @@ describe("graph_query under multi-user auth", () => {
   });
 
   it("takes a map that carries one of the driver's markers as a key for the map it is", async () => {
-    const { run, scope } = await load(true);
-    const m = memories(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { run } = await load(true);
+    const m = memories(testAccountId("alice"), testAccountId("bob"));
     // No name in this query is refused, so it runs. The answer has the shape the driver builds for
     // it, with another foreign node under each key to tell the three apart.
     const cypher = "MATCH (a:MemoryRecord {id: 'mem-alice-user'}), (m:MemoryRecord) RETURN {"

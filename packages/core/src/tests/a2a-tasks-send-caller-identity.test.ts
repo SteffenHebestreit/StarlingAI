@@ -145,11 +145,11 @@ describe("tasks/send and the workspace root a task runs in", () => {
 
     expect(status).toBe(200);
     const { getConfig } = await import("../config/loader.js");
-    const { safeUserSegment } = await import("../runtime/user-scope.js");
+    // The account's own root is keyed by its id, not by the username a re-created account shares.
     expect(runs).toEqual([{
       userId: "alice",
       contextUserId: "alice",
-      workspacePath: resolve(getConfig().workspacePath, "users", safeUserSegment("alice")),
+      workspacePath: resolve(getConfig().workspacePath, "users", testAccountId("alice")),
     }]);
   });
 

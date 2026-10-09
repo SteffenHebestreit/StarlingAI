@@ -102,11 +102,11 @@ describe("the legacy A2A route and the account a task runs as", () => {
       const response = await gw.send("alice");
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("07:40");
-      const { safeUserSegment } = await import("../runtime/user-scope.js");
+      // The account's own root is keyed by its id, not by the username a re-created account shares.
       expect(runs).toEqual([{
         userId: "alice",
         contextUserId: "alice",
-        workspacePath: resolve(gw.workspacePath, "users", safeUserSegment("alice")),
+        workspacePath: resolve(gw.workspacePath, "users", testAccountId("alice")),
       }]);
     } finally {
       await gw.stop();

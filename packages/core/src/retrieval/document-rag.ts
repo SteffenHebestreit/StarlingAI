@@ -21,6 +21,9 @@
  */
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { pairedIdentity, segmentFor } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
+import { documentSourceAliases } from "./document-aliases.js";
 import {
   engramConfigured,
   engramIngest,
@@ -39,6 +42,9 @@ export type DocumentScope = "session" | "user" | "workspace";
 export interface RagScopeContext {
   sessionId: string;
   userId?: string;
+  /** The same user whole (its account id or principal kind with its name). Under multi-user auth
+   *  the user corpus is keyed by it; without it the name is paired with the ambient identity. */
+  identity?: Identity;
 }
 
 export function sessionSource(sessionId: string): string {
@@ -46,6 +52,45 @@ export function sessionSource(sessionId: string): string {
 }
 export function userSource(userId: string): string {
   return `user:${userId}`;
+}
+
+function multiUserDocuments(): boolean {
+  try {
+    return getConfig().auth?.enabled === true;
+  } catch {
+    return true; // fail closed: never the shared name-keyed corpus
+  }
+}
+
+/**
+ * The user corpus a caller's documents go to: `user:<segment>` under multi-user auth (an account's
+ * id, a principal's segment), `user:<userId>` with one operator, as always; null with no user.
+ *
+ * It was `user:<username>` under auth too, so an account deleted and created again under the same
+ * name, or a channel sender whose id was an account's username, read and managed the old account's
+ * documents. The segment is the key every other user-scoped store uses.
+ */
+export function callerUserSource(ctx: Pick<RagScopeContext, "userId" | "identity">): string | null {
+  if (!multiUserDocuments()) return ctx.userId ? userSource(ctx.userId) : null;
+  const who = ctx.identity && (ctx.userId === undefined || ctx.identity.userId === ctx.userId)
+    ? ctx.identity
+    : ctx.userId ? pairedIdentity({ userId: ctx.userId }) : undefined;
+  if (!who?.userId) return null;
+  const segment = segmentFor(who);
+  return segment ? userSource(segment) : null;
+}
+
+/**
+ * The user corpora a caller reads: its own, plus under multi-user auth the corpora from before
+ * account ids that the account migration let this account adopt (retrieval/document-aliases.ts).
+ * With one operator just its own, as always.
+ */
+export function callerUserSources(ctx: Pick<RagScopeContext, "userId" | "identity">): string[] {
+  const own = callerUserSource(ctx);
+  if (!own) return [];
+  if (!multiUserDocuments()) return [own];
+  const account = own.slice("user:".length);
+  return [own, ...documentSourceAliases(account).filter((alias) => alias !== own)];
 }
 export function workspaceSource(name: string): string {
   return `workspace:${name}`;
@@ -58,7 +103,7 @@ export function resolveScopeSource(scope: DocumentScope, ctx: RagScopeContext): 
     case "session":
       return ctx.sessionId ? sessionSource(ctx.sessionId) : null;
     case "user":
-      return ctx.userId ? userSource(ctx.userId) : null;
+      return callerUserSource(ctx);
     case "workspace":
       return workspaceSource(cfg.workspaceName);
     default:
@@ -74,7 +119,7 @@ export function activeScopeSources(ctx: RagScopeContext): string[] {
   const cfg = getConfig().retrieval.documentRag;
   const sources: string[] = [];
   if (ctx.sessionId) sources.push(sessionSource(ctx.sessionId));
-  if (cfg.includeUserDocs && ctx.userId) sources.push(userSource(ctx.userId));
+  if (cfg.includeUserDocs) sources.push(...callerUserSources(ctx));
   if (cfg.includeWorkspaceDocs) sources.push(workspaceSource(cfg.workspaceName));
   return sources;
 }
@@ -89,10 +134,10 @@ export function activeScopeSources(ctx: RagScopeContext): string[] {
  * stop one authenticated user from listing, downloading, or deleting another
  * user's (or another session's) documents. Pure + exported for testing.
  */
-export function callerManageableSources(opts: { userId?: string; sessionId?: string }): Set<string> {
+export function callerManageableSources(opts: { userId?: string; sessionId?: string; identity?: Identity }): Set<string> {
   const cfg = getConfig().retrieval.documentRag;
   const sources = new Set<string>([workspaceSource(cfg.workspaceName)]);
-  if (opts.userId) sources.add(userSource(opts.userId));
+  for (const source of callerUserSources(opts)) sources.add(source);
   if (opts.sessionId) sources.add(sessionSource(opts.sessionId));
   return sources;
 }

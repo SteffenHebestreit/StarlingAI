@@ -53,7 +53,7 @@ async function load(authEnabled: boolean) {
   // What the gateway does for every /api request under auth (gateway/index.ts).
   app.use("/api/*", async (c, next) => {
     const user = await auth.authenticatedUser(c.req.header("Authorization"));
-    return context.runWithRequestContext({ userId: user?.username }, () => next());
+    return context.runWithRequestContext({ identity: auth.callerIdentity(user) }, () => next());
   });
   routes.registerMemoryGraphRoutes(app);
   const overview = async (username: string, role: string, query = "") => {
@@ -77,12 +77,12 @@ const wrote = (agent: Node, memory: Node) => {
 function answerWithEveryNode(aliceSegment: string, bobSegment: string): void {
   const researcher = node(["Agent"], { name: "researcher" });
   const alicePreference = node(["MemoryRecord"], {
-    id: "mem-alice-user", scope: "user", kind: "preference", tenant: "alice",
+    id: "mem-alice-user", scope: "user", kind: "preference", tenant: aliceSegment,
     content: "Alice trinkt Polarstern-Rooibos.", embedding: [0.25, 0.5, 0.75],
   });
   const aliceNote = node(["MemoryRecord"], { id: "mem-alice-ws", scope: "workspace", kind: "fact", tenant: aliceSegment, content: "Lager Nordhafen ist voll." });
   const sharedDecision = node(["MemoryRecord"], { id: "mem-shared", scope: "workspace", kind: "decision", tenant: "shared", content: "Release am Freitag." });
-  const bobPreference = node(["MemoryRecord"], { id: "mem-bob-user", scope: "user", kind: "preference", tenant: "bob", content: "Bob trinkt Earl Grey." });
+  const bobPreference = node(["MemoryRecord"], { id: "mem-bob-user", scope: "user", kind: "preference", tenant: bobSegment, content: "Bob trinkt Earl Grey." });
   const bobNote = node(["MemoryRecord"], { id: "mem-bob-ws", scope: "workspace", kind: "fact", tenant: bobSegment, content: "Lager Suedhafen ist leer." });
   const ownerless = node(["MemoryRecord"], { id: "fact:researcher:budget", scope: "workspace", kind: "fact", content: "budget = 40000" });
   const rows: Array<Record<string, unknown>> = [
@@ -126,8 +126,8 @@ describe("GET /api/graph/overview under multi-user auth", () => {
   });
 
   it("shows each account its own and the shared memory, never another account's", async () => {
-    const { overview, scope } = await load(true);
-    answerWithEveryNode(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { overview } = await load(true);
+    answerWithEveryNode(testAccountId("alice"), testAccountId("bob"));
 
     const asAlice = await overview("alice", "operator", "?label=MemoryRecord&limit=500");
     expect(asAlice.status).toBe(200);
@@ -153,8 +153,8 @@ describe("GET /api/graph/overview under multi-user auth", () => {
   });
 
   it("selects the sample per account, so its LIMIT counts the caller's own nodes", async () => {
-    const { overview, scope } = await load(true);
-    answerWithEveryNode(scope.safeUserSegment("alice"), scope.safeUserSegment("bob"));
+    const { overview } = await load(true);
+    answerWithEveryNode(testAccountId("alice"), testAccountId("bob"));
     await overview("alice", "operator", "?label=MemoryRecord");
     const [query, params] = runCypher.mock.calls[0] as [string, Record<string, unknown>];
     const flat = query.replace(/\s+/g, " ");
@@ -169,8 +169,8 @@ describe("GET /api/graph/overview under multi-user auth", () => {
     expect(flat).toContain("OPTIONAL MATCH (n)-[r]-(m) WHERE (NOT m:MemoryRecord");
     expect(params).toMatchObject({
       limit: 150,
-      readerUserTenant: "alice",
-      readerWorkspaceTenant: scope.safeUserSegment("alice"),
+      readerUserTenant: testAccountId("alice"),
+      readerWorkspaceTenant: testAccountId("alice"),
       sharedWorkspaceTenant: "shared",
     });
   });

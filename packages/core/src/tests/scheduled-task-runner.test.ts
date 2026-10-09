@@ -9,8 +9,9 @@ const h = vi.hoisted(() => {
   return {
     cronJobs: new Map<string, { onTick: () => void | Promise<void> }>(),
     removed: [] as string[],
-    createJobMock: vi.fn(async () => ({ id: "job_123" })),
+    createJobMock: vi.fn(async (_input?: Record<string, unknown>) => ({ id: "job_123" })),
     nextId: () => `cron_${++n}`,
+    multiUser: false,
   };
 });
 
@@ -28,7 +29,7 @@ vi.mock("../runtime/scheduler.js", () => ({
 vi.mock("../agent/jobs.js", () => ({ createJob: h.createJobMock }));
 
 // Mock getConfig for the turn timeout the runner reads.
-vi.mock("../config/loader.js", () => ({ getConfig: () => ({ gateway: { turnTimeoutMs: 123456 } }) }));
+vi.mock("../config/loader.js", () => ({ getConfig: () => ({ gateway: { turnTimeoutMs: 123456 }, auth: { enabled: h.multiUser } }) }));
 
 import {
   addAndActivateScheduledTask,
@@ -41,7 +42,7 @@ import { _setScheduledTasksPathForTests, listScheduledTaskRecords } from "../run
 
 let dir = "";
 beforeEach(() => {
-  h.cronJobs.clear(); h.removed.length = 0; h.createJobMock.mockClear();
+  h.cronJobs.clear(); h.removed.length = 0; h.createJobMock.mockClear(); h.multiUser = false;
   dir = mkdtempSync(join(tmpdir(), "sched-runner-"));
   _setScheduledTasksPathForTests(join(dir, ".starlingai", "scheduled-tasks.json"));
 });
@@ -86,5 +87,29 @@ describe("scheduled-task-runner", () => {
     expect(activeScheduledTaskCount()).toBe(0);
     rehydrateScheduledTasks();
     expect(activeScheduledTaskCount()).toBe(2);
+  });
+
+  // Under multi-user auth a run is its owner's whole: the account id travels with the name. A
+  // schedule from before account ids names a user and no account; its run would derive storage from
+  // the username, which the derivation refuses, so the job would fail every time it fires. It is
+  // skipped, and logged once, until the account migration stamps it.
+  it("under multi-user auth, runs a schedule as its owner's account, and skips one from before account ids", async () => {
+    h.multiUser = true;
+    addAndActivateScheduledTask({ id: "acct", cron: "* * * * *", label: "a", task: "t1", userId: "alice", account: "alice-0123456789abcdef", createdAt: "x" });
+    addAndActivateScheduledTask({ id: "bot", cron: "* * * * *", label: "b", task: "t2", userId: "job:x", principal: "synthetic", createdAt: "x" });
+    addAndActivateScheduledTask({ id: "legacy", cron: "* * * * *", label: "c", task: "t3", userId: "alice", createdAt: "x" });
+    for (const cron of h.cronJobs.values()) await cron.onTick();
+    expect(h.createJobMock.mock.calls.map(([input]) => input)).toEqual([
+      expect.objectContaining({ task: "t1", userId: "alice", account: "alice-0123456789abcdef" }),
+      expect.objectContaining({ task: "t2", userId: "job:x", principal: "synthetic" }),
+    ]);
+    expect(h.createJobMock.mock.calls[0]![0]).not.toHaveProperty("principal");
+  });
+
+  it("with one operator, runs a schedule that names only a user, as before", async () => {
+    addAndActivateScheduledTask({ id: "legacy", cron: "* * * * *", label: "c", task: "t3", userId: "alice", createdAt: "x" });
+    await [...h.cronJobs.values()][0]!.onTick();
+    expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    expect(h.createJobMock.mock.calls[0]![0]).not.toHaveProperty("account");
   });
 });
