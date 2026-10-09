@@ -16,7 +16,8 @@
  * up      starts both services (waits for healthy), writes both config files, rebuilds the config
  * down    deletes both config files, rebuilds the config, stops and removes both services
  * status  reports every piece, including whether the running gateway / mail-service images are
- *         new enough to honour the config (exit 1 while anything is missing)
+ *         new enough to honour the config (exit 1 while anything is missing), and the Docker health
+ *         of the stack's reranker, which the e2e harness reads before and after a run
  *
  * SAFETY: every compose command names the two e2e services explicitly and nothing else. This
  * script never runs `compose down`, never touches a stack service, network or volume, and writes
@@ -32,6 +33,7 @@ import { imageOfContainer } from "./build-provenance.mjs";
 import { collectShardPaths, deepMerge } from "./config-shards.mjs";
 import { NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 import { configOfContainer } from "./gateway-config-digest.mjs";
+import { serviceContainer } from "./service-container.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const rel = (path) => relative(repoRoot, path).split("\\").join("/");
@@ -109,13 +111,10 @@ function compose(stack, args, opts) {
   return docker(["compose", "-p", stack.project, ...files.flatMap((f) => ["-f", f]), "--profile", "e2e", ...args], opts);
 }
 
+/** The service's container, or null: none, or docker could not be asked (the callers read both as not ready). */
 function containerOf(project, service) {
-  const r = docker(["ps", "-a", "--filter", `label=com.docker.compose.project=${project}`, "--filter", `label=com.docker.compose.service=${service}`,
-    "--format", "{{.Names}}\t{{.State}}\t{{.Status}}"]);
-  const [name, state, status] = (r.ok ? r.out.split("\n")[0] ?? "" : "").split("\t");
-  if (!name) return null;
-  const health = /\((healthy|unhealthy|health: starting)\)/.exec(status ?? "")?.[1] ?? (state === "running" ? "no healthcheck" : "-");
-  return { name, state, health };
+  const container = serviceContainer(docker, project, service);
+  return container && !("error" in container) ? container : null;
 }
 
 // ── config ───────────────────────────────────────────────────────────────────
@@ -241,6 +240,10 @@ async function collectStatus() {
   const mailRunning = mailService?.state === "running" ? mailService.name : null;
   const gatewayRunning = stack.running ? stack.gateway : null;
   const evalAccounts = mailAccountsForEval(mailRunning);
+  // The stack's reranker (the rag profile): every turn's routing reranks through it, and its /health
+  // answers 200 only once its model has loaded and run, so Docker's health of it says whether a run
+  // had one. A docker that could not be asked stays { error }: no container would read as fine.
+  const reranker = serviceContainer(docker, stack.project, "reranker");
   const evalAccountIds = evalAccounts ? evalAccounts.map((a) => a.id) : null;
   const compiled = existsSync(COMPILED_CONFIG) ? JSON.parse(readFileSync(COMPILED_CONFIG, "utf8")) : {};
   const status = {
@@ -277,6 +280,7 @@ async function collectStatus() {
       imageSupportsAllowlist: distHasMarker(gatewayRunning, GATEWAY_DIST_FILE, GATEWAY_DIST_MARKER),
       resolvesSite: gatewayResolvesSite(gatewayRunning),
     },
+    reranker: reranker && !("error" in reranker) ? { container: reranker.name, state: reranker.state, health: reranker.health } : reranker,
   };
   const healthy = (s) => s?.state === "running" && s.health === "healthy";
   status.ready = {
@@ -311,6 +315,11 @@ function printStatus(s) {
   say(`    ${mark(Boolean(s.gateway.resolvesSite))} agents' URL               ${s.siteUrlForAgents}${s.gateway.resolvesSite ? ` (gateway resolves it to ${s.gateway.resolvesSite})` : " (not resolvable from the gateway)"}`);
   say(`    ${mark(s.config.compiledAllowsSite)} SSRF exemption            ${s.config.compiledAllowsSite ? `guardrails.allowedPrivateHosts has ${SITE_HOST}` : "not in the compiled config"}`);
   say(`    ${mark(s.gateway.imageSupportsAllowlist)} gateway image             ${s.gateway.imageSupportsAllowlist === false ? "predates guardrails.allowedPrivateHosts — rebuild the gateway image" : s.gateway.running ? "honours guardrails.allowedPrivateHosts" : "gateway not running"}`);
+  const reranker = s.reranker;
+  const rerankerRuns = Boolean(reranker && !reranker.error && !["created", "exited", "dead"].includes(reranker.state));
+  const rerankerText = reranker?.error ? `unknown (${reranker.error})` : reranker ? `${reranker.container}: ${reranker.state}, ${reranker.health}` : "none (the rag profile is off)";
+  say("\n  Stack");
+  say(`    ${mark(reranker?.error ? false : rerankerRuns ? reranker.state === "running" && reranker.health === "healthy" : null)} reranker                  ${rerankerText}`);
   say(`\n  Ready: mail ${s.ready.mail ? "yes" : "NO"}, site ${s.ready.site ? "yes" : "NO"}\n`);
 }
 

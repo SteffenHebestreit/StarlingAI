@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 74 |
 | `bucket` | packages/core/src/config/schema.ts:482 | 25 |
-| `budget` | packages/core/src/config/schema.ts:1655 | 91 |
+| `budget` | packages/core/src/config/schema.ts:1655 | 92 |
 | `budgets` | packages/core/src/config/schema.ts:543 | 14 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:932 | 48 |
@@ -142,7 +142,7 @@ Every public schema field, where it is declared, and how many production files r
 | `disabled` | packages/core/src/config/schema.ts:833 | 110 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2016 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:2018 | 3 |
-| `discovery` | packages/core/src/config/schema.ts:624 | 39 |
+| `discovery` | packages/core/src/config/schema.ts:624 | 40 |
 | `discoveryPrefetch` | packages/core/src/config/schemas/orchestration.ts:613 | 6 |
 | `displayName` | packages/core/src/config/schema.ts:380 | 16 |
 | `distillSharedFacts` | packages/core/src/config/schemas/orchestration.ts:692 | 1 |
@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:942 | 130 |
 | `rolesClaim` | packages/core/src/config/schema.ts:418 | 1 |
-| `routing` | packages/core/src/config/schema.ts:260 | 106 |
+| `routing` | packages/core/src/config/schema.ts:260 | 108 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:851 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:808 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:759 | 1 |
@@ -472,7 +472,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:944 | 20 |
 | `tags` | packages/core/src/config/schema.ts:591 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1323 | 144 |
+| `task` | packages/core/src/config/schema.ts:1323 | 145 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1824 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:488 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:676 | 1 |
