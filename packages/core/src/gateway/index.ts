@@ -9,8 +9,7 @@ import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, verifyPassword, createToken } from "./auth.js";
-import { buildLoginUrl, handleCallback, stashLoginState, takeLoginState, oidcPublicBase, OIDC_CALLBACK_PATH } from "./oidc.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole } from "./auth.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
@@ -24,6 +23,7 @@ import { buildContentDisposition } from "./content-disposition.js";
 import { registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
+import { registerAuthRoutes } from "./auth-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
 import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
@@ -129,7 +129,6 @@ import { presentProposal, requestTextReader } from "./config-assistant-visibilit
 import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
-import { getExtensionAuthProvider } from "../extension/index.js";
 import { mountExtensionRoutes } from "../extension/loader.js";
 import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
 
@@ -970,163 +969,8 @@ export function createGateway() {
   // Routes are mounted unconditionally; behavior gates on auth.enabled at
   // request time so the operator can flip the flag without a restart.
 
-  // Public (pre-auth) endpoint so the login screen can pick the right default tab.
-  // With multi-user auth OFF there are no accounts — username/password login only
-  // 503s — so the client should default to the token tab. Exposes nothing sensitive
-  // (just whether account login is available).
-  app.get("/api/auth/mode", (c) => {
-    const auth = getConfig().auth;
-    return c.json({
-      authEnabled: auth.enabled === true,
-      // The identity backend, so the login screen shows "Sign in with SSO" (oidc)
-      // vs the username/password + token form (builtin).
-      provider: auth.enabled ? auth.provider : "builtin",
-    });
-  });
-
-  // ── OIDC SSO (auth.provider = "oidc") ────────────────────────────────────
-  // Start: redirect the browser to the IdP (PKCE + state stashed server-side).
-  app.get("/api/auth/oidc/login", async (c) => {
-    const auth = getConfig().auth;
-    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
-    try {
-      const origin = new URL(c.req.url).origin;
-      const { url, codeVerifier, state } = await buildLoginUrl(origin);
-      stashLoginState(state, codeVerifier);
-      return c.redirect(url);
-    } catch (err) {
-      log.error({ err: err instanceof Error ? err.message : String(err) }, "OIDC login start failed");
-      return c.json({ error: "OIDC login unavailable — check the issuer configuration" }, 503);
-    }
-  });
-
-  // Callback: exchange the code, mint OUR session JWT (mapping IdP roles), and hand
-  // it to the SPA via the URL FRAGMENT (never the query — fragments aren't logged or
-  // sent to the server). The SPA reads it on load, stores it, clears the hash, connects.
-  app.get(OIDC_CALLBACK_PATH, async (c) => {
-    const auth = getConfig().auth;
-    const origin = new URL(c.req.url).origin;
-    const base = oidcPublicBase(origin);
-    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
-    const state = c.req.query("state");
-    const codeVerifier = state ? takeLoginState(state) : null;
-    if (!state || !codeVerifier) return c.json({ error: "Invalid or expired login state" }, 400);
-    try {
-      const query = new URL(c.req.url).searchParams.toString();
-      const currentUrl = `${base}${OIDC_CALLBACK_PATH}?${query}`;
-      const identity = await handleCallback(currentUrl, codeVerifier, state);
-      const token = await createToken(identity.username, {
-        role: identity.role,
-        ...(identity.displayName ? { displayName: identity.displayName } : {}),
-      });
-      logAudit("auth_success", { username: identity.username, role: identity.role, via: "oidc" }, { userId: identity.username });
-      return c.redirect(`${base}/#sai_token=${encodeURIComponent(token)}`);
-    } catch (err) {
-      log.warn({ err: err instanceof Error ? err.message : String(err) }, "OIDC callback failed");
-      return c.redirect(`${base}/#sai_error=${encodeURIComponent("SSO login failed")}`);
-    }
-  });
-
-  app.post("/api/auth/login", async (c) => {
-    // Rate-limit identity: the real transport peer (spoof-proof, stamped by the
-    // node bridge) by default; only trust the client-controlled X-Forwarded-For
-    // when explicitly opted in for a reverse-proxy deployment.
-    const peer = c.req.header("x-gateway-peer-addr") ?? "unknown";
-    const ip = getConfig().auth.trustProxyHeader
-      ? (c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() || peer)
-      : peer;
-    const rate = checkAuthRateLimit(ip);
-    if (!rate.allowed) {
-      return c.json({ error: "Too many failed attempts. Try again later." }, 429);
-    }
-
-    let body: { username?: unknown; password?: unknown };
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
-    }
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    if (!username || !password) {
-      return c.json({ error: "Username and password are required" }, 400);
-    }
-
-    // Extension credential backend (e.g. a fork's encrypted user store)
-    // replaces the config-file user list entirely when registered.
-    const authProvider = getExtensionAuthProvider();
-    if (authProvider) {
-      const providerUser = await authProvider.verifyCredentials(username, password);
-      if (!providerUser) {
-        recordAuthFailure(ip);
-        return c.json({ error: "Invalid username or password" }, 401);
-      }
-      clearAuthFailures(ip);
-      // Merge the provider's free-form claims FIRST and strip reserved security
-      // keys, so a malicious/compromised extension provider cannot override the
-      // authoritative `role` (privilege escalation) or `sub` in the minted JWT.
-      // `scope` is reserved too: it marks capability tokens, which verifyToken
-      // rejects — a provider setting it would brick its own users' sessions.
-      const { role: _ignoredRole, sub: _ignoredSub, scope: _ignoredScope, ...safeClaims } = providerUser.claims ?? {};
-      const token = await createToken(providerUser.id, {
-        ...safeClaims,
-        role: providerUser.role,
-        ...(providerUser.displayName ? { displayName: providerUser.displayName } : {}),
-      });
-      logAudit("auth_success", { username: providerUser.username, role: providerUser.role }, { userId: providerUser.id });
-      return c.json({
-        token,
-        username: providerUser.username,
-        displayName: providerUser.displayName,
-        role: providerUser.role,
-        user: providerUser,
-      });
-    }
-
-    const authConfig = getConfig().auth;
-    if (!authConfig.enabled) {
-      return c.json({ error: "Username/password login is disabled. Set auth.enabled = true and configure auth.users[] to enable it." }, 503);
-    }
-
-    const user = authConfig.users.find((u) => u.username.toLowerCase() === username);
-    if (!user) {
-      recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-
-    const ok = await verifyPassword(password, user.passwordHash);
-    if (!ok) {
-      recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-
-    clearAuthFailures(ip);
-    const token = await createToken(user.username, {
-      role: user.role,
-      ...(user.displayName ? { displayName: user.displayName } : {}),
-    });
-    logAudit("auth_success", { username: user.username, role: user.role }, { userId: user.username });
-    return c.json({
-      token,
-      username: user.username,
-      displayName: user.displayName,
-      role: user.role,
-    });
-  });
-
-  app.get("/api/auth/me", async (c) => {
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    // With an extension credential backend, also verify the account still
-    // exists and surface its full public record (extra fields like kvnr).
-    const authProvider = getExtensionAuthProvider();
-    if (authProvider) {
-      const record = authProvider.getUserById(user.username);
-      if (!record) return c.json({ error: "User no longer exists" }, 401);
-      return c.json({ ...user, user: record });
-    }
-    return c.json(user);
-  });
+  // Sign-in: the login mode, OIDC SSO, username/password and /me — extracted to ./auth-routes.ts.
+  registerAuthRoutes(app);
 
   // ── User management (roster, create, delete) — extracted to ./user-routes.ts ──
   registerUserRoutes(app);
