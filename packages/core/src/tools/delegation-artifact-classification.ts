@@ -9,6 +9,8 @@
  */
 import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegation.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
+import { resolveRoutingTaxonomy, type TaxonomyBearing } from "../agent/routing-taxonomy.js";
+import { ARTIFACT_BUILDER_TOOLS, holdsArtifactBuilderTool } from "../agent/sub-agent-prompt-guidance.js";
 
 // ── Concrete evidence in a result's OWN text (2026-10-05) ──────────────────────────────────
 // Units of measure and currencies: symbols, not words of any language. Durations are left out
@@ -82,7 +84,9 @@ export function looksLikePlanningOnlyResult(result: string): boolean {
  * argument of delegate_to_agent, swarm_delegate, a parallel_delegate task, a run_task_graph node,
  * a record_plan step or create_ephemeral_agent — or the runtime, for a delegation it dispatches
  * itself (the corrective build). "file": the task is to create or change a file in the workspace.
- * "answer": the reply is the result. Undeclared reads as "answer" for every verdict on a run.
+ * "answer": the reply is the result. An undeclared delegation is judged by its agent's own
+ * deliverable kind (taxonomyDefaultDeliverable); with no kind to go by, a run that wrote nothing
+ * has missed nothing.
  *
  * WHY A DECLARATION. Whether a run that wrote nothing MISSED its deliverable used to be read off
  * the task text with WORKSPACE_MUTATION_TASK_RE, a table of ~50 English and German verbs. In E2E
@@ -108,6 +112,61 @@ export type DelegationDeliverable = "file" | "answer";
 export function readDelegationDeliverable(value: unknown): DelegationDeliverable | undefined {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return normalized === "file" || normalized === "answer" ? normalized : undefined;
+}
+
+/** Routing-taxonomy kinds (RoutingDeliverableSchema) whose product is a file the agent writes. */
+const FILE_DELIVERABLE_KINDS: ReadonlySet<string> = new Set([
+  "website", "deck", "code", "running_app", "chart", "diagram", "image",
+]);
+/** Kinds whose product is the reply itself: findings, a verdict, a plan, a message, a table. */
+const ANSWER_DELIVERABLE_KINDS: ReadonlySet<string> = new Set([
+  "evidence", "verdict", "plan", "message", "data_table",
+]);
+/** Where a config change lands when it lands in the workspace's own files. */
+const WORKSPACE_CHANGE_SURFACES: ReadonlySet<string> = new Set(["workspace", "swarm_internal"]);
+
+/**
+ * What an agent delivers by default, read off its routing taxonomy (resolveRoutingTaxonomy: an
+ * authored `routing` block, else the generated label in workspace/agents/59-routing.generated.jsonc).
+ * The verdict on a delegation that declared nothing uses it, so a builder that only narrates is
+ * still a missed deliverable without the orchestrator having said "file", and an evidence agent's
+ * prose answer is still its answer (7c4cbb28):
+ *  - website, deck, code, running_app, chart, diagram, image -> "file": the product is a file;
+ *  - prose_doc -> "file" for an agent holding a tool that renders a document, page or deck
+ *    (ARTIFACT_BUILDER_TOOLS), else "answer". content_writer and summarizer carry the same label;
+ *    only their tools tell the document builder from the agent that writes a summary inline;
+ *  - config_change -> "file" when the label's surface is the workspace or the swarm's own config
+ *    (swarm_maintainer edits agent shards), else "answer": a commit, an infrastructure change or a
+ *    calendar entry lands outside the workspace, and the same agents answer status questions;
+ *  - evidence, verdict, plan, message, data_table -> "answer";
+ *  - none -> no default. That is a coordinator: what it hands back is its specialists' work, and a
+ *    coordinator that called no tool at all is a no-op whatever it was asked (classifyDelegationResult).
+ * An agent whose kinds disagree, or with no label at all (an ephemeral or promoted agent, an
+ * unknown name), has no default either.
+ */
+export function taxonomyDefaultDeliverable(agentCfg: TaxonomyBearing | undefined): DelegationDeliverable | undefined {
+  const taxonomy = resolveRoutingTaxonomy(agentCfg);
+  const kinds = taxonomy?.deliverable ?? [];
+  if (!taxonomy || kinds.length === 0) return undefined;
+  const byKind = (kind: string): DelegationDeliverable | undefined => {
+    if (FILE_DELIVERABLE_KINDS.has(kind)) return "file";
+    if (ANSWER_DELIVERABLE_KINDS.has(kind)) return "answer";
+    if (kind === "prose_doc") return holdsArtifactBuilderTool(agentCfg?.tools) ? "file" : "answer";
+    if (kind === "config_change") {
+      return (taxonomy.surface ?? []).some((surface) => WORKSPACE_CHANGE_SURFACES.has(surface)) ? "file" : "answer";
+    }
+    return undefined;
+  };
+  const defaults = new Set(kinds.map(byKind));
+  return defaults.size === 1 ? [...defaults][0] : undefined;
+}
+
+/** What a run is judged against: the delegation's declaration, else its agent's deliverable kind. */
+export function effectiveDelegationDeliverable(
+  declared: DelegationDeliverable | undefined,
+  agentCfg: TaxonomyBearing | undefined,
+): DelegationDeliverable | undefined {
+  return declared ?? taxonomyDefaultDeliverable(agentCfg);
 }
 
 /** The `deliverable` parameter, one definition for every tool that dispatches a delegation. */
@@ -241,11 +300,12 @@ export const PRODUCTIVE_COORDINATOR_TOOLS = new Set([
 ]);
 
 /**
- * The run was declared to produce a file (`deliverable: "file"`), held a tool that writes one,
- * and called none — nor, for an agent that can delegate, handed the work on. Without that
- * declaration a run that answers in prose has not missed anything, whatever tools it holds:
- * nearly every specialist holds write_file and edit_file to keep notes, and code_analyst's prose
- * diagnosis of pasted code is the deliverable (E2E 7c4cbb28; see DelegationDeliverable).
+ * The run was to produce a file (`deliverable` is the effective one: declared, else the agent's
+ * kind — effectiveDelegationDeliverable), held a tool that writes one, and called none — nor, for
+ * an agent that can delegate, handed the work on. Otherwise a run that answers in prose has not
+ * missed anything, whatever tools it holds: nearly every specialist holds write_file and
+ * edit_file to keep notes, and code_analyst's prose diagnosis of pasted code is the deliverable
+ * (E2E 7c4cbb28; see DelegationDeliverable).
  */
 export function looksLikeArtifactDeliverableMiss(
   task: string,
@@ -279,16 +339,23 @@ export function looksLikeArtifactDeliverableMiss(
   // narrative-only signal we have; we must catch it.
 
   const availableArtifactTools = (agentCfg.tools ?? []).filter((t) => ARTIFACT_PRODUCING_TOOLS.has(t));
-  if (availableArtifactTools.length === 0) return false;
+  // An agent that can delegate produces a file by handing it on, so it is judged even without a
+  // file-writing tool of its own. The shipped mission_coordinator holds none: asked for a file,
+  // a run that read context and narrated "Let me build this…" (the c903b401 shape) went unjudged.
+  const couldDelegate = (agentCfg.tools ?? []).some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
+  if (availableArtifactTools.length === 0 && !couldDelegate) return false;
 
   const calledTools = new Set(stats.toolNames ?? []);
-  const calledArtifact = [...calledTools].some((t) => ARTIFACT_PRODUCING_TOOLS.has(t));
+  // A run that served or checked a built artifact (serve_app, verify_page, verify_app — the
+  // checkers in ARTIFACT_BUILDER_TOOLS) worked on the deliverable; it did not narrate instead of
+  // building. A builder is judged by its own kind without a declaration, so its "is the page
+  // working?" and "restart the app" delegations reach this check too.
+  const calledArtifact = [...calledTools].some((t) => ARTIFACT_PRODUCING_TOOLS.has(t) || ARTIFACT_BUILDER_TOOLS.has(t));
   if (calledArtifact) return false;
 
   // If the agent could delegate (coordinator-shaped) and actually did,
   // that's a legitimate alternative path — the work might still happen
   // downstream. Don't flag it here.
-  const couldDelegate = (agentCfg.tools ?? []).some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
   if (couldDelegate) {
     const delegated = [...calledTools].some((t) => PRODUCTIVE_COORDINATOR_TOOLS.has(t));
     if (delegated) return false;
@@ -654,6 +721,8 @@ export function classifyDelegationResult(
   const leftEvidence = artifacts.length > 0 || (!allWorkFailed && carriesConcreteEvidence(output, task));
   const proseDecides = !explicitVerdict && !leftEvidence;
   const planningOnly = !explicitVerdict && artifacts.length === 0 && looksLikePlanningOnlyResult(output);
+  // What the run is judged against: its delegation's declaration, else its agent's own kind.
+  const deliverable = effectiveDelegationDeliverable(run.deliverable, agentCfg);
 
   // ── Coordinator no-op ──────────────────────────────────────────────────
   // A coordinator that completed without calling any delegation/evidence tools
@@ -680,16 +749,16 @@ export function classifyDelegationResult(
     // where the coordinator DID call some non-work tool (e.g. discovery) but
     // never delegated or shared evidence.
     // A coordinator that also owns artifact tools (write_file, generate_*,
-    // shell_exec, browser_*) and was declared to produce a file, narrating
-    // "I'll build this" without calling them, must stay an artifact-
-    // deliverable-miss failure below, which carries the "expected write_file"
-    // hint — so don't pre-empt it here. Without that declaration the miss
-    // check does not fire, and a zero-tool coordinator is a no-op like any
-    // other (it was exempt only so the miss check could name the tool).
+    // shell_exec, browser_*) and is to produce a file (declared, or its own
+    // kind), narrating "I'll build this" without calling them, must stay an
+    // artifact-deliverable-miss failure below, which carries the "expected
+    // write_file" hint — so don't pre-empt it here. Otherwise the miss check
+    // does not fire, and a zero-tool coordinator is a no-op like any other
+    // (it was exempt only so the miss check could name the tool).
     const hasArtifactTools = (agentCfg?.tools ?? []).some((name) =>
       /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
     );
-    const leftToArtifactMiss = hasArtifactTools && run.deliverable === "file";
+    const leftToArtifactMiss = hasArtifactTools && deliverable === "file";
     const calledNoTools =
       !leftToArtifactMiss && (stats.toolCount ?? 0) === 0 && (stats.toolNames ?? []).length === 0;
     if (!actuallyWorked && (calledNoTools || output.trim().length < 80 || planningOnly)) {
@@ -701,17 +770,17 @@ export function classifyDelegationResult(
     return "failure";
   }
 
-  if (looksLikeReadOnlyMutationMiss(output, stats, run.deliverable)) {
+  if (looksLikeReadOnlyMutationMiss(output, stats, deliverable)) {
     return "failure";
   }
 
   // Language-agnostic fallback: the agent had artifact-producing tools
-  // (write_file, generate_website, …) AND the delegation was declared to
-  // produce a file AND the agent called none of them AND, for coordinators,
+  // (write_file, generate_website, …) AND the run was to produce a file
+  // (declared, or its agent's kind) AND it called none of them AND, for coordinators,
   // didn't delegate either. Catches "Let me build this as a complete
   // single-file HTML application" / "Die Website wurde erstellt" / "This is
   // a substantial deliverable…" — phrasings the planning-only regex misses.
-  if (looksLikeArtifactDeliverableMiss(task, stats, agentCfg, run.deliverable)) {
+  if (looksLikeArtifactDeliverableMiss(task, stats, agentCfg, deliverable)) {
     return "failure";
   }
 
@@ -792,7 +861,8 @@ export function isNarrativeOnlyDeliverableFailure(
 ): boolean {
   if (classification !== "failure") return false;
   if (looksLikeContainerLevelFailure(output)) return false;
-  return looksLikePlanningOnlyResult(output) || looksLikeArtifactDeliverableMiss(task, stats, agentCfg, deliverable);
+  return looksLikePlanningOnlyResult(output)
+    || looksLikeArtifactDeliverableMiss(task, stats, agentCfg, effectiveDelegationDeliverable(deliverable, agentCfg));
 }
 
 export function formatArtifactReferencesForSharedContext(

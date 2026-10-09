@@ -126,7 +126,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultPrometheus` | packages/core/src/config/schema.ts:1155 | 1 |
 | `defaultQuality` | packages/core/src/config/schemas/multimodal.ts:51 | 6 |
 | `defaultRepo` | packages/core/src/config/schema.ts:1172 | 1 |
-| `defaults` | packages/core/src/config/schema.ts:1720 | 100 |
+| `defaults` | packages/core/src/config/schema.ts:1720 | 101 |
 | `defaultSpeaker` | packages/core/src/config/schemas/multimodal.ts:47 | 7 |
 | `defaultSteps` | packages/core/src/config/schemas/multimodal.ts:205 | 4 |
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:48 | 6 |
@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 29 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1093 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1091 | 1 |
-| `label` | packages/core/src/config/schema.ts:273 | 147 |
+| `label` | packages/core/src/config/schema.ts:273 | 148 |
 | `labeledAt` | packages/core/src/config/schema.ts:927 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:926 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 95 |
@@ -466,7 +466,7 @@ Every public schema field, where it is declared, and how many production files r
 | `submitSelector` | packages/core/src/config/schema.ts:813 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1550 | 1 |
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:196 | 1 |
-| `surface` | packages/core/src/config/schema.ts:916 | 94 |
+| `surface` | packages/core/src/config/schema.ts:916 | 95 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:833 | 2 |
 | `synthesis` | packages/core/src/config/schema.ts:261 | 60 |
 | `systemPrompt` | packages/core/src/config/schema.ts:944 | 20 |
