@@ -6,12 +6,20 @@
  * Scenarios whose expectations read rows the runtime builds are also checked against rows built by
  * the runtime's own code, so a scenario cannot pass on the regression it is there to catch.
  */
-import { describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
+import { Hono } from "hono";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { loadScenarios } from "../e2e/loader.js";
 import { resolveE2EPaths } from "../e2e/paths.js";
 import { evaluateEventExpectations } from "../e2e/assertions.js";
+import { E2E_ACCOUNTS } from "../e2e/setup.js";
 import { buildIntentShadowRowData, type IntentShadowOutcome } from "../agent/intent-shadow.js";
+import * as configLoader from "../config/loader.js";
+import { registerWorkspaceRoutes } from "../gateway/workspace-routes.js";
+import { createToken } from "../gateway/auth.js";
+import { safeUserSegment } from "../runtime/user-scope.js";
 
 describe("e2e scenario files", () => {
   const paths = resolveE2EPaths();
@@ -96,6 +104,58 @@ describe("e2e scenario files", () => {
     // The unasked fix, wherever the source sits.
     for (const path of ["cart.js", "generated/cart.js"]) {
       expect(namesCartSource(failures(call("edit_file", path))), path).toBe(true);
+    }
+  });
+
+  it("the missing-file scenario removes a file an earlier run left behind before it checks that the file is absent", async () => {
+    // A run whose coder created sommeraktion.html anyway left it in the eval workspace, and every
+    // later run failed its 404 check before it sent a turn. The steps before the first turn are
+    // replayed against the real workspace routes, with that file left behind and without it.
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const scenario = scenarios.find((entry) => entry.scenario.id === "guards-no-claimed-update-of-missing-file")?.scenario;
+    expect(scenario).toBeDefined();
+    const steps = scenario!.steps;
+    const setup = steps.slice(0, steps.findIndex((step) => step.kind === "turn")).flatMap((step) => step.kind === "http" ? [step] : []);
+    const absenceCheck = setup.find((step) => step.method === "GET");
+    expect(absenceCheck).toBeDefined();
+    const leftover = new URL(absenceCheck!.path, "http://gateway").searchParams.get("path") ?? "";
+    expect(leftover).not.toBe("");
+    const accountOf = (identity: string | undefined) => E2E_ACCOUNTS.find((account) => account.identity === (identity ?? scenario!.identity ?? "eval"))!;
+
+    const ws = mkdtempSync(join(tmpdir(), "sai-e2e-leftover-"));
+    process.env["SAI_JWT_SECRET"] = "e2e-scenarios-valid-leftover-test-secret-key";
+    const spy = vi.spyOn(configLoader, "getConfig").mockReturnValue({
+      auth: { enabled: true, provider: "builtin", users: [] },
+      workspacePath: ws,
+      gateway: { jwtSecret: "e2e-scenarios-valid-leftover-test-secret-key" },
+    } as unknown as ReturnType<typeof configLoader.getConfig>);
+    try {
+      const app = new Hono();
+      registerWorkspaceRoutes(app);
+      // The status check of runHttpStep (e2e/runner.ts), on the eval account's own token.
+      const replay = async (): Promise<string[]> => {
+        const failures: string[] = [];
+        for (const step of setup) {
+          const account = accountOf(step.as);
+          const token = await createToken(account.username, { role: account.role });
+          const res = await app.request(step.path, { method: step.method, headers: { Authorization: `Bearer ${token}` } });
+          const expected = step.expect?.status;
+          const allowed = expected === undefined ? null : Array.isArray(expected) ? expected : [expected];
+          if (allowed ? !allowed.includes(res.status) : res.status < 200 || res.status >= 300) failures.push(`${step.id}: HTTP ${res.status}`);
+        }
+        return failures;
+      };
+      const file = join(ws, "users", safeUserSegment(accountOf(absenceCheck!.as).username), leftover);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "<h1>Sommeraktion 2026</h1>", "utf8");
+
+      expect(await replay()).toEqual([]);
+      expect(existsSync(file)).toBe(false);
+      // Nothing left behind: the delete answers 404 and the attempt goes on.
+      expect(await replay()).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      rmSync(ws, { recursive: true, force: true });
     }
   });
 });

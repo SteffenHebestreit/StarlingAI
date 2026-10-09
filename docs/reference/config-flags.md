@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:814 | 56 |
 | `oneLiner` | packages/core/src/config/schema.ts:923 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:105 | 2 |
-| `operator` | packages/core/src/config/schema.ts:396 | 118 |
+| `operator` | packages/core/src/config/schema.ts:396 | 119 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1778 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1149 | 1 |
@@ -345,7 +345,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:1985 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:56 | 53 |
+| `points` | packages/core/src/config/schemas/decisions.ts:56 | 54 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:327 | 39 |
 | `primary` | packages/core/src/config/schema.ts:111 | 70 |
@@ -404,7 +404,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:587 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:942 | 132 |
+| `role` | packages/core/src/config/schema.ts:942 | 133 |
 | `rolesClaim` | packages/core/src/config/schema.ts:418 | 1 |
 | `routing` | packages/core/src/config/schema.ts:260 | 108 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:852 | 1 |
@@ -520,7 +520,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 20 |
-| `viewer` | packages/core/src/config/schema.ts:397 | 24 |
+| `viewer` | packages/core/src/config/schema.ts:397 | 25 |
 | `virtualization` | packages/core/src/config/schema.ts:1111 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |
