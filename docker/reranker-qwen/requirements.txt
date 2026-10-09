@@ -1,5 +1,13 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
-sentence-transformers>=3.0
-# Qwen3-Reranker needs a recent transformers
-transformers>=4.51
+# Bounded below the next majors, so a rebuild cannot move the model onto new libraries
+# unseen. Unbounded, the October 2026 rebuild took sentence-transformers 6.1.0 and
+# transformers 5.19.0; there a failed load (two loads at once) left the whole process
+# unable to load the model again, while this set recovers on the next load.
+# The Qwen3-Reranker repo scores through a LogitScore module (yes/no token logits) that
+# sentence-transformers 5.4 introduced; an older release builds a classification head
+# with random weights and returns noise. Qwen3 itself needs transformers 4.51.
+sentence-transformers>=5.4,<6
+transformers>=4.51,<5
+# transformers 4.x gets no more releases, so torch stays on the minor line it was checked with.
+torch>=2.4,<2.15
