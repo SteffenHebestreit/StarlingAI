@@ -59,6 +59,18 @@ describe("workspace catalog integrity", () => {
     expect(browserAgent?.systemPrompt).toContain("use those saved URLs instead of the homepage or a guessed path");
   });
 
+  // In the E2E order-form run the form refused express shipping for the article the user named.
+  // browser_agent then chose standard shipping itself, resubmitted, and reported an order the user
+  // had not asked for. Its prompt tells it to finish the whole task and to stop only at a hard
+  // blocker, and said nothing about a refused value, so the refusal read as an obstacle to work
+  // around. The line under that rule makes it a stop.
+  it("tells browser_agent that a refused submission is reported, not resubmitted with other choices", () => {
+    const prompt = loadAgentCatalog().subAgents["browser_agent"]?.systemPrompt ?? "";
+    const rule = "A form that refuses a value the user chose (validation error, refused option) IS a hard blocker: report the page's error text and stop; never resubmit with choices the user did not make.";
+    expect(prompt).toContain(rule);
+    expect(prompt.indexOf(rule)).toBeGreaterThan(prompt.indexOf("FINISH THE WHOLE TASK IN ONE RUN"));
+  });
+
   // search_agents ranks agents by an embedding of their catalog text, and the file format is often
   // the most specific word in a request. document_intake names DOCX as a format it READS, while no
   // agent that WRITES one said so: content_writer held generate_docx and generate_pptx, and its own
