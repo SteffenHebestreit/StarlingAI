@@ -1869,8 +1869,20 @@ async function _runTurn(
   // arm asks the intent readout too (startProduceIntentRead, the same read as the routing arm's),
   // started here, the moment the lists have fired, so its two calls overlap the judge, the document
   // retrieval and the prompt assembly. A reading that the request asks for an answer (converse,
-  // GATHER, VERIFY) releases this arm. Without a reading the word lists decide as they always did:
-  // a Claude routing tier, or a server without token logprobs, never gives one, and on such a
+  // GATHER, VERIFY) releases this arm.
+  // That releases the questions the readout reads as questions, not every question. On the probe
+  // of 2026-10-09 (the Halo, the read as asked here) a question about a tool or a technique read an
+  // answer every time ("… in PowerPoint?", "… with Hugo?", "… in Excel?"), but a question how to
+  // make the thing itself, with no tool named, read PRODUCE in both orders every time: "How do I
+  // make a good slide about tides?", "How can I build a website for my bakery?", "Wie erstelle ich
+  // ein PDF-Flugblatt?" and seven more the word lists fire on, 30 of the 54 reads of those 18
+  // questions. Such a question is still forced.
+  // Nor does every build stay forced: the E2E request to run the verified_research_brief workflow
+  // reads GATHER in the served order, so this arm releases it; there the source-sensitivity
+  // judge's research requirement forces the first call (its readout read yes on 5 of 5 probe reads).
+  // Without a reading the word lists decide as they always did, a question among them included:
+  // that is an exception to the decision of 2026-10-09, kept until the user rules on it. A Claude
+  // routing tier, or a server without token logprobs, never gives a reading, and on such a
   // deployment every --auto build would otherwise lose the call that keeps it from being answered
   // inline; on the Halo the read, both orders at once and the mode line alone, came back on all
   // 151 probe reads outside a short server outage, so a timeout there is rare. The routing arm,
@@ -2967,7 +2979,8 @@ async function _runTurn(
       // The word lists also fire on a question about making one ("Wie erstelle ich eine
       // Präsentation in PowerPoint?"), so the intent readout is asked as well (started where the
       // lists fired), and its reading that the request asks for an answer releases the arm; without
-      // a reading the lists decide as before.
+      // a reading the lists decide as before. A question the readout reads as work ("How do I make
+      // a good slide about tides?") is still forced (see where the read starts).
       // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable): the word
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
@@ -2975,7 +2988,8 @@ async function _runTurn(
       // flag and autoApprove), and is true only when that gate passed. It reads the top agent's
       // tools, not the request, so it forces only with the intent readout's word that the request
       // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
-      // a question is not forced, and without a reading the orchestrator decides as on any turn.
+      // a question the readout reads as an answer is not forced, and without a reading the
+      // orchestrator decides as on any turn.
       // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
         (autoArtifactArmed && deliverableIntent.wantsArtifact && intentReadVerdict !== "ask")

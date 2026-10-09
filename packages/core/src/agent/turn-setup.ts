@@ -165,8 +165,9 @@ export type ProduceIntentVerdict = "produce" | "ask";
  * read converse in the served order and PRODUCE in the reversed one on all 47 reads of the probe of
  * 2026-10-09, and the average landed on PRODUCE on 5 of them. On 64 build reads the rule changed no
  * verdict: every build read work in both orders except a request to run a research workflow, which
- * read GATHER in one order and in the average too. Requiring both orders costs a build nothing
- * there, and keeps a question whose orders disagree from being forced.
+ * read GATHER in one order and in the average too, so either rule reads it as an answer and the
+ * readout does not force it (agent/runtime.ts says what does). Requiring both orders costs a build
+ * nothing there, and keeps a question whose orders disagree from being forced.
  */
 export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice" | "orders"> | undefined): ProduceIntentVerdict | null {
   if (!mode) return null;
@@ -200,9 +201,16 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * for this decision. The routing arm does not force on null: a question is not to be forced, and
  * without a reading the orchestrator decides as it does on any other turn.
  *
+ * The verdict keeps a question from being forced only when the readout reads it as one. A question
+ * how to make a thing that names no tool to make it with ("How do I make a good slide about
+ * tides?") read PRODUCE in both orders on every read of the probe of 2026-10-09, and is forced like
+ * the request to make it (agent/runtime.ts has the measurement).
+ *
  * The word-list arm asks the same read (`arm: "word_list"`): the deliverable-intent word lists fire
  * on a question about making something as on a request to make it. There "ask" releases the forced
- * call and null leaves it to the word lists, as before (agent/runtime.ts says why).
+ * call and null leaves it to the word lists, as before, which forces a question among them too: an
+ * exception to the decision of 2026-10-09 that the user has yet to rule on (agent/runtime.ts says
+ * why it was kept).
  *
  * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
  * reading the mode's choice, top probability, margin, runner-up, each order's own choice and whether
