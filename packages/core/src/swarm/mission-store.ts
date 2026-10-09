@@ -287,6 +287,11 @@ class PostgresMissionStore implements MissionStore {
         ON mission_events (mission_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
       CREATE INDEX IF NOT EXISTS idx_missions_session ON missions (root_session_id);
     `);
+      // The account a mission belongs to, by its immutable id (user_id is a username, which a
+      // re-created account shares). Added here, under the lock, so the account migration only
+      // fills it in.
+      await client.query(`ALTER TABLE missions ADD COLUMN IF NOT EXISTS account_id TEXT`);
+      await client.query(`CREATE INDEX IF NOT EXISTS idx_missions_account ON missions (account_id)`);
       await client.query("COMMIT");
       log.info("Mission store tables ready");
     } catch (error) {

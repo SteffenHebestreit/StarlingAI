@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:449 | 17 |
 | `accessKeyId` | packages/core/src/config/schema.ts:509 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 98 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 100 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1724 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1755 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1287 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:571 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:733 | 11 |
-| `name` | packages/core/src/config/schema.ts:2023 | 376 |
+| `name` | packages/core/src/config/schema.ts:2023 | 377 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:734 | 57 |
 | `node` | packages/core/src/config/schema.ts:1092 | 242 |
@@ -511,7 +511,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:836 | 11 |
 | `userAgent` | packages/core/src/config/schema.ts:1199 | 3 |
-| `username` | packages/core/src/config/schema.ts:377 | 54 |
+| `username` | packages/core/src/config/schema.ts:377 | 56 |
 | `usernameClaim` | packages/core/src/config/schema.ts:442 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:837 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:627 | 4 |

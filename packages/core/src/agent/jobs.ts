@@ -589,6 +589,11 @@ class PostgresSceneJobStore implements SceneJobStore {
       CREATE INDEX IF NOT EXISTS idx_scene_jobs_heartbeat ON scene_jobs (heartbeat_at);
     `);
     await this.pool.query(`ALTER TABLE scene_jobs ADD COLUMN IF NOT EXISTS definition_type TEXT`);
+    // The account a job runs for, by its immutable id: user_id is a username, and a name deleted
+    // and created again is another person. The column exists from init on, so the account
+    // migration only fills it in and never changes the table under a running gateway.
+    await this.pool.query(`ALTER TABLE scene_jobs ADD COLUMN IF NOT EXISTS account_id TEXT`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_scene_jobs_account ON scene_jobs (account_id)`);
     await this.recoverStaleJobs(STALE_JOB_MS);
     log.info("Scene job table ready");
   }
