@@ -62,6 +62,7 @@ const MERMAID_REQUEST = "Zeichne den folgenden Bestellablauf als Mermaid-Flussdi
   + "Zahlung prüfen → wenn bezahlt: Ware kommissionieren → Versand → Zustellung; wenn nicht bezahlt: "
   + "Zahlungserinnerung senden → nach 14 Tagen ohne Zahlung: Bestellung stornieren.";
 const SMALL_TALK = "how was your weekend?";
+const WEBSITE_REQUEST = "build me a website about local bird species";
 
 /** Agents as the shipped roster declares their tools (workspace/agents). */
 const SUB_AGENTS = {
@@ -225,6 +226,20 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
   it("with autonomousModeAntiRefusal off the same --auto turn is not forced", async () => {
     const loaded = await load({ antiRefusal: false, capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
     expect(await firstCallOptions(loaded, MERMAID_REQUEST, true)).toBeUndefined();
+  });
+
+  // The flag and autoApprove are checked once per arm: where the prefetch starts for the routing
+  // arm (the two cases above), and in autonomousArtifactBuild for the word-list arm (this case).
+  it("the word-list arm keeps its own gates: a request the lists see is forced only on --auto with the flag on", async () => {
+    const onAuto = await load({});
+    expect(onAuto.deliverableIntent.classifyDeliverableIntent(WEBSITE_REQUEST).wantsArtifact).toBe(true);
+    expect((await firstCallOptions(onAuto, WEBSITE_REQUEST, true))?.toolChoice).toBe("required");
+    streamMock.mockReset();
+    const withoutAuto = await load({});
+    expect(await firstCallOptions(withoutAuto, WEBSITE_REQUEST, false)).toBeUndefined();
+    streamMock.mockReset();
+    const flagOff = await load({ antiRefusal: false });
+    expect(await firstCallOptions(flagOff, WEBSITE_REQUEST, true)).toBeUndefined();
   });
 
   it("when the prefetch did not run the turn is not forced", async () => {
