@@ -125,6 +125,20 @@ describe("scene and job runs of a re-created account", () => {
     await jobs.shutdownSceneJobStore();
   });
 
+  it("in Postgres: an ended account's queued and running runs are found by account_id", async () => {
+    const { jobs } = await deployment({ postgres: true });
+    await jobs.initSceneJobStore();
+    recorded.length = 0;
+    expect(await jobs.cancelAccountJobs(oldAlice.id)).toEqual([]);
+    const selects = recorded.filter((call) => /SELECT \*\s+FROM scene_jobs/.test(call.sql));
+    expect(selects.map((call) => call.params)).toEqual([["queued", oldAlice.id, 200], ["running", oldAlice.id, 200]]);
+    for (const call of selects) {
+      expect(call.sql).toMatch(/WHERE status = \$1 AND account_id = \$2/);
+      expect(call.sql).not.toMatch(/user_id =/);
+    }
+    await jobs.shutdownSceneJobStore();
+  });
+
   it("with one operator, a listing by owner is by the name, as before", async () => {
     const { jobs } = await deployment({ authEnabled: false });
     const alices = await jobs.createJob({ sceneName: "a", userId: "alice", task: "a", turnTimeoutMs: 30_000 });

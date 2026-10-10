@@ -24,14 +24,17 @@ import {
   changeAccountRegistry,
   type AccountRegistryEntry,
 } from "../runtime/account-registry.js";
-import { USERS_SUBDIR, userStateBaseDir } from "../runtime/user-scope.js";
+import { builtinTombstoneHolder } from "../runtime/account-tombstones.js";
+import { USERS_SUBDIR, isLegacyIdentity, userStateBaseDir } from "../runtime/user-scope.js";
 import { OidcSignInRefused, type OidcIdentity } from "./oidc.js";
 
 /**
  * Whether data was stored under this username before account ids existed: a per-user directory
- * named for it in any of the three bases, or a session it owns. Such data is not handed to whoever
- * signs in with the name first; the account waits for an admin (the migration adopts it, or the
- * admin declines it and the data stays where it is).
+ * named for it in any of the three bases, or a session from before ids that names it. Such data is
+ * not handed to whoever signs in with the name first; the account waits for an admin (the migration
+ * adopts it, or the admin declines it and the data stays where it is). A session that names an
+ * account is that account's, not the name's: a retired account's chats, its name released, do not
+ * hold the next subject who claims the name.
  *
  * A bootstrap token's name does not count. Its data stays the bootstrap token's: an IdP user called
  * "admin" (the shipped realm has one) starts empty, apart from the token's `admin` bucket.
@@ -42,7 +45,7 @@ export function hasLegacyAccountData(username: string): boolean {
   const segment = safeUserSegment(name);
   const bases = [getConfig().workspacePath, userMemoryBaseDir(), userStateBaseDir()];
   if (bases.some((base) => existsSync(resolve(base, USERS_SUBDIR, segment)))) return true;
-  return getAllSessions({ includeArchived: true }).some((session) => session.userId?.toLowerCase() === name);
+  return getAllSessions({ includeArchived: true }).some((session) => session.userId?.toLowerCase() === name && isLegacyIdentity(session.identity()));
 }
 
 /** Why a username is not free for a new identity-provider subject, or undefined when it is. */
@@ -52,6 +55,11 @@ function usernameUnavailable(username: string): string | undefined {
   if (holder) return `held by account ${holder.id}`;
   // Mixed mode: builtin accounts sign in under provider "oidc" too, and a name is one person's.
   if (getConfig().auth.users.some((user) => user.username.toLowerCase() === username)) return "held by a builtin account";
+  // A deleted builtin account's name stays held: the grants an admin wrote for it name it still, and
+  // a subject that claimed it would hold them.
+  const tombstone = builtinTombstoneHolder(username);
+  if (tombstone === "unreadable") return "the account tombstones cannot be read";
+  if (tombstone) return "held by a deleted builtin account";
   return undefined;
 }
 

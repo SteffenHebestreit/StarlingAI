@@ -19,6 +19,7 @@ import { stopManagedChannels, syncAllChannels } from "./channels/runtime.js";
 import { runChannelHealthChecks } from "./channels/registry.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./runtime/status.js";
 import { loadAccountRegistry } from "./runtime/account-registry.js";
+import { loadAccountTombstones } from "./runtime/account-tombstones.js";
 import { reportBareAclEntries } from "./guardrails/acl-entries-check.js";
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
@@ -114,10 +115,13 @@ export async function main() {
   // Seed in-process session cache from Redis (multi-instance session sharding).
   await initSessionRedis();
 
-  // The account registry (identity-provider accounts), read now so a file that cannot be read is
-  // reported at boot rather than at the first sign-in. Only under multi-user auth, which is the
-  // only mode that consults it.
-  if (getConfig().auth?.enabled === true) loadAccountRegistry();
+  // The account registry (identity-provider accounts) and the tombstones of ended accounts, read
+  // now so a file that cannot be read is reported at boot rather than at the first sign-in or
+  // channel message. Only under multi-user auth, which is the only mode that consults them.
+  if (getConfig().auth?.enabled === true) {
+    loadAccountRegistry();
+    loadAccountTombstones();
+  }
   // allowedUsers entries are matched by identity kind under multi-user auth: name the bare ones that
   // no account holds, which grant nothing any more (a channel sender needs `principal:<raw>`).
   reportBareAclEntries();

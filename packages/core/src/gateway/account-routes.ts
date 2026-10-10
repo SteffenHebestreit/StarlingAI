@@ -11,8 +11,9 @@
  * An OIDC account's username is frozen at its first sign-in (gateway/oidc-accounts.ts): access
  * lists and other people's grants name it, so it changes only when an admin approves, and a name an
  * account held is never handed to anyone else unless an admin releases it. Every change is audited.
- * Renaming or retiring an account closes its open sockets; its tokens stop resolving at once,
- * because auth.ts requires the account to be active and to hold the token's username.
+ * Renaming an account closes its open sockets; its tokens stop resolving at once, because auth.ts
+ * requires the account to be active and to hold the token's username. Retiring one ends everything
+ * it has running as well (gateway/account-lifecycle.ts) and records a tombstone.
  */
 import type { Hono } from "hono";
 import { getConfig } from "../config/loader.js";
@@ -26,8 +27,11 @@ import {
   changeAccountRegistry,
   type AccountRegistryEntry,
 } from "../runtime/account-registry.js";
+import { builtinTombstoneHolder, recordAccountTombstone } from "../runtime/account-tombstones.js";
+import { aclEntriesNamingAccount } from "../guardrails/acl-entries-check.js";
 import { authenticatedUser, userHasRole } from "./auth.js";
 import { closeAccountConnections } from "./account-connections.js";
+import { endAccountActivity } from "./account-lifecycle.js";
 
 const log = childLogger("gateway:account-routes");
 
@@ -80,6 +84,7 @@ export function registerAccountRoutes(app: Hono): void {
       const holder = accountRegistryUsernameHolder(requested);
       if (holder === "unreadable" || (holder && holder.id !== entry.id)) return { status: 409, error: `'${requested}' is held by another account` };
       if (getConfig().auth.users.some((user) => user.username.toLowerCase() === requested)) return { status: 409, error: `'${requested}' is held by a builtin account` };
+      if (builtinTombstoneHolder(requested)) return { status: 409, error: `'${requested}' is held by a deleted builtin account` };
       previous = entry.username;
       // The old name stays held by this account, so a grant an admin wrote for it does not pass to
       // whoever claims it next.
@@ -103,9 +108,28 @@ export function registerAccountRoutes(app: Hono): void {
       entry.retiredAt = new Date().toISOString();
     });
     if (result.status !== 200) return c.json({ error: result.error }, result.status);
-    closeAccountConnections(result.entry.id, "account retired");
-    logAudit("auth_account_retired", { actor: gate.actor.username, account: result.entry.id, username: result.entry.username }, { userId: gate.actor.username, severity: "warn" });
-    return c.json({ account: result.entry });
+    const retired = result.entry;
+    // What the account has running ends with it, as with a deleted builtin account: its sockets,
+    // sessions and turns, jobs, schedules, MCP sessions and A2A tasks.
+    const ended = await endAccountActivity(retired.id, "account retired", gate.actor.username);
+    // The registry entry holds the account's names until an admin releases them; the tombstone only
+    // records the retirement beside the deleted builtin accounts, so a failed write is reported and
+    // stops nothing.
+    try {
+      recordAccountTombstone({ id: retired.id, username: retired.username, kind: "oidc", retiredAt: retired.retiredAt ?? new Date().toISOString(), by: gate.actor.username });
+    } catch (err) {
+      log.error({ err, account: retired.id }, "Could not record the retired account's tombstone");
+      ended.failed.push("tombstone");
+    }
+    const aclReferences = aclEntriesNamingAccount(retired.username, retired.id);
+    logAudit("auth_account_retired", {
+      actor: gate.actor.username,
+      account: retired.id,
+      username: retired.username,
+      ended,
+      aclReferences,
+    }, { userId: gate.actor.username, severity: "warn" });
+    return c.json({ account: retired, ended, aclReferences });
   });
 
   app.post("/api/admin/accounts/:id/release-username", async (c) => {

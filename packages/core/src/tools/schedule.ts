@@ -74,7 +74,9 @@ registerTool({
     const mayManage = await scheduleManager(ctx);
     const recs = listScheduledTaskRecords().filter(mayManage);
     if (recs.length === 0) return { success: true, output: "No scheduled tasks.", metadata: { count: 0 } };
-    const lines = recs.map((r) => `- **${r.id}** "${r.label}" — \`${r.cron}\` — ${r.task}`);
+    // A schedule of a deleted or retired account stays listed (an admin removes it) and says that it
+    // no longer runs.
+    const lines = recs.map((r) => `- **${r.id}** "${r.label}" — \`${r.cron}\` — ${r.task}${r.disabled ? ` — disabled (${r.disabled.reason})` : ""}`);
     return { success: true, output: `## Scheduled tasks (${recs.length})\n\n${lines.join("\n")}`, metadata: { count: recs.length } };
   },
 });

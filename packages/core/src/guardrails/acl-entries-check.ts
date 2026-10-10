@@ -12,7 +12,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
-import { DEFAULT_BOOTSTRAP_SUB } from "../runtime/accounts.js";
+import { DEFAULT_BOOTSTRAP_SUB, sameAccountId } from "../runtime/accounts.js";
 import { accountRegistryBootstrapSubs, accountRegistryEntries } from "../runtime/account-registry.js";
 import { ACL_ACCOUNT_PREFIX, ACL_PRINCIPAL_PREFIX } from "./resource-access.js";
 
@@ -59,6 +59,30 @@ function configuredAclLists(): AclList[] {
     }
   }
   return lists;
+}
+
+/**
+ * The `allowedUsers` entries in the gateway's config that name an account: a bare entry with its
+ * username, or `account:<id>` with its id. Deleting or retiring an account leaves them in place
+ * (config is never edited); the reply names them, because an account created again under the name
+ * gets every bare grant. The mail-service's lists are in its own files, which the gateway does not
+ * read.
+ */
+export function aclEntriesNamingAccount(username: string, account: string | undefined): Array<{ where: string; entry: string }> {
+  const name = username.trim().toLowerCase();
+  const found: Array<{ where: string; entry: string }> = [];
+  for (const list of configuredAclLists()) {
+    for (const raw of list.entries) {
+      const entry = raw.trim();
+      const lower = entry.toLowerCase();
+      if (lower.startsWith(ACL_PRINCIPAL_PREFIX)) continue;
+      const names = lower.startsWith(ACL_ACCOUNT_PREFIX)
+        ? account !== undefined && sameAccountId(entry.slice(ACL_ACCOUNT_PREFIX.length).trim(), account)
+        : lower === name;
+      if (names) found.push({ where: list.where, entry });
+    }
+  }
+  return found;
 }
 
 /**

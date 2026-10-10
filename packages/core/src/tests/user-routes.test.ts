@@ -193,17 +193,28 @@ describe("an admin resets a password", () => {
 });
 
 describe("a new account never takes a name someone else already holds", () => {
-  it("refuses a username that owns sessions, archived ones included", async () => {
-    const { tokenFor, create, usernames, session } = await boot({ enabled: true, users: [account("root", "admin")] });
-    // alice's account was deleted; her conversations were not.
-    const hers = session.createSession({ channel: "webchat", workspacePath: tempDir!, userId: "alice" });
-    session.archiveSession(hers.id);
+  // A name that owned sessions was refused, archived ones included, so a deleted account's name
+  // stayed blocked for as long as its archived sessions were kept. A session is its account's by id
+  // now, and a new account gets a new id: it is created, and starts empty.
+  it("creates a deleted account's name again, and the new account owns none of the old one's sessions", async () => {
+    const { tokenFor, create, remove, usernames, idOf, session } = await boot({
+      enabled: true,
+      users: [account("root", "admin"), account("alice", "operator")],
+    });
+    const oldId = idOf("alice")!;
     const root = await tokenFor("root", "admin");
-    const refused = await create(root, "alice");
-    expect(refused.status).toBe(409);
-    expect(((await refused.json()) as { error: string }).error).toContain("owns sessions");
-    expect((await create(root, "dave")).status).toBe(200);
-    expect(usernames()).toEqual(["root", "dave"]);
+    const hers = session.createSession({ channel: "webchat", workspacePath: tempDir!, userId: "alice", account: oldId });
+    expect((await remove(root, "alice")).status).toBe(200);
+    expect(session.getSessionRecord(hers.id)?.isArchived()).toBe(true);
+
+    const created = await create(root, "alice");
+    expect(created.status).toBe(200);
+    expect(usernames()).toEqual(["root", "alice"]);
+    const newId = idOf("alice")!;
+    expect(newId).not.toBe(oldId);
+    const { ownsRecord } = await import("../runtime/user-scope.js");
+    const owned = session.getAllSessions({ includeArchived: true }).filter((s) => ownsRecord({ userId: "alice", account: newId }, s.identity()));
+    expect(owned).toEqual([]);
   });
 
   it("creates no local account while the identity provider owns the usernames", async () => {

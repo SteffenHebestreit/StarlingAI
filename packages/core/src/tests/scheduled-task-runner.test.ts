@@ -36,9 +36,10 @@ import {
   removeScheduledTask,
   rehydrateScheduledTasks,
   activeScheduledTaskCount,
+  disableAccountScheduledTasks,
   _resetScheduledTaskRuntimeForTests,
 } from "../runtime/scheduled-task-runner.js";
-import { _setScheduledTasksPathForTests, listScheduledTaskRecords } from "../runtime/scheduled-tasks.js";
+import { _setScheduledTasksPathForTests, disableScheduledTask, listScheduledTaskRecords } from "../runtime/scheduled-tasks.js";
 
 let dir = "";
 beforeEach(() => {
@@ -111,5 +112,37 @@ describe("scheduled-task-runner", () => {
     await [...h.cronJobs.values()][0]!.onTick();
     expect(h.createJobMock).toHaveBeenCalledTimes(1);
     expect(h.createJobMock.mock.calls[0]![0]).not.toHaveProperty("account");
+  });
+
+  // An account that was deleted or retired: its schedules kept firing and queued a turn as the
+  // account every time. They are disabled (kept, with the reason) and their cron jobs stopped; a tick
+  // that was already due runs nothing, and a disabled schedule is never registered again.
+  it("disables an ended account's schedules: their cron jobs stop, a tick already due runs nothing", async () => {
+    h.multiUser = true;
+    addAndActivateScheduledTask({ id: "hers", cron: "* * * * *", label: "a", task: "t1", userId: "alice", account: "alice-0123456789abcdef", createdAt: "x" });
+    addAndActivateScheduledTask({ id: "his", cron: "* * * * *", label: "b", task: "t2", userId: "bob", account: "bob-0123456789abcdef", createdAt: "x" });
+    const [hersCron] = [...h.cronJobs.keys()];
+    const [hersTick, hisTick] = [...h.cronJobs.values()].map((job) => job.onTick);
+
+    expect(disableAccountScheduledTasks("ALICE-0123456789abcdef", "account deleted", "2026-10-10T00:00:00Z")).toEqual(["hers"]);
+    expect(h.removed).toEqual([hersCron]);
+    expect(activeScheduledTaskCount()).toBe(1);
+    expect(listScheduledTaskRecords().find((record) => record.id === "hers")?.disabled).toEqual({ at: "2026-10-10T00:00:00Z", reason: "account deleted" });
+
+    await hersTick!();
+    await hisTick!();
+    expect(h.createJobMock.mock.calls.map(([input]) => input?.["task"])).toEqual(["t2"]);
+
+    // A restart: only his schedule is registered.
+    _resetScheduledTaskRuntimeForTests();
+    rehydrateScheduledTasks();
+    expect(activeScheduledTaskCount()).toBe(1);
+  });
+
+  it("runs nothing for a schedule disabled after its cron job was registered", async () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "* * * * *", label: "a", task: "t1", userId: "alice", account: "alice-0123456789abcdef", createdAt: "x" });
+    disableScheduledTask("s1", { at: "x", reason: "account deleted" });
+    await [...h.cronJobs.values()][0]!.onTick();
+    expect(h.createJobMock).not.toHaveBeenCalled();
   });
 });

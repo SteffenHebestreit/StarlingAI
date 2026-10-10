@@ -26,6 +26,7 @@ import {
   type PrincipalKind,
 } from "./accounts.js";
 import { accountRegistryEntries, accountRegistryUsernameHolder } from "./account-registry.js";
+import { builtinTombstoneHolder } from "./account-tombstones.js";
 import { USERS_SUBDIR } from "../tools/workspace-zones.js";
 
 const log = childLogger("runtime:user-scope");
@@ -77,9 +78,11 @@ export class AccountNotThreadedError extends Error {
  *
  * A name is held when a builtin account has it, when an identity-provider account holds it in any
  * status (a retired one's too, until an admin releases it; while the registry cannot be read every
- * name counts as held), or when the segment its raw name derives to is an account's id. A name
- * with control characters is never one. Names compare without case: a mail address or an IdP
- * username is the same person in any case, and the closed direction is to refuse it.
+ * name counts as held), when a deleted builtin account had it (its tombstone holds it for good;
+ * while the tombstones cannot be read every name counts as held), or when the segment its raw name
+ * derives to is an account's id. A name with control characters is never one. Names compare without
+ * case: a mail address or an IdP username is the same person in any case, and the closed direction
+ * is to refuse it.
  */
 export function reservedUsernameProblem(raw: string): string | undefined {
   // eslint-disable-next-line no-control-regex -- control characters are what is refused here
@@ -90,6 +93,9 @@ export function reservedUsernameProblem(raw: string): string | undefined {
   const holder = accountRegistryUsernameHolder(name);
   if (holder === "unreadable") return "cannot be checked against the account registry, which cannot be read";
   if (holder) return "is held by an identity-provider account";
+  const tombstone = builtinTombstoneHolder(name);
+  if (tombstone === "unreadable") return "cannot be checked against the account tombstones, which cannot be read";
+  if (tombstone) return "was a deleted builtin account's username";
   const segment = principalSegment(raw);
   const ids = [
     ...roster.flatMap((user) => (user.id ? [user.id] : [])),

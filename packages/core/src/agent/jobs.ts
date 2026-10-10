@@ -262,6 +262,32 @@ export async function cancelJob(id: string): Promise<SceneJob | undefined> {
   return job;
 }
 
+/**
+ * Cancels every queued and running job of an account that was deleted or retired: a queued one
+ * before it runs, a running one through its worker, as a cancel from the dashboard does. They ran
+ * on as an account nobody can sign in as any more, in storage nobody can reach. Matched by the
+ * account id (account_id in Postgres), never by name. Returns the ids it cancelled.
+ */
+export async function cancelAccountJobs(account: string): Promise<string[]> {
+  const owner: Identity = { account };
+  const cancelled: string[] = [];
+  const seen = new Set<string>();
+  for (const status of ["queued", "running"] as const) {
+    // A listing returns at most 200; each round cancels what it lists, so the next lists the rest.
+    // Bounded, should a job keep its status after a cancel.
+    for (let round = 0; round < 50; round += 1) {
+      const page = (await listJobs({ owner, status, limit: 200 })).filter((job) => !seen.has(job.id));
+      if (page.length === 0) break;
+      for (const job of page) {
+        seen.add(job.id);
+        const result = await cancelJob(job.id);
+        if (result?.status === "cancelled" || result?.status === "cancelling") cancelled.push(job.id);
+      }
+    }
+  }
+  return cancelled;
+}
+
 export async function markJobCancelled(id: string, reason: string): Promise<void> {
   const store = await getStore();
   await store.markCancelled(id, reason);

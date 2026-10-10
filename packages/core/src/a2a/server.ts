@@ -24,7 +24,8 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
 import { ownsRecord, principalIdentity } from "../runtime/user-scope.js";
-import { ACCOUNT_ID_RE, principalSegment, type Identity } from "../runtime/accounts.js";
+import { ACCOUNT_ID_RE, principalSegment, sameAccountId, type Identity } from "../runtime/accounts.js";
+import { registerAccountBindingTeardown } from "../gateway/account-connections.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import {
@@ -46,6 +47,33 @@ const _tasks = new Map<string, A2ATask>();
  *  as, kept OFF the wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
 const _taskOwners = new Map<string, { caller: string; identity?: Identity }>();
 const TASK_RETENTION_MS = 30 * 60_000;
+
+/**
+ * Forget every task an account submitted, once the account is deleted or retired. Its tasks/get
+ * calls are refused already, but each task kept its output and history in memory for the retention
+ * window. The task goes with its owner: a task left without an owner record would be readable by any
+ * caller (tasks/get checks only a recorded owner).
+ */
+export function forgetA2ATasksOfAccount(account: string): number {
+  let forgotten = 0;
+  for (const [taskId, owner] of _taskOwners) {
+    if (owner.identity?.account === undefined || !sameAccountId(owner.identity.account, account)) continue;
+    _tasks.delete(taskId);
+    _taskOwners.delete(taskId);
+    forgotten += 1;
+  }
+  return forgotten;
+}
+registerAccountBindingTeardown("a2aTasks", (account) => forgetA2ATasksOfAccount(account));
+
+/**
+ * Stores a task's outcome, unless its owner record is gone: the account that submitted it ended
+ * while it ran, or its retention ran out first. Stored without an owner, the outcome would be
+ * readable by any caller that knew the id.
+ */
+function storeTaskWhileOwned(taskId: string, task: A2ATask): void {
+  if (_taskOwners.has(taskId)) _tasks.set(taskId, task);
+}
 
 /** Match a path against the A2A surface; returns true when handled. */
 export async function handleA2ARequest(
@@ -298,7 +326,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       ],
       artifacts: [{ role: "agent", parts: [{ type: "text", text: run.output }] }],
     };
-    _tasks.set(taskId, finalTask);
+    storeTaskWhileOwned(taskId, finalTask);
     logAudit("a2a_task_completed", {
       taskId,
       sessionId,
@@ -320,7 +348,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       },
       history: [params.message],
     };
-    _tasks.set(taskId, failed);
+    storeTaskWhileOwned(taskId, failed);
     logAudit("a2a_request_failed", {
       taskId,
       sessionId,

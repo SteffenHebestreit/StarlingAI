@@ -18,12 +18,13 @@
  *
  * This module imports no gateway code: the runtime's own guards read it as well.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
 import { ACCOUNT_ID_RE } from "./accounts.js";
+import { writeJsonStateFileSync } from "./state-file.js";
 
 const log = childLogger("runtime:account-registry");
 
@@ -204,36 +205,6 @@ export function accountRegistryBootstrapSubs(): readonly string[] {
   return state.readable ? state.doc.bootstrapSubs : [];
 }
 
-const RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
-const RENAME_ATTEMPTS = 5;
-
-/** A short synchronous pause: the registry write stays in the caller's tick, so two sign-ins can
- *  never interleave inside one. */
-function pauseSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/** Writes the document through a temp file and a rename. On Windows a reader holding the target
- *  open fails the rename for a moment; that is retried a few times. */
-function persist(path: string, doc: AccountRegistryDocument): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      renameSync(tmp, path);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= RENAME_ATTEMPTS || !code || !RENAME_RETRY_CODES.has(code)) {
-        try { rmSync(tmp, { force: true }); } catch { /* the rename failure is what matters */ }
-        throw err;
-      }
-      pauseSync(20 * attempt);
-    }
-  }
-}
-
 /**
  * Applies a change to a copy of the registry, writes the copy, and only then makes it the registry.
  * Synchronous from start to end. Throws, with nothing changed, when the registry cannot be read or
@@ -244,7 +215,7 @@ export function changeAccountRegistry<T>(change: (doc: AccountRegistryDocument) 
   if (!state.readable) throw new Error(`the account registry at ${state.path} cannot be read (${state.reason})`);
   const next = structuredClone(state.doc);
   const result = change(next);
-  persist(state.path, next);
+  writeJsonStateFileSync(state.path, next);
   _state = { path: state.path, readable: true, doc: next };
   return result;
 }

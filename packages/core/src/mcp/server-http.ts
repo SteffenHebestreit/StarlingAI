@@ -30,7 +30,8 @@ import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
 import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
-import type { Identity } from "../runtime/accounts.js";
+import { sameAccountId, type Identity } from "../runtime/accounts.js";
+import { registerAccountBindingTeardown } from "../gateway/account-connections.js";
 import { ownsRecord } from "../runtime/user-scope.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -277,6 +278,20 @@ async function teardownSession(sessionId: string, reason: string): Promise<void>
     log.debug({ err, sessionId }, "Error closing MCP HTTP transport");
   }
 }
+
+/**
+ * Close every session an account opened, once the account is deleted or retired. Its requests are
+ * refused already (each one resolves its caller against the stores); the sessions themselves stayed
+ * open, each with a connected server, until the client closed them or the gateway stopped.
+ */
+export async function closeMcpHttpSessionsOfAccount(account: string, reason: string): Promise<number> {
+  const ids = [..._sessions.entries()]
+    .filter(([, session]) => session.ctx.identity?.account !== undefined && sameAccountId(session.ctx.identity.account, account))
+    .map(([id]) => id);
+  for (const id of ids) await teardownSession(id, reason);
+  return ids.length;
+}
+registerAccountBindingTeardown("mcpSessions", closeMcpHttpSessionsOfAccount);
 
 export async function shutdownMcpHttpSessions(): Promise<void> {
   for (const id of [..._sessions.keys()]) {
