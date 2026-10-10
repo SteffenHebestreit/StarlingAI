@@ -87,6 +87,12 @@ export function documentSourceAliases(account: string): readonly string[] {
   return [];
 }
 
+/** The accounts (lowercased) that read `source` as an alias: a purge of one removes the corpus only
+ *  when no other account reads it. */
+export function documentSourceAliasHolders(workspacePath: string, source: string): string[] {
+  return [...load(documentAliasesPath(workspacePath))].filter(([, sources]) => sources.includes(source)).map(([holder]) => holder);
+}
+
 /** Every pre-account-id source some account reads as an alias: the account migration does not offer
  *  one of them for adoption again. */
 export function aliasedDocumentSources(workspacePath: string): Set<string> {

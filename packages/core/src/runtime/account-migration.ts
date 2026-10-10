@@ -83,7 +83,7 @@ import { flowMemoryAccountCounts, rewriteFlowMemoryAccounts } from "../agent/flo
 import { conversationConfigProposalAccountCounts, rewriteConversationConfigProposalAccounts } from "../agent/config-assistant-proposals.js";
 import { kbSource, listKnowledgeBases, mutateKnowledgeBase, removeKnowledgeBaseRecord, type KnowledgeBaseRecord } from "../retrieval/knowledge-bases.js";
 import { listRegistry, unregisterDocument } from "../retrieval/document-registry.js";
-import { addDocumentSourceAlias, aliasedDocumentSources, documentSourceAliases, removeDocumentSourceAliases } from "../retrieval/document-aliases.js";
+import { addDocumentSourceAlias, aliasedDocumentSources, documentSourceAliasHolders, documentSourceAliases, removeDocumentSourceAliases } from "../retrieval/document-aliases.js";
 
 const log = childLogger("runtime:account-migration");
 
@@ -1090,11 +1090,20 @@ function planPurge(inv: Inventory, account: string): PlannedPurge {
         ? `no deleted or retired account holds ${account}`
         : undefined;
   const directories = inv.bases.filter((base) => existsSync(resolve(base.path, USERS_SUBDIR, account))).map((base) => base.name);
-  const archives = [...inv.archives].filter(([name]) => name.toLowerCase().startsWith(`${key}-`)).map(([name]) => name).sort();
+  // Archives are named `<segment>-<UTC stamp>`, and the migration archives only buckets of names,
+  // never an account's own directory: matching `<id>-` found none, and a prefix could match another
+  // segment that starts with the id. The archives of what the account's name stored before account
+  // ids are matched by the segments the ledger records the migration archived for it.
+  const segments = new Set([key, ...archivedLegacySegments(inv, account, tombstone).map((segment) => segment.toLowerCase())]);
+  const archives = [...inv.archives.keys()].filter((name) => {
+    const segment = archivedSegment(name);
+    return segment !== undefined && segments.has(segment.toLowerCase());
+  }).sort();
   const stamps = [...inv.stampCounts].filter(([stamped]) => stamped.toLowerCase() === key).reduce((sum, [, n]) => sum + n, 0);
   const sessions = [...inv.sessionsByUser.values()].flat().filter((session) => session.account?.toLowerCase() === key).length;
   const knowledgeBases = inv.kbs.filter((kb) => kb.ownerAccount?.toLowerCase() === key).length;
-  const documents = [...inv.documentSources].filter(([source]) => source.toLowerCase() === `user:${key}`).reduce((sum, [, n]) => sum + n, 0);
+  const corpora = new Set([`user:${key}`, ...purgedAliasSources(getConfig().workspacePath, account).map((source) => source.toLowerCase())]);
+  const documents = [...inv.documentSources].filter(([source]) => corpora.has(source.toLowerCase())).reduce((sum, [, n]) => sum + n, 0);
   return {
     account,
     ...(username ? { username } : {}),
@@ -1102,6 +1111,50 @@ function planPurge(inv: Inventory, account: string): PlannedPurge {
     removes: { directories, archives, stamps, sessions, knowledgeBases, documents, aliases: documentSourceAliases(account).length },
     keeps: ["audit_events and audit.jsonl (history)", "scene_jobs and missions rows: their account_id is set to retired:<id>, so they stay an admin's and are never a name's again"],
   };
+}
+
+const ARCHIVE_STAMP_RE = /-\d{8}T\d{6}Z$/;
+
+/** The segment an archive in `users/.retired` was moved from, or undefined for a name that is not
+ *  `<segment>-<UTC stamp>`. */
+function archivedSegment(archive: string): string | undefined {
+  return ARCHIVE_STAMP_RE.test(archive) ? archive.replace(ARCHIVE_STAMP_RE, "") : undefined;
+}
+
+/**
+ * The segments the migration archived for what a deleted builtin account's username stored before
+ * account ids, when that was this account's: the ledger records each archive decision with its
+ * username. It was not when the ledger records the account as created after account ids (an
+ * earlier person had the name), or the name as adopted by another id (that one took it). An
+ * identity-provider account's data from before account ids moved into its id when it was adopted,
+ * and was not its when it was declined.
+ */
+function archivedLegacySegments(inv: Inventory, account: string, tombstone: AccountTombstone | undefined): string[] {
+  if (!tombstone || tombstone.kind !== "builtin") return [];
+  const name = tombstone.username.toLowerCase();
+  const later = inv.ledger.some((entry) => entry.event === "created" && sameAccountId(entry.id, account));
+  const adoptedElsewhere = inv.ledger.some((entry) => entry.event === "adopted" && entry.username === name && !sameAccountId(entry.id, account));
+  if (later || adoptedElsewhere) return [];
+  const segments = new Set<string>();
+  for (const entry of inv.ledger) {
+    if (entry.event !== "applied" || !Array.isArray(entry.decisions)) continue;
+    for (const decision of entry.decisions as Array<{ segment?: unknown; username?: unknown; data?: unknown }>) {
+      if (decision.data === "archive" && typeof decision.segment === "string" && typeof decision.username === "string" && decision.username.toLowerCase() === name) {
+        segments.add(decision.segment);
+      }
+    }
+  }
+  return [...segments];
+}
+
+/**
+ * The corpora from before account ids that `account` adopted (its document aliases) and that no
+ * other account reads: a purge removes them with the account. Kept, an adopted `user:<username>`
+ * corpus outlived the purge, and once the alias was gone the next dry run offered it as the name's
+ * legacy data, to the next account of that name too.
+ */
+function purgedAliasSources(workspace: string, account: string): string[] {
+  return documentSourceAliases(account).filter((source) => documentSourceAliasHolders(workspace, source).every((holder) => sameAccountId(holder, account)));
 }
 
 function canonical(value: unknown): string {
@@ -1519,7 +1572,6 @@ function applyIssuerAlias(alias: { from: string; to: string }): StepOutcome {
 
 async function applyPurge(ctx: ApplyContext, purge: PlannedPurge): Promise<IdentityResult> {
   const account = purge.account;
-  const key = account.toLowerCase();
   return {
     segment: account,
     ...(purge.username ? { username: purge.username } : {}),
@@ -1533,8 +1585,9 @@ async function applyPurge(ctx: ApplyContext, purge: PlannedPurge): Promise<Ident
             rmSync(resolve(users, account), { recursive: true, force: true });
             removed += 1;
           }
-          for (const archive of listDirs(resolve(users, ".retired"))) {
-            if (archive.toLowerCase().startsWith(`${key}-`)) {
+          // The archives the plan named, and no other.
+          for (const archive of purge.removes.archives) {
+            if (existsSync(resolve(users, ".retired", archive))) {
               rmSync(resolve(users, ".retired", archive), { recursive: true, force: true });
               removed += 1;
             }
@@ -1569,7 +1622,9 @@ async function applyPurge(ctx: ApplyContext, purge: PlannedPurge): Promise<Ident
         return owned.length > 0 ? "done" : "nothing";
       }],
       ["documents", async () => {
-        const removed = await removeDocumentsOfSource(ctx, `user:${account}`);
+        let removed = await removeDocumentsOfSource(ctx, `user:${account}`);
+        // The adopted corpora go before their aliases, so a re-run after a failure still finds them.
+        for (const source of purgedAliasSources(ctx.workspace, account)) removed += await removeDocumentsOfSource(ctx, source);
         const aliases = removeDocumentSourceAliases(ctx.workspace, account);
         return removed + aliases.length > 0 ? "done" : "nothing";
       }],

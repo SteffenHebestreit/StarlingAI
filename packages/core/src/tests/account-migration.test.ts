@@ -808,6 +808,90 @@ describe("purge", () => {
     expect((await dryRun(d, { purgeRetired: root.id })).purge.refused).toContain("living builtin account");
   });
 
+  // The purge removed the `user:<id>` corpus and the alias, but not the `user:<username>` corpus the
+  // account had adopted: it stayed in engram and the registry, and with its alias gone the next dry
+  // run offered it as the name's legacy data, to the next account of that name too.
+  it("removes the corpus the account adopted with its alias, in engram and the registry, unless another account reads it", async () => {
+    const d = setup({ overlayUsers: [root.record, { username: "alice", passwordHash: DUMMY_PASSWORD_HASH, role: "operator" }] });
+    bucket(d.ws, S("alice"));
+    mkdirSync(join(d.ws, "uploads"), { recursive: true });
+    writeFileSync(join(d.ws, "uploads", ".registry.json"), JSON.stringify({
+      entries: [
+        { documentId: "d1", scope: "user", source: "user:alice", filename: "a.pdf", ingestedAt: "2026-09-01T00:00:00Z" },
+        { documentId: "d2", scope: "user", source: "user:bob", filename: "b.pdf", ingestedAt: "2026-09-01T00:00:00Z" },
+      ],
+    }), "utf8");
+    expect((await apply(d, { adopt: ["alice"] })).applied.ok).toBe(true);
+    const aliceId = String(rosterOf().find((user) => user["username"] === "alice")!["id"]);
+    expect(mods.aliases.documentSourceAliases(aliceId)).toEqual(["user:alice"]);
+
+    // alice is deleted.
+    writeFileSync(OVERLAY, JSON.stringify({ auth: { users: [root.record] } }), "utf8");
+    writeFileSync(join(d.ws, ".starlingai", "accounts-retired.json"), JSON.stringify({
+      version: 1,
+      tombstones: [{ id: aliceId, username: "alice", kind: "builtin", retiredAt: "2026-10-05T00:00:00Z", by: "root" }],
+    }), "utf8");
+    mods.loader.resetConfigForTests();
+    mods.tombstones.resetAccountTombstonesForTests();
+    const removed: Array<[string, string]> = [];
+    d.backends.documents = {
+      list: async () => [{ id: "d1", sources: ["user:alice"] }, { id: "d2", sources: ["user:bob"] }],
+      remove: async (id, source) => { removed.push([id, source]); return true; },
+    };
+
+    delete process.env["SAI_MAINTENANCE"];
+    expect((await dryRun(d, { purgeRetired: aliceId })).purge.removes).toMatchObject({ documents: 1, aliases: 1 });
+    expect((await apply(d, { purgeRetired: aliceId })).applied.ok).toBe(true);
+    expect(removed).toEqual([["d1", "user:alice"]]);
+    const registry = JSON.parse(readFileSync(join(d.ws, "uploads", ".registry.json"), "utf8")).entries.map((entry: { source: string }) => entry.source);
+    expect(registry).toEqual(["user:bob"]);
+    expect(mods.aliases.documentSourceAliases(aliceId)).toEqual([]);
+    delete process.env["SAI_MAINTENANCE"];
+    expect((await dryRun(d)).identities.some((entry: Record<string, unknown>) => entry["username"] === "alice")).toBe(false);
+
+    // A corpus another account reads too is kept, with that account's alias.
+    const other = "carol-0123456789abcdef";
+    const aliasFile = join(d.ws, ".starlingai", "document-aliases.json");
+    writeFileSync(aliasFile, JSON.stringify({ version: 1, aliases: { [aliceId]: ["user:bob"], [other]: ["user:bob"] } }), "utf8");
+    mods.aliases.resetDocumentAliasesForTests();
+    removed.length = 0;
+    expect((await apply(d, { purgeRetired: aliceId })).applied.ok).toBe(true);
+    expect(removed).toEqual([]);
+    expect(mods.aliases.documentSourceAliases(other)).toEqual(["user:bob"]);
+  });
+
+  // The purge matched archives by `<id>-`, but the migration archives only the buckets of names, as
+  // `<segment>-<UTC stamp>`: the archive of what the deleted account's name stored before account
+  // ids never matched, and a prefix could match another segment that starts with the id.
+  it("removes the archives the migration made of what the account's name stored before account ids, and no other", async () => {
+    const hank = "hank-0123456789abcdef";
+    const stamp = "20261002T000000Z";
+    const tombstones = [{ id: hank, username: "hank", kind: "builtin", retiredAt: "2026-10-01T00:00:00Z", by: "root" }];
+    const archived = { event: "applied", at: "2026-10-02T00:00:00Z", planHash: "0", mode: "migrate", decisions: [{ segment: S("hank"), username: "hank", kind: "deleted-builtin", data: "archive" }], results: [] };
+    const archive = (d: Deployment, segment: string) => {
+      const dir = join(d.ws, "users", ".retired", `${segment}-${stamp}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "note.md"), "old", "utf8");
+      return `${segment}-${stamp}`;
+    };
+
+    const d = setup({ overlayUsers: [root.record], tombstones, ledger: [archived] });
+    const legacy = archive(d, S("hank"));
+    // A name that starts with the id is another identity's.
+    const lookalike = archive(d, S(hank));
+    let plan = await dryRun(d, { purgeRetired: hank });
+    expect(plan.purge.removes.archives).toEqual([legacy]);
+    expect((await apply(d, { purgeRetired: hank })).applied.ok).toBe(true);
+    expect(readdirSync(join(d.ws, "users", ".retired"))).toEqual([lookalike]);
+
+    // An account created after account ids under a name someone had before: the name's archive is
+    // the earlier person's.
+    const e = setup({ overlayUsers: [root.record], tombstones, ledger: [archived, { event: "created", id: hank, username: "hank", at: "2026-10-03T00:00:00Z" }] });
+    archive(e, S("hank"));
+    plan = await dryRun(e, { purgeRetired: hank });
+    expect(plan.purge.removes.archives).toEqual([]);
+  });
+
   // A deleted account's id was inventoried as an unknown identity's: --archive-unmapped archived its
   // directory, and --reset retired its stamps and graph tenants, so a purge of the id then found
   // none of them and the deleted person's records survived it.
