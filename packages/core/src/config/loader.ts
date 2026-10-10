@@ -184,6 +184,18 @@ export function updateConfig(mutator: (raw: Record<string, unknown>) => void): C
 }
 
 /**
+ * Whether the account roster (`auth.users`) is one the runtime writes: the config is one file that
+ * updateConfig writes whole, or the runtime overlay holds the list (an overlay list replaces a
+ * shard's). Otherwise the list comes from a base shard, the operator's own file, which nothing here
+ * edits: the account migration prints the id to paste into it instead of writing one.
+ */
+export function rosterWrittenByRuntime(): boolean {
+  if (CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath) return true;
+  const auth = readRawConfigFile(CONFIG_SOURCE.mutablePath, "mutable")["auth"];
+  return isPlainObject(auth) && Array.isArray(auth["users"]);
+}
+
+/**
  * The config `updateConfig(mutator)` would load, without writing anything. It is not the mutated
  * raw config: the write goes through JSON, which drops an `undefined`, so a value a base shard sets
  * comes back; and the env overrides outrank what was written (SAI_PRIMARY_MODEL pins the model).

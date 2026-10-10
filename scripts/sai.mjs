@@ -10,6 +10,7 @@
  *   sai config build                       Merge config/ + workspace/ → starlingai.json
  *   sai config split [--from <file>]       Decompose monolithic config into two zones
  *   sai token [--user X] [--role X] [--ttl X]  Generate dashboard JWT
+ *   sai migrate-account-ids [flags]        Account storage migration (dry run unless --apply)
  *   sai health                             Check service health endpoints
  *   sai dev [gateway|web]                  Start development mode
  */
@@ -47,6 +48,7 @@ process.chdir(repoRoot);
 const BUILTIN_COMMANDS = new Set([
   "setup", "start", "stop", "wipe", "config", "memory",
   "env-check", "token", "health", "dev", "help", "--help", "-h",
+  "migrate-account-ids",
 ]);
 
 /**
@@ -117,6 +119,7 @@ async function main() {
     case "memory":  await cmdMemory(); break;
     case "env-check": await cmdEnvCheck(); break;
     case "token":   await cmdToken(); break;
+    case "migrate-account-ids": await cmdMigrateAccountIds(); break;
     case "health":  await cmdHealth(); break;
     case "dev":     await cmdDev(); break;
     case "help": case "--help": case "-h": case undefined:
@@ -562,6 +565,161 @@ async function cmdToken() {
   await run("node", ["scripts/gen-token.mjs", ...restArgs]);
 }
 
+// The account migration (packages/core/src/runtime/account-migration.ts): per-account storage moves
+// from the username's segment to the account's immutable id where an admin names the pair. This is
+// a thin client of POST /api/admin/account-migration on the running gateway. The route takes a
+// bootstrap token only, minted here from the JWT secret in .env as `sai token` mints one, so running
+// it needs the host. The dry run is the default and writes nothing; --apply --plan <hash> runs only
+// against a gateway restarted with SAI_MAINTENANCE=account-migration.
+async function cmdMigrateAccountIds() {
+  loadDotEnv();
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args: process.argv.slice(3),
+      options: {
+        adopt: { type: "string", multiple: true },
+        "adopt-legacy-records": { type: "boolean" },
+        "archive-unmapped": { type: "boolean" },
+        hold: { type: "string", multiple: true },
+        "adopt-retired": { type: "string", multiple: true },
+        "oidc-issuer-alias": { type: "string" },
+        reset: { type: "boolean" },
+        "purge-retired": { type: "string" },
+        apply: { type: "boolean" },
+        plan: { type: "string" },
+        json: { type: "boolean" },
+        url: { type: "string" },
+      },
+      strict: true,
+      allowPositionals: false,
+    }));
+  } catch (err) {
+    fail(err.message);
+    return;
+  }
+  const pair = (value, flag) => {
+    const at = value.indexOf("=");
+    if (at <= 0 || at === value.length - 1) throw new Error(`${flag} takes <a>=<b>, got '${value}'`);
+    return [value.slice(0, at), value.slice(at + 1)];
+  };
+  const body = {};
+  try {
+    if (values.adopt?.length) body.adopt = values.adopt;
+    if (values["adopt-legacy-records"]) body.adoptLegacyRecords = true;
+    if (values["archive-unmapped"]) body.archiveUnmapped = true;
+    if (values.hold?.length) body.hold = values.hold;
+    if (values["adopt-retired"]?.length) {
+      body.adoptRetired = values["adopt-retired"].map((value) => {
+        const [archive, id] = pair(value, "--adopt-retired");
+        return { archive, id };
+      });
+    }
+    if (values["oidc-issuer-alias"]) {
+      const [from, to] = pair(values["oidc-issuer-alias"], "--oidc-issuer-alias");
+      body.oidcIssuerAlias = { from, to };
+    }
+    if (values.reset) body.reset = true;
+    if (values["purge-retired"]) body.purgeRetired = values["purge-retired"];
+    if (values.apply) {
+      if (!values.plan) throw new Error("--apply needs --plan <hash>, the hash the dry run printed");
+      body.apply = true;
+      body.plan = values.plan;
+    }
+  } catch (err) {
+    fail(err.message);
+    return;
+  }
+
+  // A bootstrap token (the `bst` claim), short-lived; never printed.
+  let token;
+  try {
+    token = execFileSync(process.execPath, ["scripts/gen-token.mjs", "--ttl", "15m"], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch {
+    fail("Could not mint a bootstrap token: is SAI_JWT_SECRET set in .env?");
+    return;
+  }
+  const base = (values.url ?? process.env["SAI_GATEWAY_URL"] ?? `http://localhost:${process.env["SAI_GATEWAY_PORT"] ?? "8765"}`).replace(/\/+$/, "");
+  let response;
+  try {
+    response = await fetch(`${base}/api/admin/account-migration`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30 * 60_000),
+    });
+  } catch (err) {
+    fail(`The gateway at ${base} did not answer: ${err?.message ?? err}`);
+    return;
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (values.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    if (!response.ok) process.exitCode = 1;
+    return;
+  }
+  if (!response.ok) {
+    fail(`${response.status}: ${payload.error ?? "the account migration was refused"}`);
+    if (payload.plan) printMigrationPlan(payload.plan, null);
+    return;
+  }
+  printMigrationPlan(payload.plan, payload.applied ?? null);
+  if (payload.applied && !payload.applied.ok) process.exitCode = 1;
+}
+
+function printMigrationPlan(plan, applied) {
+  if (!plan) return;
+  hdr(`Account migration (${plan.mode}${applied ? ", applied" : ", dry run"})`);
+  for (const problem of plan.problems ?? []) warn(`${problem.source}: ${problem.reason}${problem.blocking ? " (nothing can be applied)" : ""}`);
+  for (const identity of plan.identities ?? []) {
+    const who = identity.username ?? `(${identity.segment})`;
+    const target = identity.account ? ` ${identity.account}` : "";
+    const extra = [identity.assignId ? "gets its id" : "", identity.activate ? "turns active" : "", identity.graph !== "none" ? `graph -> ${identity.graph}` : ""].filter(Boolean).join(", ");
+    console.log(`  ${BOLD}${who}${RESET}  ${identity.kind}  ${identity.data}${target}${extra ? `  (${extra})` : ""}`);
+    if (identity.refused) console.log(`    ${RED}refused:${RESET} ${identity.refused}`);
+    const stored = identity.stored ?? {};
+    const parts = [
+      stored.buckets?.length ? `directories in ${stored.buckets.join(", ")}` : "",
+      stored.stamps ? `${stored.stamps} ledger entries` : "",
+      stored.sessions ? `${stored.sessions} sessions` : "",
+      stored.jobs ? `${stored.jobs} jobs` : "",
+      stored.missions ? `${stored.missions} missions` : "",
+      stored.schedules ? `${stored.schedules} schedules` : "",
+      stored.knowledgeBases ? `${stored.knowledgeBases} knowledge bases` : "",
+      stored.documents ? `${stored.documents} documents` : "",
+    ].filter(Boolean);
+    if (parts.length) console.log(`    stored: ${parts.join(", ")}`);
+    for (const note of identity.notes ?? []) console.log(`    ${note}`);
+    if (identity.idLine) console.log(`    ${CYAN}${identity.idLine}${RESET}`);
+  }
+  for (const move of plan.moves ?? []) console.log(`  move ${move.base}: users/${move.from} -> users/${move.to}`);
+  for (const restore of plan.restores ?? []) console.log(`  restore users/.retired/${restore.archive} -> users/${restore.account}${restore.refused ? ` (refused: ${restore.refused})` : ""}`);
+  if (plan.issuerAlias) console.log(`  issuer ${plan.issuerAlias.from} -> ${plan.issuerAlias.to} (${plan.issuerAlias.entries} accounts)`);
+  if (plan.purge) {
+    const removes = plan.purge.removes;
+    console.log(`  purge ${plan.purge.account}${plan.purge.username ? ` (${plan.purge.username})` : ""}: directories in ${removes.directories.join(", ") || "none"}, ${removes.archives.length} archives, ${removes.stamps} ledger entries, ${removes.sessions} sessions, ${removes.knowledgeBases} knowledge bases, ${removes.documents} documents, ${removes.aliases} aliases`);
+    if (plan.purge.refused) console.log(`    ${RED}refused:${RESET} ${plan.purge.refused}`);
+    for (const kept of plan.purge.keeps ?? []) console.log(`    kept: ${kept}`);
+  }
+  for (const conflict of plan.conflicts ?? []) warn(conflict);
+  for (const note of plan.flagNotes ?? []) info(note);
+  if (applied) {
+    for (const result of applied.results ?? []) {
+      const steps = Object.entries(result.steps ?? {}).map(([step, outcome]) => `${step} ${outcome}`).join("; ");
+      (result.ok ? ok : warn)(`${result.username ?? result.segment}${result.account ? ` -> ${result.account}` : ""}: ${steps}`);
+    }
+    if (applied.ok) ok("Applied. Run the dry run again: it should have nothing left to migrate.");
+    else warn("Some steps failed; the accounts they belong to cannot sign in yet. Fix the cause and run the dry run and the apply again.");
+    return;
+  }
+  console.log(`\n  plan ${BOLD}${plan.hash}${RESET}`);
+  if (plan.nothingToMigrate) {
+    ok("Nothing to migrate.");
+  } else {
+    info(`To apply: add SAI_MAINTENANCE=account-migration to .env and restart the gateway, then run this command again with the same flags and --apply --plan ${plan.hash}. Afterwards remove the line and restart the gateway again.`);
+  }
+}
+
 async function cmdHealth() {
   hdr("Service Health");
   const endpoints = [
@@ -625,6 +783,18 @@ ${BOLD}Commands:${RESET}
   memory import [--vault <path>]     Re-ingest edited managed vault notes into the store
   env-check [--strict]               Report config $VAR refs not satisfied by .env
   token [--user X] [--role X]        Generate dashboard JWT
+  migrate-account-ids [flags]        Move per-account storage to account ids (a dry run
+                                     unless --apply --plan <hash>; apply needs a gateway
+                                     restarted with SAI_MAINTENANCE=account-migration)
+    --adopt <user>[=<id>]              Move what <user> stored to that account (repeatable)
+    --adopt-legacy-records             Adopt for every roster record without an id
+    --hold <user>                      Keep a deleted account's directories in place
+    --archive-unmapped                 Archive directories nobody can be mapped to
+    --adopt-retired <archive>=<id>     Restore an archived directory into an account
+    --oidc-issuer-alias <old>=<new>    Rename an identity provider's issuer
+    --reset                            Every account starts empty (archives the old data)
+    --purge-retired <id>               Remove what a deleted/retired account left
+    --json                             Print the gateway's answer as JSON
   health                             Check service health endpoints
   dev [gateway|web]                  Start development mode
 `);

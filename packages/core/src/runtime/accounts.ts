@@ -14,7 +14,7 @@
  * This module imports nothing from the config or the request context, so the config schema can
  * validate ids with it without an import cycle.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { PRODUCT } from "../product/index.js";
@@ -118,13 +118,30 @@ export function mintBuiltinAccountId(username: string, taken: Iterable<string>):
   throw new Error("could not mint an account id that no other account holds");
 }
 
-/** One line of the account ledger. */
-export interface AccountLedgerEntry {
-  event: "created";
-  id: string;
-  username: string;
-  at: string;
-}
+/**
+ * One line of the account ledger.
+ *
+ * - `created`: POST /api/auth/users minted the id of a new account.
+ * - `reserved`: the account migration minted an id for a record from before account ids and is
+ *   moving data to it; an apply that stops part-way continues with the same id, so nothing it moved
+ *   is left under an id the record never gets.
+ * - `assigned`: the account migration gave a record from before account ids its id.
+ * - `adopted`: the account migration moved what was stored under `username` (its old segment) to the
+ *   account `id`. From then on an id-less record under that name is a new person's.
+ * - `moved`: one directory under `<base>` (a `users` directory) was renamed, `from` and `to` relative
+ *   to it: a bucket adopted, archived to `.retired`, or restored from there.
+ * - `retagged`: an identity's graph nodes were retagged once: a principal's user-scope nodes from
+ *   its raw name to its segment, or (a reset) an account's to `retired:<segment>`.
+ * - `applied`: one apply of the account migration, its decisions and what each step did.
+ */
+export type AccountLedgerEntry =
+  | { event: "created"; id: string; username: string; at: string }
+  | { event: "reserved"; id: string; username: string; at: string }
+  | { event: "assigned"; id: string; username: string; at: string }
+  | { event: "adopted"; id: string; username: string; segment: string; at: string }
+  | { event: "moved"; base: string; from: string; to: string; at: string }
+  | { event: "retagged"; username?: string; segment: string; at: string }
+  | { event: "applied"; at: string; planHash: string; mode: string; decisions: unknown; results: unknown };
 
 /**
  * The account ledger: which ids were minted for new accounts, and later which legacy data an
@@ -141,3 +158,24 @@ export function appendAccountLedgerEntry(path: string, entry: AccountLedgerEntry
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(entry)}\n`, "utf8");
 }
+
+/**
+ * Every entry of the ledger, oldest first; none when there is no ledger. A line that does not parse,
+ * or names no known event, is skipped: the ledger is append-only, and a torn last line is the only
+ * way one gets there. Throws when the file exists but cannot be read, so a caller deciding from it
+ * decides nothing.
+ */
+export function readAccountLedger(path: string): AccountLedgerEntry[] {
+  if (!existsSync(path)) return [];
+  const entries: AccountLedgerEntry[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as { event?: unknown } | null;
+      if (parsed && typeof parsed === "object" && LEDGER_EVENTS.has(parsed.event as string)) entries.push(parsed as AccountLedgerEntry);
+    } catch { /* a torn line: see above */ }
+  }
+  return entries;
+}
+
+const LEDGER_EVENTS = new Set(["created", "reserved", "assigned", "adopted", "moved", "retagged", "applied"]);

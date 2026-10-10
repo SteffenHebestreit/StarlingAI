@@ -20,6 +20,8 @@ import { runChannelHealthChecks } from "./channels/registry.js";
 import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeComponentSuccess } from "./runtime/status.js";
 import { loadAccountRegistry } from "./runtime/account-registry.js";
 import { loadAccountTombstones } from "./runtime/account-tombstones.js";
+import { accountMigrationMaintenance, reportAccountMigrationBacklog } from "./runtime/account-migration.js";
+import { userStateBaseDir } from "./runtime/user-scope.js";
 import { reportBareAclEntries } from "./guardrails/acl-entries-check.js";
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
@@ -91,6 +93,13 @@ export async function main() {
   const config = loadConfig();
   log.info({ model: config.agents.defaults.model.primary }, "Config loaded");
 
+  // A maintenance boot for the account migration loads the stores it rewrites and serves the
+  // migration only (runtime/account-migration.ts); nothing that writes those stores starts.
+  if (accountMigrationMaintenance()) {
+    await runAccountMigrationMaintenanceBoot();
+    return;
+  }
+
   // Bootstrap OpenTelemetry tracing as early as possible so subsequent
   // initialization steps inherit the tracing context.  No-op when disabled.
   await initTracing(config.tracing);
@@ -121,6 +130,10 @@ export async function main() {
   if (getConfig().auth?.enabled === true) {
     loadAccountRegistry();
     loadAccountTombstones();
+    // What still waits for the account migration (accounts without an id cannot sign in): one
+    // warning with the counts, nothing written.
+    const { userMemoryBaseDir } = await import("./memory/service.js");
+    reportAccountMigrationBacklog([getConfig().workspacePath, userMemoryBaseDir(), userStateBaseDir()]);
   }
   // allowedUsers entries are matched by identity kind under multi-user auth: name the bare ones that
   // no account holds, which grant nothing any more (a channel sender needs `principal:<raw>`).
@@ -514,6 +527,63 @@ export async function main() {
   } else {
     log.info("Multi-user auth is enabled — log in with a configured account (no bootstrap token is printed).");
   }
+}
+
+/**
+ * The maintenance boot for the account migration (SAI_MAINTENANCE=account-migration).
+ *
+ * It loads what the migration reads and rewrites: Postgres (the audit sink, the scene_jobs and
+ * missions tables with their account_id columns), MemGraph, the session file and its Redis mirror,
+ * and the account registry and tombstones. It serves only /healthz, /api/auth/mode and the migration
+ * route (gateway/maintenance-gateway.ts). Nothing else starts: no WebSocket, channel, schedule, job
+ * trigger or scene worker, swarm bus, bidder, warden or session pruner, sweep, MCP server, A2A,
+ * plugin or dynamic tool. That is what lets the apply rewrite the shared ledgers, the session store
+ * and the schedules with no lock: no other writer of them runs. The user removes the variable and
+ * restarts the gateway when the migration is done.
+ */
+let _maintenanceGateway: { stop(): Promise<void> } | null = null;
+
+/** Test-only: stop the server a maintenance boot started. */
+export async function stopMaintenanceBootForTests(): Promise<void> {
+  await _maintenanceGateway?.stop();
+  _maintenanceGateway = null;
+}
+
+async function runAccountMigrationMaintenanceBoot(): Promise<void> {
+  log.warn("Maintenance boot for the account migration: only the migration is served; remove SAI_MAINTENANCE and restart when it is done");
+  await initPostgresAudit();
+  await initGraphSchema();
+  await initSceneJobStore();
+  if (process.env["DATABASE_URL"]?.trim()) {
+    // The missions table's own init adds its account_id column; the migration only fills it in.
+    const { getMissionStore } = await import("./swarm/mission-store.js");
+    await getMissionStore();
+  }
+  await initSessionRedis();
+  if (getConfig().auth?.enabled === true) {
+    loadAccountRegistry();
+    loadAccountTombstones();
+  }
+  const { createMaintenanceGateway } = await import("./gateway/maintenance-gateway.js");
+  const gateway = createMaintenanceGateway();
+  await gateway.start();
+  _maintenanceGateway = gateway;
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log.info({ signal }, "Maintenance boot shutting down...");
+    await gateway.stop();
+    await shutdownSceneJobStore();
+    await closeGraphDb();
+    await flushAuditLog();
+    await flushSessionStore();
+    await closeSessionRedis();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 function isDirectExecution(): boolean {

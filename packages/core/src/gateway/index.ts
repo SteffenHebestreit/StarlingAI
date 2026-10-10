@@ -26,6 +26,7 @@ import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
 import { registerAuthRoutes } from "./auth-routes.js";
 import { registerAccountRoutes } from "./account-routes.js";
+import { registerAccountMigrationRoutes } from "./account-migration-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
 import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
@@ -980,6 +981,8 @@ export function createGateway() {
   registerUserRoutes(app);
   // Identity-provider accounts (rename, retire, release, decline legacy data), admin-only.
   registerAccountRoutes(app);
+  // The account migration's dry run (a bootstrap token only); its apply runs in a maintenance boot.
+  registerAccountMigrationRoutes(app);
 
   // Federation routes — gated at request time on federation.enabled, so
   // toggling the config flag takes effect without a gateway restart.

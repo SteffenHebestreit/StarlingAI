@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { isRuntimeSubAgent } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { writeJsonStateFileSync } from "../runtime/state-file.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -61,6 +62,49 @@ export function listConversationConfigProposals(workspacePath: string, limit = 5
   return readAllConversationConfigProposals(workspacePath)
     .sort((left, right) => right.ts.localeCompare(left.ts))
     .slice(0, limit);
+}
+
+/**
+ * What the account migration does to the proposals stamped with an account: `rewrite` gets each
+ * stamped proposal's account and returns the account to stamp instead, `null` to drop the proposal,
+ * or `undefined` to leave it. One synchronous read-modify-write, through a temp file and a rename.
+ * Returns how many proposals changed. Unlike the readers above, a file that does not parse throws
+ * rather than reading as empty: an empty list written back would lose every proposal.
+ */
+export function rewriteConversationConfigProposalAccounts(workspacePath: string, rewrite: (account: string) => string | null | undefined): number {
+  const proposals = readConversationConfigProposalsStrict(workspacePath);
+  let changed = 0;
+  const next: ConversationConfigProposal[] = [];
+  for (const proposal of proposals) {
+    const replacement = typeof proposal.account === "string" ? rewrite(proposal.account) : undefined;
+    if (replacement === undefined) {
+      next.push(proposal);
+      continue;
+    }
+    changed += 1;
+    if (replacement !== null) next.push({ ...proposal, account: replacement });
+  }
+  if (changed > 0) writeJsonStateFileSync(resolve(workspacePath, PROPOSALS_FILE), next);
+  return changed;
+}
+
+/** How many proposals each account has stamped on it (the account migration's inventory). */
+export function conversationConfigProposalAccountCounts(workspacePath: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const proposal of readConversationConfigProposalsStrict(workspacePath)) {
+    if (typeof proposal.account === "string") counts.set(proposal.account, (counts.get(proposal.account) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function readConversationConfigProposalsStrict(workspacePath: string): ConversationConfigProposal[] {
+  const file = resolve(workspacePath, PROPOSALS_FILE);
+  if (!existsSync(file)) return [];
+  const raw = readFileSync(file, "utf-8");
+  if (!raw.trim()) return [];
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) throw new Error(`${file} is not a list of proposals`);
+  return parsed as ConversationConfigProposal[];
 }
 
 export function getConversationConfigProposal(workspacePath: string, id: string): ConversationConfigProposal | null {

@@ -20,9 +20,14 @@ function pauseSync(ms: number): void {
  *  holding the target open fails the rename for a moment; that is retried a few times. Throws when
  *  the write fails, with the previous file untouched. */
 export function writeJsonStateFileSync(path: string, value: unknown): void {
+  writeTextStateFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** The same for a text that is already what the file must hold (an NDJSON ledger rewritten whole). */
+export function writeTextStateFileSync(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
   for (let attempt = 1; ; attempt += 1) {
     try {
       renameSync(tmp, path);

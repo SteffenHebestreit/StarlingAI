@@ -327,6 +327,8 @@ export type CoreAuditEventType =
   | "auth_account_retired"
   | "auth_account_username_released"
   | "auth_account_legacy_declined"
+  // The account migration applied a plan (runtime/account-migration.ts)
+  | "account_migration_applied"
   // Plugin SDK
   | "plugin_loaded"
   | "plugin_unloaded"

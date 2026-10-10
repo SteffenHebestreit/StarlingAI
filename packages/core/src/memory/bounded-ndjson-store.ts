@@ -12,6 +12,7 @@
 import {
   appendFileSync,
   closeSync,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -20,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { writeTextStateFileSync } from "../runtime/state-file.js";
 
 // Average bytes per line estimate — used to size the initial tail chunk.
 const AVG_BYTES_PER_LINE = 512;
@@ -136,6 +138,52 @@ export function readLastLines(filePath: string, maxLines: number): string[] {
       try { closeSync(fd); } catch { /* ignore */ }
     }
   }
+}
+
+/**
+ * Rewrites the records of an NDJSON file in one synchronous read-modify-write. `rewrite` returns the
+ * record to write instead, `null` to drop it, or `undefined` to keep the line exactly as it was; a
+ * line that does not parse is kept as it is. The file is written through a temp file and a rename,
+ * and only when something changed. Returns how many records were changed or dropped (0 when there
+ * is no file). Throws when the file cannot be read or written: its caller, the account migration,
+ * reports the step and changes nothing else for that account.
+ */
+export function rewriteJsonLines(filePath: string, rewrite: (record: unknown) => unknown): number {
+  if (!existsSync(filePath)) return 0;
+  const lines = readFileSync(filePath, "utf-8").split("\n");
+  let changed = 0;
+  const kept: string[] = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      kept.push(line);
+      continue;
+    }
+    const next = rewrite(record);
+    if (next === undefined) {
+      kept.push(line);
+      continue;
+    }
+    changed += 1;
+    if (next !== null) kept.push(JSON.stringify(next));
+  }
+  if (changed > 0) writeTextStateFileSync(filePath, kept.length > 0 ? `${kept.join("\n")}\n` : "");
+  return changed;
+}
+
+/** Every record of an NDJSON file that parses; none when there is no file. Throws when the file
+ *  exists but cannot be read. */
+export function readAllRecords<T>(filePath: string): T[] {
+  if (!existsSync(filePath)) return [];
+  const out: T[] = [];
+  for (const line of readFileSync(filePath, "utf-8").split("\n")) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line) as T); } catch { /* skip malformed */ }
+  }
+  return out;
 }
 
 /**

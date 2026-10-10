@@ -73,6 +73,22 @@ function defaultDockerExec(args: string[], opts?: { timeoutMs?: number }): Promi
 let dockerExec: DockerExec = defaultDockerExec;
 export function __setDockerExecForTests(fn: DockerExec | null): void { dockerExec = fn ?? defaultDockerExec; }
 
+/**
+ * The host directories bound into every running served-app container, whichever gateway process
+ * started it (the account migration runs in a fresh process, which holds no `apps` entry): a
+ * container keeps its bind across a gateway restart, so a per-user directory it binds must not be
+ * moved under it. Null when Docker cannot be asked.
+ */
+export async function listServedAppBinds(): Promise<string[] | null> {
+  const names = await dockerExec(["ps", "--filter", "name=sai-app-", "--format", "{{.Names}}"], { timeoutMs: 10_000 });
+  if (names.code !== 0) return null;
+  const containers = names.stdout.split(/\r?\n/).map((name) => name.trim()).filter((name) => name.startsWith("sai-app-"));
+  if (containers.length === 0) return [];
+  const mounts = await dockerExec(["inspect", "--format", "{{range .Mounts}}{{.Source}}\n{{end}}", ...containers], { timeoutMs: 10_000 });
+  if (mounts.code !== 0) return null;
+  return mounts.stdout.split(/\r?\n/).map((source) => source.trim()).filter(Boolean);
+}
+
 // ── Injectable health probe ───────────────────────────────────────────────
 export type HealthProbe = (url: string) => Promise<boolean>;
 async function defaultHealthProbe(url: string): Promise<boolean> {
