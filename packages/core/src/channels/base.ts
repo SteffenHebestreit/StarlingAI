@@ -1,14 +1,14 @@
 /**
  * Base types and helpers shared by all inbound message channels.
  */
-import { createSession, getSession, endSession, resolveSession } from "../agent/session.js";
+import { createSession, getSession, endSession, resolveSession, type AgentSession } from "../agent/session.js";
 import { getChannelSessionId, setChannelSessionId } from "../agent/session-redis.js";
 import { runTurn } from "../agent/runtime.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { getExtensionAuthProvider } from "../extension/index.js";
 import { childLogger } from "../logger.js";
-import { AccountNotThreadedError, principalIdentity, reservedUsernameProblem } from "../runtime/user-scope.js";
+import { AccountNotThreadedError, multiUserAuthActive, ownsRecord, principalIdentity, reservedUsernameProblem } from "../runtime/user-scope.js";
 import { recordChannelIngressDenied } from "./registry.js";
 
 const log = childLogger("channel:base");
@@ -150,6 +150,20 @@ export function recordChannelSenderRefused(channelType: string, senderId: string
 }
 
 /**
+ * Whether a session the sender's mapping names is one the sender continues. Under multi-user auth
+ * only a session that is the sender's as a channel principal is. The Redis mapping outlives a
+ * rebuild by up to its TTL, and a sender who wrote within it was mapped to a session from before
+ * account ids (a name, no kind): continued, every turn on it was refused as predating account ids,
+ * and that refusal was the reply to every message until the mapping expired. Such a session, or
+ * one of anybody else, is left as it is and the sender gets a fresh one. With one operator every
+ * mapped session is continued, as before.
+ */
+function continuesSender(session: AgentSession, senderId: string): boolean {
+  if (!multiUserAuthActive()) return true;
+  return ownsRecord(principalIdentity(senderId, "channel"), session.identity());
+}
+
+/**
  * Get or create a session for a sender on a given channel, or the refusal of a sender that may not
  * be served (channelSenderRefusal), checked before any session is reused or made. A session is the
  * sender's as a channel principal. Async to support cross-instance Redis channel-session routing.
@@ -162,16 +176,18 @@ export async function getOrCreateChannelSession(channelType: string, senderId: s
   try {
     // 1. Check local in-process map first (fastest path).
     const localSid = _sessions.get(key);
-    if (localSid && getSession(localSid)) return { sessionId: localSid };
+    const local = localSid ? getSession(localSid) : undefined;
+    if (local && continuesSender(local, senderId)) return { sessionId: local.id };
 
     // 2. Check Redis for a session that was created on another instance.
     const redisSid = await getChannelSessionId(channelType, senderId);
     if (redisSid) {
       const redisSession = await resolveSession(redisSid);
-      if (redisSession) {
+      if (redisSession && continuesSender(redisSession, senderId)) {
         _sessions.set(key, redisSid);
         return { sessionId: redisSid };
       }
+      if (redisSession) log.info({ channel: channelType, sessionId: redisSid }, "The sender's mapped session is not the sender's as a channel principal; a fresh one starts");
     }
 
     // 3. Create a fresh session and publish the mapping.

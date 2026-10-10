@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1287 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:571 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:733 | 11 |
-| `name` | packages/core/src/config/schema.ts:2023 | 398 |
+| `name` | packages/core/src/config/schema.ts:2023 | 399 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:734 | 57 |
 | `node` | packages/core/src/config/schema.ts:1092 | 253 |
