@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SwarmState } from "../tools/registry.js";
 import type { InterventionNotice } from "./interventions.js";
-import { createSession } from "./session.js";
+import { createSession, type AgentSession } from "./session.js";
 import { archiveSession } from "./session.js";
 import { runTurn, type TurnOutput, type TurnPerformanceMetrics } from "./runtime.js";
 import {
@@ -28,7 +28,8 @@ import { publishNotification } from "../runtime/notifications.js";
 import { buildWorkflowExecutionKey } from "./workflow-execution-key.js";
 import { workflowStepPipeline } from "./workflow-step-pipeline.js";
 import { getScene } from "../credentials/scenes.js";
-import { principalIdentity } from "../runtime/user-scope.js";
+import { isLegacyIdentity, multiUserAuthActive, principalIdentity } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -144,15 +145,51 @@ async function monitorActiveJobs(): Promise<void> {
   }));
 }
 
+/** Why a claimed job of `owner` cannot run, before any session is opened for it; undefined when it
+ *  can. A config that cannot be read counts as multi-user. */
+function legacyJobRefusal(owner: Identity | undefined): string | undefined {
+  if (!multiUserAuthActive() || !isLegacyIdentity(owner)) return undefined;
+  return LEGACY_JOB_REFUSAL;
+}
+
+/** The error a job queued before account ids ends with under multi-user auth. */
+export const LEGACY_JOB_REFUSAL = "This job was queued before account ids: it names its owner by name alone, and no run derives storage from a name. Queue it again.";
+
+/** Ends a claimed job that never started: failed, audited and logged, so it is not left running
+ *  for the stale-job recovery to queue again. */
+async function failUnstartedJob(job: ClaimedSceneJob, error: string, err?: unknown): Promise<void> {
+  await failJob(job.id, error);
+  logAudit("scene_job_failed", { jobId: job.id, sceneName: job.sceneName, error }, { sessionId: job.sessionId, channel: "scene", severity: "error" });
+  log.error({ ...(err ? { err } : {}), jobId: job.id, sceneName: job.sceneName }, "Scene job failed before it started");
+}
+
 async function processJob(job: ClaimedSceneJob, controller: AbortController): Promise<void> {
   // The run's owner, whole, as the enqueuer stamped it (its account id or principal kind with its
   // name), else the scene's own principal. A job queued before account ids carries its name alone.
   const owner = sceneJobIdentity({ userId: job.userId, account: job.account, principal: job.principal ?? job.payload.principal });
-  const session = createSession({
-    sessionId: job.sessionId,
-    channel: "scene",
-    ...(owner ?? principalIdentity(`scene:${job.sceneName}`, "synthetic")),
-  });
+
+  // Under multi-user auth such a job's run would derive its storage from the name: the session
+  // derivation refuses that for an account's username (AccountNotThreadedError) and any other name
+  // makes a session whose turn is refused as predating account ids. The throw came before any
+  // handler, so the job was never ended: it stayed running without a heartbeat, the stale-job
+  // recovery queued it again two minutes later, and it was claimed and threw again, for good. It
+  // fails now, before a session is opened, and so does a job whose session cannot be opened.
+  const refusal = legacyJobRefusal(owner);
+  if (refusal) {
+    await failUnstartedJob(job, refusal);
+    return;
+  }
+  let session: AgentSession;
+  try {
+    session = createSession({
+      sessionId: job.sessionId,
+      channel: "scene",
+      ...(owner ?? principalIdentity(`scene:${job.sceneName}`, "synthetic")),
+    });
+  } catch (err) {
+    await failUnstartedJob(job, `The job's session could not be opened: ${err instanceof Error ? err.message : String(err)}`, err);
+    return;
+  }
 
   const counters = {
     toolCallsRequested: job.progress.toolCallsRequested,

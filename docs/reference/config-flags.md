@@ -92,7 +92,7 @@ Every public schema field, where it is declared, and how many production files r
 | `confidenceDemotion` | packages/core/src/config/schemas/retrieval.ts:133 | 1 |
 | `confidenceMinScoreGap` | packages/core/src/config/schemas/retrieval.ts:139 | 1 |
 | `confidenceMinTopRerank` | packages/core/src/config/schemas/retrieval.ts:147 | 1 |
-| `config` | packages/core/src/config/schema.ts:1256 | 300 |
+| `config` | packages/core/src/config/schema.ts:1256 | 301 |
 | `configRemovals` | packages/core/src/config/schema.ts:1741 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1568 | 1 |
@@ -511,7 +511,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:836 | 11 |
 | `userAgent` | packages/core/src/config/schema.ts:1199 | 3 |
-| `username` | packages/core/src/config/schema.ts:377 | 81 |
+| `username` | packages/core/src/config/schema.ts:377 | 82 |
 | `usernameClaim` | packages/core/src/config/schema.ts:442 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:837 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:627 | 4 |
