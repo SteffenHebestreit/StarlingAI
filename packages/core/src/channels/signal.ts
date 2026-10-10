@@ -9,6 +9,7 @@ import {
   checkDmPolicy,
   deleteChannelSession,
   getOrCreateChannelSession,
+  recordChannelSenderRefused,
   resolveToken,
   runChannelTurn,
 } from "./base.js";
@@ -159,8 +160,13 @@ async function handleSignalMessage(
     return;
   }
 
-  const sessionId = await getOrCreateChannelSession("signal", message.senderId);
-  runChannelTurn(sessionId, message.text)
+  const opened = await getOrCreateChannelSession("signal", message.senderId);
+  if ("refused" in opened) {
+    // A sender that may not be served gets no reply; the message is handled.
+    recordChannelSenderRefused("signal", message.senderId, opened.refused);
+    return;
+  }
+  runChannelTurn(opened.sessionId, message.text)
     .then((response) => sendSignalMessage(signalCliPath, account, message.senderId, response))
     .catch((err) => log.error({ err }, "Signal turn error"));
 }

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import * as dav from "./dav-client.js";
 import type { MailAccountConfig } from "./types.js";
-import { getAccount } from "./account-access.js";
+import { getAccount, mailCaller } from "./account-access.js";
 
 const AddressBookSchema = z.object({
   accountId: z.string().min(1),
@@ -53,7 +53,7 @@ export function contactsRoutes(accounts: MailAccountConfig[]) {
 
   // List address books for an account
   app.get("/api/contacts/:accountId/addressbooks", async (c) => {
-    const account = getAccount(accounts, c.req.param("accountId"), c.req.header("x-sai-user"));
+    const account = getAccount(accounts, c.req.param("accountId"), mailCaller((name) => c.req.header(name)));
     if (!account.carddav) {
       return c.json({ error: "Account has no CardDAV configuration" }, 422);
     }
@@ -64,7 +64,7 @@ export function contactsRoutes(accounts: MailAccountConfig[]) {
   // Search/list contacts in an address book
   app.post("/api/contacts/list", async (c) => {
     const body = SearchContactsSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.carddav) {
       return c.json({ error: "Account has no CardDAV configuration" }, 422);
     }
@@ -75,7 +75,7 @@ export function contactsRoutes(accounts: MailAccountConfig[]) {
   // Create a new contact
   app.post("/api/contacts", async (c) => {
     const body = CreateContactSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.carddav) {
       return c.json({ error: "Account has no CardDAV configuration" }, 422);
     }
@@ -86,7 +86,7 @@ export function contactsRoutes(accounts: MailAccountConfig[]) {
   // Update an existing contact
   app.put("/api/contacts", async (c) => {
     const body = UpdateContactSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.carddav) {
       return c.json({ error: "Account has no CardDAV configuration" }, 422);
     }
@@ -97,7 +97,7 @@ export function contactsRoutes(accounts: MailAccountConfig[]) {
   // Delete a contact
   app.delete("/api/contacts", async (c) => {
     const body = DeleteContactSchema.parse(await c.req.json());
-    const account = getAccount(accounts, body.accountId, c.req.header("x-sai-user"));
+    const account = getAccount(accounts, body.accountId, mailCaller((name) => c.req.header(name)));
     if (!account.carddav) {
       return c.json({ error: "Account has no CardDAV configuration" }, 422);
     }

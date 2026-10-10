@@ -2,6 +2,11 @@
 /**
  * Generate a StarlingAI dashboard JWT token.
  *
+ * The token is a bootstrap token (the `bst` claim): an instance credential for whoever holds the JWT
+ * secret, never an account. Under multi-user auth it resolves as the bootstrap principal named by
+ * --user (default "admin"), with its own storage, even where an account has that username:
+ * `--user alice` is not alice's account. With auth off the claim changes nothing.
+ *
  * Usage:
  *   node scripts/gen-token.mjs                     # admin token (24h)
  *   node scripts/gen-token.mjs --user bob          # custom userId
@@ -126,7 +131,7 @@ const now = Math.floor(Date.now() / 1000);
 const exp = now + parseTtlSeconds(ttl);
 
 const header = base64UrlEncode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-const payload = base64UrlEncode(JSON.stringify({ sub: userId, role, iat: now, exp }));
+const payload = base64UrlEncode(JSON.stringify({ sub: userId, role, bst: true, iat: now, exp }));
 const signature = signHs256(`${header}.${payload}`, secret);
 
 console.log(`${header}.${payload}.${signature}`);

@@ -76,7 +76,7 @@ interface Listing { text: string; items: Array<Record<string, unknown>> }
 /** The two listings as the gateway serves them: every /api request runs in its user's context. */
 async function listingsAs(userId: string | undefined, role: string): Promise<{ flow: Listing; proposals: Listing }> {
   const app = new Hono();
-  app.use("/api/*", (_c, next) => runWithRequestContext({ userId }, () => next()));
+  app.use("/api/*", (_c, next) => runWithRequestContext({ identity: { userId } }, () => next()));
   registerSubAgentRoutes(app);
   const headers = { Authorization: `Bearer ${await createToken(userId ?? "bootstrap", { role })}` };
   const read = async (path: string, key: string): Promise<Listing> => {
@@ -174,7 +174,7 @@ describe("config-assistant requests and who reads what was written from them", (
     dirs.push(shared);
     withConfig(shared, true);
     const app = new Hono();
-    app.use("/api/*", (_c, next) => runWithRequestContext({ userId: "bob" }, () => next()));
+    app.use("/api/*", (_c, next) => runWithRequestContext({ identity: { userId: "bob" } }, () => next()));
     registerSubAgentRoutes(app);
 
     const response = await app.request("/api/flow-memory", {
@@ -221,7 +221,7 @@ describe("the learned flow guidance and whose entries it reads", () => {
     const root = seedGuidance();
     withConfig(root, true);
 
-    const text = runWithRequestContext({ userId: "bob" }, () => guidance(root));
+    const text = runWithRequestContext({ identity: { userId: "bob" } }, () => guidance(root));
 
     expect(text).toContain("Bob made the researcher");
     expect(text).not.toContain("Alice");
@@ -233,10 +233,10 @@ describe("the learned flow guidance and whose entries it reads", () => {
   it("under multi-user auth, a run in the caller's own root reads the caller's own entries from the deployment root", () => {
     const root = seedGuidance();
     withConfig(root, true);
-    const bobRoot = userWorkspaceRoot(root, "bob");
+    const bobRoot = userWorkspaceRoot(root, { userId: "bob" });
     expect(bobRoot).not.toBe(root);
 
-    const text = runWithRequestContext({ userId: "bob" }, () => guidance(bobRoot));
+    const text = runWithRequestContext({ identity: { userId: "bob" } }, () => guidance(bobRoot));
 
     expect(text).toContain("Bob made the researcher");
     expect(text).not.toContain("Alice");

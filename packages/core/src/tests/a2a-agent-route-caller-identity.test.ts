@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PRODUCT } from "../product/index.js";
 import type { SubAgentRunOptions } from "../agent/sub-agent.js";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * The legacy A2A route runs a caller's task as that caller (found in review, 2026-10-08).
@@ -40,6 +41,7 @@ const ENV_KEYS = ["SAI_CONFIG_PATH", "SAI_MASTER_KEY", "SAI_CRED_STORE", "SAI_AU
 
 const account = (username: string) => ({
   username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-08T00:00:00Z",
+  id: testAccountId(username),
 });
 
 afterEach(async () => {
@@ -86,7 +88,7 @@ async function bootGateway(authEnabled: boolean) {
   /** tasks/send to the researcher with a token signed for `user`. */
   const send = async (user: string): Promise<Response> => fetch(`${baseUrl}/a2a/agents/researcher`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await auth.createToken(user, { role: "operator" })}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await auth.createToken(user, { role: "operator", aid: testAccountId(user) })}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tasks/send", params: { task: "Remember that I prefer the early ferry." } }),
   });
   const { workspacePath } = (await import("../config/loader.js")).getConfig();
@@ -100,11 +102,11 @@ describe("the legacy A2A route and the account a task runs as", () => {
       const response = await gw.send("alice");
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("07:40");
-      const { safeUserSegment } = await import("../runtime/user-scope.js");
+      // The account's own root is keyed by its id, not by the username a re-created account shares.
       expect(runs).toEqual([{
         userId: "alice",
         contextUserId: "alice",
-        workspacePath: resolve(gw.workspacePath, "users", safeUserSegment("alice")),
+        workspacePath: resolve(gw.workspacePath, "users", testAccountId("alice")),
       }]);
     } finally {
       await gw.stop();

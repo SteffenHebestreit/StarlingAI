@@ -28,6 +28,8 @@ import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from 
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { roleRank } from "./auth.js";
+import type { Identity } from "../runtime/accounts.js";
+import { ownsRecord, recordHasOwner } from "../runtime/user-scope.js";
 import { clientMayCreateSessionId } from "./session-route-access.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 
@@ -68,7 +70,7 @@ function sseEvent(res: ServerResponse, event: Record<string, unknown>): void {
 export async function handleAguiStream(
   res: ServerResponse,
   body: { sessionId?: string; message: string },
-  caller?: { userId?: string; role?: string },
+  caller?: { userId?: string; role?: string; identity?: Identity },
 ): Promise<void> {
   const { message, sessionId } = body;
   const userId = caller?.userId;
@@ -109,13 +111,17 @@ export async function handleAguiStream(
   // `session.resumed` audit entry. Doing that first meant a request the gate below DENIES had
   // already un-parked the victim's session. getSessionRecord answers the ownership question
   // without touching anything; the resume happens once the caller is allowed to have it.
+  // The owner is compared by identity (ownsRecord), not by name: an account created again under a
+  // deleted one's name drove the old one's sessions, and so did any caller whose name a channel
+  // sender's session carried. A session from before account ids is an admin's alone.
+  const callerWho = caller?.identity ?? (userId ? { userId } : undefined);
   const existingRecord = sessionId ? getSessionRecord(sessionId) : undefined;
   if (existingRecord && getConfig().auth?.enabled === true) {
-    const owner = existingRecord.userId;
+    const owner = existingRecord.identity();
     // ADMIN, not operator: operator is the role every account gets by default.
     const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
-    if (owner !== undefined && owner !== userId && !isAdmin) {
-      log.warn({ sessionId, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
+    if (recordHasOwner(owner) && !ownsRecord(callerWho, owner) && !isAdmin) {
+      log.warn({ sessionId, owner: owner.userId, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Session not found" }));
       return;
@@ -129,10 +135,10 @@ export async function handleAguiStream(
   // unowned sessions and auth-off deployments fall through. Opaque 404 to match the
   // RPC not-found shape and avoid confirming the session id exists.
   if (session && getConfig().auth?.enabled === true) {
-    const owner = session.userId;
+    const owner = session.identity();
     const isAdmin = !!caller?.role && roleRank(caller.role) >= roleRank("admin");
-    if (owner !== undefined && owner !== userId && !isAdmin) {
-      log.warn({ sessionId: session.id, owner, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
+    if (recordHasOwner(owner) && !ownsRecord(callerWho, owner) && !isAdmin) {
+      log.warn({ sessionId: session.id, owner: owner.userId, caller: userId ?? "(none)" }, "AG-UI stream denied: session owned by another user");
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Session not found" }));
       return;
@@ -167,7 +173,8 @@ export async function handleAguiStream(
     session = createSession({
       ...(sessionId ? { sessionId } : {}),
       channel: "webchat:agui",
-      ...(userId ? { userId } : {}),
+      // The caller's identity whole (its account id travels with its name), or its name alone.
+      ...(caller?.identity ?? (userId ? { userId } : {})),
       ...(caller?.role ? { userRole: caller.role } : {}),
     });
   }

@@ -95,6 +95,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useGatewayStore, type ManagedDocument, type ManagedDocumentScope } from "@/stores/gateway";
+import { ownUserSourceMatcher } from "@/composables/documentSources";
 
 const gateway = useGatewayStore();
 
@@ -103,6 +104,8 @@ const loadError = ref("");
 const documents = ref<ManagedDocument[]>([]);
 const engramAvailable = ref(true);
 const currentUser = ref<string | null>(null);
+/** Under multi-user auth, the caller's own user corpora by source (keyed by its account id). */
+const currentUserSources = ref<string[] | undefined>(undefined);
 
 const fileInputEl = ref<HTMLInputElement | null>(null);
 const uploadScope = ref<"user" | "workspace" | "session">("user");
@@ -115,10 +118,11 @@ const currentSessionId = computed(() => gateway.currentSessionId);
 
 interface DocRow { doc: ManagedDocument; entry: ManagedDocumentScope }
 
-function rowsForScope(scope: "session" | "user" | "workspace", matchSource?: string): DocRow[] {
+function rowsForScope(scope: "session" | "user" | "workspace", matchSource?: string | ((source: string) => boolean)): DocRow[] {
+  const matches = typeof matchSource === "string" ? (source: string) => source === matchSource : matchSource;
   const rows: DocRow[] = [];
   for (const doc of documents.value) {
-    const entry = doc.scopes.find((s) => s.scope === scope && (!matchSource || s.source === matchSource));
+    const entry = doc.scopes.find((s) => s.scope === scope && (!matches || matches(s.source)));
     if (entry) rows.push({ doc, entry });
   }
   return rows;
@@ -137,7 +141,7 @@ const groups = computed(() => {
     scope: "user",
     label: "Personal library",
     hint: "Your documents — searchable across your conversations when enabled in Settings → Document RAG.",
-    rows: rowsForScope("user", currentUser.value ? `user:${currentUser.value}` : undefined),
+    rows: rowsForScope("user", ownUserSourceMatcher({ currentUser: currentUser.value, currentUserSources: currentUserSources.value })),
   });
   out.push({
     scope: "workspace",
@@ -163,6 +167,7 @@ async function reload() {
     documents.value = res.documents;
     engramAvailable.value = res.engramAvailable;
     currentUser.value = res.currentUser;
+    currentUserSources.value = res.currentUserSources;
   } catch (e) {
     loadError.value = `Failed to load documents: ${e instanceof Error ? e.message : String(e)}`;
   } finally {

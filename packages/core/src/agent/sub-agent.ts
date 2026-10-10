@@ -33,7 +33,8 @@ import { turnSteeringManager } from "./turn-steering.js";
 import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, toolCallIdentity, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
+import type { Identity } from "../runtime/accounts.js";
 import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
   addFigureKeys,
@@ -2320,7 +2321,7 @@ function rejectSuspiciousNoToolOutput(
   // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
   // into one per account, and the readers only ever look at the shared one.
   // For the account the run is for, like the run's other outcomes (recordOutcome).
-  const account = recordAccount(opts.userId);
+  const account = recordAccount(toolCallIdentity(opts));
   appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
@@ -2558,6 +2559,10 @@ export interface SubAgentRunOptions {
   /** Authenticated user that owns the parent turn — propagated so sub-agents
    * enforce the same per-user resource access (mail, credentials, compute). */
   userId?: string;
+  /** The same owner whole: `userId` with its account id or principal kind, set together with it
+   *  from one identity. The run's tools and its records derive storage from it; without it the
+   *  name is paired with the ambient identity (runtime/user-scope.ts pairedIdentity). */
+  identity?: Identity;
   /** Owning conversation session for KB scope checks (ephemeral KB workers only) —
    * propagated onto the sub-agent's ToolContext so its KB access resolves against
    * the originating session rather than its rewritten per-run sub-session id. */
@@ -3767,6 +3772,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       // to the whole workspace via workspaceAccess:"full" in their agent config.
       workspaceScope: isFullScopeAgent ? "full" : "generated",
       userId: opts.userId,
+      ...(opts.identity ? { identity: opts.identity } : {}),
       ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
@@ -4465,9 +4471,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
 
     // The account this run is for, on every outcome it writes and every lesson it records: under
     // multi-user auth a reader shows an entry's task and lesson to that account only
-    // (memory/service.ts). The identity its tools act as (toolContext.userId, else the request's): an
-    // A2A caller's run has no request user of its own, only opts.userId.
-    const runAccount = recordAccount(opts.userId);
+    // (memory/service.ts). The identity its tools act as (the run's own, else the request's, never
+    // one field from each): an A2A caller's run has no request user of its own, only its options.
+    const runAccount = recordAccount(toolCallIdentity(opts));
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get

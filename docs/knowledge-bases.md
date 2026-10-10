@@ -103,13 +103,13 @@ A KB carries a **visibility scope** — the same three-scope model as documents 
 | Scope | Who can see / search / manage it | Ownership stamp |
 | --- | --- | --- |
 | `workspace` | everyone on the instance (**the default**) | — |
-| `user` | the owning user, across all their chats | `ownerId` |
+| `user` | the owning user, across all their chats | `ownerId`, and under multi-user auth `ownerAccount` (or `ownerPrincipal`) |
 | `session` | only the conversation that created it | `sessionId` |
 
-Access is decided by `callerCanAccessKb(kb, { userId?, sessionId? })`:
+Access is decided by `callerCanAccessKb(kb, { identity?, userId?, sessionId? })`:
 
 - **workspace** — always visible.
-- **user** — visible when the KB's `ownerId` equals the caller's `userId`. A user KB written with **no** owner (single-user / auth-disabled mode) stays visible to everyone, matching the flat instance-wide document view when auth is off.
+- **user** — visible to its owner. Under multi-user auth that is the account whose id the KB carries (`ownerAccount`), or for a principal's KB (a bootstrap token's, say) the same principal (`ownerPrincipal`); `ownerId` is the owner's name, for display. An account deleted and created again under the same name has a new id and does not see the old account's KBs. A user KB from before account ids carries only `ownerId`: it is an admin's on the REST routes and nobody's in retrieval and the chat tools, until an adoption in the account migration stamps it. With auth off, `ownerId` is compared with the caller's `userId`, as always. A user KB written with **no** owner (single-user / auth-disabled mode) stays visible to everyone, matching the flat instance-wide document view when auth is off.
 - **session** — visible only when the caller presents the owning `sessionId`.
 
 **Legacy KBs** created before scoping have no `scope` field and are treated as `workspace` — nothing to migrate.

@@ -2,6 +2,10 @@ import { afterAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testAccount, testAccountId } from "./support/test-account.js";
+
+/** Alice as a signed-in request carries her: her account id with her name. */
+const ALICE = { userId: "alice", account: testAccountId("alice") };
 import { Hono } from "hono";
 
 /**
@@ -15,7 +19,7 @@ const configPath = join(tempDir, "starlingai.json");
 writeFileSync(configPath, JSON.stringify({
   workspacePath,
   gateway: { jwtSecret: "t".repeat(32) },
-  auth: { enabled: true, users: [{ username: "alice", passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-10-07T00:00:00Z" }] },
+  auth: { enabled: true, users: [testAccount("alice").record] },
 }), "utf8");
 process.env["SAI_CONFIG_PATH"] = configPath;
 
@@ -37,7 +41,7 @@ describe("memory inspector scope", () => {
     const { createToken } = await import("../gateway/auth.js");
     const { registerMemoryGraphRoutes } = await import("../gateway/memory-graph-routes.js");
 
-    memory.storeWorkspaceMemoryRecord(userWorkspaceRoot(workspacePath, "alice"), {
+    memory.storeWorkspaceMemoryRecord(userWorkspaceRoot(workspacePath, ALICE), {
       key: "alice_note", subject: "Lager", content: "Alices eigene Notiz zum Lager Nordhafen.",
     });
     memory.storeWorkspaceMemoryRecord(workspacePath, {
@@ -46,10 +50,10 @@ describe("memory inspector scope", () => {
 
     const app = new Hono();
     // What the gateway does for every /api request under auth (gateway/index.ts).
-    app.use("/api/*", (_c, next) => runWithRequestContext({ userId: "alice" }, () => next()));
+    app.use("/api/*", (_c, next) => runWithRequestContext({ identity: ALICE }, () => next()));
     registerMemoryGraphRoutes(app);
 
-    const token = await createToken("alice", { role: "operator" });
+    const token = await createToken("alice", testAccount("alice").claims);
     const response = await app.request("/api/memory/entries?scope=workspace", { headers: { Authorization: `Bearer ${token}` } });
     expect(response.status).toBe(200);
     const body = await response.json() as { records: Array<{ key?: string }> };

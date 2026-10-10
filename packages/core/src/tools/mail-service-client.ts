@@ -7,7 +7,9 @@
  *  - error formatting that surfaces the upstream `error`/`message` field
  */
 import { getConfig } from "../config/loader.js";
-import { currentUserId } from "../runtime/request-context.js";
+import { currentIdentity } from "../runtime/request-context.js";
+import type { Identity } from "../runtime/accounts.js";
+import { ACL_PRINCIPAL_PREFIX } from "../guardrails/resource-access.js";
 import type { ToolResult } from "./registry.js";
 
 export interface MailServiceResponse<T = unknown> {
@@ -37,7 +39,7 @@ export async function callMailService<T>(
   // Forward the owning user so the mail-service can enforce per-account access
   // (allowedUsers). Undefined in single-user / auth-disabled mode → no header,
   // mail-service treats the request as unscoped.
-  const userId = currentUserId();
+  const identityHeaders = mailIdentityHeaders(currentIdentity());
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
@@ -47,7 +49,7 @@ export async function callMailService<T>(
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...(config.authToken ? { Authorization: `Bearer ${config.authToken}` } : {}),
-        ...(userId ? { "X-Sai-User": userId } : {}),
+        ...identityHeaders,
         ...(init?.headers ?? {}),
       },
       signal: controller.signal,
@@ -56,6 +58,37 @@ export async function callMailService<T>(
     return { status: response.status, body };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * The headers that tell the mail-service who is asking, in the forms its `allowedUsers` and
+ * `isolatedUsers` entries take (packages/mail-service/src/account-access.ts):
+ *
+ * - an account: `X-Sai-User: <username>` and `X-Sai-Account: <id>`, so an entry may name it by its
+ *   frozen username or as `account:<id>`;
+ * - a bootstrap token: `X-Sai-User: <sub>`, as always (an instance credential);
+ * - any other principal (a channel sender, an A2A peer, a scene/job/workflow run), and under
+ *   multi-user auth a name with no kind: `X-Sai-User: principal:<raw>`, which only a
+ *   `principal:<raw>` entry matches.
+ *
+ * The raw name went out for every caller, so a mail From address or a Telegram id equal to a name
+ * in an account's `allowedUsers` was granted that mailbox. With one operator identities carry no
+ * kind and the header is the name, exactly as before.
+ */
+export function mailIdentityHeaders(who: Identity | undefined): Record<string, string> {
+  if (!who?.userId) return {};
+  if (who.account) return { "X-Sai-User": who.userId, "X-Sai-Account": who.account };
+  if (who.principal === "bootstrap") return { "X-Sai-User": who.userId };
+  if (who.principal || multiUserAuth()) return { "X-Sai-User": `${ACL_PRINCIPAL_PREFIX}${who.userId}` };
+  return { "X-Sai-User": who.userId };
+}
+
+function multiUserAuth(): boolean {
+  try {
+    return getConfig().auth?.enabled === true;
+  } catch {
+    return true; // fail closed: never the bare name
   }
 }
 

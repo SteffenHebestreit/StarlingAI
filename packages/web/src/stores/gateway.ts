@@ -608,6 +608,9 @@ export interface DocumentListResponse {
   documents: ManagedDocument[];
   engramAvailable: boolean;
   currentUser: string | null;
+  /** Under multi-user auth, the caller's own user corpora by source: keyed by its account id, not
+   *  by the name in `currentUser`. Absent with one operator. */
+  currentUserSources?: string[];
 }
 
 export interface DocumentRagConfig {

@@ -60,13 +60,13 @@ function seed(): { shared: string; bobRoot: string } {
   lesson(ALICE_TASK, "search the bar association register first", safeUserSegment("alice"));
   lesson(BOB_TASK, "the harbour operator's site lists the ferry times", safeUserSegment("bob"));
   lesson(LEGACY_TASK, "cite the local rent index");
-  const bobRoot = userWorkspaceRoot(shared, "bob");
+  const bobRoot = userWorkspaceRoot(shared, { userId: "bob" });
   storeWorkspaceMemoryRecord(bobRoot, { key: "law_firm", subject: "Kanzlei", content: "Bob bevorzugt die Kanzlei Nordhafen in Hamburg", kind: "preference" });
   return { shared, bobRoot };
 }
 
 function asBob<T>(run: () => Promise<T>): Promise<T> {
-  return runWithRequestContext({ userId: "bob" }, run);
+  return runWithRequestContext({ identity: { userId: "bob" } }, run);
 }
 
 /** Bob's own task and no one else's: under multi-user auth, for a request made as Bob. */
@@ -200,7 +200,7 @@ describe("a busy account and the caller's own lessons", () => {
     });
     lesson(BOB_TASK, safeUserSegment("bob"), 0);
     for (let i = 1; i <= 200; i++) lesson(`Alice's errand number ${i} in Hamburg`, safeUserSegment("alice"), i);
-    return { bobRoot: userWorkspaceRoot(shared, "bob") };
+    return { bobRoot: userWorkspaceRoot(shared, { userId: "bob" }) };
   }
 
   it("under multi-user auth, a search still finds the caller's own lesson behind 200 of another account's", async () => {
@@ -257,7 +257,7 @@ describe("where the caller's own agent-scope records are kept, and how many", ()
     lesson(BOB_TASK, safeUserSegment("bob"), 0);
     for (let i = 1; i <= 70; i++) lesson(`Alice's errand number ${i} in Hamburg`, safeUserSegment("alice"), i);
 
-    const output = await agentSearchAsBob(userWorkspaceRoot(shared, "bob"), "Hamburg");
+    const output = await agentSearchAsBob(userWorkspaceRoot(shared, { userId: "bob" }), "Hamburg");
 
     expect(output).toContain(BOB_TASK);
   });
@@ -276,7 +276,7 @@ describe("where the caller's own agent-scope records are kept, and how many", ()
     flow("Bob tuned the researcher for the Hamburg ferries", safeUserSegment("bob"));
     for (let i = 1; i <= alice; i++) flow(`Alice's Hamburg change number ${i}`, safeUserSegment("alice"));
     flow("A Hamburg change from before accounts");
-    return { shared, bobRoot: userWorkspaceRoot(shared, "bob") };
+    return { shared, bobRoot: userWorkspaceRoot(shared, { userId: "bob" }) };
   }
 
   // The read used the caller's own root, where no flow entry is ever written: under multi-user auth
@@ -325,7 +325,7 @@ describe("the account a ledger entry is written for", () => {
   it("is the user-scope segment of the request's user under multi-user auth, never the raw user id", () => {
     withAuth(true);
 
-    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBe(safeUserSegment("bob"));
+    expect(runWithRequestContext({ identity: { userId: "bob" } }, () => recordAccount())).toBe(safeUserSegment("bob"));
     expect(safeUserSegment("bob")).not.toBe("bob");
   });
 
@@ -335,11 +335,11 @@ describe("the account a ledger entry is written for", () => {
 
     vi.restoreAllMocks();
     withAuth(false);
-    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBeUndefined();
+    expect(runWithRequestContext({ identity: { userId: "bob" } }, () => recordAccount())).toBeUndefined();
 
     vi.restoreAllMocks();
     vi.spyOn(configLoader, "getConfig").mockImplementation(() => { throw new Error("config unreadable"); });
-    expect(runWithRequestContext({ userId: "bob" }, () => recordAccount())).toBeUndefined();
+    expect(runWithRequestContext({ identity: { userId: "bob" } }, () => recordAccount())).toBeUndefined();
   });
 });
 

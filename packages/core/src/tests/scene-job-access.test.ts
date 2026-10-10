@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PRODUCT } from "../product/index.js";
+import { testAccount } from "./support/test-account.js";
 
 /**
  * An account sees and acts on its own scene and job runs only (found in review, 2026-10-08).
@@ -36,7 +37,8 @@ async function bootGateway(authEnabled: boolean) {
   writeFileSync(join(configDir, "10-test.json"), JSON.stringify({
     gateway: { port, jwtSecret: "j".repeat(40) },
     workspacePath: tempDir,
-    ...(authEnabled ? { auth: { enabled: true } } : {}),
+    // Under multi-user auth the callers are accounts, and a run is its account's by id.
+    ...(authEnabled ? { auth: { enabled: true, users: [testAccount("alice").record, testAccount("bob").record, testAccount("carol", "admin").record] } } : {}),
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = configDir;
   process.env["SAI_MASTER_KEY"] = "m".repeat(32);
@@ -60,13 +62,16 @@ async function bootGateway(authEnabled: boolean) {
   const send = async (user: string, role: string, method: string, path: string) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method,
-      headers: { Authorization: `Bearer ${await auth.createToken(user, { role })}` },
+      headers: { Authorization: `Bearer ${await auth.createToken(user, authEnabled ? testAccount(user, role).claims : { role })}` },
     });
     return { status: response.status, text: await response.text() };
   };
   /** One run each for Alice and Bob, a finished one for Alice, and one a webhook started. */
   const seed = async () => {
-    const run = (sceneName: string, userId: string) => jobs.createJob({ sceneName, userId, task: `${sceneName} task`, turnTimeoutMs: 30_000 });
+    // The owner whole, as the run routes stamp it: an account by its id, a scene's run as a principal.
+    const owner = (userId: string) => !authEnabled ? {}
+      : userId.startsWith("scene:") ? { principal: "synthetic" as const } : { account: testAccount(userId).id };
+    const run = (sceneName: string, userId: string) => jobs.createJob({ sceneName, userId, ...owner(userId), task: `${sceneName} task`, turnTimeoutMs: 30_000 });
     const alice = await run("alice_scene", "alice");
     const aliceDone = await run("alice_finished_scene", "alice");
     await jobs.cancelJob(aliceDone.id);

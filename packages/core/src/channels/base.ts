@@ -1,11 +1,17 @@
 /**
  * Base types and helpers shared by all inbound message channels.
  */
-import { createSession, getSession, endSession, resolveSession } from "../agent/session.js";
+import { createSession, getSession, endSession, resolveSession, type AgentSession } from "../agent/session.js";
 import { getChannelSessionId, setChannelSessionId } from "../agent/session-redis.js";
 import { runTurn } from "../agent/runtime.js";
 import { logAudit } from "../audit/logger.js";
+import { getConfig } from "../config/loader.js";
+import { getExtensionAuthProvider } from "../extension/index.js";
+import { childLogger } from "../logger.js";
+import { AccountNotThreadedError, multiUserAuthActive, ownsRecord, principalIdentity, reservedUsernameProblem } from "../runtime/user-scope.js";
 import { recordChannelIngressDenied } from "./registry.js";
+
+const log = childLogger("channel:base");
 
 export type DmPolicy = "open" | "allowlist" | "pairing" | "disabled";
 
@@ -102,32 +108,99 @@ export function deleteChannelSession(key: string): void {
   }
 }
 
+// ─── Senders that may not be served (multi-user auth) ────────────────────────
+// A channel sender is a principal: its storage is keyed by its raw id, the segment that id always
+// had. An account's storage is keyed by its immutable id, but the data an account kept before ids
+// existed sits under the segment of its USERNAME, which is that same formula. A Telegram user whose
+// id is an account's username, or a mail From an OIDC account's address, would read and write that
+// account's data; under an extension auth provider an account's id is the formula of the provider's
+// user id, so a sender with that id would be the account outright. Such a sender is refused: no
+// session, no turn and no reply, which tells the sender nothing about the account. With one
+// operator nothing is partitioned and every sender is served, as before.
+
+/** A sender a channel does not serve, and why (for the audit, never for the sender). */
+export interface ChannelSenderRefused {
+  refused: string;
+}
+
+/** The session a sender is served in, or the refusal. */
+export type ChannelSessionResult = { sessionId: string } | ChannelSenderRefused;
+
+/** Why `senderId` may not be served as a channel principal, or undefined when it may. A config
+ *  that cannot be read refuses. */
+export function channelSenderRefusal(senderId: string): string | undefined {
+  try {
+    if (getConfig().auth?.enabled !== true) return undefined;
+    const problem = reservedUsernameProblem(senderId);
+    if (problem) return `the sender id ${problem}`;
+    if (getExtensionAuthProvider()?.getUserById(senderId)) return "the sender id is a user id of the deployment's auth provider";
+    return undefined;
+  } catch (err) {
+    return `the sender could not be checked (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+
 /**
- * Get or create a session for a sender on a given channel.
- * Async to support cross-instance Redis channel-session routing.
+ * Records a refused sender: audited as `channel_sender_refused` and logged. The adapter marks the
+ * message handled and sends nothing back.
  */
-export async function getOrCreateChannelSession(channelType: string, senderId: string): Promise<string> {
+export function recordChannelSenderRefused(channelType: string, senderId: string, reason: string): void {
+  logAudit("channel_sender_refused", { channel: channelType, reason }, { channel: channelType, userId: senderId, severity: "warn" });
+  log.warn({ channel: channelType, reason }, "Channel message refused: the sender may not be served under multi-user auth");
+}
+
+/**
+ * Whether a session the sender's mapping names is one the sender continues. Under multi-user auth
+ * only a session that is the sender's as a channel principal is. The Redis mapping outlives a
+ * rebuild by up to its TTL, and a sender who wrote within it was mapped to a session from before
+ * account ids (a name, no kind): continued, every turn on it was refused as predating account ids,
+ * and that refusal was the reply to every message until the mapping expired. Such a session, or
+ * one of anybody else, is left as it is and the sender gets a fresh one. With one operator every
+ * mapped session is continued, as before.
+ */
+function continuesSender(session: AgentSession, senderId: string): boolean {
+  if (!multiUserAuthActive()) return true;
+  return ownsRecord(principalIdentity(senderId, "channel"), session.identity());
+}
+
+/**
+ * Get or create a session for a sender on a given channel, or the refusal of a sender that may not
+ * be served (channelSenderRefusal), checked before any session is reused or made. A session is the
+ * sender's as a channel principal. Async to support cross-instance Redis channel-session routing.
+ */
+export async function getOrCreateChannelSession(channelType: string, senderId: string): Promise<ChannelSessionResult> {
+  const refusal = channelSenderRefusal(senderId);
+  if (refusal) return { refused: refusal };
   const key = `${channelType}:${senderId}`;
 
-  // 1. Check local in-process map first (fastest path).
-  const localSid = _sessions.get(key);
-  if (localSid && getSession(localSid)) return localSid;
+  try {
+    // 1. Check local in-process map first (fastest path).
+    const localSid = _sessions.get(key);
+    const local = localSid ? getSession(localSid) : undefined;
+    if (local && continuesSender(local, senderId)) return { sessionId: local.id };
 
-  // 2. Check Redis for a session that was created on another instance.
-  const redisSid = await getChannelSessionId(channelType, senderId);
-  if (redisSid) {
-    const redisSession = await resolveSession(redisSid);
-    if (redisSession) {
-      _sessions.set(key, redisSid);
-      return redisSid;
+    // 2. Check Redis for a session that was created on another instance.
+    const redisSid = await getChannelSessionId(channelType, senderId);
+    if (redisSid) {
+      const redisSession = await resolveSession(redisSid);
+      if (redisSession && continuesSender(redisSession, senderId)) {
+        _sessions.set(key, redisSid);
+        return { sessionId: redisSid };
+      }
+      if (redisSession) log.info({ channel: channelType, sessionId: redisSid }, "The sender's mapped session is not the sender's as a channel principal; a fresh one starts");
     }
-  }
 
-  // 3. Create a fresh session and publish the mapping.
-  const session = createSession({ channel: channelType, userId: senderId });
-  _sessions.set(key, session.id);
-  void setChannelSessionId(channelType, senderId, session.id);
-  return session.id;
+    // 3. Create a fresh session and publish the mapping.
+    const session = createSession({ channel: channelType, ...principalIdentity(senderId, "channel") });
+    _sessions.set(key, session.id);
+    void setChannelSessionId(channelType, senderId, session.id);
+    return { sessionId: session.id };
+  } catch (err) {
+    // A storage derivation that refused an identity it could not place is a refusal of this one
+    // message, never a failure of the channel.
+    if (err instanceof AccountNotThreadedError) return { refused: err.message };
+    throw err;
+  }
 }
 
 /**

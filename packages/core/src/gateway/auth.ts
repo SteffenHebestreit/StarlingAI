@@ -10,6 +10,13 @@ import { logAudit } from "../audit/logger.js";
 
 import { PRODUCT } from "../product/index.js";
 import { getExtensionRole, getExtensionAuthProvider } from "../extension/index.js";
+import { extensionAccountId, sameAccountId, type Identity, type PrincipalKind } from "../runtime/accounts.js";
+import { principalIdentity } from "../runtime/user-scope.js";
+import {
+  accountRegistryEntryById,
+  accountRegistryHoldsAccounts,
+  recordAccountRegistryBootstrapSub,
+} from "../runtime/account-registry.js";
 
 const log = childLogger("gateway:auth");
 const BCRYPT_ROUNDS = 12;
@@ -199,6 +206,26 @@ export interface AuthenticatedUser {
   username: string;
   role: AuthRole;
   displayName?: string;
+  /** Under multi-user auth, the account id the token was bound to and the store still holds. */
+  account?: string;
+  /** Under multi-user auth, set instead of `account` for a bootstrap token: an instance credential,
+   *  never an account, whatever its `sub`. */
+  principal?: PrincipalKind;
+}
+
+/**
+ * The identity a resolved caller acts as, whole: its username with its account id, or with the
+ * bootstrap kind. Under multi-user auth a caller with neither holds a token from the empty-store
+ * window, which no account can hold: an instance credential like a bootstrap token, and it acts as
+ * one (a name alone would be a session from before account ids, which runs no turn). With one
+ * operator the caller is its username alone, as every caller was before account ids. The caller
+ * itself is left as it resolved, so the window still shuts on an open socket.
+ */
+export function callerIdentity(user: AuthenticatedUser | null | undefined): Identity | undefined {
+  if (!user) return undefined;
+  if (user.account) return { userId: user.username, account: user.account };
+  if (user.principal) return { userId: user.username, principal: user.principal };
+  return principalIdentity(user.username, "bootstrap");
 }
 
 export function normalizeRole(value: unknown): AuthRole {
@@ -222,62 +249,151 @@ export function normalizeRole(value: unknown): AuthRole {
 export async function authenticatedUser(authHeader: string | null | undefined): Promise<AuthenticatedUser | null> {
   const token = extractBearerToken(authHeader);
   if (!token) return null;
+  return authenticatedUserFromToken(token);
+}
+
+/**
+ * The same for a bare token: one that rides in a query string or a cookie, where a browser cannot
+ * set a header (an iframe preview, a served site, a WebSocket handshake).
+ */
+export async function authenticatedUserFromToken(token: string): Promise<AuthenticatedUser | null> {
   const payload = await verifyToken(token);
   if (!payload || typeof payload.sub !== "string") return null;
   const username = payload.sub;
 
-  // Under active multi-user auth, re-check the account against the live user
-  // store on EVERY request — a signed token is only as good as an account that
-  // still exists. This makes deleting a user (or changing their role) take effect
-  // immediately, instead of the token staying valid for its full TTL (~24h). With
-  // auth disabled (single-operator) there is no user store, so the token's own
-  // claims are authoritative — the bootstrap/god-token path, unchanged.
-  if (getConfig().auth?.enabled === true) {
-    const provider = getExtensionAuthProvider();
-    if (provider) {
-      const record = provider.getUserById(username);
-      if (!record) return null; // account removed/disabled in the extension store
-      return { username, role: normalizeRole(record.role), displayName: record.displayName };
-    }
-    // OIDC users are authenticated by the external IdP and are NOT in auth.users[]
-    // (that store backs only the builtin username/password provider). Their session
-    // token was minted from IdP claims validated at the OIDC callback, so those
-    // claims are authoritative — fall through to the token-claims path below rather
-    // than rejecting for "no local account".
-    // TRADEOFF: unlike the builtin path above, this does NOT re-check a live store, so
-    // disabling/role-changing an OIDC user in the IdP only takes effect when their token
-    // expires (≤ TTL), not immediately. Documented in docs/iam-sso-oidc.md ("revocation
-    // lag"); shorten the OIDC token lifetime if prompt off-boarding matters.
-    if (getConfig().auth.provider !== "oidc") {
-      const users = getConfig().auth.users;
-      const record = users.find((u) => u.username === username);
-      if (record) {
-        return { username, role: normalizeRole(record.role), displayName: record.displayName };
-      }
-      // Two token classes legitimately resolve via their own claims here:
-      //  - Bootstrap admin tokens (CLI-minted via `sai token`; role claim "admin",
-      //    which POST /api/auth/users can never assign). They are TTL-bound
-      //    instance credentials independent of the user store: the operator who
-      //    boots a fresh deployment must be able to create the first account and
-      //    KEEP administering in the same session (more users, prompts, models).
-      //    Revoke one early by rotating the JWT secret.
-      //  - Any signed token while the store has ZERO accounts (the bootstrap
-      //    window documented in config/gateway/30-auth.jsonc) — without it the
-      //    deployment is locked out of ever creating the first account.
-      // Everything else with an unresolvable sub is a deleted/disabled account
-      // and is revoked immediately by the live-store re-check.
-      const isBootstrapAdmin = normalizeRole(payload["role"]) === "admin";
-      if (!isBootstrapAdmin && users.length > 0) {
-        return null; // account deleted from config
-      }
-    }
+  // With auth disabled (single-operator) there is no user store, so the token's own claims are
+  // authoritative — the bootstrap/god-token path, unchanged.
+  if (getConfig().auth?.enabled !== true) {
+    return {
+      username,
+      role: normalizeRole(payload["role"]),
+      displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
+    };
+  }
+  return resolveCaller(username, {
+    aid: payload[ACCOUNT_ID_CLAIM],
+    bst: payload[BOOTSTRAP_CLAIM],
+    role: payload["role"],
+    displayName: payload["displayName"],
+  }, { recordBootstrapSub: true });
+}
+
+/** The claim that binds a session token to the account id it was minted for. */
+export const ACCOUNT_ID_CLAIM = "aid";
+/** The claim that marks a bootstrap token (`sai token`, the setup wizard): an instance credential. */
+export const BOOTSTRAP_CLAIM = "bst";
+
+/**
+ * Checks a caller resolved earlier against the store again, synchronously: an open WebSocket asks
+ * before every message it handles and every event it pushes. Null when the account is gone, retired,
+ * renamed, or holds another id now; otherwise the caller with its role as the store has it now.
+ */
+export function revalidateAuthenticatedUser(user: AuthenticatedUser): AuthenticatedUser | null {
+  if (getConfig().auth?.enabled !== true) return user;
+  return resolveCaller(user.username, {
+    aid: getExtensionAuthProvider() ? undefined : user.account,
+    bst: user.principal === "bootstrap" ? true : undefined,
+    role: user.role,
+    displayName: user.displayName,
+  }, { recordBootstrapSub: false });
+}
+
+interface CallerClaims {
+  aid: unknown;
+  bst: unknown;
+  role: unknown;
+  displayName: unknown;
+}
+
+/**
+ * Who a token is under multi-user auth, re-checked against the live stores on EVERY request: a
+ * signed token is only as good as an account that still exists, so deleting an account or changing
+ * its role takes effect at once instead of at the token's expiry (~24h).
+ *
+ * A token names its account by id (`aid`), not by username alone. A username outlives its account:
+ * an account deleted and created again under the same name, or an identity-provider subject whose
+ * claimed name another subject had first, would otherwise be signed in as the one before. The id is
+ * random and minted once, so a token can only reach the account it was minted for, and only while
+ * that account still holds the username in the token's `sub`.
+ */
+function resolveCaller(username: string, claims: CallerClaims, opts: { recordBootstrapSub: boolean }): AuthenticatedUser | null {
+  const displayName = typeof claims.displayName === "string" ? claims.displayName : undefined;
+  const provider = getExtensionAuthProvider();
+  if (provider) {
+    // An extension store's own id is the token's `sub` and is already immutable, so it is the
+    // account; the `aid` and `bst` claims mean nothing here and are ignored (its login strips them).
+    // Bootstrap tokens are not supported under an extension store, as before.
+    const record = provider.getUserById(username);
+    if (!record) return null; // account removed/disabled in the extension store
+    return { username, role: normalizeRole(record.role), displayName: record.displayName, account: extensionAccountId(username) };
   }
 
-  return {
-    username,
-    role: normalizeRole(payload["role"]),
-    displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
-  };
+  // A token carries one of the two claims; one carrying both was not minted here.
+  if (claims.aid !== undefined && claims.bst !== undefined) return null;
+  if (claims.aid !== undefined) {
+    return typeof claims.aid === "string" ? resolveAccountCaller(username, claims.aid, claims.role, displayName) : null;
+  }
+  if (claims.bst !== undefined) {
+    if (claims.bst !== true) return null;
+    // A bootstrap token is an instance credential: minted with the JWT secret by whoever holds the
+    // host (`sai token`, the setup wizard), it is never an account, whatever its `sub` names. It is
+    // not refused when an account has that username (the shipped identity-provider realm's own user
+    // is "admin", the default bootstrap `sub`): the two are different kinds, and never one bucket.
+    // TTL-bound; revoke one early by rotating the JWT secret.
+    if (opts.recordBootstrapSub) recordAccountRegistryBootstrapSub(username);
+    return { username, role: normalizeRole(claims.role), displayName, principal: "bootstrap" };
+  }
+  // A token with neither claim was minted before account ids, or by hand. It resolves by its own
+  // claims only while the deployment holds no account at all (the bootstrap window documented in
+  // config/gateway/30-auth.jsonc): without that the first account could never be created.
+  if (accountStoreIsEmpty()) {
+    return { username, role: normalizeRole(claims.role), displayName };
+  }
+  return null;
+}
+
+/** No builtin account and no identity-provider account: the bootstrap window. A registry that
+ *  cannot be read keeps the window shut. */
+function accountStoreIsEmpty(): boolean {
+  return getConfig().auth.users.length === 0 && !accountRegistryHoldsAccounts();
+}
+
+const _sharedIdsReported = new Set<string>();
+
+function resolveAccountCaller(username: string, aid: string, roleClaim: unknown, displayName: string | undefined): AuthenticatedUser | null {
+  const record = getConfig().auth.users.find((user) => user.id !== undefined && sameAccountId(user.id, aid));
+  const entry = accountRegistryEntryById(aid);
+  if (record && entry) {
+    // One id held by a builtin account and an identity-provider account: one bucket for two people.
+    // Neither signs in until an admin resolves it.
+    if (!_sharedIdsReported.has(aid.toLowerCase())) {
+      _sharedIdsReported.add(aid.toLowerCase());
+      log.error({ account: aid }, "An account id is held by both a builtin account and an identity-provider account; neither can sign in");
+    }
+    return null;
+  }
+  if (record) {
+    // Builtin accounts, also under provider "oidc" (mixed mode): the record still holds the id and
+    // the name. Role and display name are read from it now, not from the token.
+    if (record.username !== username) return null;
+    return { username, role: normalizeRole(record.role), displayName: record.displayName, account: record.id };
+  }
+  // Identity-provider accounts only while that provider is configured. The role is the one the IdP
+  // granted at sign-in (the registry holds none), as before.
+  if (entry && getConfig().auth.provider === "oidc" && entry.status === "active" && entry.username === username) {
+    return { username, role: normalizeRole(roleClaim), displayName, account: entry.id };
+  }
+  return null;
+}
+
+/**
+ * Why a builtin account cannot sign in now, or undefined when it can. Its record needs an id (the
+ * account migration assigns one to an account that predates ids), and that id must be its alone.
+ */
+export function builtinSignInProblem(record: { id?: string }): string | undefined {
+  if (!record.id) return "This account has no account id yet: an admin runs `sai migrate-account-ids`";
+  if (accountRegistryEntryById(record.id)) return "This account's id is also held by another account: an admin resolves it";
+  return undefined;
 }
 
 /**
@@ -296,6 +412,7 @@ export function userHasRole(user: AuthenticatedUser | null, required: AuthRole):
 export function resetAuthStateForTests(): void {
   _jwtSecret = null;
   failureCounts.clear();
+  _sharedIdsReported.clear();
 }
 
 function resolveJwtSecretPath(): string {

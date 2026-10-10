@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PRODUCT } from "../product/index.js";
+import { testAccount } from "./support/test-account.js";
 
 describe("scene job worker", () => {
   afterEach(async () => {
@@ -360,6 +361,53 @@ describe("scene job worker", () => {
       });
     } finally {
       if (gateway) await gateway.stop();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // A job queued before account ids names its owner by name alone. Under multi-user auth its
+  // session could not be opened for an account's username (the derivation refuses the name), and
+  // the throw came before any handler: the job stayed running, the stale-job recovery queued it
+  // again, and it threw again, for good. Such a job, and one whose session cannot be opened, ends
+  // failed before it starts.
+  it("fails a job queued before account ids, and one whose session cannot be opened, instead of leaving them running", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-legacy-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "s".repeat(32), turnTimeoutMs: 30_000 },
+      workspacePath: tempDir,
+      auth: { enabled: true, provider: "builtin", users: [testAccount("alice").record] },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    const runTurn = vi.fn(async () => ({ response: "ran", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false }));
+    vi.doMock("../agent/runtime.js", () => ({ runTurn }));
+
+    try {
+      const [{ createJob, getJob }, { runSceneJobWorkerTick, LEGACY_JOB_REFUSAL }, sessions] = await Promise.all([
+        import("../agent/jobs.js"),
+        import("../agent/scene-worker.js"),
+        import("../agent/session.js"),
+      ]);
+
+      // An account's username, and a name nobody holds: both are the name alone.
+      for (const userId of ["alice", "bob"]) {
+        const job = await createJob({ sceneName: "nightly", userId, task: "Summarise the day.", turnTimeoutMs: 30_000 });
+        expect(await runSceneJobWorkerTick()).toBe(true);
+        await waitForJobStatus(getJob, job.id, "failed");
+        expect((await getJob(job.id))?.error).toBe(LEGACY_JOB_REFUSAL);
+        // No session was opened for it: none named by the name alone, and none for the job.
+        expect(sessions.getSessionRecord(job.sessionId)).toBeUndefined();
+      }
+
+      // An owner whose session cannot be opened (an account id that is not one) fails too.
+      const broken = await createJob({ sceneName: "nightly", userId: "alice", account: "not an id", task: "x", turnTimeoutMs: 30_000 });
+      expect(await runSceneJobWorkerTick()).toBe(true);
+      await waitForJobStatus(getJob, broken.id, "failed");
+      expect((await getJob(broken.id))?.error).toMatch(/^The job's session could not be opened: .*not an account id/);
+
+      expect(runTurn).not.toHaveBeenCalled();
+    } finally {
       await flushAuditLogForTests();
       rmSync(tempDir, { recursive: true, force: true });
     }

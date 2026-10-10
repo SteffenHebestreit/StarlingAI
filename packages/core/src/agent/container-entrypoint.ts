@@ -57,6 +57,7 @@ async function main(): Promise<void> {
     context,
     parentSessionId,
     userId,
+    identity,
     workspacePath,
     agentConfig,
     resolvedModelConfig,
@@ -107,7 +108,9 @@ async function main(): Promise<void> {
     workspacePath,
     // Whose work this is. Without it every per-user store and path inside this container
     // resolves to the shared bucket while the gateway that spawned it resolves to the user's.
+    // The identity travels whole, so the bucket is the account's, as the gateway's is.
     userId,
+    ...(identity ? { identity } : {}),
     approvalCallback: undefined,
     allowedTools: agentConfig.tools,
   };

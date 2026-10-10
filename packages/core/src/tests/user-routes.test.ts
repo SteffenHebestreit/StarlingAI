@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ACCOUNT_ID_RE } from "../runtime/accounts.js";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * Creating and deleting accounts was operator-only, and operator is every account's default role.
@@ -16,8 +18,8 @@ import { join } from "node:path";
 
 const DUMMY_HASH = "$2b$10$0123456789abcdefghijklmno";
 
-function account(username: string, role: string): Record<string, unknown> {
-  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z" };
+function account(username: string, role: string, id: string = testAccountId(username)): Record<string, unknown> {
+  return { username, role, passwordHash: DUMMY_HASH, createdAt: "2026-01-01T00:00:00Z", id };
 }
 
 const tempDirs: string[] = [];
@@ -45,7 +47,12 @@ async function boot(auth: Record<string, unknown>) {
   ]);
   const app = new Hono();
   registerUserRoutes(app);
-  const tokenFor = async (username: string, role: string) => `Bearer ${await authModule.createToken(username, { role })}`;
+  // An account's token names its id, as /api/auth/login mints it; a name with no record gets a
+  // bootstrap token, as `sai token` mints it.
+  const tokenFor = async (username: string, role: string) => {
+    const id = loader.getConfig().auth.users.find((u) => u.username === username)?.id;
+    return `Bearer ${await authModule.createToken(username, id ? { role, aid: id } : { role, bst: true })}`;
+  };
   const create = async (as: string, username: string) => app.request("/api/auth/users", {
     method: "POST",
     headers: { Authorization: as, "content-type": "application/json" },
@@ -62,7 +69,8 @@ async function boot(auth: Record<string, unknown>) {
   });
   const usernames = () => loader.getConfig().auth.users.map((u) => u.username);
   const passwordHashOf = (username: string) => loader.getConfig().auth.users.find((u) => u.username === username)?.passwordHash;
-  return { app, tokenFor, create, remove, resetPassword, usernames, passwordHashOf, session, authModule };
+  const idOf = (username: string) => loader.getConfig().auth.users.find((u) => u.username === username)?.id;
+  return { app, tokenFor, create, remove, resetPassword, usernames, passwordHashOf, idOf, session, authModule };
 }
 
 afterEach(async () => {
@@ -108,7 +116,8 @@ describe("account management is admin-only", () => {
   });
 
   it("still creates the first account with the bootstrap token, auth on or off", async () => {
-    // `sai token` mints { sub: "admin", role: "admin" }; with no accounts yet it resolves by its claims.
+    // `sai token` mints { sub: "admin", role: "admin", bst: true }: a bootstrap token, which resolves
+    // with no accounts yet and after.
     const enabled = await boot({ enabled: true, users: [] });
     expect((await enabled.create(await enabled.tokenFor("admin", "admin"), "steffen")).status).toBe(200);
     expect(enabled.usernames()).toEqual(["steffen"]);
@@ -184,17 +193,28 @@ describe("an admin resets a password", () => {
 });
 
 describe("a new account never takes a name someone else already holds", () => {
-  it("refuses a username that owns sessions, archived ones included", async () => {
-    const { tokenFor, create, usernames, session } = await boot({ enabled: true, users: [account("root", "admin")] });
-    // alice's account was deleted; her conversations were not.
-    const hers = session.createSession({ channel: "webchat", workspacePath: tempDir!, userId: "alice" });
-    session.archiveSession(hers.id);
+  // A name that owned sessions was refused, archived ones included, so a deleted account's name
+  // stayed blocked for as long as its archived sessions were kept. A session is its account's by id
+  // now, and a new account gets a new id: it is created, and starts empty.
+  it("creates a deleted account's name again, and the new account owns none of the old one's sessions", async () => {
+    const { tokenFor, create, remove, usernames, idOf, session } = await boot({
+      enabled: true,
+      users: [account("root", "admin"), account("alice", "operator")],
+    });
+    const oldId = idOf("alice")!;
     const root = await tokenFor("root", "admin");
-    const refused = await create(root, "alice");
-    expect(refused.status).toBe(409);
-    expect(((await refused.json()) as { error: string }).error).toContain("owns sessions");
-    expect((await create(root, "dave")).status).toBe(200);
-    expect(usernames()).toEqual(["root", "dave"]);
+    const hers = session.createSession({ channel: "webchat", workspacePath: tempDir!, userId: "alice", account: oldId });
+    expect((await remove(root, "alice")).status).toBe(200);
+    expect(session.getSessionRecord(hers.id)?.isArchived()).toBe(true);
+
+    const created = await create(root, "alice");
+    expect(created.status).toBe(200);
+    expect(usernames()).toEqual(["root", "alice"]);
+    const newId = idOf("alice")!;
+    expect(newId).not.toBe(oldId);
+    const { ownsRecord } = await import("../runtime/user-scope.js");
+    const owned = session.getAllSessions({ includeArchived: true }).filter((s) => ownsRecord({ userId: "alice", account: newId }, s.identity()));
+    expect(owned).toEqual([]);
   });
 
   it("creates no local account while the identity provider owns the usernames", async () => {
@@ -206,5 +226,69 @@ describe("a new account never takes a name someone else already holds", () => {
     // The roster says so, for the Users page to hide account creation.
     const roster = await app.request("/api/auth/users", { headers: { Authorization: admin } });
     expect(((await roster.json()) as { provider: string }).provider).toBe("oidc");
+  });
+});
+
+/**
+ * Per-account storage is keyed by an immutable account id, not the username: the id is minted when
+ * the account is created and must survive every later change to the roster. The DELETE route
+ * rewrote every remaining record with five named fields, so each delete stripped every other
+ * account's id.
+ */
+describe("account ids", () => {
+  const ALICE_ID = "alice-0123456789abcdef";
+  const ROOT_ID = "root-fedcba9876543210";
+  const ledgerLines = (): Array<Record<string, unknown>> => {
+    const path = join(tempDir!, ".starlingai", "account-migrations.ndjson");
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  };
+
+  it("mints a random id for a new account and records it in the account ledger", async () => {
+    const { tokenFor, create, remove, idOf } = await boot({ enabled: true, users: [account("root", "admin", ROOT_ID)] });
+    const root = await tokenFor("root", "admin");
+    expect((await create(root, "carol")).status).toBe(200);
+    const first = idOf("carol");
+    expect(first).toMatch(ACCOUNT_ID_RE);
+    expect(first).toMatch(/^carol-[0-9a-f]{16}$/);
+    const [created] = ledgerLines();
+    expect(created).toEqual({ event: "created", id: first, username: "carol", at: expect.any(String) });
+
+    // A name deleted and created again is a new account: a new id, so none of the old storage.
+    expect((await remove(root, "carol")).status).toBe(200);
+    expect((await create(root, "carol")).status).toBe(200);
+    const second = idOf("carol");
+    expect(second).toMatch(ACCOUNT_ID_RE);
+    expect(second).not.toBe(first);
+    expect(ledgerLines().map((entry) => entry["id"])).toEqual([first, second]);
+  });
+
+  it("creates no account when the id cannot be recorded", async () => {
+    const { tokenFor, create, usernames } = await boot({ enabled: true, users: [account("root", "admin", ROOT_ID)] });
+    // The state directory is a file: the ledger cannot be written.
+    writeFileSync(join(tempDir!, ".starlingai"), "not a directory");
+    const refused = await create(await tokenFor("root", "admin"), "carol");
+    expect(refused.status).toBe(500);
+    expect(usernames()).toEqual(["root"]);
+  });
+
+  it("keeps every other account's id when one is deleted", async () => {
+    const { tokenFor, remove, idOf, usernames } = await boot({
+      enabled: true,
+      users: [account("root", "admin", ROOT_ID), account("alice", "operator", ALICE_ID), account("bob", "operator", "bob-1111111111111111")],
+    });
+    expect((await remove(await tokenFor("root", "admin"), "bob")).status).toBe(200);
+    expect(usernames()).toEqual(["root", "alice"]);
+    expect(idOf("alice")).toBe(ALICE_ID);
+    expect(idOf("root")).toBe(ROOT_ID);
+  });
+
+  it("keeps the id when an admin sets a new password", async () => {
+    const { tokenFor, resetPassword, idOf } = await boot({
+      enabled: true,
+      users: [account("root", "admin", ROOT_ID), account("alice", "operator", ALICE_ID)],
+    });
+    expect((await resetPassword(await tokenFor("root", "admin"), "alice", "brand-new-password")).status).toBe(200);
+    expect(idOf("alice")).toBe(ALICE_ID);
   });
 });

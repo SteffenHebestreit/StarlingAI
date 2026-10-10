@@ -15,7 +15,7 @@ import type { Context } from "hono";
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
-import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, runChannelTurn } from "./base.js";
+import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, recordChannelSenderRefused, runChannelTurn } from "./base.js";
 import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelHealthCheck, setChannelRunning, setChannelStopped } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -163,8 +163,13 @@ export async function handleWhatsappEvent(c: Context): Promise<Response> {
           continue;
         }
 
-        const sessionId = await getOrCreateChannelSession("whatsapp", senderId);
-        runChannelTurn(sessionId, text)
+        const opened = await getOrCreateChannelSession("whatsapp", senderId);
+        if ("refused" in opened) {
+          // A sender that may not be served gets no reply; the message is handled.
+          recordChannelSenderRefused("whatsapp", senderId, opened.refused);
+          continue;
+        }
+        runChannelTurn(opened.sessionId, text)
           .then(response => waSend(accessToken, phoneNumberId, senderId, response))
           .catch(err => log.error({ err }, "WhatsApp turn error"));
       }

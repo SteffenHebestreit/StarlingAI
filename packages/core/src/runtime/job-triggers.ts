@@ -2,6 +2,7 @@ import { createJob } from "../agent/jobs.js";
 import { listAllJobs, getCronTriggers, resolveJobSteps } from "../credentials/jobs.js";
 import { createCronJob, removeCronJob } from "./scheduler.js";
 import { childLogger } from "../logger.js";
+import { principalIdentity } from "./user-scope.js";
 
 const log = childLogger("runtime:job-triggers");
 const configuredCronSchedules = new Map<string, string>();
@@ -26,7 +27,7 @@ export function syncConfiguredJobTriggers(turnTimeoutMs: number): void {
           const queued = await createJob({
             sceneName: job.name,
             definitionType: "job",
-            userId: `job:${job.name}`,
+            ...principalIdentity(`job:${job.name}`, "synthetic"),
             steps,
             turnTimeoutMs,
           });

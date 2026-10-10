@@ -26,7 +26,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
-import { resolveToken, getOrCreateChannelSession, runChannelTurn } from "./base.js";
+import { resolveToken, getOrCreateChannelSession, recordChannelSenderRefused, runChannelTurn } from "./base.js";
 import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelStopped, setChannelError, setChannelHealthCheck, setChannelRunning } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -147,21 +147,28 @@ export async function startEmailChannel(): Promise<EmailStopFn | null> {
 
           if (!from || !textBody.trim()) continue;
 
-          const sessionId = await getOrCreateChannelSession("email", from);
           log.info({ from, subject }, "Email received");
 
+          // Everything about one message happens inside this try, opening its session included: a
+          // throw there used to leave the poll loop, so the message stayed unseen, was fetched first
+          // on every later poll, and no mail after it was ever read. Whatever happens, the message
+          // is marked seen below and the loop goes on to the next one.
           try {
-            const triggeredJob = await dispatchChannelTriggeredJob({ channel: "email", senderId: from, text: textBody.trim() });
-            if (triggeredJob.matched) {
-              if (triggeredJob.responseText) {
-                await sendReply(from, subject, triggeredJob.responseText);
+            const opened = await getOrCreateChannelSession("email", from);
+            if ("refused" in opened) {
+              // A sender that may not be served gets no reply; the message is handled.
+              recordChannelSenderRefused("email", from, opened.refused);
+            } else {
+              const triggeredJob = await dispatchChannelTriggeredJob({ channel: "email", senderId: from, text: textBody.trim() });
+              if (triggeredJob.matched) {
+                if (triggeredJob.responseText) {
+                  await sendReply(from, subject, triggeredJob.responseText);
+                }
+              } else {
+                const response = await runChannelTurn(opened.sessionId, `Subject: ${subject}\n\n${textBody}`);
+                await sendReply(from, subject, response);
               }
-              await client.messageFlagsAdd({ uid: message["uid"] as number }, ["\\Seen"], { uid: true });
-              continue;
             }
-
-            const response = await runChannelTurn(sessionId, `Subject: ${subject}\n\n${textBody}`);
-            await sendReply(from, subject, response);
           } catch (err) {
             log.error({ err, from }, "Email turn failed");
           }

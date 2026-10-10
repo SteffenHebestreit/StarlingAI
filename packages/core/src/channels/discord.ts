@@ -11,7 +11,7 @@ import WebSocket from "ws";
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
-import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, runChannelTurn } from "./base.js";
+import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, deleteChannelSession, recordChannelSenderRefused, runChannelTurn } from "./base.js";
 import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelRunning, setChannelStopped, setChannelError, setChannelHealthCheck } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -173,8 +173,13 @@ export function startDiscordChannel(): () => Promise<void> {
               break;
             }
 
-            const sessionId = await getOrCreateChannelSession("discord", senderId);
-            runChannelTurn(sessionId, content)
+            const opened = await getOrCreateChannelSession("discord", senderId);
+            if ("refused" in opened) {
+              // A sender that may not be served gets no reply; the message is handled.
+              recordChannelSenderRefused("discord", senderId, opened.refused);
+              break;
+            }
+            runChannelTurn(opened.sessionId, content)
               .then(response => discordSend(token, channelId, response))
               .catch(err => log.error({ err }, "Discord turn error"));
           }

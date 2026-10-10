@@ -44,6 +44,8 @@ pnpm sai token --user deploy-bot --role admin --ttl 30d
 
 Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
 
+`sai token` (and the setup wizard's dashboard token) mints a **bootstrap token**, marked with the claim `bst: true`. Under multi-user auth a bootstrap token is an instance credential, never an account: `--user alice` is a bootstrap principal named alice, with storage of its own, not alice's account. Whoever holds the JWT secret can mint one, so a bootstrap token works whatever accounts exist; rotating the secret revokes every token. Account tokens come from signing in (`POST /api/auth/login`, or SSO) and carry the account id (claim `aid`). The gateway resolves them on every request, and on every message of an open dashboard socket, only while that account still holds that id and the token's username. A token with neither claim (minted before account ids, or by hand) works only while the deployment has no account at all, the window in which the first account is created. With auth off neither claim changes anything.
+
 ### Auth Failure Rate Limiting
 
 Authentication failures are rate-limited to **10 attempts per 5-minute window per IP address** (`checkAuthRateLimit` in `packages/core/src/gateway/auth.ts`). A successful auth clears that IP's counter.
@@ -77,7 +79,7 @@ The store is read on startup and written on every change. The master key (`SAI_M
 
 ## Per-User Resource Access (RBAC)
 
-When multi-user auth is enabled (`auth.enabled: true` with accounts in `auth.users[]`), shared resources can be bound to specific users with an **`allowedUsers`** list. The authenticated user (the JWT subject) is enforced against it before any access:
+When multi-user auth is enabled (`auth.enabled: true` with accounts in `auth.users[]`), shared resources can be bound to specific users with an **`allowedUsers`** list. The authenticated caller is enforced against it before any access:
 
 | Resource | Where to set `allowedUsers` |
 |----------|-----------------------------|
@@ -91,31 +93,55 @@ Semantics (backwards compatible):
 - **No requesting user** + an **unbound** resource → allowed (the `allowedUsers` lists are inert until `auth.enabled`).
 - **No requesting user** + a **bound** resource → **the two enforcement points differ here:**
   - *Stored site credentials and computer-use nodes* go through `canAccessResource` (`guardrails/resource-access.ts`), which **fails closed** under active multi-user auth — allowed only when `auth.enabled: false`.
-  - *Mail / calendar / contacts accounts* are enforced by the mail-service instead (`packages/mail-service/src/account-access.ts`), which **allows** a user-less caller even for a bound account (`if (!user) return true`). The gateway forwards the authenticated user as `X-Sai-User`; when that header is absent the mail-service treats the request as unscoped. It has no visibility into `auth.enabled`, so it cannot make the same fail-closed decision.
+  - *Mail / calendar / contacts accounts* are enforced by the mail-service instead (`packages/mail-service/src/account-access.ts`). It cannot see `auth.enabled`, so a request without the caller's headers is ambiguous there: it **allows** it, unless the mail-service runs with `SAI_MAIL_REQUIRE_IDENTIFIED_USER=true`, which denies it for a bound account. Set that variable wherever gateway auth is on (in Docker the mail-service reads `.env` too). The gateway sets the headers on every request that has a caller, so without the variable the gap is reachable only by a caller that bypasses the gateway's user context (e.g. a service-token path).
+- Otherwise → access is allowed only if an entry of the list names the caller (below).
 
-  In practice the gateway sets the header for any JWT-authenticated request, so this gap is reachable only by a caller that bypasses user context (e.g. a service-token path). Treat `allowedUsers` on mail accounts as **advisory** rather than a hard boundary until the mail-service is given the auth state.
-- Otherwise → access is allowed only if the user's username appears in the list (compared case-insensitively).
+**Entry forms.** With auth off an entry is a username, compared case-insensitively, as always. Under multi-user auth an entry matches by the kind of caller:
 
-Enforcement is centralized: the gateway threads the authenticated user into tool execution and forwards it to the mail-service (`X-Sai-User` header); a restricted mail account returns 403 and a restricted node/credential is treated as not-found (no existence leak). See `guardrails/resource-access.ts` and the mail-service `account-access.ts`. Tool tiers, sandboxing, and approval gates remain global and are not affected by `allowedUsers`.
+| Entry | Grants |
+|---|---|
+| `account:<id>` | the account with that immutable id |
+| `alice` (bare) | the account whose username is `alice`, or a bootstrap token whose `sub` is `alice` |
+| `principal:<raw>` | a channel sender, an A2A peer, or a scene, job or workflow run with that raw name |
+
+A channel sender, a peer or a run never matches a bare entry. Their names are chosen by whoever sends: a mail `From` address, a Telegram id, a peer's `sub`. A bare entry used to match any caller whose raw name was the same string, so mail from a spoofed address equal to a listed username was granted that resource. A bare entry names an account by a username nobody can take over by editing their own profile: a builtin username never changes, an identity-provider username is frozen at the first sign-in, and the name of a deleted or retired account stays held against new identity-provider subjects and channel senders. Only an admin can hand such a name on, by creating a deleted builtin account again or releasing a retired account's name; the delete and retire replies list the entries that still name it. Prefer `account:<id>` for identity-provider accounts (see [iam-sso-oidc.md](iam-sso-oidc.md#accounts-one-per-idp-subject)). At boot the gateway logs, once, every bare entry in its own config that no account and no bootstrap token holds; such an entry grants nothing now, and is most likely a channel id that needs the `principal:` form.
+
+Enforcement is centralized: the gateway threads the authenticated caller into tool execution (`guardrails/resource-access.ts`) and forwards it to the mail-service. For an account that is `X-Sai-User: <username>` plus `X-Sai-Account: <id>`, for a bootstrap token `X-Sai-User: <sub>`, and for anyone else `X-Sai-User: principal:<raw>`. The mail-service matches the same three entry forms in `allowedUsers` and `isolatedUsers` ([its README](../packages/mail-service/README.md#accounts-file)). A restricted mail account returns 403, and a restricted node or credential is treated as not-found (no existence leak). Tool tiers, sandboxing, and approval gates remain global and are not affected by `allowedUsers`.
 
 ## Per-User Data Isolation
 
-When `auth.enabled` is true, durable **user-scope** stores are partitioned per authenticated user so different logins never share personal data:
+When `auth.enabled` is true, per-user stores are partitioned per caller, so different logins never share personal data. The partition key is the caller's **account id**, never its username.
+
+**Accounts and principals.** Every caller is one of two kinds:
+
+- An **account** has an immutable id of the form `<prefix>-<16 hex>`, minted at random and never derived from the username. A builtin account's id is `auth.users[].id`: the dashboard mints it when it creates the account, and `pnpm e2e:setup` for the e2e accounts. An identity-provider account's id is `oidc-<16 hex>`, minted at its subject's first sign-in ([iam-sso-oidc.md](iam-sso-oidc.md#accounts-one-per-idp-subject)). An extension auth provider's user keeps the segment of its own immutable user id. An account deleted and created again under the same name gets a new id, so it starts empty and never sees what the old one left. Do not edit an id, and never copy one to another person's record: whoever holds the id holds that storage. The config load refuses two records with one id.
+- A **principal** is everything else: a bootstrap token (`sai token`), a channel sender, an A2A peer, a scene, job or workflow run. Its storage is keyed by the segment its raw name always had. A principal is never an account, even when its name is an account's username.
 
 | Store | Partitioning |
 |-------|--------------|
-| Durable user memory | `<base>/users/<userId>/` (`memoryDirForScope('user')` → `userScopedDir`) |
-| Dialectic user-model | per-user file under the same base |
-| Personality | global default + per-user **override** (resolve order: override → global → built-in) |
-| Graph L0 memory | user-scope nodes carry `m.tenant`; L0 retrieval filters by the reader's tenant (and includes it in the cache key) |
+| Workspace root of a turn | `<workspace>/users/<id>/` (a principal's: its segment): the account's generated files, uploads, workspace-scope memory and skills; a turn's sandbox mounts this directory |
+| Durable user memory | `<user-memory base>/users/<id>/` (`memoryDirForScope('user')` → `userScopedDir`) |
+| Dialectic user-model | per-user file under `<state base>/users/<id>/` |
+| Personality | global default + per-user **override** under the same directory (resolve order: override → global → built-in) |
+| Graph memory | user-scope nodes carry the account id as `m.tenant`, workspace-scope nodes the id of the root they were stored in; readers filter on it (and include it in the cache key) |
+| Documents | the corpus `user:<id>` and the upload folder `uploads/user-<id>/`, plus the corpora from before account ids that the account adopted in the migration |
+| Records | sessions, scene jobs and missions (`account_id`), schedules, user knowledge bases (`ownerAccount`), and the entries of the deployment's agent ledgers carry the account they belong to |
 
-The whole turn — and every `/api/*` route — runs under the authenticated user's request context (`runWithRequestContext({ userId })`), and a delegated sub-agent inherits it, so prompt-assembly, memory, user-model, and personality all resolve to the caller. **`userScopedDir` gates on `auth.enabled` AND a present userId**, so single-operator / auth-off installs keep their original single shared path (fully back-compatible). **Workspace**-scope stores (durable workspace memory, skills, flow-memory) stay intentionally shared per project.
+The whole turn — and every `/api/*` route, the dashboard socket, AG-UI, MCP and A2A — runs under the caller's identity (`runWithRequestContext({ identity })`), set and replaced whole, and a delegated sub-agent inherits it, so prompt-assembly, memory, user-model, and personality all resolve to the caller. A tool call acts as one identity, never a name from one caller and an account from another. Under multi-user auth an identity with a name and no kind is a principal; when its name is an account's username, deriving its storage throws, so a path that forgot to carry the account fails loudly instead of reading the wrong bucket. With auth off there is one shared path and every check compares names, as always.
+
+Shared per deployment: the config zones, and the agent outcome ledger, flow memory and config-assistant proposals at the shared root's `.starlingai/`, whose entries each name their account (readers show an entry's text only to its account, see `docs/memory-context-overview.md` §6).
+
+**Ownership.** A record is its owner's by identity: an account's record belongs to the caller with that account id, a principal's to the same kind of caller with the same name. Admin exemptions stay where they were. This one rule covers sessions (the REST routes, the dashboard socket, AG-UI, session search, questions a turn asks), scene and job runs, knowledge bases and documents, MCP session reuse, A2A `tasks/get`, schedules, the long-running dock and missions.
+
+**Data from before account ids** was stored under the segment of the username. No account reaches it until an admin moves it with the account migration ([QUICKSTART](../QUICKSTART.md#upgrading-to-account-ids)), and nothing reads it by a guess in the meantime: a builtin account without an id cannot sign in (403 after the password check), an identity-provider account with data under its name waits `pending`, a chat from before ids is visible to admins only and runs no turn, a schedule from before ids does not fire, and a job queued before ids fails when a worker claims it (queue it again). A channel sender whose conversation predates ids starts a new one. What stays where it is (a bootstrap token's, a channel sender's, a run's or an extension provider user's) gets its owner back in the migration: its chats, schedules, jobs and knowledge bases from before ids get its kind (an extension user's its id), and its documents from before ids stay readable to it. At boot under multi-user auth the gateway logs one warning with what waits.
+
+**Channel senders.** Under multi-user auth a sender is refused when its id is an account's username (a deleted builtin account's too), derives to an account's id, or is a user id of an extension auth provider: no session, no turn and no reply, audited as `channel_sender_refused`. Such a sender's raw id would otherwise reach the storage that account used before account ids.
 
 Editing the shared **global** personality under auth requires the **`admin`** role (rank 90 > operator 50 > viewer 10); a regular operator only edits their own override (`PUT`/`POST /api/personality?scope=global`).
 
-Creating, deleting or resetting the password of an account (`POST`/`DELETE`/`PATCH /api/auth/users`) requires **`admin`** as well: everything above is keyed by username, so whoever can delete "alice" and create her again owns her data. The default `pnpm sai token` is an admin token, which is how the first account is created. A new account never takes a username that still owns sessions — reset the password instead (tokens already issued stay valid until they expire) — and none is created under `auth.provider: "oidc"`, where the identity provider owns the usernames. The last admin account cannot be deleted.
+Creating, deleting or resetting the password of an account (`POST`/`DELETE`/`PATCH /api/auth/users`) requires **`admin`** as well. The default `pnpm sai token` is an admin bootstrap token, which is how the first account is created. Deleting an account stops its tokens and ends what it has running: its open sockets close, its chats are archived and a turn it is running stops, its queued and running jobs are cancelled, its schedules are disabled, and its MCP sessions and A2A tasks end. A tombstone in `<workspace>/.starlingai/accounts-retired.json` keeps the name from channel senders and new identity-provider subjects; when it cannot be written, nothing is deleted. The reply lists `aclReferences`, the `allowedUsers` entries in the gateway's config that still name the username or `account:<id>` (config is never edited). The storage stays under the old id until `pnpm sai migrate-account-ids --purge-retired <id>` removes it. An admin may create the name again: the new account gets a new id and starts empty, but a bare `allowedUsers` entry for the name grants it, so rewrite those entries first. A password reset keeps the account (tokens already issued stay valid until they expire). No account is created under `auth.provider: "oidc"`, where the identity provider owns the usernames, and the last admin account cannot be deleted.
 
-Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph. See `docs/memory-context-overview.md` §6 for the full account.
+Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph; `/api/app/:id/*` (a running served app) takes any signed-in caller, not only the account that started the app; and a dashboard socket opened before its token expired stays open after. See `docs/memory-context-overview.md` §6 for the full account.
 
 ## Secret-Safe Login Automation
 

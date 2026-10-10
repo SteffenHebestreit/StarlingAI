@@ -92,7 +92,7 @@ Point the relevant `config/providers/` entry at the resulting endpoint.
 | `ws://localhost:8765/ws` | Gateway WebSocket |
 | `http://localhost:8765/healthz` | Health check |
 
-Paste the generated JWT into the dashboard login modal. Regenerate one any time with `pnpm sai token`.
+Paste the generated JWT into the dashboard login modal. Regenerate one any time with `pnpm sai token`. It is a bootstrap admin token: it works whatever accounts exist, and it is never one of them (see [Accounts](#accounts)).
 
 ## Minimum Config Checklist
 
@@ -168,6 +168,42 @@ You can trigger a scene in three ways:
 
 Scene runs are async. The trigger response returns a `jobId`, and the dashboard polls `GET /api/scenes/jobs/:jobId` until completion or failure.
 
+## Accounts
+
+With multi-user auth on (`auth.enabled: true`, as the shipped `config/gateway/30-auth.jsonc` sets), each person signs in with an account: one an admin creates on the **Users** page (`auth.provider: "builtin"`), or one their identity provider signs in ([docs/iam-sso-oidc.md](docs/iam-sso-oidc.md)). Every account has an immutable id, and its memory, files, chats, jobs, schedules and documents are keyed by that id, never by the username: an account deleted and created again under the same name starts empty. `pnpm sai token` mints a bootstrap token, an instance credential for whoever holds the JWT secret in `.env`: it is never an account, and `--user alice` does not sign in as alice. See [docs/security.md](docs/security.md#per-user-data-isolation).
+
+### Upgrading to account ids
+
+A deployment whose data predates account ids has it stored under the usernames. Nothing moves it on its own, and nothing reads it by a guess: until an admin runs the account migration, a builtin account without an id cannot sign in ("This account has no account id yet"), an identity-provider user with data under their name waits pending ("Account storage migration pending; ask an admin"), chats from before ids are read-only and shown to admins only, schedules from before ids do not fire, and jobs queued before ids fail when a worker claims them (queue them again). Dashboard tokens minted before the upgrade stop working, the setup wizard's 30-day `.starlingai/dashboard-token.txt` included; `pnpm sai start` prints a new one, as does `pnpm sai token`. The bootstrap token always works, so the migration can always run.
+
+You own the rebuild and both gateway restarts below.
+
+1. **Rebuild** with this version. The gateway logs one warning with what waits (`accountsWithoutId`, `pendingIdentityProviderAccounts`, `legacySessions`, `legacySchedules`, `legacyBuckets`).
+2. **Dry run:** `pnpm sai migrate-account-ids`. It runs against the live gateway (`localhost:8765`; `--url` or `SAI_GATEWAY_URL` for another) and writes nothing. It lists every identity with its kind, what happens to its data (`adopt` moves it to an account, `hold` leaves it where it is, `archive` moves it to `users/.retired/`, `in-place` is a bootstrap token's, a channel sender's, a run's or an extension provider user's, which stay where they are; "older records get its owner" means its chats, schedules, jobs and knowledge bases from before ids get its kind, or an extension user's id, and its documents stay readable to it), what is stored under it, notes, and the plan hash. It mints a 15-minute bootstrap token from `.env`, so run it on the host; an admin role from the identity provider is not enough.
+3. **Identity-provider users** who should keep their data: ask them to sign in once. They see "migration pending", and the dry run then lists their account with issuer, subject and first sign-in. Someone who should start fresh instead: `POST /api/admin/accounts/<id>/decline-legacy` (admin, on the live gateway). Users with no data from before ids sign in as usual.
+4. **Builtin accounts in a config shard** (your own `config/gateway/30-auth.jsonc`, say): the gateway does not write shards, so the dry run prints an `"id": "…"` line per record. Paste it into that record and run `pnpm sai config build`. For the e2e accounts run `pnpm e2e:setup` instead. Accounts created on the Users page live in the runtime overlay, and the apply writes their ids itself. An account whose id you pasted can sign in from then on, and what it writes lands under its id: an adoption into a directory that already exists is refused (nothing is merged), so paste, adopt and apply in one sitting.
+5. **Decide the adoptions** and run the dry run again with them. Without an adoption flag, nothing moves to an account.
+   - `--adopt <user>` for a record the apply gives its id to (one in the runtime overlay);
+   - `--adopt <user>=<id>` for a record that has an id (a pasted one, an identity-provider account's);
+   - `--adopt-legacy-records` for every id-less record in the overlay.
+
+   Data of a builtin account that was deleted is archived to `users/.retired/` (`--hold <user>` keeps it in place); data nobody can be mapped to is held (`--archive-unmapped` archives it). A bootstrap token's name is never adopted: on a deployment whose identity provider has an `admin` user, that user starts empty and the data stays with `sai token`, its chats and schedules from before ids included. Note the plan hash.
+6. **Apply in a maintenance boot.** Add `SAI_MAINTENANCE=account-migration` to `.env` and start the stack the way you usually do (`pnpm sai start` with your usual flags): the gateway's environment changed, so its container is created again and reads the line. A plain `docker compose restart` keeps the old environment. The gateway then serves only the migration; no chat, channel, schedule or job runs, so nothing else writes. Run `pnpm sai migrate-account-ids <the same flags> --apply --plan <hash>`. A 409 "State changed since the dry run" means a decision changed: run the dry run again and apply its hash. Then remove the line from `.env` and start the stack the same way again.
+7. **Check:** the dry run once more must say "Nothing to migrate"; what it still lists stays held where it is.
+8. **Later sign-ins** with data from before ids: decline them on the live gateway, or adopt them in the next maintenance window.
+
+The same command covers the rest, each applied the same way (a dry run first, then `--apply --plan <hash>` in a maintenance boot):
+
+| Flag | Effect |
+|---|---|
+| `--reset` | every account starts empty: account data from before ids is archived, principals keep theirs |
+| `--adopt-retired <archive>=<id>` | restores an archive from `users/.retired/` into a living account |
+| `--purge-retired <id>` | removes what a deleted or retired account left (directories, ledger entries, chats, knowledge bases, documents including a corpus it adopted, graph nodes, and the archives the migration made of what its name stored before ids); the audit log and the job and mission rows stay |
+| `--oidc-issuer-alias <old>=<new>` | renames an identity provider's issuer in the account registry |
+| `--json` | prints the gateway's answer as JSON |
+
+Each apply is recorded in `<workspace>/.starlingai/account-migrations.ndjson` and audited (`account_migration_applied`). Every step can run again: after a failure, fix the cause and repeat the dry run and the apply. The apply gives a record its id, or turns a pending identity-provider account active, as its last step, so such an account cannot sign in before all of its data has moved.
+
 ## Development Mode
 
 ```bash
@@ -181,7 +217,11 @@ The Vite app proxies `/api` and `/ws` to the gateway.
 
 **LM Studio reachable but tool calls don't happen** — verify the loaded model supports function calling and that your selected model ID matches what LM Studio exposes.
 
-**Dashboard loads but login fails** — regenerate a token with `pnpm sai token` and check whether `SAI_JWT_SECRET` changed between runs.
+**Dashboard loads but login fails** — regenerate a token with `pnpm sai token` and check whether `SAI_JWT_SECRET` changed between runs. Under multi-user auth, tokens minted before account ids stop working once an account exists.
+
+**"This account has no account id yet" or "Account storage migration pending"** — the account's data predates account ids and waits for the account migration: see [Upgrading to account ids](#upgrading-to-account-ids).
+
+**SSO says "This username is held by another account"** — another account holds the name, or held it (a retired or deleted one, or one renamed since). An admin decides: see [docs/iam-sso-oidc.md](docs/iam-sso-oidc.md#managing-accounts).
 
 **Gateway takes a long time to start on first run** — model and image downloads happen on first launch. The gateway starts immediately; dependent capabilities become available once downloads complete.
 

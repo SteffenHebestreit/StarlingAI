@@ -75,7 +75,7 @@ describe("session ids in the shared memory graph", () => {
   /** What Alice's turn writes about her session: a memory, a promoted fact, a retrieval, and the
    *  feedback loop closing it both ways. */
   async function aliceTurn(graph: Awaited<ReturnType<typeof load>>["graph"], context: Awaited<ReturnType<typeof load>>["context"]) {
-    await context.runWithRequestContext({ userId: "alice" }, async () => {
+    await context.runWithRequestContext({ identity: { userId: "alice" } }, async () => {
       await graph.upsertMemoryToGraph(record(), "researcher", ALICE_SESSION, null);
       await graph.graphPromoteFact("custody_lawyer", "Alice retained Kanzlei Nordhafen", "researcher", ALICE_SESSION);
       await graph.graphTrackRetrieval("mem-1", "researcher", ALICE_SESSION, 1);

@@ -312,7 +312,9 @@ describe("when the shadow runs", () => {
         open -= 1;
       }
     });
-    const handle = intentShadowTurnStarted(turnInput({ userId: "alice" }));
+    // The turn's identity, whole (runtime.ts hands it over with the name): the readout's calls run
+    // as the turn's account.
+    const handle = intentShadowTurnStarted(turnInput({ userId: "alice", identity: { userId: "alice", account: "alice-0123456789abcdef" } }));
     noteIntentShadowCapsule("sess-1", { status: "ok", agents: ["researcher", "web_coder"] });
     intentShadowTurnEnded(handle, output());
     await settleIntentShadowForTests();
@@ -325,7 +327,7 @@ describe("when the shadow runs", () => {
     for (const call of intent) {
       expect(call.options?.grammar).toBe(INTENT_READOUT_GRAMMAR);
       expect(call.options?.temperature).toBe(0);
-      expect(call.context).toMatchObject({ callSite: "intent_shadow", agentName: "intent_readout", sessionId: "sess-1", turnId: "turn-1", userId: "alice" });
+      expect(call.context).toMatchObject({ callSite: "intent_shadow", agentName: "intent_readout", sessionId: "sess-1", turnId: "turn-1", identity: { userId: "alice", account: "alice-0123456789abcdef" } });
     }
     expect(intent[1]!.signal).toBe(intent[0]!.signal);
     const pre = calls.filter((call) => call.kind === "pre_route");

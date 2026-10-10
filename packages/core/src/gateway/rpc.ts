@@ -10,6 +10,7 @@ import {
   createSession,
   deleteSession,
   describeMissingSession,
+  getAllSessions,
   getSession,
   getSessionRecord,
   getSessionTranscript,
@@ -17,7 +18,10 @@ import {
   listSessions,
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
-import { normalizeRole, roleRank } from "./auth.js";
+import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import { ownsRecord, principalIdentity, recordHasOwner } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
+import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
@@ -437,7 +441,7 @@ function formatJobHelpResponse(jobName?: string): string {
   ].join("\n");
 }
 
-export class RpcConnection {
+export class RpcConnection implements AccountConnection {
   readonly connId: string;
   private ws: WebSocket;
   private activeSessionId: string | null = null;
@@ -450,20 +454,79 @@ export class RpcConnection {
    *  Sessions are attributed to this so document-RAG user scope + per-user RBAC
    *  match the same identity uploads use. Undefined only if the token had no sub. */
   private readonly connUserId: string | undefined;
-  /** Authenticated role (JWT `role` claim); admins may manage any session. */
-  private readonly connRole: string | undefined;
+  /** Authenticated role; admins may manage any session. Under multi-user auth it is the role the
+   *  store holds now, read again before every message and every pushed event. */
+  private connRole: string | undefined;
+  /**
+   * Under multi-user auth, the caller as the store resolved it at the handshake. A socket lives for
+   * hours and used to keep the identity and role it opened with: a deleted account kept chatting,
+   * and a demoted admin kept every other account's audit stream. It is checked again before every
+   * message and every pushed event (revalidateAuthenticatedUser), and a caller that no longer
+   * resolves closes the socket with 4401.
+   */
+  private liveUser: AuthenticatedUser | undefined;
+  private revoked = false;
+  private untrackAccount: (() => void) | null = null;
 
-  constructor(ws: WebSocket, connUserId?: string, connRole?: string) {
+  constructor(ws: WebSocket, connUserId?: string, connRole?: string, liveUser?: AuthenticatedUser) {
     this.connId = randomUUID();
     this.ws = ws;
     this.connUserId = connUserId;
     this.connRole = connRole;
+    this.liveUser = liveUser;
+    // Deleting, retiring or renaming the account closes this socket at once (account-connections).
+    if (liveUser?.account) this.untrackAccount = trackAccountConnection(liveUser.account, this);
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
       sessions: this.visibleSessions(),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
+  }
+
+  /**
+   * Whether the caller still signs in as it did at the handshake, its role taken as the store holds
+   * it now. Always true without multi-user auth (no live caller to check); false once revoked.
+   */
+  private callerStillSignedIn(): boolean {
+    if (this.revoked) return false;
+    if (!this.liveUser) return true;
+    const fresh = revalidateAuthenticatedUser(this.liveUser);
+    if (!fresh) return false;
+    this.liveUser = fresh;
+    this.connRole = fresh.role;
+    return true;
+  }
+
+  /** Whether a pushed event may go out: the caller is checked as for a message, and a caller that
+   *  no longer signs in closes the socket instead. */
+  private pushAllowed(): boolean {
+    if (this.callerStillSignedIn()) return true;
+    this.revoke("account no longer signs in");
+    return false;
+  }
+
+  /** Close the socket because its caller no longer signs in (4401, as a refused handshake). */
+  revoke(reason: string): void {
+    if (this.revoked) return;
+    this.revoked = true;
+    this.untrackAccount?.();
+    this.untrackAccount = null;
+    log.info({ connId: this.connId, reason }, "RPC connection revoked: its account no longer signs in");
+    try {
+      this.ws.close(4401, "Unauthorized (account no longer valid)");
+    } catch (err) {
+      log.warn({ err, connId: this.connId }, "Could not close a revoked RPC connection");
+    }
+  }
+
+  /**
+   * Who this connection's caller is, whole: under multi-user auth the account (or bootstrap kind)
+   * the store resolved, with its name; without it the token's subject alone, as before.
+   */
+  private connIdentity(): Identity | undefined {
+    if (this.liveUser) return callerIdentity(this.liveUser);
+    return this.connUserId ? { userId: this.connUserId } : undefined;
   }
 
   /**
@@ -485,8 +548,20 @@ export class RpcConnection {
   private canAccessSession(sid: string): boolean {
     if (!this.connUserId || this.isSessionAdmin()) return true;
     const rec = getSessionRecord(sid);
-    if (!rec || rec.userId === undefined) return true;
-    return rec.userId === this.connUserId;
+    if (!rec) return true;
+    return this.ownsSession(rec);
+  }
+
+  /**
+   * Whether this connection's caller owns a session, or the session has no owner. By identity under
+   * multi-user auth (ownsRecord): the username matched, so an account created again under a deleted
+   * one's name listed, opened and drove the old one's chats, and a session a channel sender or a
+   * bootstrap token opened under an account's name was that account's. By name with one operator,
+   * as before.
+   */
+  private ownsSession(session: { identity(): Identity | undefined }): boolean {
+    const owner = session.identity();
+    return !recordHasOwner(owner) || ownsRecord(this.connIdentity(), owner);
   }
 
   /**
@@ -494,8 +569,10 @@ export class RpcConnection {
    * answering a question in someone else's running turn puts words in their mouth.
    */
   private userInputCaller(): UserInputCaller {
+    const identity = this.connIdentity();
     return {
       ...(this.connUserId ? { userId: this.connUserId } : {}),
+      ...(identity ? { identity } : {}),
       isAdmin: this.isSessionAdmin(),
     };
   }
@@ -505,7 +582,11 @@ export class RpcConnection {
    * (callerMayUseSession) and this connection's own session access, whichever is stricter.
    */
   private mayStopTurnIn(sessionId: string): boolean {
-    const caller = this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
+    // Under multi-user auth the caller as the store resolved it (its account or principal kind with
+    // its live role): a name alone would read as an instance credential (callerIdentity).
+    const caller = this.liveUser
+      ? { ...this.liveUser, role: normalizeRole(this.connRole) }
+      : this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
     return this.canAccessSession(sessionId) && callerMayUseSession(caller, sessionId);
   }
 
@@ -518,9 +599,15 @@ export class RpcConnection {
    */
   private mayWatchAuditEvent(event: AuditEvent): boolean {
     if (!this.connUserId || this.isSessionAdmin()) return true;
-    if (!event.sessionId) return event.userId !== undefined && event.userId === this.connUserId;
+    if (!event.sessionId) {
+      // An event with no session names its user by name alone, with no account or principal kind:
+      // under multi-user auth, by the rule for such records, it is an admin's (a channel sender's
+      // refusal names the sender, who may share an account's name). With one operator, by name.
+      if (this.liveUser) return false;
+      return event.userId !== undefined && event.userId === this.connUserId;
+    }
     const owner = getSessionRecord(owningChatSessionId(event.sessionId));
-    return owner !== undefined && (owner.userId === undefined || owner.userId === this.connUserId);
+    return owner !== undefined && this.ownsSession(owner);
   }
 
   /** Settings as a session shows them: its own choices over the defaults. session.get and
@@ -549,9 +636,10 @@ export class RpcConnection {
 
   /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
-    const all = listSessions({ includeArchived: true });
-    if (!this.connUserId || this.isSessionAdmin()) return all;
-    return all.filter((s) => s.userId === undefined || s.userId === this.connUserId);
+    if (!this.connUserId || this.isSessionAdmin()) return listSessions({ includeArchived: true });
+    return getAllSessions({ includeArchived: true })
+      .filter((session) => this.ownsSession(session))
+      .map((session) => session.toSummary());
   }
 
   async handleMessage(raw: string): Promise<void> {
@@ -565,6 +653,13 @@ export class RpcConnection {
 
     const { id, method, params } = req;
     log.debug({ connId: this.connId, method, id }, "RPC request");
+
+    if (!this.callerStillSignedIn()) {
+      // Answered first, so the caller's pending request fails with a reason; then closed.
+      this.sendResponse({ id, ok: false, error: "Unauthorized (account no longer valid)" });
+      this.revoke("account no longer signs in");
+      return;
+    }
 
     try {
       const payload = await this.dispatch(method, params ?? {});
@@ -618,8 +713,9 @@ export class RpcConnection {
           channel: String(params["channel"] ?? "webchat"),
           // Attribute the session to the authenticated connection user (so the
           // document-RAG user scope + RBAC match the identity uploads use). The
-          // server-derived identity wins over any client-supplied userId.
-          userId: this.connUserId ?? (params["userId"] ? String(params["userId"]) : undefined),
+          // server-derived identity wins over any client-supplied userId, and travels whole:
+          // the account id with the name.
+          ...(this.connIdentity() ?? (params["userId"] ? { userId: String(params["userId"]) } : {})),
           ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
         });
@@ -930,7 +1026,7 @@ export class RpcConnection {
               // As the signed-in user, like the REST route: their run, listed, read and cancelled as
               // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
               // connection with no user runs it as the job itself.
-              userId: this.connUserId ?? `job:${jobName}`,
+              ...(this.connIdentity() ?? principalIdentity(`job:${jobName}`, "synthetic")),
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });
@@ -1050,7 +1146,7 @@ export class RpcConnection {
         // nobody to ask. The questions go to this socket and to any tab that loads the session.
         const interactiveTurn = !overrideFlags.autoApprove;
         if (interactiveTurn) {
-          userInputBroker.openTurn(requestId, session.id, session.userId);
+          userInputBroker.openTurn(requestId, session.id, session.identity());
           userInputBroker.attachSink(session.id, this.connId, (event) => this.sendEvent(event), this.userInputCaller());
         }
 
@@ -1501,6 +1597,7 @@ export class RpcConnection {
       case "audit.subscribe": {
         if (this.auditUnsubscribe) this.auditUnsubscribe();
         this.auditUnsubscribe = subscribeToAudit(event => {
+          if (!this.pushAllowed()) return;
           if (!this.mayWatchAuditEvent(event)) return;
           this.sendEvent({ type: "audit.event", data: event });
         });
@@ -1515,6 +1612,7 @@ export class RpcConnection {
       case "notifications.subscribe": {
         this.notificationsUnsubscribe?.();
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
+          if (!this.pushAllowed()) return;
           this.sendEvent({ type: "notification.event", data: notification });
         });
         return { subscribed: true };
@@ -1578,6 +1676,8 @@ export class RpcConnection {
 
   close(options: RpcConnectionCloseOptions = {}): void {
     const shouldAbortInFlightTurns = options.abortInFlightTurns === true;
+    this.untrackAccount?.();
+    this.untrackAccount = null;
     this.auditUnsubscribe?.();
     this.notificationsUnsubscribe?.();
     for (const [id, controller] of this.abortControllers) {

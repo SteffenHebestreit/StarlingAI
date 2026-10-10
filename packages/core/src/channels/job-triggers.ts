@@ -4,6 +4,7 @@ import type { JobTriggerConfig } from "../config/schema.js";
 import type { ChannelType } from "../credentials/channels.js";
 import { getChannelTriggers, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { childLogger } from "../logger.js";
+import { principalIdentity } from "../runtime/user-scope.js";
 
 const log = childLogger("channels:job-triggers");
 
@@ -110,7 +111,7 @@ export async function dispatchChannelTriggeredJob(
       const queued = await createJob({
         sceneName: job.name,
         definitionType: "job",
-        userId: `${ctx.channel}:${ctx.senderId}`,
+        ...principalIdentity(`${ctx.channel}:${ctx.senderId}`, "synthetic"),
         steps,
         turnTimeoutMs,
       });

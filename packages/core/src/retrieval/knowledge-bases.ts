@@ -31,6 +31,8 @@ import { readFile, writeFile, mkdir, rename, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import { isLegacyIdentity, multiUserAuthActive, ownsRecord } from "../runtime/user-scope.js";
+import type { Identity, PrincipalKind } from "../runtime/accounts.js";
 
 const log = childLogger("retrieval:knowledge-bases");
 
@@ -143,6 +145,13 @@ export interface KnowledgeBaseRecord {
   scope?: KbScope;
   /** Owning user (set when scope === "user") — access is restricted to this user. */
   ownerId?: string;
+  /** The owning account's immutable id, beside `ownerId` (set when scope === "user" and the owner
+   *  is an account). `ownerId` is a username, which an account created again under the same name
+   *  shares with the old one; `ownerId` stays for display. */
+  ownerAccount?: string;
+  /** Set instead of `ownerAccount` when the owner is a principal (a bootstrap token, a channel
+   *  sender): its kind. A user KB whose owner has neither predates account ids. */
+  ownerPrincipal?: PrincipalKind;
   /** Owning session (set when scope === "session") — access is restricted to this conversation. */
   sessionId?: string;
   /** The ephemeral agent that works with this KB (see KbWorkerSpec). */
@@ -181,7 +190,24 @@ export interface KnowledgeBaseSummary {
 /** Identity used for KB access control (mirrors documents' callerManageableSources). */
 export interface KbAccessContext {
   userId?: string;
+  /** The same user whole (its account id or principal kind with its name): under multi-user auth a
+   *  user KB is its owner's by identity (ownsRecord). Without it the name stands alone. */
+  identity?: Identity;
   sessionId?: string;
+  /** The caller is an admin: under multi-user auth the only one who reaches a user KB from before
+   *  account ids, to manage or delete it. */
+  admin?: boolean;
+}
+
+type KbOwnerFields = Pick<KnowledgeBaseRecord, "scope" | "ownerId" | "ownerAccount" | "ownerPrincipal" | "sessionId">;
+
+/** Who owns a user KB, whole: its owner's name with the account id or the principal kind stamped
+ *  beside it, or the name alone for a KB from before account ids; undefined when it names none. */
+export function kbOwnerIdentity(kb: Pick<KnowledgeBaseRecord, "ownerId" | "ownerAccount" | "ownerPrincipal">): Identity | undefined {
+  if (!kb.ownerId) return undefined;
+  if (kb.ownerAccount) return { userId: kb.ownerId, account: kb.ownerAccount };
+  if (kb.ownerPrincipal) return { userId: kb.ownerId, principal: kb.ownerPrincipal };
+  return { userId: kb.ownerId };
 }
 
 /**
@@ -190,13 +216,23 @@ export interface KbAccessContext {
  * conversation. In single-user mode (no auth) userId is undefined and user KBs
  * created without an owner remain visible — matching the documents model where
  * the flat instance-wide view applies when auth is disabled.
+ *
+ * A user KB's owner is compared by identity (ownsRecord), not by name: an account created again
+ * under a deleted one's name saw, searched, re-crawled and deleted the old one's KBs. Under
+ * multi-user auth a user KB from before account ids names its owner by name alone and is an
+ * admin's (ctx.admin), nobody else's; with one operator it is its owner's by name, as before.
  */
-export function callerCanAccessKb(kb: Pick<KnowledgeBaseRecord, "scope" | "ownerId" | "sessionId">, ctx: KbAccessContext): boolean {
+export function callerCanAccessKb(kb: KbOwnerFields, ctx: KbAccessContext): boolean {
   switch (kb.scope ?? "workspace") { // legacy records (no scope) are workspace-shared
     case "workspace":
       return true;
-    case "user":
-      return !kb.ownerId || kb.ownerId === ctx.userId;
+    case "user": {
+      const owner = kbOwnerIdentity(kb);
+      if (!owner) return true;
+      const caller = ctx.identity ?? (ctx.userId !== undefined ? { userId: ctx.userId } : undefined);
+      if (ownsRecord(caller, owner)) return true;
+      return ctx.admin === true && isLegacyIdentity(owner) && multiUserAuthActive();
+    }
     case "session":
       return !!ctx.sessionId && kb.sessionId === ctx.sessionId;
     default:
@@ -205,7 +241,7 @@ export function callerCanAccessKb(kb: Pick<KnowledgeBaseRecord, "scope" | "owner
 }
 
 /** Filter a list of KBs to those the caller may access. */
-export function filterAccessibleKbs<T extends Pick<KnowledgeBaseRecord, "scope" | "ownerId" | "sessionId">>(kbs: T[], ctx: KbAccessContext): T[] {
+export function filterAccessibleKbs<T extends KbOwnerFields>(kbs: T[], ctx: KbAccessContext): T[] {
   return kbs.filter((kb) => callerCanAccessKb(kb, ctx));
 }
 
@@ -416,6 +452,10 @@ export interface CreateKnowledgeBaseInput {
   scope?: KbScope;
   /** Owner identity, used to stamp ownership for user-scoped KBs (and attribution). */
   ownerId?: string;
+  /** The owner's account id, stamped beside `ownerId` on a user-scoped KB. */
+  ownerAccount?: string;
+  /** Instead of `ownerAccount`, the owner's principal kind. */
+  ownerPrincipal?: PrincipalKind;
   /** Session identity, used to stamp ownership for session-scoped KBs. */
   sessionId?: string;
   /** Per-KB worker template. */
@@ -518,6 +558,8 @@ export async function createKnowledgeBase(input: CreateKnowledgeBaseInput): Prom
     ambientRetrieval: input.ambientRetrieval === true,
     scope,
     ...(scope === "user" && input.ownerId ? { ownerId: input.ownerId } : {}),
+    ...(scope === "user" && input.ownerId && input.ownerAccount ? { ownerAccount: input.ownerAccount } : {}),
+    ...(scope === "user" && input.ownerId && !input.ownerAccount && input.ownerPrincipal ? { ownerPrincipal: input.ownerPrincipal } : {}),
     ...(scope === "session" && input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(worker.value ? { worker: worker.value } : {}),
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
@@ -591,6 +633,10 @@ export interface UpdateKnowledgeBaseInput {
   /** Change visibility scope. session→needs sessionId; user→needs ownerId (passed alongside). */
   scope?: KbScope;
   ownerId?: string;
+  /** The account id of `ownerId`, when it names an account; replaces the stamp with `ownerId`. */
+  ownerAccount?: string;
+  /** Instead, the principal kind of `ownerId`, when it names a principal. */
+  ownerPrincipal?: PrincipalKind;
   sessionId?: string;
   /** Replace the worker template (null clears it). */
   worker?: KbWorkerSpec | null;
@@ -650,13 +696,20 @@ export async function updateKnowledgeBase(id: string, patch: UpdateKnowledgeBase
       if (patch.scope === "session") {
         const sid = patch.sessionId ?? kb.sessionId;
         if (!sid) return { ok: false as const, error: "session scope requires a sessionId" };
-        kb.scope = "session"; kb.sessionId = sid; delete kb.ownerId;
+        kb.scope = "session"; kb.sessionId = sid; delete kb.ownerId; delete kb.ownerAccount; delete kb.ownerPrincipal;
       } else if (patch.scope === "user") {
         const oid = patch.ownerId ?? kb.ownerId;
         if (!oid) return { ok: false as const, error: "user scope requires an ownerId" };
         kb.scope = "user"; kb.ownerId = oid; delete kb.sessionId;
+        // A new owner brings its own account stamp (or none); the same owner keeps the one it has.
+        if (patch.ownerId !== undefined) {
+          if (patch.ownerAccount) kb.ownerAccount = patch.ownerAccount;
+          else delete kb.ownerAccount;
+          if (!patch.ownerAccount && patch.ownerPrincipal) kb.ownerPrincipal = patch.ownerPrincipal;
+          else delete kb.ownerPrincipal;
+        }
       } else {
-        kb.scope = "workspace"; delete kb.ownerId; delete kb.sessionId;
+        kb.scope = "workspace"; delete kb.ownerId; delete kb.ownerAccount; delete kb.ownerPrincipal; delete kb.sessionId;
       }
     }
 
@@ -706,7 +759,7 @@ export async function removeKnowledgeBaseRecord(id: string): Promise<KnowledgeBa
 // per CALL — two callers in the same TTL window can see different in-scope KBs.
 // Busted on every local write (inside writeStore); the TTL covers writes from
 // OTHER processes.
-interface AmbientKbDescriptor { id: string; scope: KbScope; ownerId?: string; sessionId?: string }
+interface AmbientKbDescriptor { id: string; scope: KbScope; ownerId?: string; ownerAccount?: string; ownerPrincipal?: PrincipalKind; sessionId?: string }
 const AMBIENT_TTL_MS = 5_000;
 let _ambientCache: { storedAt: number; descriptors: AmbientKbDescriptor[] } | null = null;
 
@@ -728,7 +781,14 @@ export async function ambientKbSources(ctx: KbAccessContext = {}): Promise<strin
     const kbs = await withLock(readStore);
     descriptors = kbs
       .filter((k) => k.ambientRetrieval && k.status === "ready")
-      .map((k) => ({ id: k.id, scope: k.scope ?? "workspace", ...(k.ownerId ? { ownerId: k.ownerId } : {}), ...(k.sessionId ? { sessionId: k.sessionId } : {}) }));
+      .map((k) => ({
+        id: k.id,
+        scope: k.scope ?? "workspace",
+        ...(k.ownerId ? { ownerId: k.ownerId } : {}),
+        ...(k.ownerAccount ? { ownerAccount: k.ownerAccount } : {}),
+        ...(k.ownerPrincipal ? { ownerPrincipal: k.ownerPrincipal } : {}),
+        ...(k.sessionId ? { sessionId: k.sessionId } : {}),
+      }));
     _ambientCache = { storedAt: Date.now(), descriptors };
   }
   return descriptors.filter((d) => callerCanAccessKb(d, ctx)).map((d) => kbSource(d.id));

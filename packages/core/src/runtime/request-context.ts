@@ -3,19 +3,25 @@
  *
  * Carries the authenticated user that owns the currently-executing tool call
  * across async boundaries WITHOUT threading it through every function signature.
- * Set once inside executeTool from ToolContext.userId; read by downstream
- * clients (e.g. the mail-service HTTP client) to forward identity so shared
+ * Set by every entry point (a request, a turn, a tool call) from the identity it serves; read by
+ * downstream clients (e.g. the mail-service HTTP client) to forward identity so shared
  * resources can be access-controlled per user.
  *
- * Undefined store / userId = single-user / auth-disabled mode (no scoping).
+ * Undefined store / identity = single-user / auth-disabled mode (no scoping).
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { UserInputChannel } from "../agent/user-input.js";
 import type { OutcomeRun } from "../agent/outcomes.js";
+import type { Identity } from "./accounts.js";
 
 export interface RequestContext {
-  /** Authenticated user (JWT subject / username) that owns this tool execution. */
-  userId?: string;
+  /**
+   * Who owns this work, as one value: the username (or a principal's raw name) together with the
+   * account id or the principal kind it belongs to. Always set and replaced whole, never assembled
+   * from the fields of two identities: a userId paired with another identity's account would read
+   * and write that account's storage (runtime/user-scope.ts segmentFor).
+   */
+  identity?: Identity;
   /**
    * Workspace visibility zone of the executing agent. "generated" confines file
    * tools to the working zones (generated/ + uploads/); "full" / undefined means
@@ -27,7 +33,7 @@ export interface RequestContext {
    * directory name). Set by background sweeps that enumerate existing per-user buckets so
    * userScopedDir targets that bucket VERBATIM instead of re-deriving it from a userId —
    * safeUserSegment is a lossy hash and must never be applied to its own output. Takes
-   * precedence over userId for user-scope path resolution.
+   * precedence over the identity for user-scope path resolution.
    */
   userScopeSegment?: string;
   /**
@@ -126,7 +132,12 @@ export function runWithRequestContext<T>(ctx: RequestContext, fn: () => T): T {
 
 /** Convenience: the user that owns the active tool execution, if any. */
 export function currentUserId(): string | undefined {
-  return storage.getStore()?.userId;
+  return storage.getStore()?.identity?.userId;
+}
+
+/** The identity that owns the active work, if any. */
+export function currentIdentity(): Identity | undefined {
+  return storage.getStore()?.identity;
 }
 
 /** Convenience: the workspace zone of the active tool execution, if any. */

@@ -22,7 +22,7 @@ vi.mock("../observability/cost.js", () => ({
 }));
 
 const session = (id: string, userId?: string): AgentSession =>
-  ({ id, userId } as unknown as AgentSession);
+  ({ id, userId, identity: () => (userId ? { userId } : undefined) } as unknown as AgentSession);
 
 describe("prepareRateLimit — subject keying", () => {
   afterEach(() => vi.clearAllMocks());

@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { PRODUCT } from "../product/index.js";
+import { testAccountId } from "./support/test-account.js";
 
 describe("gateway auth secret resolution", () => {
   afterEach(async () => {
@@ -91,9 +92,10 @@ describe("authenticatedUser — live-account re-check (JWT revocation)", () => {
   function writeAuthConfig(configPath: string, users: Array<{ username: string; role: string }>): void {
     writeFileSync(configPath, JSON.stringify({
       gateway: { jwtSecret: "s".repeat(32) },
+      workspacePath: dirname(configPath),
       auth: {
         enabled: true,
-        users: users.map((u) => ({ ...u, passwordHash: "x".repeat(24), createdAt: "2026-01-01T00:00:00Z" })),
+        users: users.map((u) => ({ ...u, passwordHash: "x".repeat(24), createdAt: "2026-01-01T00:00:00Z", id: testAccountId(u.username) })),
       },
     }), "utf8");
   }
@@ -107,7 +109,7 @@ describe("authenticatedUser — live-account re-check (JWT revocation)", () => {
     const auth = await import("../gateway/auth.js");
     const configLoader = await import("../config/loader.js");
     try {
-      const aliceToken = await auth.createToken("alice", { role: "operator" });
+      const aliceToken = await auth.createToken("alice", { role: "operator", aid: testAccountId("alice") });
       expect((await auth.authenticatedUser(`Bearer ${aliceToken}`))?.username).toBe("alice");
 
       // Delete alice from config (same jwtSecret so her token still verifies).
@@ -131,7 +133,7 @@ describe("authenticatedUser — live-account re-check (JWT revocation)", () => {
     const auth = await import("../gateway/auth.js");
     const configLoader = await import("../config/loader.js");
     try {
-      const token = await auth.createToken("alice", { role: "operator" }); // token claims operator
+      const token = await auth.createToken("alice", { role: "operator", aid: testAccountId("alice") }); // token claims operator
       writeAuthConfig(configPath, [{ username: "alice", role: "viewer" }]); // downgraded in config
       configLoader.resetConfigForTests();
       expect((await auth.authenticatedUser(`Bearer ${token}`))?.role).toBe("viewer");

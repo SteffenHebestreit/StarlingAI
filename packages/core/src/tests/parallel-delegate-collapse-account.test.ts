@@ -68,7 +68,7 @@ describe("a collapsed parallel_delegate and the account it ran for", () => {
     const { runWithRequestContext } = await import("../runtime/request-context.js");
     const swarmState: SwarmState = { objective: "ferries", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} };
     const ctx: ToolContext = { sessionId: "collapse-session", workspacePath: dir, swarmState, currentAgentName: "mission_coordinator", ...(userId ? { userId } : {}) };
-    await runWithRequestContext(userId ? { userId } : {}, () => getTool("parallel_delegate")!.execute({
+    await runWithRequestContext(userId ? { identity: { userId } } : {}, () => getTool("parallel_delegate")!.execute({
       tasks: [{ agentName: "researcher", task: SLICE }, { agentName: "researcher", task: SLICE }],
     }, ctx));
     const file = join(dir, PRODUCT.stateDirName, "agent_outcomes.ndjson");

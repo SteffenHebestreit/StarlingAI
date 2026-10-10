@@ -29,7 +29,34 @@ export interface OidcIdentity {
   role: AuthRole;
   displayName?: string;
   email?: string;
+  /** The ID token's `iss`, without a trailing slash: with `subject`, who this person is. */
+  issuer: string;
+  /** The ID token's `sub`: the IdP's own immutable id for the person. A username is only a claim. */
+  subject: string;
 }
+
+/**
+ * A sign-in the gateway refuses, with what to audit and what to tell the person. Thrown by the
+ * callback; the route audits `auditType` and redirects to the login screen with `userMessage`.
+ */
+export class OidcSignInRefused extends Error {
+  constructor(
+    readonly auditType: "auth_oidc_unverified_email" | "auth_oidc_invalid_username" | "auth_oidc_username_conflict" | "auth_oidc_account_refused",
+    readonly userMessage: string,
+    message: string,
+    readonly username?: string,
+  ) {
+    super(message);
+    this.name = "OidcSignInRefused";
+  }
+}
+
+/**
+ * The usernames an identity provider may sign in under, after lowercasing. Nothing a principal's
+ * name could take: synthetic principals are `scene:<x>`, `job:<x>` and `<channel>:<sender>`, so a
+ * colon is refused, and so are spaces and control characters.
+ */
+export const OIDC_USERNAME_RE = /^[a-z0-9][a-z0-9_.@+-]{0,127}$/;
 
 // ── Discovery (cached) ─────────────────────────────────────────────────────────
 
@@ -164,16 +191,42 @@ export async function handleCallback(
   return identityFromClaims(cfg, claims);
 }
 
-/** Map validated token claims → our identity (username + role), enforcing role mapping. */
-function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIdentity {
-  const username = pickClaim(claims, cfg.usernameClaim) ?? (typeof claims.sub === "string" ? claims.sub : undefined);
-  if (!username) throw new Error(`OIDC token missing username claim '${cfg.usernameClaim}'`);
+/**
+ * Map validated token claims → our identity (username + role + who the IdP says this is),
+ * enforcing role mapping. Exported for tests.
+ *
+ * The username is a claim the person can often change, so it is checked before it is used: an email
+ * address is a username only when the IdP has verified it (anyone can type someone else's address
+ * into a self-service profile), and it must be a name no principal can carry.
+ */
+export function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIdentity {
+  const subject = typeof claims.sub === "string" && claims.sub.trim() ? claims.sub : undefined;
+  if (!subject) throw new Error("OIDC token carries no subject (sub)");
+  const issuer = typeof claims.iss === "string" ? claims.iss.replace(/\/+$/, "") : "";
+  if (!issuer) throw new Error("OIDC token carries no issuer (iss)");
+  const claimed = pickClaim(claims, cfg.usernameClaim) ?? subject;
+  const username = claimed.toLowerCase();
+  if (cfg.usernameClaim === "email" && claims["email_verified"] !== true) {
+    throw new OidcSignInRefused(
+      "auth_oidc_unverified_email",
+      "Your email address is not verified at the identity provider",
+      `OIDC user '${username}' signs in by email, and the IdP has not verified it`,
+      username,
+    );
+  }
+  if (!OIDC_USERNAME_RE.test(username)) {
+    throw new OidcSignInRefused(
+      "auth_oidc_invalid_username",
+      "Your username cannot be used here",
+      `OIDC username '${username.slice(0, 64)}' is not one this gateway accepts`,
+    );
+  }
   const roles = extractRoles(claims, cfg.rolesClaim);
   const role = mapRole(cfg, roles);
   if (!role) throw new Error(`OIDC user '${username}' has no mapped role (${roles.join(", ") || "no roles"}) and no defaultRole`);
   const displayName = pickClaim(claims, "name") ?? pickClaim(claims, "preferred_username");
   const email = pickClaim(claims, "email");
-  return { username: username.toLowerCase(), role, displayName, email };
+  return { username, role, displayName, email, issuer, subject };
 }
 
 /** admin → operator → viewer (most-privileged listed role wins); else defaultRole. */

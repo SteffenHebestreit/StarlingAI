@@ -64,7 +64,7 @@ async function load(dir: string): Promise<{ run: (userId: string | undefined, ta
   const { safeUserSegment } = await import("../runtime/user-scope.js");
   return {
     run: async (userId, task, parentSessionId = `parent-${Math.random().toString(36).slice(2)}`, runUserId) => {
-      await runWithRequestContext(userId ? { userId } : {}, () => runSubAgentWithStats({
+      await runWithRequestContext(userId ? { identity: { userId } } : {}, () => runSubAgentWithStats({
         agentName: AGENT,
         task,
         parentSessionId,

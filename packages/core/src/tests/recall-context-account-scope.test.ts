@@ -51,13 +51,13 @@ function seed(): { bobRoot: string } {
   lesson(ALICE_TASK, "search the bar association register first", safeUserSegment("alice"));
   lesson(BOB_TASK, "the harbour operator's site lists the ferry times", safeUserSegment("bob"));
   lesson(LEGACY_TASK, "cite the local rent index");
-  const bobRoot = userWorkspaceRoot(shared, "bob");
+  const bobRoot = userWorkspaceRoot(shared, { userId: "bob" });
   storeWorkspaceMemoryRecord(bobRoot, { key: "law_firm", subject: "Kanzlei", content: "Bob bevorzugt die Kanzlei Nordhafen in Hamburg", kind: "preference" });
   return { bobRoot };
 }
 
 async function recallAsBob(bobRoot: string, include?: string[]): Promise<string> {
-  const result = await runWithRequestContext({ userId: "bob" }, () => getTool("recall_context")!.execute(
+  const result = await runWithRequestContext({ identity: { userId: "bob" } }, () => getTool("recall_context")!.execute(
     { query: QUERY, ...(include ? { include } : {}) },
     { sessionId: "recall-account-bob", workspacePath: bobRoot, userId: "bob" },
   ));

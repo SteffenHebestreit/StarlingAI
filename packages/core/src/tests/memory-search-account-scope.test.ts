@@ -52,7 +52,7 @@ function seed(): { shared: string; bobRoot: string } {
   lesson(ALICE_TASK, "search the bar association register first", safeUserSegment("alice"));
   lesson(BOB_TASK, "the harbour operator's site lists the ferry times", safeUserSegment("bob"));
   lesson(LEGACY_TASK, "cite the local rent index");
-  const bobRoot = userWorkspaceRoot(shared, "bob");
+  const bobRoot = userWorkspaceRoot(shared, { userId: "bob" });
   storeWorkspaceMemoryRecord(bobRoot, { key: "law_firm", subject: "Kanzlei", content: "Bob bevorzugt die Kanzlei Nordhafen in Hamburg", kind: "preference" });
   return { shared, bobRoot };
 }
@@ -62,7 +62,7 @@ function search(ctx: ToolContext, scopes?: string[]): Promise<ToolResult> {
 }
 
 async function searchAsBob(bobRoot: string, scopes?: string[]): Promise<ToolResult> {
-  const result = await runWithRequestContext({ userId: "bob" }, () => search(
+  const result = await runWithRequestContext({ identity: { userId: "bob" } }, () => search(
     { sessionId: "memory-search-account-bob", workspacePath: bobRoot, userId: "bob" },
     scopes,
   ));

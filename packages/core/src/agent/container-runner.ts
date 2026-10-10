@@ -27,7 +27,8 @@ import type { SubAgentConfig, ModelConfig } from "../config/schema.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
 import { resolveDockerWorkspaceBind } from "../tools/workspace-mount.js";
 import { logAudit } from "../audit/logger.js";
-import { currentUserId } from "../runtime/request-context.js";
+import { pairedIdentity } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 import { userWordsBlockForRun } from "./delegation-user-words.js";
 
 const log = childLogger("agent:container-runner");
@@ -63,6 +64,9 @@ export interface ContainerTaskPayload {
    * gateway about whose work it is doing.
    */
   userId?: string;
+  /** The same owner whole (runtime/accounts.ts Identity): the container's tools derive per-user
+   *  storage from it as the gateway's do. Its `userId` is `userId` above. */
+  identity?: Identity;
   workspacePath: string;
   agentConfig: SubAgentConfig;
   resolvedModelConfig: ModelConfig;
@@ -174,6 +178,17 @@ function recoverPartialOutput(stdout: string): string {
   return textLines.sort((a, b) => b.length - a.length)[0]!.slice(0, 400);
 }
 
+/** The owner a container run carries: its own identity (or name) paired with the ambient one. The
+ *  identity rides along only when it names an account or a principal kind; a name alone is
+ *  `userId`, so the payload with one operator is the one it was. */
+function containerOwner(opts: Pick<SubAgentRunOptions, "userId" | "identity">): { userId: string | undefined; identity?: Identity } {
+  const own = opts.identity && (opts.userId === undefined || opts.identity.userId === opts.userId)
+    ? opts.identity
+    : opts.userId !== undefined ? { userId: opts.userId } : undefined;
+  const who = pairedIdentity(own);
+  return { userId: who?.userId, ...(who?.userId && (who.account || who.principal) ? { identity: who } : {}) };
+}
+
 /**
  * The payload handed to the container, built where it can be tested.
  *
@@ -197,10 +212,11 @@ export function buildContainerTaskPayload(
     task: `${opts.task}${userWordsBlockForRun(agentCfg.domain, opts.turnUserWords, opts.task, opts.context)}`,
     context: opts.context,
     parentSessionId: opts.parentSessionId,
-    // `?? currentUserId()`: the in-process runner uses the same fallback (tools/registry.ts),
-    // so a caller that did not thread userId still hands the container the ambient owner
-    // rather than dropping to the shared bucket.
-    userId: opts.userId ?? currentUserId(),
+    // The run's identity paired with the ambient one, as the in-process runner pairs them
+    // (tools/registry.ts): a caller that did not thread one still hands the container the ambient
+    // owner rather than dropping to the shared bucket, and never the ambient account under
+    // another name.
+    ...containerOwner(opts),
     workspacePath: opts.workspacePath,
     agentConfig: agentCfg,
     resolvedModelConfig,

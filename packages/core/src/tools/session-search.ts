@@ -4,10 +4,9 @@
  * earlier work without rehydrating whole transcripts into context.
  */
 
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, toolCallIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { getChatProvider } from "../providers/index.js";
 import { searchSessions, summarizeSession } from "../agent/session-search.js";
-import { currentUserId } from "../runtime/request-context.js";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("tool:session-search");
@@ -52,8 +51,8 @@ registerTool({
 
     // Only the requesting user's own sessions under multi-user auth (security finding S2,
     // 2026-10-05): this searched every account's history. A delegated sub-agent's context may
-    // not carry userId, so fall back to the turn's ambient user, as executeTool does.
-    const matches = searchSessions(query, { limit, excludeSessionId: ctx.sessionId, requestingUserId: ctx.userId ?? currentUserId() });
+    // not carry userId, so fall back to the turn's ambient identity, as executeTool does.
+    const matches = searchSessions(query, { limit, excludeSessionId: ctx.sessionId, requester: toolCallIdentity(ctx) });
     if (matches.length === 0) {
       return {
         success: true,

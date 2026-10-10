@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { productEnv } from "../product/index.js";
+import { ACCOUNT_ID_RE, reservedAccountIdProblem } from "../runtime/accounts.js";
 
 // Domain sub-schemas extracted into config/schemas/* (pure relocation). They are
 // re-exported here so the long-standing `from "../config/schema.js"` import path
@@ -397,7 +398,32 @@ export const AuthUserSchema = z.object({
   role: AuthRoleSchema,
   /** ISO timestamp of when this account was created.  Set by the runtime; do not edit. */
   createdAt: z.string().optional(),
+  /** Immutable account id, the key of the account's own storage. Minted at random when the account
+   *  is created (or by `pnpm e2e:setup`, or the account migration); never derived from the username,
+   *  so a name deleted and created again is a new account. Do not edit it, and never copy it to
+   *  another person's record: whoever holds the id holds that storage. */
+  id: z.string().regex(ACCOUNT_ID_RE, "id must be <prefix>-<16 hex digits>").optional(),
 });
+
+/**
+ * The roster is refused at load when two records hold one id (compared without case: on a
+ * case-insensitive filesystem those are one directory), or a record holds the default bootstrap
+ * token's storage segment. Either would put two identities in one bucket.
+ */
+function refuseSharedAccountIds(users: Array<z.infer<typeof AuthUserSchema>>, ctx: z.RefinementCtx): void {
+  const seen = new Map<string, string>();
+  users.forEach((user, index) => {
+    if (!user.id) return;
+    const reserved = reservedAccountIdProblem(user.id);
+    if (reserved) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "id"], message: reserved });
+    const holder = seen.get(user.id.toLowerCase());
+    if (holder !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "id"], message: `account id '${user.id}' is already held by '${holder}'` });
+    } else {
+      seen.set(user.id.toLowerCase(), user.username);
+    }
+  });
+}
 
 export type AuthRole = z.infer<typeof AuthRoleSchema>;
 
@@ -469,7 +495,7 @@ export const AuthSchema = z.object({
   enabled: z.boolean().default(false),
   provider: z.enum(["builtin", "oidc"]).default("builtin"),
   oidc: OidcConfigSchema.optional(),
-  users: z.array(AuthUserSchema).default([]),
+  users: z.array(AuthUserSchema).superRefine(refuseSharedAccountIds).default([]),
   /**
    * Trust the client-supplied `X-Forwarded-For` header for the login
    * brute-force rate-limit identity. Leave FALSE (the default) for a directly

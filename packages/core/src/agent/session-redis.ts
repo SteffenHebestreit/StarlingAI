@@ -148,6 +148,77 @@ export async function loadAllSessionsFromRedis(): Promise<string[]> {
   }
 }
 
+// ── The account migration's access (runtime/account-migration.ts) ───────────
+// The calls above swallow every Redis error, which is right for a mirror written in the background
+// and wrong for a migration that rewrites the store of record (in Docker the session file does not
+// survive a container recreate): these throw, so a step that did not land is reported as failed.
+
+/** Whether a Redis mirror is configured at all. */
+export function sessionRedisConfigured(): boolean {
+  return Boolean(process.env["REDIS_URL"]?.trim());
+}
+
+async function requireRedisClient(): Promise<RedisClient | null> {
+  if (!sessionRedisConfigured()) return null;
+  const redis = await getRedisClient();
+  if (!redis) throw new Error("the Redis session mirror is configured but its client could not be loaded");
+  return redis;
+}
+
+/**
+ * Every session record in the mirror, however many: the boot hydrates only the most recent
+ * MAX_HYDRATE, and a session that exists only in the mirror must not be missed. Read in pages of
+ * the index. Null when no mirror is configured; throws when it is and fails.
+ */
+export async function loadEverySessionFromRedis(): Promise<Array<{ id: string; json: string }> | null> {
+  const redis = await requireRedisClient();
+  if (!redis) return null;
+  const out: Array<{ id: string; json: string }> = [];
+  const PAGE = 500;
+  for (let start = 0; ; start += PAGE) {
+    const ids: string[] = await redis.zrange(SESSION_INDEX_KEY, start, start + PAGE - 1);
+    if (!ids.length) break;
+    const pipeline = redis.pipeline();
+    for (const id of ids) pipeline.get(SESSION_KEY(id));
+    const results: Array<[Error | null, unknown]> = (await pipeline.exec()) ?? [];
+    results.forEach(([err, raw], index) => {
+      if (err) throw err;
+      if (typeof raw === "string") out.push({ id: ids[index]!, json: raw });
+    });
+    if (ids.length < PAGE) break;
+  }
+  return out;
+}
+
+/** Writes one record; false when no mirror is configured, throws when the write fails. */
+export async function saveSessionToRedisChecked(id: string, json: string, updatedAtMs: number): Promise<boolean> {
+  const redis = await requireRedisClient();
+  if (!redis) return false;
+  const results: Array<[Error | null, unknown]> | null = await redis
+    .multi()
+    .set(SESSION_KEY(id), json, "EX", SESSION_TTL_SECONDS)
+    .zadd(SESSION_INDEX_KEY, updatedAtMs, id)
+    .exec();
+  const failed = results?.find(([err]) => err);
+  if (!results || failed) throw failed?.[0] ?? new Error(`Redis did not run the write of session ${id}`);
+  return true;
+}
+
+/** Reads one record back; null when absent or no mirror is configured, throws when the read fails. */
+export async function loadSessionFromRedisChecked(id: string): Promise<string | null> {
+  const redis = await requireRedisClient();
+  if (!redis) return null;
+  return (await redis.get(SESSION_KEY(id))) as string | null;
+}
+
+/** Deletes one record and its index entry (a purge); false when no mirror is configured. */
+export async function deleteSessionFromRedisChecked(id: string): Promise<boolean> {
+  const redis = await requireRedisClient();
+  if (!redis) return false;
+  await redis.multi().del(SESSION_KEY(id)).zrem(SESSION_INDEX_KEY, id).exec();
+  return true;
+}
+
 /**
  * Look up the session ID associated with a channel + sender pair.
  * Used to route incoming channel messages to existing sessions on other instances.

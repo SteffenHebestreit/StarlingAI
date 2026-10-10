@@ -1,6 +1,7 @@
 import { getConfig } from "../config/loader.js";
 import { getSessionRecord } from "../agent/session.js";
-import { userHasRole, type AuthenticatedUser } from "./auth.js";
+import { ownsRecord, recordHasOwner } from "../runtime/user-scope.js";
+import { callerIdentity, userHasRole, type AuthenticatedUser } from "./auth.js";
 
 /**
  * Whether an HTTP caller may read or drive a session through a /api/sessions/:sessionId route.
@@ -15,14 +16,19 @@ import { userHasRole, type AuthenticatedUser } from "./auth.js";
  * - An owner this process cannot see is not an absent owner. getSessionRecord also sees archived
  *   sessions; an id it cannot resolve at all (never existed, or held by another gateway instance)
  *   is refused rather than assumed free.
- * - A session with no owner (auth-off history, channel sessions) stays open to any caller.
+ * - A session with no owner (auth-off history) stays open to any caller.
+ * - Otherwise the caller must be its owner by identity (ownsRecord), not by name: an account
+ *   created again under a deleted one's name, or a bootstrap token whose `sub` is an account's
+ *   username, owned every session the name did. A channel sender's session is that principal's,
+ *   so no dashboard caller owns it, and a session from before account ids is an admin's alone.
  */
 export function callerMayUseSession(caller: AuthenticatedUser | null, sessionId: string): boolean {
   if (getConfig().auth?.enabled !== true) return true;
   if (userHasRole(caller, "admin")) return true;
   const session = getSessionRecord(sessionId);
   if (!session) return false;
-  return session.userId === undefined || session.userId === caller?.username;
+  const owner = session.identity();
+  return !recordHasOwner(owner) || ownsRecord(callerIdentity(caller), owner);
 }
 
 /** The ids a client may start a session under: letters, digits, `_` and `-`, at most 128 of them.

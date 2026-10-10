@@ -75,13 +75,15 @@ function syncSeaweedfsS3Config(accessKey, secretKey) {
 }
 
 // ── HS256 JWT minting (mirrors scripts/gen-token.mjs) ────────────────────────
+// A bootstrap token (`bst`), as gen-token.mjs mints: under multi-user auth an instance credential,
+// never an account, so it keeps working once accounts exist.
 function b64url(value) {
   return Buffer.from(value).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 function mintToken(secret, { userId = "admin", role = "admin", ttlSeconds = 30 * 86400 } = {}) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const payload = b64url(JSON.stringify({ sub: userId, role, iat: now, exp: now + ttlSeconds }));
+  const payload = b64url(JSON.stringify({ sub: userId, role, bst: true, iat: now, exp: now + ttlSeconds }));
   const sig = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64")
     .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
   return `${header}.${payload}.${sig}`;
