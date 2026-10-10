@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { productEnv } from "../product/index.js";
+import { ACCOUNT_ID_RE, reservedAccountIdProblem } from "../runtime/accounts.js";
 
 // Domain sub-schemas extracted into config/schemas/* (pure relocation). They are
 // re-exported here so the long-standing `from "../config/schema.js"` import path
@@ -106,6 +107,10 @@ export const ProvidersSchema = z.object({
   ollama: OllamaProviderSchema.optional(),
   anthropic: AnthropicProviderSchema.optional(),
 });
+
+/** The tool-call syntaxes a forced call can be started in (ModelConfig.toolCallPrefill). */
+export const ToolCallPrefillSyntaxSchema = z.enum(["qwen-xml"]);
+export type ToolCallPrefillSyntax = z.infer<typeof ToolCallPrefillSyntaxSchema>;
 
 export const ModelConfigSchema = z.object({
   primary: z.string().max(200).default("lmstudio/qwen/qwen3.6-35b-a3b"),
@@ -225,7 +230,8 @@ export const ModelConfigSchema = z.object({
    *  opening of the model's tool-call syntax, and the server continues it. The only format is
    *  "qwen-xml", the Qwen3-Coder XML syntax Qwen3.5/3.6 use on llama.cpp (`<tool_call>` then
    *  `<function=`). Only callers that ask for it get it (CompletionCallOptions.prefillToolCall;
-   *  today the orchestrator's forced calls), so every other request is unchanged.
+   *  today the orchestrator's forced --agent and build calls, agent/runtime.ts forcedCallPrefill),
+   *  so every other request is unchanged.
    *
    *  Why: on the deployed llama.cpp (b11015), "required" only keeps the turn from ENDING until a
    *  call is complete, and prose before the call is allowed. A model that wants to answer itself
@@ -234,16 +240,26 @@ export const ModelConfigSchema = z.object({
    *  streamed and not, thinking on or off. A continuation closes the think block, so a prefilled
    *  call does not deliberate first.
    *
-   *  Set it only on a model whose endpoints (primary, fallback and cloudFallback share this
-   *  config) all serve that syntax through llama.cpp's Qwen3-Coder handler with
-   *  --prefill-assistant (on by default): the opener must be a valid start of the server's
-   *  tool-call grammar. A model preset that replaces the model (activeModelPreset) drops it,
-   *  as it drops the tiers and endpoint overrides: the syntax is the replaced model's. A
-   *  prefilled request answered with an HTTP 4xx about the request is retried once without the
-   *  prefill, and only when that retry is served is the endpoint remembered and its forced calls
-   *  sent without one; a context overflow is not taken for a refusal. Qwen3's JSON tool-call
-   *  syntax needs a different opener and is not covered. The Anthropic provider ignores it. */
-  toolCallPrefill: z.enum(["qwen-xml"]).optional(),
+   *  Set it only on a model that serves that syntax through llama.cpp's Qwen3-Coder handler
+   *  with --prefill-assistant (on by default): the opener must be a valid start of the server's
+   *  tool-call grammar. Two forms:
+   *  - a map from model id to syntax, `{ "lmstudio/qwen": "qwen-xml" }`: each endpoint of the
+   *    config (primary, fallback, cloudFallback) gets the syntax its own id names, and an id
+   *    the map does not name gets none. Use it on a model config whose ids can be replaced
+   *    while the flag stays: agents.defaults.model, whose primary SAI_PRIMARY_MODEL, the
+   *    dashboard's model settings, a later shard or a sub-agent's own model block can change.
+   *    Written as one string there, the flag outlives the id: a wizard install pinned to
+   *    `lmstudio/qwen2.5:7b` on Ollama would get the Qwen3.6 opener on every forced call;
+   *  - one string: every endpoint of this config. For a config whose ids nothing else sets.
+   *  A model preset that replaces the model (activeModelPreset) drops either form, as it drops
+   *  the tiers and endpoint overrides: the syntax is the replaced model's. A prefilled request
+   *  answered with an HTTP 4xx about the request is retried once without the prefill, and only
+   *  when that retry is served is the endpoint remembered and its forced calls sent without one;
+   *  a context overflow is not taken for a refusal. A server that continues the trailing
+   *  assistant message instead of refusing it with a 4xx (Ollama, per the review of e7da7236) is
+   *  not caught that way, which is why the syntax is named per id. Qwen3's JSON tool-call syntax
+   *  needs a different opener and is not covered. The Anthropic provider ignores it. */
+  toolCallPrefill: z.union([ToolCallPrefillSyntaxSchema, z.record(z.string().min(1).max(200), ToolCallPrefillSyntaxSchema)]).optional(),
   /** Optional model-tier ladder. When set, the orchestrator swaps in the
    *  tier-specific model for certain paths instead of `primary`:
    *   - `routing`   : lightweight classifier/picker calls (reserved — wired as
@@ -382,7 +398,32 @@ export const AuthUserSchema = z.object({
   role: AuthRoleSchema,
   /** ISO timestamp of when this account was created.  Set by the runtime; do not edit. */
   createdAt: z.string().optional(),
+  /** Immutable account id, the key of the account's own storage. Minted at random when the account
+   *  is created (or by `pnpm e2e:setup`, or the account migration); never derived from the username,
+   *  so a name deleted and created again is a new account. Do not edit it, and never copy it to
+   *  another person's record: whoever holds the id holds that storage. */
+  id: z.string().regex(ACCOUNT_ID_RE, "id must be <prefix>-<16 hex digits>").optional(),
 });
+
+/**
+ * The roster is refused at load when two records hold one id (compared without case: on a
+ * case-insensitive filesystem those are one directory), or a record holds the default bootstrap
+ * token's storage segment. Either would put two identities in one bucket.
+ */
+function refuseSharedAccountIds(users: Array<z.infer<typeof AuthUserSchema>>, ctx: z.RefinementCtx): void {
+  const seen = new Map<string, string>();
+  users.forEach((user, index) => {
+    if (!user.id) return;
+    const reserved = reservedAccountIdProblem(user.id);
+    if (reserved) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "id"], message: reserved });
+    const holder = seen.get(user.id.toLowerCase());
+    if (holder !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "id"], message: `account id '${user.id}' is already held by '${holder}'` });
+    } else {
+      seen.set(user.id.toLowerCase(), user.username);
+    }
+  });
+}
 
 export type AuthRole = z.infer<typeof AuthRoleSchema>;
 
@@ -454,7 +495,7 @@ export const AuthSchema = z.object({
   enabled: z.boolean().default(false),
   provider: z.enum(["builtin", "oidc"]).default("builtin"),
   oidc: OidcConfigSchema.optional(),
-  users: z.array(AuthUserSchema).default([]),
+  users: z.array(AuthUserSchema).superRefine(refuseSharedAccountIds).default([]),
   /**
    * Trust the client-supplied `X-Forwarded-For` header for the login
    * brute-force rate-limit identity. Leave FALSE (the default) for a directly

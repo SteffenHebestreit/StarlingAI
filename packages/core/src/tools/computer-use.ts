@@ -13,7 +13,7 @@ import { Buffer } from "node:buffer";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, resourceGuardIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { canAccessResource } from "../guardrails/resource-access.js";
 import { lookupSiteCredential, siteCredentialMissMessage } from "../credentials/sites.js";
 import {
@@ -386,7 +386,7 @@ registerTool({
   async execute(_args, ctx) {
     try {
       const cuCfg = requireEnabled();
-      const user = ctx.userId;
+      const user = resourceGuardIdentity(ctx);
       const entries: { name: string; adapter: string; label: string; host?: string }[] = [];
 
       // Named nodes — hide nodes the requesting user may not use.
@@ -479,9 +479,9 @@ registerTool({
       if (nodeId) {
         // ── Named node resolution ─────────────────────────────────────────
         const node = cuCfg.nodes?.[nodeId];
-        if (!node || !canAccessResource(ctx.userId, node as { allowedUsers?: string[] })) {
+        if (!node || !canAccessResource(resourceGuardIdentity(ctx), node as { allowedUsers?: string[] })) {
           // Treat a restricted node like an unknown one — do not leak existence.
-          const available = Object.keys(cuCfg.nodes ?? {}).filter((n) => canAccessResource(ctx.userId, cuCfg.nodes?.[n] as { allowedUsers?: string[] }));
+          const available = Object.keys(cuCfg.nodes ?? {}).filter((n) => canAccessResource(resourceGuardIdentity(ctx), cuCfg.nodes?.[n] as { allowedUsers?: string[] }));
           throw new Error(
             `Computer node '${nodeId}' not found. ` +
             (available.length > 0
@@ -1508,7 +1508,7 @@ registerTool({
         return fail("field must be 'username' or 'password'");
       }
 
-      const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+      const lookup = lookupSiteCredential(hostname, ctx.sessionId, resourceGuardIdentity(ctx));
       if (lookup.status !== "resolved") {
         return fail(siteCredentialMissMessage(lookup, hostname));
       }

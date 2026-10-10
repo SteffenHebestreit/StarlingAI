@@ -12,7 +12,7 @@
  *                         the values.
  */
 import { isIP } from "node:net";
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, resourceGuardIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { lookupSiteCredential, siteCredentialMissMessage, type ResolvedSiteCredential } from "../credentials/sites.js";
 import { callPlaywrightTool } from "./multimodal.js";
 import { childLogger } from "../logger.js";
@@ -168,7 +168,7 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+    const lookup = lookupSiteCredential(hostname, ctx.sessionId, resourceGuardIdentity(ctx));
     if (lookup.status !== "resolved") {
       return {
         success: false,
@@ -252,7 +252,7 @@ registerTool({
       return { success: false, output: "", error: "hostname is required" };
     }
 
-    const lookup = lookupSiteCredential(hostname, ctx.sessionId, ctx.userId);
+    const lookup = lookupSiteCredential(hostname, ctx.sessionId, resourceGuardIdentity(ctx));
     if (lookup.status !== "resolved") {
       return {
         success: false,

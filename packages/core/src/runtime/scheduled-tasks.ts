@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
+import type { PrincipalKind } from "./accounts.js";
 
 const log = childLogger("scheduled-tasks");
 
@@ -26,7 +27,16 @@ export interface ScheduledTaskRecord {
   task: string;
   /** Owner — scopes the scheduled run to a user (auth-on deployments). */
   userId?: string;
+  /** With `userId`, from one identity: the owner's account id, or (instead) its principal kind.
+   *  Under multi-user auth a schedule with a userId and neither predates account ids, and the
+   *  runner skips it (scheduled-task-runner.ts). */
+  account?: string;
+  principal?: PrincipalKind;
   createdAt: string;
+  /** Set when the schedule must not run again (its owner's account was deleted or retired). It is
+   *  kept, not removed: its owner's data stays until a purge, and an admin can still read and remove
+   *  it. The runner registers no cron job for it. */
+  disabled?: { at: string; reason: string };
 }
 
 let _cache: ScheduledTaskRecord[] | null = null;
@@ -70,6 +80,16 @@ export function saveScheduledTask(rec: ScheduledTaskRecord): void {
   const tasks = loadScheduledTasks().filter((t) => t.id !== rec.id);
   tasks.push(rec);
   persist(tasks);
+}
+
+/** Mark a schedule disabled, in place, and persist. Returns false if it wasn't there or was
+ *  disabled already. */
+export function disableScheduledTask(id: string, disabled: { at: string; reason: string }): boolean {
+  const tasks = loadScheduledTasks();
+  const target = tasks.find((t) => t.id === id);
+  if (!target || target.disabled) return false;
+  persist(tasks.map((t) => (t.id === id ? { ...t, disabled } : t)));
+  return true;
 }
 
 /** Remove a schedule by id. Returns false if it wasn't there. */

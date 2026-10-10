@@ -769,10 +769,21 @@ describe("AgentSession workspace root under multi-user auth", () => {
     expect(run.getWorkspacePath()).toBe(aliceRoot);
   });
 
-  it("brings a session persisted with the extra levels back to the user's root", () => {
+  it("brings an account's session persisted with the extra levels back to the account's root", () => {
+    const account = `alice-${"6".repeat(16)}`;
+    const accountRoot = resolve(shared, "users", account);
+    const session = new AgentSession({ channel: "webchat", userId: "alice", account, workspacePath: shared, systemPrompt: "x" });
+    expect(session.getWorkspacePath()).toBe(accountRoot);
+    const record = { ...session.toRecord(), workspacePath: resolve(accountRoot, "users", account, "users", account) };
+    expect(AgentSession.fromRecord(record).getWorkspacePath()).toBe(accountRoot);
+  });
+
+  // A session from before account ids names its user and no account. Any root other than the one it
+  // was stored with would be derived from the name, so it keeps that one (AgentSession.fromRecord).
+  it("keeps the stored root of a session from before account ids, extra levels and all", () => {
     const session = new AgentSession({ channel: "webchat", userId: "alice", workspacePath: shared, systemPrompt: "x" });
-    const record = { ...session.toRecord(), workspacePath: resolve(aliceRoot, "users", segment, "users", segment) };
-    expect(AgentSession.fromRecord(record).getWorkspacePath()).toBe(aliceRoot);
+    const nested = resolve(aliceRoot, "users", segment, "users", segment);
+    expect(AgentSession.fromRecord({ ...session.toRecord(), workspacePath: nested }).getWorkspacePath()).toBe(nested);
   });
 });
 

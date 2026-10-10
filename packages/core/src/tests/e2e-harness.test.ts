@@ -50,6 +50,7 @@ import { detectReplyLanguage, fieldMatches, summarizeAgents, summarizeTools } fr
 import { parseJudgeScore } from "../e2e/judge.js";
 import { GreenMailAdapter, parseMimeMessage, type MailAdapter } from "../e2e/mail.js";
 import { findRepoRoot, resolveE2EPaths } from "../e2e/paths.js";
+import { ACCOUNT_ID_RE } from "../runtime/accounts.js";
 import type { E2EProvenance } from "../e2e/provenance.js";
 import type { E2EScenario } from "../e2e/scenario.js";
 
@@ -1450,6 +1451,38 @@ describe("e2e harness — setup (temp config only)", () => {
     expect(existsSync(credentialsPath)).toBe(false);
     expect(existsSync(paths.mailIsolationPath)).toBe(false);
     expect(builds).toHaveLength(5);
+  });
+
+  it("gives each account an id, and gives one to accounts that predate ids without new passwords", async () => {
+    // Per-account storage is keyed by auth.users[].id; the gateway refuses sign-in without one.
+    const paths = setupPaths();
+    const readUsers = () => (JSON5.parse(readFileSync(paths.shardPath, "utf8")) as { auth: { users: Array<Record<string, unknown>> } }).auth.users;
+    expect((await runE2ESetup({ paths, build })).action).toBe("created");
+    const created = readUsers();
+    for (const user of created) expect(user["id"]).toMatch(ACCOUNT_ID_RE);
+    expect(created[0]!["id"]).not.toBe(created[1]!["id"]);
+
+    // A shard written before ids existed (and one with a malformed id): the accounts are kept and
+    // each gets an id; the passwords, and so the credentials file, stay as they were.
+    const credentialsText = readFileSync(credentialsPath, "utf8");
+    const legacy = created.map(({ id: _id, ...rest }) => rest);
+    legacy[1]!["id"] = "not-an-id";
+    writeFileSync(paths.shardPath, JSON.stringify({ auth: { users: legacy } }));
+    const logs: string[] = [];
+    expect((await runE2ESetup({ paths, build, log: (line) => logs.push(line) })).action).toBe("kept");
+    const kept = readUsers();
+    expect(kept.map((user) => user["passwordHash"])).toEqual(created.map((user) => user["passwordHash"]));
+    for (const user of kept) expect(user["id"]).toMatch(ACCOUNT_ID_RE);
+    expect(kept[0]!["id"]).not.toBe(kept[1]!["id"]);
+    expect(readFileSync(credentialsPath, "utf8")).toBe(credentialsText);
+    expect(logs.join("\n")).toContain("gave eval and eval-viewer an account id, passwords unchanged");
+    const stored = JSON.parse(credentialsText) as Record<string, { password: string }>;
+    expect(await bcrypt.compare(stored["eval"]!.password, String(kept[0]!["passwordHash"]))).toBe(true);
+
+    // With ids in place a re-run changes nothing.
+    const shardText = readFileSync(paths.shardPath, "utf8");
+    expect((await runE2ESetup({ paths, build })).action).toBe("kept");
+    expect(readFileSync(paths.shardPath, "utf8")).toBe(shardText);
   });
 });
 

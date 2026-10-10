@@ -41,6 +41,7 @@ import "./plan-executor.js";
 import "./recall-context.js";
 import "./workspace-search.js";
 import "./web.js";
+import "./web-table.js";
 import "./multimodal.js";
 import "./document-output.js";
 import "./render-pdf.js";

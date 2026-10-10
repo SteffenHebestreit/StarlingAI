@@ -131,20 +131,66 @@ export function prefetchRoutedToDeliverableEmitter(agents: readonly DiscoveryCap
 export const ASK_MODES: ReadonlySet<string> = new Set(["converse", "GATHER", "VERIFY"]);
 
 /**
- * Wall-clock bound on the produce-intent read, both option orders together. The readout measured
- * 0.86-1.16 s a call warm (agent/intent-shadow.ts); the rest leaves room for a cold prefill of its
- * ~1k-token prefix. Iteration 0 waits for it, so it is well under the shadow's own bound
- * (INTENT_SHADOW_TIMEOUT_MS, 15 s).
+ * Wall-clock bound on the produce-intent read, both option orders together. Iteration 0 waits for
+ * it, so it is well under the shadow's own bound (INTENT_SHADOW_TIMEOUT_MS, 15 s). The shadow's
+ * 0.86-1.16 s a call is not what a turn saw. Probed on the Halo (2026-10-09) with a new message for
+ * every read and the four ways of asking interleaved in one run, 24 reads each alone and 24 with
+ * the source judge's call beside it, as a turn sends it, and 20 with the judge after every slot of
+ * the server had been overwritten: the two orders one after the other, each writing its whole
+ * reply, took p50 3.8 s alone and 5.3 s beside the judge, and ran past this bound on all 20 reads
+ * after the overwrite. Asked as now, both at once and the mode line alone
+ * (PRODUCE_INTENT_READ_MAX_TOKENS), the read took p50 1.9 s alone (p90 2.0 s), 2.7 s beside the
+ * judge (p90 3.1 s) and 5.1 s after the overwrite (p90 and max 5.1 s). None of those 68 reached the
+ * bound, but after the overwrite less than a second was left: a turn that finds the server's slots
+ * taken by other prompts is the one to watch.
  */
 export const PRODUCE_INTENT_READ_TIMEOUT_MS = 6_000;
+
+/**
+ * The produce-intent read's output cap: the reply's first line and no more. The verdict reads the
+ * mode facet alone, and mode is the line the grammar writes first, so nothing after it can change
+ * it: the six other letters and the English restatement were tokens the turn's first call waited
+ * for, 43 to 54 a pass, decoded at about 42 a second a stream on the Halo (2026-10-09). `mode: C`
+ * is three tokens on Qwen's tokenizer (a cap of two read no mode); three more leave room for a
+ * tokenizer that splits the label. A reply cut there reads the mode as the whole reply does and the
+ * other facets as missing (parseIntentReadout).
+ */
+export const PRODUCE_INTENT_READ_MAX_TOKENS = 6;
 
 /** What the readout's mode says of the request: something to be made or done, or an answer. */
 export type ProduceIntentVerdict = "produce" | "ask";
 
-/** The readout's mode as a verdict: "ask" for ASK_MODES, "produce" for any other option, null when the facet was not read. Pure. */
-export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice"> | undefined): ProduceIntentVerdict | null {
+/**
+ * What the produce-intent read resolves to: a verdict, or which of two kinds of no reading it was,
+ * because the word-list arm forces on one and not on the other (agent/runtime.ts
+ * autonomousArtifactBuild).
+ * - "unavailable": the deployment can never give a reading. The routing tier gives no token
+ *   logprobs (a Claude routing tier, which is not asked; a server whose reply carried none), or
+ *   there is no routing-tier provider. Every read on that deployment ends so.
+ * - "missed": a deployment that gives readings gave none this time: a timeout, the turn stopped,
+ *   an error, a mode only one option order read, or a reply without a mode facet.
+ * The audit row's outcome names the cause: no_logprobs_provider, no_logprobs or no_provider for
+ * the first; timeout, aborted, error, single_pass or no_mode for the second.
+ */
+export type ProduceIntentReadOutcome = ProduceIntentVerdict | "unavailable" | "missed";
+
+/**
+ * The readout's mode as a verdict: "produce" only when every reading of it is work — the choice and,
+ * on a both-orders reading, each order's own choice (PRODUCE, ACT or ORCHESTRATE, not necessarily the
+ * same one) — "ask" when any of them is one of ASK_MODES, null when the facet was not read. Pure.
+ *
+ * The averaged choice alone forced questions. "Wie erstelle ich eine Präsentation in PowerPoint?"
+ * read converse in the served order and PRODUCE in the reversed one on all 47 reads of the probe of
+ * 2026-10-09, and the average landed on PRODUCE on 5 of them. On 64 build reads the rule changed no
+ * verdict: every build read work in both orders except a request to run a research workflow, which
+ * read GATHER in one order and in the average too, so either rule reads it as an answer and the
+ * readout does not force it (agent/runtime.ts says what does). Requiring both orders costs a build
+ * nothing there, and keeps a question whose orders disagree from being forced.
+ */
+export function produceIntentVerdict(mode: Pick<IntentFacetRead, "choice" | "orders"> | undefined): ProduceIntentVerdict | null {
   if (!mode) return null;
-  return ASK_MODES.has(mode.choice) ? "ask" : "produce";
+  const readings = [mode.choice, mode.orders?.served, mode.orders?.reversed].filter((choice): choice is string => choice !== undefined);
+  return readings.some((choice) => ASK_MODES.has(choice)) ? "ask" : "produce";
 }
 
 const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
@@ -159,21 +205,38 @@ const round4 = (value: number): number => Math.round(value * 10_000) / 10_000;
  * at 0.817. The readout's mode reads the request itself, in any language, and asks exactly this:
  * what the request asks the assistant to do, the verb and not the topic. On the bench it read mode
  * right in 84.8 % of 312 cases with both option orders averaged and in 74.2 % with one, and on real
- * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked.
+ * turns seven questions had PRODUCE as runner-up with the two orders disagreeing, so both are asked,
+ * at once (askIntentReadout concurrentOrders) and only as far as the mode line
+ * (PRODUCE_INTENT_READ_MAX_TOKENS): the turn's first call waits for them. Both orders must read
+ * work for the verdict to be "produce" (produceIntentVerdict).
  *
- * Resolves to "produce", "ask", or null when there is no reading: an Anthropic routing tier (the
- * readout needs a grammar and token logprobs, which only a llama.cpp server gives, and the shadow
- * skips it there for the same reason), no provider, a timeout, the turn stopped, a reply without
- * logprobs, an error, or no mode facet in it. A mode only one of the two orders read is no reading
- * either: askIntentReadout still answers when the reversed call failed or missed the slot, with the
- * served pass alone (or the reversed pass alone), and one order is the reading that was rejected
- * for this decision. The caller does not force on null: a question is not to be forced, and without
- * a reading the orchestrator decides as it does on any other turn.
+ * Resolves to "produce", "ask", or, when there is no reading, one of two outcomes
+ * (ProduceIntentReadOutcome). "unavailable" where the deployment can never give one: an Anthropic
+ * routing tier (the readout needs a grammar and token logprobs, which only a llama.cpp server
+ * gives, and the shadow skips it there for the same reason), a reply without logprobs, or no
+ * provider. "missed" where it can and did not this time: a timeout, the turn stopped, an error, or
+ * no mode facet in the reply. A mode only one of the two orders read is missed too: askIntentReadout
+ * still answers when the reversed call failed or missed the slot, with the served pass alone (or
+ * the reversed pass alone), and one order is the reading that was rejected for this decision. The
+ * routing arm forces on "produce" alone: a question is not to be forced, and without a reading the
+ * orchestrator decides as it does on any other turn.
+ *
+ * The verdict keeps a question from being forced only when the readout reads it as one. A question
+ * how to make a thing that names no tool to make it with ("How do I make a good slide about
+ * tides?") read PRODUCE in both orders on every read of the probe of 2026-10-09, and is forced like
+ * the request to make it (agent/runtime.ts has the measurement).
+ *
+ * The word-list arm asks the same read (`arm: "word_list"`): the deliverable-intent word lists fire
+ * on a question about making something as on a request to make it. There "produce" forces the call
+ * and "ask" releases it. Without a reading, as the user ruled (decision 6, option 3), "unavailable"
+ * leaves it to the word lists, as before, so a deployment that never gives a reading keeps its
+ * forced builds, and "missed" releases it, so a question is not forced because one read failed
+ * (agent/runtime.ts says more).
  *
  * Logs one row (guardrail_flagged, type auto_artifact_build_mode_read): the outcome, and for a
- * reading the mode's choice, top probability, margin, runner-up, whether the two orders agreed, and
- * which pass read it when only one did. Never the user's message, the digest or the readout's
- * restatement. Never rejects.
+ * reading the mode's choice, top probability, margin, runner-up, each order's own choice and whether
+ * they agreed, and which pass read it when only one did. Never the user's message, the digest or the
+ * readout's restatement. Never rejects.
  */
 export async function startProduceIntentRead(params: {
   userMessage: string;
@@ -183,19 +246,28 @@ export async function startProduceIntentRead(params: {
   /** The turn's signal: a stopped turn stops the read. */
   signal: AbortSignal;
   timeoutMs?: number;
-}): Promise<ProduceIntentVerdict | null> {
+  /**
+   * Which --auto arm asked, for the row: the deliverable-intent word lists, which force where the
+   * readout is unavailable, or the prefetch's routing, which does not (agent/runtime.ts
+   * autonomousArtifactBuild).
+   */
+  arm?: "word_list" | "routing";
+}): Promise<ProduceIntentReadOutcome> {
   const started = Date.now();
   const record = (outcome: string, mode?: IntentFacetRead, ms?: number): void => {
     try {
       logAudit("guardrail_flagged", {
         type: "auto_artifact_build_mode_read",
         outcome,
+        ...(params.arm ? { arm: params.arm } : {}),
         ...(mode
           ? {
               choice: mode.choice,
               top: round4(mode.top),
               margin: round4(mode.margin),
               runnerUp: mode.runnerUp ?? null,
+              servedChoice: mode.orders?.served ?? null,
+              reversedChoice: mode.orders?.reversed ?? null,
               orderAgreed: mode.orders?.agreed ?? null,
               ...(mode.orders?.singlePass ? { singlePass: mode.orders.singlePass } : {}),
             }
@@ -206,6 +278,15 @@ export async function startProduceIntentRead(params: {
       // A row that could not be written costs the measurement, never the turn.
     }
   };
+  // Each outcome without a reading is recorded under its class, so the two cannot be confused.
+  const unavailable = (outcome: "no_logprobs_provider" | "no_logprobs" | "no_provider", ms?: number): "unavailable" => {
+    record(outcome, undefined, ms);
+    return "unavailable";
+  };
+  const missed = (outcome: "timeout" | "aborted" | "error" | "single_pass" | "no_mode", mode?: IntentFacetRead, ms?: number): "missed" => {
+    record(outcome, mode, ms);
+    return "missed";
+  };
   try {
     let modelId = "";
     try {
@@ -213,38 +294,33 @@ export async function startProduceIntentRead(params: {
     } catch {
       // unknown: asked, and a reply without logprobs is recorded as that
     }
-    if (modelId.split("/")[0]?.trim() === "anthropic") {
-      record("no_logprobs_provider");
-      return null;
-    }
+    if (modelId.split("/")[0]?.trim() === "anthropic") return unavailable("no_logprobs_provider");
     let provider: ChatProvider;
     try {
       provider = resolveRoutingTierProvider();
     } catch {
-      record("no_provider");
-      return null;
+      return unavailable("no_provider");
     }
     const timeout = AbortSignal.timeout(params.timeoutMs ?? PRODUCE_INTENT_READ_TIMEOUT_MS);
     const result = await runWithCallAttribution({ callSite: "routing_tier", agentName: "intent_readout" }, () => askIntentReadout(
       provider,
       { userMessage: params.userMessage, ...(params.priorTurnDigest ? { priorTurnDigest: params.priorTurnDigest } : {}) },
-      { signal: AbortSignal.any([params.signal, timeout]), bothOrders: true },
+      { signal: AbortSignal.any([params.signal, timeout]), bothOrders: true, concurrentOrders: true, maxTokens: PRODUCE_INTENT_READ_MAX_TOKENS },
     ));
     if (!result.ok) {
-      record(params.signal.aborted ? "aborted" : timeout.aborted ? "timeout" : result.reason, undefined, result.ms);
-      return null;
+      if (params.signal.aborted) return missed("aborted", undefined, result.ms);
+      if (timeout.aborted) return missed("timeout", undefined, result.ms);
+      // A server that sends no token logprobs sends none on any read.
+      return result.reason === "no_logprobs" ? unavailable("no_logprobs", result.ms) : missed(result.reason, undefined, result.ms);
     }
     const mode = result.readout.facets.mode;
-    if (mode?.orders?.singlePass) {
-      record("single_pass", mode, result.readout.ms);
-      return null;
-    }
+    if (mode?.orders?.singlePass) return missed("single_pass", mode, result.readout.ms);
     const verdict = produceIntentVerdict(mode);
-    record(verdict ?? "no_mode", mode, result.readout.ms);
+    if (!verdict) return missed("no_mode", mode, result.readout.ms);
+    record(verdict, mode, result.readout.ms);
     return verdict;
   } catch {
-    record("error");
-    return null;
+    return missed("error");
   }
 }
 

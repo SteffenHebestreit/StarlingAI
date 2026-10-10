@@ -123,6 +123,7 @@ Always allowed; no side effects.
 | `vscode_search_workspace` | — | — | Full workspace text search in VS Code |
 | `web_fetch` | — | — | Fetch and read content from a public URL |
 | `web_search` | — | — | Search the public web for documentation, news, and references |
+| `web_table` | — | — | Read a public page's HTML tables (or the open browser tab's) and compute a column's sum, count, min, max or avg |
 | `wikipedia_lookup` | — | — | Look up a Wikipedia article summary by title or free-text term |
 | `workspace_search` | — | — | Full-text keyword search across workspace text files |
 

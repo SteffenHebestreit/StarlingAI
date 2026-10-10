@@ -95,6 +95,9 @@ importers:
       eld:
         specifier: ^2.1.0
         version: 2.1.0
+      entities:
+        specifier: ^7.0.1
+        version: 7.0.1
       grammy:
         specifier: ^1.44.0
         version: 1.44.0

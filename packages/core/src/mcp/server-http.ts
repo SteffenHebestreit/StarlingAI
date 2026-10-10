@@ -29,7 +29,10 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { authenticatedUser, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import { sameAccountId, type Identity } from "../runtime/accounts.js";
+import { registerAccountBindingTeardown } from "../gateway/account-connections.js";
+import { ownsRecord } from "../runtime/user-scope.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { createStarlingMcpServer, type ExposeContext } from "./server.js";
@@ -78,6 +81,7 @@ export async function handleMcpHttpRequest(
   // token's role so the MCP RBAC matches the REST gate (viewers → read-only).
   let role: AuthRole = "operator";
   let userId: string | undefined;
+  let identity: Identity | undefined;
   if (expose.http.requireAuth) {
     const headerToken = req.headers["authorization"]
       ? extractBearerToken(req.headers["authorization"] as string)
@@ -107,6 +111,7 @@ export async function handleMcpHttpRequest(
       caller = user.username;
       role = user.role;
       userId = user.username;
+      identity = callerIdentity(user);
     } else {
       caller = (verified as { sub?: string }).sub ?? "authenticated";
       role = normalizeRole((verified as { role?: unknown }).role);
@@ -126,7 +131,11 @@ export async function handleMcpHttpRequest(
   // creator, or closed the session (found in review, 2026-10-09). Another caller now gets the reply
   // an unknown id gets, which says nothing about whose session it is. With one operator there is
   // nobody to keep apart, and any caller is served as before.
-  if (session && multiUser && session.caller !== caller) {
+  //
+  // The creator is compared by identity (ownsRecord), not by name: an account created again under a
+  // deleted one's name was served on the old one's open sessions, as the old one. Callers with no
+  // identity (requireAuth off) still compare as they always did.
+  if (session && multiUser && !sameMcpCaller(session, caller, identity)) {
     log.warn({ sessionId, caller }, "MCP request refused: the session belongs to another caller");
     logAudit("mcp_server_request", {
       method: "session",
@@ -169,7 +178,7 @@ export async function handleMcpHttpRequest(
       res.end(JSON.stringify({ error: "Method not allowed for new MCP session" }));
       return true;
     }
-    session = await createHttpSession({ caller, role, ...(userId ? { userId } : {}) });
+    session = await createHttpSession({ caller, role, ...(userId ? { userId, identity } : {}) });
     created = session;
   }
 
@@ -201,6 +210,13 @@ export async function handleMcpHttpRequest(
     }
   }
   return true;
+}
+
+/** Whether a request's caller is the one that opened the session: by identity when either names
+ *  one, else by the caller string (no-auth callers are all "anonymous"). */
+function sameMcpCaller(session: McpHttpSession, caller: string, identity: Identity | undefined): boolean {
+  if (session.ctx.identity || identity) return ownsRecord(identity, session.ctx.identity);
+  return session.caller === caller;
 }
 
 async function createHttpSession(ctx: ExposeContext): Promise<McpHttpSession> {
@@ -262,6 +278,20 @@ async function teardownSession(sessionId: string, reason: string): Promise<void>
     log.debug({ err, sessionId }, "Error closing MCP HTTP transport");
   }
 }
+
+/**
+ * Close every session an account opened, once the account is deleted or retired. Its requests are
+ * refused already (each one resolves its caller against the stores); the sessions themselves stayed
+ * open, each with a connected server, until the client closed them or the gateway stopped.
+ */
+export async function closeMcpHttpSessionsOfAccount(account: string, reason: string): Promise<number> {
+  const ids = [..._sessions.entries()]
+    .filter(([, session]) => session.ctx.identity?.account !== undefined && sameAccountId(session.ctx.identity.account, account))
+    .map(([id]) => id);
+  for (const id of ids) await teardownSession(id, reason);
+  return ids.length;
+}
+registerAccountBindingTeardown("mcpSessions", closeMcpHttpSessionsOfAccount);
 
 export async function shutdownMcpHttpSessions(): Promise<void> {
   for (const id of [..._sessions.keys()]) {

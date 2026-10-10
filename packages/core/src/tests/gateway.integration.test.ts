@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import { DEFAULT_TTS_CHUNK_MAX_CHARS } from "../multimodal/tts-chunking.js";
 
 import { PRODUCT } from "../product/index.js";
+import { testAccountId } from "./support/test-account.js";
 
 function createPcmWav(sampleCount: number, seed = 0): Buffer {
   const dataSize = sampleCount * 2;
@@ -236,7 +237,7 @@ describe("gateway HTTP bridge", () => {
     const port = 19300 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
     const users = [["carol", "admin"], ["olga", "operator"], ["vic", "viewer"]].map(([username, role]) => ({
-      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role, createdAt: "2026-10-06T00:00:00Z",
+      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role, createdAt: "2026-10-06T00:00:00Z", id: testAccountId(username!),
     }));
     writeFileSync(configPath, JSON.stringify({
       gateway: { port, jwtSecret: "t".repeat(32) },
@@ -262,7 +263,7 @@ describe("gateway HTTP bridge", () => {
       await waitForHealth(`${baseUrl}/healthz`);
       const createKb = async (user: string, role: string) => fetch(`${baseUrl}/api/knowledge-bases`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${await auth.createToken(user, { role })}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${await auth.createToken(user, { role, aid: testAccountId(user) })}`, "Content-Type": "application/json" },
         // Deliberately incomplete: the handler's own validation answers once the gate lets it through.
         body: JSON.stringify({}),
       });
@@ -289,7 +290,7 @@ describe("gateway HTTP bridge", () => {
     const port = 18300 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
     const users = ["alice", "bob"].map((username) => ({
-      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-09-23T00:00:00Z",
+      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-09-23T00:00:00Z", id: testAccountId(username),
     }));
 
     writeFileSync(configPath, JSON.stringify({
@@ -319,11 +320,11 @@ describe("gateway HTTP bridge", () => {
     try {
       await waitForHealth(`${baseUrl}/healthz`);
       const sessionId = "steer-route-session";
-      sessions.createSession({ sessionId, channel: "webchat", userId: "alice" });
+      sessions.createSession({ sessionId, channel: "webchat", userId: "alice", account: testAccountId("alice") });
       const steer = async (user: string, message: string, clientMessageId?: string, requestId?: string) => fetch(`${baseUrl}/api/sessions/${sessionId}/steer`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${await auth.createToken(user, { role: "operator" })}`,
+          Authorization: `Bearer ${await auth.createToken(user, { role: "operator", aid: testAccountId(user) })}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ message, ...(clientMessageId !== undefined ? { clientMessageId } : {}), ...(requestId !== undefined ? { requestId } : {}) }),
@@ -380,7 +381,7 @@ describe("gateway HTTP bridge", () => {
       // /stop had the same gap: its "operator override" exempted the role every account has.
       const foreignStop = await fetch(`${baseUrl}/api/sessions/${sessionId}/stop`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${await auth.createToken("bob", { role: "operator" })}` },
+        headers: { Authorization: `Bearer ${await auth.createToken("bob", { role: "operator", aid: testAccountId("bob") })}` },
       });
       expect(foreignStop.status).toBe(404);
     } finally {
@@ -398,11 +399,13 @@ describe("gateway HTTP bridge", () => {
     const port = 18400 + Math.floor(Math.random() * 1000);
     const configPath = join(tempDir, "starlingai.json");
     const users = ["alice", "bob"].map((username) => ({
-      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-09-23T00:00:00Z",
+      username, passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-09-23T00:00:00Z", id: testAccountId(username),
     }));
 
     writeFileSync(configPath, JSON.stringify({
       gateway: { port, jwtSecret: "f".repeat(32) },
+      // Its own: the bootstrap token below is recorded in <workspace>/.starlingai/accounts.json.
+      workspacePath: tempDir,
       auth: { enabled: true, users },
     }), "utf8");
 
@@ -428,10 +431,10 @@ describe("gateway HTTP bridge", () => {
     try {
       await waitForHealth(`${baseUrl}/healthz`);
       const sessionId = "facts-route-session";
-      sessions.createSession({ sessionId, channel: "webchat", userId: "alice" });
+      sessions.createSession({ sessionId, channel: "webchat", userId: "alice", account: testAccountId("alice") });
       await swarmMemory.writeSharedFact(sessionId, "hero_image", "workspace/generated/alice-hero.png");
       const get = async (user: string, role: string, path: string) => fetch(`${baseUrl}${path}`, {
-        headers: { Authorization: `Bearer ${await auth.createToken(user, { role })}` },
+        headers: { Authorization: `Bearer ${await auth.createToken(user, user === "root" ? { role, bst: true } : { role, aid: testAccountId(user) })}` },
       });
       const subAgentId = encodeURIComponent(`sub:${sessionId}:image_creator:1`);
 

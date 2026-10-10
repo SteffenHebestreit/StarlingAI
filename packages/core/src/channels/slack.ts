@@ -13,7 +13,7 @@ import type { Context } from "hono";
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
 import { listPairedSenders, pairSender } from "../credentials/pairings.js";
-import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, runChannelTurn } from "./base.js";
+import { checkChannelIngress, checkDmPolicy, resolveToken, getOrCreateChannelSession, recordChannelSenderRefused, runChannelTurn } from "./base.js";
 import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { setChannelRunning, setChannelStopped, setChannelHealthCheck } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -161,9 +161,14 @@ export async function handleSlackEvent(c: Context): Promise<Response> {
     return c.json({ ok: true });
   }
 
-  const sessionId = await getOrCreateChannelSession("slack", senderId);
+  const opened = await getOrCreateChannelSession("slack", senderId);
+  if ("refused" in opened) {
+    // A sender that may not be served gets no reply; the event is acknowledged as handled.
+    recordChannelSenderRefused("slack", senderId, opened.refused);
+    return c.json({ ok: true });
+  }
   // Fire and forget — Slack requires 200 within 3s
-  runChannelTurn(sessionId, text).then(response =>
+  runChannelTurn(opened.sessionId, text).then(response =>
     slackSend(botToken, channelId, response)
   ).catch(err => log.error({ err }, "Slack turn error"));
 

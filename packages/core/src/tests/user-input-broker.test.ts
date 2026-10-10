@@ -59,7 +59,7 @@ describe("user input broker", () => {
   }
 
   it("answers auto / no_channel at once where nobody can be asked", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const meta = { requesterSessionId: ROOT };
     await expect(broker.userInputBroker.request(undefined, picker(), meta)).resolves.toMatchObject({ outcome: "auto", reason: "no_channel" });
     await expect(broker.userInputBroker.request({ ...channel, mode: "unattended" }, picker(), meta))
@@ -70,7 +70,7 @@ describe("user input broker", () => {
   });
 
   it("tells the client which call asked, and only the session owner or an admin may answer", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const { outcome, needed, inputId } = ask();
     expect(needed()).toMatchObject({
       requestId: TURN, sessionId: ROOT, kind: "image_settings", title: "Image settings",
@@ -90,7 +90,7 @@ describe("user input broker", () => {
   });
 
   it("keeps the request open on an invalid answer, and settles it on a valid one", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const { outcome, events, inputId } = ask();
 
     await expect(broker.userInputBroker.respond(inputId(), { settings: { count: 9 } }, alice))
@@ -118,7 +118,7 @@ describe("user input broker", () => {
   });
 
   it("maps the person's own auto and skip to their outcomes", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const first = ask();
     await broker.userInputBroker.respond(first.inputId(), { choice: "auto" }, alice);
     await expect(first.outcome).resolves.toMatchObject({ outcome: "auto", reason: "user" });
@@ -129,7 +129,7 @@ describe("user input broker", () => {
 
   it("expires to auto: timeout while a tab watches, disconnected_expired when none does", async () => {
     vi.useFakeTimers();
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const watched = ask();
     await vi.advanceTimersByTimeAsync(60_000);
     await expect(watched.outcome).resolves.toMatchObject({ outcome: "auto", reason: "timeout" });
@@ -145,7 +145,7 @@ describe("user input broker", () => {
 
   it("hold gives the configure window from now, never beyond one window past the first", async () => {
     vi.useFakeTimers();
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const startedAt = Date.now();
     const { outcome, inputId } = ask(picker({ timeoutMs: 60_000, holdTimeoutMs: 300_000 }));
     await vi.advanceTimersByTimeAsync(50_000);
@@ -161,7 +161,7 @@ describe("user input broker", () => {
   });
 
   it("settles open requests when the turn ends, on Stop, and on the turn's abort", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const atEnd = ask();
     expect(broker.userInputBroker.closeTurn(TURN)).toBe(1);
     await expect(atEnd.outcome).resolves.toMatchObject({ outcome: "cancelled", reason: "turn_aborted" });
@@ -170,7 +170,7 @@ describe("user input broker", () => {
     // The turn is gone: whatever still runs has nobody to ask.
     await expect(ask().outcome).resolves.toMatchObject({ outcome: "auto", reason: "no_channel" });
 
-    broker.userInputBroker.openTurn("req-2", ROOT, "alice");
+    broker.userInputBroker.openTurn("req-2", ROOT, { userId: "alice" });
     const stopChannel = { ...channel, turnId: "req-2" };
     const beforeStop = broker.userInputBroker.request(stopChannel, picker(), { requesterSessionId: ROOT });
     expect(broker.userInputBroker.stopRoot(ROOT)).toBe(1);
@@ -178,7 +178,7 @@ describe("user input broker", () => {
     await expect(broker.userInputBroker.request(stopChannel, picker(), { requesterSessionId: ROOT }))
       .resolves.toMatchObject({ outcome: "cancelled", reason: "turn_aborted" });
 
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const abort = new AbortController();
     const onAbort = ask(picker(), { signal: abort.signal });
     abort.abort();
@@ -189,7 +189,7 @@ describe("user input broker", () => {
   it("hands the person's own words only to the connections of the session owner or an admin", () => {
     // Review of round 3, B #1: unread steering is pushed through these sinks, and a connection
     // with no identity is attached to them once it drives a turn on someone's chat.
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const got: Record<string, string[]> = {};
     const sink = (name: string) => (event: { type: string }) => { (got[name] ??= []).push(event.type); };
     broker.userInputBroker.attachSink(ROOT, "tab-alice", sink("alice"), alice);
@@ -202,7 +202,7 @@ describe("user input broker", () => {
   });
 
   it("serves previews only through the request's own resolver", async () => {
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const { inputId } = ask(picker({
       preview: (candidateId) => candidateId === "cand-1" ? { dataUrl: "data:image/png;base64,AAAA", width: 8, height: 8 } : null,
     }));
@@ -235,7 +235,7 @@ describe("user input broker", () => {
   it("a run whose turn was stopped hears cancelled, however late it asks", async () => {
     // Review #16: Stop aborts the run and closes its turn in one step; a tool that asked a moment
     // later found no turn and got auto / no_channel, and rendered for a turn the person had stopped.
-    broker.userInputBroker.openTurn(TURN, ROOT, "alice");
+    broker.userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     const stopped = new AbortController();
     stopped.abort();
     broker.userInputBroker.closeTurn(TURN, "aborted");
@@ -248,7 +248,7 @@ describe("user input broker", () => {
       .resolves.toMatchObject({ outcome: "cancelled", reason: "turn_aborted" });
 
     // A turn that simply ended is not a stop: a background run that outlived it has nobody to ask.
-    broker.userInputBroker.openTurn("req-done", ROOT, "alice");
+    broker.userInputBroker.openTurn("req-done", ROOT, { userId: "alice" });
     broker.userInputBroker.closeTurn("req-done", "ended");
     await expect(broker.userInputBroker.request({ ...channel, turnId: "req-done" }, picker(), { requesterSessionId: ROOT }))
       .resolves.toMatchObject({ outcome: "auto", reason: "no_channel" });

@@ -47,13 +47,13 @@ describe("the summary drafted from an unparsed reply", () => {
     const real = configLoader.getConfig();
     vi.spyOn(configLoader, "getConfig").mockReturnValue({ ...real, workspacePath: shared, auth: { ...real.auth, enabled: true } } as typeof real);
     const request = "Make the researcher cite family-law sources for my custody hearing";
-    const { assistantAgent, draft } = await runWithRequestContext({ userId: "alice" }, () => proposeConversationConfigChange({ request, mode: "enhancement", workspacePath: shared }));
+    const { assistantAgent, draft } = await runWithRequestContext({ identity: { userId: "alice" } }, () => proposeConversationConfigChange({ request, mode: "enhancement", workspacePath: shared }));
     expect(draft.summary).toContain("custody hearing");
     createConversationConfigProposal(shared, { status: "pending", mode: "enhancement", request, assistantAgent, ...draft, account: safeUserSegment("alice") });
 
     const listAs = async (userId: string) => {
       const app = new Hono();
-      app.use("/api/*", (_c, next) => runWithRequestContext({ userId }, () => next()));
+      app.use("/api/*", (_c, next) => runWithRequestContext({ identity: { userId } }, () => next()));
       registerSubAgentRoutes(app);
       const response = await app.request("/api/config-assistant/proposals", { headers: { Authorization: `Bearer ${await createToken(userId, { role: "operator" })}` } });
       return response.text();

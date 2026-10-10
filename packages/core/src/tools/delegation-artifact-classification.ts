@@ -587,7 +587,7 @@ export function shouldAcceptPartialDelegation(
   // (used web_search, web_fetch, or similar) — research agents that fetch
   // content but hit max_iterations should be treated as partial successes.
   const hasResearchTools = stats.toolNames.some((name) =>
-    name === "web_search" || name === "web_fetch" || name === "read_shared_facts"
+    name === "web_search" || name === "web_fetch" || name === "web_table" || name === "read_shared_facts"
   );
   if (hasResearchTools && stats.toolCount >= 2) {
     return true;

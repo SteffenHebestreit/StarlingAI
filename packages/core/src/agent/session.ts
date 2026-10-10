@@ -13,7 +13,9 @@ import {
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
-import { deploymentWorkspaceRoot, userWorkspaceRoot } from "../tools/workspace-path.js";
+import { deploymentWorkspaceRoot, stripUserWorkspaceRoots, userWorkspaceRoot } from "../tools/workspace-path.js";
+import { ACCOUNT_ID_RE, principalSegment, type Identity, type PrincipalKind } from "../runtime/accounts.js";
+import { isLegacyIdentity, USERS_SUBDIR } from "../runtime/user-scope.js";
 import type { EffortTier } from "../config/schema.js";
 import { formatMainAssistantPersonalityGuidance } from "../personality/service.js";
 import { buildReplyLanguageRule } from "./reply-language.js";
@@ -25,14 +27,17 @@ import {
   loadSessionFromRedis,
   deleteSessionFromRedis,
   loadAllSessionsFromRedis,
+  saveSessionToRedisChecked,
+  loadSessionFromRedisChecked,
+  deleteSessionFromRedisChecked,
 } from "./session-redis.js";
 
 import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
-import { isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
-import { retrievalEvidenceMaxChars } from "./tool-result-format.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -90,6 +95,12 @@ export interface AgentSessionOptions {
   sessionId?: string;
   channel: string;
   userId?: string;
+  /** The account the session belongs to, by its immutable id; set together with `userId` from one
+   *  identity (runtime/accounts.ts), never alongside `principal`. */
+  account?: string;
+  /** Set instead of `account` when the session belongs to a principal: a bootstrap token, a channel
+   *  sender, an A2A peer, a scene, job or workflow run. */
+  principal?: PrincipalKind;
   /** Authenticated role (JWT `role` claim) of the user that owns this session, when
    *  under active multi-user auth. Threaded into the turn's ToolContext so tools can
    *  gate mutating actions by role (e.g. operator-only knowledge-base management),
@@ -179,6 +190,10 @@ export interface PersistedSessionRecord {
   id: string;
   channel: string;
   userId?: string;
+  /** The owner's account id or principal kind. A record with a userId and neither was written
+   *  before account ids existed (a legacy record): it restores with its stored root. */
+  account?: string;
+  principal?: PrincipalKind;
   userRole?: string;
   createdAt: string;
   updatedAt: string;
@@ -200,6 +215,8 @@ export class AgentSession {
   readonly id: string;
   readonly channel: string;
   readonly userId: string | undefined;
+  readonly account: string | undefined;
+  readonly principal: PrincipalKind | undefined;
   readonly userRole: string | undefined;
   readonly createdAt: Date;
 
@@ -243,10 +260,14 @@ export class AgentSession {
     turnCount?: number;
     history?: SessionHistoryMessage[];
     earlierSummary?: string;
+    /** The working root as fromRecord settled it, taken as it is: a restore never derives. */
+    restoredWorkspacePath?: string;
   }) {
     this.id = opts.sessionId ?? randomUUID();
     this.channel = opts.channel;
     this.userId = opts.userId;
+    this.account = opts.account;
+    this.principal = opts.account ? undefined : opts.principal;
     this.userRole = opts.userRole;
     this.createdAt = opts.createdAt ?? new Date();
     // THE ROOT IS THE USER'S. Everything a turn does with files hangs off this — the
@@ -254,7 +275,10 @@ export class AgentSession {
     // partitioning HERE keeps one turn's work in one place. Config zones and the deployment's
     // own state stay at the shared root, which the two workspaceAccess:"full" agents keep (see
     // agent/sub-agent.ts) and which the config loader always reads directly.
-    this.workspacePath = userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, opts.userId);
+    // The root comes from the session's identity, whole (the ambient one when the session names
+    // nobody). A restored session's root was settled by fromRecord and is not derived again.
+    this.workspacePath = opts.restoredWorkspacePath
+      ?? userWorkspaceRoot(opts.workspacePath ?? getConfig().workspacePath, this.identity());
     this.systemPrompt = opts.systemPrompt ?? defaultSystemPrompt();
     this.updatedAt = opts.updatedAt ?? this.createdAt;
     this.archivedAt = opts.archivedAt;
@@ -275,14 +299,30 @@ export class AgentSession {
     }
   }
 
+  /**
+   * RESTORING NEVER DERIVES. It runs at import, before the account registry is loaded, and for
+   * records written before account ids existed: the identity guard (runtime/user-scope.ts
+   * segmentFor) must not run here, and a legacy record must not be moved into a bucket worked out
+   * from its username, which is exactly the guess that lets a re-created name inherit.
+   *
+   * - An account's or a principal's record restores to `<deployment root>/users/<segment>`, the
+   *   segment its identity names. Any `users/<segment>` levels at the end of the stored root are
+   *   taken off first, whichever segment they name: a root stored under the username's old segment
+   *   comes back under the account's id, and one nested by an earlier restore comes back flat.
+   * - A legacy record (a userId and no kind) and an ownerless one keep their stored root verbatim.
+   * - With multi-user auth off every record keeps its stored root, as it always did.
+   */
   static fromRecord(record: PersistedSessionRecord): AgentSession {
     return new AgentSession({
       sessionId: record.id,
       channel: record.channel,
       userId: record.userId,
+      ...(record.account ? { account: record.account } : {}),
+      ...(record.principal ? { principal: record.principal } : {}),
       userRole: record.userRole,
       systemPrompt: record.systemPrompt,
       workspacePath: record.workspacePath,
+      restoredWorkspacePath: restoredWorkspaceRoot(record),
       createdAt: new Date(record.createdAt),
       updatedAt: new Date(record.updatedAt),
       archivedAt: record.archivedAt ? new Date(record.archivedAt) : undefined,
@@ -292,6 +332,25 @@ export class AgentSession {
       earlierSummary: record.earlierSummary,
       settings: record.settings,
     });
+  }
+
+  /**
+   * Who the session belongs to, as one value for the context its turns run in; undefined for a
+   * session that names nobody. Never assembled from another identity's fields.
+   */
+  identity(): Identity | undefined {
+    if (this.userId === undefined && this.account === undefined) return undefined;
+    return {
+      ...(this.userId !== undefined ? { userId: this.userId } : {}),
+      ...(this.account ? { account: this.account } : {}),
+      ...(this.principal ? { principal: this.principal } : {}),
+    };
+  }
+
+  /** A session written before account ids existed: it names a user and neither an account nor a
+   *  principal kind, so no storage can be derived for it without guessing. */
+  isLegacy(): boolean {
+    return isLegacyIdentity(this.identity());
   }
 
   getHistory(): readonly SessionHistoryMessage[] {
@@ -374,7 +433,13 @@ export class AgentSession {
           // Delegation results carry sub-agent evidence that the orchestrator must
           // relay faithfully.  A 500-char cap truncated evidence and caused
           // hallucinations.  Use 2000 chars for delegation results, 500 for others.
-          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name);
+          // A knowledge-base worker's report is a delegated result too (use_knowledge_base runs the
+          // worker agent): at the generic 500 a later turn kept little more than the tool's own
+          // relay instruction, which takes over 200 of them. A worker that could not run is no
+          // report: its "Error: …" result keeps the generic 500, on this turn and later ones.
+          const kbWorkerReport = isKnowledgeBaseWorkerReport(call.function.name, resultMetadata.get(call.id));
+          const isDelegation = /^(delegate_to_agent|parallel_delegate|create_ephemeral_agent|run_task_graph|run_workflow)$/.test(call.function.name)
+            || kbWorkerReport;
           // execute_plan's result stands in for a WHOLE PLAN — every step's evidence at once, and
           // the only channel a `direct` or `reuse` step's output has, since those run as nested
           // calls that never become tool messages of their own. At the delegation cap it lost every
@@ -386,11 +451,16 @@ export class AgentSession {
           // than the whole budget allowed here. At the generic 500 the turn that made the search read
           // only its first few hundred characters (E2E core-ix-kb-documentation-rag). Once the turn
           // is over it is history like any other result.
+          // A knowledge-base worker's report is what the turn is told to relay as-is, and the frame
+          // has already held it to the budget of a delegated result relayed verbatim. On the turn
+          // that made the call it keeps that budget; afterwards it gets the delegation snippet.
           const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
             : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
               ? retrievalEvidenceMaxChars()
-              : (isDelegation ? 2000 : 500);
+              : kbWorkerReport && i > currentTurnStart
+                ? knowledgeBaseWorkerReportMaxChars()
+                : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /
@@ -671,6 +741,9 @@ export class AgentSession {
       id: this.id,
       channel: this.channel,
       userId: this.userId,
+      // Only when set: a record without either is written exactly as before account ids.
+      ...(this.account ? { account: this.account } : {}),
+      ...(this.principal ? { principal: this.principal } : {}),
       ...(this.userRole ? { userRole: this.userRole } : {}),
       createdAt: this.createdAt.toISOString(),
       updatedAt: this.updatedAt.toISOString(),
@@ -1163,6 +1236,12 @@ let _storeWrites: Promise<void> = Promise.resolve();
 /** The newest snapshot handed to an async write that has not landed yet. Taking the snapshot
  *  clears the dirty flag, so without this an exit during the write found nothing to write. */
 let _pendingStoreText: string | null = null;
+/** Records the boot could not restore, in file order: their JSON text, and their id when they had
+ *  one (a live session under that id, hydrated from Redis or created again, supersedes the text).
+ *  See loadPersistedSessions. */
+const _unrestoredRecords: Array<{ id?: string; json: string }> = [];
+/** Set when the store file could neither be read nor set aside: this process never writes it. */
+let _storeWriteBlocked = false;
 
 {
   // One exit listener per process, however often a test re-evaluates this module: the slot holds
@@ -1171,6 +1250,20 @@ let _pendingStoreText: string | null = null;
   const holder = globalThis as unknown as Record<symbol, (() => void) | undefined>;
   if (!holder[slot]) process.once("exit", () => holder[slot]?.());
   holder[slot] = flushSessionStoreSync;
+}
+
+/**
+ * The root a stored record restores to (see AgentSession.fromRecord). Never runs the identity
+ * guard and never reads the account registry: only the record and the auth switch.
+ */
+function restoredWorkspaceRoot(record: PersistedSessionRecord): string {
+  if (!record.account && !record.principal) return record.workspacePath;
+  if (getConfig().auth?.enabled !== true) return record.workspacePath;
+  const segment = record.account ?? (record.userId !== undefined ? principalSegment(record.userId) : undefined);
+  // An account id that is not segment-shaped is never joined into a path; the root stays as stored
+  // and every derivation from the identity refuses it.
+  if (!segment || !ACCOUNT_ID_RE.test(segment)) return record.workspacePath;
+  return resolve(stripUserWorkspaceRoots(record.workspacePath), USERS_SUBDIR, segment);
 }
 
 loadPersistedSessions();
@@ -1456,6 +1549,130 @@ export async function initSessionRedis(): Promise<void> {
   }
 }
 
+// ── The account migration (runtime/account-migration.ts) ─────────────────────
+// A session from before account ids names its user by name alone. When an admin lets an account
+// adopt what that name stored, its sessions become the account's: the account id is stamped on the
+// record and its root moves under the account's segment. A principal's (a bootstrap token, a channel
+// sender, a scene run) get its kind, and its root stays the segment of its name. Nothing else
+// changes, `updatedAt` included, so the file store and the Redis mirror agree on the next boot
+// whichever wins there.
+
+/** How the migration reaches the Redis mirror: every call throws when Redis fails, unlike the
+ *  background mirror writes. `save` and `remove` answer false when no mirror is configured. */
+export interface SessionMirrorAccess {
+  save(id: string, json: string, updatedAtMs: number): Promise<boolean>;
+  load(id: string): Promise<string | null>;
+  remove(id: string): Promise<boolean>;
+}
+
+// Resolved per call, not when this module loads: nothing but the migration reaches these.
+export const checkedSessionMirror: SessionMirrorAccess = {
+  save: (id, json, updatedAtMs) => saveSessionToRedisChecked(id, json, updatedAtMs),
+  load: (id) => loadSessionFromRedisChecked(id),
+  remove: (id) => deleteSessionFromRedisChecked(id),
+};
+
+/**
+ * A session record rewritten as the account's: the id stamped, any principal kind dropped, and the
+ * root moved to `<deployment root>/users/<account>`, every user level taken off the stored root first
+ * (stripUserWorkspaceRoots), so `users/<old segment>` becomes `users/<account>` and never nests.
+ */
+export function accountSessionRecord(record: PersistedSessionRecord, account: string): PersistedSessionRecord {
+  if (!ACCOUNT_ID_RE.test(account)) throw new Error(`'${account}' is not an account id`);
+  const { principal: _principal, ...rest } = record;
+  return { ...rest, account, workspacePath: resolve(stripUserWorkspaceRoots(record.workspacePath), USERS_SUBDIR, account) };
+}
+
+/**
+ * A session record from before account ids rewritten as a principal's: the kind stamped, and the
+ * root put at `<deployment root>/users/<the segment of its name>`, every user level taken off the
+ * stored root first. That is the root a principal's session always had under multi-user auth, so for
+ * such a record nothing moves.
+ */
+export function principalSessionRecord(record: PersistedSessionRecord, principal: PrincipalKind): PersistedSessionRecord {
+  if (record.account) throw new Error(`session ${record.id} is an account's`);
+  if (typeof record.userId !== "string" || record.userId === "") throw new Error(`session ${record.id} names nobody`);
+  return { ...record, principal, workspacePath: resolve(stripUserWorkspaceRoots(record.workspacePath), USERS_SUBDIR, principalSegment(record.userId)) };
+}
+
+/** Whose a session from before account ids becomes: an account's (by its id) or a principal's (by
+ *  its kind, with the name it has). */
+export type SessionOwnerStamp = { account: string } | { principal: PrincipalKind };
+
+function stampedSessionRecord(record: PersistedSessionRecord, stamp: SessionOwnerStamp): PersistedSessionRecord {
+  return "account" in stamp ? accountSessionRecord(record, stamp.account) : principalSessionRecord(record, stamp.principal);
+}
+
+function carriesStamp(record: { account?: string; principal?: string }, stamp: SessionOwnerStamp): boolean {
+  return "account" in stamp ? record.account === stamp.account : !record.account && record.principal === stamp.principal;
+}
+
+/**
+ * Makes the in-process session `id` the stamped owner's, then writes it to the Redis mirror,
+ * awaited, and reads it back: a write that did not land, or a record that comes back different,
+ * throws, and the session stays as it was here. Then the file store is flushed, awaited. "absent"
+ * when this process holds no session under the id; "unchanged" when it carries the stamp already.
+ */
+export async function migrateSessionOwner(id: string, stamp: SessionOwnerStamp, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<"migrated" | "unchanged" | "absent"> {
+  const session = _sessions.get(id);
+  if (!session) return "absent";
+  if (carriesStamp(session, stamp)) return "unchanged";
+  const migrated = AgentSession.fromRecord(stampedSessionRecord(session.toRecord(), stamp));
+  const json = JSON.stringify(migrated.toRecord());
+  if (await mirror.save(id, json, migrated.getUpdatedAt().getTime())) {
+    const back = await mirror.load(id);
+    if (back !== json) throw new Error(`the Redis mirror holds a different record for session ${id} after the write`);
+  }
+  // The record changed under the same id: the cached text of the old object is never used again.
+  _sessions.set(id, migrated);
+  persistSessionStore();
+  await flushSessionStore();
+  return "migrated";
+}
+
+/**
+ * The same for a session only the mirror holds (the boot hydrates at most the newest thousand):
+ * its record is rewritten there, awaited and read back. Returns false when the record carries the
+ * stamp already.
+ */
+export async function migrateMirroredSessionOwner(id: string, json: string, stamp: SessionOwnerStamp, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<boolean> {
+  const record = JSON.parse(json) as PersistedSessionRecord;
+  if (carriesStamp(record, stamp)) return false;
+  const next = JSON.stringify(stampedSessionRecord(record, stamp));
+  if (!await mirror.save(id, next, new Date(record.updatedAt).getTime())) throw new Error("no Redis mirror is configured");
+  const back = await mirror.load(id);
+  if (back !== next) throw new Error(`the Redis mirror holds a different record for session ${id} after the write`);
+  return true;
+}
+
+/** Removes every session of `account` here and in the mirror (a purge). Returns how many. */
+export async function purgeAccountSessions(account: string, mirrored: Array<{ id: string; json: string }>, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<number> {
+  const ids = new Set<string>();
+  for (const session of [..._sessions.values()]) {
+    if (session.account && session.account.toLowerCase() === account.toLowerCase()) ids.add(session.id);
+  }
+  for (const entry of mirrored) {
+    try {
+      const record = JSON.parse(entry.json) as PersistedSessionRecord;
+      if (record.account && record.account.toLowerCase() === account.toLowerCase()) ids.add(entry.id);
+    } catch { /* not a record of this account */ }
+  }
+  for (const id of ids) {
+    const session = _sessions.get(id);
+    if (session) {
+      session.end();
+      _sessions.delete(id);
+      recordSessionRemoval(id, "deleted");
+    }
+    await mirror.remove(id);
+  }
+  if (ids.size > 0) {
+    persistSessionStore();
+    await flushSessionStore();
+  }
+  return ids.size;
+}
+
 export function listSessions(opts?: { includeArchived?: boolean }): SessionSummary[] {
   return getAllSessions(opts).map((session) => session.toSummary());
 }
@@ -1489,6 +1706,7 @@ export function getSessionTranscript(id: string, opts?: { limit?: number; before
 export function resetSessionsForTests(): void {
   _sessions.clear();
   _changedSessions.clear();
+  _unrestoredRecords.length = 0;
   persistSessionStore();
 }
 
@@ -1503,17 +1721,66 @@ function withTimestamp(message: SessionMessageInput): SessionHistoryMessage {
   };
 }
 
+// ── Restoring the store (2026-10-09) ────────────────────────────────────────
+// The load used to be one `try` around the whole loop: one record that did not restore aborted it,
+// the sessions after that record never loaded, and the next flush (which writes the whole store)
+// dropped every one of them. A file that did not parse went the same way. Now each record restores
+// on its own, and one that does not is kept as the JSON it was read as and written back, after the
+// live ones, by every flush, so no flush loses it. A file that cannot be read as a store is renamed
+// aside before anything can write over it. When every record restores, the store text is what it
+// always was. (The state this keeps is declared with the other store state, above the load.)
+
 function loadPersistedSessions(): void {
   if (!existsSync(SESSION_STORE_PATH)) return;
 
+  let records: unknown[];
   try {
-    const raw = JSON.parse(readFileSync(SESSION_STORE_PATH, "utf8")) as { sessions?: PersistedSessionRecord[] };
-    for (const record of raw.sessions ?? []) {
-      const session = AgentSession.fromRecord(record);
-      _sessions.set(session.id, session);
-    }
+    const raw = JSON.parse(readFileSync(SESSION_STORE_PATH, "utf8")) as unknown;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("the store is not a JSON object");
+    const sessions = (raw as { sessions?: unknown }).sessions;
+    if (sessions !== undefined && !Array.isArray(sessions)) throw new Error("the store's sessions are not a list");
+    records = sessions ?? [];
   } catch (err) {
-    log.error({ err, path: SESSION_STORE_PATH }, "Failed to load persisted sessions — starting with an empty session store");
+    setAsideUnreadableStore(err);
+    return;
+  }
+
+  let failed = 0;
+  let firstError: unknown;
+  for (const record of records) {
+    try {
+      const session = AgentSession.fromRecord(record as PersistedSessionRecord);
+      // A record that restores but cannot be written back (a date that does not parse) would
+      // otherwise throw in every flush: its record is built once here, as each flush builds it.
+      session.toRecord();
+      _sessions.set(session.id, session);
+    } catch (err) {
+      failed += 1;
+      firstError ??= err;
+      const id = (record as { id?: unknown } | null)?.id;
+      _unrestoredRecords.push({ ...(typeof id === "string" ? { id } : {}), json: JSON.stringify(record) });
+    }
+  }
+  if (failed > 0) {
+    log.error(
+      { err: firstError, failed, restored: records.length - failed, path: SESSION_STORE_PATH },
+      "Some persisted sessions could not be restored; they stay in the session store as they were",
+    );
+  }
+}
+
+/** Renames a store file that cannot be read as one to `<store>.unreadable-<UTC stamp>`, so the
+ *  gateway starts empty without writing over it. When even that fails, nothing writes the store. */
+function setAsideUnreadableStore(cause: unknown): void {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  let target = `${SESSION_STORE_PATH}.unreadable-${stamp}`;
+  for (let n = 1; existsSync(target); n += 1) target = `${SESSION_STORE_PATH}.unreadable-${stamp}-${n}`;
+  try {
+    renameSync(SESSION_STORE_PATH, target);
+    log.error({ err: cause, path: SESSION_STORE_PATH, setAside: target }, "The session store could not be read; it was set aside and the gateway starts with no sessions");
+  } catch (err) {
+    _storeWriteBlocked = true;
+    log.error({ err: cause, renameError: err, path: SESSION_STORE_PATH }, "The session store could not be read nor set aside; this process will not write it");
   }
 }
 
@@ -1561,6 +1828,18 @@ function takeSessionStoreSnapshot(): { text: string; mirror: Array<{ id: string;
     records.push(json);
     if (changed.has(session)) mirror.push({ id: session.id, json, updatedAtMs: session.getUpdatedAt().getTime() });
   }
+  // The records the boot could not restore go back as they were read (see loadPersistedSessions).
+  // A live session under the same id (hydrated from Redis, or created again) supersedes one for
+  // good. None in a store that restored whole.
+  for (let index = 0; index < _unrestoredRecords.length;) {
+    const unrestored = _unrestoredRecords[index]!;
+    if (unrestored.id !== undefined && _sessions.has(unrestored.id)) {
+      _unrestoredRecords.splice(index, 1);
+    } else {
+      records.push(unrestored.json);
+      index += 1;
+    }
+  }
   // Byte-for-byte what JSON.stringify({ sessions: records }) gives, built from the cached texts.
   return { text: `{"sessions":[${records.join(",")}]}\n`, mirror };
 }
@@ -1580,6 +1859,8 @@ export function flushSessionStore(): Promise<void> {
   if (!_storeDirty) return _storeWrites;
   const { text, mirror } = takeSessionStoreSnapshot();
   for (const entry of mirror) void saveSessionToRedis(entry.id, entry.json, entry.updatedAtMs);
+  // A store file the boot could neither read nor set aside is left as it is; Redis still mirrors.
+  if (_storeWriteBlocked) return _storeWrites;
   _pendingStoreText = text;
   _storeWrites = _storeWrites.then(async () => {
     try {
@@ -1627,6 +1908,7 @@ async function renameRetryingSharingErrors(from: string, to: string): Promise<vo
  */
 function flushSessionStoreSync(): void {
   cancelSessionStoreFlushTimer();
+  if (_storeWriteBlocked) return;
   const text = _storeDirty ? takeSessionStoreSnapshot().text : _pendingStoreText;
   if (text === null) return;
   _pendingStoreText = null;

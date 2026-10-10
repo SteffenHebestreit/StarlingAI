@@ -54,7 +54,7 @@ function seed(): string {
 /** The route as the gateway serves it: every /api request runs in its user's request context. */
 async function outcomesAs(userId: string | undefined): Promise<{ text: string; agents: Array<Record<string, unknown>> }> {
   const app = new Hono();
-  app.use("/api/*", (_c, next) => runWithRequestContext({ userId }, () => next()));
+  app.use("/api/*", (_c, next) => runWithRequestContext({ identity: { userId } }, () => next()));
   registerSubAgentRoutes(app);
   const token = await createToken(userId ?? "bootstrap", { role: "viewer" });
   const response = await app.request("/api/agents/outcomes", { headers: { Authorization: `Bearer ${token}` } });

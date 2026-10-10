@@ -404,6 +404,13 @@ export const OrchestrationSchema = z.object({
   /** Max consistency repair rounds (each = one check + one fix call). Low — a consistency
    *  fix is usually one shot, and every round is extra slow-model latency. */
   deliverableConsistencyQaMaxRounds: z.number().int().min(1).max(3).default(1),
+  /** Arithmetic-chain check on a sub-agent's final answer (agent/arithmetic-check.ts): an explicit
+   *  "a + b + … = N" whose terms do not come to N under either decimal convention. "shadow" logs
+   *  guardrail_flagged {type: "sub_agent_arithmetic_mismatch", nudged: false} and changes nothing.
+   *  "nudge" also gives the run one corrective iteration, with the first answer held and returned on
+   *  any other exit. Default "shadow": the false-positive rate is measured on real runs first, and
+   *  "nudge" stays off until pass^k. */
+  subAgentArithmeticCheck: z.enum(["off", "shadow", "nudge"]).default("shadow"),
   /** When true, the one bounded corrective build RESUMES a partial deliverable instead
    *  of regenerating it. If an earlier build attempt THIS turn left a file that genuinely
    *  looks cut off mid-document (artifactFileLooksTruncated: HTML missing </html>, JSON that
@@ -888,7 +895,7 @@ export const OrchestrationSchema = z.object({
   durableApprovals: z.boolean().default(false),
   /** Per-call caps for regular researcher sub-agents.
    *  Keys are tool names; values override the built-in defaults.
-   *  Built-in: web_search=14, web_fetch=16, write_file=3, … */
+   *  Built-in: web_search=14, web_fetch=16, web_table=8, write_file=3, … */
   subAgentToolCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
   /** Per-call caps specifically for the mission_coordinator sub-agent.
    *  Coordinator overrides layer on top of subAgentToolCaps overrides.
@@ -897,5 +904,16 @@ export const OrchestrationSchema = z.object({
   /** Per-turn caps for the main orchestrator agent (not sub-agents).
    *  Built-in: delegate_to_agent=5, computer_click=8, computer_type=6, … */
   perTurnCaps: z.record(z.string(), z.number().int().min(1).max(500)).default({}),
+  /** The narrated-action-claim check (design-tool-bridge §12). A sub-agent that held a
+   *  consequential tool (one whose tier requires per-call approval and that is not read-only) and
+   *  that had NONE of those tools succeed, yet whose answer states an action identifier — a git
+   *  commit/tag hash or an http(s) URL — that no input of the run contained, is narrating an action
+   *  that did not happen (e.g. "committed as 3f9c2ab and pushed" with no successful git_commit).
+   *  The signal is structural and language-independent (tier metadata + identifier shape), not a
+   *  verb list. "off" does nothing. "shadow" writes a sub_agent_unbacked_action_claim audit row
+   *  with counts only and changes neither the answer nor the outcome, so the false-positive rate
+   *  can be measured before any enforcement. Default off; an "enforce" mode that masks the
+   *  identifiers and caps the outcome is a separate, eval-gated follow-up. */
+  unbackedActionClaims: z.enum(["off", "shadow"]).default("off"),
 });
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;

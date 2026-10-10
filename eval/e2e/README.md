@@ -26,7 +26,7 @@ personal data, real credentials or real mail addresses in any scenario or fixtur
 
    | File (all git-ignored) | Content |
    |---|---|
-   | `config/gateway/31-e2e.local.jsonc` | `{ auth: { users: [eval (operator), eval-viewer (viewer)] } }` — bcrypt hashes from the gateway's own `hashPassword`; nothing else of `auth` is touched |
+   | `config/gateway/31-e2e.local.jsonc` | `{ auth: { users: [eval (operator), eval-viewer (viewer)] } }` — bcrypt hashes from the gateway's own `hashPassword`, and each account's immutable `id`, without which it cannot sign in; a re-run gives an account it finds without one an id and keeps its password; nothing else of `auth` is touched |
    | `eval/e2e/.credentials.local.json` | the plaintext passwords (32 random characters) the harness logs in with |
    | `config/mail/accounts.d/00-e2e-isolation.json5` | `{ accounts: [], isolatedUsers: ["eval", "eval-viewer"] }` — the mail-service withholds every **shared** mail account (one without `allowedUsers`) from both identities, so an eval turn never reaches your real mailboxes |
 

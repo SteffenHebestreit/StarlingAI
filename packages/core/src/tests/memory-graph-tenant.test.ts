@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MemoryRecord } from "../memory/service.js";
+import { testAccount, testAccountId } from "./support/test-account.js";
 
 /**
  * WORKSPACE MEMORY STAYS WITH ITS ACCOUNT IN THE GRAPH (found 2026-10-07).
@@ -14,6 +15,10 @@ import type { MemoryRecord } from "../memory/service.js";
  * The block's read had a rule of its own, in which a null user tenant matched every node: under
  * multi-user auth a request with no user got every account's user-scope decisions and preferences
  * (found in review, 2026-10-08). It now applies the reader rule of the graph inspector and graph_query.
+ *
+ * A user-scope node's tenant was the raw username, so an account deleted and created again under
+ * the same name read and wrote the old account's user memory, and so did a channel sender whose id
+ * was the name. It is the account's id now, the key of every other per-account store.
  */
 const { isGraphDbAvailable, runCypher, toPlainRecords } = vi.hoisted(() => ({
   isGraphDbAvailable: vi.fn(() => true),
@@ -40,7 +45,7 @@ describe("workspace-scope graph nodes are partitioned by account", () => {
   async function load(authEnabled: boolean) {
     writeFileSync(configPath, JSON.stringify({
       auth: authEnabled
-        ? { enabled: true, users: [{ username: "alice", passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-10-07T00:00:00Z" }] }
+        ? { enabled: true, users: [testAccount("alice").record, testAccount("bob").record] }
         : { enabled: false },
     }), "utf8");
     // Sequential: these modules import each other, and parallel first imports can deadlock.
@@ -78,25 +83,45 @@ describe("workspace-scope graph nodes are partitioned by account", () => {
   });
 
   it("injects only the reader's own and the shared workspace preferences", async () => {
-    const { graph, context, scope } = await load(true);
+    const { graph, context } = await load(true);
     toPlainRecords.mockReturnValue([{ id: "mem-1", kind: "preference", content: "Bevorzugt Polarstern-Rooibos." }]);
-    await context.runWithRequestContext({ userId: "alice" }, () => graph.graphL0Layer());
-    await context.runWithRequestContext({ userId: "bob" }, () => graph.graphL0Layer());
+    await context.runWithRequestContext({ identity: { userId: "alice", account: testAccountId("alice") } }, () => graph.graphL0Layer());
+    await context.runWithRequestContext({ identity: { userId: "bob", account: testAccountId("bob") } }, () => graph.graphL0Layer());
 
     const reads = runCypher.mock.calls.filter(([query]) => String(query).includes("['decision', 'preference']"));
     // One query per reader: a cached block is never served across accounts.
     expect(reads).toHaveLength(2);
     const [aliceRead, bobRead] = reads.map(([query, params]) => ({ query: String(query), params: params as Record<string, unknown> }));
-    expect(aliceRead!.params["readerWorkspaceTenant"]).toBe(scope.safeUserSegment("alice"));
-    expect(bobRead!.params["readerWorkspaceTenant"]).toBe(scope.safeUserSegment("bob"));
+    expect(aliceRead!.params["readerWorkspaceTenant"]).toBe(testAccountId("alice"));
+    expect(bobRead!.params["readerWorkspaceTenant"]).toBe(testAccountId("bob"));
     expect(aliceRead!.params["sharedWorkspaceTenant"]).toBe(graph.SHARED_WORKSPACE_TENANT);
-    expect(aliceRead!.params["readerUserTenant"]).toBe("alice");
+    expect(aliceRead!.params["readerUserTenant"]).toBe(testAccountId("alice"));
     // The workspace branch of the filter is gated on the tenant, not open to every node: the reader
     // rule the graph inspector and graph_query apply.
     expect(aliceRead!.query).toContain(graph.graphMemoryReadablePredicate("m"));
     expect(aliceRead!.query.replace(/\s+/g, " ")).toContain(
       "m.scope = 'workspace' AND m.tenant IN [$readerWorkspaceTenant, $sharedWorkspaceTenant]",
     );
+  });
+
+  it("keys a user-scope node by the account id, so a name created again reads none of it", async () => {
+    const { graph, context, scope } = await load(true);
+    const first = { userId: "alice", account: testAccountId("alice") };
+    const second = { userId: "alice", account: `alice-${"9".repeat(16)}` };
+    await context.runWithRequestContext({ identity: first }, () => graph.upsertMemoryToGraph(record({ id: "mem-u", scope: "user" })));
+    expect(mergeParams().map((p) => p["tenant"])).toEqual([first.account]);
+    expect(mergeParams()[0]!["tenant"]).not.toBe("alice");
+
+    const readerOf = (identity: { userId: string; account: string }) =>
+      context.runWithRequestContext({ identity }, () => graph.graphMemoryReader())!;
+    expect(readerOf(first).readerUserTenant).toBe(first.account);
+    expect(readerOf(second).readerUserTenant).toBe(second.account);
+    const node = { scope: "user", tenant: first.account };
+    expect(graph.isGraphMemoryReadable(["MemoryRecord"], node, readerOf(first))).toBe(true);
+    expect(graph.isGraphMemoryReadable(["MemoryRecord"], node, readerOf(second))).toBe(false);
+    // A principal's user memory is keyed by its own segment.
+    expect(context.runWithRequestContext({ identity: { userId: "555", principal: "channel" } }, () => graph.graphMemoryReader())!.readerUserTenant)
+      .toBe(scope.safeUserSegment("555"));
   });
 
   // A request with no user under multi-user auth (an A2A, MCP or federation run, and the sub-agent
@@ -124,7 +149,7 @@ describe("workspace-scope graph nodes are partitioned by account", () => {
   it("leaves a single-operator install unpartitioned", async () => {
     const { graph, context } = await load(false);
     await graph.upsertMemoryToGraph(record(), undefined, undefined, null, join("/workspace", ".starlingai", "memory"));
-    await context.runWithRequestContext({ userId: "alice" }, () => graph.graphL0Layer());
+    await context.runWithRequestContext({ identity: { userId: "alice" } }, () => graph.graphL0Layer());
     expect(mergeParams()[0]!["tenant"]).toBeNull();
     const read = runCypher.mock.calls.find(([query]) => String(query).includes("['decision', 'preference']"));
     expect((read![1] as Record<string, unknown>)["workspaceTenant"]).toBeNull();

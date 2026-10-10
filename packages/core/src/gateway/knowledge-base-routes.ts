@@ -10,10 +10,21 @@
  * progress persisted in the KB record.
  */
 import type { Hono, Context } from "hono";
-import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
+import { verifyToken, extractBearerToken, authenticatedUser, callerIdentity, userHasRole, type AuthenticatedUser } from "./auth.js";
 import { registerRoutePolicies } from "./route-policies.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import { getConfig } from "../config/loader.js";
+import type { KbAccessContext } from "../retrieval/knowledge-bases.js";
+import type { PrincipalKind } from "../runtime/accounts.js";
+
+/** What a KB the caller owns is stamped with beside its name: the account id, or for a principal
+ *  (a bootstrap token) its kind, so it stays theirs if the name is reused. With one operator the
+ *  caller has neither and nothing is stamped, as before. */
+function kbOwnerStamp(user: AuthenticatedUser | null): { ownerAccount?: string; ownerPrincipal?: PrincipalKind } {
+  const who = callerIdentity(user);
+  if (who?.account) return { ownerAccount: who.account };
+  return who?.principal ? { ownerPrincipal: who.principal } : {};
+}
 
 export function registerKnowledgeBaseRoutes(app: Hono): void {
   registerRoutePolicies("core", [
@@ -40,11 +51,21 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
   // and nothing about the session shows. A 404 for it broke the dashboard, which sends the id of the
   // chat it has open on every KB call, for workspace and own KBs too, whenever that chat was gone.
   // With auth off every caller may, as before.
-  const kbAccessCtx = async (c: Context): Promise<{ userId?: string; sessionId?: string }> => {
+  //
+  // The caller travels whole (its account id or principal kind with its name): a user KB is its
+  // owner's by identity, not by name (callerCanAccessKb). An admin is named too, the only caller who
+  // reaches a user KB from before account ids.
+  const kbAccessCtx = async (c: Context): Promise<KbAccessContext> => {
     const user = await authenticatedUser(c.req.header("Authorization"));
     const named = c.req.query("sessionId");
     const sessionId = named && callerMayUseSession(user, named) ? named : undefined;
-    return { ...(user?.username ? { userId: user.username } : {}), ...(sessionId ? { sessionId } : {}) };
+    const identity = callerIdentity(user);
+    return {
+      ...(user?.username ? { userId: user.username } : {}),
+      ...(identity ? { identity } : {}),
+      ...(userHasRole(user, "admin") ? { admin: true } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
   };
   // For a session a request would put a KB in (a create or update body): the session routes'
   // opaque 404 when it is not one the caller may act for.
@@ -132,6 +153,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
         ...(scope ? { scope } : {}),
         ...(user?.username ? { ownerId: user.username } : {}),
+        ...kbOwnerStamp(user),
         ...(sessionId ? { sessionId } : {}),
         ...(body["worker"] !== undefined ? { worker: body["worker"] as never } : {}),
         ...(user?.username ? { createdBy: user.username } : {}),
@@ -177,6 +199,7 @@ export function registerKnowledgeBaseRoutes(app: Hono): void {
         ...(typeof body["ambientRetrieval"] === "boolean" ? { ambientRetrieval: body["ambientRetrieval"] } : {}),
         ...(scope ? { scope } : {}),
         ...(user?.username ? { ownerId: user.username } : {}),
+        ...kbOwnerStamp(user),
         ...(typeof body["sessionId"] === "string" ? { sessionId: body["sessionId"] } : {}),
         ...(body["worker"] !== undefined ? { worker: (body["worker"] as never) } : {}),
       });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
@@ -135,10 +136,12 @@ describe("the workspace root is per-user", () => {
   const SHARED = resolve("/tmp/ws");
   const mockAuth = (enabled: boolean): void => {
     vi.spyOn(configLoader, "getConfig").mockReturnValue(
-      { auth: { enabled } } as unknown as ReturnType<typeof configLoader.getConfig>,
+      // A workspace with no account registry in it: no account holds any name, so a bare name
+      // is a principal's, in the bucket it always had.
+      { auth: { enabled, users: [] }, workspacePath: resolve(tmpdir(), "sai-scope-no-registry") } as unknown as ReturnType<typeof configLoader.getConfig>,
     );
   };
-  const asUser = <T,>(userId: string, fn: () => T): T => runWithRequestContext({ userId }, fn);
+  const asUser = <T,>(userId: string, fn: () => T): T => runWithRequestContext({ identity: { userId } }, fn);
   const aliceRoot = () => resolve(SHARED, "users", safeUserSegment("alice"));
 
   afterEach(() => { vi.restoreAllMocks(); });
@@ -206,7 +209,7 @@ describe("the workspace root is per-user", () => {
 
   it("still re-roots a scope-confined agent into its own working zone", () => {
     mockAuth(true);
-    const r = runWithRequestContext({ userId: "alice", workspaceScope: "generated" },
+    const r = runWithRequestContext({ identity: { userId: "alice" }, workspaceScope: "generated" },
       () => resolvePathWithinWorkspace("agents/10-core-agents.jsonc", aliceRoot()));
     expect(r.relativePath).toBe("generated/agents/10-core-agents.jsonc");
     expect(r.resolved.startsWith(aliceRoot())).toBe(true);

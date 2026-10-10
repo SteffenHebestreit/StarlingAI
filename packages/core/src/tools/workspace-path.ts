@@ -1,7 +1,21 @@
 import { stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
-import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
+import { segmentFor } from "../runtime/user-scope.js";
+import { ACCOUNT_ID_RE, type Identity } from "../runtime/accounts.js";
+import { GENERATED_SUBDIR, UPLOADS_SUBDIR, USERS_SUBDIR } from "./workspace-zones.js";
+
+// The zones and the config-shard rules live in a leaf module the config loader can import without
+// a cycle (tools/workspace-zones.ts); they stay importable from here.
+export {
+  GENERATED_SUBDIR,
+  UPLOADS_SUBDIR,
+  SWARM_TOOLS_SUBDIR,
+  NON_CONFIG_WORKSPACE_ZONES,
+  NON_CONFIG_BASE_ZONES,
+  isNonConfigShardDirectory,
+  compareShardPaths,
+} from "./workspace-zones.js";
 
 /** True when a filesystem path exists (stat succeeds), false otherwise. */
 export async function pathExists(target: string): Promise<boolean> {
@@ -30,16 +44,6 @@ export async function overwriteGuard(
 }
 
 /**
- * Dedicated subfolder for agent-generated files/projects, kept one layer below
- * the workspace root so generated output never lands next to the hand-/config-
- * authored zone (agents/, jobs/, scenes/, tools/, runtime/).
- */
-export const GENERATED_SUBDIR = "generated";
-
-/** User-uploaded files (chat attachments) — readable by every agent. */
-export const UPLOADS_SUBDIR = "uploads";
-
-/**
  * THE WORKING ROOT FOR THE AMBIENT USER: `<shared>/users/<segment>`, or the shared root when
  * there is nobody to partition by (auth off, or an unattended run).
  *
@@ -57,17 +61,31 @@ export const UPLOADS_SUBDIR = "uploads";
  *
  * IDEMPOTENT: a root that already is this user's comes back unchanged. A session persists the
  * root this returns and hands it back here on every restore (AgentSession.fromRecord), and a
- * workflow run passes the caller's root together with the caller's id. Each pass nested it one
+ * workflow run passes the caller's root together with the caller's identity. Each pass nested it one
  * level deeper, <shared>/users/<seg>/users/<seg> after a single gateway restart, and nothing of
  * the user's (their memory, their files) is in there. The user's own segment is stripped first,
  * however often it repeats, so a session persisted with the extra levels comes back right too.
  */
-export function userWorkspaceRoot(sharedRoot: string, userId?: string): string {
-  const segment = activeUserScopeSegment(userId);
+export function userWorkspaceRoot(sharedRoot: string, who?: Identity): string {
+  const segment = segmentFor(who);
   if (!segment) return sharedRoot;
   let root = resolve(sharedRoot);
   while (basename(root) === segment && basename(dirname(root)) === USERS_SUBDIR) root = dirname(dirname(root));
   return resolve(root, USERS_SUBDIR, segment);
+}
+
+/**
+ * A root with every per-user level taken off its end: `<x>/users/<segment>` becomes `<x>`, however
+ * often it repeats and whichever segment it names. A restored account session's root is rebuilt
+ * from this and the account's own segment (agent/session.ts), so a root stored under the
+ * username's old segment, or nested by an earlier restore, does not nest again.
+ */
+export function stripUserWorkspaceRoots(root: string): string {
+  let stripped = resolve(root);
+  while (basename(dirname(stripped)) === USERS_SUBDIR && ACCOUNT_ID_RE.test(basename(stripped))) {
+    stripped = dirname(dirname(stripped));
+  }
+  return stripped;
 }
 
 /**
@@ -116,70 +134,6 @@ export function generatedZoneDir(workspacePath: string): string {
   return resolve(workspacePath, generatedZoneRel());
 }
 
-
-/**
- * Swarm-invented dynamic tools (JSON bundles managed by tools/dynamic-tools.ts).
- * Lives in the workspace next to the other self-authored zones (agents/, jobs/,
- * scenes/) so the swarm's own creations are inspectable and versionable in one
- * place. Written only by the tool-development pipeline (sandbox-tested +
- * approved) — write_file roots everything into generated/, so agents cannot
- * plant tool bundles directly.
- */
-export const SWARM_TOOLS_SUBDIR = "tools";
-
-/**
- * Workspace zones that hold working data, not configuration. The config-shard
- * loaders must skip these when sweeping the workspace for .json/.jsonc shards —
- * otherwise an agent-generated data.json (or an uploaded file, or a dynamic-tool
- * bundle) would merge into the live config on the next reload.
- */
-export const NON_CONFIG_WORKSPACE_ZONES: ReadonlySet<string> = new Set([
-  GENERATED_SUBDIR,
-  UPLOADS_SUBDIR,
-  SWARM_TOOLS_SUBDIR,
-  // Each signed-in user's working root (userWorkspaceRoot) holds that user's own generated/,
-  // uploads/ and state dir — one level down, where the depth-0 zone check above never looked,
-  // so an agent-written users/<id>/generated/data.json merged into the live config.
-  USERS_SUBDIR,
-]);
-
-/**
- * Top-level directories of the CONFIG tree (config/) that hold another service's own files, not
- * gateway config. config/mail/ is the mail-service's accounts file, which it reads itself: swept as
- * a shard it put the real mail account list into the compiled starlingai.json as a top-level
- * `accounts` key (2026-10-07), where nothing reads it, and a malformed edit refused the config load.
- */
-export const NON_CONFIG_BASE_ZONES: ReadonlySet<string> = new Set(["mail"]);
-
-/**
- * Whether a config-shard sweep skips this directory: one of `zones` at the top (the workspace's
- * working zones by default; NON_CONFIG_BASE_ZONES for the config tree), or a hidden directory at
- * any depth. Hidden directories hold state, never shards — the state dir under the workspace keeps
- * a JSON file per long-running task (checkpoints/), and one half-written file there was read as a
- * base shard, which refuses to boot on a parse error.
- */
-export function isNonConfigShardDirectory(
-  name: string,
-  depth: number,
-  zones: ReadonlySet<string> = NON_CONFIG_WORKSPACE_ZONES,
-): boolean {
-  return name.startsWith(".") || (depth === 0 && zones.has(name));
-}
-
-/**
- * Shard merge order: code-point order on the "/"-joined path relative to the swept directory —
- * the order `sai config build` (scripts/config-shards.mjs) uses, so the compiled config and the
- * loaded one merge alike on every OS. localeCompare would weigh case and punctuation by locale,
- * and Windows separators sort apart from "/".
- */
-export function compareShardPaths(directory: string): (left: string, right: string) => number {
-  const sortKey = (path: string) => relative(directory, path).split(sep).join("/");
-  return (left, right) => {
-    const a = sortKey(left);
-    const b = sortKey(right);
-    return a < b ? -1 : a > b ? 1 : 0;
-  };
-}
 
 /**
  * Workspace zones a scope-confined ("generated") agent sees verbatim. Everything

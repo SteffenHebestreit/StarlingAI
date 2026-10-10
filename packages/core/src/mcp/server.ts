@@ -40,6 +40,7 @@ import { userHasRole, type AuthRole } from "../gateway/auth.js";
 import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
+import type { Identity } from "../runtime/accounts.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
@@ -68,6 +69,15 @@ export interface ExposeContext {
    *  request context. Absent with one operator, for stdio and for an anonymous caller, whose calls
    *  run in the shared root with no account, as before. */
   userId?: string;
+  /** The same caller whole: `userId` with its account id (or bootstrap kind). Set with `userId`,
+   *  from the same resolved caller; the root and the request context derive from it. */
+  identity?: Identity;
+}
+
+/** The identity of a call's caller: its own whole identity, or its name alone. */
+function callerIdentityOf(ctx: ExposeContext): Identity | undefined {
+  if (!ctx.userId) return undefined;
+  return ctx.identity?.userId === ctx.userId ? ctx.identity : { userId: ctx.userId };
 }
 
 /**
@@ -79,13 +89,13 @@ export interface ExposeContext {
  */
 function callWorkspaceRoot(ctx: ExposeContext): string {
   const shared = getConfig().workspacePath;
-  return ctx.userId ? userWorkspaceRoot(shared, ctx.userId) : shared;
+  return ctx.userId ? userWorkspaceRoot(shared, callerIdentityOf(ctx)) : shared;
 }
 
 /** Run `fn` with the caller's account on the request context, which a run's own memory reads and
  *  per-user stores take their account from; with none there when the call has no account. */
 function asCaller<T>(ctx: ExposeContext, fn: () => Promise<T>): Promise<T> {
-  return ctx.userId ? runWithRequestContext({ userId: ctx.userId }, fn) : fn();
+  return ctx.userId ? runWithRequestContext({ identity: callerIdentityOf(ctx) }, fn) : fn();
 }
 
 /** Operators may run mutating tools / sub-agents / scenes; viewers are read-only. Exported for testing. */
@@ -328,7 +338,7 @@ async function runNativeToolCall(
     sessionId,
     workspacePath: callWorkspaceRoot(ctx),
     // The account and its live role on the tool context, as a chat turn's tools have them.
-    ...(ctx.userId ? { userId: ctx.userId, userRole: ctx.role } : {}),
+    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx), userRole: ctx.role } : {}),
   }));
 
   return {
@@ -368,7 +378,7 @@ async function runAgentCall(
     parentSessionId,
     workspacePath: callWorkspaceRoot(ctx),
     // The account on the run's tools too, so a 'user' memory and per-user resources are the caller's.
-    ...(ctx.userId ? { userId: ctx.userId } : {}),
+    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx) } : {}),
   }));
 
   return {
@@ -440,7 +450,7 @@ async function runSceneCall(
     workspacePath: callWorkspaceRoot(ctx),
     allowedAgents: scene.allowedAgents,
     humanInLoopSteps: scene.humanInLoopSteps,
-    ...(ctx.userId ? { userId: ctx.userId } : {}),
+    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx) } : {}),
   }));
 
   return {

@@ -108,6 +108,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  web_table: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Read a public page's HTML tables (or the open browser tab's) and compute a column's sum, count, min, max or avg",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   fetch_image: {
     tier: ToolTier.ONE_WRITE,
     description: "Download + verify a real image from a URL/page and save it into the workspace",

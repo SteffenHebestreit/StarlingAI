@@ -30,6 +30,7 @@ import { buildProfileBiasedQuery } from "./user-profile-prefetch.js";
 import { timedPhase, type TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { RunTurnOptions, TurnOutput } from "./turn-types.js";
 import { lastAssistantReplyText } from "./reply-language.js";
+import { segmentFor } from "../runtime/user-scope.js";
 
 const log = childLogger("agent:runtime");
 
@@ -47,17 +48,41 @@ export function blocked(reason: string, swarmState?: SwarmState, performance?: T
 
 // ── Turn-preparation phases ──────────────────────────────────────────────────
 
+/** What a conversation that predates account ids answers instead of running a turn. */
+export const LEGACY_SESSION_REFUSAL = "This conversation predates account ids and cannot continue until an admin migrates it (`sai migrate-account-ids`).";
+
+/**
+ * Phase 0 — Under multi-user auth a session that names a user but neither an account nor a
+ * principal kind (written before account ids existed) runs no turn. A turn needs an identity to
+ * derive its storage from, and for such a session that identity would be a guess from the
+ * username: the bucket an account kept before ids, or the one a deleted account of that name left.
+ * The derivation itself refuses (runtime/user-scope.ts segmentFor); this answers the person
+ * cleanly before anything tries. With auth off nothing is partitioned and every session runs.
+ * Returns the blocked TurnOutput, or null to continue.
+ */
+export function prepareLegacySession(session: AgentSession): TurnOutput | null {
+  let multiUser = true;
+  try {
+    multiUser = getConfig().auth?.enabled === true;
+  } catch { /* fail closed */ }
+  if (!multiUser || !session.isLegacy()) return null;
+  log.warn({ sessionId: session.id, channel: session.channel }, "Turn refused: the session predates account ids");
+  return blocked(LEGACY_SESSION_REFUSAL);
+}
+
 /**
  * Phase 1 — Rate-limit check. Returns the blocked TurnOutput when the limit is
  * exceeded (caller returns it), else null (continue the turn).
  *
- * The limiter keys on the authenticated USER when multi-user auth is on, so a
- * single account cannot multiply its request budget by opening N sessions
- * (multi-tab, multiple channels). With auth off there is no userId, so it falls
- * back to the session id — the historical per-session behavior, unchanged.
+ * The limiter keys on the session's OWNER when multi-user auth is on (its account id, or a
+ * principal's segment), so a single account cannot multiply its request budget by opening N
+ * sessions (multi-tab, multiple channels), and an account created again under an old name starts
+ * with its own budget. With auth off there is no segment, so it keys on the userId, else the
+ * session id — the historical behavior, unchanged.
  */
 export async function prepareRateLimit(session: AgentSession): Promise<TurnOutput | null> {
-  const subject = session.userId ?? session.id;
+  const owner = session.identity();
+  const subject = (owner ? segmentFor(owner) : undefined) ?? session.userId ?? session.id;
   const rl = await checkRateLimit(subject, "request");
   if (!rl.allowed) {
     logAudit("rate_limited", { remaining: 0, resetAt: rl.resetAt }, { sessionId: session.id });
@@ -287,7 +312,7 @@ export async function prepareDocumentRag(args: {
   try {
     const { augmentTurnWithDocuments } = await import("../retrieval/document-rag.js");
     const aug = await timedPhase("documentRag", () => augmentTurnWithDocuments({
-      ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}) },
+      ctx: { sessionId: session.id, ...(session.userId ? { userId: session.userId } : {}), ...(session.identity() ? { identity: session.identity() } : {}) },
       workspacePath: session.getWorkspacePath(),
       query: ragQuery,
       attachments: opts.userAttachments,

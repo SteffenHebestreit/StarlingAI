@@ -33,11 +33,16 @@ import { turnSteeringManager } from "./turn-steering.js";
 import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
-import { isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, toolCallIdentity, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
+import type { Identity } from "../runtime/accounts.js";
+import { getToolTier, isToolAllowed, requiresSandbox } from "../guardrails/tool-tiers.js";
 import {
+  addFigureKeys,
   addArgumentFigureKeys,
+  addArgumentIdentifierKeys,
   addReceivedFigureKeys,
+  addReceivedIdentifierKeys,
+  countUnbackedIdentifiers,
   argumentTexts,
   countUnobservedFigures,
   maskFiguresByKey,
@@ -118,6 +123,9 @@ import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swa
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
 import { inferCompletedRunOutcome, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
+import { coerceJsonArrayArg } from "../tools/json-arg-coercion.js";
+import { clearWebTableSessionState } from "../tools/web-table-budget.js";
+import { describeChain, findArithmeticMismatches, type ArithmeticMismatch } from "./arithmetic-check.js";
 import { buildDynamicTurnGuidance } from "./intent-classifier.js";
 import { looksLikeArtifactCreationRequest } from "./deliverable-intent.js";
 import { shareFinding } from "../tools/memory.js";
@@ -358,6 +366,59 @@ const ROUTING_METADATA_TOOL_NAMES = new Set([
 const FETCH_PRODUCTIVITY_TOOL_NAMES = new Set(["web_fetch", "url_inspect", "browser_navigate"]);
 const NON_PRODUCTIVE_FETCH_STREAK_LIMIT = 4;
 const NON_PRODUCTIVE_FETCH_RE = /could not be extracted|document-extraction service is unavailable|page not found|404 not found|\b403 forbidden\b|\b429\b|too many requests|access denied|rate.?limit|no content|empty (?:page|response)/i;
+
+/**
+ * A page address as the run's read set holds it: parsed (host case, default port) and without its
+ * fragment, which is never sent. Text that is not a URL is kept as it is, minus the fragment.
+ */
+export function comparablePageUrl(url: string): string {
+  const trimmed = url.trim();
+  let text = trimmed;
+  try {
+    text = new URL(trimmed).href;
+  } catch {
+    // compared as given
+  }
+  const hash = text.indexOf("#");
+  return hash < 0 ? text : text.slice(0, hash);
+}
+
+/**
+ * Whether a web_table call may run after the evidence strip withdrew the gathering tools. web_table
+ * is not a gathering tool (it reads no page without a table), so the strip leaves it callable, and
+ * a run told "write the final answer now" could fetch ten new pages with it. Computing over pages
+ * the run has already read is exactly what it should do at that point: a call is allowed when it
+ * computes (aggregates, where or group_by, or reads the open browser tab) and every URL it names is
+ * one the run read (`readUrls`, comparablePageUrl form). Anything else is refused as the strip
+ * refuses a gathering tool.
+ */
+export function webTableCallAllowedAfterEvidenceStrip(args: Record<string, unknown> | undefined, readUrls: ReadonlySet<string>): boolean {
+  const given = (value: unknown): boolean => {
+    if (value === undefined || value === null) return false;
+    const coerced = coerceJsonArrayArg(value);
+    if (Array.isArray(coerced)) return coerced.length > 0;
+    return typeof coerced === "string" ? coerced.trim().length > 0 : true;
+  };
+  const tab = args?.["source"] === "tab";
+  if (!tab && !given(args?.["aggregates"]) && !given(args?.["where"]) && !given(args?.["group_by"])) return false;
+  const rawUrls = coerceJsonArrayArg(args?.["url"]);
+  const urls = (Array.isArray(rawUrls) ? rawUrls : rawUrls === undefined || rawUrls === null || rawUrls === "" ? [] : [rawUrls])
+    .filter((url): url is string => typeof url === "string" && url.trim().length > 0);
+  if (tab) return urls.every((url) => readUrls.has(comparablePageUrl(url)));
+  return urls.length > 0 && urls.every((url) => readUrls.has(comparablePageUrl(url)));
+}
+
+/**
+ * Whether a call reads state that can change between two identical calls, so the consecutive-
+ * duplicate cache may not answer it: a browser or computer tool, and web_table reading the browser
+ * tab (source "tab"), whose page a click between two identical calls can change. That cache is
+ * keyed by tool name and survives the click, so a browser_agent paging through a table with the
+ * tab source would get page 1's computed lines back as page 2's. web_table over URLs reads the
+ * same pages again and is still answered from the cache.
+ */
+export function readsLiveState(name: string, args: Record<string, unknown> | undefined): boolean {
+  return isLiveStateTool(name) || (name === "web_table" && args?.["source"] === "tab");
+}
 
 /** True when a fetch result carried no usable content (cost-center 3, audit 5d51862f). */
 export function fetchResultIsNonProductive(success: boolean, content: string): boolean {
@@ -1172,6 +1233,9 @@ const SUB_AGENT_PER_TOOL_CAPS: Partial<Record<string, number>> = {
   computer_snapshot: 8,
   web_search: 14,
   web_fetch: 16,
+  // A web_table call reads up to 10 pages (40 per run, tools/web-table-budget.ts), so 8 calls
+  // bound a run at 240 requests counting redirects, under web_fetch's 16 × 21.
+  web_table: 8,
   // KB retrieval can honestly loop like web_search; lifecycle calls cannot.
   search_knowledge_base: 12,
   list_knowledge_bases: 4,
@@ -1400,6 +1464,27 @@ export function requiresInProcessExecution(tools: readonly string[] | undefined)
   return list.some((t) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(t))
     || list.some((t) => GATEWAY_BOUND_SERVICE_TOOL_NAMES.has(t)
       || GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.some((prefix) => t.startsWith(prefix)));
+}
+
+/**
+ * Does this agent resolve to the containerized dispatch path (the fail-loud pre-flight at the
+ * call site below)? This is the single predicate the runtime branch and the shipped-config gate
+ * share, so a change to the rule cannot pass the gate while breaking the runtime, or the reverse.
+ * It is exactly the condition the dispatch comment describes: an agent is containerized when its
+ * tools do not force it in-process AND it either opts in explicitly (`container.enabled`) or runs
+ * under the global opt-out model (`agents.defaultContainerized` on and `container.disabled` not
+ * set). The 15 specialists that used to resolve here now carry `container.disabled: true` and run
+ * in-process (2026-10-09 user decision); the branch and its honest-failure path stay for any
+ * future agent that is containerized by default.
+ */
+export function resolvesToContainerizedDispatch(
+  agentCfg: { tools?: readonly string[]; container?: { enabled?: boolean; disabled?: boolean } },
+  defaultContainerized: boolean,
+): boolean {
+  return !requiresInProcessExecution(agentCfg.tools) && (
+    agentCfg.container?.enabled === true ||
+    (defaultContainerized === true && agentCfg.container?.disabled !== true)
+  );
 }
 
 // Tools whose output is deterministic enough within a single sub-agent run that
@@ -2236,7 +2321,7 @@ function rejectSuspiciousNoToolOutput(
   // appendOutcome call in the run's own finalizer. A per-user root splits one deployment ledger
   // into one per account, and the readers only ever look at the shared one.
   // For the account the run is for, like the run's other outcomes (recordOutcome).
-  const account = recordAccount(opts.userId);
+  const account = recordAccount(toolCallIdentity(opts));
   appendOutcome(getConfig().workspacePath, {
     ts: new Date().toISOString(),
     agent: opts.agentName,
@@ -2285,6 +2370,13 @@ export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | u
     "exitCode",
     "programOutputChars",
     "timedOut",
+    // Which tree the git sandbox mounted: "caller" (narrowed to this agent's own workspace root)
+    // or "repo" (the whole deployment tree, only for the full-scope maintenance agent). E2E reads
+    // it on the sub_agent_tool_call row to prove a delegated git agent never reached the repo.
+    "mountScope",
+    // web_table's one namespaced key (pages, table, computed values, fetchFailed): flat fields
+    // would collide with other tools' keys, and any key not listed here is dropped.
+    "webTable",
   ]) {
     if (key in metadata) {
       summary[key] = metadata[key];
@@ -2467,6 +2559,10 @@ export interface SubAgentRunOptions {
   /** Authenticated user that owns the parent turn — propagated so sub-agents
    * enforce the same per-user resource access (mail, credentials, compute). */
   userId?: string;
+  /** The same owner whole: `userId` with its account id or principal kind, set together with it
+   *  from one identity. The run's tools and its records derive storage from it; without it the
+   *  name is paired with the ambient identity (runtime/user-scope.ts pairedIdentity). */
+  identity?: Identity;
   /** Owning conversation session for KB scope checks (ephemeral KB workers only) —
    * propagated onto the sub-agent's ToolContext so its KB access resolves against
    * the originating session rather than its rewritten per-run sub-session id. */
@@ -2627,9 +2723,55 @@ export interface SubAgentRunResult {
    *  name and files (the delegated ones as they came back, and this run when its own account did),
    *  so its delegation can tell the turn which run that was. See MaskedDelegatedRun. */
   maskedRuns?: MaskedDelegatedRun[];
+  /** Present only when the run computed aggregates with web_table: the figure keys (figureKey, two
+   *  digits or more) of the values it computed, at most 32. A reply that states one of them is not
+   *  re-synthesized for coverage (agent/runtime.ts enforceDelegateCoverage). */
+  computedAggregateKeys?: string[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
+}
+
+/**
+ * The first answer of a run the arithmetic check sent back for one corrective iteration
+ * (orchestration.subAgentArithmeticCheck "nudge"). It is created by runSubAgentWithStats because
+ * several exits of the loop never pass through withArtifacts (a suspicious answer, a rescue, the
+ * timeout synthesis), so the wrapper is the one point every exit passes. `settled` is set when the
+ * corrective answer is a real one; until then any exit returns the held answer instead.
+ */
+interface ArithmeticHold {
+  answer?: SubAgentRunResult;
+  settled: boolean;
+}
+
+/**
+ * The held answer in place of an exit the corrective iteration ended in: its output and outcome,
+ * with the usage and iteration count the run actually spent. The exit's own completion audit and
+ * ledger row stay as written; this row explains the substitution.
+ */
+function releaseArithmeticHold(hold: ArithmeticHold, exit: SubAgentRunResult | undefined, failure?: unknown): SubAgentRunResult {
+  const held = hold.answer!;
+  logAudit("guardrail_flagged", {
+    type: "sub_agent_arithmetic_hold_returned",
+    agentName: held.stats.agentName,
+    exitTerminalState: exit?.stats.terminalState ?? "error",
+    ...(failure !== undefined ? { error: (failure instanceof Error ? failure.message : String(failure)).slice(0, 200) } : {}),
+  }, { sessionId: held.stats.sessionId, severity: "warn" });
+  if (!exit) return held;
+  return { ...held, stats: { ...held.stats, usage: { ...exit.stats.usage }, iterations: exit.stats.iterations } };
+}
+
+/**
+ * The arithmetic nudge (pass^k-relevant). With web_table at hand it does not state the sum of the
+ * written terms: 604 replacing 609 is still wrong when a term was misread (Südtal is 596), and
+ * would then look consistent. Without a computing tool that exact sum is the only exact fact the
+ * runtime has, and checking each term comes first.
+ */
+function arithmeticNudgeText(mismatch: ArithmeticMismatch, webTable: boolean): string {
+  const chain = `${describeChain(mismatch)} (${mismatch.terms.length} terms) does not come to ${mismatch.stated}`;
+  return webTable
+    ? `ARITHMETIC CHECK: in your answer, ${chain}. Take that total from web_table over the page instead of adding it yourself, then give your complete final answer again.`
+    : `ARITHMETIC CHECK: in your answer, ${chain}; those terms add up to ${mismatch.computed}. Check each term against your sources, then give your complete final answer again with the corrected figures.`;
 }
 
 export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
@@ -2659,7 +2801,17 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           // the parent's would attribute every sub-agent call to the parent turn.
           sessionId: undefined,
         },
-        () => runSubAgentWithStatsInner(opts),
+        async () => {
+          const hold: ArithmeticHold = { settled: false };
+          let exit: SubAgentRunResult;
+          try {
+            exit = await runSubAgentWithStatsInner(opts, hold);
+          } catch (err) {
+            if (hold.answer && !hold.settled) return releaseArithmeticHold(hold, undefined, err);
+            throw err;
+          }
+          return hold.answer && !hold.settled ? releaseArithmeticHold(hold, exit) : exit;
+        },
       );
       span.setAttribute("starlingai.agent.iterations", result.stats.iterations);
       span.setAttribute("starlingai.agent.toolCount", result.stats.toolCount);
@@ -2673,7 +2825,7 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
   );
 }
 
-async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubAgentRunResult> {
+async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHold: ArithmeticHold = { settled: false }): Promise<SubAgentRunResult> {
   const config = getConfig();
   const agentCfg = opts.inlineConfig ?? config.subAgents[opts.agentName];
   const runStartedAt = Date.now();
@@ -3124,11 +3276,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // `--network none` isolation breaks mcp__* tools (they reach their MCP
     // servers via the gateway's host-side registry), so MCP-using agents are
     // forced in-process too — see GATEWAY_BOUND_SERVICE_TOOL_PREFIXES.
-    const isContainerized =
-      !requiresInProcessExecution(agentCfg.tools) && (
-        agentCfg.container?.enabled === true ||
-        (config.agents.defaultContainerized === true && agentCfg.container?.disabled !== true)
-      );
+    const isContainerized = resolvesToContainerizedDispatch(
+      agentCfg,
+      config.agents.defaultContainerized === true,
+    );
     if (isContainerized) {
       // STATIC PRE-FLIGHT — the same check the worker makes on itself (agent/container-entrypoint.ts),
       // made here before a container is ever started. The agent-worker process registers only the
@@ -3621,6 +3772,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // to the whole workspace via workspaceAccess:"full" in their agent config.
       workspaceScope: isFullScopeAgent ? "full" : "generated",
       userId: opts.userId,
+      ...(opts.identity ? { identity: opts.identity } : {}),
       ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,
@@ -3844,6 +3996,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // An agent without an allow-list holds every registered tool, so the wire list stands in.
     const tracksFigures = (effectiveToolNames ?? tools.map((tool) => tool.name))
       .some((name) => requiresSandbox(name) || receivesExecutionRecords(name));
+    // THE NARRATED-ACTION-CLAIM CHECK (orchestration.unbackedActionClaims, design §12; default off,
+    // shadow is audit-only). The consequential tools the run HELD: those whose tier requires
+    // per-call approval and that are not read-only (not IDEMPOTENT_TOOLS). Tier metadata, not a
+    // tool-name list. If the run holds none, no narrated-action claim is possible, so the check is
+    // off for it whatever the mode. When it IS on, the default figure path stays byte-identical:
+    // every added line below is guarded by checksActionClaims, which is false under the "off"
+    // default.
+    const unbackedActionClaimsMode = config.orchestration.unbackedActionClaims;
+    const consequentialToolsHeld = (effectiveToolNames ?? tools.map((tool) => tool.name))
+      .filter((name) => getToolTier(name).requiresPerCallApproval && !IDEMPOTENT_TOOLS.has(name));
+    const checksActionClaims = unbackedActionClaimsMode !== "off" && consequentialToolsHeld.length > 0;
+    // Keys of the action identifiers (commit/tag hashes, http(s) URLs) the run RECEIVED, the same
+    // input set as the figures below. Fed at the same absorb points; stays empty unless the check
+    // is on. And the consequential tools that actually succeeded at least once this run.
+    const receivedIdentifierKeys = new Set<string>();
+    const succeededConsequentialTools = new Set<string>();
     // Keys of every figure the run RECEIVED: its system prompt, every user, tool and system
     // message, and its per-iteration nudges. Never its own prose, the files it wrote, what it
     // shared or the commands it sent to the sandbox: those are the claims being checked.
@@ -3853,6 +4021,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // The prompt's "Today's date" in the numeric forms an answer writes it in.
       addReceivedFigureKeys(observedFigureKeys, numericDateForms(todayDate));
     }
+    if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, systemPrompt);
     // A RUN'S OWN CLAIM HANDED BACK TO IT IS STILL ITS OWN CLAIM. Keys of the figures the run put
     // into the arguments of its own calls before any input had contained them: the files it
     // wrote, what it shared, the task it delegated, the commands it ran. In review, a coder whose
@@ -3865,18 +4034,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // session-00b3675d rule keeps a read-back of the run's own file out of the shared facts (see
     // the auto-share below).
     const ownClaimFigureKeys = new Set<string>();
+    // The action-identifier equivalent of ownClaimFigureKeys. A hash or URL the run wrote into a
+    // call's arguments before any input contained it (recordOwnClaims) is still its own claim when a
+    // tool hands it back: a FAILED git_commit returns "Exit code N: Command failed: … git commit -m
+    // <message>", so a URL or hash the model put in its own commit message comes back in the error
+    // text and, absorbed verbatim, would back the answer that narrates the commit as done. read_
+    // shared_facts handing back the run's own share_finding values does the same. So these keys are
+    // skipped when absorbing non-user messages; the user task and the system prompt still count.
+    const ownClaimIdentifierKeys = new Set<string>();
     // How far into `history` the set has read. The trim digests, drops and clamps history in place,
     // so the set is filled BEFORE each trim; rebuilt from history when the answer is written, it
     // would miss a figure the run read early and the trim has since removed. The run's own
     // messages add nothing: their prose and their calls are what it claims.
     let absorbedHistoryLength = 0;
     const absorbNewHistory = (): void => {
-      if (!tracksFigures) return;
+      if (!tracksFigures && !checksActionClaims) return;
       for (; absorbedHistoryLength < history.length; absorbedHistoryLength++) {
         const message = history[absorbedHistoryLength]!;
         if (message.role === "assistant") continue;
         const content = typeof message.content === "string" ? message.content : "";
-        addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, content, message.role === "user" ? undefined : ownClaimFigureKeys);
+        // An identifier any non-assistant message holds (the task, a git_log tool result, a system
+        // message) is one the run RECEIVED, so an answer that states it is backed — unless it is one
+        // of the run's OWN claims a tool echoed back (ownClaimIdentifierKeys), which the user's own
+        // messages never carry, the same rule as the figure path above.
+        if (checksActionClaims) addReceivedIdentifierKeys(receivedIdentifierKeys, content, message.role === "user" ? undefined : ownClaimIdentifierKeys);
       }
     };
     /**
@@ -3893,11 +4075,25 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
      * keeps its figures (see the quoted-code check below).
      */
     const recordOwnClaims = (toolName: string, args: unknown): void => {
-      if (!tracksFigures || IDEMPOTENT_TOOLS.has(toolName)) return;
-      const claimed = new Set<string>();
-      addArgumentFigureKeys(claimed, args);
-      for (const key of claimed) {
-        if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+      // A read (IDEMPOTENT_TOOLS) asks for something and claims nothing, for identifiers the same as
+      // for figures: a URL in a web_fetch argument is the run choosing what to fetch, confirmed by
+      // what the fetch returns, not an action it narrates.
+      if (IDEMPOTENT_TOOLS.has(toolName)) return;
+      if (tracksFigures) {
+        const claimed = new Set<string>();
+        addArgumentFigureKeys(claimed, args);
+        for (const key of claimed) {
+          if (!observedFigureKeys.has(key)) ownClaimFigureKeys.add(key);
+        }
+      }
+      // The same for action identifiers: a hash or URL this call introduces that no input had yet
+      // contained is the run's own, so a failed tool that echoes the argument back cannot back it.
+      if (checksActionClaims) {
+        const claimedIds = new Set<string>();
+        addArgumentIdentifierKeys(claimedIds, args);
+        for (const key of claimedIds) {
+          if (!receivedIdentifierKeys.has(key)) ownClaimIdentifierKeys.add(key);
+        }
       }
     };
     // QUOTED CODE IS NOT A CLAIM. In review, the coder of a broken sandbox reported honestly and
@@ -4000,6 +4196,31 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       }
       if (executionRecord.attempted > 0) shadowUnobservedFigures = countUnobservedFigures(text, observedFigureKeys, quoted);
       return text;
+    };
+    /**
+     * SHADOW narrated-action-claim check (design §12; audit only, changes nothing). When the run
+     * held consequential tools but NONE of them succeeded this run, an action identifier in the
+     * answer that no input contained — a commit/tag hash or a URL the run invented — is a narrated
+     * action that did not happen ("committed as 3f9c2ab and pushed", no successful git_commit). A
+     * read that quotes a hash (git_log) makes that hash a received input, so it is not flagged; a
+     * successful consequential call means the premise fails and nothing is checked. Writes one
+     * sub_agent_unbacked_action_claim row with counts only; the answer and the outcome are
+     * untouched until an "enforce" mode is added (separate, eval-gated).
+     */
+    const shadowUnbackedActionClaim = (answer: string): void => {
+      if (!checksActionClaims) return;
+      const succeeded = consequentialToolsHeld.filter((name) => succeededConsequentialTools.has(name));
+      if (succeeded.length > 0) return;
+      absorbNewHistory();
+      const identifiers = countUnbackedIdentifiers(answer, receivedIdentifierKeys);
+      if (identifiers === 0) return;
+      logAudit("sub_agent_unbacked_action_claim", {
+        agentName: opts.agentName,
+        mode: unbackedActionClaimsMode,
+        identifiers,
+        consequentialToolsHeld: consequentialToolsHeld.length,
+        consequentialToolsSucceeded: succeeded.length,
+      }, { sessionId: subSessionId, severity: "warn" });
     };
     /**
      * WHAT THE RUN WROTE ITSELF, HANDED BACK BY A TOOL, IS NOT EVIDENCE IN THE RUNTIME'S OWN
@@ -4112,6 +4333,15 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // E21: Source-diversity — detect when research plateaus on repeated domains
     const visitedSourceDomains = new Set<string>();
     let consecutiveStaleDomainFetches = 0;
+    // The pages this run has read (web_fetch, browser_navigate and web_table, comparablePageUrl
+    // form): after the evidence strip, web_table may compute over these and fetch nothing new.
+    const readPageUrls = new Set<string>();
+    // The figure keys of the values web_table computed in this run (its counts, sums and averages,
+    // never a min or a max, at most 32), handed up as computedAggregateKeys: an aggregate over an
+    // 18-row listing is short by construction, and the
+    // orchestrator's coverage re-synthesis asked for "all 18 items" and got invented rows (E2E
+    // 2026-10-09, session 820e1171: 596 became 740).
+    const computedAggregateKeys = new Set<string>();
     // Cost-center 3 (audit 5d51862f): consecutive fetches that returned NO usable content
     // (404 / blocked / non-extractable PDF / error page). These slip past the success-only
     // stale-domain plateau, so the model keeps guessing alternate URLs for the same document
@@ -4241,9 +4471,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
     // The account this run is for, on every outcome it writes and every lesson it records: under
     // multi-user auth a reader shows an entry's task and lesson to that account only
-    // (memory/service.ts). The identity its tools act as (toolContext.userId, else the request's): an
-    // A2A caller's run has no request user of its own, only opts.userId.
-    const runAccount = recordAccount(opts.userId);
+    // (memory/service.ts). The identity its tools act as (the run's own, else the request's, never
+    // one field from each): an A2A caller's run has no request user of its own, only its options.
+    const runAccount = recordAccount(toolCallIdentity(opts));
     /** G32: Thin wrapper that auto-injects taskKeywords + sharedFindingsCount.
      *  Also closes the graph-memory retrieval feedback loop on success/partial
      *  outcomes so retrieved memories that led to a real deliverable get
@@ -4391,6 +4621,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         ...(wardenStop ? { wardenStop: { ...wardenStop } } : {}),
         ...(executions ? { executions } : {}),
         ...(maskedRuns ? { maskedRuns } : {}),
+        ...(computedAggregateKeys.size > 0 ? { computedAggregateKeys: [...computedAggregateKeys] } : {}),
       };
     };
 
@@ -5969,18 +6200,27 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
       // bound — only their POSITION changed.
       const nudgeMessage = iterationNudges.join("\n\n");
       // Read what the run has received BEFORE the trim digests, drops or clamps it (see
-      // absorbNewHistory); the nudges count too, since the model reads them as context.
-      if (tracksFigures) {
+      // absorbNewHistory); the nudges count too, since the model reads them as context. The absorb
+      // runs for the action-identifier check as well — design §12.2 absorbs identifiers at the same
+      // input points as figures — or an agent that checks claims but does not track figures (holds
+      // an approval-gated tool, no sandbox tool: a mail/notification/http specialist) would lose a
+      // URL or hash a tool result carried the moment the trim digested that result, and flag the
+      // answer that cites it as unbacked. The nudges stay figure-only: the runtime's own wrap-up
+      // text is context the model reads, never an action identifier it could legitimately cite.
+      if (tracksFigures || checksActionClaims) {
         absorbNewHistory();
-        addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
+        if (tracksFigures) addReceivedFigureKeys(observedFigureKeys, nudgeMessage);
       }
       const trimmed = trimSubAgentHistory(history, {
         systemPromptChars: systemPrompt.length + nudgeMessage.length,
         tools: effectiveTools,
         contextWindow: modelConfig.contextWindow,
       });
-      // The trim shortens history in place, so everything left in it has been read.
-      if (tracksFigures) absorbedHistoryLength = history.length;
+      // The trim shortens history in place, so everything left in it has been read. Reset under the
+      // same combined condition the pre-trim absorb used: left gated on tracksFigures alone,
+      // absorbedHistoryLength would stay past the shrunken length for a claim-checking leaf and the
+      // next absorb would skip the messages appended after this trim.
+      if (tracksFigures || checksActionClaims) absorbedHistoryLength = history.length;
       // A digest is a KV-prefix break (everything behind the rewritten message re-prefills,
       // 10-16 s cold on the audited runs), so each batch is its own row: the log must show
       // how many breaks a run paid, not just how many messages it dropped. The row carries
@@ -6655,6 +6895,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           result = outputScan.redacted;
         }
 
+        // SHADOW: flag a commit/tag hash or URL this answer states that no input backed, when the
+        // run held consequential tools and none of them succeeded. Audit only.
+        shadowUnbackedActionClaim(result);
+
         const semanticOutcome: SubAgentOutcome = recovered.forcedOutcome
           ?? truncationRecovered.forcedOutcome
           ?? completedRunOutcome(result);
@@ -6668,6 +6912,66 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         );
         if (suspicious) {
           return suspicious;
+        }
+
+        // THE ARITHMETIC CHECK (orchestration.subAgentArithmeticCheck, agent/arithmetic-check.ts).
+        // E2E 2026-10-09: browser_agent wrote "17 + 9 + … + 73 = **609**", 18 terms that come to 604,
+        // and a single delegation's long answer is relayed verbatim, so the check sits here, on the
+        // text the run would return: after the mask and the redaction above. "shadow" (the default)
+        // writes one audit row and changes nothing. "nudge" sends the run back once, holding this
+        // answer, under every guard the row's skipReason names: no second nudge, an "auto" call with
+        // room left for the variant, no stop, no figures the provenance mask is checking (the nudge
+        // would hand the model's own figures to observedFigureKeys), and a real answer.
+        const correctiveAnswer = arithmeticHold.answer !== undefined && !arithmeticHold.settled;
+        if (correctiveAnswer) {
+          // The answer to the nudge replaces the held one only when it is a real answer. An empty
+          // or recovered one ends the run here, and the wrapper returns the held answer instead.
+          if (result === "Sub-agent produced no final response." || recovered.forcedOutcome || truncationRecovered.forcedOutcome) {
+            return withArtifacts({ output: result, stats });
+          }
+          arithmeticHold.settled = true;
+        }
+        const arithmeticMode = getConfig().orchestration?.subAgentArithmeticCheck ?? "shadow";
+        const mismatch = arithmeticMode === "off" ? undefined : findArithmeticMismatches(result)[0];
+        if (mismatch) {
+          const holdsWebTable = (effectiveToolNames ?? tools.map((tool) => tool.name)).includes("web_table");
+          const webTableCap = resolveSubAgentToolCap("web_table", isCoordinatorAgent);
+          const webTableUsable = holdsWebTable && !blockedToolReasons.has("web_table") && !sufficiencyToolsStripped
+            && (webTableCap === undefined || (perToolCallCount.get("web_table") ?? 0) < webTableCap);
+          // Variant A needs a tool call and an answer, variant B an answer.
+          const variant: "A" | "B" | null = webTableUsable && iterations + 2 < maxIterations ? "A"
+            : iterations + 1 < maxIterations ? "B" : null;
+          // Today a call goes out under tool_choice "none" only when the time budget is critical
+          // (caught the line before) or on the last iteration (variant is null), so the
+          // callToolChoice test decides nothing alone; it keeps any later "none" path from nudging.
+          const skipReason = arithmeticMode === "shadow" ? "shadow"
+            : correctiveAnswer ? "already_nudged"
+            : timeBudgetCritical ? "time_critical"
+            : callToolChoice !== "auto" || variant === null ? "no_iterations"
+            : lrgOperatorStop || supervisorStop || signal?.aborted || longRunningGenerationManager.isStopRequested(subSessionId) ? "stopped"
+            : tracksFigures && noExecutionCompleted(executionRecord) ? "figures_unverified"
+            : recovered.forcedOutcome || truncationRecovered.forcedOutcome ? "forced_outcome"
+            : undefined;
+          logAudit("guardrail_flagged", {
+            type: "sub_agent_arithmetic_mismatch",
+            agentName: opts.agentName,
+            mode: arithmeticMode,
+            stated: mismatch.stated,
+            computed: mismatch.computed,
+            terms: mismatch.terms.length,
+            excerpt: mismatch.excerpt,
+            holdsWebTable,
+            nudged: skipReason === undefined,
+            ...(skipReason !== undefined ? { skipReason } : {}),
+            ...(correctiveAnswer ? { secondMismatch: true } : {}),
+          }, { sessionId: subSessionId, severity: "warn" });
+          if (skipReason === undefined) {
+            arithmeticHold.answer = withArtifacts({ output: result, stats });
+            history.push({ role: "assistant", content: result });
+            history.push({ role: "user", content: arithmeticNudgeText(mismatch, variant === "A") });
+            iterations++;
+            continue;
+          }
         }
 
         history.push({ role: "assistant", content: result });
@@ -6986,6 +7290,20 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           toolResults.push({
             role: "tool",
             content: describeRunBlockedTool(tc.name, blockReason),
+            tool_call_id: tc.id,
+          });
+          continue;
+        }
+        if (tc.name === "web_table" && sufficiencyToolsStripped && !webTableCallAllowedAfterEvidenceStrip(tc.arguments, readPageUrls)) {
+          logAudit(
+            "sub_agent_tool_blocked",
+            { agentName: opts.agentName, tool: tc.name, reason: "evidence_cap_enforced" },
+            { sessionId: subSessionId, severity: "warn" },
+          );
+          toolResults.push({
+            role: "tool",
+            content: `${describeRunBlockedTool(tc.name, "evidence_cap_enforced")} `
+              + "web_table may still compute (aggregates, where, group_by) over pages this run has already read.",
             tool_call_id: tc.id,
           });
           continue;
@@ -7329,7 +7647,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // immediately prior call, return the cached result with a warning
         // instead of wasting an iteration on a redundant network round-trip.
         const prev = lastToolCallSig.get(tc.name);
-        if (prev && prev.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
+        if (prev && prev.args === argsSig && !readsLiveState(tc.name, tc.arguments) && !NEVER_REPLAYED_TOOLS.has(tc.name)) {
           if (loopBrakeRefuses(prev.result)) continue;
           log.warn(
             { agentName: opts.agentName, tool: tc.name },
@@ -7593,6 +7911,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
 
         if (result.success) {
           successfulToolCount += 1;
+          // For the narrated-action-claim check: record which consequential tools actually
+          // succeeded, so a run that only ATTEMPTED (or was approval-blocked on) its privileged
+          // tools is distinguished from one that completed one. Gated, so the default path is
+          // byte-identical.
+          if (checksActionClaims) succeededConsequentialTools.add(tc.name);
           // The supervisor's progress counter: a success counts only when it brought back a result
           // this run has not seen (isNovelToolOutcome). Taken from resultContent here, before any
           // note or nudge is appended to the message that carries it.
@@ -7872,6 +8195,34 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
           } else {
             nonProductiveFetchStreak = 0;
           }
+        } else if (tc.name === "web_table") {
+          // Not by fetchResultIsNonProductive: its text scan would count a computed 429 or a row
+          // value as a dead fetch, and an argument error as a failed one. The tool says which
+          // failures reached no page (fetchFailed); an argument error leaves the streak alone.
+          const webTable = result.metadata?.["webTable"] as { fetchFailed?: unknown } | undefined;
+          if (webTable?.fetchFailed === true) nonProductiveFetchStreak += 1;
+          else if (result.success) nonProductiveFetchStreak = 0;
+        }
+        if (result.success) {
+          const urlArg = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
+          if ((tc.name === "web_fetch" || tc.name === "browser_navigate") && typeof urlArg === "string") readPageUrls.add(comparablePageUrl(urlArg));
+          if (tc.name === "web_table") {
+            const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; computed?: unknown } | undefined;
+            for (const list of [webTable?.urls, webTable?.finalUrls]) {
+              if (!Array.isArray(list)) continue;
+              for (const url of list) if (typeof url === "string") readPageUrls.add(comparablePageUrl(url));
+            }
+            // Only what web_table computed: a min or a max is a cell's value, and recorded from
+            // every aggregate, a max that a 10-row listing showed waived its coverage check.
+            if (Array.isArray(webTable?.computed)) {
+              for (const value of webTable.computed as unknown[]) {
+                if (typeof value !== "string") continue;
+                const keys = new Set<string>();
+                addFigureKeys(keys, value);
+                for (const key of keys) if (computedAggregateKeys.size < 32) computedAggregateKeys.add(key);
+              }
+            }
+          }
         }
 
         // When web_search reports degraded/hard-blocked, block it at the call site for the
@@ -7972,7 +8323,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
         // replay it: live-state tools, NEVER_REPLAYED_TOOLS and a write that just emptied the
         // caches are never answered from one, so the brake never sees them either.
         if (loopBrakeEnabled && (idempotentCallCache.has(idemKey)
-          || (lastToolCallSig.get(tc.name)?.args === argsSig && !isLiveStateTool(tc.name) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
+          || (lastToolCallSig.get(tc.name)?.args === argsSig && !readsLiveState(tc.name, tc.arguments) && !NEVER_REPLAYED_TOOLS.has(tc.name)))) {
           replaysSinceWrite.set(idemKey, { calls: 1, answers: [executedAnswer] });
         }
       }
@@ -8873,6 +9224,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions): Promise<SubA
     // Clean up per-session search circuit-breaker state to avoid memory leaks.
     const clearSearch = await getSearchCleanup();
     clearSearch(subSessionId);
+    clearWebTableSessionState(subSessionId);
 
     // Transfer any computer sessions the sub-agent created back to the parent
     // so the orchestrator can reuse them if it falls back to direct tool calls.

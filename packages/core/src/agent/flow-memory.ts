@@ -5,6 +5,7 @@ import { childLogger } from "../logger.js";
 import { isProtectedConfigPath } from "./config-assistant-proposals.js";
 import { canReadRecord, recordReader } from "../runtime/user-scope.js";
 import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
+import { readAllRecords, rewriteJsonLines } from "../memory/bounded-ndjson-store.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -98,6 +99,30 @@ export function readFlowMemoryEntries(workspacePath: string, limit = 100): FlowM
     log.warn({ err }, "Failed to read flow memory entries");
     return [];
   }
+}
+
+/**
+ * What the account migration does to the entries stamped with an account: `rewrite` gets each
+ * stamped entry's account and returns the account to stamp instead, `null` to drop the entry, or
+ * `undefined` to leave it. One synchronous read-modify-write. Returns how many entries changed.
+ * Throws when the file cannot be read or written.
+ */
+export function rewriteFlowMemoryAccounts(workspacePath: string, rewrite: (account: string) => string | null | undefined): number {
+  return rewriteJsonLines(resolve(workspacePath, FLOW_MEMORY_FILE), (record) => {
+    const account = (record as FlowMemoryEntry | null)?.account;
+    if (typeof account !== "string") return undefined;
+    const next = rewrite(account);
+    return next === undefined ? undefined : next === null ? null : { ...(record as FlowMemoryEntry), account: next };
+  });
+}
+
+/** How many entries each account has stamped on it (the account migration's inventory). */
+export function flowMemoryAccountCounts(workspacePath: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const entry of readAllRecords<FlowMemoryEntry>(resolve(workspacePath, FLOW_MEMORY_FILE))) {
+    if (typeof entry?.account === "string") counts.set(entry.account, (counts.get(entry.account) ?? 0) + 1);
+  }
+  return counts;
 }
 
 export function searchFlowMemory(

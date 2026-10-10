@@ -4,6 +4,8 @@ import pg from "pg";
 import type { TurnOutput, TurnPerformanceMetrics } from "./runtime.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
+import type { Identity, PrincipalKind } from "../runtime/accounts.js";
+import { multiUserAuthActive, ownsRecord } from "../runtime/user-scope.js";
 
 const log = childLogger("agent:jobs");
 
@@ -46,6 +48,11 @@ export interface SceneJob {
   definitionType?: "scene" | "job";
   sessionId: string;
   userId?: string;
+  /** The account the run belongs to, by its immutable id (the account_id column). */
+  account?: string;
+  /** Set instead of `account` for a principal's run (a bootstrap token, a scene, job or channel
+   *  trigger); kept in the payload. A job with a userId and neither predates account ids. */
+  principal?: PrincipalKind;
   status: JobStatus;
   createdAt: string;
   startedAt?: string;
@@ -78,6 +85,8 @@ export interface SceneJobPayload {
   approvalTimeoutMs?: number;
   params?: Record<string, string>;
   turnTimeoutMs: number;
+  /** The principal kind of the run's owner (SceneJob.principal): the table has no column for it. */
+  principal?: PrincipalKind;
   /**
    * Resumable-workflow checkpoint (B31): the outputs of steps that have FULLY completed,
    * persisted after each step. On worker recovery the workflow restores these and resumes
@@ -94,6 +103,10 @@ export interface CreateSceneJobInput {
   sceneName: string;
   definitionType?: "scene" | "job";
   userId?: string;
+  /** With `userId`, from one identity (runtime/accounts.ts): the owner's account id ... */
+  account?: string;
+  /** ... or principal kind. */
+  principal?: PrincipalKind;
   task?: string;
   steps?: JobExecutionStep[];
   allowedAgents?: string[];
@@ -153,6 +166,7 @@ interface SceneJobRow {
   definition_type: string | null;
   session_id: string;
   user_id: string | null;
+  account_id?: string | null;
   status: JobStatus;
   created_at: string | Date;
   started_at: string | Date | null;
@@ -192,11 +206,18 @@ export async function createJob(input: CreateSceneJobInput): Promise<SceneJob> {
 }
 
 /** Which jobs a listing returns: the newest `limit` (default 50, at most 200) of those with the
- *  given status and, when `userId` is set, run as that user. Both filters apply before the limit. */
+ *  given status and, when `owner` is set, run as that identity. Both filters apply before the
+ *  limit. */
 export interface ListJobsOptions {
   limit?: number;
   status?: JobStatus;
-  userId?: string;
+  /**
+   * Only the runs this identity owns (runtime/user-scope.ts ownsRecord): an account's by its id, a
+   * principal's by its kind and name. It was the username the runs were made as, so an account
+   * created again under a deleted one's name listed the old one's runs. A run from before account
+   * ids, or made as nobody, is nobody's here.
+   */
+  owner?: Identity;
 }
 
 export async function listJobs(opts?: ListJobsOptions): Promise<SceneJob[]> {
@@ -239,6 +260,32 @@ export async function cancelJob(id: string): Promise<SceneJob | undefined> {
     });
   }
   return job;
+}
+
+/**
+ * Cancels every queued and running job of an account that was deleted or retired: a queued one
+ * before it runs, a running one through its worker, as a cancel from the dashboard does. They ran
+ * on as an account nobody can sign in as any more, in storage nobody can reach. Matched by the
+ * account id (account_id in Postgres), never by name. Returns the ids it cancelled.
+ */
+export async function cancelAccountJobs(account: string): Promise<string[]> {
+  const owner: Identity = { account };
+  const cancelled: string[] = [];
+  const seen = new Set<string>();
+  for (const status of ["queued", "running"] as const) {
+    // A listing returns at most 200; each round cancels what it lists, so the next lists the rest.
+    // Bounded, should a job keep its status after a cancel.
+    for (let round = 0; round < 50; round += 1) {
+      const page = (await listJobs({ owner, status, limit: 200 })).filter((job) => !seen.has(job.id));
+      if (page.length === 0) break;
+      for (const job of page) {
+        seen.add(job.id);
+        const result = await cancelJob(job.id);
+        if (result?.status === "cancelled" || result?.status === "cancelling") cancelled.push(job.id);
+      }
+    }
+  }
+  return cancelled;
 }
 
 export async function markJobCancelled(id: string, reason: string): Promise<void> {
@@ -352,6 +399,7 @@ class InMemorySceneJobStore implements SceneJobStore {
       definitionType,
       sessionId,
       userId: input.userId,
+      ...jobOwnerStamp(input),
       status: "queued",
       createdAt,
       progress: defaultProgress("queued", "Queued for worker execution"),
@@ -365,6 +413,7 @@ class InMemorySceneJobStore implements SceneJobStore {
         approvalTimeoutMs: input.approvalTimeoutMs,
         params: input.params,
         turnTimeoutMs: input.turnTimeoutMs,
+        ...jobPrincipalStamp(input),
       },
     };
     this.jobs.set(job.id, job);
@@ -376,7 +425,7 @@ class InMemorySceneJobStore implements SceneJobStore {
     const limit = normalizeListLimit(opts?.limit);
     return [...this.jobs.values()]
       .filter((job) => !opts?.status || job.status === opts.status)
-      .filter((job) => opts?.userId === undefined || job.userId === opts.userId)
+      .filter((job) => opts?.owner === undefined || ownsRecord(opts.owner, sceneJobIdentity(job)))
       .sort((left, right) => (right.completedAt ?? right.startedAt ?? right.createdAt).localeCompare(left.completedAt ?? left.startedAt ?? left.createdAt))
       .slice(0, limit)
       .map((job) => toPublicJob(job));
@@ -589,6 +638,11 @@ class PostgresSceneJobStore implements SceneJobStore {
       CREATE INDEX IF NOT EXISTS idx_scene_jobs_heartbeat ON scene_jobs (heartbeat_at);
     `);
     await this.pool.query(`ALTER TABLE scene_jobs ADD COLUMN IF NOT EXISTS definition_type TEXT`);
+    // The account a job runs for, by its immutable id: user_id is a username, and a name deleted
+    // and created again is another person. The column exists from init on, so the account
+    // migration only fills it in and never changes the table under a running gateway.
+    await this.pool.query(`ALTER TABLE scene_jobs ADD COLUMN IF NOT EXISTS account_id TEXT`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS idx_scene_jobs_account ON scene_jobs (account_id)`);
     await this.recoverStaleJobs(STALE_JOB_MS);
     log.info("Scene job table ready");
   }
@@ -609,13 +663,14 @@ class PostgresSceneJobStore implements SceneJobStore {
       approvalTimeoutMs: input.approvalTimeoutMs,
       params: input.params,
       turnTimeoutMs: input.turnTimeoutMs,
+      ...jobPrincipalStamp(input),
     };
 
     await this.pool.query(
       `INSERT INTO scene_jobs (
-         id, scene_name, definition_type, session_id, user_id, status, created_at, progress, payload
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)`,
-      [id, input.sceneName, definitionType, sessionId, input.userId ?? null, "queued", createdAt, JSON.stringify(progress), JSON.stringify(payload)]
+         id, scene_name, definition_type, session_id, user_id, status, created_at, progress, payload, account_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10)`,
+      [id, input.sceneName, definitionType, sessionId, input.userId ?? null, "queued", createdAt, JSON.stringify(progress), JSON.stringify(payload), jobOwnerStamp(input).account ?? null]
     );
 
     return {
@@ -624,6 +679,8 @@ class PostgresSceneJobStore implements SceneJobStore {
       definitionType,
       sessionId,
       userId: input.userId,
+      ...jobOwnerStamp(input),
+      ...(payload.principal ? { principal: payload.principal } : {}),
       status: "queued",
       createdAt,
       progress,
@@ -638,9 +695,25 @@ class PostgresSceneJobStore implements SceneJobStore {
       values.push(opts.status);
       conditions.push(`status = $${values.length}`);
     }
-    if (opts?.userId !== undefined) {
-      values.push(opts.userId);
-      conditions.push(`user_id = $${values.length}`);
+    if (opts?.owner !== undefined) {
+      // The same rule in SQL: an account's runs by account_id; a principal's by its name, its kind
+      // (kept in the payload) and no account. Anything else owns nothing.
+      const owner = opts.owner;
+      if (owner.account) {
+        values.push(owner.account);
+        conditions.push(`account_id = $${values.length}`);
+      } else if (owner.principal && owner.userId !== undefined) {
+        values.push(owner.userId);
+        const userParam = `$${values.length}`;
+        values.push(owner.principal);
+        conditions.push(`account_id IS NULL AND user_id = ${userParam} AND payload->>'principal' = $${values.length}`);
+      } else if (!multiUserAuthActive() && owner.userId !== undefined) {
+        // One operator: by the name the runs were made as, as always.
+        values.push(owner.userId);
+        conditions.push(`user_id = $${values.length}`);
+      } else {
+        conditions.push("FALSE");
+      }
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     values.push(limit);
@@ -926,6 +999,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       definitionType: row.definition_type === "job" ? "job" : "scene",
       sessionId: row.session_id,
       userId: row.user_id ?? undefined,
+      ...(row.account_id ? { account: row.account_id } : {}),
       status,
       createdAt: toIso(row.created_at) ?? nowIso(),
       startedAt: toIso(row.started_at),
@@ -979,6 +1053,7 @@ function normalizePayload(value: unknown): SceneJobPayload {
       ? Object.fromEntries(Object.entries(payload.params as Record<string, unknown>).map(([key, entry]) => [key, String(entry)]))
       : undefined,
     turnTimeoutMs: typeof payload.turnTimeoutMs === "number" && Number.isFinite(payload.turnTimeoutMs) ? payload.turnTimeoutMs : 900_000,
+    ...(isPrincipalKind(payload.principal) ? { principal: payload.principal } : {}),
     // B31 resumable-workflow checkpoint: MUST round-trip through the Postgres jsonb read
     // path or resume silently never happens (the field is written by saveWorkflowCheckpoint
     // but would otherwise be stripped here). Keep only entries with the TurnOutput shape
@@ -1115,6 +1190,8 @@ function toPublicJob(job: StoredSceneJob): SceneJob {
     definitionType: job.definitionType,
     sessionId: job.sessionId,
     userId: job.userId,
+    ...(job.account ? { account: job.account } : {}),
+    ...(!job.account && job.payload.principal ? { principal: job.payload.principal } : {}),
     status: job.status,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
@@ -1126,4 +1203,32 @@ function toPublicJob(job: StoredSceneJob): SceneJob {
     error: job.error,
     progress: structuredClone(job.progress),
   };
+}
+
+const PRINCIPAL_KINDS: readonly PrincipalKind[] = ["bootstrap", "channel", "peer", "synthetic"];
+
+function isPrincipalKind(value: unknown): value is PrincipalKind {
+  return typeof value === "string" && (PRINCIPAL_KINDS as readonly string[]).includes(value);
+}
+
+/** The account a new job is stamped with (the account_id column), when its owner is one. */
+function jobOwnerStamp(input: Pick<CreateSceneJobInput, "account">): { account?: string } {
+  return input.account ? { account: input.account } : {};
+}
+
+/** The principal kind a new job keeps in its payload, when its owner is one and no account. */
+function jobPrincipalStamp(input: Pick<CreateSceneJobInput, "account" | "principal">): { principal?: PrincipalKind } {
+  return !input.account && input.principal ? { principal: input.principal } : {};
+}
+
+/**
+ * Who a job runs as, whole: its account with its username, or its principal kind with its name. A
+ * job with a userId and neither was queued before account ids existed and is its name alone; with
+ * no userId it names nobody.
+ */
+export function sceneJobIdentity(job: Pick<SceneJob, "userId" | "account" | "principal">): Identity | undefined {
+  if (job.userId === undefined) return undefined;
+  if (job.account) return { userId: job.userId, account: job.account };
+  if (job.principal) return { userId: job.userId, principal: job.principal };
+  return { userId: job.userId };
 }

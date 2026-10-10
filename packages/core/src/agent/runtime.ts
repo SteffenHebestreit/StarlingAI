@@ -38,6 +38,7 @@ import {
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
+import { addFigureKeys } from "./figure-provenance.js";
 import { getConfig } from "../config/loader.js";
 import {
   runWithEffortContext,
@@ -164,6 +165,7 @@ import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstru
 // closure; runtime.ts imports them back (one-directional edge, no cycle).
 import {
   blocked,
+  prepareLegacySession,
   prepareRateLimit,
   prepareCostBudget,
   prepareInputGuardrails,
@@ -261,7 +263,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
-import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentVerdict } from "./turn-setup.js";
+import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
 // heavily-mocked module so gateway/rpc.ts can import it without going through runtime.js).
@@ -424,7 +426,8 @@ const MAX_CONTINUATION_OVERLAP_CHARS = 400;
  * The call only has to name an agent and a task. Thinking-off makes the burn rarer but does not
  * remove it: on a prompt the model wants to answer itself, 9 of 12 forced calls came with thinking
  * off and 1 of 12 with it on, and every miss ran to the ceiling (2026-10-08). What holds there is
- * the prefilled tool call at the call site (ModelConfig.toolCallPrefill, off by default). The
+ * the prefilled tool call at the call site (ModelConfig.toolCallPrefill), which the turn asks for
+ * on its --agent and build calls only (forcedCallPrefill in the iteration loop). The
  * ceiling bounds a runaway that gets past them: the largest forced-call arguments observed are a
  * record_plan with steps + acceptance criteria ≈1,200 tokens and a coordinator task ≈500 chars,
  * so 4,000 clears them and caps a runaway at ~2 min at the measured 34.5 tok/s instead of the
@@ -760,6 +763,25 @@ async function enforceDelegateCoverage(
   const lengthShortfall = initialCoverage.lengthShortfall;
 
   if (!itemShortfall && !lengthShortfall) return finalResponse;
+
+  // A computed aggregate is short by construction. The delegated run computed it with web_table
+  // (computedAggregateKeys), the reply states that very figure, and the evidence it falls short of
+  // is the listing the figure was computed over. Re-synthesizing "for all 18 items" turned a
+  // correct 596 into 740 with four invented rows (E2E 2026-10-09, session 820e1171). Figure identity
+  // against a value the tool computed, not text matching: a reply stating another total, or none,
+  // is still checked for coverage.
+  if (evidence.computedAggregateKeys && evidence.computedAggregateKeys.length > 0) {
+    const stated = new Set<string>();
+    addFigureKeys(stated, finalResponse);
+    if (evidence.computedAggregateKeys.some((key) => stated.has(key))) {
+      logAudit(
+        "guardrail_flagged",
+        { type: "coverage_shortfall_waived_computed_aggregate", evidenceItems: evidence.itemCount, finalItems },
+        { sessionId: session.id, channel: session.channel, severity: "info" },
+      );
+      return finalResponse;
+    }
+  }
 
   // A15: Action-task exemption. Delete, move, archive, send, and similar
   // mutation tasks produce short confirmation responses that legitimately
@@ -1119,11 +1141,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   let intentShadow: IntentShadowHandle | undefined;
   let delivered: TurnOutput | undefined;
   try {
-    // Run the ENTIRE turn under the authenticated user's request context so that
-    // prompt assembly, personality, the user-model, and durable memory all see the
-    // ambient userId and resolve to that user's per-user store (multi-user auth).
-    // When auth is off the session has no userId → single shared path (back-compat).
-    // The per-tool wrap in tools/registry.ts re-sets the same userId for each tool.
+    // Run the ENTIRE turn under the session's identity so that prompt assembly, personality, the
+    // user-model, and durable memory all resolve to its owner's per-user store (multi-user auth):
+    // the account by its id, a principal by its own segment. When auth is off nothing is
+    // partitioned (back-compat). The per-tool wrap in tools/registry.ts re-sets the same identity
+    // for each tool.
     // Establish a fresh per-turn phase-timing store, then run the turn inside it so
     // timedPhase() calls anywhere in the turn record into THIS turn's map.
     // sessionId/agentName/callSite are ATTRIBUTION, not scoping: they let the two
@@ -1144,6 +1166,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
       sessionId: opts.session.id,
       turnId,
       ...(opts.session.userId ? { userId: opts.session.userId } : {}),
+      ...(opts.session.identity() ? { identity: opts.session.identity() } : {}),
       channel: opts.session.channel,
       userMessage: opts.userMessage,
       // Read now, before the turn records its message: the same digest the facet triage reads.
@@ -1153,7 +1176,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     });
     delivered = await runWithRequestContext(
       {
-        userId: opts.session.userId,
+        identity: opts.session.identity(),
         sessionId: opts.session.id,
         agentName: "main",
         callSite: "main_turn",
@@ -1761,6 +1784,10 @@ async function _runTurn(
     toolSchemasChars: 0,
   };
 
+  // ── A conversation that predates account ids runs no turn (multi-user auth) ─
+  const legacyRefused = prepareLegacySession(session);
+  if (legacyRefused) return legacyRefused;
+
   // ── Rate limit check ──────────────────────────────────────────────────────
   const rateLimited = await prepareRateLimit(session);
   if (rateLimited) return rateLimited;
@@ -1859,6 +1886,63 @@ async function _runTurn(
   // lists do not already see.
   const deliverableIntent = classifyDeliverableIntent(userMessage);
 
+  // ── The --auto forced first call and the intent readout ─────────────────────
+  // Under orchestration.autonomousModeAntiRefusal an --auto turn that asks for an artifact has its
+  // first tool call forced (autonomousArtifactBuild below). Two arms say a turn is one: the
+  // deliverable-intent word lists, here, and the discovery prefetch's routing, below. Neither reads
+  // what the request asks the assistant to do. The word lists match verbs and nouns, so "Wie
+  // erstelle ich eine Präsentation in PowerPoint?" was forced exactly like "Erstelle eine
+  // Präsentation …", and a question is never to be forced (decision of 2026-10-09). So the word-list
+  // arm asks the intent readout too (startProduceIntentRead, the same read as the routing arm's),
+  // started here, the moment the lists have fired, so its two calls overlap the judge, the document
+  // retrieval and the prompt assembly. A reading that the request asks for an answer (converse,
+  // GATHER, VERIFY) releases this arm.
+  // That releases the questions the readout reads as questions, not every question. On the probe
+  // of 2026-10-09 (the Halo, the read as asked here) a question about a tool or a technique read an
+  // answer every time ("… in PowerPoint?", "… with Hugo?", "… in Excel?"), but a question how to
+  // make the thing itself, with no tool named, read PRODUCE in both orders every time: "How do I
+  // make a good slide about tides?", "How can I build a website for my bakery?", "Wie erstelle ich
+  // ein PDF-Flugblatt?" and seven more the word lists fire on, 30 of the 54 reads of those 18
+  // questions. Such a question is still forced.
+  // Nor does every build stay forced: the E2E request to run the verified_research_brief workflow
+  // reads GATHER in the served order, so this arm releases it; there the source-sensitivity
+  // judge's research requirement forces the first call (its readout read yes on 5 of 5 probe reads).
+  // Without a reading, as the user ruled (decision 6, option 3), the word lists decide as they
+  // always did only where the deployment can never give one ("unavailable": a Claude routing tier,
+  // a server without token logprobs, no provider), and there a question among them is forced too.
+  // On such a deployment every --auto build would otherwise lose the call that keeps it from being
+  // answered inline. Where the readout can read, a read that gave nothing this time ("missed": a
+  // timeout, an error, one option order alone, no mode facet) releases the arm, so no question is
+  // forced because one read failed; a build there is left to the orchestrator for that turn. That
+  // is rare: on the Halo the read, both orders at once and the mode line alone, came back in time
+  // on all 68 probe reads of new messages, with less than a second to spare after the server's
+  // slots had been overwritten (PRODUCE_INTENT_READ_TIMEOUT_MS). The routing arm, whose own signal
+  // is the top agent's tools rather than anything in the request, forces only on a reading of
+  // work, and never without one, "unavailable" included. Neither arm asks on a workflow step,
+  // which is never forced, or on an --agent directive turn, whose directive forces the call until
+  // its agent has run (see the routing arm below); there the word lists decide as before. With the
+  // flag off or without --auto nothing is asked.
+  const autoArtifactArmed = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
+    && opts.autoApprove === true;
+  // Typed by assertion: it may be assigned inside the prefetch's callback, which narrowing does
+  // not follow.
+  let produceIntentRead = null as Promise<ProduceIntentReadOutcome> | null;
+  /** The read's outcome once awaited; null on a turn that asked none. */
+  let intentReadOutcome: ProduceIntentReadOutcome | null = null;
+  const startIntentRead = (arm: "word_list" | "routing"): void => {
+    const priorTurnDigest = buildPriorTurnDigest(session);
+    produceIntentRead = startProduceIntentRead({
+      userMessage,
+      ...(priorTurnDigest ? { priorTurnDigest } : {}),
+      sessionId: session.id,
+      signal,
+      arm,
+    });
+  };
+  if (autoArtifactArmed && deliverableIntent.wantsArtifact && session.channel !== "workflow" && directiveAgent === undefined) {
+    startIntentRead("word_list");
+  }
+
   // ── Discovery prefetch: STARTED here, consumed by the first prompt assembly ──
   // It reads only the user's message and the turn's agent grant, so like the judge above it starts
   // the moment the fast lane has declined the turn (finding 2026-10-05). Started inside the first
@@ -1874,41 +1958,30 @@ async function _runTurn(
   // two calls overlap the document retrieval and the prompt assembly: only a reading that the
   // request asks for something to be made or done arms the same forced first tool call as an
   // artifact request the word lists recognise (autonomousArtifactBuild below). A request the word
-  // lists see is forced by them already, and a workflow step is never forced, so neither asks. Nor
-  // does an --agent directive turn: the directive forces the call until its agent has run, and the
-  // delegation that runs it releases this arm, so the verdict would change nothing and its wait
-  // would only delay the first token. (A plan step that attempted the agent and failed releases the
-  // directive without counting as a delegation; that turn is left to the orchestrator, as a turn
-  // without a reading is.)
+  // lists see has had the read started for it above, and a workflow step is never forced, so
+  // neither asks here. Nor does an --agent directive turn: the directive forces the call until its
+  // agent has run, and the delegation that runs it releases this arm, so the verdict would change
+  // nothing and its wait would only delay the first token. (A plan step that attempted the agent
+  // and failed releases the directive without counting as a delegation; that turn is left to the
+  // orchestrator, as a turn without a reading is.)
   // Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a late
-  // or failed prefetch. readPrefetchRouting is the one gate on this path: the flag and autoApprove
+  // or failed prefetch. autoArtifactArmed is the one gate on this path: the flag and autoApprove
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
   // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
-  // Typed by assertion: it is assigned only inside the callback, which narrowing does not follow.
-  let produceIntentRead = null as Promise<ProduceIntentVerdict | null> | null;
-  let prefetchAskedToProduce: ProduceIntentVerdict | null = null;
-  const readPrefetchRouting = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-    && opts.autoApprove === true;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
       userMessage,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
-      ...(readPrefetchRouting
+      ...(autoArtifactArmed
         ? {
             onCapsuleAgents: (agents) => {
               prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
               if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
                 && directiveAgent === undefined) {
-                const priorTurnDigest = buildPriorTurnDigest(session);
-                produceIntentRead = startProduceIntentRead({
-                  userMessage,
-                  ...(priorTurnDigest ? { priorTurnDigest } : {}),
-                  sessionId: session.id,
-                  signal,
-                });
+                startIntentRead("routing");
               }
             },
           }
@@ -2179,6 +2252,7 @@ async function _runTurn(
     sessionId: session.id,
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
+    identity: session.identity(),
     userRole: session.userRole,
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
@@ -2864,15 +2938,15 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "info" });
     }
 
-    // The intent readout's verdict for the --auto routing arm (autonomousArtifactBuild below),
-    // awaited once, on the first iteration it is pending. It is timed as its own phase, and awaited
+    // The intent readout's verdict for the --auto arms (autonomousArtifactBuild below), awaited
+    // once, on the first iteration it is pending. It is timed as its own phase, and awaited
     // here, before llmStartedAt, because turn_performance counts a phase outside llmTimeMs: awaited
     // inside the call's window, the same seconds were counted in both, and a slow turn's SLO alert
     // named the model and this wait for one stretch of wall-clock.
     if (produceIntentRead) {
       const pendingRead = produceIntentRead;
       produceIntentRead = null;
-      prefetchAskedToProduce = await timedPhase("produceIntentReadWait", () => pendingRead);
+      intentReadOutcome = await timedPhase("produceIntentReadWait", () => pendingRead);
     }
 
     let llmResponse: LLMResponse;
@@ -2935,20 +3009,27 @@ async function _runTurn(
       // artifact request also forces the first tool call, even if the narrower
       // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
       // wantsArtifact); no topic/keywords.
+      // The word lists also fire on a question about making one ("Wie erstelle ich eine
+      // Präsentation in PowerPoint?"), so the intent readout is asked as well (started where the
+      // lists fired), and its reading that the request asks for an answer releases the arm. Without
+      // a reading the lists decide as before only on a deployment that can never give one
+      // ("unavailable"); a read that missed this time releases the arm (the user's decision 6,
+      // option 3). On a turn that asked no read (a workflow step, an --agent directive turn) the
+      // lists decide as before. A question the readout reads as work ("How do I make a good slide
+      // about tides?") is still forced (see where the read starts).
       // The discovery prefetch counts as seeing one too (prefetchRoutedToDeliverable): the word
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
-      // first. That signal is gated once, where the prefetch starts (readPrefetchRouting: the same
+      // first. That signal is gated once, where the prefetch starts (autoArtifactArmed: the same
       // flag and autoApprove), and is true only when that gate passed. It reads the top agent's
       // tools, not the request, so it forces only with the intent readout's word that the request
       // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
-      // a question is not forced, and without a reading the orchestrator decides as on any turn.
+      // a question the readout reads as an answer is not forced, and without a reading the
+      // orchestrator decides as on any turn.
       // The read is awaited above, before this call's clock starts.
       const autonomousArtifactBuild =
-        ((getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-          && opts.autoApprove === true
-          && deliverableIntent.wantsArtifact)
-        || (prefetchRoutedToDeliverable && prefetchAskedToProduce === "produce");
+        (autoArtifactArmed && deliverableIntent.wantsArtifact && intentReadOutcome !== "ask" && intentReadOutcome !== "missed")
+        || (prefetchRoutedToDeliverable && intentReadOutcome === "produce");
       // The directive (`--agent`) is released by its agent having run, not by the tally: a
       // delegation the tally counted may never have reached that agent.
       // The research requirement is also released by a knowledge-base read that brought content
@@ -2971,6 +3052,40 @@ async function _runTurn(
         planRecorded: async () => (await loadTurnPlan(session.id)) !== null,
       });
       iterationToolRestriction = restriction;
+      // WHICH FORCED CALLS START INSIDE THEIR TOOL CALL (ModelConfig.toolCallPrefill). "required" does
+      // not make the call come first on the deployed llama.cpp: it only keeps the turn from ending
+      // until a call is complete, so a model that wants to answer itself writes prose up to the
+      // ceiling (13,263 characters on the --agent turn of 2026-10-07). With `<tool_call>\n<function=`
+      // prefilled, the call is the continuation, and the think block is closed before it.
+      // Replayed on the Halo on 2026-10-09 (the turn's own forced requests, 12 per arm in one run),
+      // the prefill helped the calls whose next call is already decided and hurt the ones that still
+      // have to decide it, so it is asked for on the first kind only:
+      // - an --agent directive, named: delegate_to_agent to code_analyst 12 of 12 with and without
+      //   it, at half the generation time (6.6 s against 15.4 s median);
+      // - a build the turn must hand off (the artifact arms), bare, while no plan exists. Without
+      //   it the Mermaid build wrote prose to the 4,000-token ceiling 8 times in 12 and called a
+      //   tool the call site refuses the other 4; with it, delegate_to_agent to diagram_designer 12
+      //   of 12. A site, a chart and a deck that needs research first routed the same either way.
+      // Not on a call forced for research alone: the multi-step plan call then skipped the agent
+      // search its tail asks for and planned with web_coder 10 times in 12. Not once a plan exists:
+      // on the price question, after a no-op execute_plan, the thinking-off dispatch picked
+      // record_plan, run_workflow or execute_plan 12 times in 12 and delegated 0 times, against 7
+      // of 12 without it. The provider sends the opener only where the model config names the
+      // syntax; unasked, nothing changes.
+      // A build's plan call is not followed by an unprefilled dispatch when its step runs. With the
+      // prefill the chart build recorded a one-step chart_designer plan 12 times in 12 (7 without).
+      // record_plan alone runs a plan with a delegate step in its own call (planRoundFold), so the
+      // delegation happens there, and one that succeeds releases the force. A forced call with the
+      // plan in place is left only after a failed delegation, or after a plan of direct steps (one
+      // website build in 12, either way). Replayed on 2026-10-09, 12 per arm, sent unprefilled as
+      // here: after the prefilled chart plan whose step failed, a valid call 12 times in 12; after
+      // the one-direct-step website plan, 10 of 12; none ran to the ceiling. Prefilled, the latter
+      // picked execute_plan 12 times in 12, a no-op for that plan.
+      const forcedCallPrefill: { tool?: string } | undefined = directiveAgentPending
+        ? { tool: "delegate_to_agent" }
+        : (requiresArtifactDelegation || autonomousArtifactBuild) && forcedPlanState?.planRecorded === false
+          ? {}
+          : undefined;
       llmResponse = await collectStream(
         provider.stream(
           messages,
@@ -2984,18 +3099,8 @@ async function _runTurn(
                 // call's whole job is the deliberation — see FORCED_TOOL_CALL_CONTROLS.
                 ...(forcedPlanState?.planRecorded !== false ? { controls: FORCED_TOOL_CALL_CONTROLS } : {}),
                 maxTokens: FORCED_TOOL_CALL_MAX_TOKENS,
-                // "required" DOES NOT MAKE THE CALL COME FIRST on the deployed llama.cpp: it only
-                // keeps the turn from ending until a call is complete, so a model that wants to
-                // answer itself writes prose up to the ceiling (13,263 characters on the --agent
-                // turn of 2026-10-07). With `<tool_call>\n<function=` prefilled the call is the
-                // continuation: 24 of 24 against 10 of 24 on one prompt. Asked on every forced
-                // call; the provider sends it only where ModelConfig.toolCallPrefill names the
-                // syntax, so with that unset the request is what it was. Named while an --agent
-                // directive is pending: that call has one right answer, the delegation the user
-                // asked for. On the PLANNING call a continuation also closes the think block
-                // (0 reasoning characters, 4 of 4), so with the flag set the plan is recorded
-                // without deliberating; a two-phase call that thinks first is the follow-up.
-                prefillToolCall: directiveAgentPending ? { tool: "delegate_to_agent" } : {},
+                // See forcedCallPrefill above for which forced calls ask for it.
+                ...(forcedCallPrefill ? { prefillToolCall: forcedCallPrefill } : {}),
               }
             : undefined,
         ),
@@ -6099,6 +6204,7 @@ async function runQaDeliveryGate(
         parentSessionId: session.id,
         workspacePath: session.getWorkspacePath(),
         userId: session.userId,
+        identity: session.identity(),
         signal,
         maxIterationsOverride: 5,
         turnTimeoutOverrideMs: 120_000,

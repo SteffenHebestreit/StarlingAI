@@ -21,8 +21,9 @@
 export const UNOBSERVED_FIGURE_MARKER = "[not observed]";
 
 /** A run of digits, optionally grouped in threes by . , ' ’ NBSP or NNBSP, with an optional decimal
- *  tail, that no digit follows. */
-const FIGURE_BODY = String.raw`(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})`;
+ *  tail, that no digit follows. Exported so a table cell's value (tools/table-numbers.ts) and an
+ *  arithmetic chain (agent/arithmetic-check.ts) read a figure exactly as this module does. */
+export const FIGURE_BODY = String.raw`(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})`;
 /** A figure: never one that continues a word or a number in front of it. */
 const FIGURE_RE = new RegExp(String.raw`(?<![\p{L}\p{N}_])${FIGURE_BODY}`, "gu");
 /** The digits an identifier carries: a figure glued to a letter or "_" in front of it, the "18.17"
@@ -37,7 +38,7 @@ const DECIMAL_DIGIT_RE = /\p{Nd}/u;
  * only in contiguous runs of ten, zero first, so a digit's value is its distance from the start of
  * its run, modulo ten (several scripts' runs sit back to back, which the modulo absorbs).
  */
-function asciiDigit(digit: string): string {
+export function asciiDigit(digit: string): string {
   const codePoint = digit.codePointAt(0)!;
   if (codePoint >= 0x30 && codePoint <= 0x39) return digit;
   let start = codePoint;
@@ -83,6 +84,84 @@ export function addReceivedFigureKeys(into: Set<string>, text: string | null | u
       if (countsAsFigure(key) && !except?.has(key)) into.add(key);
     }
   }
+}
+
+/**
+ * Action identifiers (v1), structural and language-independent — no verb or keyword lists, per the
+ * no-keyword rule. Two shapes: a hex token of 7 to 40 characters that holds at least one digit AND
+ * at least one a–f letter (a git commit or tag id), and an http(s) URL. The digit-and-letter rule
+ * keeps pure-digit figures (which the figure check already covers) and all-letter words out. A hex
+ * token is keyed lowercased; a URL is trimmed of trailing sentence punctuation and lowercased.
+ */
+const HEX_IDENTIFIER_RE = /(?<![\p{L}\p{N}_])[0-9a-fA-F]{7,40}(?![\p{L}\p{N}_])/gu;
+const URL_IDENTIFIER_RE = /https?:\/\/[^\s<>"'`()[\]]+/giu;
+const HEX_KEY_RE = /^[0-9a-f]{7,40}$/;
+
+function isCommitLikeHex(token: string): boolean {
+  return /[0-9]/.test(token) && /[a-f]/i.test(token);
+}
+
+function normalizeUrlIdentifier(url: string): string {
+  return url.replace(/[.,;:!?)\]}>"']+$/, "").toLowerCase();
+}
+
+/** The normalized action identifiers `text` contains: commit/tag hex ids and http(s) URLs. */
+export function identifierTokens(text: string | null | undefined): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const match of text.matchAll(HEX_IDENTIFIER_RE)) {
+    if (isCommitLikeHex(match[0])) out.push(match[0].toLowerCase());
+  }
+  for (const match of text.matchAll(URL_IDENTIFIER_RE)) {
+    const key = normalizeUrlIdentifier(match[0]);
+    if (key.length > "https://".length) out.push(key);
+  }
+  return out;
+}
+
+/** Add the key of every action identifier `text` holds as an input of the run, to `into`, except the
+ *  keys in `except`. Fed at the same absorb points as addReceivedFigureKeys, so an identifier any
+ *  input contained — the task, a tool result (a git_log hash), a system message — counts as backed.
+ *  `except` carries the run's OWN claims (ownClaimIdentifierKeys), so a hash or URL the run wrote
+ *  into a call argument and a failed tool handed back verbatim does not vouch for itself. */
+export function addReceivedIdentifierKeys(into: Set<string>, text: string | null | undefined, except?: ReadonlySet<string>): void {
+  for (const key of identifierTokens(text)) {
+    if (!except?.has(key)) into.add(key);
+  }
+}
+
+/**
+ * Add the key of every action identifier a tool call's arguments hold: each string, at any depth,
+ * read the way an input is (addReceivedIdentifierKeys). Mirrors addArgumentFigureKeys so a hash or
+ * URL the run wrote into its own call — a commit message, an http_request url — is recorded as its
+ * own claim before the call runs, and then skipped when a tool result (git's "Command failed: …"
+ * error echoes the whole command back) re-introduces it. Numbers carry no commit-hash letter and no
+ * URL scheme, so only strings are read.
+ */
+export function addArgumentIdentifierKeys(into: Set<string>, value: unknown, depth = 0): void {
+  if (typeof value === "string") addReceivedIdentifierKeys(into, value);
+  else if (value && typeof value === "object" && depth < 8) {
+    for (const entry of Array.isArray(value) ? value : Object.values(value)) addArgumentIdentifierKeys(into, entry, depth + 1);
+  }
+}
+
+/**
+ * How many action identifiers in `answer` no received input backs. A hex id is backed by a prefix
+ * in EITHER direction, because git abbreviates a 40-char hash to seven or more characters: an
+ * answer's "3f9c2ab" is backed by an input's full hash, and the full hash is backed by an input's
+ * abbreviation. A URL is backed by an exact key match. The run's own prose and its call arguments
+ * are never in `received`, so an invented hash or URL — the narrated claim with no successful
+ * action behind it — is unbacked.
+ */
+export function countUnbackedIdentifiers(answer: string, received: ReadonlySet<string>): number {
+  const hexReceived = received.size === 0 ? [] : [...received].filter((key) => HEX_KEY_RE.test(key));
+  let count = 0;
+  for (const id of identifierTokens(answer)) {
+    if (received.has(id)) continue;
+    if (HEX_KEY_RE.test(id) && hexReceived.some((key) => key.startsWith(id) || id.startsWith(key))) continue;
+    count++;
+  }
+  return count;
 }
 
 /**

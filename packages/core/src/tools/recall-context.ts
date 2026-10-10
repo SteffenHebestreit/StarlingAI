@@ -16,14 +16,13 @@
  * "nothing stored"; only a pull where every section failed fails. Read-only, no approval.
  */
 
-import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
+import { registerTool, toolCallIdentity, type ToolContext, type ToolResult } from "./registry.js";
 import { deriveSharedSessionId } from "./memory.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { searchMemoryRecordsWithStatus } from "../memory/service.js";
 import { formatUserModelGuidance } from "../user-model/service.js";
 import { searchSessions } from "../agent/session-search.js";
-import { currentUserId } from "../runtime/request-context.js";
 import { searchSharedFacts } from "../swarm/memory.js";
 import { retrieveSkillGuidance } from "../skills/service.js";
 import { buildDynamicTurnGuidance } from "../agent/intent-classifier.js";
@@ -206,7 +205,7 @@ registerTool({
         const matches = searchSessions(query, {
           limit: limitFor("sessions"),
           excludeSessionId: ctx.sessionId,
-          requestingUserId: ctx.userId ?? currentUserId(),
+          requester: toolCallIdentity(ctx),
         });
         meta["sessions"] = matches.length;
         if (matches.length > 0) {
@@ -247,7 +246,7 @@ registerTool({
       try {
         const { chunks, retrievalFailed } = await retrieveDocumentContextWithStatus(query, {
           sessionId: ctx.sessionId,
-          ...(ctx.userId ? { userId: ctx.userId } : {}),
+          ...(ctx.userId ? { userId: ctx.userId, identity: toolCallIdentity(ctx) } : {}),
         });
         meta["documents"] = chunks.length;
         if (chunks.length > 0) {

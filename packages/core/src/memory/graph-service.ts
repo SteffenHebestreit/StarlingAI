@@ -40,19 +40,22 @@ import type { MemoryRecord } from "./service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
-import { currentUserId } from "../runtime/request-context.js";
-import { activeUserScopeSegment, USERS_SUBDIR } from "../runtime/user-scope.js";
+import { segmentFor, USERS_SUBDIR } from "../runtime/user-scope.js";
 
 /**
- * Per-user tenant for 'user'-scope graph nodes: the authenticated userId when
- * multi-user auth is on, else null (single-operator — no partitioning, fully
- * back-compat). Workspace-scope nodes are partitioned too, by their storage root
- * (graphWorkspaceTenant); session / agent scopes stay shared. Pass the record's
- * scope on WRITE; omit on READ to get the current reader's tenant.
+ * Per-user tenant for 'user'-scope graph nodes: the ambient identity's segment (an account's id, a
+ * principal's segment) when multi-user auth is on, else null (single-operator — no partitioning,
+ * fully back-compat). Workspace-scope nodes are partitioned too, by their storage root
+ * (graphWorkspaceTenant); session / agent scopes stay shared. Pass the record's scope on WRITE;
+ * omit on READ to get the current reader's tenant.
+ *
+ * It was the raw username. An account deleted and created again under the same name then read and
+ * wrote the old account's user-scope nodes, and a channel sender whose id was an account's
+ * username shared them too. The segment is the key every other user-scoped store uses.
  */
 function graphUserTenant(scope?: string): string | null {
   if (scope !== undefined && scope !== "user") return null;
-  return getConfig().auth?.enabled === true ? (currentUserId() ?? null) : null;
+  return segmentFor() ?? null;
 }
 
 /**
@@ -79,7 +82,7 @@ export function graphWorkspaceTenant(storageDir?: string): string | null {
     }
     return SHARED_WORKSPACE_TENANT;
   }
-  return activeUserScopeSegment() ?? SHARED_WORKSPACE_TENANT;
+  return segmentFor() ?? SHARED_WORKSPACE_TENANT;
 }
 
 /** The label of the memory service's nodes. */

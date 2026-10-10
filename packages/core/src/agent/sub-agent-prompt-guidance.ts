@@ -624,6 +624,13 @@ export function buildSubAgentToolInventory(toolNames: string[] | undefined): str
   } else if (canDelegateToSpecialists) {
     guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, delegate to a research-capable specialist instead of guessing.");
   }
+  // pass^k-relevant. One line, in a run that holds web_table only: every holder, configured or
+  // ephemeral, reads it once, a fork that drops the grant drops the line, and a run without the
+  // tool gets the inventory it always had. Agents that added 18 cells in their heads answered
+  // 609 and 740 for a stock of 596 (E2E 2026-10-09).
+  if (availableTools.includes("web_table")) {
+    guidance.push("Take a total, count, minimum or maximum over a web table's rows from web_table instead of adding up or counting rows yourself; for a table spread over several pages, give it every page's URL.");
+  }
 
   if (availableTools.includes("search_agents")) {
     guidance.push("If the right specialist is not obvious, call search_agents before delegating.");

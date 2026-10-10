@@ -13,8 +13,9 @@ import { getConfig } from "../config/loader.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
-import { registerTool, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
-import { currentUserId } from "../runtime/request-context.js";
+import { registerTool, toolCallIdentity, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
+import { principalIdentity } from "../runtime/user-scope.js";
+import type { Identity } from "../runtime/accounts.js";
 
 type WorkflowType = "scene" | "job";
 
@@ -1023,10 +1024,13 @@ async function runSceneInline(
     // username so per-user resources "resolve exactly as if they ran the scene from chat",
     // with the synthetic identity only as the no-caller fallback), and scene-worker.ts honours
     // whatever the enqueuer set. This is the one path that was not following it.
+    // The caller's identity is taken WHOLE (its account id travels with its name), so the
+    // session's root and every store its turns touch are the caller's; a name alone paired with
+    // some other account would be someone else's bucket.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${scene.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: ctx.userId ?? currentUserId() ?? `workflow:${scene.name}`,
+    ...workflowRunIdentity(ctx, `workflow:${scene.name}`),
     workspacePath: ctx.workspacePath,
   });
 
@@ -1189,12 +1193,12 @@ async function runJobInline(
     ...(ctx._workflowExecutionStack ?? []),
     buildWorkflowExecutionKey(job.name, "job"),
   ];
-  // Same rule as the scene path above: the caller owns the run, the synthetic identity is
-  // only the fallback for a trigger with no user behind it.
+  // Same rule as the scene path above: the caller owns the run, whole, and the synthetic identity
+  // is only the fallback for a trigger with no user behind it.
   const session = createSession({
     sessionId: `workflow:${ctx.sessionId}:${job.name}:${randomUUID()}`,
     channel: "workflow",
-    userId: ctx.userId ?? currentUserId() ?? `workflow:${job.name}`,
+    ...workflowRunIdentity(ctx, `workflow:${job.name}`),
     workspacePath: ctx.workspacePath,
   });
 
@@ -1530,6 +1534,13 @@ export async function searchWorkflowCandidates(
   }));
 }
 
+
+/** Who a workflow run belongs to: the caller, whole, or the workflow's own principal when the
+ *  trigger has no user behind it. */
+function workflowRunIdentity(ctx: ToolContext, principal: string): Identity {
+  const caller = toolCallIdentity(ctx);
+  return caller?.userId ? caller : principalIdentity(principal, "synthetic");
+}
 registerTool({
   name: "search_workflows",
   description: "Search reusable workflow catalog entries across scenes and jobs. Use this before ad hoc coordinator planning when the request may match a recurring workflow such as a research packet, paper, browser inspection, review, or broadcast.",

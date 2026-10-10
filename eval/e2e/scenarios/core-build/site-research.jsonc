@@ -72,11 +72,44 @@
           },
           events: {
             must: [
-              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/produkte" } } },
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate", "web_table"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/produkte" } } },
             ],
           },
           judge: {
             rubric: "Die Antwort nennt je Kategorie genau einen günstigsten Artikel: Akkuwerkzeug NW-1101 (129,00 €), Handwerkzeug NW-1201 (34,90 €), Messwerkzeug NW-1203 (27,50 €), Werkstatt NW-2105 (64,00 €), Arbeitsschutz NW-3102 (8,90 €), Zubehör NW-3106 (24,90 € im Sonderangebot). Keine erfundenen Artikel oder Preise.",
+            minScore: 7,
+          },
+        },
+      },
+    ],
+  },
+
+  {
+    id: "core-build-site-catalogue-sum-under-50",
+    title: "Site research: total of the current prices of every article under 50 € across all catalogue pages",
+    group: "core",
+    tags: ["site", "research", "table", "aggregation", "pagination"],
+    description: "Filter + sum across the three catalogue pages (site/produkte/seite-1..3.html). Eight articles cost under 50 €; their current prices sum to 227,40 €. NW-3106's current price is the special offer 24,90 € (its list price 32,90 € is struck through, <s>), so an answer that adds the struck price says 235,40 €. The start URL /produkte/ redirects to page 1, so a call that lists it and page 1 must not count page 1 twice (289,80 €). Protects: reading every page, filtering numerically, using the current price, adding exactly. Ground truth computed from the served pages.",
+    requires: ["model", "e2e-site"],
+    timeoutMs: 1200000,
+    steps: [
+      {
+        kind: "turn",
+        id: "ask",
+        message: "Was kosten alle Artikel der Nordlicht Werkzeuge GmbH, die weniger als 50 € kosten, zusammen – jeweils zum aktuellen Preis? Der Katalog unter http://www.nordlicht-werkzeuge.test/produkte/ hat mehrere Seiten. --auto",
+        timeoutMs: 900000,
+        expect: {
+          reply: {
+            matches: ["227[,.]40"],
+          },
+          events: {
+            must: [
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate", "web_table"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/produkte" } } },
+            ],
+          },
+          // No excludes: a correct answer may name 235,40 € as the contrast. The rubric judges the result.
+          judge: {
+            rubric: "Die Antwort nennt 227,40 € als Summe der aktuellen Preise der acht Artikel unter 50 € (NW-1201, NW-1203, NW-2102, NW-3101, NW-3102, NW-3103, NW-3105, NW-3106 mit 24,90 €), nennt keine andere Summe als Ergebnis und erfindet keine Artikel oder Preise.",
             minScore: 7,
           },
         },
@@ -104,8 +137,14 @@
           },
           events: {
             must: [
-              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/lager" } } },
+              { type: "sub_agent_tool_call", where: { "data.phase": "done", "data.success": true, "data.tool": { in: ["web_fetch", "browser_navigate", "web_table"] }, "data.args.url": { regex: "nordlicht-werkzeuge\\.test/lager" } } },
             ],
+          },
+          // Session 820e1171 passed the reply regex with a final 740 (four invented rows) whose prose
+          // called 596 incomplete; the judge reads which total the answer gives.
+          judge: {
+            rubric: "Die Antwort nennt 596 Stück als Gesamtbestand am Standort Südtal und erfindet keine Artikel.",
+            minScore: 7,
           },
         },
       },

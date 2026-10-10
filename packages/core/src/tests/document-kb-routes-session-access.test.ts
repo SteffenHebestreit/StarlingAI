@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * The document and knowledge-base routes and the session id a request names (found in review,
@@ -46,15 +47,23 @@ vi.mock("../retrieval/document-registry.js", async (importActual) => ({
     documentId, source: "", relativePath: "uploads/notes.md", filename: "notes.md", contentType: "text/markdown",
   }),
 }));
-vi.mock("../retrieval/document-rag.js", async (importActual) => ({
-  ...(await importActual<typeof import("../retrieval/document-rag.js")>()),
-  forgetDocument: async () => { reached.push("forgetDocument"); return true; },
-  invalidateDocument: async () => { reached.push("invalidateDocument"); return true; },
-  ingestDocumentBytes: async () => {
-    reached.push("ingestDocumentBytes");
-    return { ok: true, result: { documentId: "doc-new", title: "notes", scope: "session", chunkCount: 1, keywords: [], source: "", text: "" } };
-  },
-}));
+/**
+ * The document store's writers, stubbed per deployment (deployment() registers it after each module
+ * reset). A hoisted mock keeps its first instance across resets, and with it the config loader of
+ * the first test, whose file is gone by the next: the real source helpers it spreads (which read
+ * whether multi-user auth is on) then answered for that first configuration.
+ */
+function mockDocumentStore(): void {
+  vi.doMock("../retrieval/document-rag.js", async (importActual) => ({
+    ...(await importActual<typeof import("../retrieval/document-rag.js")>()),
+    forgetDocument: async () => { reached.push("forgetDocument"); return true; },
+    invalidateDocument: async () => { reached.push("invalidateDocument"); return true; },
+    ingestDocumentBytes: async () => {
+      reached.push("ingestDocumentBytes");
+      return { ok: true, result: { documentId: "doc-new", title: "notes", scope: "session", chunkCount: 1, keywords: [], source: "", text: "" } };
+    },
+  }));
+}
 vi.mock("../storage/uploads.js", () => ({
   scanAndStoreUpload: async () => { reached.push("scanAndStoreUpload"); return { ok: true }; },
 }));
@@ -72,6 +81,7 @@ vi.mock("../retrieval/kb-crawler.js", async (importActual) => ({
 
 const account = (username: string) => ({
   username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-09T00:00:00Z",
+  id: testAccountId(username),
 });
 
 const dirs: string[] = [];
@@ -110,6 +120,7 @@ async function deployment(authEnabled: boolean): Promise<Deployment> {
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
   vi.resetModules();
+  mockDocumentStore();
 
   const [{ registerDocumentRoutes }, { registerKnowledgeBaseRoutes }, auth, session] = await Promise.all([
     import("../gateway/document-routes.js"),
@@ -120,10 +131,12 @@ async function deployment(authEnabled: boolean): Promise<Deployment> {
   const app = new Hono();
   registerDocumentRoutes(app);
   registerKnowledgeBaseRoutes(app);
-  const aliceSession = session.createSession({ channel: "webchat", userId: "alice" }).id;
+  // Alice's own session, opened as the socket opens it: her name with her account id. With auth
+  // off there is no account to name.
+  const aliceSession = session.createSession({ channel: "webchat", userId: "alice", ...(authEnabled ? { account: testAccountId("alice") } : {}) }).id;
 
   const request: Deployment["request"] = async (as, path, init = {}) => {
-    const headers: Record<string, string> = { Authorization: `Bearer ${await auth.createToken(as, { role: "operator" })}` };
+    const headers: Record<string, string> = { Authorization: `Bearer ${await auth.createToken(as, { role: "operator", aid: testAccountId(as) })}` };
     if (init.json !== undefined) headers["Content-Type"] = "application/json";
     return app.request(path, {
       method: init.method ?? "GET",
@@ -222,16 +235,21 @@ describe("document routes and the session a request names", () => {
     // A document is stored once, shared by every scope that holds it. Its entry listed every source,
     // so bob's list named alice's session id and showed that she holds the same file (review,
     // 2026-10-09).
+    // Under multi-user auth a user corpus is keyed by the account id; `user:bob` is the corpus from
+    // before ids, which bob's account has not adopted.
     const { request, aliceSession } = await deployment(true);
-    engramDocs.list = [{ id: "doc-shared", title: "Ferry notes", chunkCount: 2, sources: ["user:bob", `session:${aliceSession}`, "user:alice"] }];
+    const bobCorpus = `user:${testAccountId("bob")}`;
+    const aliceCorpus = `user:${testAccountId("alice")}`;
+    engramDocs.list = [{ id: "doc-shared", title: "Ferry notes", chunkCount: 2, sources: [bobCorpus, `session:${aliceSession}`, aliceCorpus, "user:bob"] }];
 
     const list = await request("bob", "/api/documents");
     expect(list.status).toBe(200);
     const text = await list.text();
     expect(text).not.toContain(aliceSession);
-    expect(text).not.toContain("user:alice");
+    expect(text).not.toContain(aliceCorpus);
+    expect(text).not.toContain("\"user:bob\"");
     expect((JSON.parse(text) as { documents: Array<{ id: string; scopes: Array<{ scope: string; source: string }> }> }).documents)
-      .toEqual([expect.objectContaining({ id: "doc-shared", scopes: [{ scope: "user", source: "user:bob" }] })]);
+      .toEqual([expect.objectContaining({ id: "doc-shared", scopes: [{ scope: "user", source: bobCorpus }] })]);
   });
 
   it("with one operator, lists every source of a document, as before", async () => {
@@ -299,8 +317,9 @@ describe("knowledge-base routes and the session a request names", () => {
     const { request, aliceSession } = await deployment(true);
     const { createKnowledgeBase } = await import("../retrieval/knowledge-bases.js");
     const shared = await createKnowledgeBase({ name: "Harbour rules", seedUrls: ["https://harbour.example/rules"] });
-    const bobs = await createKnowledgeBase({ name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", ownerId: "bob" });
-    const alices = await createKnowledgeBase({ name: "Alice's ferries", seedUrls: ["https://alice.example/"], scope: "user", ownerId: "alice" });
+    // A user KB is its owner's by account id (callerCanAccessKb), stamped as the routes stamp it.
+    const bobs = await createKnowledgeBase({ name: "Bob's ferries", seedUrls: ["https://bob.example/"], scope: "user", ownerId: "bob", ownerAccount: testAccountId("bob") });
+    const alices = await createKnowledgeBase({ name: "Alice's ferries", seedUrls: ["https://alice.example/"], scope: "user", ownerId: "alice", ownerAccount: testAccountId("alice") });
     if (!shared.ok || !bobs.ok || !alices.ok) throw new Error("seeding the KB store failed");
     const sessionKb = await aliceSessionKb(aliceSession);
     const listed = async (path: string): Promise<string[]> => {

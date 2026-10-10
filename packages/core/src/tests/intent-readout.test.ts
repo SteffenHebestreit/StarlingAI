@@ -39,6 +39,7 @@ import {
   triageVerdictKeys,
   type IntentFacetDefinition,
   type IntentFacetName,
+  type IntentReadout,
   type PreRouteReadout,
 } from "../decisions/intent-readout.js";
 import { applyTemperature, LETTERS } from "../decisions/logit-readout.js";
@@ -808,5 +809,125 @@ describe("both orders", () => {
     expect(await askIntentReadout(second.provider, { userMessage: "a request" }, { language: "en", bothOrders: true, signal: late.signal })).toMatchObject({ ok: false, reason: "aborted" });
     expect(second.calls.map((call) => call.reversed)).toEqual([false, true]);
     expect(seen).toEqual([true]);
+  });
+});
+
+/** An answer that waits until `open` is called, or rejects when its call is aborted first. */
+function gatedAnswer(gate: Promise<void>, body: Partial<LLMResponse>, aborted: AbortSignal[]): (signal: AbortSignal | undefined) => Promise<Partial<LLMResponse>> {
+  return (signal) => new Promise((resolve, reject) => {
+    const stop = () => {
+      aborted.push(signal!);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    // The recorded tier answers after 5 ms: the abort may already have come.
+    if (signal?.aborted) stop();
+    else signal?.addEventListener("abort", stop, { once: true });
+    void gate.then(() => resolve(body));
+  });
+}
+
+/** A reading with its wall-clock times zeroed, for comparing two runs of the same reading. */
+function withoutTimes(readout: IntentReadout): IntentReadout {
+  return { ...readout, ms: 0, ...(readout.reversed ? { reversed: { ...readout.reversed, ms: 0 } } : {}) };
+}
+
+describe("both orders together (concurrentOrders)", () => {
+  it("sends both orders before either answers, and reads exactly what one after the other reads", async () => {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const aborted: AbortSignal[] = [];
+    const { provider, calls, maxOpen } = bothOrdersProvider(
+      gatedAnswer(gate, { logprobs: reply(SERVED_SLOTS, " Served restatement.") }, aborted),
+      gatedAnswer(gate, { logprobs: reply(REVERSED_SLOTS, " Reversed restatement.") }, aborted),
+    );
+    const input = { userMessage: "a request", priorTurnDigest: "an earlier turn" };
+    const pending = askIntentReadout(provider, input, { language: "en", bothOrders: true, concurrentOrders: true });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Both calls are out and neither has answered: in sequence the reversed one would not be sent yet.
+    expect(calls.map((call) => call.reversed)).toEqual([false, true]);
+    open();
+    const together = await pending;
+    expect(maxOpen()).toBe(2);
+    expect(aborted).toEqual([]);
+    // The same two prefixes, the same case and the same call options as in sequence.
+    expect(calls[0]!.messages[0]!.content).toBe(INTENT_READOUT_SYSTEM_PROMPT);
+    expect(calls[1]!.messages[0]!.content).toBe(REVERSED_PREFIX);
+    expect(calls[1]!.messages[1]).toEqual(calls[0]!.messages[1]);
+    expect(calls[1]!.options).toEqual(calls[0]!.options);
+    const sequential = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS, " Served restatement.") }, { logprobs: reply(REVERSED_SLOTS, " Reversed restatement.") });
+    const inSequence = await askIntentReadout(sequential.provider, input, { language: "en", bothOrders: true });
+    expect(sequential.maxOpen()).toBe(1);
+    expect(together.ok && inSequence.ok).toBe(true);
+    if (!together.ok || !inSequence.ok) return;
+    expect(withoutTimes(together.readout)).toEqual(withoutTimes(inSequence.readout));
+    expect(together.readout.version).toBe(INTENT_READOUT_BOTH_ORDERS_VERSION);
+    expect(together.readout.facets.mode).toMatchObject({ choice: "PRODUCE", orders: { served: "PRODUCE", reversed: "PRODUCE", agreed: true } });
+  });
+
+  it("stops the reversed call when the served one fails, and the readout is that failure", async () => {
+    for (const served of [new Error("400 grammar"), { logprobs: [] }] as OrderAnswer[]) {
+      const aborted: AbortSignal[] = [];
+      const { provider, calls } = bothOrdersProvider(served, gatedAnswer(new Promise(() => {}), { logprobs: reply(REVERSED_SLOTS) }, aborted));
+      const outcome = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true, concurrentOrders: true });
+      expect(outcome).toMatchObject({ ok: false, reason: served instanceof Error ? "error" : "no_logprobs" });
+      // The reversed call went out beside it, and was stopped rather than left holding its slot
+      // (its answer, which never comes on its own, sees the abort once the recorded tier's 5 ms are up).
+      expect(calls.map((call) => call.reversed)).toEqual([false, true]);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(aborted).toHaveLength(1);
+    }
+  });
+
+  it("leaves every facet the served order's alone when the reversed call fails", async () => {
+    const { provider } = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, new Error("500 slot unavailable"));
+    const result = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true, concurrentOrders: true });
+    expect(result.ok && result.readout.reversed).toMatchObject({ tokens: 0, failure: "error" });
+    expect(result.ok && result.readout.facets.mode?.orders).toEqual({ served: "PRODUCE", singlePass: "served" });
+  });
+
+  it("is an aborted readout when the caller stops it, and the abort reaches both calls at once", async () => {
+    const stop = new AbortController();
+    const aborted: AbortSignal[] = [];
+    const never = new Promise<void>(() => {});
+    const { provider, calls } = bothOrdersProvider(
+      gatedAnswer(never, { logprobs: reply(SERVED_SLOTS) }, aborted),
+      gatedAnswer(never, { logprobs: reply(REVERSED_SLOTS) }, aborted),
+    );
+    const pending = askIntentReadout(provider, { userMessage: "a request" }, { language: "en", bothOrders: true, concurrentOrders: true, signal: stop.signal });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(calls).toHaveLength(2);
+    stop.abort();
+    expect(await pending).toMatchObject({ ok: false, reason: "aborted" });
+    expect(aborted).toHaveLength(2);
+    // Aborted after the served pass answered, while the reversed call is out: never the served pass alone.
+    const late = new AbortController();
+    const second = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, (signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      setTimeout(() => late.abort(), 20);
+    }));
+    expect(await askIntentReadout(second.provider, { userMessage: "a request" }, { language: "en", bothOrders: true, concurrentOrders: true, signal: late.signal })).toMatchObject({ ok: false, reason: "aborted" });
+  });
+
+  // The produce-intent read (agent/turn-setup.ts) caps the reply at its first line, the only one it reads.
+  it("reads a reply cut after six tokens: the mode as the whole reply reads it, every later facet missing", async () => {
+    const input = { userMessage: "a request" };
+    const whole = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: reply(REVERSED_SLOTS) });
+    const full = await askIntentReadout(whole.provider, input, { language: "en", bothOrders: true, concurrentOrders: true });
+    // `mode`, `:`, ` C`, a newline, `domain`, `:` — the next slot's label without its letter.
+    const cut = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS).slice(0, 6), finishReason: "length" }, { logprobs: reply(REVERSED_SLOTS).slice(0, 6), finishReason: "length" });
+    const capped = await askIntentReadout(cut.provider, input, { language: "en", bothOrders: true, concurrentOrders: true, maxTokens: 6 });
+    expect(cut.calls.map((call) => call.options?.maxTokens)).toEqual([6, 6]);
+    expect(full.ok && capped.ok).toBe(true);
+    if (!full.ok || !capped.ok) return;
+    expect(capped.readout.facets.mode).toEqual(full.readout.facets.mode);
+    expect(Object.keys(capped.readout.facets)).toEqual(["mode"]);
+    expect(Object.keys(capped.readout.misses).sort()).toEqual(INTENT_FACETS.filter((f) => f.name !== "mode").map((f) => f.name).sort());
+  });
+
+  it("changes nothing without bothOrders: one call", async () => {
+    const { provider, calls } = bothOrdersProvider({ logprobs: reply(SERVED_SLOTS) }, { logprobs: reply(REVERSED_SLOTS) });
+    const single = await askIntentReadout(provider, { userMessage: "a request" }, { language: "en", concurrentOrders: true });
+    expect(calls).toHaveLength(1);
+    expect(single.ok && single.readout.version).toBe(INTENT_READOUT_VERSION);
   });
 });

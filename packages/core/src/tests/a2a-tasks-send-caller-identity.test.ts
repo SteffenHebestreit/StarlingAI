@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 import { A2A_ERROR } from "../a2a/protocol.js";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * tasks/send on the public A2A surface and the account a task runs as (found in review, 2026-10-08).
@@ -42,6 +43,7 @@ vi.mock("../agent/sub-agent.js", async (importActual) => ({
 
 const account = (username: string) => ({
   username, role: "operator", passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-08T00:00:00Z",
+  id: testAccountId(username),
 });
 
 const dirs: string[] = [];
@@ -95,10 +97,10 @@ async function send(bearer: string, extra: Record<string, unknown> = {}): Promis
   return { status: captured.status, answer: JSON.parse(captured.body ?? "{}") as { result?: unknown; error?: { code: number } } };
 }
 
-/** A gateway token signed for `username`. */
+/** A gateway token signed for `username`'s account. */
 async function tokenFor(username: string): Promise<string> {
   const auth = await import("../gateway/auth.js");
-  return auth.createToken(username, { role: "operator" });
+  return auth.createToken(username, { role: "operator", aid: testAccountId(username) });
 }
 
 describe("tasks/send and the account behind its token", () => {
@@ -143,11 +145,11 @@ describe("tasks/send and the workspace root a task runs in", () => {
 
     expect(status).toBe(200);
     const { getConfig } = await import("../config/loader.js");
-    const { safeUserSegment } = await import("../runtime/user-scope.js");
+    // The account's own root is keyed by its id, not by the username a re-created account shares.
     expect(runs).toEqual([{
       userId: "alice",
       contextUserId: "alice",
-      workspacePath: resolve(getConfig().workspacePath, "users", safeUserSegment("alice")),
+      workspacePath: resolve(getConfig().workspacePath, "users", testAccountId("alice")),
     }]);
   });
 

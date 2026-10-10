@@ -186,7 +186,7 @@ function lastUserMessageIndex(
 function findRecentDelegateEvidence(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
   options: { scopeToCurrentTurn?: boolean } = {},
-): { evidence: string; itemCount: number } | null {
+): { evidence: string; itemCount: number; computedAggregateKeys?: string[] } | null {
   // When scoped to the current turn, drop everything up to and including the
   // last user message. Without this, the scan reaches back across turns and a
   // PRIOR turn's richer deliverable wins on `length + items*200`, becoming the
@@ -197,7 +197,7 @@ function findRecentDelegateEvidence(
     ? history.slice(lastUserMessageIndex(history) + 1)
     : history;
   const recent = [...scoped].reverse().slice(0, 24);
-  let bestCandidate: { evidence: string; itemCount: number; score: number } | null = null;
+  let bestCandidate: { evidence: string; itemCount: number; score: number; computedAggregateKeys?: string[] } | null = null;
 
   for (const message of recent) {
     if (message.role !== "tool") continue;
@@ -252,12 +252,20 @@ function findRecentDelegateEvidence(
     const itemCount = countStructuredItems(evidence);
     const score = evidence.length + (itemCount * 200);
     if (!bestCandidate || score > bestCandidate.score) {
-      bestCandidate = { evidence, itemCount, score };
+      // The figure keys of the aggregates the delegated run computed with web_table, when it did.
+      const keys = Array.isArray(meta["computedAggregateKeys"])
+        ? (meta["computedAggregateKeys"] as unknown[]).filter((key): key is string => typeof key === "string")
+        : [];
+      bestCandidate = { evidence, itemCount, score, ...(keys.length > 0 ? { computedAggregateKeys: keys } : {}) };
     }
   }
 
   return bestCandidate
-    ? { evidence: bestCandidate.evidence, itemCount: bestCandidate.itemCount }
+    ? {
+      evidence: bestCandidate.evidence,
+      itemCount: bestCandidate.itemCount,
+      ...(bestCandidate.computedAggregateKeys ? { computedAggregateKeys: bestCandidate.computedAggregateKeys } : {}),
+    }
     : null;
 }
 

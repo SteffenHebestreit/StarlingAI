@@ -124,7 +124,7 @@ describe("structured user input inside delegated runs", () => {
         return { success: true, output: `Rendered with ${JSON.stringify(probeOutcome)}` };
       },
     });
-    userInputBroker.openTurn(TURN, ROOT, "alice");
+    userInputBroker.openTurn(TURN, ROOT, { userId: "alice" });
     userInputBroker.attachSink(ROOT, "tab-1", (event) => {
       events.push(event as { type: string; data: Record<string, unknown> });
       if (event.type !== "agent.user_input_needed") return;
@@ -135,7 +135,7 @@ describe("structured user input inside delegated runs", () => {
     });
     // What runTurn sets for an interactive dashboard turn; everything below inherits it.
     const inTurn = <T>(fn: () => Promise<T>) => requestContext.runWithRequestContext(
-      { userId: "alice", sessionId: ROOT, agentName: "main", userInput: { rootSessionId: ROOT, turnId: TURN, mode: "interactive" } },
+      { identity: { userId: "alice" }, sessionId: ROOT, agentName: "main", userInput: { rootSessionId: ROOT, turnId: TURN, mode: "interactive" } },
       fn,
     );
     return { getTool, inTurn };

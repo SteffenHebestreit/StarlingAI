@@ -9,10 +9,10 @@ import * as configLoader from "../config/loader.js";
  */
 describe("canAccessResource", () => {
   it("allows shared resources (no allowedUsers) for everyone", () => {
-    expect(canAccessResource("alice", {})).toBe(true);
-    expect(canAccessResource("alice", { allowedUsers: [] })).toBe(true);
+    expect(canAccessResource({ userId: "alice" }, {})).toBe(true);
+    expect(canAccessResource({ userId: "alice" }, { allowedUsers: [] })).toBe(true);
     expect(canAccessResource(undefined, { allowedUsers: [] })).toBe(true);
-    expect(canAccessResource("bob", undefined)).toBe(true);
+    expect(canAccessResource({ userId: "bob" }, undefined)).toBe(true);
   });
 
   it("allows when auth is disabled (no requesting user) even on a scoped resource", () => {
@@ -20,13 +20,13 @@ describe("canAccessResource", () => {
   });
 
   it("enforces the allow-list when a user is known", () => {
-    expect(canAccessResource("alice", { allowedUsers: ["alice", "carol"] })).toBe(true);
-    expect(canAccessResource("bob", { allowedUsers: ["alice", "carol"] })).toBe(false);
+    expect(canAccessResource({ userId: "alice" }, { allowedUsers: ["alice", "carol"] })).toBe(true);
+    expect(canAccessResource({ userId: "bob" }, { allowedUsers: ["alice", "carol"] })).toBe(false);
   });
 
   it("compares usernames case-insensitively", () => {
-    expect(canAccessResource("Alice", { allowedUsers: ["alice"] })).toBe(true);
-    expect(canAccessResource("alice", { allowedUsers: ["ALICE"] })).toBe(true);
+    expect(canAccessResource({ userId: "Alice" }, { allowedUsers: ["alice"] })).toBe(true);
+    expect(canAccessResource({ userId: "alice" }, { allowedUsers: ["ALICE"] })).toBe(true);
   });
 
   it("filters a resource list to the accessible subset", () => {
@@ -35,7 +35,7 @@ describe("canAccessResource", () => {
       { id: "alice-only", allowedUsers: ["alice"] },
       { id: "bob-only", allowedUsers: ["bob"] },
     ];
-    expect(filterAccessibleResources("alice", accounts).map((a) => a.id)).toEqual(["shared", "alice-only"]);
+    expect(filterAccessibleResources({ userId: "alice" }, accounts).map((a) => a.id)).toEqual(["shared", "alice-only"]);
     expect(filterAccessibleResources(undefined, accounts).map((a) => a.id)).toEqual(["shared", "alice-only", "bob-only"]);
   });
 });
@@ -61,9 +61,9 @@ describe("canAccessResource under multi-user auth", () => {
   it("still shares unbound resources and enforces the allow-list under auth", () => {
     mockAuth(true);
     expect(canAccessResource(undefined, { allowedUsers: [] })).toBe(true);
-    expect(canAccessResource("bob", {})).toBe(true);
-    expect(canAccessResource("alice", { allowedUsers: ["alice"] })).toBe(true);
-    expect(canAccessResource("bob", { allowedUsers: ["alice"] })).toBe(false);
+    expect(canAccessResource({ userId: "bob", account: "bob-0000000000000002" }, {})).toBe(true);
+    expect(canAccessResource({ userId: "alice", account: "alice-0000000000000001" }, { allowedUsers: ["alice"] })).toBe(true);
+    expect(canAccessResource({ userId: "bob", account: "bob-0000000000000002" }, { allowedUsers: ["alice"] })).toBe(false);
   });
 });
 

@@ -18,12 +18,14 @@ import { timingSafeEqual } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
 import { runSubAgentWithStats, type SubAgentRunOptions } from "../agent/sub-agent.js";
-import { authenticatedUser, verifyToken, extractBearerToken, type AuthenticatedUser } from "../gateway/auth.js";
+import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, type AuthenticatedUser } from "../gateway/auth.js";
 import { verifyInboundA2aToken } from "../gateway/oidc.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
-import { safeUserSegment } from "../runtime/user-scope.js";
+import { ownsRecord, principalIdentity } from "../runtime/user-scope.js";
+import { ACCOUNT_ID_RE, principalSegment, sameAccountId, type Identity } from "../runtime/accounts.js";
+import { registerAccountBindingTeardown } from "../gateway/account-connections.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import {
@@ -41,10 +43,37 @@ const log = childLogger("a2a:server");
 
 /** In-memory task store.  Single-node by design — federation/A2A clients hit one instance. */
 const _tasks = new Map<string, A2ATask>();
-/** Resolved caller (JWT sub / shared-bearer) that submitted each task, kept OFF the
- *  wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
-const _taskOwners = new Map<string, string>();
+/** Resolved caller (JWT sub / shared-bearer) that submitted each task, with the identity it ran
+ *  as, kept OFF the wire A2ATask so tasks/get can enforce per-caller ownership without leaking it. */
+const _taskOwners = new Map<string, { caller: string; identity?: Identity }>();
 const TASK_RETENTION_MS = 30 * 60_000;
+
+/**
+ * Forget every task an account submitted, once the account is deleted or retired. Its tasks/get
+ * calls are refused already, but each task kept its output and history in memory for the retention
+ * window. The task goes with its owner: a task left without an owner record would be readable by any
+ * caller (tasks/get checks only a recorded owner).
+ */
+export function forgetA2ATasksOfAccount(account: string): number {
+  let forgotten = 0;
+  for (const [taskId, owner] of _taskOwners) {
+    if (owner.identity?.account === undefined || !sameAccountId(owner.identity.account, account)) continue;
+    _tasks.delete(taskId);
+    _taskOwners.delete(taskId);
+    forgotten += 1;
+  }
+  return forgotten;
+}
+registerAccountBindingTeardown("a2aTasks", (account) => forgetA2ATasksOfAccount(account));
+
+/**
+ * Stores a task's outcome, unless its owner record is gone: the account that submitted it ended
+ * while it ran, or its retention ran out first. Stored without an owner, the outcome would be
+ * readable by any caller that knew the id.
+ */
+function storeTaskWhileOwned(taskId: string, task: A2ATask): void {
+  if (_taskOwners.has(taskId)) _tasks.set(taskId, task);
+}
 
 /** Match a path against the A2A surface; returns true when handled. */
 export async function handleA2ARequest(
@@ -153,7 +182,7 @@ async function handleJsonRpcRequest(req: IncomingMessage, res: ServerResponse): 
         // the same synthetic id, so they still match. Reuse TASK_NOT_FOUND to avoid
         // disclosing that the task exists.
         const owner = _taskOwners.get(params.id);
-        if (owner !== undefined && owner !== caller) {
+        if (owner !== undefined && !sameTaskCaller(owner, caller, a2aRunIdentity(caller, authResult.user))) {
           logAudit("a2a_request_failed", { method: "tasks/get", caller, reason: "task_owner_mismatch" }, { severity: "warn" });
           return respondError(res, id, A2A_ERROR.TASK_NOT_FOUND);
         }
@@ -195,6 +224,24 @@ function respondError(
   return true;
 }
 
+/** Who a caller's tasks run as, whole: a signed-in account (or a bootstrap token) as itself; the
+ *  shared bearer, an identity-provider peer, and any caller with one operator as a peer principal. */
+function a2aRunIdentity(caller: string, user: AuthenticatedUser | undefined): Identity | undefined {
+  if (user) return callerIdentity(user);
+  return caller === "anonymous" ? undefined : principalIdentity(caller, "peer");
+}
+
+/**
+ * Whether a tasks/get caller is the one that submitted the task. By identity (ownsRecord), not by
+ * the caller's name: an account created again under a deleted one's name read the old one's task
+ * output and history, and so did a peer whose token `sub` was an account's username. With one
+ * operator identities carry no kind and compare by name, as the caller string always did.
+ */
+function sameTaskCaller(owner: { caller: string; identity?: Identity }, caller: string, identity: Identity | undefined): boolean {
+  if (owner.identity || identity) return ownsRecord(identity, owner.identity);
+  return owner.caller === caller;
+}
+
 /** `user` is the account a gateway token resolved to under multi-user auth (authorizeInbound). */
 async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?: AuthenticatedUser): Promise<A2ATask> {
   const config = getConfig();
@@ -220,11 +267,13 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
     throw new Error("task id already exists");
   }
   const sessionId = params.sessionId ?? `a2a-in:${randomUUID()}`;
+  // Who the task runs as, whole (a2aRunIdentity).
+  const runIdentity = a2aRunIdentity(caller, user);
   // The session the run works in. A caller-chosen id was used as it came, so under multi-user auth
   // a caller could name another account's session and the run would read and write its shared
   // facts, peer messages and checkpoints (found in review, 2026-10-08). There it now names a
   // session in the caller's own namespace; the task still reports the id the caller sent.
-  const runSessionId = params.sessionId ? callerScopedSessionId(params.sessionId, caller) : sessionId;
+  const runSessionId = params.sessionId ? callerScopedSessionId(params.sessionId, runIdentity ?? { userId: caller }) : sessionId;
   const userText = params.message.parts.map((p) => p.text).join("\n").trim();
   const context =
     typeof (params.metadata?.["context"]) === "string"
@@ -238,7 +287,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
     history: [params.message],
   };
   _tasks.set(taskId, initialTask);
-  _taskOwners.set(taskId, caller);
+  _taskOwners.set(taskId, { caller, ...(runIdentity ? { identity: runIdentity } : {}) });
   scheduleTaskExpiry(taskId);
 
   try {
@@ -254,16 +303,17 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       // (found in review, 2026-10-08). A signed-in account's task now runs in that account's own
       // root, as its chat runs and the legacy /a2a/agents route's do. The shared-bearer machine
       // caller and an OIDC peer are no account of this deployment and keep the shared root.
-      workspacePath: user ? userWorkspaceRoot(config.workspacePath, user.username) : config.workspacePath,
+      workspacePath: user ? userWorkspaceRoot(config.workspacePath, runIdentity) : config.workspacePath,
       // Scope per-user resource guards (mail/credentials/compute) to the caller. A
       // machine "shared-bearer" caller carries no user identity, so it is correctly
       // denied user-restricted resources while still reaching shared ones.
       userId: caller === "anonymous" ? undefined : caller,
+      ...(runIdentity ? { identity: runIdentity } : {}),
     };
     // The account on the request context too, which the run's own memory reads and per-user
     // stores take their account from; with no account there, as before.
     const run = user
-      ? await runWithRequestContext({ userId: user.username }, () => runSubAgentWithStats(runOptions))
+      ? await runWithRequestContext({ identity: runIdentity }, () => runSubAgentWithStats(runOptions))
       : await runSubAgentWithStats(runOptions);
 
     const finalTask: A2ATask = {
@@ -276,7 +326,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       ],
       artifacts: [{ role: "agent", parts: [{ type: "text", text: run.output }] }],
     };
-    _tasks.set(taskId, finalTask);
+    storeTaskWhileOwned(taskId, finalTask);
     logAudit("a2a_task_completed", {
       taskId,
       sessionId,
@@ -298,7 +348,7 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       },
       history: [params.message],
     };
-    _tasks.set(taskId, failed);
+    storeTaskWhileOwned(taskId, failed);
     logAudit("a2a_request_failed", {
       taskId,
       sessionId,
@@ -359,15 +409,23 @@ async function authorizeInbound(req: IncomingMessage): Promise<AuthResult> {
   return { ok: false, caller: "anonymous" };
 }
 
-/** A caller-chosen session id inside the caller's own namespace under multi-user auth; as it came
- *  with one operator. A config that cannot be read counts as multi-user. The legacy
- *  /a2a/agents/:name route (gateway/index.ts) uses it too, so an id names one session on both. */
-export function callerScopedSessionId(sessionId: string, caller: string): string {
+/**
+ * A caller-chosen session id inside the caller's own namespace under multi-user auth; as it came
+ * with one operator. A config that cannot be read counts as multi-user. The legacy
+ * /a2a/agents/:name route (gateway/index.ts) uses it too, so an id names one session on both.
+ *
+ * The namespace is the caller's storage segment: an account's id, a principal's segment. It was
+ * the segment of the username, so an account deleted and created again under the same name named
+ * the old account's A2A sessions; those stay behind, admin-only, under the old segment.
+ */
+export function callerScopedSessionId(sessionId: string, caller: Identity): string {
   let multiUser = true;
   try {
     multiUser = getConfig().auth?.enabled === true;
   } catch { /* fail closed */ }
-  return multiUser ? `a2a-in:${safeUserSegment(caller)}:${sessionId}` : sessionId;
+  if (!multiUser) return sessionId;
+  if (caller.account && !ACCOUNT_ID_RE.test(caller.account)) throw new Error(`'${caller.account}' is not an account id`);
+  return `a2a-in:${caller.account ?? principalSegment(caller.userId ?? "anonymous")}:${sessionId}`;
 }
 
 function resolveSecret(value: string): string {

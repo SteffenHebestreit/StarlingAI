@@ -3,7 +3,8 @@ import { createSession, endSession } from "../agent/session.js";
 import { runTurn } from "../agent/runtime.js";
 import { getConfig } from "../config/loader.js";
 import { getEffectiveChannelConfig } from "../credentials/channels.js";
-import { checkChannelIngress, type ChannelBaseConfig } from "./base.js";
+import { channelSenderRefusal, checkChannelIngress, recordChannelSenderRefused, type ChannelBaseConfig } from "./base.js";
+import { principalIdentity } from "../runtime/user-scope.js";
 import { dispatchChannelTriggeredJob } from "./job-triggers.js";
 import { childLogger } from "../logger.js";
 import { deliverWithRetry } from "./delivery.js";
@@ -14,6 +15,29 @@ const log = childLogger("channel:telegram");
 
 // Maps Telegram chat IDs → session IDs
 const chatSessions = new Map<number, string>();
+
+/**
+ * Whether a Telegram sender may be served (channels/base.ts channelSenderRefusal). A sender that may
+ * not is recorded as refused, and the caller handles the update without a reply.
+ */
+function telegramSenderServed(fromId: number | undefined): boolean {
+  if (fromId === undefined) return true;
+  const sender = fromId.toString();
+  const refusal = channelSenderRefusal(sender);
+  if (!refusal) return true;
+  recordChannelSenderRefused("telegram", sender, refusal);
+  return false;
+}
+
+/** A new session for a chat, owned by its sender as a channel principal. */
+function newTelegramSession(chatId: number, fromId: number | undefined): string {
+  const session = createSession({
+    channel: "telegram",
+    ...(fromId !== undefined ? principalIdentity(fromId.toString(), "channel") : {}),
+  });
+  chatSessions.set(chatId, session.id);
+  return session.id;
+}
 
 // Exported bot API reference for the send_telegram tool
 let _botApi: Bot<Context>["api"] | null = null;
@@ -54,23 +78,20 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
       await ctx.reply("Unauthorized. This bot is private.");
       return;
     }
-    const session = createSession({
-      channel: "telegram",
-      userId: userId?.toString(),
-    });
-    chatSessions.set(ctx.chat.id, session.id);
+    if (!telegramSenderServed(userId)) return;
+    const sessionId = newTelegramSession(ctx.chat.id, userId);
     await ctx.reply(`${PRODUCT.name} connected. How can I help?`);
-    log.info({ chatId: ctx.chat.id, sessionId: session.id }, "Telegram session started");
+    log.info({ chatId: ctx.chat.id, sessionId }, "Telegram session started");
   });
 
   bot.command("reset", async (ctx) => {
+    if (!telegramSenderServed(ctx.from?.id)) return;
     const sid = chatSessions.get(ctx.chat.id);
     if (sid) {
       endSession(sid);
       chatSessions.delete(ctx.chat.id);
     }
-    const session = createSession({ channel: "telegram", userId: ctx.from?.id?.toString() });
-    chatSessions.set(ctx.chat.id, session.id);
+    newTelegramSession(ctx.chat.id, ctx.from?.id);
     await ctx.reply("Session reset. Fresh start!");
   });
 
@@ -80,6 +101,9 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
       await ctx.reply("Unauthorized.");
       return;
     }
+    // Before anything else of this message, the chat's session included: the update is handled
+    // and nothing goes back.
+    if (!telegramSenderServed(userId)) return;
 
     const tgBaseConfig: ChannelBaseConfig = {
       enabled: tgConfig.enabled ?? false,
@@ -96,11 +120,7 @@ export async function startTelegramBot(): Promise<(() => Promise<void>) | null> 
     }
 
     let sessionId = chatSessions.get(ctx.chat.id);
-    if (!sessionId) {
-      const session = createSession({ channel: "telegram", userId: userId?.toString() });
-      chatSessions.set(ctx.chat.id, session.id);
-      sessionId = session.id;
-    }
+    if (!sessionId) sessionId = newTelegramSession(ctx.chat.id, userId);
 
     const triggeredJob = await dispatchChannelTriggeredJob({
       channel: "telegram",

@@ -16,7 +16,7 @@ Base URL: `http://${host}:${port}` — default `http://0.0.0.0:5020`.
 
 Auth (optional): set `SAI_MAIL_SERVICE_TOKEN`; clients pass `Authorization: Bearer <token>`. When unset, the service runs unauthenticated (only safe on a private Docker network).
 
-Per-user access: the gateway forwards the authenticated user via the `X-Sai-User` header (derived from the verified JWT; the shared service token bounds trust to the gateway). Account-scoped routes return `403` when that user is not in an account's `allowedUsers` list (see below). No header — single-user or auth-disabled — is always allowed.
+Per-user access: the gateway forwards the caller via the `X-Sai-User` header, plus `X-Sai-Account` for an account (derived from the verified JWT; the shared service token bounds trust to the gateway). Account-scoped routes return `403` when no entry of an account's `allowedUsers` list names that caller (see below). A request without these headers — single-user or auth-disabled — is allowed, unless `SAI_MAIL_REQUIRE_IDENTIFIED_USER=true`, which denies it for a bound account.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -91,8 +91,16 @@ The service is configured through two channels:
 ```
 
 - Any string value prefixed with `$` is resolved against the process environment at load time — use this to keep secrets out of the config file.
-- `allowedUsers` is an optional array of usernames. Empty or omitted = the account is shared with all users; when set, only those authenticated users (matched against the `X-Sai-User` header) may access the account — others get `403`.
-- `isolatedUsers` (top level, optional) names users who see **only** the accounts that list them in `allowedUsers`: every shared account is withheld from them. Used for identities that must never touch the operator's own mail, such as the e2e eval accounts.
+- `allowedUsers` is an optional array of entries. Empty or omitted = the account is shared with all users; when set, only the callers an entry names may access the account — others get `403`. An entry takes one of three forms, compared without case:
+
+  | Entry | Names | The gateway sends |
+  |---|---|---|
+  | `account:<id>` | the StarlingAI account with that immutable id (recommended for identity-provider accounts) | `X-Sai-Account: <id>` (beside `X-Sai-User: <username>`) |
+  | `alice` | the account whose username is `alice`, or a bootstrap token (`sai token`) whose `sub` is `alice` | `X-Sai-User: alice` |
+  | `principal:<raw>` | a channel sender, an A2A peer, or a scene, job or workflow run with that raw name | `X-Sai-User: principal:<raw>` |
+
+  Under the gateway's multi-user auth, a channel sender, peer or run is always sent with the `principal:` prefix, so a bare entry never names one: mail from a spoofed `From` address equal to a listed username is not granted the mailbox. With the gateway's auth off, every caller is sent as its plain name, so a bare entry is a username, as always.
+- `isolatedUsers` (top level, optional) names users who see **only** the accounts that list them in `allowedUsers`: every shared account is withheld from them. Its entries take the same three forms. Used for identities that must never touch the operator's own mail, such as the e2e eval accounts.
 
 ### Overlay directory (`accounts.d`)
 
@@ -110,6 +118,7 @@ More accounts can be added while the service runs, without touching the accounts
 | `PORT` | `5020` | Listen port |
 | `SAI_MAIL_SERVICE_DATA_PATH` | `/data/mail-service.json` | File (not directory) where drafts and category metadata are persisted. Mount its parent as a volume in Docker. |
 | `SAI_MAIL_SERVICE_TOKEN` | *(unset)* | When set, every request must carry `Authorization: Bearer <token>` |
+| `SAI_MAIL_REQUIRE_IDENTIFIED_USER` | *(unset)* | `true`: a request without `X-Sai-User`/`X-Sai-Account` is denied a bound account (one with `allowedUsers`). Set it wherever the gateway runs multi-user auth; unset, such a request is allowed, as on a single-user install |
 
 ## Source layout
 
@@ -119,7 +128,7 @@ More accounts can be added while the service runs, without touching the accounts
 | `src/app.ts` | Hono app wiring; mounts account, message, draft, calendar, contacts routes |
 | `src/config.ts` | Config loader + Zod schema; env-var reference resolution; overlay directory reader |
 | `src/live-accounts.ts` | The live account set: accounts file + overlay directory, re-read while running; `isolatedUsers` |
-| `src/account-access.ts` | Per-user account access control (`allowedUsers` + `X-Sai-User`); resolves accounts, 403 on denied user |
+| `src/account-access.ts` | Per-user account access control (`allowedUsers` entry forms + `X-Sai-User`/`X-Sai-Account`); resolves accounts, 403 on denied user |
 | `src/imap-client.ts` | IMAP session pool (via imapflow) |
 | `src/smtp-client.ts` | SMTP transport (via nodemailer) |
 | `src/dav-client.ts` | CalDAV + CardDAV client (via tsdav) |

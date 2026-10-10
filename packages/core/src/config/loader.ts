@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-zones.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -181,6 +181,18 @@ export function updateConfig(mutator: (raw: Record<string, unknown>) => void): C
   writeFileSync(CONFIG_SOURCE.mutablePath, `${JSON.stringify(rawToPersist, null, 2)}\n`, "utf-8");
   _config = null;
   return loadConfig();
+}
+
+/**
+ * Whether the account roster (`auth.users`) is one the runtime writes: the config is one file that
+ * updateConfig writes whole, or the runtime overlay holds the list (an overlay list replaces a
+ * shard's). Otherwise the list comes from a base shard, the operator's own file, which nothing here
+ * edits: the account migration prints the id to paste into it instead of writing one.
+ */
+export function rosterWrittenByRuntime(): boolean {
+  if (CONFIG_SOURCE.mutablePath === CONFIG_SOURCE.basePath) return true;
+  const auth = readRawConfigFile(CONFIG_SOURCE.mutablePath, "mutable")["auth"];
+  return isPlainObject(auth) && Array.isArray(auth["users"]);
 }
 
 /**

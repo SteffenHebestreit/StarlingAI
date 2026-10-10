@@ -773,7 +773,7 @@ registerTool({
  * JSON literal under `### Result` (followed by other sections); an empty page is `""`, which as
  * raw text is two quote characters and read as content. Unparseable answers pass through whole.
  */
-function evaluateResultText(output: string): string {
+export function evaluateResultText(output: string): string {
   const start = output.indexOf("### Result\n");
   if (start < 0) return output;
   const body = output.slice(start + "### Result\n".length);
@@ -1277,7 +1277,7 @@ export async function leaveRefusedPage(): Promise<void> {
  * because web_fetch hands those to the browser, and the browser follows the same redirects with
  * nothing checking where they lead.
  */
-class SsrfRefusal extends Error {
+export class SsrfRefusal extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SsrfRefusal";
@@ -1307,7 +1307,7 @@ async function safeFetch(url: string, ms: number, init?: RequestInit, maxRedirec
  * so a slow hop was a way past the per-hop check. The first request keeps its own timeout and
  * fails as before.
  */
-async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5, chainBudgetMs = Number.POSITIVE_INFINITY): Promise<{ res: Response; finalUrl: string }> {
+export async function safeFetchFinal(url: string, ms: number, init?: RequestInit, maxRedirects = 5, chainBudgetMs = Number.POSITIVE_INFINITY): Promise<{ res: Response; finalUrl: string }> {
   const deadline = Date.now() + chainBudgetMs;
   const tooSlow = () => new SsrfRefusal(`${url}: the redirect chain took too long; it is not followed further`);
   let current = url;

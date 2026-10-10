@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { testAccount, testAccountId } from "./support/test-account.js";
 
 /**
  * A DURABLE RECORD THAT IS DELETED LEAVES THE GRAPH TOO (found 2026-10-08).
@@ -26,10 +27,13 @@ mkdirSync(workspacePath, { recursive: true });
 const configPath = join(tempDir, "starlingai.json");
 writeFileSync(configPath, JSON.stringify({
   workspacePath,
-  auth: { enabled: true, users: [{ username: "alice", passwordHash: "scrypt$placeholder-hash-not-used-here", role: "operator", createdAt: "2026-10-07T00:00:00Z" }] },
+  auth: { enabled: true, users: [testAccount("alice").record] },
 }), "utf8");
 process.env["SAI_CONFIG_PATH"] = configPath;
 process.env["SAI_USER_MEMORY_PATH"] = userMemoryPath;
+
+/** Alice as a signed-in request carries her: her account id with her name. */
+const ALICE = { userId: "alice", account: testAccountId("alice") };
 
 describe("deleted durable records leave the memory graph", () => {
   async function load() {
@@ -63,7 +67,7 @@ describe("deleted durable records leave the memory graph", () => {
 
   it("deletes the node of a deleted record, and the Critical Memory block stops serving it at once", async () => {
     const { context, memory, graph } = await load();
-    await context.runWithRequestContext({ userId: "alice" }, async () => {
+    await context.runWithRequestContext({ identity: ALICE }, async () => {
       const record = memory.storeUserMemoryRecord(workspacePath, {
         key: "lieblingstee", subject: "Tee", content: "Lieblingsteesorte: Polarstern-Rooibos", kind: "preference",
       });
@@ -80,7 +84,7 @@ describe("deleted durable records leave the memory graph", () => {
 
   it("deletes the nodes of the duplicates a compaction merges away", async () => {
     const { context, memory } = await load();
-    await context.runWithRequestContext({ userId: "alice" }, async () => {
+    await context.runWithRequestContext({ identity: ALICE }, async () => {
       const stored = [
         memory.storeWorkspaceMemoryRecord(workspacePath, {
           key: "quality_summary", subject: "Quality goal", content: "Prefer retrieval precision over raw memory volume.", kind: "summary",

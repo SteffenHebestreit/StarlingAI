@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 import type { ToolContext, ToolResult } from "../tools/registry.js";
+import { testAccountId } from "./support/test-account.js";
 
 /**
  * The MCP HTTP server at /mcp and the account its calls run as (found in review, 2026-10-09).
@@ -58,6 +59,7 @@ vi.mock("../tools/registry.js", async (importActual) => ({
 
 const account = (username: string, role: string) => ({
   username, role, passwordHash: "scrypt$placeholder-hash-not-used-here", createdAt: "2026-10-09T00:00:00Z",
+  id: testAccountId(username),
 });
 
 const dirs: string[] = [];
@@ -122,10 +124,10 @@ async function deployment(authEnabled: boolean): Promise<{ url: string; dir: str
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, dir };
 }
 
-/** A gateway token signed for `username`, claiming the operator role. */
+/** A gateway token signed for `username`'s account, claiming the operator role. */
 async function tokenFor(username: string): Promise<string> {
   const auth = await import("../gateway/auth.js");
-  return auth.createToken(username, { role: "operator" });
+  return auth.createToken(username, { role: "operator", aid: testAccountId(username) });
 }
 
 /** An MCP client session opened with `token`; returns the client and its mcp-session-id. */
@@ -221,8 +223,8 @@ describe("/mcp and the workspace root a call runs in", () => {
 
     expect(scene.isError).toBe(false);
     const { getConfig } = await import("../config/loader.js");
-    const { safeUserSegment } = await import("../runtime/user-scope.js");
-    const aliceRoot = resolve(getConfig().workspacePath, "users", safeUserSegment("alice"));
+    // The account's own root is keyed by its id, not by the username a re-created account shares.
+    const aliceRoot = resolve(getConfig().workspacePath, "users", testAccountId("alice"));
     expect(runs).toEqual([
       { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },
       { userId: "alice", contextUserId: "alice", workspacePath: aliceRoot },

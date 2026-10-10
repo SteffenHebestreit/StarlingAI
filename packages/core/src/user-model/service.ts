@@ -13,13 +13,11 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { childLogger } from "../logger.js";
 
-import { PRODUCT } from "../product/index.js";
-import { userScopedDir } from "../runtime/user-scope.js";
+import { userScopedDir, userStateBaseDir } from "../runtime/user-scope.js";
 
 const log = childLogger("user-model");
 
@@ -63,9 +61,7 @@ export interface UserModelUpdate {
 }
 
 function storePath(): string {
-  const baseDir = process.env["SAI_USER_MEMORY_PATH"]?.trim()
-    ? resolve(process.env["SAI_USER_MEMORY_PATH"])
-    : resolve(homedir(), PRODUCT.stateDirName, "state");
+  const baseDir = userStateBaseDir();
   // The dialectic user-model is inherently per-user — partition it by the
   // authenticated user (single shared path when auth is off / no userId).
   return resolve(userScopedDir(baseDir), USER_MODEL_FILENAME);

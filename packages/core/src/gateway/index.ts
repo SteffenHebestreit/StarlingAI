@@ -9,8 +9,7 @@ import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getConfig, previewConfigUpdate, updateConfig } from "../config/loader.js";
-import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, userHasRole, verifyPassword, createToken } from "./auth.js";
-import { buildLoginUrl, handleCallback, stashLoginState, takeLoginState, oidcPublicBase, OIDC_CALLBACK_PATH } from "./oidc.js";
+import { verifyToken, extractBearerToken, checkAuthRateLimit, recordAuthFailure, clearAuthFailures, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { registerSubAgentRoutes } from "./sub-agent-routes.js";
 import { registerSkillLibraryRoutes } from "./skill-routes.js";
@@ -19,11 +18,15 @@ import { registerKnowledgeBaseRoutes } from "./knowledge-base-routes.js";
 import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
 import { registerMissionRoutes } from "./mission-routes.js";
+import { registerLongRunningRoutes } from "./long-running-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
+import { registerAuthRoutes } from "./auth-routes.js";
+import { registerAccountRoutes } from "./account-routes.js";
+import { registerAccountMigrationRoutes } from "./account-migration-routes.js";
 import { registerSecurityConfigRoutes } from "./security-config-routes.js";
 import { registerCheckpointRoutes } from "./checkpoint-routes.js";
 import { mountFederationRoutes } from "./federation-router.js";
@@ -122,14 +125,13 @@ import {
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
 import { appendFlowMemoryEntry } from "../agent/flow-memory.js";
-import { recordAccount } from "../runtime/user-scope.js";
+import { principalIdentity, recordAccount } from "../runtime/user-scope.js";
 import { presentProposal, requestTextReader } from "./config-assistant-visibility.js";
 
 
 import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
-import { getExtensionAuthProvider } from "../extension/index.js";
 import { mountExtensionRoutes } from "../extension/loader.js";
 import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
 
@@ -188,19 +190,21 @@ export function createGateway() {
     // routes that gate on bare verifyToken cannot keep honoring a revoked token for its
     // full ~24h TTL. A request with NO token falls through untouched, so public/pre-auth
     // routes (login, /api/auth/mode, oidc, health) and each route's own 401 still work.
-    // Token classes that legitimately resolve outside the user store and are NOT
-    // rejected here: bootstrap admin tokens (TTL-bound instance credentials — see
-    // authenticatedUser), any signed token while auth.users[] is still empty (the
-    // bootstrap window; without it the first account could never be created), and
-    // OIDC tokens, which resolve via validated IdP claims (their revocation lag is
-    // a separate, documented limitation).
+    // Token classes that legitimately resolve outside an account and are NOT rejected
+    // here: bootstrap tokens (the `bst` claim; TTL-bound instance credentials — see
+    // authenticatedUser) and any signed token while the deployment holds no account
+    // (the bootstrap window; without it the first account could never be created).
+    // Every other token names its account id (`aid`), builtin or identity-provider, and
+    // resolves only while that account holds it.
     if (!user) {
       const token = extractBearerToken(authHeader);
       if (token && await verifyToken(token)) {
         return c.json({ error: "Unauthorized (account no longer valid)" }, 401);
       }
     }
-    return runWithRequestContext({ userId: user?.username }, () => next());
+    // The caller's identity, whole: its account id (or bootstrap kind) travels with its name, and
+    // every per-user store derives from it (runtime/user-scope.ts segmentFor).
+    return runWithRequestContext({ identity: callerIdentity(user) }, () => next());
   });
   const turnTimeoutMs = config.gateway.turnTimeoutMs;
   const currentMultimodalConfig = () => getConfig().multimodal;
@@ -970,166 +974,15 @@ export function createGateway() {
   // Routes are mounted unconditionally; behavior gates on auth.enabled at
   // request time so the operator can flip the flag without a restart.
 
-  // Public (pre-auth) endpoint so the login screen can pick the right default tab.
-  // With multi-user auth OFF there are no accounts — username/password login only
-  // 503s — so the client should default to the token tab. Exposes nothing sensitive
-  // (just whether account login is available).
-  app.get("/api/auth/mode", (c) => {
-    const auth = getConfig().auth;
-    return c.json({
-      authEnabled: auth.enabled === true,
-      // The identity backend, so the login screen shows "Sign in with SSO" (oidc)
-      // vs the username/password + token form (builtin).
-      provider: auth.enabled ? auth.provider : "builtin",
-    });
-  });
-
-  // ── OIDC SSO (auth.provider = "oidc") ────────────────────────────────────
-  // Start: redirect the browser to the IdP (PKCE + state stashed server-side).
-  app.get("/api/auth/oidc/login", async (c) => {
-    const auth = getConfig().auth;
-    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
-    try {
-      const origin = new URL(c.req.url).origin;
-      const { url, codeVerifier, state } = await buildLoginUrl(origin);
-      stashLoginState(state, codeVerifier);
-      return c.redirect(url);
-    } catch (err) {
-      log.error({ err: err instanceof Error ? err.message : String(err) }, "OIDC login start failed");
-      return c.json({ error: "OIDC login unavailable — check the issuer configuration" }, 503);
-    }
-  });
-
-  // Callback: exchange the code, mint OUR session JWT (mapping IdP roles), and hand
-  // it to the SPA via the URL FRAGMENT (never the query — fragments aren't logged or
-  // sent to the server). The SPA reads it on load, stores it, clears the hash, connects.
-  app.get(OIDC_CALLBACK_PATH, async (c) => {
-    const auth = getConfig().auth;
-    const origin = new URL(c.req.url).origin;
-    const base = oidcPublicBase(origin);
-    if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
-    const state = c.req.query("state");
-    const codeVerifier = state ? takeLoginState(state) : null;
-    if (!state || !codeVerifier) return c.json({ error: "Invalid or expired login state" }, 400);
-    try {
-      const query = new URL(c.req.url).searchParams.toString();
-      const currentUrl = `${base}${OIDC_CALLBACK_PATH}?${query}`;
-      const identity = await handleCallback(currentUrl, codeVerifier, state);
-      const token = await createToken(identity.username, {
-        role: identity.role,
-        ...(identity.displayName ? { displayName: identity.displayName } : {}),
-      });
-      logAudit("auth_success", { username: identity.username, role: identity.role, via: "oidc" }, { userId: identity.username });
-      return c.redirect(`${base}/#sai_token=${encodeURIComponent(token)}`);
-    } catch (err) {
-      log.warn({ err: err instanceof Error ? err.message : String(err) }, "OIDC callback failed");
-      return c.redirect(`${base}/#sai_error=${encodeURIComponent("SSO login failed")}`);
-    }
-  });
-
-  app.post("/api/auth/login", async (c) => {
-    // Rate-limit identity: the real transport peer (spoof-proof, stamped by the
-    // node bridge) by default; only trust the client-controlled X-Forwarded-For
-    // when explicitly opted in for a reverse-proxy deployment.
-    const peer = c.req.header("x-gateway-peer-addr") ?? "unknown";
-    const ip = getConfig().auth.trustProxyHeader
-      ? (c.req.header("X-Forwarded-For")?.split(",")[0]?.trim() || peer)
-      : peer;
-    const rate = checkAuthRateLimit(ip);
-    if (!rate.allowed) {
-      return c.json({ error: "Too many failed attempts. Try again later." }, 429);
-    }
-
-    let body: { username?: unknown; password?: unknown };
-    try {
-      body = await c.req.json();
-    } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
-    }
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    if (!username || !password) {
-      return c.json({ error: "Username and password are required" }, 400);
-    }
-
-    // Extension credential backend (e.g. a fork's encrypted user store)
-    // replaces the config-file user list entirely when registered.
-    const authProvider = getExtensionAuthProvider();
-    if (authProvider) {
-      const providerUser = await authProvider.verifyCredentials(username, password);
-      if (!providerUser) {
-        recordAuthFailure(ip);
-        return c.json({ error: "Invalid username or password" }, 401);
-      }
-      clearAuthFailures(ip);
-      // Merge the provider's free-form claims FIRST and strip reserved security
-      // keys, so a malicious/compromised extension provider cannot override the
-      // authoritative `role` (privilege escalation) or `sub` in the minted JWT.
-      // `scope` is reserved too: it marks capability tokens, which verifyToken
-      // rejects — a provider setting it would brick its own users' sessions.
-      const { role: _ignoredRole, sub: _ignoredSub, scope: _ignoredScope, ...safeClaims } = providerUser.claims ?? {};
-      const token = await createToken(providerUser.id, {
-        ...safeClaims,
-        role: providerUser.role,
-        ...(providerUser.displayName ? { displayName: providerUser.displayName } : {}),
-      });
-      logAudit("auth_success", { username: providerUser.username, role: providerUser.role }, { userId: providerUser.id });
-      return c.json({
-        token,
-        username: providerUser.username,
-        displayName: providerUser.displayName,
-        role: providerUser.role,
-        user: providerUser,
-      });
-    }
-
-    const authConfig = getConfig().auth;
-    if (!authConfig.enabled) {
-      return c.json({ error: "Username/password login is disabled. Set auth.enabled = true and configure auth.users[] to enable it." }, 503);
-    }
-
-    const user = authConfig.users.find((u) => u.username.toLowerCase() === username);
-    if (!user) {
-      recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-
-    const ok = await verifyPassword(password, user.passwordHash);
-    if (!ok) {
-      recordAuthFailure(ip);
-      return c.json({ error: "Invalid username or password" }, 401);
-    }
-
-    clearAuthFailures(ip);
-    const token = await createToken(user.username, {
-      role: user.role,
-      ...(user.displayName ? { displayName: user.displayName } : {}),
-    });
-    logAudit("auth_success", { username: user.username, role: user.role }, { userId: user.username });
-    return c.json({
-      token,
-      username: user.username,
-      displayName: user.displayName,
-      role: user.role,
-    });
-  });
-
-  app.get("/api/auth/me", async (c) => {
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    // With an extension credential backend, also verify the account still
-    // exists and surface its full public record (extra fields like kvnr).
-    const authProvider = getExtensionAuthProvider();
-    if (authProvider) {
-      const record = authProvider.getUserById(user.username);
-      if (!record) return c.json({ error: "User no longer exists" }, 401);
-      return c.json({ ...user, user: record });
-    }
-    return c.json(user);
-  });
+  // Sign-in: the login mode, OIDC SSO, username/password and /me — extracted to ./auth-routes.ts.
+  registerAuthRoutes(app);
 
   // ── User management (roster, create, delete) — extracted to ./user-routes.ts ──
   registerUserRoutes(app);
+  // Identity-provider accounts (rename, retire, release, decline legacy data), admin-only.
+  registerAccountRoutes(app);
+  // The account migration's dry run (a bootstrap token only); its apply runs in a maintenance boot.
+  registerAccountMigrationRoutes(app);
 
   // Federation routes — gated at request time on federation.enabled, so
   // toggling the config flag takes effect without a gateway restart.
@@ -1827,7 +1680,7 @@ export function createGateway() {
       config: getConfig().orchestration,
       defaults: {
         maxParallelSlices: 2,
-        subAgentToolCaps: { web_search: 14, web_fetch: 16, write_file: 3, delegate_to_agent: 3, computer_snapshot: 8 },
+        subAgentToolCaps: { web_search: 14, web_fetch: 16, web_table: 8, write_file: 3, delegate_to_agent: 3, computer_snapshot: 8 },
         coordinatorToolCaps: { delegate_to_agent: 6, swarm_delegate: 6, web_search: 20, web_fetch: 25 },
         perTurnCaps: { delegate_to_agent: 5, computer_click: 8, computer_type: 6, computer_hotkey: 6, computer_snapshot: 3 },
       },
@@ -3283,7 +3136,8 @@ export function createGateway() {
     // chat. Webhook-key triggers have no user → fall back to the scene identity
     // (which only resolves credentials that aren't user-scoped).
     const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
-    const runUserId = triggeredBy?.username ?? `scene:${sceneName}`;
+    // Whole: the caller's account (or bootstrap kind) runs with its name, else the scene's principal.
+    const runIdentity = callerIdentity(triggeredBy) ?? principalIdentity(`scene:${sceneName}`, "synthetic");
 
     // Read optional params from request body to apply template substitution
     let bodyParams: Record<string, string> = {};
@@ -3310,7 +3164,7 @@ export function createGateway() {
     const job = await createJob({
       sceneName,
       definitionType: "scene",
-      userId: runUserId,
+      ...runIdentity,
       task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
@@ -3385,7 +3239,7 @@ export function createGateway() {
     // Run identity: authenticated operator → their username (per-user RBAC
     // resolves their credentials); webhook key → synthetic job identity.
     const triggeredBy = bearerToken ? await authenticatedUser(c.req.header("Authorization")) : null;
-    const runUserId = triggeredBy?.username ?? `job:${jobName}`;
+    const runIdentity = callerIdentity(triggeredBy) ?? principalIdentity(`job:${jobName}`, "synthetic");
 
     let bodyParams: Record<string, string> = {};
     try {
@@ -3407,7 +3261,7 @@ export function createGateway() {
     const queued = await createJob({
       sceneName: jobName,
       definitionType: "job",
-      userId: runUserId,
+      ...runIdentity,
       steps,
       turnTimeoutMs,
     });
@@ -3501,8 +3355,8 @@ export function createGateway() {
     // Under multi-user auth a non-admin lists the runs made as themselves (scene-job-access.ts),
     // chosen in the store before the limit.
     const viewer = await sceneJobViewer(c.req.header("Authorization"));
-    if (!viewer.all && !viewer.userId) return c.json({ jobs: [] });
-    const jobs = await listJobs({ limit, status, ...(viewer.all ? {} : { userId: viewer.userId }) });
+    if (!viewer.all && !viewer.identity) return c.json({ jobs: [] });
+    const jobs = await listJobs({ limit, status, ...(viewer.all ? {} : { owner: viewer.identity }) });
     return c.json({
       jobs: jobs.map((job) => presentSceneJob(job, viewer)),
     });
@@ -3699,34 +3553,9 @@ export function createGateway() {
   // Mission flight recorder + controls (UX-501/502) — reads for any authed user, cancel operator-gated.
   registerMissionRoutes(app);
 
-  // ── Long-running-generation routes ──────────────────────────────────────────
-  // Surface paused sub-agent runs to the dashboard and accept the operator's
-  // decision (continue / unbounded / stop). See
-  // agent/long-running-generation.ts for the failure mode this addresses.
-  app.get("/api/long-running/active", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(longRunningGenerationManager.listPending());
-  });
-
-  app.post("/api/long-running/:id/respond", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    let body: { outcome?: unknown };
-    try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
-    const outcome = typeof body.outcome === "string" ? body.outcome : "";
-    if (outcome !== "continue" && outcome !== "unbounded" && outcome !== "stop") {
-      return c.json({ error: "outcome must be one of: continue, unbounded, stop" }, 400);
-    }
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    const resolved = longRunningGenerationManager.resolveRequest(
-      c.req.param("id"),
-      outcome,
-      user?.username ?? "operator",
-    );
-    if (!resolved) return c.json({ error: "Request not found or already resolved" }, 404);
-    return c.json({ ok: true, request: resolved });
-  });
+  // ── Long-running-generation routes — extracted to ./long-running-routes.ts ──
+  // Surface paused sub-agent runs to the dashboard and accept the decision on one.
+  registerLongRunningRoutes(app);
 
   // ── REST chat endpoint ───────────────────────────────────────────────────
   // Never implemented: a turn is inherently streaming (tool calls, delegation,
@@ -3823,7 +3652,7 @@ export function createGateway() {
             res.end(JSON.stringify({ error: "Unauthorized" }));
             return;
           }
-          await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role });
+          await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role, identity: callerIdentity(aguiUser) });
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
@@ -3906,7 +3735,7 @@ export function createGateway() {
           const { callerScopedSessionId } = await import("../a2a/server.js");
           const multiUser = getConfig().auth?.enabled === true;
           const sessId = rpc.params?.["sessionId"]
-            ? callerScopedSessionId(String(rpc.params["sessionId"]), a2aCaller)
+            ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
           const autoApprove = rpc.params?.["autoApprove"] === true;
 
@@ -3919,17 +3748,17 @@ export function createGateway() {
             // the shared root a memory stored with the default 'workspace' scope is the shared
             // root's, and every account reads it.
             workspacePath: a2aUser
-              ? userWorkspaceRoot(getConfig().workspacePath, a2aUser.username)
+              ? userWorkspaceRoot(getConfig().workspacePath, callerIdentity(a2aUser))
               : getConfig().workspacePath,
             approvalCallback: autoApprove
               ? async () => true
               : undefined,
             // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
             // request context the run's own memory reads take their account from.
-            ...(a2aUser ? { userId: a2aUser.username } : {}),
+            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser) } : {}),
           };
           const result = a2aUser
-            ? await runWithRequestContext({ userId: a2aUser.username }, () => runSubAgent(runOptions))
+            ? await runWithRequestContext({ identity: callerIdentity(a2aUser) }, () => runSubAgent(runOptions))
             : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -3999,20 +3828,36 @@ export function createGateway() {
       return;
     }
 
-    const payload = token ? await verifyToken(token) : null;
-    if (!payload) {
-      recordAuthFailure(ip);
-      ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
-      return;
+    let conn: RpcConnection;
+    if (getConfig().auth?.enabled === true) {
+      // Under multi-user auth the socket's caller is resolved against the stores, as on /api: a
+      // signed token of a deleted account, or one bound to an account id its name no longer holds,
+      // is refused here. The connection keeps the resolved caller and checks it again before every
+      // message and every pushed event, so a socket cannot outlive its account.
+      const user = token ? await authenticatedUserFromToken(token) : null;
+      if (!user) {
+        recordAuthFailure(ip);
+        ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
+        return;
+      }
+      clearAuthFailures(ip);
+      conn = new RpcConnection(ws, user.username, user.role, user);
+    } else {
+      const payload = token ? await verifyToken(token) : null;
+      if (!payload) {
+        recordAuthFailure(ip);
+        ws.close(4401, "Unauthorized — provide token as ?token= or Authorization header");
+        return;
+      }
+
+      clearAuthFailures(ip);
+
+      // Attribute the connection (and its sessions) to the authenticated user so
+      // document-RAG user scope + RBAC key on the same identity as REST uploads.
+      const connUserId = typeof payload.sub === "string" ? payload.sub : undefined;
+      const connRole = typeof payload.role === "string" ? payload.role : undefined;
+      conn = new RpcConnection(ws, connUserId, connRole);
     }
-
-    clearAuthFailures(ip);
-
-    // Attribute the connection (and its sessions) to the authenticated user so
-    // document-RAG user scope + RBAC key on the same identity as REST uploads.
-    const connUserId = typeof payload.sub === "string" ? payload.sub : undefined;
-    const connRole = typeof payload.role === "string" ? payload.role : undefined;
-    const conn = new RpcConnection(ws, connUserId, connRole);
 
     ws.on("message", async (raw) => {
       await conn.handleMessage(raw.toString());
@@ -4078,7 +3923,13 @@ export function createGateway() {
       const token = url.searchParams.get("token") ?? extractBearerToken(req.headers["authorization"]);
       const rl = checkAuthRateLimit(ip);
       if (!rl.allowed) { socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n"); socket.destroy(); return; }
-      if (!token || !await verifyToken(token)) {
+      // The live browser is reached only through this check, and the token rides in the query
+      // string, past the /api middleware that refuses a revoked account: under multi-user auth the
+      // caller is resolved against the stores here, so a deleted account's token cannot watch it.
+      const vncCallerValid = token
+        ? (getConfig().auth?.enabled === true ? await authenticatedUserFromToken(token) !== null : await verifyToken(token) !== null)
+        : false;
+      if (!vncCallerValid) {
         recordAuthFailure(ip);
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
