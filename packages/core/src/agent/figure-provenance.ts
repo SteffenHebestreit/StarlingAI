@@ -21,8 +21,9 @@
 export const UNOBSERVED_FIGURE_MARKER = "[not observed]";
 
 /** A run of digits, optionally grouped in threes by . , ' ’ NBSP or NNBSP, with an optional decimal
- *  tail, that no digit follows. */
-const FIGURE_BODY = String.raw`(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})`;
+ *  tail, that no digit follows. Exported so a table cell's value (tools/table-numbers.ts) and an
+ *  arithmetic chain (agent/arithmetic-check.ts) read a figure exactly as this module does. */
+export const FIGURE_BODY = String.raw`(?:\p{Nd}{1,3}(?:[.,'\u2019\u00a0\u202f]\p{Nd}{3})+(?:[.,]\p{Nd}+)?|\p{Nd}+(?:[.,]\p{Nd}+)?)(?!\p{N})`;
 /** A figure: never one that continues a word or a number in front of it. */
 const FIGURE_RE = new RegExp(String.raw`(?<![\p{L}\p{N}_])${FIGURE_BODY}`, "gu");
 /** The digits an identifier carries: a figure glued to a letter or "_" in front of it, the "18.17"
@@ -37,7 +38,7 @@ const DECIMAL_DIGIT_RE = /\p{Nd}/u;
  * only in contiguous runs of ten, zero first, so a digit's value is its distance from the start of
  * its run, modulo ten (several scripts' runs sit back to back, which the modulo absorbs).
  */
-function asciiDigit(digit: string): string {
+export function asciiDigit(digit: string): string {
   const codePoint = digit.codePointAt(0)!;
   if (codePoint >= 0x30 && codePoint <= 0x39) return digit;
   let start = codePoint;

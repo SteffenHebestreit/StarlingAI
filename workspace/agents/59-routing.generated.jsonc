@@ -95,7 +95,7 @@
           "browser"
         ],
         "oneLiner": "Drives a live browser (navigate/click/submit/login); also captures snapshots (secondary GATHER) that vision_browser_analyst reads.",
-        "sourceHash": "86b778e2ee9990e1",
+        "sourceHash": "c3349c819f5cb97f",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }
@@ -1001,7 +1001,7 @@
           "external_network"
         ],
         "oneLiner": "The only fresh-discovery web researcher; shares web tools with source_verifier(audits) and image_sourcer(images) -- separated by L1 + deliverable.",
-        "sourceHash": "7b7aef8122aa060a",
+        "sourceHash": "c903980b24718e9e",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }

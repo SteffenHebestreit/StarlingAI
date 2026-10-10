@@ -59,6 +59,22 @@ describe("workspace catalog integrity", () => {
     expect(browserAgent?.systemPrompt).toContain("use those saved URLs instead of the homepage or a guessed path");
   });
 
+  // E2E 2026-10-08/09: researcher and browser_agent added table rows in their heads (609 and 740
+  // for a stock of 596; 6, 7 and 9 articles for 8). Both hold web_table; vision_browser_analyst,
+  // which only views the shared tab, does not. browser_agent's own table sentence competed with
+  // the tool, so it now sends totals to "the table tool from your tool inventory": tool-neutral,
+  // so a fork without the grant is left with no dangling name. pass^k-relevant.
+  it("grants web_table to researcher and browser_agent, and points browser_agent's table sentence at it", () => {
+    const catalog = loadAgentCatalog();
+    expect(catalog.subAgents["researcher"]?.tools).toContain("web_table");
+    expect(catalog.subAgents["browser_agent"]?.tools).toContain("web_table");
+    expect(catalog.subAgents["vision_browser_analyst"]?.tools ?? []).not.toContain("web_table");
+    const prompt = catalog.subAgents["browser_agent"]?.systemPrompt ?? "";
+    expect(prompt).toContain("synthesize as soon as the visible rows or cells are readable. When the answer is a total, count, minimum or maximum over a table's rows, first open every page the table spans, then compute it with the table tool from your tool inventory, not from the snapshot.");
+    expect(prompt).not.toContain("web_table");
+    expect(catalog.subAgents["researcher"]?.systemPrompt ?? "").not.toContain("web_table");
+  });
+
   // In the E2E order-form run the form refused express shipping for the article the user named.
   // browser_agent then chose standard shipping itself, resubmitted, and reported an order the user
   // had not asked for. Its prompt tells it to finish the whole task and to stop only at a hard

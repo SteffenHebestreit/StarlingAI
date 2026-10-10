@@ -50,6 +50,9 @@ const GRANTABLE_TOOLS = new Set([
   "parallel_delegate",
   "workspace_search", "glob_files", "grep_files",
   "web_search", "web_fetch",
+  // Totals, counts and extremes over a web table, computed instead of added up by the model.
+  // Tier 0; its "tab" source needs a page-driving browser tool granted beside it.
+  "web_table",
   "list_knowledge_bases", "search_knowledge_base",
   // Native live-site inspection + read-only web audits, so a temporary agent
   // spun up for an ad-hoc "evaluate site X (optionally against knowledge base Y)"
