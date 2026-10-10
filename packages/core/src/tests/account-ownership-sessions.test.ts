@@ -296,6 +296,36 @@ describe("sessions of other kinds", () => {
     expect(mods.access.callerMayUseSession(account, accountsChat.id)).toBe(true);
   });
 
+  // A principal's record is the caller's only when the caller is the same principal: the same name
+  // AND the same kind. Without the kind, `sai token --user 4711 --role operator` would own Telegram
+  // sender 4711's chats, runs and questions; nothing else pinned that comparison.
+  it("a principal's records are not another kind's of the same name: a bootstrap token named like a channel sender", async () => {
+    configure({ enabled: true, users: [root.record] });
+    const sender: Identity = { userId: "4711", principal: "channel" };
+    const token: Identity = { userId: "4711", principal: "bootstrap" };
+    const telegram = chatOf(sender, "telegram");
+    const own = chatOf(token);
+    const bootstrap = await signedIn("4711", bootstrapClaims("operator"));
+
+    // The session routes.
+    expect(mods.access.callerMayUseSession(bootstrap, telegram.id)).toBe(false);
+    expect(mods.access.callerMayUseSession(bootstrap, own.id)).toBe(true);
+    // The dashboard socket's list.
+    const tab = await openSocket("4711", bootstrapClaims("operator"));
+    const listed = ((await tab.call("session.list")).payload as Array<{ id: string }>).map((summary) => summary.id);
+    expect(listed).toContain(own.id);
+    expect(listed).not.toContain(telegram.id);
+    // Scene and job runs.
+    const { canSeeSceneJob } = await import("../gateway/scene-job-access.js");
+    expect(canSeeSceneJob({ all: false, identity: token }, { userId: "4711", principal: "channel" })).toBe(false);
+    expect(canSeeSceneJob({ all: false, identity: token }, { userId: "4711", principal: "bootstrap" })).toBe(true);
+    // Session search and the questions a turn asks.
+    expect(mods.search.searchSessions(MARKER, { limit: 10, requester: token }).map((result) => result.id)).toEqual([own.id]);
+    mods.broker.userInputBroker.openTurn("turn-tg", telegram.id, sender);
+    expect(mods.broker.userInputBroker.canAnswerFor(telegram.id, { userId: "4711", identity: token, isAdmin: false })).toBe(false);
+    expect(mods.broker.userInputBroker.canAnswerFor(telegram.id, { userId: "4711", identity: sender, isAdmin: false })).toBe(true);
+  });
+
   it("a session from before account ids is an admin's alone, and runs no turn", async () => {
     // Written while no account held the name (a record from before ids restores the same way).
     configure({ enabled: true, users: [root.record] });
