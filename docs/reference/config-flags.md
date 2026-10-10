@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:464 | 18 |
 | `accessKeyId` | packages/core/src/config/schema.ts:524 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 139 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 141 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1739 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1770 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -324,7 +324,7 @@ Every public schema field, where it is declared, and how many production files r
 | `oversight` | packages/core/src/config/schemas/effort.ts:52 | 17 |
 | `pageSpeedInsightsApiKey` | packages/core/src/config/schema.ts:1223 | 1 |
 | `pageTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:194 | 1 |
-| `params` | packages/core/src/config/schema.ts:1372 | 60 |
+| `params` | packages/core/src/config/schema.ts:1372 | 61 |
 | `parseParams` | packages/core/src/config/schema.ts:1422 | 3 |
 | `password` | packages/core/src/config/schema.ts:849 | 49 |
 | `passwordHash` | packages/core/src/config/schema.ts:394 | 5 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1283 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:575 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:765 | 54 |
-| `provider` | packages/core/src/config/schema.ts:496 | 147 |
+| `provider` | packages/core/src/config/schema.ts:496 | 148 |
 | `providers` | packages/core/src/config/schema.ts:1275 | 101 |
 | `publicUrl` | packages/core/src/config/schema.ts:357 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:450 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1445 | 87 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1678 | 170 |
+| `store` | packages/core/src/config/schema.ts:1678 | 171 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:413 | 1 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:654 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1923 | 2 |
@@ -484,7 +484,7 @@ Every public schema field, where it is declared, and how many production files r
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:275 | 40 |
 | `timeoutMs` | packages/core/src/config/schema.ts:70 | 105 |
-| `token` | packages/core/src/config/schema.ts:1211 | 200 |
+| `token` | packages/core/src/config/schema.ts:1211 | 201 |
 | `tokenId` | packages/core/src/config/schema.ts:1110 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1111 | 1 |
 | `toolCallPrefill` | packages/core/src/config/schema.ts:262 | 3 |
@@ -513,7 +513,7 @@ Every public schema field, where it is declared, and how many production files r
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |
 | `urls` | packages/core/src/config/schema.ts:851 | 13 |
 | `userAgent` | packages/core/src/config/schema.ts:1214 | 3 |
-| `username` | packages/core/src/config/schema.ts:392 | 82 |
+| `username` | packages/core/src/config/schema.ts:392 | 83 |
 | `usernameClaim` | packages/core/src/config/schema.ts:457 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:852 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:634 | 4 |

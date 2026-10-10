@@ -29,6 +29,15 @@
         <p class="text-sm text-gray-500">{{ tabHint }}</p>
       </div>
 
+      <!-- Why the last SSO sign-in ended without a token: the message for the gateway's code. -->
+      <p
+        v-if="ssoErrorText"
+        role="alert"
+        class="mb-6 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs leading-relaxed text-red-200"
+      >
+        {{ ssoErrorText }}
+      </p>
+
       <!-- OIDC/SSO: replace the form with a redirect to the identity provider. -->
       <template v-if="provider === 'oidc'">
         <div class="space-y-6">
@@ -143,8 +152,13 @@
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
+import { ssoErrorMessage } from "@/composables/ssoReturn";
 
-const props = withDefaults(defineProps<{ dismissible?: boolean }>(), { dismissible: false });
+const props = withDefaults(
+  defineProps<{ dismissible?: boolean; ssoError?: string | null }>(),
+  { dismissible: false, ssoError: null },
+);
+const ssoErrorText = computed(() => (props.ssoError == null ? null : ssoErrorMessage(props.ssoError)));
 const emit = defineEmits<{ (event: "close"): void }>();
 
 const gateway = useGatewayStore();

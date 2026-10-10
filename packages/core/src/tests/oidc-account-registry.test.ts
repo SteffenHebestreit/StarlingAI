@@ -105,9 +105,10 @@ async function boot(auth: Record<string, unknown> = oidcAuth()) {
     idp.byState.set(state, { claims: { iss: ISSUER, realm_access: { roles: [] }, ...claims }, ...(gate ? { gate } : {}) });
     return async () => {
       const response = await app.request(`/api/auth/oidc/callback?state=${state}&code=abc`);
-      const fragment = new URL(response.headers.get("location") ?? "http://x/").hash.slice(1);
+      const location = response.headers.get("location") ?? "";
+      const fragment = new URL(location || "http://x/").hash.slice(1);
       const params = new URLSearchParams(fragment);
-      return { token: params.get("sai_token") ?? undefined, error: params.get("sai_error") ?? undefined };
+      return { location, token: params.get("sai_token") ?? undefined, error: params.get("sai_error") ?? undefined };
     };
   };
   const signIn = async (claims: Record<string, unknown>) => begin(claims)();
@@ -152,7 +153,7 @@ describe("an identity-provider subject owns one account", () => {
 
     const second = await signIn({ sub: "subject-2", preferred_username: "alice" });
     expect(second.token).toBeUndefined();
-    expect(second.error).toMatch(/held by another account/);
+    expect(second.error).toBe("username_held");
     expect(entries().map((entry) => [entry.subject, entry.username])).toEqual([["subject-1", "alice"]]);
     expect(await auditTypes()).toContain("auth_oidc_username_conflict");
 
@@ -199,7 +200,7 @@ describe("an identity-provider subject owns one account", () => {
     const after = await signIn({ sub: "subject-1", preferred_username: "alice.smith" });
     expect(await resolve(after.token!)).toMatchObject({ username: "alice.smith", account: id });
     // The old name stays this account's: nobody else is given it, or the grants written for it.
-    expect((await signIn({ sub: "subject-2", preferred_username: "alice" })).error).toMatch(/held by another account/);
+    expect((await signIn({ sub: "subject-2", preferred_username: "alice" })).error).toBe("username_held");
     expect(await auditTypes()).toContain("auth_account_renamed");
   });
 
@@ -212,9 +213,9 @@ describe("an identity-provider subject owns one account", () => {
 
     // Its tokens stop at once, and it does not sign in again.
     expect(await resolve(first.token!)).toBeNull();
-    expect((await signIn({ sub: "subject-1", preferred_username: "carol" })).error).toMatch(/retired/);
+    expect((await signIn({ sub: "subject-1", preferred_username: "carol" })).error).toBe("account_retired");
     // Nor does anyone else as carol.
-    expect((await signIn({ sub: "subject-2", preferred_username: "carol" })).error).toMatch(/held by another account/);
+    expect((await signIn({ sub: "subject-2", preferred_username: "carol" })).error).toBe("username_held");
 
     expect((await adminPost(`/api/admin/accounts/${oldId}/release-username`)).status).toBe(200);
     const next = await signIn({ sub: "subject-2", preferred_username: "carol" });
@@ -228,7 +229,7 @@ describe("an identity-provider subject owns one account", () => {
     const { signIn, resolve, entries } = await boot(oidcAuth({ usernameClaim: "email" }));
     const unverified = await signIn({ sub: "subject-1", email: "eve@example.com", email_verified: false });
     expect(unverified.token).toBeUndefined();
-    expect(unverified.error).toMatch(/not verified/);
+    expect(unverified.error).toBe("email_unverified");
     expect((await signIn({ sub: "subject-1", email: "eve@example.com" })).token).toBeUndefined();
     expect(entries()).toEqual([]);
     expect(await auditTypes()).toContain("auth_oidc_unverified_email");
@@ -242,6 +243,8 @@ describe("an identity-provider subject owns one account", () => {
     for (const name of ["telegram:12345", "has space", "line\nbreak", "-leading-dash", ""]) {
       const result = await signIn({ sub: `subject-${name.length}`, preferred_username: name || undefined, ...(name ? {} : { sub: "" }) });
       expect(result.token, JSON.stringify(name)).toBeUndefined();
+      // No subject at all is no refusal of a name: the sign-in failed.
+      expect(result.error, JSON.stringify(name)).toBe(name ? "username_invalid" : "sso_failed");
     }
     expect(entries()).toEqual([]);
   });
@@ -267,9 +270,9 @@ describe("an identity-provider subject owns one account", () => {
     mkdirSync(join(workspace, "users", accounts.safeUserSegment("dora")), { recursive: true });
     const held = await signIn({ sub: "subject-1", preferred_username: "dora" });
     expect(held.token).toBeUndefined();
-    expect(held.error).toMatch(/migration pending/i);
+    expect(held.error).toBe("migration_pending");
     expect(entries()[0]).toMatchObject({ username: "dora", status: "pending", legacy: { segment: accounts.safeUserSegment("dora") } });
-    expect((await signIn({ sub: "subject-1", preferred_username: "dora" })).error).toMatch(/migration pending/i);
+    expect((await signIn({ sub: "subject-1", preferred_username: "dora" })).error).toBe("migration_pending");
 
     expect((await adminPost(`/api/admin/accounts/${entries()[0]!.id}/decline-legacy`)).status).toBe(200);
     expect(entries()[0]).toMatchObject({ status: "active", legacy: { decision: "declined" } });
@@ -278,7 +281,31 @@ describe("an identity-provider subject owns one account", () => {
 
     // A session the name owns counts the same as a directory.
     sessions.createSession({ channel: "webchat", userId: "erik", workspacePath: workspace });
-    expect((await signIn({ sub: "subject-2", preferred_username: "erik" })).error).toMatch(/migration pending/i);
+    expect((await signIn({ sub: "subject-2", preferred_username: "erik" })).error).toBe("migration_pending");
+  });
+
+  it("tells the login screen why a sign-in is refused by a code alone, never the account or the reason", async () => {
+    const { signIn, entries, accounts } = await boot();
+    mkdirSync(join(workspace, "users", accounts.safeUserSegment("ida")), { recursive: true });
+    for (const attempt of ["first", "again"]) {
+      const refused = await signIn({ sub: "subject-ida-7f3c", preferred_username: "ida" });
+      const id = entries()[0]!.id;
+      // Neither the account id, the subject, the name nor the reason the log gets.
+      for (const secret of [id, id.slice("oidc-".length), "subject-ida-7f3c", "ida", "account migration"]) {
+        expect(decodeURIComponent(refused.location), `${attempt}: ${secret}`).not.toContain(secret);
+      }
+      expect(refused.location, attempt).toBe("http://localhost/#sai_error=migration_pending");
+    }
+    // The refusal itself is as it was: pending, audited, no token.
+    expect(entries()).toMatchObject([{ username: "ida", status: "pending" }]);
+    expect(await auditTypes()).toContain("auth_oidc_account_refused");
+  });
+
+  it("hands a successful sign-in its token in the fragment and nothing else", async () => {
+    const { signIn } = await boot();
+    const ok = await signIn({ sub: "subject-1", preferred_username: "jo" });
+    expect(ok.location).toBe(`http://localhost/#sai_token=${encodeURIComponent(ok.token!)}`);
+    expect(ok.error).toBeUndefined();
   });
 
   it("resolves an identity-provider token only while the provider is oidc", async () => {
@@ -295,6 +322,8 @@ describe("an identity-provider subject owns one account", () => {
     writeFileSync(registryFile(), "{ this is not the registry");
     const refused = await signIn({ sub: "subject-1", preferred_username: "gina" });
     expect(refused.token).toBeUndefined();
+    // Not "held by another account": nobody holds it, the registry cannot be read.
+    expect(refused.error).toBe("accounts_unreadable");
     expect(readFileSync(registryFile(), "utf8")).toBe("{ this is not the registry");
     const listed = await adminPost("/api/admin/accounts/oidc-0123456789abcdef/retire");
     expect(listed.status).toBe(404);
@@ -305,7 +334,9 @@ describe("an identity-provider subject owns one account", () => {
     const { signIn, entries } = await boot();
     // The state directory is a file: nothing can be written under it.
     writeFileSync(join(workspace, ".starlingai"), "not a directory");
-    expect((await signIn({ sub: "subject-1", preferred_username: "hugo" })).token).toBeUndefined();
+    const failed = await signIn({ sub: "subject-1", preferred_username: "hugo" });
+    expect(failed.token).toBeUndefined();
+    expect(failed.location).toBe("http://localhost/#sai_error=sso_failed");
     expect(entries()).toEqual([]);
   });
 });

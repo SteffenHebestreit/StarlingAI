@@ -26,7 +26,7 @@ import {
 } from "../runtime/account-registry.js";
 import { builtinTombstoneHolder } from "../runtime/account-tombstones.js";
 import { USERS_SUBDIR, isLegacyIdentity, userStateBaseDir } from "../runtime/user-scope.js";
-import { OidcSignInRefused, type OidcIdentity } from "./oidc.js";
+import { OidcSignInRefused, type OidcIdentity, type OidcRefusalCode } from "./oidc.js";
 
 /**
  * Whether data was stored under this username before account ids existed: a per-user directory
@@ -48,18 +48,21 @@ export function hasLegacyAccountData(username: string): boolean {
   return getAllSessions({ includeArchived: true }).some((session) => session.userId?.toLowerCase() === name && isLegacyIdentity(session.identity()));
 }
 
-/** Why a username is not free for a new identity-provider subject, or undefined when it is. */
-function usernameUnavailable(username: string): string | undefined {
+/**
+ * Why a username is not free for a new identity-provider subject, or undefined when it is: the reason
+ * the log gets, and the code the login screen gets.
+ */
+function usernameUnavailable(username: string): { reason: string; code: OidcRefusalCode } | undefined {
   const holder = accountRegistryUsernameHolder(username);
-  if (holder === "unreadable") return "the account registry cannot be read";
-  if (holder) return `held by account ${holder.id}`;
+  if (holder === "unreadable") return { reason: "the account registry cannot be read", code: "accounts_unreadable" };
+  if (holder) return { reason: `held by account ${holder.id}`, code: "username_held" };
   // Mixed mode: builtin accounts sign in under provider "oidc" too, and a name is one person's.
-  if (getConfig().auth.users.some((user) => user.username.toLowerCase() === username)) return "held by a builtin account";
+  if (getConfig().auth.users.some((user) => user.username.toLowerCase() === username)) return { reason: "held by a builtin account", code: "username_held" };
   // A deleted builtin account's name stays held: the grants an admin wrote for it name it still, and
   // a subject that claimed it would hold them.
   const tombstone = builtinTombstoneHolder(username);
-  if (tombstone === "unreadable") return "the account tombstones cannot be read";
-  if (tombstone) return "held by a deleted builtin account";
+  if (tombstone === "unreadable") return { reason: "the account tombstones cannot be read", code: "accounts_unreadable" };
+  if (tombstone) return { reason: "held by a deleted builtin account", code: "username_held" };
   return undefined;
 }
 
@@ -96,13 +99,13 @@ export function resolveOidcSignIn(identity: OidcIdentity, now: Date = new Date()
     if (known.status === "pending") {
       throw new OidcSignInRefused(
         "auth_oidc_account_refused",
-        "Account storage migration pending; ask an admin",
+        "migration_pending",
         `OIDC account ${known.id} is waiting for the account migration`,
         known.username,
       );
     }
     if (known.status === "retired") {
-      throw new OidcSignInRefused("auth_oidc_account_refused", "This account has been retired", `OIDC account ${known.id} is retired`, known.username);
+      throw new OidcSignInRefused("auth_oidc_account_refused", "account_retired", `OIDC account ${known.id} is retired`, known.username);
     }
     // The username stays the frozen one. A different claim is recorded for an admin to approve:
     // grants written for a name must not move because someone edited their own profile. A claim
@@ -122,8 +125,8 @@ export function resolveOidcSignIn(identity: OidcIdentity, now: Date = new Date()
   if (unavailable) {
     throw new OidcSignInRefused(
       "auth_oidc_username_conflict",
-      "This username is held by another account; ask an admin",
-      `OIDC username '${identity.username}' is ${unavailable}`,
+      unavailable.code,
+      `OIDC username '${identity.username}' is ${unavailable.reason}`,
       identity.username,
     );
   }
@@ -142,7 +145,7 @@ export function resolveOidcSignIn(identity: OidcIdentity, now: Date = new Date()
   if (legacy) {
     throw new OidcSignInRefused(
       "auth_oidc_account_refused",
-      "Account storage migration pending; ask an admin",
+      "migration_pending",
       `OIDC account ${fresh.id} for '${fresh.username}' has data from before account ids and waits for the account migration`,
       fresh.username,
     );

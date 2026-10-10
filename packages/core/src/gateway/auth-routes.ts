@@ -70,6 +70,9 @@ export function registerAuthRoutes(app: Hono): void {
   // Callback: exchange the code, mint OUR session JWT (mapping IdP roles), and hand
   // it to the SPA via the URL FRAGMENT (never the query — fragments aren't logged or
   // sent to the server). The SPA reads it on load, stores it, clears the hash, connects.
+  // A sign-in that does not end in a token hands the login screen `sai_error`: the refusal's
+  // code (OidcRefusalCode), or "sso_failed" for anything else. Only the code: the subject, the
+  // account id and the reason stay in the log and the audit.
   app.get(OIDC_CALLBACK_PATH, async (c) => {
     const auth = getConfig().auth;
     const origin = new URL(c.req.url).origin;
@@ -112,10 +115,10 @@ export function registerAuthRoutes(app: Hono): void {
           severity: "warn",
         });
         log.warn({ reason: err.message }, "OIDC sign-in refused");
-        return c.redirect(`${base}/#sai_error=${encodeURIComponent(err.userMessage)}`);
+        return c.redirect(`${base}/#sai_error=${err.code}`);
       }
       log.warn({ err: err instanceof Error ? err.message : String(err) }, "OIDC callback failed");
-      return c.redirect(`${base}/#sai_error=${encodeURIComponent("SSO login failed")}`);
+      return c.redirect(`${base}/#sai_error=sso_failed`);
     }
   });
 

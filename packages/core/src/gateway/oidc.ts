@@ -36,13 +36,26 @@ export interface OidcIdentity {
 }
 
 /**
+ * Why a sign-in was refused, as the login screen is told it: a short, stable code the dashboard
+ * shows a message for. Never the subject, an account id or the reason text, which stay in the
+ * gateway's log and audit.
+ */
+export type OidcRefusalCode =
+  | "email_unverified"
+  | "username_invalid"
+  | "username_held"
+  | "accounts_unreadable"
+  | "migration_pending"
+  | "account_retired";
+
+/**
  * A sign-in the gateway refuses, with what to audit and what to tell the person. Thrown by the
- * callback; the route audits `auditType` and redirects to the login screen with `userMessage`.
+ * callback; the route audits `auditType` and redirects to the login screen with `code`.
  */
 export class OidcSignInRefused extends Error {
   constructor(
     readonly auditType: "auth_oidc_unverified_email" | "auth_oidc_invalid_username" | "auth_oidc_username_conflict" | "auth_oidc_account_refused",
-    readonly userMessage: string,
+    readonly code: OidcRefusalCode,
     message: string,
     readonly username?: string,
   ) {
@@ -209,7 +222,7 @@ export function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIde
   if (cfg.usernameClaim === "email" && claims["email_verified"] !== true) {
     throw new OidcSignInRefused(
       "auth_oidc_unverified_email",
-      "Your email address is not verified at the identity provider",
+      "email_unverified",
       `OIDC user '${username}' signs in by email, and the IdP has not verified it`,
       username,
     );
@@ -217,7 +230,7 @@ export function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIde
   if (!OIDC_USERNAME_RE.test(username)) {
     throw new OidcSignInRefused(
       "auth_oidc_invalid_username",
-      "Your username cannot be used here",
+      "username_invalid",
       `OIDC username '${username.slice(0, 64)}' is not one this gateway accepts`,
     );
   }
