@@ -807,6 +807,30 @@ describe("purge", () => {
     delete process.env["SAI_MAINTENANCE"];
     expect((await dryRun(d, { purgeRetired: root.id })).purge.refused).toContain("living builtin account");
   });
+
+  // A deleted account's id was inventoried as an unknown identity's: --archive-unmapped archived its
+  // directory, and --reset retired its stamps and graph tenants, so a purge of the id then found
+  // none of them and the deleted person's records survived it.
+  it("finds what a deleted account left under its id after plain, --reset and --archive-unmapped runs, which leave it there", async () => {
+    const hank = "hank-0123456789abcdef";
+    for (const body of [{}, { reset: true }, { archiveUnmapped: true }]) {
+      const d = setup({
+        overlayUsers: [root.record],
+        tombstones: [{ id: hank, username: "hank", kind: "builtin", retiredAt: "2026-10-01T00:00:00Z", by: "root" }],
+      });
+      bucket(d.ws, hank);
+      appendLines(join(d.ws, ".starlingai", "agent_outcomes.ndjson"), [outcome(hank)]);
+      const plan = await dryRun(d, body);
+      expect(plan.identities.map((entry: Record<string, unknown>) => entry["segment"]), JSON.stringify(body)).not.toContain(hank);
+      expect((await apply(d, body)).applied.ok).toBe(true);
+      expect(existsSync(join(d.ws, "users", hank, "note.md")), JSON.stringify(body)).toBe(true);
+      expect(readFileSync(join(d.ws, ".starlingai", "agent_outcomes.ndjson"), "utf8")).toContain(`"account":"${hank}"`);
+      expect(d.cypher.filter((call) => call.params["tenant"] === `retired:${hank}`)).toEqual([]);
+
+      delete process.env["SAI_MAINTENANCE"];
+      expect((await dryRun(d, { purgeRetired: hank })).purge.removes).toMatchObject({ directories: ["workspace"], stamps: 1 });
+    }
+  });
 });
 
 describe("the request", () => {

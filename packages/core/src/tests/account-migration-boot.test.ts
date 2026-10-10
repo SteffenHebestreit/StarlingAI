@@ -215,9 +215,15 @@ describe("the boot warning", () => {
       accounts: [{ id: "oidc-0123456789abcdef", issuer: "https://idp", subject: "s", username: "dave", status: "pending", firstSeenAt: "2026-10-01T00:00:00Z", lastSeenAt: "2026-10-01T00:00:00Z" }],
       bootstrapSubs: ["admin"],
     }), "utf8");
-    // Counted: alice's old bucket. Not counted: the bootstrap token's, an account's own, one an
-    // apply decided, a dot-directory.
-    for (const name of [S("alice"), S("admin"), root.id, S("held"), ".retired"]) mkdirSync(join(workspace, "users", name), { recursive: true });
+    // A deleted account's storage stays under its id until a purge.
+    const hank = "hank-0123456789abcdef";
+    writeFileSync(join(workspace, ".starlingai", "accounts-retired.json"), JSON.stringify({
+      version: 1,
+      tombstones: [{ id: hank, username: "hank", kind: "builtin", retiredAt: "2026-10-01T00:00:00Z", by: "root" }],
+    }), "utf8");
+    // Counted: alice's old bucket. Not counted: the bootstrap token's, an account's own, a deleted
+    // account's own, one an apply decided, a dot-directory.
+    for (const name of [S("alice"), S("admin"), root.id, hank, S("held"), ".retired"]) mkdirSync(join(workspace, "users", name), { recursive: true });
     writeFileSync(join(workspace, ".starlingai", "account-migrations.ndjson"), `${JSON.stringify({ event: "applied", at: "x", planHash: "0", mode: "migrate", decisions: [{ segment: S("held") }], results: [] })}\n`, "utf8");
     // A session from before account ids, hydrated as a boot hydrates one.
     mirror.records = [JSON.stringify({ id: "s-legacy", channel: "webchat", userId: "alice", createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z", systemPrompt: "s", workspacePath: workspace, turnCount: 0, history: [] })];

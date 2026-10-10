@@ -368,6 +368,11 @@ function listDirs(path: string): string[] {
   }
 }
 
+/** The lowercased ids of the accounts that were deleted or retired. */
+function endedAccountIds(tombstones: readonly AccountTombstone[]): string[] {
+  return tombstones.flatMap((tombstone) => (tombstone.id ? [tombstone.id.toLowerCase()] : []));
+}
+
 function isLegacyRecordOwner(owner: { userId?: string; account?: string; principal?: string }): owner is { userId: string } {
   return typeof owner.userId === "string" && owner.userId !== "" && !owner.account && !owner.principal;
 }
@@ -398,6 +403,12 @@ async function takeInventory(backends: AccountMigrationBackends): Promise<Invent
     ...registry.map((entry) => entry.id.toLowerCase()),
     ...ledger.flatMap((entry) => (entry.event === "reserved" ? [entry.id.toLowerCase()] : [])),
   ]);
+  // So is what a deleted account left under its id: it stays there until a purge removes it. It
+  // was inventoried as an unknown identity's, so --archive-unmapped archived its directory and
+  // --reset retired its stamps and graph tenants, after which a purge of the id matched none of
+  // them and the deleted person's records survived it. Its id is never a living account's, so it
+  // is kept apart from `accountIds`, which an archive is restored into.
+  const knownIds = new Set<string>([...accountIds, ...endedAccountIds(tombstones)]);
 
   const stored = new Map<string, StoredUnder>();
   const under = (segment: string): StoredUnder => {
@@ -425,7 +436,7 @@ async function takeInventory(backends: AccountMigrationBackends): Promise<Invent
         continue;
       }
       if (name.startsWith(".")) continue;
-      if (accountIds.has(name.toLowerCase())) {
+      if (knownIds.has(name.toLowerCase())) {
         if (!accountDirs.has(name.toLowerCase())) accountDirs.set(name.toLowerCase(), new Set());
         accountDirs.get(name.toLowerCase())!.add(base.name);
         continue;
@@ -445,7 +456,7 @@ async function takeInventory(backends: AccountMigrationBackends): Promise<Invent
     try {
       for (const [segment, n] of count(workspace)) {
         stampCounts.set(segment, (stampCounts.get(segment) ?? 0) + n);
-        if (accountIds.has(segment.toLowerCase()) || segment.startsWith("retired:")) continue;
+        if (knownIds.has(segment.toLowerCase()) || segment.startsWith("retired:")) continue;
         under(segment).stamps += n;
       }
     } catch (err) {
@@ -1672,9 +1683,11 @@ export function reportAccountMigrationBacklog(bases: string[]): { idless: number
   const idless = config.auth.users.filter((user) => !user.id).length;
   const pending = accountRegistryEntries().filter((entry) => entry.status === "pending").length;
   const sessions = getAllSessions({ includeArchived: true }).filter((session) => session.isLegacy()).length;
+  // A deleted account's directory stays under its id until a purge: it is no legacy bucket.
   const accountIds = new Set([
     ...config.auth.users.flatMap((user) => (user.id ? [user.id.toLowerCase()] : [])),
     ...accountRegistryEntries().map((entry) => entry.id.toLowerCase()),
+    ...endedAccountIds(accountTombstones()),
   ]);
   const known = new Set([DEFAULT_BOOTSTRAP_SUB, ...accountRegistryBootstrapSubs()].map((sub) => principalSegment(sub)));
   for (const session of getAllSessions({ includeArchived: true })) {
