@@ -39,6 +39,18 @@ vi.mock("../agent/session-redis.js", async (importOriginal) => ({
   deleteSessionFromRedisChecked: async (id: string) => { redis.store.delete(id); return true; },
 }));
 
+// The cron scheduler is recorded, not run: a test fires a schedule's tick itself.
+const cron = vi.hoisted(() => ({ next: 0, ticks: new Map<string, () => unknown>() }));
+vi.mock("../runtime/scheduler.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../runtime/scheduler.js")>()),
+  createCronJob: (_expression: string, _label: string, _action: string, onTick: () => unknown) => {
+    const id = `cron_${++cron.next}`;
+    cron.ticks.set(id, onTick);
+    return { id };
+  },
+  removeCronJob: (id: string) => cron.ticks.delete(id),
+}));
+
 const SECRET = "m".repeat(40);
 const FILE_DIR = mkdtempSync(join(tmpdir(), "starlingai-account-migration-file-"));
 const BASE = join(FILE_DIR, "base.json");
@@ -140,6 +152,11 @@ function fakeSql(): FakeSql {
       if (text.startsWith("UPDATE scene_jobs SET account_id = $1 WHERE user_id = $2")) {
         const rows = sql.jobs.filter((row) => row.user_id === params[1] && row.account_id === null && !row.principal);
         for (const row of rows) row.account_id = String(params[0]);
+        return { rows: [], rowCount: rows.length };
+      }
+      if (text.startsWith("UPDATE scene_jobs SET payload = jsonb_set(")) {
+        const rows = sql.jobs.filter((row) => row.user_id === params[1] && row.account_id === null && !row.principal);
+        for (const row of rows) row.principal = String(params[0]);
         return { rows: [], rowCount: rows.length };
       }
       if (text.startsWith("UPDATE missions SET account_id = $1 WHERE user_id = $2")) {
@@ -397,6 +414,8 @@ describe("classification", () => {
     const result = await mods.migration.runAccountMigration(mods.migration.parseAccountMigrationRequest({ archiveUnmapped: true, apply: true, plan: plan.hash }) as never, d.backends, "test");
     expect(result.status).toBe(200);
     expect(existsSync(join(d.ws, "users", S("u-17"), "note.md"))).toBe(true);
+    // Its session from before account ids is its account's again: the id is its segment.
+    expect(mods.sessions.getSessionRecord("s-u17")?.identity()).toEqual({ userId: "u-17", account: S("u-17") });
   });
 
   it("archives a deleted builtin account's directories, reversibly, and disables its schedules", async () => {
@@ -441,6 +460,80 @@ describe("classification", () => {
     await mirrorSessions([legacySession("s-tg", "12345", d.ws, "telegram")]);
     bucket(d.ws, S("12345"));
     expect(identity(await dryRun(d), "12345")).toMatchObject({ kind: "channel-or-peer", data: "in-place" });
+  });
+});
+
+describe("identities whose storage stays in place", () => {
+  // Their records named them by name alone and the apply only retagged their graph nodes, so they
+  // stayed from before account ids for good: the bootstrap admin's schedules were skipped on every
+  // tick, its chats were read-only, its `user:admin` documents were out of reach (its corpus is
+  // `user:<segment>` under multi-user auth), and the next dry run had nothing left to migrate. The
+  // same held for channel senders and scene runs.
+  it("get their records stamped with the owner they are: the bootstrap admin's schedule fires, its chats continue, its documents are listed", async () => {
+    const d = setup({ overlayUsers: [root.record] });
+    bucket(d.ws, S("admin"));
+    await mirrorSessions([
+      legacySession("s-admin", "admin", d.ws),
+      legacySession("s-admin-old", "admin", d.ws),
+      legacySession("s-tg", "12345", d.ws, "telegram"),
+      legacySession("s-wf", "workflow:nightly", d.ws, "workflow"),
+    ], { hidden: ["s-admin-old"] });
+    mods.scheduled.saveScheduledTask({ id: "t-admin", cron: "0 * * * *", label: "admin's", task: "x", userId: "admin", createdAt: "2026-09-01T00:00:00Z" });
+    d.sql.jobs.push({ user_id: "admin", account_id: null }, { user_id: "12345", account_id: null });
+    mkdirSync(join(d.ws, "uploads"), { recursive: true });
+    writeFileSync(join(d.ws, "uploads", ".knowledge-bases.json"), JSON.stringify({
+      version: 1,
+      kbs: [{ id: "kb-admin", name: "admin kb", seedUrls: [], maxPages: 1, maxDepth: 1, sameOriginOnly: true, respectRobots: true, ambientRetrieval: false, scope: "user", ownerId: "admin", createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z", status: "ready", pages: {} }],
+    }), "utf8");
+    writeFileSync(join(d.ws, "uploads", ".registry.json"), JSON.stringify({ entries: [{ documentId: "d1", scope: "user", source: "user:admin", filename: "a.pdf", ingestedAt: "2026-09-01T00:00:00Z" }] }), "utf8");
+
+    const plan = await dryRun(d);
+    expect(identity(plan, "admin")).toMatchObject({ kind: "bootstrap", data: "in-place", stampRecords: true });
+    expect(identity(plan, "12345")).toMatchObject({ kind: "channel-or-peer", data: "in-place", stampRecords: true });
+    expect(identity(plan, "workflow:nightly")).toMatchObject({ kind: "synthetic", data: "in-place", stampRecords: true });
+    expect((await apply(d)).applied.ok).toBe(true);
+
+    // Sessions, here and in the mirror, each its own kind; the root is where it was.
+    const admin = mods.sessions.getSessionRecord("s-admin")!;
+    expect(admin.identity()).toEqual({ userId: "admin", principal: "bootstrap" });
+    expect(admin.getWorkspacePath()).toBe(join(d.ws, "users", S("admin")));
+    expect(JSON.parse(redis.store.get("s-admin")!)).toMatchObject({ principal: "bootstrap", workspacePath: join(d.ws, "users", S("admin")) });
+    expect(JSON.parse(redis.store.get("s-admin-old")!)).toMatchObject({ principal: "bootstrap", updatedAt: "2026-09-02T00:00:00.000Z" });
+    expect(mods.sessions.getSessionRecord("s-tg")!.identity()).toEqual({ userId: "12345", principal: "channel" });
+    expect(mods.sessions.getSessionRecord("s-wf")!.identity()).toEqual({ userId: "workflow:nightly", principal: "synthetic" });
+    // Jobs, the schedule and the knowledge base.
+    expect(d.sql.jobs).toEqual([{ user_id: "admin", account_id: null, principal: "bootstrap" }, { user_id: "12345", account_id: null, principal: "channel" }]);
+    expect(mods.scheduled.listScheduledTaskRecords().find((task) => task.id === "t-admin")).toMatchObject({ userId: "admin", principal: "bootstrap" });
+    expect(JSON.parse(readFileSync(join(d.ws, "uploads", ".knowledge-bases.json"), "utf8")).kbs[0]).toMatchObject({ ownerId: "admin", ownerPrincipal: "bootstrap" });
+    // The documents: the bootstrap admin reads its old corpus, an account does not.
+    expect(mods.rag.callerUserSources({ userId: "admin", identity: { userId: "admin", principal: "bootstrap" } })).toEqual([`user:${S("admin")}`, "user:admin"]);
+    expect(mods.rag.callerUserSources({ userId: "root", identity: { userId: "root", account: root.id } })).toEqual([`user:${root.id}`]);
+
+    // The schedule fires again, as the bootstrap principal.
+    const runner = await import("../runtime/scheduled-task-runner.js");
+    const jobs = await import("../agent/jobs.js");
+    cron.ticks.clear();
+    runner.rehydrateScheduledTasks();
+    expect(cron.ticks.size).toBe(1);
+    for (const tick of cron.ticks.values()) await tick();
+    expect((await jobs.listJobs()).filter((job) => job.userId === "admin").map((job) => job.principal)).toEqual(["bootstrap"]);
+
+    // Nothing is left to migrate, and nothing waits at boot.
+    delete process.env["SAI_MAINTENANCE"];
+    expect((await dryRun(d)).nothingToMigrate).toBe(true);
+    expect(mods.migration.reportAccountMigrationBacklog([d.ws])).toMatchObject({ sessions: 0, schedules: 0 });
+  });
+
+  it("keep a bootstrap token's name's records the token's where an identity-provider account has the name", async () => {
+    const idpAdmin = entry("admin", "active");
+    const d = setup({ provider: "oidc", overlayUsers: [root.record], registry: [idpAdmin] });
+    bucket(d.ws, S("admin"));
+    mods.scheduled.saveScheduledTask({ id: "t-admin", cron: "0 * * * *", label: "admin's", task: "x", userId: "admin", createdAt: "2026-09-01T00:00:00Z" });
+    const plan = await dryRun(d);
+    expect(identity(plan, "admin")).toMatchObject({ kind: "oidc", data: "hold", stampRecords: true });
+    expect((await apply(d)).applied.ok).toBe(true);
+    expect(mods.scheduled.listScheduledTaskRecords().find((task) => task.id === "t-admin")).toMatchObject({ userId: "admin", principal: "bootstrap" });
+    expect(existsSync(join(d.ws, "users", S("admin"), "note.md"))).toBe(true);
   });
 });
 

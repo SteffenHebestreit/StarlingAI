@@ -71,11 +71,12 @@ import { disableScheduledTask, listScheduledTaskRecords, saveScheduledTask, type
 import {
   checkedSessionMirror,
   getAllSessions,
-  migrateMirroredSessionAccount,
-  migrateSessionAccount,
+  migrateMirroredSessionOwner,
+  migrateSessionOwner,
   purgeAccountSessions,
   type PersistedSessionRecord,
   type SessionMirrorAccess,
+  type SessionOwnerStamp,
 } from "../agent/session.js";
 import { loadEverySessionFromRedis } from "../agent/session-redis.js";
 import { outcomeAccountCounts, rewriteOutcomeAccounts } from "../agent/outcomes.js";
@@ -86,6 +87,10 @@ import { listRegistry, unregisterDocument } from "../retrieval/document-registry
 import { addDocumentSourceAlias, aliasedDocumentSources, documentSourceAliasHolders, documentSourceAliases, removeDocumentSourceAliases } from "../retrieval/document-aliases.js";
 
 const log = childLogger("runtime:account-migration");
+
+/** Whose a record from before account ids becomes: an account's by its id, or a principal's by its
+ *  kind (with the name it has). */
+type RecordOwner = SessionOwnerStamp;
 
 /** The value of SAI_MAINTENANCE that boots the gateway for the account migration only. */
 export const ACCOUNT_MIGRATION_MAINTENANCE = "account-migration";
@@ -715,6 +720,10 @@ export interface PlannedIdentity {
   /** segment: a principal's user-scope graph nodes go from its raw name to its segment; retired: a
    *  reset's. */
   graph: "segment" | "retired" | "none";
+  /** The records from before account ids (sessions, jobs, schedules, knowledge bases) of an identity
+   *  whose storage stays where it is get the owner it is: a principal's kind, or an extension user's
+   *  id (its segment), and its `user:<name>` documents an alias. Nothing moves. */
+  stampRecords: boolean;
   /** The record gets its id (written to the roster the runtime writes). */
   assignId: boolean;
   /** A pending identity-provider account becomes active. */
@@ -827,6 +836,17 @@ function storedSummary(stored: StoredUnder): PlannedIdentity["stored"] {
   };
 }
 
+/**
+ * Whether an identity has records from before account ids that name it by name alone and that a
+ * stamp makes its own: sessions, jobs, schedules, knowledge bases, documents. A principal's
+ * missions are owned through their root sessions and never carry an account, so they are not among
+ * them; an extension user's, which carry its account id, are.
+ */
+function hasUnstampedRecords(stored: StoredUnder, kind: MigrationKind): boolean {
+  return stored.sessions.length > 0 || stored.jobs > 0 || stored.schedules.length > 0 || stored.kbs.length > 0 || stored.documents > 0
+    || (kind === "extension" && stored.missions > 0);
+}
+
 function hasMovableData(stored: StoredUnder): boolean {
   return stored.buckets.size > 0 || stored.stamps > 0 || stored.sessions.length > 0 || stored.jobs > 0 || stored.missions > 0
     || stored.schedules.length > 0 || stored.kbs.length > 0 || stored.documents > 0;
@@ -872,6 +892,7 @@ function buildPlan(inv: Inventory, request: AccountMigrationRequest): AccountMig
       kind,
       data: "hold",
       graph: "none",
+      stampRecords: false,
       assignId: false,
       activate: false,
       disableSchedules: false,
@@ -974,6 +995,16 @@ function buildPlan(inv: Inventory, request: AccountMigrationRequest): AccountMig
       plan.data = "hold";
       plan.notes.push(why);
       conflicts.push(`${username}: ${why}`);
+    }
+    // What stays where it is keeps its records, under the owner it is. They named it by name alone,
+    // so they stayed from before account ids for good: its schedules were skipped on every tick,
+    // its chats were read-only and refused every turn, and its `user:<name>` documents were out of
+    // reach, while the next dry run had nothing left to migrate. That covers the principals and the
+    // extension users, and what a bootstrap token's name stored where an account has the name too:
+    // it stays the token's.
+    if (!plan.refused && hasUnstampedRecords(stored, kind)
+      && (plan.data === "in-place" || (bootstrapName && !request.reset && plan.data === "hold" && (kind === "builtin" || kind === "oidc")))) {
+      plan.stampRecords = true;
     }
     // A directory a running app binds is not moved under it.
     if ((plan.data === "adopt" || plan.data === "archive") && bindsSegment(inv.appBinds, segment)) {
@@ -1182,7 +1213,7 @@ function finishPlan(
   const decisions = {
     v: 1,
     mode,
-    identities: identities.map((plan) => [plan.segment, plan.username ?? "", plan.kind, plan.account ?? "", plan.data, plan.graph, plan.assignId, plan.activate, plan.disableSchedules, plan.refused ?? ""]),
+    identities: identities.map((plan) => [plan.segment, plan.username ?? "", plan.kind, plan.account ?? "", plan.data, plan.graph, plan.stampRecords, plan.assignId, plan.activate, plan.disableSchedules, plan.refused ?? ""]),
     moves: moves.map((move) => [move.base, move.from, move.to]).sort((left, right) => left.join("/").localeCompare(right.join("/"))),
     restores: restores.map((restore) => [restore.archive, restore.account, restore.bases, restore.refused ?? ""]),
     conflicts: [...conflicts].sort(),
@@ -1223,7 +1254,7 @@ function finishPlan(
 
 /** Whether the apply would change anything for this identity. */
 function isActionable(plan: PlannedIdentity, inv: Inventory, mode: AccountMigrationPlan["mode"]): boolean {
-  if (plan.assignId || plan.activate || plan.disableSchedules || plan.graph !== "none") return true;
+  if (plan.assignId || plan.activate || plan.disableSchedules || plan.graph !== "none" || plan.stampRecords) return true;
   const stored = inv.stored.get(plan.segment);
   if (!stored) return false;
   if (plan.data === "adopt") return hasMovableData(stored);
@@ -1330,7 +1361,8 @@ function restamp(ctx: ApplyContext, from: string, to: string): StepOutcome {
   return changed > 0 ? "done" : "nothing";
 }
 
-async function migrateSessions(ctx: ApplyContext, plan: PlannedIdentity, account: string): Promise<StepOutcome> {
+/** Stamps each of the identity's sessions from before account ids with the owner `ownerOf` names. */
+async function migrateSessions(ctx: ApplyContext, plan: PlannedIdentity, ownerOf: (session: SessionFacts) => RecordOwner): Promise<StepOutcome> {
   const sessions = ctx.inv.stored.get(plan.segment)?.sessions ?? [];
   if (ctx.inv.problems.some((problem) => problem.source === "Redis session mirror")) {
     return "failed: the Redis session mirror could not be read, so a session only it holds could be missed";
@@ -1338,8 +1370,8 @@ async function migrateSessions(ctx: ApplyContext, plan: PlannedIdentity, account
   let changed = 0;
   for (const session of sessions) {
     if (session.mirrorJson !== undefined) {
-      if (await migrateMirroredSessionAccount(session.id, session.mirrorJson, account, ctx.backends.mirror)) changed += 1;
-    } else if (await migrateSessionAccount(session.id, account, ctx.backends.mirror) === "migrated") {
+      if (await migrateMirroredSessionOwner(session.id, session.mirrorJson, ownerOf(session), ctx.backends.mirror)) changed += 1;
+    } else if (await migrateSessionOwner(session.id, ownerOf(session), ctx.backends.mirror) === "migrated") {
       changed += 1;
     }
   }
@@ -1363,11 +1395,11 @@ async function backfillRows(ctx: ApplyContext, plan: PlannedIdentity, account: s
   return "done";
 }
 
-function stampSchedules(ctx: ApplyContext, plan: PlannedIdentity, account: string): StepOutcome {
+function stampSchedules(ctx: ApplyContext, plan: PlannedIdentity, owner: RecordOwner): StepOutcome {
   const tasks = ctx.inv.stored.get(plan.segment)?.schedules ?? [];
   for (const task of tasks) {
-    const { principal: _principal, ...rest } = task;
-    saveScheduledTask({ ...rest, account });
+    const { principal: _principal, account: _account, ...rest } = task;
+    saveScheduledTask({ ...rest, ...owner });
   }
   return tasks.length > 0 ? "done" : "nothing";
 }
@@ -1380,15 +1412,69 @@ function disableSchedules(ctx: ApplyContext, plan: PlannedIdentity, reasonText: 
   return changed > 0 ? "done" : "nothing";
 }
 
-async function stampKnowledgeBases(ctx: ApplyContext, plan: PlannedIdentity, account: string): Promise<StepOutcome> {
+async function stampKnowledgeBases(ctx: ApplyContext, plan: PlannedIdentity, owner: RecordOwner): Promise<StepOutcome> {
   const kbs = ctx.inv.stored.get(plan.segment)?.kbs ?? [];
   for (const kb of kbs) {
     await mutateKnowledgeBase(kb.id, (record) => {
-      record.ownerAccount = account;
+      delete record.ownerAccount;
       delete record.ownerPrincipal;
+      if ("account" in owner) record.ownerAccount = owner.account;
+      else record.ownerPrincipal = owner.principal;
     });
   }
   return kbs.length > 0 ? "done" : "nothing";
+}
+
+/** Stamps a principal's kind on its scene jobs from before account ids, in the payload (the table
+ *  has no column for it); an extension user's jobs and missions get its account id. A principal's
+ *  missions are owned through their root sessions. */
+async function stampJobs(ctx: ApplyContext, plan: PlannedIdentity, owner: RecordOwner): Promise<StepOutcome> {
+  if ("account" in owner) return backfillRows(ctx, plan, owner.account);
+  const stored = ctx.inv.stored.get(plan.segment);
+  if (!stored || stored.jobs === 0 || !plan.username || !ctx.backends.sql) return "nothing";
+  if (ctx.inv.problems.some((problem) => problem.source === "Postgres")) return "failed: Postgres could not be read";
+  if (!ctx.inv.sqlTables.jobs) return "nothing";
+  await ctx.backends.sql.query(
+    "UPDATE scene_jobs SET payload = jsonb_set(COALESCE(payload, '{}'::jsonb), '{principal}', to_jsonb($1::text)) WHERE user_id = $2 AND account_id IS NULL AND (payload->>'principal') IS NULL",
+    [owner.principal, plan.username],
+  );
+  return "done";
+}
+
+/** Whose the records of an identity that stays in place become: an extension user's account id,
+ *  which is its segment; else the principal kind it is. A bootstrap token's name held where an
+ *  account has the name too is the token's. */
+function inPlaceOwner(plan: PlannedIdentity, inv: Inventory): RecordOwner {
+  if (plan.kind === "extension") return { account: plan.segment };
+  if (plan.kind === "synthetic") return { principal: "synthetic" };
+  if (plan.kind === "channel-or-peer") {
+    const sessions = inv.sessionsByUser.get(plan.username ?? "") ?? [];
+    const peer = (session: SessionFacts) => session.principal === "peer" || session.id.startsWith("a2a-in:");
+    return { principal: sessions.length > 0 && sessions.every(peer) ? "peer" : "channel" };
+  }
+  return { principal: "bootstrap" };
+}
+
+/** A session's own owner within its identity: a channel's session is the channel sender's and an
+ *  inbound A2A one the peer's, whatever else the name was. */
+function inPlaceSessionOwner(session: SessionFacts, owner: RecordOwner): RecordOwner {
+  if ("account" in owner) return owner;
+  if ((CHANNEL_TYPES as readonly string[]).includes(session.channel)) return { principal: "channel" };
+  if (session.id.startsWith("a2a-in:")) return { principal: "peer" };
+  return owner;
+}
+
+/** The steps that stamp an in-place identity's records from before account ids. Nothing moves:
+ *  the segment its storage is under is the one its records name already. */
+function stampRecordSteps(ctx: ApplyContext, plan: PlannedIdentity): Array<[string, () => Promise<StepOutcome> | StepOutcome]> {
+  const owner = inPlaceOwner(plan, ctx.inv);
+  return [
+    ["sessions", () => migrateSessions(ctx, plan, (session) => inPlaceSessionOwner(session, owner))],
+    ["jobs", () => stampJobs(ctx, plan, owner)],
+    ["schedules", () => stampSchedules(ctx, plan, owner)],
+    ["knowledgeBases", () => stampKnowledgeBases(ctx, plan, owner)],
+    ["documents", () => aliasDocuments(ctx, plan, plan.segment)],
+  ];
 }
 
 async function retagGraph(ctx: ApplyContext, plan: PlannedIdentity, mode: "account" | "segment" | "retired", account?: string): Promise<StepOutcome> {
@@ -1461,14 +1547,18 @@ async function applyIdentity(ctx: ApplyContext, plan: PlannedIdentity, mode: Acc
   const base: Omit<IdentityResult, "ok" | "steps"> = { segment: plan.segment, ...(plan.username ? { username: plan.username } : {}) };
 
   if (plan.data === "in-place" || (plan.data === "hold" && !plan.assignId && !plan.activate)) {
-    if (plan.graph !== "segment") return null;
-    const run = await runSteps([
-      ["graph", () => retagGraph(ctx, plan, "segment")],
-      ["record", () => {
-        ledger(ctx, { event: "retagged", ...(plan.username ? { username: plan.username } : {}), segment: plan.segment, at: new Date().toISOString() });
-        return "done";
-      }],
-    ]);
+    const steps = plan.stampRecords ? stampRecordSteps(ctx, plan) : [];
+    if (plan.graph === "segment") {
+      steps.push(
+        ["graph", () => retagGraph(ctx, plan, "segment")],
+        ["record", () => {
+          ledger(ctx, { event: "retagged", ...(plan.username ? { username: plan.username } : {}), segment: plan.segment, at: new Date().toISOString() });
+          return "done";
+        }],
+      );
+    }
+    if (steps.length === 0) return null;
+    const run = await runSteps(steps);
     return { ...base, ...run };
   }
 
@@ -1514,14 +1604,16 @@ async function applyIdentity(ctx: ApplyContext, plan: PlannedIdentity, mode: Acc
     steps.push(
       ["directories", () => moveBuckets(ctx, plan, () => account!)],
       ["stamps", () => restamp(ctx, plan.segment, account!)],
-      ["sessions", () => migrateSessions(ctx, plan, account!)],
+      ["sessions", () => migrateSessions(ctx, plan, () => ({ account: account! }))],
       ["jobs", () => backfillRows(ctx, plan, account!)],
-      ["schedules", () => stampSchedules(ctx, plan, account!)],
-      ["knowledgeBases", () => stampKnowledgeBases(ctx, plan, account!)],
+      ["schedules", () => stampSchedules(ctx, plan, { account: account! })],
+      ["knowledgeBases", () => stampKnowledgeBases(ctx, plan, { account: account! })],
       ["graph", () => retagGraph(ctx, plan, "account", account!)],
       ["documents", () => aliasDocuments(ctx, plan, account!)],
     );
   }
+  // A bootstrap token's name held where an account has it too: its records are the token's.
+  if (plan.stampRecords) steps.push(...stampRecordSteps(ctx, plan));
   // Last: the account can sign in only once everything else is done.
   if (plan.assignId) steps.push(["account", () => writeRosterId(ctx, plan.username!.toLowerCase(), account!)]);
   else if (plan.activate) steps.push(["account", () => activateAccount(plan, account!, plan.data === "adopt" ? "adopted" : "declined")]);
@@ -1730,14 +1822,16 @@ export async function runAccountMigration(request: AccountMigrationRequest, back
 /**
  * What still waits for the account migration, counted cheaply at boot under multi-user auth: roster
  * records without an id (they cannot sign in), identity-provider accounts pending, sessions from
- * before account ids (read-only, admins only), and directories under `users/` that are no account's
- * and that no apply decided. Logs one warning when anything waits; writes nothing.
+ * before account ids (read-only, admins only), schedules from before account ids (skipped on every
+ * tick), and directories under `users/` that are no account's and that no apply decided. Logs one
+ * warning when anything waits; writes nothing.
  */
-export function reportAccountMigrationBacklog(bases: string[]): { idless: number; pending: number; sessions: number; buckets: number } {
+export function reportAccountMigrationBacklog(bases: string[]): { idless: number; pending: number; sessions: number; schedules: number; buckets: number } {
   const config = getConfig();
   const idless = config.auth.users.filter((user) => !user.id).length;
   const pending = accountRegistryEntries().filter((entry) => entry.status === "pending").length;
   const sessions = getAllSessions({ includeArchived: true }).filter((session) => session.isLegacy()).length;
+  const schedules = listScheduledTaskRecords().filter((task) => isLegacyRecordOwner(task) && !task.disabled).length;
   // A deleted account's directory stays under its id until a purge: it is no legacy bucket.
   const accountIds = new Set([
     ...config.auth.users.flatMap((user) => (user.id ? [user.id.toLowerCase()] : [])),
@@ -1761,11 +1855,11 @@ export function reportAccountMigrationBacklog(bases: string[]): { idless: number
       buckets.add(name);
     }
   }
-  const counts = { idless, pending, sessions, buckets: buckets.size };
-  if (idless + pending + sessions + buckets.size > 0) {
+  const counts = { idless, pending, sessions, schedules, buckets: buckets.size };
+  if (idless + pending + sessions + schedules + buckets.size > 0) {
     log.warn(
-      { accountsWithoutId: idless, pendingIdentityProviderAccounts: pending, legacySessions: sessions, legacyBuckets: buckets.size },
-      "Account storage from before account ids waits for the account migration: accounts without an id cannot sign in, pending identity-provider accounts wait for an admin, and older sessions are read-only. Run `sai migrate-account-ids` (a dry run, which writes nothing) to see the plan",
+      { accountsWithoutId: idless, pendingIdentityProviderAccounts: pending, legacySessions: sessions, legacySchedules: schedules, legacyBuckets: buckets.size },
+      "Account storage from before account ids waits for the account migration: accounts without an id cannot sign in, pending identity-provider accounts wait for an admin, older sessions are read-only and older schedules do not run. Run `sai migrate-account-ids` (a dry run, which writes nothing) to see the plan",
     );
   }
   return counts;

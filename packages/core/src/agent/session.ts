@@ -1541,8 +1541,10 @@ export async function initSessionRedis(): Promise<void> {
 // ── The account migration (runtime/account-migration.ts) ─────────────────────
 // A session from before account ids names its user by name alone. When an admin lets an account
 // adopt what that name stored, its sessions become the account's: the account id is stamped on the
-// record and its root moves under the account's segment. Nothing else changes, `updatedAt` included,
-// so the file store and the Redis mirror agree on the next boot whichever wins there.
+// record and its root moves under the account's segment. A principal's (a bootstrap token, a channel
+// sender, a scene run) get its kind, and its root stays the segment of its name. Nothing else
+// changes, `updatedAt` included, so the file store and the Redis mirror agree on the next boot
+// whichever wins there.
 
 /** How the migration reaches the Redis mirror: every call throws when Redis fails, unlike the
  *  background mirror writes. `save` and `remove` answer false when no mirror is configured. */
@@ -1571,16 +1573,40 @@ export function accountSessionRecord(record: PersistedSessionRecord, account: st
 }
 
 /**
- * Makes the in-process session `id` the account's, then writes it to the Redis mirror, awaited, and
- * reads it back: a write that did not land, or a record that comes back different, throws, and the
- * session stays as it was here. Then the file store is flushed, awaited. "absent" when this process
- * holds no session under the id; "unchanged" when it is the account's already.
+ * A session record from before account ids rewritten as a principal's: the kind stamped, and the
+ * root put at `<deployment root>/users/<the segment of its name>`, every user level taken off the
+ * stored root first. That is the root a principal's session always had under multi-user auth, so for
+ * such a record nothing moves.
  */
-export async function migrateSessionAccount(id: string, account: string, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<"migrated" | "unchanged" | "absent"> {
+export function principalSessionRecord(record: PersistedSessionRecord, principal: PrincipalKind): PersistedSessionRecord {
+  if (record.account) throw new Error(`session ${record.id} is an account's`);
+  if (typeof record.userId !== "string" || record.userId === "") throw new Error(`session ${record.id} names nobody`);
+  return { ...record, principal, workspacePath: resolve(stripUserWorkspaceRoots(record.workspacePath), USERS_SUBDIR, principalSegment(record.userId)) };
+}
+
+/** Whose a session from before account ids becomes: an account's (by its id) or a principal's (by
+ *  its kind, with the name it has). */
+export type SessionOwnerStamp = { account: string } | { principal: PrincipalKind };
+
+function stampedSessionRecord(record: PersistedSessionRecord, stamp: SessionOwnerStamp): PersistedSessionRecord {
+  return "account" in stamp ? accountSessionRecord(record, stamp.account) : principalSessionRecord(record, stamp.principal);
+}
+
+function carriesStamp(record: { account?: string; principal?: string }, stamp: SessionOwnerStamp): boolean {
+  return "account" in stamp ? record.account === stamp.account : !record.account && record.principal === stamp.principal;
+}
+
+/**
+ * Makes the in-process session `id` the stamped owner's, then writes it to the Redis mirror,
+ * awaited, and reads it back: a write that did not land, or a record that comes back different,
+ * throws, and the session stays as it was here. Then the file store is flushed, awaited. "absent"
+ * when this process holds no session under the id; "unchanged" when it carries the stamp already.
+ */
+export async function migrateSessionOwner(id: string, stamp: SessionOwnerStamp, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<"migrated" | "unchanged" | "absent"> {
   const session = _sessions.get(id);
   if (!session) return "absent";
-  if (session.account === account) return "unchanged";
-  const migrated = AgentSession.fromRecord(accountSessionRecord(session.toRecord(), account));
+  if (carriesStamp(session, stamp)) return "unchanged";
+  const migrated = AgentSession.fromRecord(stampedSessionRecord(session.toRecord(), stamp));
   const json = JSON.stringify(migrated.toRecord());
   if (await mirror.save(id, json, migrated.getUpdatedAt().getTime())) {
     const back = await mirror.load(id);
@@ -1595,13 +1621,13 @@ export async function migrateSessionAccount(id: string, account: string, mirror:
 
 /**
  * The same for a session only the mirror holds (the boot hydrates at most the newest thousand):
- * its record is rewritten there, awaited and read back. Returns false when the record is the
- * account's already.
+ * its record is rewritten there, awaited and read back. Returns false when the record carries the
+ * stamp already.
  */
-export async function migrateMirroredSessionAccount(id: string, json: string, account: string, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<boolean> {
+export async function migrateMirroredSessionOwner(id: string, json: string, stamp: SessionOwnerStamp, mirror: SessionMirrorAccess = checkedSessionMirror): Promise<boolean> {
   const record = JSON.parse(json) as PersistedSessionRecord;
-  if (record.account === account) return false;
-  const next = JSON.stringify(accountSessionRecord(record, account));
+  if (carriesStamp(record, stamp)) return false;
+  const next = JSON.stringify(stampedSessionRecord(record, stamp));
   if (!await mirror.save(id, next, new Date(record.updatedAt).getTime())) throw new Error("no Redis mirror is configured");
   const back = await mirror.load(id);
   if (back !== next) throw new Error(`the Redis mirror holds a different record for session ${id} after the write`);

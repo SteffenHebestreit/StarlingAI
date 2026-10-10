@@ -674,7 +674,7 @@ function printMigrationPlan(plan, applied) {
   for (const identity of plan.identities ?? []) {
     const who = identity.username ?? `(${identity.segment})`;
     const target = identity.account ? ` ${identity.account}` : "";
-    const extra = [identity.assignId ? "gets its id" : "", identity.activate ? "turns active" : "", identity.graph !== "none" ? `graph -> ${identity.graph}` : ""].filter(Boolean).join(", ");
+    const extra = [identity.assignId ? "gets its id" : "", identity.activate ? "turns active" : "", identity.graph !== "none" ? `graph -> ${identity.graph}` : "", identity.stampRecords ? "older records get its owner" : ""].filter(Boolean).join(", ");
     console.log(`  ${BOLD}${who}${RESET}  ${identity.kind}  ${identity.data}${target}${extra ? `  (${extra})` : ""}`);
     if (identity.refused) console.log(`    ${RED}refused:${RESET} ${identity.refused}`);
     const stored = identity.stored ?? {};

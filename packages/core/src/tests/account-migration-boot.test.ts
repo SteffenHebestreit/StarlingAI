@@ -120,7 +120,8 @@ async function loadModules() {
   const maintenance = await import("../gateway/maintenance-gateway.js");
   const sessions = await import("../agent/session.js");
   const accounts = await import("../runtime/accounts.js");
-  return { loader, authModule, registry, tombstones, migration, maintenance, sessions, accounts };
+  const scheduled = await import("../runtime/scheduled-tasks.js");
+  return { loader, authModule, registry, tombstones, migration, maintenance, sessions, accounts, scheduled };
 }
 
 beforeAll(async () => {
@@ -152,6 +153,7 @@ function configure(extra: Record<string, unknown> = {}, users: unknown[] = [root
   mods.tombstones.resetAccountTombstonesForTests();
   mods.authModule.resetAuthStateForTests();
   mods.migration.resetAccountMigrationForTests();
+  mods.scheduled._setScheduledTasksPathForTests(join(workspace, ".starlingai", "scheduled-tasks.json"));
   return workspace;
 }
 
@@ -228,8 +230,14 @@ describe("the boot warning", () => {
     // A session from before account ids, hydrated as a boot hydrates one.
     mirror.records = [JSON.stringify({ id: "s-legacy", channel: "webchat", userId: "alice", createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z", systemPrompt: "s", workspacePath: workspace, turnCount: 0, history: [] })];
     await mods.sessions.initSessionRedis();
+    // A schedule from before account ids, skipped on every tick. Not counted: a disabled one, and one
+    // that names its owner's kind.
+    const schedule = { cron: "0 * * * *", label: "nightly", task: "x", createdAt: "2026-09-01T00:00:00Z" };
+    mods.scheduled.saveScheduledTask({ ...schedule, id: "t-legacy", userId: "admin" });
+    mods.scheduled.saveScheduledTask({ ...schedule, id: "t-disabled", userId: "alice", disabled: { at: "2026-10-01T00:00:00Z", reason: "account deleted" } });
+    mods.scheduled.saveScheduledTask({ ...schedule, id: "t-kinded", userId: "admin", principal: "bootstrap" });
     const counts = mods.migration.reportAccountMigrationBacklog([workspace]);
-    expect(counts).toEqual({ idless: 1, pending: 1, sessions: 1, buckets: 1 });
+    expect(counts).toEqual({ idless: 1, pending: 1, sessions: 1, schedules: 1, buckets: 1 });
     const warned = warnings.filter((warning) => warning.logger === "runtime:account-migration");
     expect(warned).toHaveLength(1);
     expect(String(warned[0]!.message)).toContain("sai migrate-account-ids");
@@ -238,7 +246,7 @@ describe("the boot warning", () => {
     mods.sessions.resetSessionsForTests();
     const clean = configure();
     mkdirSync(join(clean, "users", root.id), { recursive: true });
-    expect(mods.migration.reportAccountMigrationBacklog([clean])).toEqual({ idless: 0, pending: 0, sessions: 0, buckets: 0 });
+    expect(mods.migration.reportAccountMigrationBacklog([clean])).toEqual({ idless: 0, pending: 0, sessions: 0, schedules: 0, buckets: 0 });
     expect(warnings.filter((warning) => warning.logger === "runtime:account-migration")).toEqual([]);
   });
 });
