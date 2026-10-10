@@ -297,6 +297,7 @@
     <LoginModal
       v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting)"
       :dismissible="gateway.connected"
+      :sso-error="ssoError"
       @close="showLogin = false"
     />
 
@@ -374,6 +375,7 @@ import { extensionNavEntries } from "@/extensions/registry";
 import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
+import { readSsoReturn } from "@/composables/ssoReturn";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
 import { type NavGroupItem } from "@/components/NavGroup.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
@@ -418,6 +420,9 @@ const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+// Why the last SSO sign-in ended without a token: the gateway's code, which the login modal shows
+// a message for. Cleared once a sign-in connects.
+const ssoError = ref<string | null>(null);
 
 // Burger nav panel: the main nav + header tools are hidden by default and
 // summoned here; navigating closes it. Groups drill down into a sub-level
@@ -617,11 +622,12 @@ async function enableBrowserNotifications(): Promise<void> {
 onMounted(() => {
   // OIDC/SSO return: the gateway hands our JWT back in the URL FRAGMENT (never the
   // query — fragments aren't logged or sent to the server). Consume it into the
-  // token, then strip the hash so it doesn't linger in the address bar.
-  const hash = window.location.hash.replace(/^#/, "");
-  if (hash.includes("sai_token=") || hash.includes("sai_error=")) {
-    const ssoToken = new URLSearchParams(hash).get("sai_token");
-    if (ssoToken) gateway.token = ssoToken;
+  // token, or keep a refusal's code for the login modal, then strip the hash so it
+  // doesn't linger in the address bar.
+  const sso = readSsoReturn(window.location.hash);
+  if (sso) {
+    if (sso.token) gateway.token = sso.token;
+    if (sso.errorCode !== undefined) ssoError.value = sso.errorCode;
     history.replaceState(null, "", window.location.pathname + window.location.search);
   }
   notifications.syncPermission();
@@ -642,6 +648,7 @@ onMounted(() => {
 watch(() => gateway.connected, (now) => {
   if (now) {
     showLogin.value = false; // a successful (re)connect closes a manually-opened modal
+    ssoError.value = null;
     void auth.refreshCurrentUser();
     void modelPreset.fetch();
     void modelPreset.fetchOAuthStatus();

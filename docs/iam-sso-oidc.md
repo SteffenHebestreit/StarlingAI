@@ -18,6 +18,12 @@ With `auth.provider: "oidc"`, the login screen shows **Sign in with SSO**:
 3. The gateway exchanges the code, validates the ID token, maps roles, and mints our session JWT.
 4. The token is handed to the SPA via the URL **fragment** (never the query — fragments aren't logged or sent to the server); the SPA stores it and connects.
 
+A sign-in that ends without a token comes back as `#sai_error=<code>`, and the login screen shows a
+message for the code: `migration_pending`, `account_retired`, `username_held`, `username_invalid`,
+`email_unverified`, `accounts_unreadable` (the refusals [below](#accounts-one-per-idp-subject)), or
+`sso_failed` for anything else (a failed token exchange, no mapped role). Only the code: the subject,
+the account id and the reason stay in the gateway log (`OIDC sign-in refused`) and the audit.
+
 ### Configure via `.env`
 
 ```bash
@@ -68,8 +74,8 @@ person is, is the token's issuer and subject (`iss` and `sub`). So:
 - **A new subject needs a free name.** A name is held by any account in the registry (in any status,
   and its names before an approved rename too, until an admin releases them), by a builtin account in
   `auth.users` (mixed mode, below), and by a deleted builtin account (its tombstone). A held name is
-  refused at sign-in with "This username is held by another account; ask an admin"
-  (`auth_oidc_username_conflict`). "Alice" after "alice" is refused, instead of becoming her.
+  refused at sign-in (`username_held` on the login screen, `auth_oidc_username_conflict` in the
+  audit). "Alice" after "alice" is refused, instead of becoming her.
 - **Usernames** must match `^[a-z0-9][a-z0-9_.@+-]{0,127}$` after lowercasing
   (`auth_oidc_invalid_username` otherwise). No colon, space or control character: the names of
   channel senders and scene runs use a colon.
@@ -78,7 +84,7 @@ person is, is the token's issuer and subject (`iss` and `sub`). So:
   self-service profile.
 - **Data from before account ids.** When something was stored under the name before account ids
   (a per-user directory of the name, or a chat from before ids), the new account starts **pending**
-  and cannot sign in ("Account storage migration pending; ask an admin"). Nothing is handed to
+  and cannot sign in (`migration_pending` on the login screen). Nothing is handed to
   whoever signs in with the name first: an admin moves the data to this account with the account
   migration ([QUICKSTART](../QUICKSTART.md#upgrading-to-account-ids)), or declines it with the
   `decline-legacy` route below, and the account then starts empty. The name of a bootstrap token does
