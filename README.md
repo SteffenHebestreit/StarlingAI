@@ -112,6 +112,7 @@ pnpm sai stop --volumes        # stop + wipe all data
 pnpm sai start --build         # force rebuild images
 pnpm sai config build          # recompile config/ + workspace/ → starlingai.json
 pnpm sai token                 # generate dashboard login JWT
+pnpm sai migrate-account-ids   # account storage migration (dry run unless --apply; see QUICKSTART)
 pnpm sai health                # check service health endpoints
 pnpm security:pack             # verify packed artifacts contain no .map or debug files
 pnpm sai dev gateway           # start gateway in dev mode

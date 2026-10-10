@@ -118,6 +118,12 @@ Outbound delivery uses exponential backoff through `packages/core/src/channels/d
 - WhatsApp inbound events are verified against `X-Hub-Signature-256` using `appSecret`.
 - Unauthorized or malformed inbound traffic is rejected before any agent turn starts.
 
+## Senders and Accounts (multi-user auth)
+
+With `auth.enabled: true`, a channel sender is a **principal**, never an account: its sessions, memory and files are keyed by its raw sender id, apart from every account's ([security.md](security.md#per-user-data-isolation)). A sender is refused when its id is an account's username (a deleted builtin account's too, and an identity-provider account's, current or former, until an admin releases it), derives to an account's id, or is a user id of an extension auth provider. Such an id would otherwise reach the storage that account used before account ids. A refused message gets no session, no turn and no reply, which tells the sender nothing about the account; it is audited as `channel_sender_refused` and counts as handled (the email channel marks it seen, and the next message of the same poll is read). A sender refused this way is refused in an open conversation too, from its next message.
+
+An `allowedUsers` grant to a sender (on a mail account, a site credential or a compute node) needs the `principal:<sender id>` form: a bare name matches only an account or a bootstrap token. With auth off every sender is served as before.
+
 ## Email Configuration Shape
 
 Email uses flat fields in the current schema, not nested `imap` and `smtp` objects:
