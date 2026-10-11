@@ -210,6 +210,10 @@ export type CoreAuditEventType =
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_research_candidate_selected"
   | "delegation_render_research_redirect_skipped"
+  // On a flagged turn, a step whose first agent only reads the open browser tab runs a gatherer it
+  // also names first; the tab readers wait behind it until a browser has been driven.
+  | "delegation_tab_reader_demoted"
+  | "delegation_tab_reader_held"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
   | "delegation_depth_ceiling_enforced"

@@ -65,6 +65,7 @@ const AGENTS = {
   code_analyst: { tools: ["read_file", "grep_files", "read_shared_facts", "share_finding"], routingGenerated: label("GATHER", "workspace", "codebase") },
   vision_browser_analyst: { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"], routingGenerated: label("GATHER", "browser", "image") },
   data_analyst: { tools: ["read_file", "spreadsheet_read", "json_query", "read_shared_facts", "share_finding", "write_file"], routingGenerated: label("GATHER", "workspace", "structured_data") },
+  document_intake: { tools: ["extract_file_content", "read_file", "spreadsheet_read", "read_shared_facts", "share_finding", "write_file"], routingGenerated: label("GATHER", "workspace", "file_upload") },
 } as const;
 
 /** The live 2f31f387 plan, verbatim. */
@@ -561,6 +562,65 @@ describe("the research gate's turn trigger", () => {
     expect(ran()).toEqual(["vision_browser_analyst"]);
   }, 30_000);
 
+  // 71d42257 (E2E 2026-10-10): the orchestrator called delegate_to_agent with no agentName after a
+  // search_agents call that ranked the tab reader first, and the runtime filled in that top match
+  // with the search's suggested fallbacks (reuse_search_agents_top_result). The queue held gatherers
+  // behind the tab reader, so a rule for tab readers alone never applied: it read about:blank five
+  // times and described a page it never saw.
+  /** The call as the runtime's recovery leaves it: the top match named, the suggested fallbacks behind it. */
+  const RECOVERED_SITE_CALL = {
+    agentName: "vision_browser_analyst",
+    fallbackAgents: ["browser_agent", "researcher", "document_intake"],
+    task: "Besuche die Website http://www.nordlicht-werkzeuge.test/ und ermittle Gründungsjahr und Mitarbeiterzahl.",
+    deliverable: "answer",
+  };
+
+  it("runs the gatherer behind the tab reader first when the runtime filled in the search's top match (71d42257)", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute(RECOVERED_SITE_CALL, turnCtx("s-tab-recovered"));
+
+    expect(ran()).toEqual(["browser_agent"]);
+    expect(rows("delegation_tab_reader_demoted")).toEqual([
+      expect.objectContaining({
+        requestedAgents: ["vision_browser_analyst", "browser_agent", "researcher", "document_intake"],
+        queue: ["browser_agent", "researcher", "document_intake", "vision_browser_analyst"],
+      }),
+    ]);
+  }, 30_000);
+
+  it("keeps the tab reader first once the session's browser agent has opened a page, and on a turn with no verdict", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute(RECOVERED_SITE_CALL, turnCtx("s-tab-recovered-driven", { swarmState: swarmDrivenBy("browser_agent") }));
+    const noVerdict = turnCtx("s-tab-recovered-no-verdict");
+    delete noVerdict.turnEvidence;
+    await getTool("delegate_to_agent")!.execute(RECOVERED_SITE_CALL, noVerdict);
+
+    expect(ran()).toEqual(["vision_browser_analyst", "vision_browser_analyst"]);
+    expect(rows("delegation_tab_reader_demoted")).toEqual([]);
+  }, 30_000);
+
+  it("judges the queue's first agent when the named agent is unknown and the tab reader leads the fallbacks", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ ...RECOVERED_SITE_CALL, agentName: "web_crawler", fallbackAgents: ["vision_browser_analyst", "browser_agent"] },
+      turnCtx("s-tab-fallbacks-only"));
+
+    expect(ran()).toEqual(["browser_agent"]);
+  }, 30_000);
+
+  it("replaces the tab reader at the head when nothing behind it opens a page or gathers", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ ...RECOVERED_SITE_CALL, fallbackAgents: ["document_intake"] }, turnCtx("s-tab-no-gatherer"));
+
+    expect(ran()).toEqual(["researcher"]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst", "document_intake"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
   // ── Routed delegations: no agent named, so the router's ranking picks it ──────────────────────
 
   /** The router's ranking for the live step (79dd29e0): the tab reader first, both gatherers right behind it. */
@@ -647,6 +707,24 @@ describe("the research gate's turn trigger", () => {
     await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, turnCtx("s-routed-driver-failed", { turnEvidence: { required: true, outsideEngaged: "researcher" } }));
 
     expect(ran()).toEqual(["browser_agent", "researcher"]);
+  }, 30_000);
+
+  it("holds a tab reader moved behind a browser agent that then failed: the tab still shows no page of the session's", async () => {
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const failed = args.agentName === "browser_agent";
+      return {
+        output: failed ? "browser_agent: the page did not load." : `${args.agentName}: done`,
+        stats: { ...statsFor(args), ...(failed ? { outcome: "failure" as const } : {}) },
+      };
+    });
+    routeAs(LIVE_SITE_RANKING);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ ...RECOVERED_SITE_CALL, fallbackAgents: ["browser_agent"] }, turnCtx("s-tab-demoted-driver-failed"));
+
+    // Its queue spent, the delegation routes, and the router's tab reader is barred the same way.
+    expect(ran()).toEqual(["browser_agent", "researcher"]);
+    expect(rows("delegation_tab_reader_held")).toEqual([expect.objectContaining({ agentName: "vision_browser_analyst" })]);
   }, 30_000);
 
   it("routes a step that names a web address past an agent with a workspace source of its own, to one that reaches outside", async () => {
