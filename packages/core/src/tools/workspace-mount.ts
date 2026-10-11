@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
@@ -192,6 +192,11 @@ export interface SandboxHostOverrides {
 export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
   const at = input.at ?? "/workspace";
   const bound = boundGatewayPath(input.workspacePath, input.bind);
+  // A new account's root does not exist before its first run: the stat found nothing, no --user
+  // went out, and docker created the bind source itself, as root 0755, which the image's user
+  // cannot write. The gateway creates it first, as it creates everything else in the workspace.
+  // The repo bind is the deployment mount, which the gateway does not create.
+  if (input.bind === "caller") ensureGatewayDir(bound);
   const args = sandboxUserArgs(bound);
 
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
@@ -201,6 +206,9 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
     const sandboxPath = sandboxPathWithin(`${normalizeRoot(root)}/${PRODUCT.stateDirName}`, bound, at);
     if (sandboxPath === null || masked.has(sandboxPath)) continue;
     masked.add(sandboxPath);
+    // Docker creates a missing mount point itself, owned by root, where a gateway that does not
+    // run as root could then not write its own state.
+    ensureGatewayDir(join(root, PRODUCT.stateDirName));
     args.push(`--tmpfs=${sandboxPath}:ro,size=4k`);
   }
 
@@ -229,6 +237,15 @@ function boundGatewayPath(workspacePath: string, bind: SandboxBind): string {
   if (bind === "repo") return "/workspace";
   const source = resolveDockerWorkspaceMountSource(workspacePath);
   return resolveHostPathUnderWorkspace(workspacePath, source) === null ? "/workspace" : workspacePath;
+}
+
+/** `mkdir -p` on the gateway side. On a failure docker creates the directory, as it did before. */
+function ensureGatewayDir(path: string): void {
+  try {
+    mkdirSync(path, { recursive: true });
+  } catch {
+    // Left to docker.
+  }
 }
 
 /** Where a sandbox sees a gateway path, or null when the path is outside the bound directory. */

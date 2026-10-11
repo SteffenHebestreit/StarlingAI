@@ -184,6 +184,34 @@ describe("sandboxIsolationArgs in the compose layout", () => {
   });
 });
 
+describe("a new account's first sandbox run", () => {
+  it("creates the caller's root on the gateway side before it reads the owner", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const root = join(tempRoot, "users", "acct-new");
+    const args = sandboxIsolationArgs({ workspacePath: root, workspaceScope: "generated", bind: "caller" }, { sharedRoot: shared });
+    const { uid, gid } = fs.statSync(root);
+    expect(flagValue(args, "--user")).toBe(`${uid}:${gid}`);
+    // The masked state directory too, so docker does not create it as root.
+    expect(fs.existsSync(join(root, ".starlingai"))).toBe(true);
+  });
+
+  it("calls mkdir before stat for the caller's bind, and creates nothing for the repo bind", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    fakeOwners.set(CALLER_WS, 2222).set("/workspace", 1111);
+    sandboxIsolationArgs({ workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    const mkdirOrder = vi.mocked(fs.mkdirSync).mock.calls.findIndex(([path]) => norm(path) === CALLER_WS);
+    const statOrder = vi.mocked(fs.statSync).mock.calls.findIndex(([path]) => norm(path) === CALLER_WS);
+    expect(mkdirOrder).toBeGreaterThanOrEqual(0);
+    expect(statOrder).toBeGreaterThanOrEqual(0);
+    expect(vi.mocked(fs.mkdirSync).mock.invocationCallOrder[mkdirOrder]!)
+      .toBeLessThan(vi.mocked(fs.statSync).mock.invocationCallOrder[statOrder]!);
+
+    vi.mocked(fs.mkdirSync).mockClear();
+    sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind: "repo" }, { sharedRoot: SHARED });
+    expect(vi.mocked(fs.mkdirSync).mock.calls.map(([path]) => norm(path))).not.toContain("/workspace");
+  });
+});
+
 describe("the owner each git bind runs as", () => {
   it("is the owner of /workspace for the full-scope repo bind, and of the caller's root for the narrowed one", async () => {
     fakeOwners.set("/workspace", 1111).set(CALLER_WS, 2222);
