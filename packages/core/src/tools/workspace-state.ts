@@ -56,6 +56,16 @@ export function workspaceStateDir(workspacePath: string): string {
   return resolve(root, PRODUCT.stateDirName);
 }
 
+/**
+ * The marker the boot's one-time move of each account's workspace state out of its root writes once
+ * that move is complete for every account (runtime/workspace-state-relocation.ts):
+ * `<shared>/<stateDir>/users/.relocated-v1`. Once it exists, an old state directory in an account's
+ * root is a file of that account's workspace, never the gateway's.
+ */
+export function workspaceStateRelocatedMarker(sharedRoot: string): string {
+  return resolve(sharedRoot, PRODUCT.stateDirName, USERS_SUBDIR, ".relocated-v1");
+}
+
 /** Whether a root is an account's own, which workspaceStateDir keeps no state in: a segment
  *  directly under `users/`, as userWorkspaceRoot makes it. Either separator, resolved or not. */
 export function isAccountWorkspaceRoot(workspacePath: string): boolean {

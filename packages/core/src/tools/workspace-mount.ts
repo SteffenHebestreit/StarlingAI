@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
-import { isAccountWorkspaceRoot } from "./workspace-state.js";
+import { isAccountWorkspaceRoot, stripUserWorkspaceRoots, workspaceStateRelocatedMarker } from "./workspace-state.js";
 
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
@@ -234,9 +234,11 @@ export interface SandboxHostOverrides {
  * over it, which a cap-less root cannot remount or write ("Read-only file system", verified live
  * 2026-10-11), as does the repo root's. That directory is created first, so docker does not create
  * the mount point as root; the bind itself is read-only around it (above and below). An old state
- * directory in an account's root, which the boot moved out (runtime/workspace-state-relocation.ts)
- * or a sandbox made since, is masked too where it exists. A missing one is not: docker would create
- * the mount point on the host, an empty directory at the place the gateway no longer reads.
+ * directory in an account's root is masked where it exists only until the boot's move of the state
+ * out of the account roots is complete (runtime/workspace-state-relocation.ts): until then it can
+ * still be the account's state, after that it is the account's own file. A missing one is not
+ * masked: docker would create the mount point on the host, an empty directory at the place the
+ * gateway no longer reads.
  *
  * THE SHARED ROOT IS READ-ONLY, EXCEPT generated/, for a sandbox that is not full-scope and has the
  * shared root in its bind (an auth-off session, whose root is the shared root, or the whole-volume
@@ -267,8 +269,11 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
     const sandboxPath = sandboxPathWithin(`${normalizeRoot(root)}/${PRODUCT.stateDirName}`, bound, at);
     if (sandboxPath === null || masked.has(sandboxPath)) continue;
     if (isAccountWorkspaceRoot(root)) {
-      // Not where the gateway keeps this account's state: masked only where it exists.
-      if (!existsSync(stateDir)) continue;
+      // Not where the gateway keeps this account's state. Until the boot's move of it is complete
+      // for every account, an old directory there can still be the account's state, which a later
+      // boot moves: masked where it exists. Once the move is complete it is a file of the account's
+      // own workspace, and masking it only broke a tool that makes such a directory where it runs.
+      if (!existsSync(stateDir) || existsSync(workspaceStateRelocatedMarker(stripUserWorkspaceRoots(root)))) continue;
     } else {
       // Docker creates a missing mount point itself, owned by root, where a gateway that does not
       // run as root could then not write its own state.

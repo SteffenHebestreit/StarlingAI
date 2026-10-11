@@ -244,6 +244,23 @@ describe("an account's root, which holds no gateway state (workspaceStateDir)", 
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
   });
 
+  it("masks an old one only until the boot's move is complete; after that it is the account's own file", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const root = join(shared, "users", ACCOUNT);
+    mkdirSync(join(root, ".starlingai"), { recursive: true });
+    const marker = join(shared, ".starlingai", "users", ".relocated-v1");
+    try {
+      const input = { workspacePath: root, workspaceScope: "generated", bind: "caller" } as const;
+      expect(masks(sandboxIsolationArgs(input, { sharedRoot: shared }))).toEqual([MASK("/workspace/.starlingai")]);
+      mkdirSync(join(shared, ".starlingai", "users"), { recursive: true });
+      writeFileSync(marker, "");
+      expect(masks(sandboxIsolationArgs(input, { sharedRoot: shared }))).toEqual([]);
+    } finally {
+      rmSync(join(root, ".starlingai"), { recursive: true, force: true });
+      rmSync(marker, { force: true });
+    }
+  });
+
   it("does not create the state directory in a new account's real root", async () => {
     const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
     const root = join(shared, "users", ACCOUNT);

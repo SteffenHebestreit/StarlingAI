@@ -65,7 +65,7 @@ export async function main() {
 
   // A standalone worker runs sandboxes too, and may start before the gateway: the same one-time move
   // of each account's workspace state out of its root, before any of them (src/index.ts).
-  relocateAccountWorkspaceState(config.workspacePath);
+  await relocateAccountWorkspaceState(config.workspacePath);
 
   startEventLoopMonitor();
   startProviderActivityMonitor();

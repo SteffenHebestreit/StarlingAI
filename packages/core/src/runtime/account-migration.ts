@@ -40,7 +40,7 @@
  * account left, for good.
  */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { getConfig, rosterWrittenByRuntime, updateConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
@@ -68,6 +68,7 @@ import {
 import { accountTombstones, loadAccountTombstones, type AccountTombstone } from "./account-tombstones.js";
 import { USERS_SUBDIR } from "./user-scope.js";
 import { workspaceStateDir } from "../tools/workspace-state.js";
+import { renameRetrying } from "./rename-retrying.js";
 import { disableScheduledTask, listScheduledTaskRecords, saveScheduledTask, type ScheduledTaskRecord } from "./scheduled-tasks.js";
 import {
   checkedSessionMirror,
@@ -1278,22 +1279,6 @@ export interface IdentityResult {
   account?: string;
   ok: boolean;
   steps: Record<string, StepOutcome>;
-}
-
-const RENAME_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
-
-/** A rename that waits out a Windows sharing error for a moment (a reader holding the directory). */
-async function renameRetrying(from: string, to: string): Promise<void> {
-  for (let attempt = 1; ; attempt += 1) {
-    try {
-      renameSync(from, to);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= 6 || !code || !RENAME_RETRY_CODES.has(code)) throw err;
-      await new Promise((done) => setTimeout(done, 25 * attempt));
-    }
-  }
 }
 
 function utcStamp(date: Date): string {
