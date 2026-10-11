@@ -1,7 +1,8 @@
-import { mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
+import { isAccountWorkspaceRoot } from "./workspace-state.js";
 
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
@@ -175,15 +176,17 @@ export interface SandboxHostOverrides {
  * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
  * the deployment mount, /workspace on the gateway side, not the agent's own root.
  *
- * GATEWAY STATE IS MASKED. Running as the owner made the sandbox root in the compose deployment,
- * and the bind holds gateway state the sandbox must not write: the bound directory's own state
- * directory (workspace-scope durable memory, memory/service.ts) and, where the shared root lies
- * inside the bind, the shared root's (accounts.json, approvals/). Only the shell's token-level
- * guard (findSensitiveWorkspaceReference) stood in the way, and a script, a variable or a relative
- * path past it reaches the files. Each such directory gets an empty read-only tmpfs over it, which a
- * cap-less root cannot remount or write ("Read-only file system", verified live 2026-10-11). It is
- * masked whether or not it exists yet, so a sandbox cannot create it and plant memory the gateway
- * then reads.
+ * NO GATEWAY STATE IS KEPT IN AN ACCOUNT'S ROOT. An account's sandboxes run as the owner of that
+ * root, root in the compose deployment, and can write anything in it, under any spelling; the
+ * gateway keeps that account's state outside it (tools/workspace-state.ts workspaceStateDir). Where
+ * the shared root lies inside the bind (an auth-off session, the whole-volume fallback, the repo
+ * bind), its state directory (accounts.json, approvals/, the ledgers) gets an empty read-only tmpfs
+ * over it, which a cap-less root cannot remount or write ("Read-only file system", verified live
+ * 2026-10-11), as does the repo root's. That directory is created first, so docker does not create
+ * the mount point as root; a sandbox that is not full-scope has that bind read-only (below). An old
+ * state directory in an account's root, which the boot moved out (runtime/workspace-state-relocation.ts)
+ * or a sandbox made since, is masked too where it exists. A missing one is not: docker would create
+ * the mount point on the host, an empty directory at the place the gateway no longer reads.
  *
  * THE SHARED ROOT IS READ-ONLY, EXCEPT generated/, for a sandbox that is not full-scope and has the
  * shared root in its bind (an auth-off session, whose root is the shared root, or the whole-volume
@@ -211,12 +214,18 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
   const masked = new Set<string>();
   for (const root of [bound, input.workspacePath, sharedRoot]) {
     if (!root) continue;
+    const stateDir = join(root, PRODUCT.stateDirName);
     const sandboxPath = sandboxPathWithin(`${normalizeRoot(root)}/${PRODUCT.stateDirName}`, bound, at);
     if (sandboxPath === null || masked.has(sandboxPath)) continue;
+    if (isAccountWorkspaceRoot(root)) {
+      // Not where the gateway keeps this account's state: masked only where it exists.
+      if (!existsSync(stateDir)) continue;
+    } else {
+      // Docker creates a missing mount point itself, owned by root, where a gateway that does not
+      // run as root could then not write its own state.
+      ensureGatewayDir(stateDir);
+    }
     masked.add(sandboxPath);
-    // Docker creates a missing mount point itself, owned by root, where a gateway that does not
-    // run as root could then not write its own state.
-    ensureGatewayDir(join(root, PRODUCT.stateDirName));
     args.push(`--tmpfs=${sandboxPath}:ro,size=4k`);
   }
 

@@ -12,8 +12,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { appendJsonLine, readAllRecords, readLastRecords, rewriteJsonLines } from "../memory/bounded-ndjson-store.js";
-
-import { PRODUCT } from "../product/index.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 const log = childLogger("agent:outcomes");
 
@@ -49,7 +48,11 @@ export interface OutcomeEntry {
   account?: string;
 }
 
-const OUTCOMES_FILE = `${PRODUCT.stateDirName}/agent_outcomes.ndjson`;
+/** The ledger in the root's state directory, which for an account's root is kept outside that root
+ *  (workspaceStateDir): the account's sandboxes can write anything inside it. */
+function outcomesFile(workspacePath: string): string {
+  return resolve(workspaceStateDir(workspacePath), "agent_outcomes.ndjson");
+}
 const MAX_OUTCOMES_LINES = 50_000;
 
 // Short-TTL parsed-tail cache. readRecentOutcomes is hit ~30× per degraded route
@@ -62,7 +65,7 @@ const _outcomesCache = new Map<string, { storedAt: number; entries: OutcomeEntry
 
 export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void {
   try {
-    const filePath = resolve(workspacePath, OUTCOMES_FILE);
+    const filePath = outcomesFile(workspacePath);
     appendJsonLine(filePath, entry, { maxLines: MAX_OUTCOMES_LINES });
     _outcomesCache.delete(filePath); // invalidate so the next read reflects the append
   } catch (err) {
@@ -78,7 +81,7 @@ export function appendOutcome(workspacePath: string, entry: OutcomeEntry): void 
  * ledger cannot be read or written.
  */
 export function rewriteOutcomeAccounts(workspacePath: string, rewrite: (account: string) => string | null | undefined): number {
-  const filePath = resolve(workspacePath, OUTCOMES_FILE);
+  const filePath = outcomesFile(workspacePath);
   try {
     return rewriteJsonLines(filePath, (record) => {
       const account = (record as OutcomeEntry | null)?.account;
@@ -94,7 +97,7 @@ export function rewriteOutcomeAccounts(workspacePath: string, rewrite: (account:
 /** How many entries each account has stamped on it (the account migration's inventory). */
 export function outcomeAccountCounts(workspacePath: string): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const entry of readAllRecords<OutcomeEntry>(resolve(workspacePath, OUTCOMES_FILE))) {
+  for (const entry of readAllRecords<OutcomeEntry>(outcomesFile(workspacePath))) {
     if (typeof entry?.account === "string") counts.set(entry.account, (counts.get(entry.account) ?? 0) + 1);
   }
   return counts;
@@ -115,7 +118,7 @@ export interface OutcomeRun {
 
 
 export function readRecentOutcomes(workspacePath: string, limit = 40): OutcomeEntry[] {
-  const file = resolve(workspacePath, OUTCOMES_FILE);
+  const file = outcomesFile(workspacePath);
   if (!existsSync(file)) return [];
   // Asks beyond the cached window bypass the cache (rare).
   if (limit > OUTCOMES_CACHE_LIMIT) return readLastRecords<OutcomeEntry>(file, limit);

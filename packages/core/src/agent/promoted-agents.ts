@@ -7,15 +7,18 @@
  * hot-reloadable config) so they persist without touching starlingai.json.
  */
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import type { SubAgentConfig } from "../config/schema.js";
-
-import { PRODUCT } from "../product/index.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 const log = childLogger("agent:promoted-agents");
 
-const PROMOTED_FILE = `${PRODUCT.stateDirName}/promoted_agents.json`;
+/** The catalog in the root's state directory, which for an account's root is kept outside that root
+ *  (workspaceStateDir): the account's sandboxes can write anything inside it. */
+function promotedFile(workspacePath: string): string {
+  return resolve(workspaceStateDir(workspacePath), "promoted_agents.json");
+}
 
 /** Minimum successful runs before an ephemeral agent is promoted to the catalog. */
 export const PROMOTION_MIN_SUCCESSES = 3;
@@ -24,7 +27,7 @@ export const PROMOTION_MIN_SUCCESSES = 3;
 export const PROMOTION_MIN_SUCCESS_RATE = 0.6;
 
 export function readPromotedAgents(workspacePath: string): Record<string, SubAgentConfig> {
-  const file = resolve(workspacePath, PROMOTED_FILE);
+  const file = promotedFile(workspacePath);
   if (!existsSync(file)) return {};
   try {
     const raw = JSON.parse(readFileSync(file, "utf-8"));
@@ -48,9 +51,9 @@ export function withPromotedAgents(
 }
 
 export function writePromotedAgents(workspacePath: string, agents: Record<string, SubAgentConfig>): void {
-  const dir = resolve(workspacePath, PRODUCT.stateDirName);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(resolve(workspacePath, PROMOTED_FILE), JSON.stringify(agents, null, 2), "utf-8");
+  const file = promotedFile(workspacePath);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(agents, null, 2), "utf-8");
 }
 
 /**

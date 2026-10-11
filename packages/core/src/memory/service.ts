@@ -8,7 +8,7 @@ import { readAllFacts } from "../swarm/memory.js";
 import { upsertMemoryToGraph, deleteMemoryFromGraph, graphL0Layer, graphRerank, graphTrackRetrieval } from "./graph-service.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
-import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
+import { deploymentWorkspaceRoot, workspaceStateDir } from "../tools/workspace-path.js";
 import { logAudit } from "../audit/logger.js";
 import { isEmbeddingAvailable, computeQueryEmbedding, computeRetrievalQueryEmbedding, computeTextEmbeddings, cosineSimilarity } from "../providers/embeddings.js";
 
@@ -17,7 +17,8 @@ import { canReadRecord, recordReader, userScopedDir } from "../runtime/user-scop
 
 const log = childLogger("memory:service");
 
-const MEMORY_SUBDIR = `${PRODUCT.stateDirName}/memory`;
+/** The workspace scope's directory under the workspace's state directory (workspaceStateDir). */
+const MEMORY_SUBDIR = "memory";
 const CONTENT_MERGE_MAX_CHARS = 560;
 
 const TOKEN_STOPWORDS = new Set([
@@ -1354,7 +1355,8 @@ function memoryDirForScope(scope: DurableMemoryScope, workspacePath: string): st
   // The 'user' scope is partitioned per authenticated user (multi-user auth);
   // it stays at the single shared base when no userId is present (auth-off).
   if (scope === "user") return userScopedDir(userMemoryBaseDir());
-  return resolve(workspacePath, MEMORY_SUBDIR);
+  // An account's root is its sandboxes' read-write bind; its state is kept outside it.
+  return resolve(workspaceStateDir(workspacePath), MEMORY_SUBDIR);
 }
 
 function ensureDirForScope(scope: DurableMemoryScope, workspacePath: string): string {

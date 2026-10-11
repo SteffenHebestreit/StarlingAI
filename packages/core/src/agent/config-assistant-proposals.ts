@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { isRuntimeSubAgent } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { writeJsonStateFileSync } from "../runtime/state-file.js";
-
-import { PRODUCT } from "../product/index.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 const log = childLogger("agent:config-assistant-proposals");
 
-const PROPOSALS_FILE = `${PRODUCT.stateDirName}/config_assistant_proposals.json`;
+/** The file in the root's state directory, which for an account's root is kept outside that root
+ *  (workspaceStateDir): the account's sandboxes can write anything inside it. */
+function proposalsFile(workspacePath: string): string {
+  return resolve(workspaceStateDir(workspacePath), "config_assistant_proposals.json");
+}
 
 export type ConversationProposalStatus = "pending" | "applied" | "rejected";
 export type ConversationFeedbackOutcome = "success" | "failure" | "partial" | "rejected";
@@ -84,7 +87,7 @@ export function rewriteConversationConfigProposalAccounts(workspacePath: string,
     changed += 1;
     if (replacement !== null) next.push({ ...proposal, account: replacement });
   }
-  if (changed > 0) writeJsonStateFileSync(resolve(workspacePath, PROPOSALS_FILE), next);
+  if (changed > 0) writeJsonStateFileSync(proposalsFile(workspacePath), next);
   return changed;
 }
 
@@ -98,7 +101,7 @@ export function conversationConfigProposalAccountCounts(workspacePath: string): 
 }
 
 function readConversationConfigProposalsStrict(workspacePath: string): ConversationConfigProposal[] {
-  const file = resolve(workspacePath, PROPOSALS_FILE);
+  const file = proposalsFile(workspacePath);
   if (!existsSync(file)) return [];
   const raw = readFileSync(file, "utf-8");
   if (!raw.trim()) return [];
@@ -360,7 +363,7 @@ export function isProtectedConfigChange(change: { path: string; value: unknown }
 }
 
 function readAllConversationConfigProposals(workspacePath: string): ConversationConfigProposal[] {
-  const file = resolve(workspacePath, PROPOSALS_FILE);
+  const file = proposalsFile(workspacePath);
   if (!existsSync(file)) return [];
 
   try {
@@ -376,9 +379,9 @@ function readAllConversationConfigProposals(workspacePath: string): Conversation
 
 function writeAllConversationConfigProposals(workspacePath: string, proposals: ConversationConfigProposal[]): void {
   try {
-    const dir = resolve(workspacePath, PRODUCT.stateDirName);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(resolve(workspacePath, PROPOSALS_FILE), `${JSON.stringify(proposals, null, 2)}\n`, "utf-8");
+    const file = proposalsFile(workspacePath);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(proposals, null, 2)}\n`, "utf-8");
   } catch (err) {
     log.warn({ err }, "Failed to persist config assistant proposals");
   }

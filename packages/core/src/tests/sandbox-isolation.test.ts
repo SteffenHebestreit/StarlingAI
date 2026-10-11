@@ -58,6 +58,7 @@ vi.mock("node:fs", async (importOriginal) => {
 const HOST_SOURCE = "/opt/deploy/repo";
 const SHARED = "/workspace/workspace";
 const CALLER_WS = "/workspace/workspace/users/acct-1";
+const ACCOUNT = "alice-0123456789abcdef";
 const MASK = (at: string) => `--tmpfs=${at}:ro,size=4k`;
 
 let tempRoot = "";
@@ -187,6 +188,41 @@ describe("sandboxIsolationArgs in the compose layout", () => {
       MASK("/workspace/workspace/.starlingai"),
     ]);
     expect(args.filter((arg) => arg === "-v")).toEqual([]);
+  });
+});
+
+describe("an account's root, which holds no gateway state (workspaceStateDir)", () => {
+  // A segment of the shape every account's root has; "acct-1" above is not one.
+  const ACCOUNT_WS = `/workspace/workspace/users/${ACCOUNT}`;
+
+  it("masks no state directory that does not exist there, and creates none", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([]);
+    expect(vi.mocked(fs.mkdirSync).mock.calls.map(([path]) => norm(path))).not.toContain(`${ACCOUNT_WS}/.starlingai`);
+  });
+
+  it("masks an old one that is still there", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    fakeExisting.add(`${ACCOUNT_WS}/.starlingai`);
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
+  });
+
+  it("still masks the shared root's state where the whole volume is bound", async () => {
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
+  });
+
+  it("does not create the state directory in a new account's real root", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const root = join(shared, "users", ACCOUNT);
+    const args = sandboxIsolationArgs({ workspacePath: root, workspaceScope: "generated", bind: "caller" }, { sharedRoot: shared });
+    expect(fs.existsSync(root)).toBe(true);
+    expect(fs.existsSync(join(root, ".starlingai"))).toBe(false);
+    expect(masks(args)).toEqual([]);
   });
 });
 

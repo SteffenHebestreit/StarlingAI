@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 import { segmentFor } from "../runtime/user-scope.js";
-import { ACCOUNT_ID_RE, type Identity } from "../runtime/accounts.js";
+import type { Identity } from "../runtime/accounts.js";
 import { GENERATED_SUBDIR, UPLOADS_SUBDIR, USERS_SUBDIR } from "./workspace-zones.js";
 
 // The zones and the config-shard rules live in a leaf module the config loader can import without
@@ -16,6 +16,9 @@ export {
   isNonConfigShardDirectory,
   compareShardPaths,
 } from "./workspace-zones.js";
+// Where the gateway keeps its state for a root lives in a leaf module the outcomes ledger can import
+// (tools/workspace-state.ts); it stays importable from here.
+export { isAccountWorkspaceRoot, stripUserWorkspaceRoots, workspaceStateDir } from "./workspace-state.js";
 
 /** True when a filesystem path exists (stat succeeds), false otherwise. */
 export async function pathExists(target: string): Promise<boolean> {
@@ -72,20 +75,6 @@ export function userWorkspaceRoot(sharedRoot: string, who?: Identity): string {
   let root = resolve(sharedRoot);
   while (basename(root) === segment && basename(dirname(root)) === USERS_SUBDIR) root = dirname(dirname(root));
   return resolve(root, USERS_SUBDIR, segment);
-}
-
-/**
- * A root with every per-user level taken off its end: `<x>/users/<segment>` becomes `<x>`, however
- * often it repeats and whichever segment it names. A restored account session's root is rebuilt
- * from this and the account's own segment (agent/session.ts), so a root stored under the
- * username's old segment, or nested by an earlier restore, does not nest again.
- */
-export function stripUserWorkspaceRoots(root: string): string {
-  let stripped = resolve(root);
-  while (basename(dirname(stripped)) === USERS_SUBDIR && ACCOUNT_ID_RE.test(basename(stripped))) {
-    stripped = dirname(dirname(stripped));
-  }
-  return stripped;
 }
 
 /**

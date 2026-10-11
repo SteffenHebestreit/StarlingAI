@@ -1,7 +1,9 @@
 /**
  * Workspace-scoped persistent memory tools.
  *
- * Entries are stored as JSON files under <workspacePath>/.starlingai/memory/.
+ * Entries are stored as JSON files under the workspace's state directory, `memory/` in
+ * workspaceStateDir(<workspacePath>): <workspacePath>/.starlingai/memory/, or, for an account's own
+ * root, the deployment's state directory, outside that root.
  * No external database required — the workspace directory acts as the store.
  *
  * memory_store  — write or overwrite an entry by key

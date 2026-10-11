@@ -67,6 +67,7 @@ import {
 } from "./account-registry.js";
 import { accountTombstones, loadAccountTombstones, type AccountTombstone } from "./account-tombstones.js";
 import { USERS_SUBDIR } from "./user-scope.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 import { disableScheduledTask, listScheduledTaskRecords, saveScheduledTask, type ScheduledTaskRecord } from "./scheduled-tasks.js";
 import {
   checkedSessionMirror,
@@ -217,14 +218,17 @@ export interface MigrationSql {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number | null }>;
 }
 
-/** A per-user base: buckets are `<path>/users/<segment>`. */
+/** A per-user base: buckets are `<path>/users/<segment>`. "workspace-state" is the deployment's state
+ *  directory, which holds each account's workspace state outside the account's own root
+ *  (workspaceStateDir), so that state moves, is archived and is purged with the account's
+ *  workspace. */
 export interface MigrationBase {
-  name: "workspace" | "user-memory" | "state";
+  name: "workspace" | "workspace-state" | "user-memory" | "state";
   path: string;
 }
 
 export interface AccountMigrationBackends {
-  /** The three bases, the same directory listed once. */
+  /** The bases, the same directory listed once. */
   bases: MigrationBase[];
   /** Postgres, when configured. */
   sql: MigrationSql | null;
@@ -255,6 +259,7 @@ export async function defaultAccountMigrationBackends(): Promise<AccountMigratio
     if (!bases.some((base) => (process.platform === "win32" ? base.path.toLowerCase() : base.path) === key)) bases.push({ name, path: resolved });
   };
   add("workspace", getConfig().workspacePath);
+  add("workspace-state", workspaceStateDir(getConfig().workspacePath));
   add("user-memory", userMemoryBaseDir());
   add("state", userStateBaseDir());
 
