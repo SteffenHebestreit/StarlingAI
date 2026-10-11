@@ -11,6 +11,7 @@ import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecuti
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
+import { isBlankBrowserPage } from "./browser-page-report.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
 import {
@@ -2442,6 +2443,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // The figure keys of the aggregates the run computed with web_table, passed up so the turn's
       // coverage check leaves a reply that states one of them alone (agent/runtime.ts).
       let runComputedAggregateKeys: string[] = [];
+      // The pages the run's views of the open browser tab reported (agent/sub-agent.ts viewedTabPages).
+      let runViewedTabPages: string[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2464,6 +2467,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           runMaskedRuns = readMaskedRuns(maybeResult.maskedRuns);
           runComputedAggregateKeys = Array.isArray(maybeResult.computedAggregateKeys)
             ? maybeResult.computedAggregateKeys.filter((key): key is string => typeof key === "string").slice(0, 32)
+            : [];
+          runViewedTabPages = Array.isArray(maybeResult.viewedTabPages)
+            ? maybeResult.viewedTabPages.filter((page): page is string => typeof page === "string")
             : [];
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
@@ -2556,7 +2562,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
       // D14: Consolidated classification — replaces the scattered acceptPartial /
       // coordinatorMicroCompletion / weak variables that used to live here.
-      const classification = classifyDelegationResult(
+      const classified = classifyDelegationResult(
         output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
         {
           explicitVerdict: Boolean(parsedOutcome?.status),
@@ -2564,6 +2570,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           ...(request.deliverable ? { deliverable: request.deliverable } : {}),
         },
       );
+      // AN AGENT THAT ONLY READS THE OPEN TAB, WHICH SHOWED NO PAGE. In 71d42257 (E2E 2026-10-10)
+      // vision_browser_analyst snapshotted about:blank five times, described a header it never saw,
+      // and ended as a success, so the agents queued behind it never ran. When every page its views
+      // of the tab reported is the browser's empty page, it read nothing: the attempt fails and its
+      // text is not kept as evidence. A run whose views reported no page is judged as before.
+      const sawOnlyBlankTab = runViewedTabPages.length > 0
+        && runViewedTabPages.every(isBlankBrowserPage)
+        && agentCfgOnlyReadsOpenBrowserTab(agentCfg);
+      const classification = sawOnlyBlankTab && classified !== "infrastructure_failure" ? "failure" : classified;
+      if (sawOnlyBlankTab) {
+        logAudit("delegation_tab_reader_saw_blank_tab", {
+          taskTitle: title,
+          agentName: candidate,
+          classified,
+          viewedTabPages: runViewedTabPages,
+        }, { sessionId: ctx.sessionId });
+      }
       // The result's own evidence, judged once here where the task is known (figures echoed from
       // the task do not count, nor does anything when every work call failed). The orchestrator's
       // frame reads it from the metadata instead of re-deriving it from the text (2026-10-05).
@@ -2591,7 +2614,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           classification, output, request.task, stats, agentCfg, request.deliverable,
           { artifacts, ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) },
         );
-        if (narrativeOnly) {
+        if (sawOnlyBlankTab) {
+          taskState.error = `Sub-agent '${candidate}' saw only an empty browser tab (about:blank): no page was open for it to read, and it cannot open one.`;
+        } else if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
             /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
           );
@@ -2616,6 +2641,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // back to the caller as a successful partial.
         if (
           !lastFailureWasInfrastructure
+          && !sawOnlyBlankTab
           && stats?.terminalState !== "missing_tools"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)

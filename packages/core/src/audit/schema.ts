@@ -214,6 +214,8 @@ export type CoreAuditEventType =
   // agents it names first; the tab readers wait behind them until a browser has been driven.
   | "delegation_tab_reader_demoted"
   | "delegation_tab_reader_held"
+  // An agent that only reads the open browser tab saw nothing but the browser's empty page: failed.
+  | "delegation_tab_reader_saw_blank_tab"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
   | "delegation_depth_ceiling_enforced"
