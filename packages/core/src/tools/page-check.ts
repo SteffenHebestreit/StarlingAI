@@ -45,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { judgeCanvasPainting, type CanvasPaintReport } from "./canvas-geometry.js";
 import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import {
@@ -301,8 +302,15 @@ export async function runScriptsIsolated(
     }
   }
   log.warn({ stderr: lastStderr.slice(0, 500) }, "page check could not start its isolated runner");
+  // A page never runs unconfined, so without a runner the build-quality gate is off. A warning
+  // alone goes unnoticed; the audit trail records it once per process (review 2026-10-12).
+  if (!pageCheckUnavailableReported) {
+    pageCheckUnavailableReported = true;
+    logAudit("page_check_unavailable", { reason: lastStderr.slice(0, 300), node: process.version }, { severity: "warn" });
+  }
   return null;
 }
+let pageCheckUnavailableReported = false;
 
 /**
  * Is this built page actually working? The same judgement verify_page makes, callable from
