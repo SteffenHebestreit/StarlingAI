@@ -13,11 +13,13 @@
  *   - Require per-call approval (Tier 2)
  *   - Are discoverable via list_agents and search_agents
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, watch, type FSWatcher } from "node:fs";
 import { join, basename } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, unregisterTool, type ToolHandler, type ToolContext, type ToolResult } from "./registry.js";
 import { SWARM_TOOLS_SUBDIR } from "./workspace-path.js";
+import { sweepEntryKind } from "./workspace-zones.js";
+import { withContainedWorkspaceFile } from "./workspace-containment.js";
 import { executeDynamicTool } from "./dynamic-tool-executor.js";
 import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -120,7 +122,7 @@ function migrateLegacyDynamicTools(targetDir: string): void {
         for (const file of legacyFiles) {
             const target = join(targetDir, file);
             if (existsSync(target)) continue; // workspace copy wins
-            writeFileSync(target, readFileSync(join(LEGACY_DYNAMIC_TOOLS_DIR, file), "utf-8"), "utf-8");
+            writeBundleFile(target, readFileSync(join(LEGACY_DYNAMIC_TOOLS_DIR, file), "utf-8"), "create");
             moved += 1;
         }
         if (moved > 0) {
@@ -129,6 +131,49 @@ function migrateLegacyDynamicTools(targetDir: string): void {
     } catch (err) {
         log.warn({ err }, "Legacy dynamic-tools migration failed — continuing with workspace tools/ zone only");
     }
+}
+
+/**
+ * THE tools/ ZONE IS READ AND WRITTEN THROUGH NO LINK. The full-scope maintenance sandbox writes
+ * tools/ (workspace-mount.ts fullScopeZoneMounts) and can leave `tools/x.json` linked to any file the
+ * gateway can read or write: listed by name and read by path, the bundle loader read through it, and
+ * every write the gateway makes to a bundle (deploy, call stats, promotion) wrote through it, as the
+ * gateway's own user (review 2026-10-12). A bundle is listed only where lstat finds a regular file,
+ * a link is warned about once and skipped, and each bundle is read and written held to its zone
+ * (workspace-containment.ts), never opening a link at its own name to write.
+ */
+const _warnedLinks = new Set<string>();
+
+function bundleFileNames(): string[] {
+    const dir = dynamicToolsDir();
+    const names: string[] = [];
+    for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".json")) continue;
+        const path = join(dir, name);
+        const kind = sweepEntryKind(path);
+        if (kind === "link") {
+            if (!_warnedLinks.has(path)) {
+                _warnedLinks.add(path);
+                log.warn({ path }, "Skipped a link in the tools/ zone: a tool bundle is read only from a regular file, and no link is followed");
+            }
+            continue;
+        }
+        if (kind === "file") names.push(name);
+    }
+    return names;
+}
+
+function readBundleFile(name: string): string {
+    return withContainedWorkspaceFile(join(dynamicToolsDir(), name), getConfig().workspacePath, { mode: "read" }, (file) => file.read().toString("utf-8"));
+}
+
+function writeBundleFile(path: string, text: string, mode: "write" | "create" = "write"): void {
+    withContainedWorkspaceFile(path, getConfig().workspacePath, { mode, createDirs: true }, (file) => file.replace(text));
+}
+
+/** Writes a tool's bundle to tools/<name>.json. */
+function writeBundle(def: DynamicToolDefinition): void {
+    writeBundleFile(join(dynamicToolsDir(), `${def.name}.json`), JSON.stringify(def, null, 2));
 }
 
 const TOOL_NAME_PREFIX = "selfdev__";
@@ -144,13 +189,12 @@ let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
 export function loadDynamicTools(): void {
     ensureDir();
 
-    const files = readdirSync(dynamicToolsDir()).filter((file) => file.endsWith(".json"));
+    const files = bundleFileNames();
     let loaded = 0;
 
     for (const file of files) {
         try {
-            const filePath = join(dynamicToolsDir(), file);
-            const raw = readFileSync(filePath, "utf-8");
+            const raw = readBundleFile(file);
             const def = JSON.parse(raw) as DynamicToolDefinition;
 
             if (validateDefinition(def)) {
@@ -203,8 +247,7 @@ export function deployApprovedTool(def: DynamicToolDefinition): void {
         def.version = existing.version + 1;
     }
 
-    const filePath = join(dynamicToolsDir(), `${def.name}.json`);
-    writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+    writeBundle(def);
 
     registerDynamicTool(def);
 
@@ -315,13 +358,12 @@ function registerDynamicTool(def: DynamicToolDefinition): void {
 function syncDynamicTools(): void {
     if (!existsSync(dynamicToolsDir())) return;
 
-    const files = readdirSync(dynamicToolsDir()).filter((file) => file.endsWith(".json"));
+    const files = bundleFileNames();
     const fileNames = new Set(files.map((file) => basename(file, ".json")));
 
     for (const file of files) {
         try {
-            const filePath = join(dynamicToolsDir(), file);
-            const raw = readFileSync(filePath, "utf-8");
+            const raw = readBundleFile(file);
             const def = JSON.parse(raw) as DynamicToolDefinition;
 
             if (!validateDefinition(def)) continue;
@@ -370,8 +412,7 @@ function persistStatsNow(bareToolName: string, stats: _CallStats): void {
     def.runtimeCalls = stats.calls;
     def.runtimeSuccesses = stats.successes;
     try {
-        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
-        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+        writeBundle(def);
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist runtime stats — counts will reset on restart");
     }
@@ -401,8 +442,7 @@ function maybeNominateForPromotion(bareToolName: string): void {
 
     // Persist the updated definition
     try {
-        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
-        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+        writeBundle(def);
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion nomination");
     }
@@ -492,8 +532,7 @@ export function approvePromotion(bareToolName: string, reviewedBy: string): bool
 
     // Persist updated status
     try {
-        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
-        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+        writeBundle(def);
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion approval");
     }
@@ -531,8 +570,7 @@ export function rejectPromotion(bareToolName: string, reviewedBy: string): boole
     def.promotionStatus = "rejected";
 
     try {
-        const filePath = join(dynamicToolsDir(), `${def.name}.json`);
-        writeFileSync(filePath, JSON.stringify(def, null, 2), "utf-8");
+        writeBundle(def);
     } catch (err) {
         log.warn({ err, toolName: bareToolName }, "Failed to persist promotion rejection");
     }

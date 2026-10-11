@@ -19,8 +19,7 @@
  * swarm_maintainer. They do NOT depend on the selfImprovement/toolDevelopment flags (config
  * authoring is not sandbox tool-dev) — a maintainer can author capabilities out of the box.
  */
-import { writeFileSync, readFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import type { ZodTypeAny } from "zod";
 import { registerTool, getAllTools, type ToolContext, type ToolResult } from "./registry.js";
 import { getConfig, updateConfig } from "../config/loader.js";
@@ -28,6 +27,8 @@ import { validateWorkspaceConfig } from "../config/validate-workspace.js";
 import { SubAgentConfigSchema, SceneConfigSchema, JobConfigSchema } from "../config/schema.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { sweepEntryKind } from "./workspace-zones.js";
+import { removeContainedWorkspaceFile, withContainedWorkspaceFile } from "./workspace-containment.js";
 
 const log = childLogger("tool:swarm-authoring");
 
@@ -75,23 +76,41 @@ function authorShard(kind: AuthorKind, args: Record<string, unknown>, ctx: ToolC
 
   const workspacePath = getConfig().workspacePath;
   const shardPath = join(workspacePath, kind.subdir, `50-authored-${name}.jsonc`);
-  const priorContent = existsSync(shardPath) ? readFileSync(shardPath, "utf8") : null;
+  // THE SHARD IS READ AND WRITTEN THROUGH NO LINK. The full-scope sandbox writes the zones and can
+  // leave this name linked to any file: the prior content was read through it, and the shard, and
+  // its restore, were written through it as the gateway's own user (review 2026-10-12). The loader
+  // follows no link (config/loader.ts), so a link here is refused rather than replaced; the file is
+  // read and written held to its zone, never opening a link at its own name to write.
+  if (sweepEntryKind(shardPath) === "link") {
+    log.warn({ path: shardPath }, "Refused to author a shard whose path is a link");
+    return reject(kind, name, `Refused: workspace/${kind.subdir}/50-authored-${name}.jsonc is a link. The loader follows no link; remove it first.`);
+  }
+  let priorContent: string | null;
+  try {
+    priorContent = withContainedWorkspaceFile(shardPath, workspacePath, { mode: "read" }, (file) => file.read().toString("utf8"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+      return reject(kind, name, `Failed to read the existing shard: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    priorContent = null;
+  }
+  const writeShard = (text: string) => withContainedWorkspaceFile(shardPath, workspacePath, { mode: "write", createDirs: true }, (file) => file.replace(text));
 
   // 2) Write the durable shard. Store the ORIGINAL definition (no injected zod defaults) so the
   // shard stays clean + human-editable; the loader applies defaults when it reads.
   try {
-    mkdirSync(dirname(shardPath), { recursive: true });
     const payload = { [kind.wrapper]: { [name]: definition } };
-    writeFileSync(shardPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+    writeShard(`${JSON.stringify(payload, null, 2)}\n`);
   } catch (err) {
     return reject(kind, name, `Failed to write the shard: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const restoreShard = () => {
     try {
-      if (priorContent !== null) writeFileSync(shardPath, priorContent, "utf8");
-      else if (existsSync(shardPath)) unlinkSync(shardPath);
+      if (priorContent !== null) writeShard(priorContent);
+      else removeContainedWorkspaceFile(shardPath, workspacePath);
     } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return;
       log.error({ err, shardPath }, "Failed to revert authored shard after a validation failure");
     }
   };

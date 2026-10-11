@@ -8,8 +8,12 @@
  * loader reads (the zones, a new .jsonc at the root, runtime/runtime.overrides.json).
  * sandboxIsolationArgs masks every state directory in the bind with an empty read-only tmpfs; for a
  * sandbox that is not full-scope with the shared root in its bind, sandboxBindSpec makes the bind
- * read-only, only generated/ is bound again writable, and users/ is masked. The full-scope git
- * repo bind keeps the tree writable, because swarm_maintainer commits configuration through git.
+ * read-only, only generated/ is bound again writable, and users/ is masked. On Docker Desktop neither
+ * a mask (the bind is case-insensitive) nor a file's mode (host-made entries are 0777) protects the
+ * state in a bind, and a read-only bind stops writes, not reads. So a full-scope shell, script or
+ * test sandbox gets no bind of its root at all, only the zones it maintains and generated/, each at
+ * /workspace/<zone>; the full-scope git repo bind is read-only with those zones writable, and runs as
+ * the bind's owner, which git needs.
  *
  * node:fs is the real module behind spies: a test can give a path an owner (statSync) or a zone
  * (existsSync) in the compose layout, which does not exist on the machine running the tests.
@@ -58,6 +62,7 @@ vi.mock("node:fs", async (importOriginal) => {
 const HOST_SOURCE = "/opt/deploy/repo";
 const SHARED = "/workspace/workspace";
 const CALLER_WS = "/workspace/workspace/users/acct-1";
+const ACCOUNT = "alice-0123456789abcdef";
 const MASK = (at: string) => `--tmpfs=${at}:ro,size=4k`;
 
 let tempRoot = "";
@@ -81,6 +86,11 @@ function readOnlyBinds(args: string[]): string[] {
   return args.flatMap((arg, i) => (args[i - 1] === "-v" && arg.endsWith(":ro") ? [arg] : []));
 }
 
+/** Every `-v` spec that binds something writable. */
+function writableBinds(args: string[]): string[] {
+  return args.flatMap((arg, i) => (args[i - 1] === "-v" && !arg.endsWith(":ro") ? [arg] : []));
+}
+
 function masks(args: string[]): string[] {
   return args.filter((arg) => arg.startsWith("--tmpfs=") && arg.endsWith(":ro,size=4k"));
 }
@@ -89,7 +99,7 @@ beforeAll(async () => {
   tempRoot = mkdtempSync(join(tmpdir(), "sai-sandbox-isolation-"));
   shared = join(tempRoot, "shared");
   configDir = join(tempRoot, "config");
-  for (const dir of [join(shared, "agents"), join(shared, "scenes"), join(shared, "users", "acct-1"), configDir]) {
+  for (const dir of [join(shared, "agents"), join(shared, "scenes"), join(shared, "generated"), join(shared, "users", "acct-1"), configDir]) {
     mkdirSync(dir, { recursive: true });
   }
   writeFileSync(join(configDir, "starlingai.json"), JSON.stringify({ workspacePath: shared }), "utf8");
@@ -155,22 +165,64 @@ describe("sandboxIsolationArgs in the compose layout", () => {
     }
   });
 
-  it("leaves the shared root writable to a full-scope sandbox, and still masks its state", async () => {
-    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    const input = { workspacePath: SHARED, workspaceScope: "full", bind: "caller" } as const;
-    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace");
-    const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
-    expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
-    expect(args.filter((arg) => arg === "-v")).toEqual([]);
+  it("gives a full-scope shell no bind of the shared root, only the zones that are there, writable from their HOST paths", async () => {
+    const { callerSandboxMounts } = await import("../tools/workspace-mount.js");
+    for (const zone of ["agents", "scenes", "generated"]) fakeExisting.add(`${SHARED}/${zone}`);
+    const mounts = callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED });
+    if ("error" in mounts) throw new Error(mounts.error);
+    // jobs/ and tools/ are not there: nothing is bound, and docker creates nothing.
+    expect(writableBinds(mounts.args)).toEqual([
+      `${HOST_SOURCE}/workspace/agents:/workspace/agents`,
+      `${HOST_SOURCE}/workspace/scenes:/workspace/scenes`,
+      `${HOST_SOURCE}/workspace/generated:/workspace/generated`,
+    ]);
+    // Nothing else: not the shared root, not the mount source, and no mask over a state directory
+    // that is not in the sandbox under any spelling.
+    expect(readOnlyBinds(mounts.args)).toEqual([]);
+    expect(mounts.args.filter((arg) => arg.startsWith("--tmpfs"))).toEqual([]);
+    expect(mounts.args.filter((arg, i) => mounts.args[i - 1] === "-v" && /:\/workspace(:ro)?$/.test(arg))).toEqual([]);
   });
 
-  it("masks the repo root's and the shared root's state for the full-scope git repo bind, and keeps the tree writable", async () => {
+  it("binds tools/ read-only to a full-scope shell, so a bundle written there cannot skip the tool pipeline's approval", async () => {
+    const { callerSandboxMounts } = await import("../tools/workspace-mount.js");
+    for (const zone of ["agents", "tools"]) fakeExisting.add(`${SHARED}/${zone}`);
+    const mounts = callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED });
+    if ("error" in mounts) throw new Error(mounts.error);
+    expect(writableBinds(mounts.args)).toEqual([`${HOST_SOURCE}/workspace/agents:/workspace/agents`]);
+    expect(readOnlyBinds(mounts.args)).toEqual([`${HOST_SOURCE}/workspace/tools:/workspace/tools:ro`]);
+  });
+
+  it("refuses to hand a full-scope shell its root through the bind helpers", async () => {
     const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const input = { workspacePath: SHARED, workspaceScope: "full", bind: "caller" } as const;
+    expect(() => sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toThrow(/only the zones/);
+    expect(() => sandboxIsolationArgs(input, { sharedRoot: SHARED })).toThrow(/only the zones/);
+  });
+
+  it("makes the full-scope git repo bind read-only, binds the zones writable at their place in it, and masks the repo root's and the shared root's state", async () => {
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    for (const zone of ["agents", "jobs", "scenes", "tools", "generated"]) fakeExisting.add(`${SHARED}/${zone}`);
     const input = { workspacePath: SHARED, workspaceScope: "full", bind: "repo" } as const;
-    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace");
+    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace:ro");
     const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
-    expect(args.filter((arg) => arg === "-v")).toEqual([]);
+    expect(writableBinds(args)).toEqual(["agents", "jobs", "scenes", "tools", "generated"]
+      .map((zone) => `${HOST_SOURCE}/workspace/${zone}:/workspace/workspace/${zone}`));
+  });
+
+  it("keeps a full-scope named-volume repo bind read-only, and refuses the shell, with no zone to bind from a host path", async () => {
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    const { callerSandboxMounts, FULL_SCOPE_NO_ZONES_SANDBOX_ERROR, sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    for (const zone of ["agents", "generated"]) fakeExisting.add(`${SHARED}/${zone}`);
+    const input = { workspacePath: SHARED, workspaceScope: "full", bind: "repo" } as const;
+    expect(sandboxBindSpec("gc-workspace:/workspace", input, { sharedRoot: SHARED })).toBe("gc-workspace:/workspace:ro");
+    expect(writableBinds(sandboxIsolationArgs(input, { sharedRoot: SHARED }))).toEqual([]);
+    expect(callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED })).toEqual({ error: FULL_SCOPE_NO_ZONES_SANDBOX_ERROR });
+  });
+
+  it("refuses a full-scope shell where none of its zones is there", async () => {
+    const { callerSandboxMounts, FULL_SCOPE_NO_ZONES_SANDBOX_ERROR } = await import("../tools/workspace-mount.js");
+    expect(callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED })).toEqual({ error: FULL_SCOPE_NO_ZONES_SANDBOX_ERROR });
   });
 
   it("masks every state directory in a named-volume bind and keeps that whole-volume bind read-only", async () => {
@@ -187,6 +239,58 @@ describe("sandboxIsolationArgs in the compose layout", () => {
       MASK("/workspace/workspace/.starlingai"),
     ]);
     expect(args.filter((arg) => arg === "-v")).toEqual([]);
+  });
+});
+
+describe("an account's root, which holds no gateway state (workspaceStateDir)", () => {
+  // A segment of the shape every account's root has; "acct-1" above is not one.
+  const ACCOUNT_WS = `/workspace/workspace/users/${ACCOUNT}`;
+
+  it("masks no state directory that does not exist there, and creates none", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([]);
+    expect(vi.mocked(fs.mkdirSync).mock.calls.map(([path]) => norm(path))).not.toContain(`${ACCOUNT_WS}/.starlingai`);
+  });
+
+  it("masks an old one that is still there", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    fakeExisting.add(`${ACCOUNT_WS}/.starlingai`);
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
+  });
+
+  it("still masks the shared root's state where the whole volume is bound", async () => {
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const args = sandboxIsolationArgs({ workspacePath: ACCOUNT_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
+  });
+
+  it("masks an old one only until the boot's move is complete; after that it is the account's own file", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const root = join(shared, "users", ACCOUNT);
+    mkdirSync(join(root, ".starlingai"), { recursive: true });
+    const marker = join(shared, ".starlingai", "users", ".relocated-v1");
+    try {
+      const input = { workspacePath: root, workspaceScope: "generated", bind: "caller" } as const;
+      expect(masks(sandboxIsolationArgs(input, { sharedRoot: shared }))).toEqual([MASK("/workspace/.starlingai")]);
+      mkdirSync(join(shared, ".starlingai", "users"), { recursive: true });
+      writeFileSync(marker, "");
+      expect(masks(sandboxIsolationArgs(input, { sharedRoot: shared }))).toEqual([]);
+    } finally {
+      rmSync(join(root, ".starlingai"), { recursive: true, force: true });
+      rmSync(marker, { force: true });
+    }
+  });
+
+  it("does not create the state directory in a new account's real root", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const root = join(shared, "users", ACCOUNT);
+    const args = sandboxIsolationArgs({ workspacePath: root, workspaceScope: "generated", bind: "caller" }, { sharedRoot: shared });
+    expect(fs.existsSync(root)).toBe(true);
+    expect(fs.existsSync(join(root, ".starlingai"))).toBe(false);
+    expect(masks(args)).toEqual([]);
   });
 });
 
@@ -258,6 +362,34 @@ describe("the owner each git bind runs as", () => {
   });
 });
 
+describe("a full-scope sandbox runs as its bind's owner, root included", () => {
+  // Its bind is read-only but for the zones it maintains, so the gateway's state in it is safe from
+  // root too, and git reads a repository only as its owner: as uid 1000 it is "dubious ownership".
+  it("gets the owner's --user, root's where the owner is root, for the repo bind and the shell", async () => {
+    const { callerSandboxMounts, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    fakeExisting.add(`${SHARED}/agents`);
+    for (const uid of [0, 1111]) {
+      fakeOwners.set("/workspace", uid).set(SHARED, uid);
+      expect(flagValue(sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind: "repo" }, { sharedRoot: SHARED }), "--user"), `repo ${uid}`).toBe(`${uid}:${uid}`);
+      const mounts = callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED });
+      expect("args" in mounts && flagValue(mounts.args, "--user"), `shell ${uid}`).toBe(`${uid}:${uid}`);
+    }
+  });
+
+  it("as the git tools issue it, read-only, with safe.directory for a run that is not the owner's", async () => {
+    fakeOwners.set("/workspace", 0);
+    execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_status")!.execute({}, { sessionId: "s-full-root", workspacePath: SHARED, workspaceScope: "full" });
+    expect(flagValue(dockerArgs(), "--user")).toBe("0:0");
+    expect(readOnlyBinds(dockerArgs())).toEqual([`${HOST_SOURCE}:/workspace:ro`]);
+    const env = dockerArgs().flatMap((arg, i, all) => (all[i - 1] === "-e" ? [arg] : []));
+    expect(env).toEqual(["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace"]);
+    // Before the image: docker's own flags, not git's.
+    expect(dockerArgs().indexOf("GIT_CONFIG_COUNT=1")).toBeLessThan(dockerArgs().indexOf("starlingai/sandbox:latest"));
+  });
+});
+
 describe("the sandbox tools on an auth-off session's root, which is the shared root", () => {
   const ctx = (workspaceScope?: "full" | "generated"): ToolContext => ({ sessionId: "s-isolation", workspacePath: shared, workspaceScope });
   const root = () => shared.replace(/[/\\]+$/, "");
@@ -279,15 +411,44 @@ describe("the sandbox tools on an auth-off session's root, which is the shared r
     expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/users")]);
   });
 
-  it("a full-scope sandbox keeps the tree writable", async () => {
+  it("a full-scope shell, script or test sandbox has only the zones that are there and generated/, and no bind of the root", async () => {
     const { getTool } = await import("../tools/registry.js");
-    await getTool("shell_exec")!.execute({ command: "ls" }, ctx("full"));
-    expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai")]);
-    expect(readOnlyBinds(dockerArgs())).toEqual([]);
+    // agents/, scenes/ and generated/ are there (beforeAll); jobs/ and tools/ are not. The state
+    // directory and users/ are there too, and must not be in the sandbox under any spelling: the
+    // root is not bound, so nothing reaches them.
+    mkdirSync(join(shared, ".starlingai"), { recursive: true });
+    const zones = ["agents", "scenes", "generated"].map((zone) => `${root()}/${zone}:/workspace/${zone}`);
+    for (const [tool, args] of [["shell_exec", { command: "ls" }], ["run_script", { path: "count.js" }], ["run_test_suite", { suite: "vitest" }]] as const) {
+      const result = await getTool(tool)!.execute({ ...args }, ctx("full"));
+      expect(result.success, tool).toBe(true);
+      expect(writableBinds(dockerArgs()), tool).toEqual(zones);
+      expect(readOnlyBinds(dockerArgs()), tool).toEqual([]);
+      expect(masks(dockerArgs()), tool).toEqual([]);
+      const sources = dockerArgs().flatMap((arg, i, all) => (all[i - 1] === "-v" ? [arg.slice(0, arg.lastIndexOf(":/workspace"))] : []));
+      expect(sources.some((source) => source === root() || /[/\\](\.starlingai|users)$/i.test(source)), tool).toBe(false);
+    }
+  });
 
+  it("the full-scope git repo bind keeps the tree read-only but for the zones that are there and generated/", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const zones = ["agents", "scenes", "generated"].map((zone) => `${root()}/${zone}:/workspace/${zone}`);
     await getTool("git_status")!.execute({}, ctx("full"));
+    expect(readOnlyBinds(dockerArgs())).toEqual([`${root()}:/workspace:ro`]);
+    expect(writableBinds(dockerArgs())).toEqual(zones);
     expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai")]);
-    expect(readOnlyBinds(dockerArgs())).toEqual([]);
+  });
+
+  it.each([
+    ["shell_exec", { command: "ls" }],
+    ["run_script", { path: "count.js" }],
+    ["run_test_suite", { suite: "vitest" }],
+  ] as const)("%s refuses a full-scope run where no zone can be bound, and runs nothing", async (tool, args) => {
+    const { getTool } = await import("../tools/registry.js");
+    const empty = mkdtempSync(join(tempRoot, "no-zones-"));
+    const result = await getTool(tool)!.execute({ ...args }, { sessionId: "s-no-zones", workspacePath: empty, workspaceScope: "full" });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/none of the workspace zones.*Nothing was run/);
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
   });
 });
 
@@ -300,17 +461,53 @@ describe("the path the model wrote, where the whole named volume is bound", () =
 
   it("stays as written for a named volume, and maps to /workspace where the caller's own root is bound", async () => {
     const { getTool } = await import("../tools/registry.js");
-    const ctx: ToolContext = { sessionId: "s-volume", workspacePath: CALLER_WS, workspaceScope: "generated" };
-    const command = `cd ${CALLER_WS} && ls generated`;
-
+    // Behind a named volume only the shared root runs (an account's root is refused, below).
+    const sharedCommand = `cd ${SHARED}/generated && ls`;
     delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
-    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
-    expect(flagValue(dockerArgs(), "-w")).toBe(CALLER_WS);
-    expect(dockerArgs().at(-1)).toContain(command);
+    await getTool("shell_exec")!.execute({ command: sharedCommand, workdir: SHARED }, { sessionId: "s-volume", workspacePath: SHARED, workspaceScope: "generated" });
+    expect(flagValue(dockerArgs(), "-w")).toBe(SHARED);
+    expect(dockerArgs().at(-1)).toContain(sharedCommand);
 
+    const command = `cd ${CALLER_WS} && ls generated`;
     process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
-    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
+    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, { sessionId: "s-host", workspacePath: CALLER_WS, workspaceScope: "generated" });
     expect(flagValue(dockerArgs(), "-w")).toBe("/workspace");
     expect(dockerArgs().at(-1)).toContain("cd /workspace && ls generated");
+  });
+});
+
+describe("an account's root where the bind cannot be narrowed to it (a named volume)", () => {
+  // The whole volume was bound, with users/ unmasked because the caller's own root is in it: an
+  // account's sandbox had every other account's workspace.
+  const ACCOUNT_WS = `/workspace/workspace/users/${ACCOUNT}`;
+
+  beforeEach(() => {
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+  });
+
+  it.each([
+    ["shell_exec", { command: "ls" }],
+    ["run_script", { path: "count.js" }],
+    ["run_test_suite", { suite: "vitest" }],
+  ] as const)("%s refuses and runs nothing", async (tool, args) => {
+    const { getTool } = await import("../tools/registry.js");
+    for (const workspacePath of [ACCOUNT_WS, CALLER_WS]) {
+      for (const workspaceScope of ["generated", undefined] as const) {
+        const result = await getTool(tool)!.execute({ ...args }, { sessionId: "s-unnarrowed", workspacePath, workspaceScope });
+        expect(result.success, `${workspacePath} ${workspaceScope}`).toBe(false);
+        expect(result.error).toMatch(/named volume.*Nothing was run/);
+      }
+    }
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+  });
+
+  it("is told apart from the shared root, which keeps the whole-volume bind, and from a host-path source", async () => {
+    const { callerSandboxBind } = await import("../tools/workspace-mount.js");
+    expect(callerSandboxBind(ACCOUNT_WS, { sharedRoot: SHARED })).toBeNull();
+    expect(callerSandboxBind(`${SHARED}/users/notes/deeper`, { sharedRoot: SHARED })).toBeNull();
+    expect(callerSandboxBind(SHARED, { sharedRoot: SHARED })).toBe("gc-workspace:/workspace");
+    process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
+    expect(callerSandboxBind(ACCOUNT_WS, { sharedRoot: SHARED })).toBe(`${HOST_SOURCE}/workspace/users/${ACCOUNT}:/workspace`);
   });
 });

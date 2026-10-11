@@ -13,6 +13,7 @@ import {
   type SessionHistoryMessage,
   type SessionTranscriptMessage,
 } from "./session.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -327,7 +328,9 @@ async function readSessionAuditEventsAsync(sessionId: string, workspacePath?: st
     resolveAuditLogPath(),
     resolve(process.cwd(), PRODUCT.stateDirName, "audit.jsonl"),
     resolve(homedir(), PRODUCT.stateDirName, "audit.jsonl"),
-    workspacePath ? resolve(workspacePath, PRODUCT.stateDirName, "audit.jsonl") : undefined,
+    // The session's root is an account's own directory under multi-user auth, which its sandboxes
+    // can write: never read an audit log from inside it (workspaceStateDir).
+    workspacePath ? resolve(workspaceStateDir(workspacePath), "audit.jsonl") : undefined,
   ].filter((value): value is string => Boolean(value));
 
   const seen = new Set<string>();

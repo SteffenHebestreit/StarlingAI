@@ -79,7 +79,7 @@ Three long-lived branches:
 
 - **Agents** — define under `workspace/agents/*.jsonc` (description, tags, capabilities, tools, model). Prefer semantic discovery (`search_agents`) over hard-coded names.
 - **Scenes / jobs** — `workspace/scenes/` and `workspace/jobs/`; discoverable via `search_workflows` / `run_workflow`.
-- **Skills** — authored at runtime (`record_skill` / the distiller) as `SKILL.md` procedures under `.starlingai/skills/`; see [docs/architecture.md](docs/architecture.md).
+- **Skills** — authored at runtime (`record_skill` / the distiller) as `SKILL.md` procedures under `skills/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, and `<shared>/.starlingai/users/<seg>/` for an account's own root, outside the directory its sandboxes are handed; see [docs/architecture.md](docs/architecture.md).
 - **Tools** — register in `packages/core/src/tools/`, and add a tier entry in `guardrails/tool-tiers.ts` (an unlisted tool defaults to BLOCKED and `registerTool` throws at boot).
 
 ### Prompts are a map, not a manual

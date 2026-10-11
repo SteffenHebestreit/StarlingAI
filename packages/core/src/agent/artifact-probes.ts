@@ -13,6 +13,7 @@ import { childLogger } from "../logger.js";
 import { validateArtifactBytes, checkFormatMatchesExtension, validateHtmlText, extensionOf } from "./artifact-validators.js";
 import type { QaJudgeArtifactRef } from "./qa-tool-judge.js";
 import { UNFINISHED_STUB_MARKER } from "./sub-agent-prompt-guidance.js";
+import { containedWorkspaceRealPath } from "../tools/workspace-containment.js";
 
 const log = childLogger("agent:artifact-probes");
 
@@ -297,6 +298,8 @@ async function probeReferencedAssets(
     const started = Date.now();
     const absolute = resolve(htmlDir, ref);
     if (absolute !== workspaceRoot && !absolute.startsWith(workspaceRoot + sep)) continue;
+    // Nor through a link out of its zone, which a sandbox can leave under the ref's name.
+    if (!containedWorkspaceRealPath(absolute, workspacePath)) continue;
     try {
       const info = await stat(absolute);
       if (!info.isFile() || info.size === 0 || info.size > MAX_PROBE_BYTES) continue;
@@ -350,12 +353,16 @@ async function probeFolder(workspacePath: string, location: string, started: num
 async function probeFile(workspacePath: string, location: string, followFolder = true): Promise<ArtifactProbeReceipt[]> {
   const started = Date.now();
   const absolute = resolve(workspacePath, location);
-  if (followFolder && await stat(absolute).then((info) => info.isDirectory(), () => false)) {
+  // The location comes from what a tool reported, and the file there may be a link a sandbox left:
+  // only a path that stays in its zone of the workspace is read (containedWorkspaceRealPath).
+  const contained = containedWorkspaceRealPath(absolute, workspacePath) !== null;
+  if (followFolder && contained && await stat(absolute).then((info) => info.isDirectory(), () => false)) {
     return probeFolder(workspacePath, location, started);
   }
   const receipts: ArtifactProbeReceipt[] = [];
   let content: Buffer;
   try {
+    if (!contained) throw new Error("Path escapes workspace boundary");
     const info = await stat(absolute);
     if (!info.isFile() || info.size === 0) {
       return [{ target: location, probe: "exists", status: "fail", detail: info.isFile() ? "zero-byte file" : "not a file", durationMs: Date.now() - started }];

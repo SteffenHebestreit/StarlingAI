@@ -41,7 +41,7 @@ Two feature sections control the self-improving procedural-memory layer. Both ca
 }
 ```
 
-Skills are workspace-scoped under `.starlingai/skills/<slug>/SKILL.md` (gitignored). Authoring is automatic via the distiller, and any agent granted `record_skill` can author explicitly; recall/curation tools (`search_skills`, `search_sessions`, `curate_memory`) and `run_tool_pipeline` are granted per-agent in `workspace/agents/`. Every pipeline step still passes the normal tier + approval checks **and** is restricted to the calling agent's own tool allowlist.
+Skills are workspace-scoped under `skills/<slug>/SKILL.md` in the workspace's state directory: `.starlingai/` of the shared root (gitignored), and `.starlingai/users/<segment>/` of the shared root for an account's own root, outside the directory its sandboxes are handed. Authoring is automatic via the distiller, and any agent granted `record_skill` can author explicitly; recall/curation tools (`search_skills`, `search_sessions`, `curate_memory`) and `run_tool_pipeline` are granted per-agent in `workspace/agents/`. Every pipeline step still passes the normal tier + approval checks **and** is restricted to the calling agent's own tool allowlist.
 
 ## Main-Assistant Routing
 

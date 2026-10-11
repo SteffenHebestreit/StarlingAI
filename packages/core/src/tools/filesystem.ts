@@ -1,10 +1,19 @@
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync, realpathSync } from "node:fs";
-import { basename, resolve, extname, join, relative, isAbsolute } from "node:path";
+import { readdirSync, statSync, lstatSync, existsSync } from "node:fs";
+import { basename, resolve, extname, join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { PRODUCT } from "../product/index.js";
+import { containedWorkspaceRealPath, generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import {
+  isWorkspaceContainmentError,
+  makeContainedWorkspaceDir,
+  openContainedWorkspaceFile,
+  removeContainedWorkspaceFile,
+  withContainedWorkspaceFile,
+  type OpenContainedFile,
+} from "./workspace-containment.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 import { buildArtifactTextPreview } from "./artifact-preview.js";
 
@@ -167,13 +176,11 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
     if (isSensitiveWorkspacePath(relative(workspacePath, resolved))) {
       return { safe: false, resolved };
     }
-    let real: string | null = null;
-    try { real = realpathSync(resolved); } catch { /* not created yet — the lexical check stands */ }
-    if (real !== null) {
-      const realRel = relative(workspacePath, real);
-      if (realRel.startsWith("..") || isAbsolute(realRel) || isSensitiveWorkspacePath(realRel)) {
-        return { safe: false, resolved };
-      }
+    // The resolver above held the path to its zone through any link (containedWorkspaceRealPath);
+    // where it really leads must not be a denied file either.
+    const real = containedWorkspaceRealPath(resolved, workspacePath);
+    if (!real || isSensitiveWorkspacePath(relative(real.root, real.real))) {
+      return { safe: false, resolved };
     }
     return { safe: true, resolved };
   } catch {
@@ -186,13 +193,91 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
  * under the workspace's `generated/` subfolder so agent output never clutters
  * the config zone. Reads keep guardPath (workspace-wide). Returns the
  * workspace-rooted relativePath (e.g. "generated/index.html") for artifacts.
+ *
+ * AND WRITES THROUGH NO LINK. A sandbox can leave links where it can write, and the write tools
+ * followed them: write_file to generated/evil.jsonc linked to ../agents/evil.jsonc overwrote a
+ * config shard, and generated/up linked to .. reached the parent (review 2026-10-11). The directory
+ * the target is in must really be in the target's zone (resolveWorkspaceWritePath,
+ * containedWorkspaceRealPath), and where a link on the way makes its real path differ from the path
+ * as named, the real path must not be one the file tools refuse to read (refusedWriteTarget). The
+ * target itself must not be a link: write_file, edit_file and create_dir refuse one, which would
+ * write wherever it leads; delete_file (`finalLink: "remove"`) removes the link and leaves what it
+ * leads to.
+ *
+ * BY NAME, ONLY THE GATEWAY'S STATE DIRECTORY. Applying read_file's whole denylist to the path as
+ * named refused `app/.env` and `.envrc`, which a coder scaffolding a project writes, and said the
+ * path escaped the workspace (review 2026-10-11). The write tools never refused a name before; the
+ * state directory is the one they must not write under any name or spelling (a full-scope agent's
+ * root holds accounts.json and approvals/ there), and a refusal by name says "protected path".
  */
-function guardWritePath(path: string, workspacePath: string): { safe: boolean; resolved: string; relativePath: string } {
+function guardWritePath(
+  path: string,
+  workspacePath: string,
+  finalLink: "refuse" | "remove" = "refuse",
+): { safe: boolean; resolved: string; relativePath: string; refusal?: WriteRefusal } {
   try {
-    const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath);
+    const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath, { final: "link" });
+    const named = relative(workspacePath, resolved);
+    if (isGatewayStatePath(named)) return { safe: false, resolved, relativePath, refusal: "protected" };
+    const real = containedWorkspaceRealPath(resolved, workspacePath, { final: "link" });
+    if (real === null || (finalLink === "refuse" && isLink(resolved))) {
+      return { safe: false, resolved, relativePath, refusal: "boundary" };
+    }
+    if (refusedWriteTarget(named, relative(real.root, real.real))) {
+      return { safe: false, resolved, relativePath, refusal: "protected" };
+    }
     return { safe: true, resolved, relativePath };
   } catch {
-    return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path };
+    return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path, refusal: "boundary" };
+  }
+}
+
+/** Why guardWritePath refused a path: it leads out of its zone, or it is a protected path. */
+type WriteRefusal = "boundary" | "protected";
+
+/** The error a write tool returns for a path guardWritePath refused. */
+function writeRefusalError(refusal: WriteRefusal | undefined): string {
+  return refusal === "protected"
+    ? `Refused: protected path (the gateway's state directory, ${PRODUCT.stateDirName}/, or a file a link on the way leads to that read_file refuses)`
+    : "Path escapes workspace boundary";
+}
+
+/** Whether a workspace-relative path names the gateway's state directory or anything in it, in
+ *  any case: a case-insensitive bind opens `.STARLINGAI/` as `.starlingai/`. */
+function isGatewayStatePath(relativePath: string): boolean {
+  const state = PRODUCT.stateDirName.toLowerCase();
+  return relativePath.replace(/\\/g, "/").toLowerCase().split("/").includes(state);
+}
+
+/**
+ * Whether a write tool refuses where a path really leads (`real`, relative to the real root) for the
+ * path as named (`named`, relative to the root): always where that is the state directory, and,
+ * only where a link on the way makes the two differ, where it is a file read_file refuses
+ * (isSensitiveWorkspacePath): `notes` linked to `.git` must not turn a write into a write of
+ * `.git/config`. A path reached through no link is judged by name alone (guardWritePath).
+ */
+function refusedWriteTarget(named: string, real: string): boolean {
+  if (isGatewayStatePath(real)) return true;
+  const norm = (rel: string) => {
+    const slashed = rel.replace(/\\/g, "/");
+    return process.platform === "win32" ? slashed.toLowerCase() : slashed;
+  };
+  return norm(named) !== norm(real) && isSensitiveWorkspacePath(real);
+}
+
+/** refusedWriteTarget for a path guardWritePath accepted, applied again where the write tools open,
+ *  make or remove it (tools/workspace-containment.ts). */
+function writeTargetRefuser(resolved: string, workspacePath: string): (real: string) => boolean {
+  const named = relative(workspacePath, resolved);
+  return (real) => refusedWriteTarget(named, real);
+}
+
+/** Whether the path itself is a link (a junction too), without following it. */
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -275,7 +360,14 @@ registerTool({
     }
 
     try {
-      const content = readFileSync(resolved, "utf-8");
+      // Through the open descriptor, held to its zone as it is opened: guardPath judged the path when
+      // it was resolved, and a sandbox can swap a directory on the way for a link in between.
+      const content = withContainedWorkspaceFile(
+        resolved,
+        ctx.workspacePath,
+        { mode: "read", refuse: isSensitiveWorkspacePath },
+        (file) => file.read().toString("utf-8"),
+      );
       // Windowed read. Without it the only way to see part of a large file was to
       // pull the whole thing into context and let the model find its way — the
       // single biggest source of wasted prompt on a big source tree.
@@ -326,6 +418,7 @@ registerTool({
         metadata: { path, size: stat.size, ext, totalLines },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "read_file failed");
       return { success: false, output: "", error: `Read failed: ${String(err)}` };
     }
@@ -376,7 +469,7 @@ registerTool({
       };
     }
 
-    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0 };
+    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0, links: 0 };
     let entries: string[];
     try {
       entries = listDir(resolved, recursive ? LIST_RECURSIVE_DEPTH : 0, recursive, listHintPrefix(path), notes);
@@ -386,6 +479,7 @@ registerTool({
     const footer = [
       notes.unreadable > 0 ? `${notes.unreadable} entr${notes.unreadable === 1 ? "y" : "ies"} could not be read — marked "unreadable" above.` : "",
       notes.cutByDepth > 0 ? `${notes.cutByDepth} director${notes.cutByDepth === 1 ? "y was" : "ies were"} not expanded: the recursive listing stops ${LIST_RECURSIVE_DEPTH} levels down — call list_files on the path shown to see inside.` : "",
+      notes.links > 0 ? `${notes.links} entr${notes.links === 1 ? "y is a link" : "ies are links"}, marked "@" above: listed, not followed.` : "",
     ].filter(Boolean).join("\n");
     // An empty-string output reads as "something went wrong" to the model — it
     // retries the same listing over and over (audit a438ef4a: 5 identical
@@ -399,6 +493,7 @@ registerTool({
         count: entries.length,
         ...(notes.unreadable > 0 ? { unreadable: notes.unreadable } : {}),
         ...(notes.cutByDepth > 0 ? { cutByDepth: notes.cutByDepth } : {}),
+        ...(notes.links > 0 ? { links: notes.links } : {}),
       },
     };
   },
@@ -624,10 +719,10 @@ registerTool({
       return { success: false, output: "", error: "content is required — write_file needs the file content (or, for mode:\"append\", the chunk to append). Refusing to write a 0-byte file. If the content is large, build it in bounded chunks with mode:\"append\"." };
     }
 
-    const { safe, resolved, relativePath } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, relativePath, refusal } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) {
-      return { success: false, output: "", error: "Path escapes workspace boundary" };
+      return { success: false, output: "", error: writeRefusalError(refusal) };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -635,10 +730,25 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for writing` };
     }
 
-    const fileExists = existsSync(resolved);
-    if (mode === "create" && fileExists) {
-      return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
+    // Opened once, held to its zone as it is opened (openContainedWorkspaceFile): guardWritePath
+    // judged the path when it was resolved, and a sandbox can swap a directory on the way for a link
+    // in between. The file is not truncated by the open; every read and write below goes through it.
+    let file: OpenContainedFile;
+    try {
+      file = openContainedWorkspaceFile(resolved, ctx.workspacePath, {
+        mode: mode === "create" ? "create" : "write",
+        createDirs,
+        refuse: writeTargetRefuser(resolved, ctx.workspacePath),
+      });
+    } catch (err) {
+      if (mode === "create" && (err as NodeJS.ErrnoException).code === "EEXIST") {
+        return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
+      }
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
+      log.error({ err, path }, "write_file failed");
+      return { success: false, output: "", error: `Write failed: ${String(err)}` };
     }
+    const fileExists = !file.created;
 
     // write_file regeneration nudge (orchestration.detectWriteChurnOverwrite, default off): a builder that
     // re-emits a file from the top after a completion-limit cut-off — instead of appending the remainder —
@@ -653,7 +763,7 @@ registerTool({
     // the whole point is that the bytes on disk are worth more than the bytes in the call.
     if (mode === "overwrite" && fileExists) {
       try {
-        const previous = readFileSync(resolved, "utf-8");
+        const previous = file.read().toString("utf-8");
         const regression = evaluateStubRegression(previous, content);
         if (regression.replacesFinished) {
           // Allowed, but never silent: this is the shape of a deliberate rebuild AND the shape
@@ -675,6 +785,7 @@ registerTool({
             existingChars: previous.length,
             newChars: content.length,
           }, { sessionId: ctx.sessionId, severity: "warn" });
+          file.close();
           return {
             success: false,
             output: "",
@@ -691,7 +802,7 @@ registerTool({
     let churnNudge = "";
     if (mode === "overwrite" && fileExists && getConfig().orchestration?.detectWriteChurnOverwrite === true) {
       try {
-        const existing = readFileSync(resolved, "utf-8");
+        const existing = file.read().toString("utf-8");
         if (!ctx._turnWriteChurnTracker) ctx._turnWriteChurnTracker = new Map();
         const tracker = ctx._turnWriteChurnTracker.get(relativePath) ?? { count: 0 };
         const churn = evaluateWriteChurn(existing, content, tracker);
@@ -712,18 +823,15 @@ registerTool({
     }
 
     try {
-      if (createDirs) {
-        mkdirSync(resolve(resolved, ".."), { recursive: true });
-      }
       const appended = mode === "append" && fileExists;
       if (appended) {
-        appendFileSync(resolved, content, "utf-8");
+        file.append(content);
       } else {
-        writeFileSync(resolved, content, "utf-8");
+        file.replace(content);
       }
       // On append, preview/size reflect the full resulting file so the artifact
       // shows the whole deliverable as it is assembled — not just the last chunk.
-      const fullContent = appended ? readFileSync(resolved, "utf-8") : content;
+      const fullContent = appended ? file.read().toString("utf-8") : content;
       const contentType = inferArtifactContentType(relativePath);
       const textPreview = buildArtifactTextPreview(fullContent);
       const verb = appended ? "appended to" : "written";
@@ -748,6 +856,8 @@ registerTool({
     } catch (err) {
       log.error({ err, path }, "write_file failed");
       return { success: false, output: "", error: `Write failed: ${String(err)}` };
+    } finally {
+      file.close();
     }
   },
 });
@@ -773,9 +883,9 @@ registerTool({
     const oldStr = String(args["old_string"] ?? "");
     const newStr = String(args["new_string"] ?? "");
     const replaceAll = args["replace_all"] === true;
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
     if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
 
@@ -789,8 +899,11 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for editing` };
     }
 
+    let file: OpenContainedFile | undefined;
     try {
-      const content = readFileSync(resolved, "utf-8");
+      // Read and written through one open file, held to its zone as it is opened, as write_file does.
+      file = openContainedWorkspaceFile(resolved, ctx.workspacePath, { mode: "edit", refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
+      const content = file.read().toString("utf-8");
       if (!content.includes(oldStr)) {
         // "old_string not found in file" is true and useless: it tells the caller the edit
         // missed but not what to aim at instead. During a staged build the overwhelmingly
@@ -829,7 +942,7 @@ registerTool({
         };
       }
       const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
-      writeFileSync(resolved, updated, "utf-8");
+      file.replace(updated);
       const replacements = replaceAll ? occurrences : 1;
       return {
         success: true,
@@ -837,8 +950,11 @@ registerTool({
         metadata: { path, replacements },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "edit_file failed");
       return { success: false, output: "", error: `Edit failed: ${String(err)}` };
+    } finally {
+      file?.close();
     }
   },
 });
@@ -858,19 +974,21 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!path.trim()) return { success: false, output: "", error: "path is required" };
 
     try {
-      mkdirSync(resolved, { recursive: true });
+      // One level at a time, none entered through a link, held to its zone as it is made.
+      makeContainedWorkspaceDir(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
       return {
         success: true,
         output: `Directory created: ${path}`,
         metadata: { path },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "create_dir failed");
       return { success: false, output: "", error: `Create directory failed: ${String(err)}` };
     }
@@ -892,18 +1010,23 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath, "remove");
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
-    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };
-
-    const stat = statSync(resolved);
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
+    // lstat: a link is removed itself, never what it leads to, and one that leads nowhere is there too.
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(resolved);
+    } catch {
+      return { success: false, output: "", error: `File not found: ${path}` };
+    }
     if (stat.isDirectory()) {
       return { success: false, output: "", error: "Cannot delete directories with this tool — use shell_exec for recursive removal" };
     }
 
     try {
-      unlinkSync(resolved);
+      // Removed in the directory it is found in, held to its zone as that is opened.
+      removeContainedWorkspaceFile(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
       log.info({ path, sessionId: ctx.sessionId }, "delete_file: file deleted");
       return {
         success: true,
@@ -911,6 +1034,7 @@ registerTool({
         metadata: { path },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "delete_file failed");
       return { success: false, output: "", error: `Delete failed: ${String(err)}` };
     }
@@ -922,7 +1046,7 @@ registerTool({
 /** How many levels below the listed directory a recursive list_files descends. */
 const LIST_RECURSIVE_DEPTH = 3;
 
-interface ListDirNotes { unreadable: number; cutByDepth: number }
+interface ListDirNotes { unreadable: number; cutByDepth: number; links: number }
 
 /** The error's code (EACCES, ENOENT, …) when it has one, else its message. */
 function errorCode(err: unknown): string {
@@ -959,10 +1083,17 @@ function listDir(dir: string, depth: number, recursive: boolean, relDir: string,
     const rel = relDir ? `${relDir}/${name}` : name;
     let stat;
     try {
-      stat = statSync(full);
+      // lstat: a link is listed by its name and not followed; a sandbox can leave one leading out.
+      stat = lstatSync(full);
     } catch (err) {
       notes.unreadable++;
       entries.push(`${name} (unreadable: ${errorCode(err)})`);
+      continue;
+    }
+    // Marked, so a link to a directory does not read as an empty file (the footer says what @ is).
+    if (stat.isSymbolicLink()) {
+      notes.links++;
+      entries.push(`${name}@`);
       continue;
     }
     if (!stat.isDirectory()) {

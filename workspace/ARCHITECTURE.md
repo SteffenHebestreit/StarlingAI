@@ -113,8 +113,11 @@ shard does not require touching them.
 
 ## 6. Memory vault — the reviewable Markdown layer
 
-Durable memory lives as one JSON file per key under `<workspace>/.starlingai/memory/` (workspace
-scope) and `SAI_USER_MEMORY_PATH` / `~/.starlingai/user-memory/` (user scope); skills are already
+Durable memory lives as one JSON file per key under `memory/` in the workspace's state directory
+(workspace scope): `<workspace>/.starlingai/` for the shared root, and
+`<shared>/.starlingai/users/<segment>/` for an account's own root, outside the directory its
+sandboxes are handed (`tools/workspace-state.ts`); and under `SAI_USER_MEMORY_PATH` /
+`~/.starlingai/user-memory/` (user scope); skills are already
 portable `SKILL.md`. Under `auth.enabled` the user-scope stores (user memory, the dialectic
 user-model, and the personality override) are partitioned per authenticated user to
 `<base>/users/<userId>/` (`runtime/user-scope.ts`); with auth disabled — the default — they stay at

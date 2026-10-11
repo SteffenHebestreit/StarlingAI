@@ -18,8 +18,10 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { relative, resolve } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolveHostWorkspacePath } from "./workspace-mount.js";
+import { containedWorkspaceRealPath } from "./workspace-containment.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -181,6 +183,23 @@ export function sanitizeAppRoot(root: string): string | null {
   return cleaned;
 }
 
+/**
+ * Whether the app's directory is reached through no link at all.
+ *
+ * DOCKER RESOLVES THE BIND ON THE HOST. A link a sandbox left at the root or on the way to it would
+ * be followed there, where an absolute target names a host directory (/, /var/run, another
+ * account's root), and that directory would be bound read-write into the app's container. The
+ * gateway can only see where a link leads on its own filesystem, so any link is refused: the
+ * directory's real path must be its own path (containedWorkspaceRealPath).
+ */
+export function reachedThroughNoLink(root: string, workspacePath: string): boolean {
+  const appDir = resolve(workspacePath, root);
+  const real = containedWorkspaceRealPath(appDir, workspacePath);
+  if (!real) return false;
+  const [actual, expected] = [relative(real.root, real.real), relative(resolve(workspacePath), appDir)];
+  return process.platform === "win32" ? actual.toLowerCase() === expected.toLowerCase() : actual === expected;
+}
+
 /** Insert a <base href> so an app proxied under /api/app/<id>/ resolves its
  * relative asset URLs correctly. No-op when the document already declares a base. */
 export function injectBaseHref(html: string, base: string): string {
@@ -268,7 +287,7 @@ function appSummary(app: ServedApp): Record<string, unknown> {
 
 async function startApp(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
   const root = sanitizeAppRoot(String(args["root"] ?? ""));
-  if (!root) {
+  if (!root || !reachedThroughNoLink(root, ctx.workspacePath)) {
     return { success: false, output: "", error: "A workspace-relative 'root' directory (containing the app, e.g. 'generated/my-app') is required and must stay inside the workspace." };
   }
   const running = listServedApps().filter((a) => a.status === "running" || a.status === "starting");

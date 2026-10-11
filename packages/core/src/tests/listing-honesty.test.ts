@@ -23,6 +23,11 @@ vi.mock("node:fs", async (importOriginal) => {
     if (unreadable(p)) throw eacces(p);
     return (actual.statSync as (...a: unknown[]) => unknown)(p, ...rest);
   }) as typeof actual.statSync;
+  // list_files reads each entry with lstat, so a link is listed and not followed.
+  const lstatSync = ((p: Parameters<typeof actual.lstatSync>[0], ...rest: unknown[]) => {
+    if (unreadable(p)) throw eacces(p);
+    return (actual.lstatSync as (...a: unknown[]) => unknown)(p, ...rest);
+  }) as typeof actual.lstatSync;
   const readdirSync = ((p: Parameters<typeof actual.readdirSync>[0], ...rest: unknown[]) => {
     if (unlistable(p)) throw eacces(p);
     // A directory with more entries than a walk visits; only its names matter.
@@ -35,7 +40,7 @@ vi.mock("node:fs", async (importOriginal) => {
     if (unreadable(p) || String(p).includes("NOREAD")) throw eacces(p);
     return (actual.readFileSync as (...a: unknown[]) => unknown)(p, ...rest);
   }) as typeof actual.readFileSync;
-  return { ...actual, statSync, readdirSync, readFileSync, default: { ...actual, statSync, readdirSync, readFileSync } };
+  return { ...actual, statSync, lstatSync, readdirSync, readFileSync, default: { ...actual, statSync, lstatSync, readdirSync, readFileSync } };
 });
 
 const cleanup: string[] = [];

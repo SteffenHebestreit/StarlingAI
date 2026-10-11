@@ -38,6 +38,7 @@ import bcrypt from "bcryptjs";
 import { hashPassword } from "../gateway/auth.js";
 import { ACCOUNT_ID_RE, mintBuiltinAccountId, reservedAccountIdProblem, sameAccountId } from "../runtime/accounts.js";
 import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { sweepEntryKind } from "../tools/workspace-zones.js";
 import { isRecord } from "./gateway-client.js";
 import type { E2EIdentity } from "./scenario.js";
 
@@ -133,19 +134,25 @@ export function resolveSetupPaths(
 }
 
 /** Config shards of one directory, in merge order — the sweep the config loader does (config/mail/
- *  and the workspace's working zones are not config). */
-function collectShards(directory: string, zones: ReadonlySet<string>): string[] {
+ *  and the workspace's working zones are not config, and no link is followed: each is added to
+ *  `links`). */
+function collectShards(directory: string, zones: ReadonlySet<string>, links: string[]): string[] {
   if (!isDirectory(directory)) return [];
   const shards: string[] = [];
   const visit = (current: string, depth: number): void => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const path = join(current, entry.name);
-      if (entry.isDirectory()) {
+      const kind = sweepEntryKind(path);
+      if (kind === "link") {
+        if (!isNonConfigShardDirectory(entry.name, depth, zones)) links.push(path);
+        continue;
+      }
+      if (kind === "directory") {
         if (!isNonConfigShardDirectory(entry.name, depth, zones)) visit(path, depth + 1);
         continue;
       }
       const extension = extname(entry.name).toLowerCase();
-      if (!entry.isFile() || (extension !== ".json" && extension !== ".jsonc")) continue;
+      if (kind !== "file" || (extension !== ".json" && extension !== ".jsonc")) continue;
       if (entry.name === "runtime.overrides.json") continue;
       shards.push(path);
     }
@@ -158,6 +165,8 @@ interface ShardScan {
   conflicts: string[];
   /** auth.enabled as the shards leave it (undefined: never set). */
   authEnabled: boolean | undefined;
+  /** Links in the config trees, which the loader skips as the scan does. */
+  links: string[];
 }
 
 /**
@@ -169,9 +178,10 @@ export function scanAuthUsers(paths: SetupPaths): ShardScan {
   const conflicts: string[] = [];
   let authEnabled: boolean | undefined;
   const show = (path: string): string => relative(paths.repoRoot, path).split("\\").join("/") || path;
+  const links: string[] = [];
   const ordered = [
-    ...collectShards(paths.configDir, NON_CONFIG_BASE_ZONES).map((path) => ({ path, zone: "config" as const })),
-    ...(paths.workspaceDir ? collectShards(paths.workspaceDir, NON_CONFIG_WORKSPACE_ZONES).map((path) => ({ path, zone: "workspace" as const })) : []),
+    ...collectShards(paths.configDir, NON_CONFIG_BASE_ZONES, links).map((path) => ({ path, zone: "config" as const })),
+    ...(paths.workspaceDir ? collectShards(paths.workspaceDir, NON_CONFIG_WORKSPACE_ZONES, links).map((path) => ({ path, zone: "workspace" as const })) : []),
   ];
   const ownKey = relative(paths.configDir, paths.shardPath).split("\\").join("/");
   const mergesAfterOurs = (path: string, zone: "config" | "workspace"): boolean =>
@@ -215,7 +225,7 @@ export function scanAuthUsers(paths: SetupPaths): ShardScan {
       // The loader ignores an unparseable overlay too.
     }
   }
-  return { conflicts, authEnabled };
+  return { conflicts, authEnabled, links };
 }
 
 interface CredentialsEntry {
@@ -371,6 +381,9 @@ export async function runE2ESetup(opts: SetupOptions): Promise<SetupResult> {
       `(usernames ${E2E_ACCOUNTS.map((account) => `${account.username} = ${account.role}`).join(", ")}; hashes from the gateway's hashPassword)`,
       `and put their passwords in ${show(paths.credentialsPath)} as { "<identity>": { "username", "password" } }.`,
     ].join("\n"));
+  }
+  for (const link of scan.links) {
+    warnings.push(`${show(link)} is a link in the config tree: the gateway's loader skips it and follows no link, so nothing behind it is configuration.`);
   }
   if (scan.authEnabled !== true) {
     warnings.push("auth.enabled is not true in the config shards: unless the gateway turns auth on through its environment (SAI_AUTH_PROVIDER), username/password login stays off and the harness cannot log in.");

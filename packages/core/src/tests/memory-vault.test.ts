@@ -139,4 +139,18 @@ describe("memory vault", () => {
     // Second call is a no-op.
     expect(seedObsidianVaultSkill(workspacePath)).toBe(false);
   });
+
+  it("names where a skill's source of truth is in a way that holds for an account's root too", async () => {
+    // An account's state is kept outside its root (workspaceStateDir), so `.starlingai/skills/...`
+    // named a place that, for an account, holds no skill.
+    seedObsidianVaultSkill(workspacePath);
+    await exportMemoryVault({ workspacePath, includeSessions: false });
+    const note = readVault(join("skills", `${OBSIDIAN_VAULT_SKILL_SLUG}.md`));
+    const procedure = getSkill(workspacePath, OBSIDIAN_VAULT_SKILL_SLUG)!.body;
+    for (const text of [note, procedure]) {
+      expect(text).toContain("the skill library, `skills/");
+      expect(text).toMatch(/SKILL\.md` in the\s+workspace's state directory/);
+      expect(text).not.toContain(".starlingai/skills");
+    }
+  });
 });

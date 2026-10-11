@@ -33,6 +33,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { readAllFacts } from "../swarm/memory.js";
+import { containedWorkspaceRealPath } from "../tools/workspace-containment.js";
 import {
   listUserMemoryRecords,
   listWorkspaceMemoryRecords,
@@ -42,7 +43,6 @@ import {
   type MemoryRecord,
 } from "./service.js";
 import { getSkill, listSkills, writeSkill } from "../skills/store.js";
-import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("memory:vault");
 
@@ -244,8 +244,19 @@ function renderReadonlyNote(
   return lines.join("\n");
 }
 
+/**
+ * Whether a path in the vault stays in its part of the vault through any link. The default vault is
+ * `vault/` in the caller's own root, which its sandboxes can write: a directory in it replaced by a
+ * link would have the export write notes, and prune or import files, wherever the link leads
+ * (containedWorkspaceRealPath). Such a path is left alone.
+ */
+function inVault(vaultPath: string, abs: string): boolean {
+  return containedWorkspaceRealPath(abs, vaultPath) !== null;
+}
+
 function writeNote(vaultPath: string, relPath: string, content: string, written: string[]): void {
   const abs = join(vaultPath, relPath);
+  if (!inVault(vaultPath, abs)) return;
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content, "utf8");
   written.push(relPath.replace(/\\/g, "/"));
@@ -254,10 +265,11 @@ function writeNote(vaultPath: string, relPath: string, content: string, written:
 /** Remove managed notes in `relDir` whose starlingai_id is not in `liveIds`. */
 function pruneManaged(vaultPath: string, relDir: string, liveIds: Set<string>, pruned: string[]): void {
   const abs = join(vaultPath, relDir);
-  if (!existsSync(abs)) return;
+  if (!existsSync(abs) || !inVault(vaultPath, abs)) return;
   for (const file of readdirSync(abs)) {
     if (!file.endsWith(".md")) continue;
     const full = join(abs, file);
+    if (!inVault(vaultPath, full)) continue;
     let parsed: ParsedNote;
     try {
       parsed = parseNote(readFileSync(full, "utf8"));
@@ -339,7 +351,7 @@ export async function exportMemoryVault(input: VaultExportInput): Promise<VaultE
         "",
         skill.body.trim(),
         "",
-        `_Source of truth: \`${PRODUCT.stateDirName}/skills/${skill.frontmatter.slug}/SKILL.md\` — edit there, not here._`,
+        `_Source of truth: the skill library, \`skills/${skill.frontmatter.slug}/SKILL.md\` in the workspace's state directory — edit there, not here._`,
       ].join("\n");
       writeNote(
         vaultPath,
@@ -485,10 +497,11 @@ export function importMemoryVault(input: VaultImportInput): VaultImportResult {
 
   for (const scope of ["workspace", "user"] as const) {
     const dir = join(vaultPath, "memory", scope);
-    if (!existsSync(dir)) continue;
+    if (!existsSync(dir) || !inVault(vaultPath, dir)) continue;
     for (const file of readdirSync(dir)) {
       if (!file.endsWith(".md")) continue;
       const full = join(dir, file);
+      if (!inVault(vaultPath, full)) continue;
       let parsed: ParsedNote;
       try {
         parsed = parseNote(readFileSync(full, "utf8"));
@@ -559,7 +572,8 @@ export function seedObsidianVaultSkill(workspacePath: string): boolean {
     "## Pitfalls",
     "",
     "- `skills/`, `sessions/`, `tags/` are read-only mirrors — edits there are NOT re-ingested. Skills are",
-    "  corrected via the skill tools; their source of truth is `" + PRODUCT.stateDirName + "/skills/<slug>/SKILL.md`.",
+    "  corrected via the skill tools; their source of truth is the skill library, `skills/<slug>/SKILL.md` in the",
+    "  workspace's state directory.",
     "- Only keyed durable records are re-ingestable (managed). Keyless captures are mirrored read-only.",
     "- Re-export is idempotent and prunes notes whose source record was deleted — safe to run any time.",
     "- The export is deterministic code; do NOT hand-write vault notes with file tools to 'maintain' it.",

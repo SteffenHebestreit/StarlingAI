@@ -135,16 +135,19 @@ describe("directory walkers skip protected workspace data", () => {
 
     const grepped = await grep.execute({ pattern: "canary", path: "generated/link" }, ctx());
     expect(grepped.success).toBe(false);
-    expect(grepped.error).toMatch(/Access denied/);
+    // The resolver refuses it first now: a link may not lead a path out of its zone.
+    expect(grepped.error).toMatch(/Access denied|within the workspace/);
     expectNoSecret(`${grepped.output ?? ""}${grepped.error ?? ""}`);
     const globbed = await glob.execute({ pattern: "**/*", path: "generated/link" }, ctx());
     expect(globbed.success).toBe(false);
     expect(String(globbed.output ?? "")).not.toContain("facts.json");
 
-    // A link to an ordinary directory still searches (refusing every link would pass the above).
-    mkdirSync(join(ws, "docs"), { recursive: true });
-    writeFileSync(join(ws, "docs", "guide.md"), "The canary-public guide.\n");
-    symlinkSync(join(ws, "docs"), join(ws, "generated", "docs-link"), "junction");
+    // A link to an ordinary directory in its own zone still searches (refusing every link would
+    // pass the above). One into another zone is refused like one into the state directory: a link
+    // may not lead a path out of the zone it is in (containedWorkspaceRealPath).
+    mkdirSync(join(ws, "generated", "docs"), { recursive: true });
+    writeFileSync(join(ws, "generated", "docs", "guide.md"), "The canary-public guide.\n");
+    symlinkSync(join(ws, "generated", "docs"), join(ws, "generated", "docs-link"), "junction");
     const ordinary = await grep.execute({ pattern: "canary", path: "generated/docs-link" }, ctx());
     expect(ordinary.success).toBe(true);
     expect(String(ordinary.output)).toContain("guide.md");
