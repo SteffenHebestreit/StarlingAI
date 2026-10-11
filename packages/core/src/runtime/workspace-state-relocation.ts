@@ -293,6 +293,9 @@ async function mergeStaged(segment: string, staging: string, to: string, beat: (
   );
 }
 
+/** The name a file's own copy is made under in `dir` before it is renamed over the file. */
+const OWN_COPY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.copy$/;
+
 /** Removes everything under `dir` that is not a plain file or directory, following none, and gives a
  *  file with more than one name a copy of its own. */
 function clean(dir: string, beat: () => void, found: { removed: string[]; copied: string[] } = { removed: [], copied: [] }): { removed: string[]; copied: string[] } {
@@ -310,10 +313,15 @@ function clean(dir: string, beat: () => void, found: { removed: string[]; copied
         rmSync(path, { force: true });
       }
       found.removed.push(path);
+    } else if (OWN_COPY.test(entry.name)) {
+      // A copy an earlier pass made and was cut short before renaming: the file it was made for is
+      // still whole beside it, and is copied again below if it still needs it.
+      rmSync(path, { force: true });
     } else if (stat.nlink > 1) {
+      // The rename replaces the file in one step. Unlinking it first left a moment in which only the
+      // copy existed, and a crash there lost the file under its own name.
       const copy = join(dir, `.${randomUUID()}.copy`);
       copyFileFollowingNoLink(path, copy, beat);
-      unlinkSync(path);
       renameSync(copy, path);
       found.copied.push(path);
     }
@@ -333,11 +341,13 @@ function copyFollowingNoLink(from: string, to: string, beat: () => void): void {
   }
 }
 
-/** A file's bytes into a new file, opened without following a link. */
+/** A file's bytes into a new file, opened without following a link. Throws when what is open is not a
+ *  plain file (swapped since it was listed): returning without a copy left the caller to go on as
+ *  though it had one, so a tree copy finished without the file and the old tree was then removed. */
 function copyFileFollowingNoLink(from: string, to: string, beat: () => void): void {
   const source = openSync(from, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
-    if (!fstatSync(source).isFile()) return;
+    if (!fstatSync(source).isFile()) throw new Error(`Not a plain file, not copied: ${from}`);
     const target = openSync(to, "wx");
     try {
       const buffer = Buffer.alloc(64 * 1024);

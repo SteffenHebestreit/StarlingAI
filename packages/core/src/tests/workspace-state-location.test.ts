@@ -39,6 +39,7 @@ const fsHooks = vi.hoisted(() => ({
   openFails: null as ((path: string) => boolean) | null,
   readdirFails: null as ((path: string) => boolean) | null,
   touched: null as ((path: string) => void) | null,
+  notAFile: null as ((path: string) => boolean) | null,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -47,10 +48,18 @@ vi.mock("node:fs", async (importOriginal) => {
     if (fsHooks.renameFails?.(String(from))) throw Object.assign(new Error(`EPERM: operation not permitted, rename '${String(from)}'`), { code: "EPERM" });
     return real.renameSync(from, to);
   }) as typeof real.renameSync;
+  const opened = new Map<number, string>();
   const openSync = ((path: Parameters<typeof real.openSync>[0], ...rest: unknown[]) => {
     if (fsHooks.openFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, open '${String(path)}'`), { code: "EACCES" });
-    return (real.openSync as (...args: unknown[]) => number)(path, ...rest);
+    const fd = (real.openSync as (...args: unknown[]) => number)(path, ...rest);
+    opened.set(fd, String(path));
+    return fd;
   }) as typeof real.openSync;
+  // What is open turns out to be something else than a plain file (swapped since it was listed).
+  const fstatSync = ((fd: number, ...rest: unknown[]) => {
+    const stat = (real.fstatSync as (...args: unknown[]) => import("node:fs").Stats)(fd, ...rest);
+    return fsHooks.notAFile?.(opened.get(fd) ?? "") ? Object.assign(Object.create(stat), { isFile: () => false }) : stat;
+  }) as typeof real.fstatSync;
   const readdirSync = ((path: Parameters<typeof real.readdirSync>[0], ...rest: unknown[]) => {
     if (fsHooks.readdirFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, scandir '${String(path)}'`), { code: "EACCES" });
     return (real.readdirSync as (...args: unknown[]) => unknown)(path, ...rest);
@@ -59,7 +68,7 @@ vi.mock("node:fs", async (importOriginal) => {
     fsHooks.touched?.(String(path));
     return (real.utimesSync as (...args: unknown[]) => void)(path, ...rest);
   }) as typeof real.utimesSync;
-  return { ...real, renameSync, openSync, readdirSync, utimesSync, default: { ...real, renameSync, openSync, readdirSync, utimesSync } };
+  return { ...real, renameSync, openSync, fstatSync, readdirSync, utimesSync, default: { ...real, renameSync, openSync, fstatSync, readdirSync, utimesSync } };
 });
 
 /** The relocation's own logger, to read what it says and at which level. */
@@ -112,6 +121,7 @@ afterEach(() => {
   fsHooks.openFails = null;
   fsHooks.readdirFails = null;
   fsHooks.touched = null;
+  fsHooks.notAFile = null;
   for (const fn of Object.values(relocationLogger)) fn.mockClear();
   _clearDurableMemoryCaches();
   _resetTrajectoryInvalidationForTests();
@@ -364,6 +374,37 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(statSync(moved).nlink).toBe(1);
     writeFileSync(moved, "{ \"planted\": true }");
     expect(readFileSync(join(shared, "agents", "10-core.jsonc"), "utf8")).toBe("{}");
+  });
+
+  it("keeps a file with another name under its own name until its copy replaces it, and finishes that at the next boot", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(shared, "agents"), { recursive: true });
+    writeFileSync(join(shared, "agents", "10-core.jsonc"), "{}");
+    mkdirSync(join(old, "memory"), { recursive: true });
+    linkSync(join(shared, "agents", "10-core.jsonc"), join(old, "memory", "editor.json"));
+    // The copy is made, and the pass stops before it is renamed over the file (a crash, a held handle).
+    fsHooks.renameFails = (from) => from.endsWith(".copy");
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ failed: [ALICE], complete: false });
+    const staged = join(shared, STATE, "users", `.${ALICE}.relocating`, "memory");
+    expect(readFileSync(join(staged, "editor.json"), "utf8")).toBe("{}");
+
+    fsHooks.renameFails = null;
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readdirSync(join(state, "memory"))).toEqual(["editor.json"]);
+    expect(statSync(join(state, "memory", "editor.json")).nlink).toBe(1);
+  });
+
+  it("fails the account, losing nothing, when a file it copies is no longer a plain file", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    writeFileSync(join(old, "memory", "other.json"), "{}");
+    fsHooks.renameFails = (from) => from === old;
+    fsHooks.notAFile = (path) => path === join(old, "memory", "editor.json");
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [], kept: [], failed: [ALICE], complete: false });
+    expect(readdirSync(join(old, "memory")).sort()).toEqual(["editor.json", "other.json"]);
+    expect(existsSync(state)).toBe(false);
+    expect(readdirSync(join(shared, STATE, "users"))).toEqual([]);
   });
 
   it("picks up what an earlier boot staged whole, and throws away a copy a crash cut short", async () => {
