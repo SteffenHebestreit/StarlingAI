@@ -376,7 +376,7 @@ describe("a full-scope sandbox runs as its bind's owner, root included", () => {
     }
   });
 
-  it("as the git tools issue it, read-only, with safe.directory for a run that is not the owner's", async () => {
+  it("as the git tools issue it, read-only, with safe.directory for a run that is not the owner's, and no bare repository", async () => {
     fakeOwners.set("/workspace", 0);
     execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
     const { getTool } = await import("../tools/registry.js");
@@ -384,7 +384,11 @@ describe("a full-scope sandbox runs as its bind's owner, root included", () => {
     expect(flagValue(dockerArgs(), "--user")).toBe("0:0");
     expect(readOnlyBinds(dockerArgs())).toEqual([`${HOST_SOURCE}:/workspace:ro`]);
     const env = dockerArgs().flatMap((arg, i, all) => (all[i - 1] === "-e" ? [arg] : []));
-    expect(env).toEqual(["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace"]);
+    expect(env).toEqual([
+      "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace",
+      // A directory the write tools made in the shape of a bare repository is not one to git.
+      "GIT_CONFIG_KEY_1=safe.bareRepository", "GIT_CONFIG_VALUE_1=explicit",
+    ]);
     // Before the image: docker's own flags, not git's.
     expect(dockerArgs().indexOf("GIT_CONFIG_COUNT=1")).toBeLessThan(dockerArgs().indexOf("starlingai/sandbox:latest"));
   });

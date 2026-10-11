@@ -48,7 +48,9 @@ async function runGitInSandbox(
   // value the model supplies is an option's value, a pathspec after `--`, or refused where git would
   // read it as an option (refuseOptionLike). git prints file content only from its object database
   // and index, never an untracked or ignored file; the one way it does, a no-index diff (`--no-index`,
-  // or two refs that name paths outside the repository), git_diff closes off.
+  // or two refs that name paths outside the repository), git_diff closes off. Nor does git run a
+  // command a repository's own config or hooks name: the write tools refuse `.git` by name, and
+  // safe.bareRepository below keeps git from taking a directory merely shaped like one.
   let bind: string;
   let mountScope: "caller" | "repo";
   if (ctx.workspaceScope === "full") {
@@ -87,9 +89,16 @@ async function runGitInSandbox(
     // owner the stat could not read), git refuses the repository at /workspace as of "dubious
     // ownership". safe.directory names it for this run only, through the environment, which is the
     // command scope: git honours safe.directory only from protected configuration.
-    "-e", "GIT_CONFIG_COUNT=1",
+    // safe.bareRepository=explicit: git takes no directory it discovers for a bare repository. The
+    // write tools refuse `.git` by name (filesystem.ts), but they can still make a directory shaped
+    // like one (HEAD, objects/, refs/, and a config with core.worktree and core.fsmonitor), and
+    // git_status with that as its path ran the config's command (probed against starlingai/sandbox,
+    // git 2.43). No git tool works on a bare repository.
+    "-e", "GIT_CONFIG_COUNT=2",
     "-e", "GIT_CONFIG_KEY_0=safe.directory",
     "-e", "GIT_CONFIG_VALUE_0=/workspace",
+    "-e", "GIT_CONFIG_KEY_1=safe.bareRepository",
+    "-e", "GIT_CONFIG_VALUE_1=explicit",
     "-w", workdir,
     SANDBOX_IMAGE,
     "git", ...args,
