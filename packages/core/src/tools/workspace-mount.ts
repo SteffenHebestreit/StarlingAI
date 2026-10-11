@@ -162,14 +162,21 @@ export function callerSandboxMounts(
  * that is not there, or has no host path (a named-volume source), is skipped; null where none is left
  * to bind, and the tool refuses the run. It runs as the owner of that root, root in the compose
  * deployment, as before (sandboxUserArgs).
+ *
+ * tools/ is bound READ-ONLY. A dynamic tool bundle there registers on the next load, and the loader
+ * checks only that its approval fields are filled in, so a shell that wrote one registered a tool
+ * past the tool-development pipeline and its approval (review 2026-10-12). The maintainer edits
+ * agents, jobs and scenes; tools come through that pipeline.
  */
+const READ_ONLY_FULL_SCOPE_ZONE = "tools";
+
 function fullScopeZoneMounts(workspacePath: string, host: SandboxHostOverrides): string[] | null {
   const binds: string[] = [];
   for (const zone of [...PROTECTED_WORKSPACE_ZONES, "generated"]) {
     // Null for a named-volume source, which has no host path to bind a zone from.
     const hostZone = resolveHostWorkspacePath(workspacePath, zone);
     if (hostZone === null || !existsSync(join(workspacePath, zone))) continue;
-    binds.push("-v", `${hostZone}:/workspace/${zone}`);
+    binds.push("-v", `${hostZone}:/workspace/${zone}${zone === READ_ONLY_FULL_SCOPE_ZONE ? ":ro" : ""}`);
   }
   return binds.length === 0 ? null : [...sandboxUserArgs(workspacePath, host.platform), ...binds];
 }

@@ -183,6 +183,15 @@ describe("sandboxIsolationArgs in the compose layout", () => {
     expect(mounts.args.filter((arg, i) => mounts.args[i - 1] === "-v" && /:\/workspace(:ro)?$/.test(arg))).toEqual([]);
   });
 
+  it("binds tools/ read-only to a full-scope shell, so a bundle written there cannot skip the tool pipeline's approval", async () => {
+    const { callerSandboxMounts } = await import("../tools/workspace-mount.js");
+    for (const zone of ["agents", "tools"]) fakeExisting.add(`${SHARED}/${zone}`);
+    const mounts = callerSandboxMounts({ workspacePath: SHARED, workspaceScope: "full" }, { sharedRoot: SHARED });
+    if ("error" in mounts) throw new Error(mounts.error);
+    expect(writableBinds(mounts.args)).toEqual([`${HOST_SOURCE}/workspace/agents:/workspace/agents`]);
+    expect(readOnlyBinds(mounts.args)).toEqual([`${HOST_SOURCE}/workspace/tools:/workspace/tools:ro`]);
+  });
+
   it("refuses to hand a full-scope shell its root through the bind helpers", async () => {
     const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
     const input = { workspacePath: SHARED, workspaceScope: "full", bind: "caller" } as const;
