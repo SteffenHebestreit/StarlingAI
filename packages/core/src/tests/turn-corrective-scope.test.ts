@@ -25,13 +25,14 @@ vi.mock("../audit/logger.js", () => ({
   logAudit: vi.fn((_event: string, details: Record<string, unknown>) => { auditRows.push(details); }),
 }));
 
-const { runCorrectiveBuild } = await import("../agent/turn-corrective.js");
+const { runCorrectiveBuild, runCorrectiveReroute } = await import("../agent/turn-corrective.js");
 const { classifyDeliverableIntent } = await import("../agent/deliverable-intent.js");
 
 const REQUEST = "Write a sourced report on the company as a document.";
 
 function correctiveContext(allowedAgents: string[] | undefined) {
   let latch = false;
+  let rerouteLatch = false;
   const ctx: CorrectiveContext = {
     signal: new AbortController().signal,
     session: { id: "corrective-scope", channel: "scene", addMessage: () => undefined } as unknown as CorrectiveContext["session"],
@@ -43,6 +44,8 @@ function correctiveContext(allowedAgents: string[] | undefined) {
     getStashedBuilderTaskSpec: () => null,
     getQaCorrectiveBuildUsed: () => latch,
     setQaCorrectiveBuildUsed: (value) => { latch = value; },
+    getCorrectiveRerouteUsed: () => rerouteLatch,
+    setCorrectiveRerouteUsed: (value) => { rerouteLatch = value; },
     incrementDelegationCount: () => undefined,
     forceSynthesis: async () => null,
     selectCorrectiveResumeTarget: () => null,
@@ -81,5 +84,21 @@ describe("the final-QA corrective build in a turn scoped to allowedAgents", () =
       expect(delegations.map((args) => args["agentName"])).toEqual(["content_writer"]);
       expect(latch()).toBe(true);
     }
+  });
+});
+
+// The loop-brake reroute (agent/runtime.ts) and the zero-work fabrication guard
+// (turn-finalize-guards.ts) both re-dispatch the request through runCorrectiveReroute. They share
+// one latch: the request goes out a second time in no turn.
+describe("the corrective reroute", () => {
+  it("re-dispatches the request once a turn, whichever guard asks", async () => {
+    const { ctx } = correctiveContext(undefined);
+
+    expect(await runCorrectiveReroute(ctx, "loop_brake", { brake: "tool_streak_across_iterations" })).toBe("The brief, as text.");
+    expect(await runCorrectiveReroute(ctx)).toBeNull();
+
+    expect(delegations).toEqual([{ task: REQUEST }]);
+    expect(auditRows).toContainEqual(expect.objectContaining({ type: "loop_brake_reroute_delegated", brake: "tool_streak_across_iterations" }));
+    expect(auditRows).not.toContainEqual(expect.objectContaining({ type: "fabricated_zero_work_reroute_delegated" }));
   });
 });

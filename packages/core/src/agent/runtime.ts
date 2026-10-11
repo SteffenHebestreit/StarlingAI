@@ -72,6 +72,7 @@ import {
   readNestedToolCalls,
   retrievedKnowledgeBaseContent,
   knowledgeBaseSourceUrls,
+  isRetrievalEvidenceResult,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
@@ -1969,23 +1970,25 @@ async function _runTurn(
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
   // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
+  // How many agents the capsule admitted, when it came within its budget: the loop-brake reroute
+  // below re-dispatches the request only where routing found a specialist for it. Zero on a late,
+  // failed or empty prefetch, and with the prefetch off.
+  let prefetchAdmittedAgentCount = 0;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
       userMessage,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
-      ...(autoArtifactArmed
-        ? {
-            onCapsuleAgents: (agents) => {
-              prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
-              if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
-                && directiveAgent === undefined) {
-                startIntentRead("routing");
-              }
-            },
-          }
-        : {}),
+      onCapsuleAgents: (agents) => {
+        prefetchAdmittedAgentCount = agents.length;
+        if (!autoArtifactArmed) return;
+        prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
+        if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
+          && directiveAgent === undefined) {
+          startIntentRead("routing");
+        }
+      },
     })
     : undefined;
 
@@ -2366,6 +2369,11 @@ async function _runTurn(
   // research delegation does, so it releases the turn's research requirement; see where
   // requiresDelegatedResearch is read below.
   let _turnRetrievedKnowledgeBaseContent = false;
+  // A retrieval tool (isRetrievalEvidenceResult: documents, the knowledge base, RAG, memory, the
+  // planning-context pack) came back this turn and reached the model. Such a turn has evidence of its
+  // own, and a loop brake on it ends in the synthesis from that evidence, as before (see the loop-brake
+  // reroute after the loop).
+  let _turnRetrievalReachedModel = false;
   // The page URLs those reads returned (knowledgeBaseSourceUrls). The citation guard keeps an
   // answer's citation of one of them and strips every other URL it cites.
   const _turnKnowledgeBaseSourceUrls = new Set<string>();
@@ -2392,6 +2400,9 @@ async function _runTurn(
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
+  // At most ONE corrective re-dispatch of the request per turn (runCorrectiveReroute), shared by the
+  // loop-brake reroute and the zero-work fabrication guard.
+  let correctiveRerouteUsed = false;
 
   // Dependency carrier for the two bounded corrective bodies (extracted verbatim to
   // ./turn-corrective.ts). Read-only fields are the turn's stable values; the getter
@@ -2412,6 +2423,8 @@ async function _runTurn(
     getStashedBuilderTaskSpec: () => stashedBuilderTaskSpec,
     getQaCorrectiveBuildUsed: () => qaCorrectiveBuildUsed,
     setQaCorrectiveBuildUsed: (v) => { qaCorrectiveBuildUsed = v; },
+    getCorrectiveRerouteUsed: () => correctiveRerouteUsed,
+    setCorrectiveRerouteUsed: (v) => { correctiveRerouteUsed = v; },
     incrementDelegationCount: () => { _turnDelegationCount += 1; },
     forceSynthesis,
     selectCorrectiveResumeTarget,
@@ -2609,9 +2622,13 @@ async function _runTurn(
   // Lean, droppable effort prompt-chunk (high/max tiers) — nudges the model toward
   // depth/completeness for the whole turn. Empty for low/medium.
   const effortPromptAddendum = currentEffortProfile()?.promptAddendum ?? "";
-  let terminalSynthesisInstruction =
+  const limitTerminalSynthesisInstruction =
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
+  let terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
   let terminalFinishReason = "max_tool_iterations";
+  // Which loop brake ended the loop, when one did: the one-tool streak or every call blocked. Read by
+  // the loop-brake reroute after the loop.
+  let loopBrakeExit: "tool_streak_across_iterations" | "all_tool_calls_blocked" | undefined;
   // A scene or job step's turn that ran into a loop brake, or out of iterations, having delegated
   // nothing, gets its start directive once more and one more go (workflowStepStartBackstop below).
   // The ceiling is raised for that one iteration only; on every other turn it is maxToolIterations.
@@ -5189,6 +5206,7 @@ async function _runTurn(
         _turnRetrievedKnowledgeBaseContent = true;
         for (const url of knowledgeBaseSourceUrls(tc.name, result)) _turnKnowledgeBaseSourceUrls.add(url);
       }
+      if (!outputBlocked && result.success && isRetrievalEvidenceResult(tc.name)) _turnRetrievalReachedModel = true;
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -5611,6 +5629,7 @@ async function _runTurn(
         terminalSynthesisInstruction =
           "The model repeatedly attempted tool calls that were blocked or unavailable, so NOTHING was created or changed this turn. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the user asked you to create or modify an artifact and you have no direct file tool, say plainly that you could not apply the change and offer to delegate it — do NOT invent an artifact path, and do NOT repeat or re-paste an earlier turn's answer as if the change had been applied.";
         _forcedSynthesisFired = true;
+        loopBrakeExit = "all_tool_calls_blocked";
         log.warn({ iterationCount, blocked: _consecutiveFullyBlockedIterations }, "All tool calls blocked for consecutive iterations — forcing synthesis");
         break;
       }
@@ -5669,7 +5688,50 @@ async function _runTurn(
         }
       }
       if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
-      if (streakLoop) break; // falls through to forceSynthesis below
+      if (streakLoop) {
+        loopBrakeExit = "tool_streak_across_iterations";
+        break; // falls through to forceSynthesis below
+      }
+    }
+  }
+
+  // ONE CORRECTIVE CHANCE BEFORE A LOOP BRAKE'S SYNTHESIS, FOR A TURN NO SPECIALIST WORKED ON.
+  // An orchestration_only turn without --auto is not forced to delegate, and the orchestrator holds
+  // no file tool. In the E2E run of 2026-10-10 "change the heading in <file>" called search_tools,
+  // then wrote "the heading was updated" into memory three times until the streak brake stopped it,
+  // and "list the folder <path>" called execute_plan with no plan and memory_store with no content
+  // until every call was blocked twice. Both went to the synthesis with nothing delegated, and the
+  // answers said only that no tool had run: nobody had looked at the workspace, although the
+  // discovery prefetch had admitted content_writer, and report_writer_agent, document_intake and
+  // code_analyst, for those requests.
+  // The original request is re-dispatched once through delegate_to_agent with no agent named
+  // (runCorrectiveReroute), and the specialist's answer is shipped. Not one more forced iteration:
+  // the turn's own tool choices were the loop, its history now holds the false memory notes, and
+  // the reroute's routing reads the request as the user wrote it. Not a build (runCorrectiveBuild):
+  // it would create the file the user asked to change. Only where the prefetch admitted an agent
+  // (routing has a specialist to give it), on a turn that has delegated nothing, run no workflow and
+  // retrieved no evidence of its own (a turn that searched its documents until the brake answers
+  // from them, as before), outside workflows and --agent turns. When it returns nothing shippable,
+  // the synthesis below runs as before, with the specialist's result in its history.
+  let loopBrakeRerouteAnswer: string | null = null;
+  if (
+    loopBrakeExit !== undefined
+    && activeMainAssistantToolMode === "orchestration_only"
+    && opts.autoApprove !== true
+    && _turnDelegationCount === 0
+    && !workflowRunCompletedThisTurn
+    && !isWorkflowExecutionTurn
+    && directiveAgent === undefined
+    && !_turnRetrievalReachedModel
+    && !_turnRetrievedKnowledgeBaseContent
+    && prefetchAdmittedAgentCount > 0
+    && !signal.aborted
+  ) {
+    loopBrakeRerouteAnswer = await runCorrectiveRerouteImpl(correctiveCtx, "loop_brake", { brake: loopBrakeExit });
+    // The blocked-calls instruction says NOTHING was created or changed: after a specialist ran,
+    // that is no longer known.
+    if (loopBrakeRerouteAnswer === null && terminalFinishReason === "all_tool_calls_blocked") {
+      terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
     }
   }
 
@@ -5683,11 +5745,11 @@ async function _runTurn(
     { preferHigherScore: false },
   );
   const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
-  let synthesized = bypassTerminalSynthesis
+  let synthesized = loopBrakeRerouteAnswer ?? (bypassTerminalSynthesis
     ? null
     : await forceSynthesis(
         session, provider, signal, terminalSynthesisInstruction,
-      );
+      ));
   // Honesty guard for terminal turns that did NOT deliver the user's NEW request,
   // yet "answer" by re-pasting an EARLIER turn's deliverable summary almost verbatim —
   // shipping a stale false success. First seen on all_tool_calls_blocked (audit

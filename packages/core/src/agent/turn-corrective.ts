@@ -63,6 +63,11 @@ export interface CorrectiveContext {
   getQaCorrectiveBuildUsed: () => boolean;
   setQaCorrectiveBuildUsed: (v: boolean) => void;
 
+  // --- the turn's one corrective re-dispatch of the request (runCorrectiveReroute), whichever
+  //     guard asks for it: set on entry, and a second call in the turn returns null ---
+  getCorrectiveRerouteUsed: () => boolean;
+  setCorrectiveRerouteUsed: (v: boolean) => void;
+
   // --- per-turn delegation counter mutation ---
   incrementDelegationCount: () => void;
 
@@ -288,19 +293,45 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
 // specialist, the same path the user's manual follow-up would take) and ship the
 // specialist's answer. Returns the deliverable text, or null when the delegation
 // failed or returned nothing shippable (the caller then sends an honest denial).
-export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<string | null> => {
+//
+// The runtime calls it for a second reason (`loop_brake`): an orchestration turn that a loop brake
+// stopped before it had delegated anything (runtime.ts, before the terminal synthesis). The turn's
+// own tool choices were the loop, so the request goes out as the user wrote it, not as that turn
+// would have restated it.
+export type CorrectiveRerouteReason = "fabricated_zero_work" | "loop_brake";
+
+const REROUTE_STATUS: Record<CorrectiveRerouteReason, { de: string; en: string }> = {
+  fabricated_zero_work: {
+    de: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.",
+    en: "The previous answer was not backed by work that actually ran — passing the request to the right specialist.",
+  },
+  loop_brake: {
+    de: "Bisher hat kein Spezialist an der Anfrage gearbeitet — ich leite sie an den passenden weiter.",
+    en: "No specialist has worked on the request yet — passing it to the right one.",
+  },
+};
+
+const REROUTE_HISTORY_TASK: Record<CorrectiveRerouteReason, string> = {
+  fabricated_zero_work: "REROUTE (zero-work fabrication guard)",
+  loop_brake: "REROUTE (loop brake, nothing delegated)",
+};
+
+export const runCorrectiveReroute = async (
+  ctx: CorrectiveContext,
+  reason: CorrectiveRerouteReason = "fabricated_zero_work",
+  auditDetails: Record<string, unknown> = {},
+): Promise<string | null> => {
   const { signal, session, userMessage, toolContext } = ctx;
-  if (signal.aborted) return null;
+  if (ctx.getCorrectiveRerouteUsed() || signal.aborted) return null;
+  ctx.setCorrectiveRerouteUsed(true);
   logAudit("guardrail_flagged", {
-    type: "fabricated_zero_work_reroute_delegated",
+    type: `${reason}_reroute_delegated`,
     userMessageChars: userMessage.length,
+    ...auditDetails,
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
   ctx.onStatus?.({
     phase: "guardrail",
-    message: localizedFixedText({
-      de: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.",
-      en: "The previous answer was not backed by work that actually ran — passing the request to the right specialist.",
-    }),
+    message: localizedFixedText(REROUTE_STATUS[reason]),
     iteration: ctx.getIterationCount(),
   });
   try {
@@ -314,7 +345,7 @@ export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<stri
     session.addMessage({
       role: "assistant",
       content: "",
-      tool_calls: [{ id: rerouteCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "REROUTE (zero-work fabrication guard)" }) } }],
+      tool_calls: [{ id: rerouteCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: REROUTE_HISTORY_TASK[reason] }) } }],
     });
     session.addMessage({
       role: "tool",
@@ -332,7 +363,7 @@ export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<stri
     if (!body || looksLikeDegenerateRepetition(body) || looksLikeTruncatedCodeDeliverable(body)) return null;
     return body;
   } catch (err) {
-    ctx.logWarn({ err, sessionId: session.id }, "Zero-work fabrication reroute delegation failed");
+    ctx.logWarn({ err, sessionId: session.id }, reason === "loop_brake" ? "Loop-brake reroute delegation failed" : "Zero-work fabrication reroute delegation failed");
     return null;
   }
 };
