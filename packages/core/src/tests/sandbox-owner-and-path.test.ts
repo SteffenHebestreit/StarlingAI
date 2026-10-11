@@ -115,6 +115,39 @@ describe("toSandboxCommand", () => {
     expect(toSandboxCommand(`ls ${ACCOUNT_ROOT}-old`, ACCOUNT_ROOT)).toBe(`ls ${ACCOUNT_ROOT}-old`);
     expect(toSandboxCommand("ls generated", ACCOUNT_ROOT)).toBe("ls generated");
   });
+
+  it("ends the root where a list item, a host:path pair, a brace or an assignment ends", async () => {
+    const { toSandboxCommand } = await import("../tools/workspace-mount.js");
+    expect(toSandboxCommand(`PATH=${ACCOUNT_ROOT}:/usr/bin node a.js`, ACCOUNT_ROOT)).toBe("PATH=/workspace:/usr/bin node a.js");
+    expect(toSandboxCommand(`cp -r {${ACCOUNT_ROOT},/tmp}/a .`, ACCOUNT_ROOT)).toBe("cp -r {/workspace,/tmp}/a .");
+    expect(toSandboxCommand(`echo "\${DIR:=${ACCOUNT_ROOT}}"`, ACCOUNT_ROOT)).toBe('echo "${DIR:=/workspace}"');
+    expect(toSandboxCommand(`printf %s ${ACCOUNT_ROOT}=1`, ACCOUNT_ROOT)).toBe("printf %s /workspace=1");
+  });
+
+  it("starts the root only where a word can start, so a longer path that contains it stays as written", async () => {
+    const { toSandboxCommand } = await import("../tools/workspace-mount.js");
+    expect(toSandboxCommand(`ls /mnt${ACCOUNT_ROOT}/x`, ACCOUNT_ROOT)).toBe(`ls /mnt${ACCOUNT_ROOT}/x`);
+    expect(toSandboxCommand(`ls x${ACCOUNT_ROOT}`, ACCOUNT_ROOT)).toBe(`ls x${ACCOUNT_ROOT}`);
+    expect(toSandboxCommand(`(cd ${ACCOUNT_ROOT}) && echo \`ls ${ACCOUNT_ROOT}\``, ACCOUNT_ROOT)).toBe("(cd /workspace) && echo `ls /workspace`");
+  });
+
+  it("maps a Windows root in its backslash form too", async () => {
+    const { toSandboxCommand } = await import("../tools/workspace-mount.js");
+    const windowsRoot = "C:\\Users\\me\\ws";
+    expect(toSandboxCommand("cd C:\\Users\\me\\ws && cat C:/Users/me/ws/a.txt", windowsRoot)).toBe("cd /workspace && cat /workspace/a.txt");
+    expect(toSandboxCommand("ls C:\\Users\\me\\ws\\gen", windowsRoot)).toBe("ls /workspace\\gen");
+    expect(toSandboxCommand("ls C:\\Users\\me\\ws-old", windowsRoot)).toBe("ls C:\\Users\\me\\ws-old");
+  });
+
+  it("matches a root with regular-expression metacharacters literally", async () => {
+    const { toSandboxCommand, toSandboxPath } = await import("../tools/workspace-mount.js");
+    const root = "/srv/w+s.(1)[x]";
+    expect(toSandboxCommand(`cat "${root}/a.txt" && ls ${root}`, root)).toBe('cat "/workspace/a.txt" && ls /workspace');
+    // Taken as a pattern, the root would have matched this other directory instead.
+    expect(toSandboxCommand("cat /srv/wwsZ1x/a.txt", root)).toBe("cat /srv/wwsZ1x/a.txt");
+    expect(toSandboxCommand("cd '/srv/$HOME^x?' && ls", "/srv/$HOME^x?")).toBe("cd '/workspace' && ls");
+    expect(toSandboxPath(`${root}/a.txt`, root)).toBe("/workspace/a.txt");
+  });
 });
 
 describe("the sandbox tools", () => {

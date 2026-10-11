@@ -292,13 +292,30 @@ export function toSandboxPath(path: string, workspacePath: string, at = "/worksp
   return path;
 }
 
-/** The same mapping for every place a command names the workspace root, at a path boundary only
- *  (`<root>-old` is another directory and stays as written). */
+/**
+ * The same mapping for every place a command names the workspace root, at a path boundary on both
+ * sides. After it: the end, a separator, or what ends a shell word, an assignment, a list item or a
+ * `host:path` pair (`<root>-old` is another directory and stays as written). Before it: the start,
+ * or what can open such a word (`/mnt<root>/x` is another path and stays as written). A Windows
+ * root also matches in its backslash form.
+ */
 export function toSandboxCommand(command: string, workspacePath: string, at = "/workspace"): string {
   const root = normalizeRoot(workspacePath);
-  if (!root || root === at || !command.includes(root)) return command;
-  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return command.replace(new RegExp(`${escaped}(?=$|[/\\s'"\`;&|<>()])`, "g"), at);
+  if (!root || root === at) return command;
+  const windows = /^[a-zA-Z]:\//.test(root);
+  const forms = windows ? [root, root.replace(/\//g, "\\")] : [root];
+  if (!forms.some((form) => command.includes(form))) return command;
+  const after = windows ? WINDOWS_ROOT_AFTER : ROOT_AFTER;
+  const pattern = forms.map((form) => `${ROOT_BEFORE}${escapeRegExp(form)}${after}`).join("|");
+  return command.replace(new RegExp(pattern, "g"), at);
+}
+
+const ROOT_BEFORE = /(?<=^|[\s'"`=:;&|<>(){},])/.source;
+const ROOT_AFTER = /(?=$|[/\s'"`;&|<>(){},:=])/.source;
+const WINDOWS_ROOT_AFTER = /(?=$|[/\\\s'"`;&|<>(){},:=])/.source;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeRoot(workspacePath: string): string {
