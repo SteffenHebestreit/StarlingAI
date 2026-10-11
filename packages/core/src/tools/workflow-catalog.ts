@@ -381,6 +381,10 @@ function appendWorkflowContext(task: string, context?: string): string {
   return `${task.trim()}\n\nAdditional workflow context:\n${context.trim()}`;
 }
 
+/** How a scene or job run's context names the request that started it, for every agent and step turn it reaches. */
+const ORIGINAL_REQUEST_BACKGROUND_LABEL =
+  "Original user request: (background — this workflow is already running; carry out its task and do not search for or start a workflow)";
+
 function buildWorkflowParamContext(
   template: string,
   params: Record<string, string>,
@@ -399,8 +403,12 @@ function buildWorkflowParamContext(
       workflowContext ?? "",
       ...Object.values(params),
     ].join(" ")).includes(normalizeSearchText(trimmedObjective));
+    // Labelled as background: a step's turn read the request that started the workflow ("Nutze den
+    // Workflow …", "Starte den Job …") as its own instruction and looked for that workflow until the
+    // loop brake ended it (E2E 2026-10-10). The label still opens with "Original user request:",
+    // which looksLikeDelegationTaskEcho reads.
     if (!objectiveAlreadyPresent) {
-      sections.push(`Original user request:\n${trimmedObjective}`);
+      sections.push(`${ORIGINAL_REQUEST_BACKGROUND_LABEL}\n${trimmedObjective}`);
     }
   }
 

@@ -405,6 +405,38 @@ describe("a scene or job step's turn whose task names its agents goes without ag
   });
 });
 
+// A step's turn read the request that started the workflow, which it was handed as "Original user
+// request", as its own instruction: "Nutze den Workflow „verified_research_brief“ …" sent it looking
+// for that workflow until the loop brake ended it (E2E 2026-10-10).
+describe("a scene or job step's turn reads the request that started the workflow as background", () => {
+  const OBJECTIVE = "Nutze den Workflow „sourced_brief“ für ein Briefing zu Nordlicht Werkzeuge.";
+
+  for (const workflow of [
+    { name: "sourced_brief", workflowType: "scene" },
+    { name: "sourced_brief_packet", workflowType: "job" },
+  ] as const) {
+    it(`${workflow.workflowType}: the request is labelled as background to a workflow that is already running`, async () => {
+      const { registry } = await loadModules();
+      scriptDirectiveFollowingModel("researcher");
+
+      await registry.getTool("run_workflow")!.execute({ ...workflow }, {
+        sessionId: `chat-background-${workflow.workflowType}`,
+        workspacePath: "/workspace",
+        swarmState: { objective: OBJECTIVE, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
+      });
+
+      const stepMessage = ((streamMock.mock.calls[0]?.[0] ?? []) as LLMMessage[])
+        .find((message) => message.role === "user" && typeof message.content === "string" && message.content.includes(OBJECTIVE));
+      expect(stepMessage, "the step's turn is handed the request").toBeDefined();
+      const content = stepMessage!.content as string;
+      const label = content.slice(0, content.indexOf(OBJECTIVE)).trimEnd().split("\n").at(-1) ?? "";
+      expect(label.startsWith("Original user request: (background")).toBe(true);
+      expect(label).toContain("already running");
+      expect(label).toContain("do not search for or start a workflow");
+    });
+  }
+});
+
 // The dashboard and webhook triggers, `/job` over RPC and channel triggers queue a scene or job, and the
 // scene worker runs it as a turn on channel "scene" (agent/scene-worker.ts).
 describe("a scene or job queued through the scene worker", () => {
