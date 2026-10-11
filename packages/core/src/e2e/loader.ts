@@ -3,7 +3,8 @@
  * scenario or an array of them. Beyond ScenarioSchema, the loader checks what the schema cannot:
  * unique ids across files, regexes that compile, fixtures that exist inside eval/e2e/fixtures/,
  * min ≤ max pairs, and which fields each mail action takes. Files whose name starts with "_"
- * (the commented example) are templates: validated like any other, run only when named by --id.
+ * (the commented example, or a scenario that must not run unattended) are templates: validated like
+ * any other, run only when named by --id.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";

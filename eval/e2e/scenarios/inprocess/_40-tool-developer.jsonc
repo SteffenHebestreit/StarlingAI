@@ -13,16 +13,28 @@
 // removes it again, so each run would leave a live tool behind, and the next run's tool_dev_start
 // would refuse the name as already in use. Without --auto, tool_dev_start (per-call approval) would
 // wait for a card the harness never answers. So the message asks for start and test only, and a
-// submit fails the scenario. If one happens anyway, remove workspace/tools/celsius_to_fahrenheit.json
-// by hand (and restart the gateway to unregister the tool).
+// submit fails the scenario.
+//
+// RUN ONLY BY ID (the leading "_" of the file name). Only that sentence of the message keeps the
+// model from submitting, while tool_developer's own prompt (WORKFLOW step 5) and tool_dev_test's
+// "All tests passed! You can now submit" point it there, and the harness has no way to refuse one
+// tool inside an --auto turn. One slip would deploy a live tool into the shared workspace, so no
+// group, tag or full run takes this scenario: `pnpm e2e:evaluate --id
+// inprocess-tool-developer-sandbox-tests`. After a submit, remove workspace/tools/
+// celsius_to_fahrenheit.json by hand and restart the gateway to unregister the tool.
+//
+// THE LEADING WAIT. Every attempt leaves its dev session open (status "testing"): nothing ends it
+// when the turn ends, and tool_dev_start refuses once toolDevelopment.maxConcurrentSessions (2) are
+// open. Only the tool-dev warden frees a slot: a sweep every 15 s marks a session stuck after
+// maxIdleMs (5 minutes) without activity (agent/tool-dev-warden.ts). So each attempt first waits
+// 330 s (maxIdleMs, one sweep, 15 s margin): every session left idle before it, by an earlier
+// attempt or by anyone, is stuck by then, and --repeat attempts do not take each other's slots.
 //
 // Ground truth: F = C × 9/5 + 32, so 100 °C -> 212 °F and 0 °C -> 32 °F. tool_dev_test answers
 // "## Test Results: <passed>/<total> passed" and then one block per case with its input, expected
 // substring and output (tools/tool-develop.ts). The audit keeps that text as resultPreview
 // (whitespace collapsed, 280 characters): every case passed, and the 100 °C case with 212 is among
-// them. The session sweeper marks an untouched session stuck after toolDevelopment.maxIdleMs
-// (5 minutes), and at most maxConcurrentSessions (2) may develop at once, so back-to-back repeats
-// share that budget.
+// them.
 {
   id: "inprocess-tool-developer-sandbox-tests",
   title: "In-process tool_developer: a pure-compute tool is developed and passes its sandbox tests",
@@ -30,8 +42,10 @@
   tags: ["inprocess", "tool_developer", "sandbox", "self-improvement"],
   description: "tool_developer (in-process since 2026-10-09) builds celsius_to_fahrenheit: tool_dev_start validates the code in the no-network sandbox, tool_dev_test runs 100 °C -> 212 and 0 °C -> 32 there, and every case passes. Protects: the in-process tool-development path (session start and sandbox tests, both dispatched by tool_developer), a reply grounded in the test result (212), and that the test run deploys nothing: tool_dev_submit, which --auto would approve into a live tool, must not run.",
   requires: ["model", "sandbox"],
-  timeoutMs: 900000,
+  timeoutMs: 1200000,
   steps: [
+    // The dev-session slots of earlier attempts are free again (THE LEADING WAIT above).
+    { kind: "wait", ms: 330000 },
     {
       kind: "turn",
       id: "develop-and-test",

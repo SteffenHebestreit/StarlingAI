@@ -9,13 +9,14 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
+import JSON5 from "json5";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { loadScenarios } from "../e2e/loader.js";
+import { filterScenarios, loadScenarios } from "../e2e/loader.js";
 import { findRepoRoot, resolveE2EPaths } from "../e2e/paths.js";
 import { checkReply, evaluateEventExpectations } from "../e2e/assertions.js";
 import type { E2EHttpStep, E2EScenario, E2ETurnStep } from "../e2e/scenario.js";
@@ -385,6 +386,17 @@ describe("in-process specialist scenarios", () => {
     expect(checkReply(step.expect!.reply!, "Die Tests sind fehlgeschlagen.")).not.toEqual([]);
   });
 
+  it("tool_developer runs only when named by id: no full, group or tag run takes it", () => {
+    // One submit under --auto deploys a live tool that no route removes, and only the message
+    // keeps the model from it.
+    const id = "inprocess-tool-developer-sandbox-tests";
+    const selected = (filter: Parameters<typeof filterScenarios>[1]) => filterScenarios(scenarios, filter).selected.map((entry) => entry.scenario.id);
+    expect(selected({})).not.toContain(id);
+    expect(selected({ groups: ["inprocess"] })).not.toContain(id);
+    expect(selected({ tags: scenarioById(id).tags ?? [] })).not.toContain(id);
+    expect(selected({ ids: [id] })).toEqual([id]);
+  });
+
   it("api_integrator: http_request's answer for the fixture JSON passes, and the reply facts are the fixture's", async () => {
     const scenario = scenarioById("inprocess-api-integrator-json-endpoint");
     const step = turnOf(scenario, "call-endpoint");
@@ -549,5 +561,64 @@ describe("notification scenario with the e-mail channel off", () => {
     expect(checkReply(reply, "Die Status-E-Mail „Deploy OK“ ist erfolgreich versendet.")).not.toEqual([]);
     // A delivery claim beside a negation about something else is still a delivery claim.
     expect(checkReply(reply, "Die Status-E-Mail ist erfolgreich versendet; Slack ist nicht konfiguriert.")).not.toEqual([]);
+  });
+});
+
+describe("tool_developer scenario across back-to-back attempts", () => {
+  const envKeys = ["SAI_CONFIG_PATH", "SAI_MUTABLE_CONFIG_PATH"] as const;
+  let stopWarden: (() => void) | undefined;
+
+  afterEach(async () => {
+    stopWarden?.();
+    stopWarden = undefined;
+    vi.useRealTimers();
+    const loader = await import("../config/loader.js");
+    loader.resetConfigForTests();
+    for (const key of envKeys) delete process.env[key];
+  });
+
+  it("the leading wait outlasts the idle sweep, so the sessions earlier attempts left open no longer block tool_dev_start", async () => {
+    const scenario = scenarioById("inprocess-tool-developer-sandbox-tests");
+    const turnIndex = scenario.steps.findIndex((entry) => entry.kind === "turn" && entry.id === "develop-and-test");
+    const waitedMs = scenario.steps.slice(0, turnIndex).reduce((sum, entry) => sum + (entry.kind === "wait" ? entry.ms : 0), 0);
+
+    // The gateway's tool-development settings: the shipped shard over the schema defaults.
+    const shipped = JSON5.parse(readFileSync(join(repoRoot, "config", "tooling", "10-platform.jsonc"), "utf8")) as { toolDevelopment?: unknown };
+    const dir = tempDir("sai-e2e-tooldev-slots-");
+    const configPath = join(dir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({ workspacePath: dir, toolDevelopment: shipped.toolDevelopment }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    process.env["SAI_MUTABLE_CONFIG_PATH"] = configPath;
+    // Fresh modules: no dev session of another test holds a slot.
+    vi.resetModules();
+    const [{ getConfig }, { getTool }, warden] = await Promise.all([
+      import("../config/loader.js"),
+      import("../tools/registry.js"),
+      import("../agent/tool-dev-warden.js"),
+    ]);
+    await import("../tools/tool-develop.js");
+    const { enabled, maxConcurrentSessions } = getConfig().toolDevelopment;
+    expect(enabled).toBe(true);
+    vi.useFakeTimers();
+    const start = () => getTool("tool_dev_start")!.execute({
+      toolName: "celsius_to_fahrenheit",
+      description: "Celsius in Fahrenheit",
+      parametersSchema: { type: "object", properties: { celsius: { type: "number" } }, required: ["celsius"] },
+      code: "export function execute(args) { return String(Number(args.celsius) * 9 / 5 + 32); }",
+    }, { sessionId: "e2e-inprocess", workspacePath: dir });
+
+    // Earlier attempts left one session open each, until every slot was taken.
+    for (let attempt = 1; attempt <= maxConcurrentSessions; attempt++) expect((await start()).success, `attempt ${attempt}`).toBe(true);
+    const refused = await start();
+    expect(refused.success).toBe(false);
+    expect(refused.error).toMatch(/^Maximum concurrent dev sessions reached/);
+
+    // The warden sweeps on its own clock. Started as the last session went idle, one of its sweeps
+    // lands exactly at maxIdleMs, where a session is not yet stuck: the latest a slot frees.
+    warden.startToolDevWarden();
+    stopWarden = warden.stopToolDevWarden;
+    vi.advanceTimersByTime(waitedMs);
+    const next = await start();
+    expect(next.success, next.error).toBe(true);
   });
 });

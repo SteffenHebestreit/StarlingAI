@@ -44,7 +44,7 @@ personal data, real credentials or real mail addresses in any scenario or fixtur
 
 ```bash
 pnpm e2e:validate                                   # static check of every scenario file (no gateway)
-pnpm e2e:evaluate                                   # every scenario except templates
+pnpm e2e:evaluate                                   # every scenario except templates (files starting with _)
 pnpm e2e:evaluate --group core --tag smoke          # in any listed group AND carrying any listed tag
 pnpm e2e:evaluate --id steer-reaches-specialist     # by id (templates too: --id example-site-and-mail)
 pnpm e2e:evaluate --repeat 3                        # pass^3 (a scenario's own `repeat` wins)
@@ -198,6 +198,9 @@ Start from the commented template [`scenarios/_example.jsonc`](scenarios/_exampl
 file without the leading `_` (files starting with `_` are templates — validated, but run only by `--id`),
 give it a new kebab-case `id` and keep what you need. One file holds one scenario or an array of them.
 `pnpm e2e:validate` checks every file; so does CI (`packages/core/src/tests/e2e-scenarios-valid.test.ts`).
+A scenario that must not run unattended keeps the leading `_` too, and its header says why: e.g.
+[`scenarios/inprocess/_40-tool-developer.jsonc`](scenarios/inprocess/_40-tool-developer.jsonc), where one
+slip of the model under `--auto` would deploy a live tool that no route removes.
 
 ### Steps
 
