@@ -474,14 +474,19 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
     try {
       const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
-      const fileStat = await stat(resolved);
+      // The archive leaves out every link INSIDE the directory (addWorkspacePathToZip), so the walk
+      // starts at where the requested path really is: the resolver held it to its zone through any
+      // link, and a requested path that is itself a link inside its zone (generated/latest ->
+      // generated/v2) came back as an empty archive.
+      const walkRoot = await realpath(resolved);
+      const fileStat = await stat(walkRoot);
       if (!fileStat.isFile() && !fileStat.isDirectory()) {
         return c.json({ error: "Requested workspace path must be a file or directory" }, 400);
       }
 
       // Pre-flight size/entry check for directories
       if (fileStat.isDirectory()) {
-        const { totalBytes, entryCount } = await estimateDirectorySize(resolved);
+        const { totalBytes, entryCount } = await estimateDirectorySize(walkRoot);
         if (entryCount > WORKSPACE_ARCHIVE_MAX_ENTRIES) {
           return c.json({ error: `Directory has too many entries (${entryCount}). Maximum is ${WORKSPACE_ARCHIVE_MAX_ENTRIES}.` }, 413);
         }
@@ -493,7 +498,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
       }
 
       const archiveBaseName = basename(resolved) || "workspace";
-      const archiveBytes = await buildWorkspaceArchiveBuffer(resolved, archiveBaseName);
+      const archiveBytes = await buildWorkspaceArchiveBuffer(walkRoot, archiveBaseName);
       const archiveName = `${archiveBaseName}.zip`;
       const responseBytes = new Uint8Array(archiveBytes);
 

@@ -219,6 +219,19 @@ describe("the dashboard's workspace routes", () => {
     expect(bytes.includes(Buffer.from("secret.txt"))).toBe(false);
   });
 
+  it("the archive of a path that is itself a link inside its zone holds what it leads to", async () => {
+    mkdirSync(join(ws, "generated", "v2"), { recursive: true });
+    writeFileSync(join(ws, "generated", "v2", "kept.txt"), "kept");
+    linkDir(join(ws, "generated", "v2"), join(ws, "generated", "latest"));
+    const response = await get(`/api/workspace/archive?path=${encodeURIComponent("generated/latest")}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toContain("latest.zip");
+    const bytes = Buffer.from(await response.arrayBuffer());
+    expect(bytes.includes(Buffer.from("latest/kept.txt"))).toBe(true);
+    // A link out of the zone as the requested path is still refused by the resolver.
+    expect((await get(`/api/workspace/archive?path=${encodeURIComponent("generated/out")}`)).status).toBe(400);
+  });
+
   it.skipIf(!fileLinks)(`an upload is not written through a link at its own name (${FILE_LINK_REASON})`, async () => {
     symlinkSync(join(outside, "secret.txt"), join(ws, "generated", "notes.txt"));
     const form = new FormData();
