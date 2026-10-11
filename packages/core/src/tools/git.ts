@@ -86,9 +86,14 @@ async function runGitInSandbox(
     // read-only but for the config zones and generated/ (sandboxIsolationArgs).
     ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
     // Where the sandbox does not run as that owner (no --user on a Windows-native gateway, or an
-    // owner the stat could not read), git refuses the repository at /workspace as of "dubious
-    // ownership". safe.directory names it for this run only, through the environment, which is the
-    // command scope: git honours safe.directory only from protected configuration.
+    // owner the stat could not read), git refuses a repository as of "dubious ownership".
+    // safe.directory lifts that for this run only, through the environment, which is the command
+    // scope: git honours safe.directory only from protected configuration. `*`, not /workspace:
+    // git matches the value against the repository's own directory, so /workspace left a repository
+    // in a subdirectory (generated/<clone>) refused. The ownership check protects nothing here: the
+    // sandbox sees only the bind this tool hands the caller (its own root, or the full-scope repo
+    // bind), where every file is the bind owner's, or shows as root's on Docker Desktop, and no
+    // other user's repository is there to be kept from.
     // safe.bareRepository=explicit: git takes no directory it discovers for a bare repository. The
     // write tools refuse `.git` by name (filesystem.ts), but they can still make a directory shaped
     // like one (HEAD, objects/, refs/, and a config with core.worktree and core.fsmonitor), and
@@ -96,7 +101,7 @@ async function runGitInSandbox(
     // git 2.43). No git tool works on a bare repository.
     "-e", "GIT_CONFIG_COUNT=2",
     "-e", "GIT_CONFIG_KEY_0=safe.directory",
-    "-e", "GIT_CONFIG_VALUE_0=/workspace",
+    "-e", "GIT_CONFIG_VALUE_0=*",
     "-e", "GIT_CONFIG_KEY_1=safe.bareRepository",
     "-e", "GIT_CONFIG_VALUE_1=explicit",
     "-w", workdir,
