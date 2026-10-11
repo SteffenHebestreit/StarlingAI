@@ -101,6 +101,8 @@ import {
   parseUpstreamJsonResponse,
   callMultimodalToolViaMcp,
   checkEndpointHealth,
+  checkOpenAiTtsHealth,
+  fetchOpenAiTtsModels,
   multimodalServiceConfigured,
   unwrapConversionResult,
   disabledServiceStatus,
@@ -587,7 +589,7 @@ export function createGateway() {
     if (config.api === "openai-compatible") {
       const [voicesResponse, modelsResponse] = await Promise.all([
         fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-        fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
+        fetchOpenAiTtsModels(config),
       ]);
 
       if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
@@ -1599,11 +1601,10 @@ export function createGateway() {
       !multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
         ? Promise.resolve(disabledServiceStatus("Disabled: no TTS endpoint configured."))
         : multimodalConfig.tts.api === "openai-compatible"
-          ? checkEndpointHealth({
+          ? checkOpenAiTtsHealth({
               baseUrl: multimodalConfig.tts.baseUrl,
               apiKey: multimodalConfig.tts.apiKey,
               timeoutMs: multimodalConfig.tts.timeoutMs,
-              path: "/models",
             })
           : checkEndpointHealth({
               baseUrl: multimodalConfig.tts.baseUrl,
