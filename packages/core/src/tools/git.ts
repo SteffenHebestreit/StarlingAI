@@ -254,11 +254,16 @@ registerTool({
     const gitArgs = ["diff"];
     if (args["staged"]) gitArgs.push("--cached");
     if (args["stat"]) gitArgs.push("--stat");
-    if (ref1) gitArgs.push(ref1);
-    if (ref2) gitArgs.push(ref2);
-    // `--` closes the refs, always. Two arguments with none after them, where one names a path
-    // outside the repository (`/dev/null` and a file), are a no-index diff to git, which prints any
-    // file: an untracked or ignored one, or the gateway's state under a case alias.
+    // Each ref peeled to the commit it names. Where the working directory is no repository (an
+    // auth-off session's shared-root bind, a full-scope repo bind without .git), git took two
+    // arguments for paths and diffed them with no index whatever followed (diff_no_index drops the
+    // `--`), which printed any file the sandbox can read. `<ref>^{commit}` resolves for every ref,
+    // range and commit a caller means, and names no file git or the gateway keeps, so outside a
+    // repository it is an error, not a diff of two files.
+    if (ref1) gitArgs.push(`${ref1}^{commit}`);
+    if (ref2) gitArgs.push(`${ref2}^{commit}`);
+    // `--` closes the refs, always: inside a repository two arguments with none after them, where one
+    // names a path outside it (`/dev/null` and a file), are a no-index diff to git too.
     gitArgs.push("--");
     if (args["path"]) gitArgs.push(sandboxPathFor(String(args["path"]), ctx));
 

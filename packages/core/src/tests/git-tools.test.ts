@@ -1,7 +1,13 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const execFileAsyncMock = vi.fn();
+/** The real module, past the mock below: the git_diff cases that run this machine's git use it. */
+const realChildProcess = createRequire(import.meta.url)("node:child_process") as typeof import("node:child_process");
 
 vi.mock("node:child_process", () => {
   const execFile = vi.fn();
@@ -165,15 +171,81 @@ describe("git tools: what the model supplies is never a git option", () => {
     expect(execFileAsyncMock).not.toHaveBeenCalled();
   });
 
-  it("git_diff closes its refs with --, so two paths are refs to git and never a no-index diff", async () => {
+  it("git_diff peels its refs to commits and closes them with --, so two paths are never a no-index diff", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
     const { getTool } = await import("../tools/registry.js");
     await getTool("git_diff")!.execute({ ref1: "/dev/null", ref2: "/workspace/.STARLINGAI/accounts.json" }, ctx);
-    expect(gitArgv()).toEqual(["diff", "/dev/null", "/workspace/.STARLINGAI/accounts.json", "--"]);
+    expect(gitArgv()).toEqual(["diff", "/dev/null^{commit}", "/workspace/.STARLINGAI/accounts.json^{commit}", "--"]);
     await getTool("git_diff")!.execute({ ref1: "HEAD~1", path: "agents" }, ctx);
-    expect(gitArgv()).toEqual(["diff", "HEAD~1", "--", "agents"]);
+    expect(gitArgv()).toEqual(["diff", "HEAD~1^{commit}", "--", "agents"]);
     await getTool("git_diff")!.execute({ staged: true, stat: true }, ctx);
     expect(gitArgv()).toEqual(["diff", "--cached", "--stat", "--"]);
+  });
+
+  /** The argv git_diff builds, run by this machine's git in `cwd`. */
+  const realGit = async (cwd: string, args: Record<string, unknown>) => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_diff")!.execute({ ...args }, ctx);
+    // GIT_CEILING_DIRECTORIES: a directory that is no repository is not taken for part of one above it.
+    const run = realChildProcess.spawnSync("git", gitArgv(), { cwd, encoding: "utf8", env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir() } });
+    return { status: run.status, stdout: run.stdout };
+  };
+  const hostGit = (() => {
+    try {
+      return realChildProcess.spawnSync("git", ["--version"]).status === 0;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!hostGit)("git_diff's argv still diffs two refs, a ref and the worktree, and the worktree, in a real repository", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "sai-git-diff-"));
+    try {
+      const git = (...argv: string[]) => realChildProcess.spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...argv], { cwd: repo, encoding: "utf8" });
+      git("init", "-q");
+      writeFileSync(join(repo, "a.txt"), "one\n");
+      git("add", "a.txt");
+      git("commit", "-q", "-m", "one");
+      writeFileSync(join(repo, "a.txt"), "two\n");
+      git("commit", "-q", "-am", "two");
+      writeFileSync(join(repo, "a.txt"), "three\n");
+
+      const twoRefs = await realGit(repo, { ref1: "HEAD~1", ref2: "HEAD" });
+      expect(twoRefs.status).toBe(0);
+      expect(twoRefs.stdout).toMatch(/^-one$/m);
+      expect(twoRefs.stdout).toMatch(/^\+two$/m);
+      const range = await realGit(repo, { ref1: "HEAD~1..HEAD" });
+      expect(range.status).toBe(0);
+      expect(range.stdout).toMatch(/^\+two$/m);
+      const refToWorktree = await realGit(repo, { ref1: "HEAD~1", path: "a.txt" });
+      expect(refToWorktree.status).toBe(0);
+      expect(refToWorktree.stdout).toMatch(/^-one$/m);
+      expect(refToWorktree.stdout).toMatch(/^\+three$/m);
+      const worktree = await realGit(repo, {});
+      expect(worktree.status).toBe(0);
+      expect(worktree.stdout).toMatch(/^-two$/m);
+      expect(worktree.stdout).toMatch(/^\+three$/m);
+      git("add", "a.txt");
+      const staged = await realGit(repo, { staged: true, ref1: "HEAD" });
+      expect(staged.status).toBe(0);
+      expect(staged.stdout).toMatch(/^\+three$/m);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hostGit)("git_diff's argv, outside any repository, is an error and never a diff of two files", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sai-git-norepo-"));
+    try {
+      writeFileSync(join(dir, "one.txt"), "first-file-content\n");
+      writeFileSync(join(dir, "two.txt"), "second-file-content\n");
+      const result = await realGit(dir, { ref1: "one.txt", ref2: "two.txt" });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).not.toContain("file-content");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("git_clone puts its URL and destination after --", async () => {
