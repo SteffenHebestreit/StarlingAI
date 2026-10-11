@@ -66,8 +66,13 @@ export function containedWorkspaceRealPath(
   }
   // An account's directory under the shared root is a zone of its own: a link one account's sandbox
   // made must not lead a path through the shared root into another account's.
+  //
+  // `users` IN ANY CASE. On a case-insensitive filesystem (Windows, macOS, a Docker Desktop bind)
+  // `USERS/alice` is `users/alice`, and compared exactly it made all of `USERS/` one zone, where a
+  // link in alice's directory reached bob's (review 2026-10-11). Lowercasing is safe the other way
+  // too: on a case-sensitive filesystem a directory named `USERS` only gets the narrower zone.
   const segments = rel === "" ? [] : rel.split(sep);
-  const zone = join(realRoot, ...segments.slice(0, segments[0] === USERS_SUBDIR ? 2 : 1));
+  const zone = join(realRoot, ...segments.slice(0, segments[0]?.toLowerCase() === USERS_SUBDIR ? 2 : 1));
 
   const rest: string[] = [];
   let probe = target;

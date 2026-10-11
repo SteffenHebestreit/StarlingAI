@@ -40,6 +40,10 @@ const fileLinks = (() => {
 })();
 const FILE_LINK_REASON = "this machine cannot make a symbolic link to a file (Windows without the privilege); runs where it can";
 
+/** Whether the temp directory's filesystem ignores case, as Windows and macOS do. */
+const caseInsensitive = existsSync(tmpdir().toUpperCase()) && existsSync(tmpdir().toLowerCase());
+const CASE_REASON = "needs a case-insensitive filesystem (Windows, macOS); a case-sensitive one has no other spelling of users/";
+
 /** A link to a directory: a symbolic link, or a junction where the machine cannot make one. */
 function linkDir(target: string, at: string): void {
   try {
@@ -114,6 +118,17 @@ describe("containedWorkspaceRealPath", () => {
     linkDir(bob, join(alice, "generated", "peek"));
     expect(containedWorkspaceRealPath(join(alice, "generated", "peek", "x"), ws)).toBeNull();
     expect(containedWorkspaceRealPath(join(alice, "generated", "peek", "x"), alice)).toBeNull();
+  });
+
+  it.skipIf(!caseInsensitive)(`holds them apart under any spelling of users/ (${CASE_REASON})`, () => {
+    const aliceSegment = "alice-0123456789abcdef";
+    mkdirSync(join(ws, "users", aliceSegment, "generated"), { recursive: true });
+    mkdirSync(join(ws, "users", "bob-0123456789abcdef"), { recursive: true });
+    linkDir(join(ws, "users", "bob-0123456789abcdef"), join(ws, "users", aliceSegment, "generated", "peek"));
+    for (const users of ["USERS", "Users"]) {
+      expect(containedWorkspaceRealPath(join(ws, users, aliceSegment, "generated", "peek", "x"), ws), users).toBeNull();
+    }
+    expect(containedWorkspaceRealPath(join(ws, "USERS", aliceSegment, "generated", "x"), ws)).not.toBeNull();
   });
 
   it("refuses a link that leads nowhere, and with final 'link' judges only where the link itself is", () => {
