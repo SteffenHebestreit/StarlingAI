@@ -50,7 +50,7 @@ One clarification that removes most confusion (see [primitives taxonomy](#a-note
 | **Job** | An ordered chain of scene steps + triggers (api/cron/channel) | `jobs.<name>` shard, or `swarm_save_job` tool; **Jobs page** monitors | Its trigger, or `run_workflow` |
 | **Agent** | A worker persona: model + system prompt + tool allowlist + routing tags | `subAgents.<name>` shard, or `swarm_define_agent`; **Agents page** | Delegated to by the orchestrator |
 
-**Skills** — `skillLibrary.*`: `enabled`(true), `autoAuthor`(true), `minStepsToAuthor`(3), `maxInjected`(3), `retireBelowSuccessRate`(0.34), `retireMinUses`(5), `autoPromoteToScene`(true), `holdoutRate`(0). Stored at `.starlingai/skills/<slug>/`. Inert until skills exist; semantic retrieval needs an embedding provider (falls back to keyword).
+**Skills** — `skillLibrary.*`: `enabled`(true), `autoAuthor`(true), `minStepsToAuthor`(3), `maxInjected`(3), `retireBelowSuccessRate`(0.34), `retireMinUses`(5), `autoPromoteToScene`(true), `holdoutRate`(0). Stored at `skills/<slug>/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, `<shared>/.starlingai/users/<seg>/` for an account's own root. Inert until skills exist; semantic retrieval needs an embedding provider (falls back to keyword).
 
 **Scenes** — `SceneConfigSchema`: `task`(required), `params`, `allowedAgents`, `humanInLoopSteps`, `expectArtifact`, `triggers`, `approvalChannel`. A scene with `triggers` (regex `all` + optional `requiresActionVerb`) auto-trips the workflow guardrail; without them it's still discoverable via `search_workflows` but never force-routes. **No dedicated frontend page** — shards or `swarm_save_scene` only.
 

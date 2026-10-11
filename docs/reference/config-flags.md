@@ -517,7 +517,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:457 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:852 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:634 | 4 |
-| `users` | packages/core/src/config/schema.ts:498 | 54 |
+| `users` | packages/core/src/config/schema.ts:498 | 55 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:372 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |

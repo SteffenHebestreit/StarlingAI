@@ -12,11 +12,13 @@
  * guardrail stack still governs every tool a skill suggests.
  *
  * Layout (workspace-scoped, mirroring flow_memory / trajectory_cache), in the workspace's state
- * directory (workspaceStateDir), shown here as `.starlingai`:
- *   .starlingai/skills/<slug>/SKILL.md          ← portable Markdown + frontmatter
- *   .starlingai/skills/<slug>/skill.meta.json   ← outcome stats + embedding
- *   .starlingai/skills/<slug>/skill.history.json ← bounded mutation history for rollback
- *   .starlingai/skills/<slug>/{references,templates,scripts,assets}/... ← support files
+ * directory (workspaceStateDir), shown here as `<state>`: `<shared>/.starlingai` for the shared root,
+ * and `<shared>/.starlingai/users/<seg>` for an account's own root, which keeps no gateway state
+ * inside the directory its sandboxes are handed:
+ *   <state>/skills/<slug>/SKILL.md          ← portable Markdown + frontmatter
+ *   <state>/skills/<slug>/skill.meta.json   ← outcome stats + embedding
+ *   <state>/skills/<slug>/skill.history.json ← bounded mutation history for rollback
+ *   <state>/skills/<slug>/{references,templates,scripts,assets}/... ← support files
  *
  * Security:
  * - Credential-shaped content is rejected before persistence (same RE family as
