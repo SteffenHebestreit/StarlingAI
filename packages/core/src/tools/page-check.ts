@@ -31,18 +31,21 @@
  * So execution moved out of this process entirely (runScriptsIsolated → page-check-worker.ts):
  * a child node with a scrubbed environment, a working directory in the OS temp dir, a hard
  * kill, and no shared memory with the gateway. An escape there finds no secrets, no sessions
- * and no event loop to block. The child runs as the same OS user and can still reach the
- * filesystem — full containment belongs to the sandbox runner (shell_exec / run_script); this
- * is the bounded check that can run on every build without one.
+ * and no event loop to block. The child also runs under Node's permission model (see
+ * confinedWorkerFlags): it reads its own modules and nothing else, and starts no process, no
+ * worker and no addon. Full containment still belongs to the sandbox runner (shell_exec /
+ * run_script); this is the bounded check that can run on every build without one.
  */
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import * as nodeModule from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { judgeCanvasPainting, type CanvasPaintReport } from "./canvas-geometry.js";
 import { childLogger } from "../logger.js";
+import { logAudit } from "../audit/logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { resolvePathWithinWorkspace } from "./workspace-path.js";
 import {
@@ -77,23 +80,104 @@ const ISOLATED_RUN_TIMEOUT_MS = 25_000;
 const ISOLATED_MAX_OUTPUT_BYTES = 4_000_000;
 
 /**
+ * THE CHILD'S RIGHTS, NOT ONLY ITS ENVIRONMENT.
+ *
+ * A scrubbed environment keeps the secrets out of the child's own `process.env`, but an escaped
+ * page still had a whole node process with the gateway's uid behind it: it could read
+ * /proc/<gateway pid>/environ (same uid, every secret the gateway holds), the credential store,
+ * every account's workspace, the config, and start any program. Measured in the gateway image
+ * before this: /proc/1/environ, /config/starlingai.json and `id` through execSync all answered.
+ *
+ * So the child starts under Node's permission model. It may read exactly what it loads: the
+ * directory its own modules sit in (the compiled dist/tools/, or src/tools/ from source) and the
+ * TypeScript package the runner parses the page with. Nothing else, and not the page's folder
+ * either: the parent reads the page's scripts and hands them over on stdin (collectScripts), so
+ * the child never opens a file of the page's. It may write nothing, and starts no child process,
+ * no worker thread, no addon and no WASI module, since none of those is granted.
+ *
+ * THE NETWORK IS NOT COVERED ON NODE 22. Its permission model has no network permission, so an
+ * escaped page can still open sockets from the gateway's network namespace there. It carries no
+ * credentials to them (the environment is scrubbed and no file holding one is readable), but a
+ * service that asks for none is reachable. Node 25 added `--allow-net`; where the runtime knows
+ * that flag the network is denied too, because it is never granted. Signals are not covered on
+ * any version: the child runs as the gateway's uid and could signal it. Both are the sandbox
+ * runner's to close, not this check's.
+ *
+ * The flag is `--permission` from Node 22.13 and `--experimental-permission` before it; a
+ * runtime with neither gets no worker at all (null below): a page is not run unconfined.
+ */
+function permissionFlag(): string | null {
+  const flags = process.allowedNodeEnvironmentFlags;
+  if (flags.has("--permission")) return "--permission";
+  if (flags.has("--experimental-permission")) return "--experimental-permission";
+  return null;
+}
+
+/** What the worker at `workerFile` may read: its own directory and the TypeScript package. */
+function workerReadGrants(workerFile: string): string[] {
+  const grants = [dirname(workerFile)];
+  // The runner sits next to the worker and loads TypeScript with createRequire from there, so
+  // the lookup paths are these, and the first that holds the package is the one Node uses.
+  const lookup = nodeModule.createRequire(workerFile).resolve.paths("typescript") ?? [];
+  const found = lookup.map((dir) => join(dir, "typescript")).find((candidate) => existsSync(candidate));
+  if (found) grants.push(found);
+  return grants;
+}
+
+/**
+ * `--preserve-symlinks` keeps the TypeScript package at the path resolution found it by. Without
+ * it, Node takes the realpath of a pnpm link by reading every directory above it (the worktree's
+ * node_modules junction on Windows), and each of those would need a grant of its own, whole
+ * subtree included.
+ */
+function confinedWorkerFlags(permission: string, workerFile: string): string[] {
+  return [permission, "--preserve-symlinks", ...workerReadGrants(workerFile).map((path) => `--allow-fs-read=${path}`)];
+}
+
+/**
+ * From source the worker is TypeScript importing its siblings as `./x.js`, the way tsc wants
+ * them written. Node strips the types itself but does not map `.js` to `.ts`, and tsx (which
+ * did) transforms through esbuild in a child process, which the confined worker may not start.
+ * This hook does the mapping in-thread (module.registerHooks, Node 22.15+), for a relative
+ * `.js` import from a `.ts` file that resolves to nothing.
+ */
+const SOURCE_RESOLVE_HOOK = String.raw`import { registerHooks } from "node:module";
+registerHooks({
+  resolve(specifier, context, next) {
+    try {
+      return next(specifier, context);
+    } catch (err) {
+      const fromTs = typeof context.parentURL === "string" && context.parentURL.endsWith(".ts");
+      if (err?.code !== "ERR_MODULE_NOT_FOUND" || !fromTs || !/^\.\.?\//.test(specifier) || !specifier.endsWith(".js")) throw err;
+      return next(specifier.slice(0, -3) + ".ts", context);
+    }
+  },
+});`;
+
+/**
  * How to start the worker, most-likely-correct first. Deployed we run compiled JS next to this
- * file; from source (vitest, `pnpm dev`) the sibling is still TypeScript, which recent Node
- * runs directly and older Node needs `tsx` for — tsx being the devDependency every other
- * source-mode entrypoint in this package already uses. The first candidate that answers is
- * cached, so the fallback costs one spawn per process, not one per check.
+ * file; from source (vitest, `pnpm dev`) the sibling is still TypeScript, which Node runs with
+ * its own type stripping and the resolve hook above. Every candidate runs confined; the first
+ * that answers is cached, so the fallback costs one spawn per process, not one per check.
  */
 function workerCommandCandidates(): string[][] {
+  const permission = permissionFlag();
+  if (!permission) return [];
   const candidates: string[][] = [];
   const compiled = fileURLToPath(new URL("./page-check-worker.js", import.meta.url));
-  if (existsSync(compiled)) candidates.push([compiled]);
+  if (existsSync(compiled)) candidates.push([...confinedWorkerFlags(permission, compiled), compiled]);
   const source = fileURLToPath(new URL("./page-check-worker.ts", import.meta.url));
-  if (existsSync(source)) {
-    candidates.push([source]);
-    try {
-      const tsx = pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
-      candidates.push(["--import", tsx, source]);
-    } catch { /* tsx is a devDependency; absent in a production install, where the .js exists */ }
+  if (existsSync(source) && typeof nodeModule.registerHooks === "function") {
+    // Type stripping is on by default from Node 22.18; before that it takes the flag.
+    const stripTypes = !process.features.typescript && process.allowedNodeEnvironmentFlags.has("--experimental-strip-types")
+      ? ["--experimental-strip-types"]
+      : [];
+    candidates.push([
+      ...confinedWorkerFlags(permission, source),
+      ...stripTypes,
+      "--import", `data:text/javascript,${encodeURIComponent(SOURCE_RESOLVE_HOOK)}`,
+      source,
+    ]);
   }
   return candidates;
 }
@@ -169,7 +253,9 @@ export async function runScriptsIsolated(
 ): Promise<RunReport | null> {
   const payload = JSON.stringify({ scripts, ids: [...ids], declared: [...declared.entries()] });
   const candidates = workerCommand ? [workerCommand] : workerCommandCandidates();
-  let lastStderr = "";
+  let lastStderr = candidates.length === 0
+    ? "no confined way to start the worker on this Node (no permission model, or from source without module.registerHooks)"
+    : "";
   for (const argv of candidates) {
     let result: { code: number | null; stdout: string; stderr: string };
     try {
@@ -216,8 +302,15 @@ export async function runScriptsIsolated(
     }
   }
   log.warn({ stderr: lastStderr.slice(0, 500) }, "page check could not start its isolated runner");
+  // A page never runs unconfined, so without a runner the build-quality gate is off. A warning
+  // alone goes unnoticed; the audit trail records it once per process (review 2026-10-12).
+  if (!pageCheckUnavailableReported) {
+    pageCheckUnavailableReported = true;
+    logAudit("page_check_unavailable", { reason: lastStderr.slice(0, 300), node: process.version }, { severity: "warn" });
+  }
   return null;
 }
+let pageCheckUnavailableReported = false;
 
 /**
  * Is this built page actually working? The same judgement verify_page makes, callable from

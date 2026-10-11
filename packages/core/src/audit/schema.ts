@@ -118,6 +118,7 @@ export type CoreAuditEventType =
   | "turn_guidance_applied"
   | "turn_slo_breach"
   | "computer_action"
+  | "page_check_unavailable"
   | "computer_screenshot_analyzed"
   | "computer_credential_prompt_detected"
   | "computer_session_started"

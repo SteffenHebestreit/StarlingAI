@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { RunTurnOptions, TurnOutput } from "../agent/turn-types.js";
 import { PRODUCT } from "../product/index.js";
 import { testAccount } from "./support/test-account.js";
@@ -162,6 +162,35 @@ describe("sessions an entry point opens", () => {
     const session = mods.sessions.getSession(reply!.payload!.sessionId!)!;
     expect(session.identity()).toEqual(ALICE);
     expect(session.getWorkspacePath()).toBe(join(workspace, "users", alice.id));
+    connection.close();
+  });
+
+  // With gateway.sessionWorkspaceRoot set, alice could root her session at users/<root>, and the
+  // session nested her own level under it: users/<root>/users/<alice>, inside the admin's root.
+  it("a dashboard socket may not root a session in another account's workspace", async () => {
+    configure(true, { gateway: { sessionWorkspaceRoot: FILE_DIR } });
+    const sent: string[] = [];
+    const ws = { readyState: 1, send: (data: string) => { sent.push(data); }, close() {} };
+    const caller = await mods.auth.authenticatedUserFromToken(await mods.auth.createToken("alice", alice.claims));
+    const connection = new mods.rpc.RpcConnection(ws as never, caller!.username, caller!.role, caller!);
+    const create = async (id: string, workspacePath: string) => {
+      await connection.handleMessage(JSON.stringify({ id, method: "session.create", params: { workspacePath } }));
+      return sent.map((data) => JSON.parse(data) as { id?: string; ok?: boolean; error?: string; payload?: { sessionId?: string } }).find((message) => message.id === id);
+    };
+    const deployment = basename(workspace);
+
+    const foreign = await create("c1", `${deployment}/users/${root.id}`);
+    expect(foreign?.ok).toBe(false);
+    expect(foreign?.error).toMatch(/not your own account's workspace/);
+    expect((await create("c2", `${deployment}/users/${root.id}/users/${alice.id}`))?.ok).toBe(false);
+
+    const own = await create("c3", `${deployment}/users/${alice.id}/evals`);
+    expect(own?.ok).toBe(true);
+    expect(mods.sessions.getSession(own!.payload!.sessionId!)!.getWorkspacePath())
+      .toBe(join(workspace, "users", alice.id, "evals", "users", alice.id));
+    const top = await create("c4", deployment);
+    expect(top?.ok).toBe(true);
+    expect(mods.sessions.getSession(top!.payload!.sessionId!)!.getWorkspacePath()).toBe(join(workspace, "users", alice.id));
     connection.close();
   });
 

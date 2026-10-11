@@ -219,6 +219,18 @@ export async function ingestDocumentText(input: {
 
   log.info({ source, title: input.title, chunks: res.chunkCount }, "ingested document into engram");
 
+  // The file's key in the ingesting caller's own namespace, recorded with it: the download and
+  // removal routes run as whoever asks, and a workspace document is fetched by accounts other than
+  // the one that stored it. A path the caller may not store at gets no key, and nothing is read
+  // back for it.
+  let storeKey: string | undefined;
+  if (input.file?.relativePath) {
+    const { callerUploadKey } = await import("../storage/object-store.js");
+    try {
+      storeKey = (await callerUploadKey(input.file.relativePath)).key;
+    } catch { /* refused: recorded without a key */ }
+  }
+
   // Record in the registry so the management UI can list/view/remove it.
   const { registerDocument } = await import("./document-registry.js");
   await registerDocument({
@@ -227,6 +239,7 @@ export async function ingestDocumentText(input: {
     source,
     filename: input.title,
     ...(input.file?.relativePath ? { relativePath: input.file.relativePath } : {}),
+    ...(storeKey ? { storeKey } : {}),
     ...(input.file?.contentType ? { contentType: input.file.contentType } : {}),
     ...(typeof input.file?.size === "number" ? { size: input.file.size } : {}),
     chunkCount: res.chunkCount,
@@ -604,9 +617,12 @@ export async function augmentTurnWithDocuments(input: {
         // traversal guard still has to run on a client-supplied path), then read through
         // the backend-aware store, falling back to the disk for genuine workspace files
         // that were never routed through an upload.
-        const { resolved } = resolvePathWithinWorkspace(att.relativePath, input.workspacePath);
-        const storeKey = att.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-        const stored = await getUpload(storeKey);
+        // The store is asked for the path the guard approved, and answers from the caller's own
+        // namespace. The raw client path went to a store that joined it to the shared root, so an
+        // attachment naming "users/<other>/generated/x.pdf" was read, and ingested, from another
+        // account's root.
+        const { resolved, relativePath } = resolvePathWithinWorkspace(att.relativePath, input.workspacePath);
+        const stored = await getUpload(relativePath);
         const bytes = stored ?? new Uint8Array(await readFile(resolved));
         const filename = att.filename || basename(att.relativePath);
         const outcome = await ingestDocumentBytes({
@@ -615,7 +631,7 @@ export async function augmentTurnWithDocuments(input: {
           contentType: att.contentType || "application/octet-stream",
           scope: "session",
           ctx: input.ctx,
-          relativePath: att.relativePath,
+          relativePath,
         });
         if (outcome.ok) {
           ingested += 1;
@@ -764,19 +780,15 @@ export async function forgetDocument(
     const { unregisterDocument } = await import("./document-registry.js");
     const removed = await unregisterDocument(documentId, source);
     if (removed.length > 0) {
-      const [{ rm }, { resolvePathWithinWorkspace }] = await Promise.all([
-        import("node:fs/promises"),
-        import("../tools/workspace-path.js"),
-      ]);
-      const workspacePath = getConfig().workspacePath;
+      // Through the store, by the key recorded at ingest, or else by the path in the caller's
+      // own namespace. The path was joined to the SHARED root here, and a client names the path
+      // an attachment is recorded under: an account that attached "users/<other>/generated/x.pdf"
+      // from its own root and then removed the document deleted the other account's file. And
+      // under S3 the object was never deleted at all.
+      const { deleteUpload, deleteUploadByStoreKey } = await import("../storage/object-store.js");
       for (const entry of removed) {
-        if (!entry.relativePath) continue;
-        try {
-          const { resolved } = resolvePathWithinWorkspace(entry.relativePath, workspacePath);
-          await rm(resolved, { force: true });
-        } catch (err) {
-          log.warn({ err, path: entry.relativePath }, "could not delete persisted file for removed document");
-        }
+        if (entry.storeKey) await deleteUploadByStoreKey(entry.storeKey);
+        else if (entry.relativePath) await deleteUpload(entry.relativePath);
       }
     }
   } catch (err) {
