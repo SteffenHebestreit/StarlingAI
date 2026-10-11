@@ -14,7 +14,7 @@
  * (Windows without the privilege); a junction is a link to a directory, which is what these cases
  * need.
  */
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,7 @@ const fsHooks = vi.hoisted(() => ({
   renameFails: null as ((from: string) => boolean) | null,
   openFails: null as ((path: string) => boolean) | null,
   readdirFails: null as ((path: string) => boolean) | null,
+  touched: null as ((path: string) => void) | null,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -54,7 +55,11 @@ vi.mock("node:fs", async (importOriginal) => {
     if (fsHooks.readdirFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, scandir '${String(path)}'`), { code: "EACCES" });
     return (real.readdirSync as (...args: unknown[]) => unknown)(path, ...rest);
   }) as typeof real.readdirSync;
-  return { ...real, renameSync, openSync, readdirSync, default: { ...real, renameSync, openSync, readdirSync } };
+  const utimesSync = ((path: Parameters<typeof real.utimesSync>[0], ...rest: unknown[]) => {
+    fsHooks.touched?.(String(path));
+    return (real.utimesSync as (...args: unknown[]) => void)(path, ...rest);
+  }) as typeof real.utimesSync;
+  return { ...real, renameSync, openSync, readdirSync, utimesSync, default: { ...real, renameSync, openSync, readdirSync, utimesSync } };
 });
 
 /** The relocation's own logger, to read what it says and at which level. */
@@ -106,6 +111,7 @@ afterEach(() => {
   fsHooks.renameFails = null;
   fsHooks.openFails = null;
   fsHooks.readdirFails = null;
+  fsHooks.touched = null;
   for (const fn of Object.values(relocationLogger)) fn.mockClear();
   _clearDurableMemoryCaches();
   _resetTrajectoryInvalidationForTests();
@@ -441,6 +447,86 @@ describe("the boot's move of the state still in an account's root", () => {
     rmSync(marker(shared));
     writeFileSync(lock, `${hostname()} ${process.pid}\n`);
     expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ complete: true });
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("says that it waits for the lock, and again while it keeps waiting", async () => {
+    const { shared, old } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, `${hostname()} ${process.ppid}\n`);
+    const pass = relocateAccountWorkspaceState(shared);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(relocationLogger.info).toHaveBeenCalledTimes(1);
+    expect(relocationLogger.info).toHaveBeenCalledWith({ lock, holder: `${hostname()} ${process.ppid}` }, expect.stringMatching(/^Waiting for another process/));
+    expect(relocationLogger.warn).not.toHaveBeenCalled();
+
+    // Half a minute on, it says so again, and for how long.
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 31_000);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(relocationLogger.warn).toHaveBeenCalledTimes(1);
+    expect(relocationLogger.warn).toHaveBeenCalledWith(expect.objectContaining({ lock, waitedMs: expect.any(Number) }), expect.stringMatching(/^Still waiting/));
+    expect((relocationLogger.warn.mock.calls[0]![0] as { waitedMs: number }).waitedMs).toBeGreaterThanOrEqual(30_000);
+    rmSync(lock);
+    expect(await pass).toMatchObject({ moved: [ALICE], complete: true });
+  });
+
+  it("keeps its lock touched while it copies, not only between accounts", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    for (const name of ["a.json", "b.json", "c.json"]) writeFileSync(join(old, "memory", name), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    const copying = join(shared, STATE, "users", `.${ALICE}.copying`);
+    fsHooks.renameFails = (from) => from === old;
+    // Each reading of the clock is two seconds after the last, so no chance to touch the lock is skipped.
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => (clock += 2_000));
+    const touchedWhileCopying: boolean[] = [];
+    fsHooks.touched = (path) => {
+      if (path === lock) touchedWhileCopying.push(existsSync(copying));
+    };
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ moved: [ALICE], complete: true });
+    expect(readdirSync(join(state, "memory")).sort()).toEqual(["a.json", "b.json", "c.json"]);
+    expect(touchedWhileCopying.filter(Boolean).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("leaves the lock at the end to another process that took it over meanwhile", async () => {
+    const { shared, old } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    const theirs = `${hostname()} ${process.ppid} their-token\n`;
+    // While this pass moves her state, another process judges it dead and takes the lock over.
+    fsHooks.renameFails = (from) => {
+      if (from === old) writeFileSync(lock, theirs);
+      return false;
+    };
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ moved: [ALICE], complete: true });
+    expect(readFileSync(lock, "utf8")).toBe(theirs);
+    expect(relocationLogger.warn).toHaveBeenCalledWith({ lock, holder: `${hostname()} ${process.ppid}` }, expect.stringMatching(/took over the lock/));
+  });
+
+  it("waits for another host's lock while it is touched, and takes it over once it was left before this process started", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    // A scene worker's pass in another container, touched just now: waited for.
+    writeFileSync(lock, "another-host 1 their-token\n");
+    const pass = relocateAccountWorkspaceState(shared);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(existsSync(state)).toBe(false);
+
+    // Its last touch was before this process started (that container is gone; a restarted one has
+    // another hostname): taken over without waiting out the ten minutes.
+    const started = Date.now() - process.uptime() * 1000;
+    const before = new Date(started - 120_000);
+    utimesSync(lock, before, before);
+    const outcome = await Promise.race([pass, new Promise((done) => setTimeout(() => done("still waiting"), 2_000))]);
+    expect(outcome).toMatchObject({ moved: [ALICE], complete: true });
     expect(existsSync(lock)).toBe(false);
   });
 });
