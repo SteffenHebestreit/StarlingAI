@@ -11,9 +11,12 @@
  * A directory link is a junction on Windows, which needs no privilege; a file link needs one there,
  * so the cases that need it run only where a file symlink can be made.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error — plain .mjs, no types
 import * as configShardsModule from "../../../../scripts/config-shards.mjs";
@@ -21,14 +24,15 @@ import * as configShardsModule from "../../../../scripts/config-shards.mjs";
 const { collectShardPaths } = configShardsModule as { collectShardPaths: (dir: string, options?: { excludeZones?: string[] }) => string[] };
 
 const warnings: Array<{ logger: string; fields: unknown; message: unknown }> = [];
+const errors: Array<{ logger: string; fields: unknown; message: unknown }> = [];
 
 vi.mock("../logger.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../logger.js")>();
   const capture = <T extends object>(name: string, target: T): T => new Proxy(target, {
     get(t, property, receiver) {
-      if (property === "warn") {
+      if (property === "warn" || property === "error") {
         return (...args: unknown[]) => {
-          warnings.push({ logger: name, fields: args[0], message: args[args.length - 1] });
+          (property === "warn" ? warnings : errors).push({ logger: name, fields: args[0], message: args[args.length - 1] });
         };
       }
       return Reflect.get(t, property, receiver) as unknown;
@@ -74,6 +78,7 @@ const canLinkFiles = (() => {
 
 const norm = (path: unknown) => String(path).replace(/\\/g, "/").toLowerCase();
 const warnedAbout = (path: string) => warnings.some((warning) => norm((warning.fields as { path?: unknown } | null)?.path) === norm(path));
+const erredAbout = (path: string) => errors.some((error) => norm((error.fields as { path?: unknown } | null)?.path) === norm(path));
 
 let root = "";
 let outside = "";
@@ -103,6 +108,7 @@ beforeEach(() => {
     SAI_AUDIT_LOG: process.env["SAI_AUDIT_LOG"],
   };
   warnings.length = 0;
+  errors.length = 0;
   vi.resetModules();
 });
 
@@ -142,6 +148,28 @@ describe("the config loader", () => {
     const { loadConfig } = await loaderFor(layout);
     expect(Object.keys(loadConfig({ skipCompiledWrite: true }).subAgents)).not.toContain("evil");
     expect(warnedAbout(link)).toBe(true);
+  });
+
+  it("says as an error, not a warning, that a linked directory at the top of a config tree is left out", async () => {
+    const layout = buildLayout();
+    const kept = join(root, "kept-gateway");
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, "10-gateway.jsonc"), JSON.stringify({ gateway: { port: 18_999 } }));
+    const link = join(layout.config, "gateway");
+    linkDirectory(kept, link);
+    const { loadConfig } = await loaderFor(layout);
+    loadConfig({ skipCompiledWrite: true });
+    expect(erredAbout(link)).toBe(true);
+    expect(warnedAbout(link)).toBe(false);
+  });
+
+  it("reads a config directory that is itself a link", async () => {
+    const layout = buildLayout();
+    const linkedConfig = join(root, "linked-config");
+    linkDirectory(layout.config, linkedConfig);
+    const { loadConfig } = await loaderFor({ ...layout, config: linkedConfig });
+    expect(loadConfig({ skipCompiledWrite: true }).providers).toHaveProperty("lmstudio");
+    expect(errors).toEqual([]);
   });
 });
 
@@ -224,6 +252,59 @@ describe("the e2e setup's shard scan (scanAuthUsers)", () => {
       canBuild: false,
     });
     expect(scan.links.map(norm)).toEqual([norm(link)]);
+  });
+});
+
+/** `config build` itself (scripts/config-layout.mjs), run on a copy of its scripts beside `layout`. */
+function runBuild(repo: string): { status: number | null; stdout: string; stderr: string } {
+  const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+  mkdirSync(join(repo, "scripts"), { recursive: true });
+  for (const script of ["config-layout.mjs", "config-shards.mjs", "config-zones.mjs", "product.mjs"]) {
+    copyFileSync(join(repoRoot, "scripts", script), join(repo, "scripts", script));
+  }
+  // The build's one dependency, where node resolves it from the copy.
+  const json5 = dirname(createRequire(join(repoRoot, "scripts", "config-layout.mjs")).resolve("json5/package.json"));
+  mkdirSync(join(repo, "node_modules"), { recursive: true });
+  linkDirectory(json5, join(repo, "node_modules", "json5"));
+  const run = spawnSync(process.execPath, [join(repo, "scripts", "config-layout.mjs"), "build"], { cwd: repo, encoding: "utf8" });
+  return { status: run.status, stdout: run.stdout, stderr: run.stderr };
+}
+
+describe("config build (scripts/config-layout.mjs)", () => {
+  it("fails, naming it and how to fix it, on a linked directory at the top of a config tree, and writes nothing", () => {
+    const layout = buildLayout();
+    const kept = join(root, "kept-gateway");
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, "10-gateway.jsonc"), JSON.stringify({ gateway: { port: 18_999 } }));
+    const link = join(layout.config, "gateway");
+    linkDirectory(kept, link);
+    const build = runBuild(root);
+    expect(build.status).toBe(1);
+    expect(norm(build.stderr)).toContain(norm(link));
+    expect(build.stderr).toMatch(/Replace the link with what it points to/);
+    expect(build.stdout).not.toMatch(/Built/);
+    expect(existsSync(join(root, "starlingai.json"))).toBe(false);
+  });
+
+  it("builds from a config/ and a workspace/ that are themselves links", () => {
+    const layout = buildLayout();
+    const real = join(root, "real");
+    mkdirSync(real, { recursive: true });
+    const config = join(real, "config");
+    const workspace = join(real, "workspace");
+    // The layout moved aside, and config/ and workspace/ at the root are links to it.
+    linkDirectory(layout.config, config);
+    linkDirectory(layout.workspace, workspace);
+    const repo = join(root, "repo");
+    mkdirSync(repo, { recursive: true });
+    linkDirectory(config, join(repo, "config"));
+    linkDirectory(workspace, join(repo, "workspace"));
+    const build = runBuild(repo);
+    expect(build.status, build.stderr).toBe(0);
+    expect(build.stdout).toMatch(/Built starlingai\.json/);
+    const built = JSON.parse(readFileSync(join(repo, "starlingai.json"), "utf8")) as { providers?: unknown; subAgents?: Record<string, unknown> };
+    expect(built.providers).toHaveProperty("lmstudio");
+    expect(Object.keys(built.subAgents ?? {})).toEqual(["good"]);
   });
 });
 

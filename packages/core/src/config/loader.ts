@@ -4,7 +4,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES, sweepEntryKind } from "../tools/workspace-zones.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES, sweepEntryKind, topLevelLinkHoldsConfig } from "../tools/workspace-zones.js";
 import { isWorkspaceContainmentError, withContainedWorkspaceFile } from "../tools/workspace-containment.js";
 import { logger } from "../logger.js";
 
@@ -374,7 +374,15 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
       // By lstat, never through a link (sweepEntryKind): the full-scope sandbox writes the zones.
       const kind = sweepEntryKind(nextPath);
       if (kind === "link") {
-        if (!isNonConfigShardDirectory(entry.name, depth, zones)) {
+        if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
+        if (depth === 0 && topLevelLinkHoldsConfig(nextPath, isSupportedConfigFile(entry.name))) {
+          // The operator's layout, not a sandbox's: everything behind it is missing from the config.
+          logger.error(
+            { path: nextPath },
+            "A link at the top of the config tree is not read, so everything behind it is left out of the configuration. Replace "
+              + "the link with what it points to, or make the whole config or workspace directory the link instead, which is read through",
+          );
+        } else {
           logger.warn({ path: nextPath }, "Skipped a link in the config tree: a shard is read only from a regular file, and no link is followed");
         }
         continue;

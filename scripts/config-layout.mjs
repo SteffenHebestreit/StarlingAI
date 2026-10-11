@@ -7,7 +7,7 @@ import { PRODUCT } from "./product.mjs";
 import { NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 // Shard walk, order (code point, not locale) and merge live in one place so the routing
 // taxonomy check (routing-taxonomy-check.mjs) merges exactly what this build does.
-import { collectShardPaths, deepMerge, sweepEntryKind, warnSkippedLink } from "./config-shards.mjs";
+import { collectShardPaths, deepMerge, LinkedConfigEntryError, sweepEntryKind, warnSkippedLink } from "./config-shards.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultSourceFile = join(repoRoot, PRODUCT.configFileName);
@@ -125,6 +125,26 @@ if (command === "split") {
 // ---------------------------------------------------------------------------
 
 function buildTwoZone() {
+  let merged;
+  try {
+    merged = mergeShards();
+  } catch (err) {
+    if (!(err instanceof LinkedConfigEntryError)) throw err;
+    // Not built: a starlingai.json without everything behind the link is not the configuration.
+    console.error(`[config-layout] ERROR: ${err.message}`);
+    console.error(`[config-layout] Not built; ${relative(repoRoot, defaultTargetFile)} is unchanged.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (merged === null) return;
+
+  mkdirSync(dirname(defaultTargetFile), { recursive: true });
+  writeFileSync(defaultTargetFile, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  console.log(`[config-layout] Built ${relative(repoRoot, defaultTargetFile)}`);
+}
+
+/** Every shard of the layout merged, or null where there is no layout (said, with exit code 1). */
+function mergeShards() {
   let merged = {};
 
   if (existsSync(defaultConfigDir) && isDir(defaultConfigDir)) {
@@ -149,12 +169,9 @@ function buildTwoZone() {
   } else {
     console.error("[config-layout] No config/ directory found. Run 'config split' first or create config/ + workspace/ manually.");
     process.exitCode = 1;
-    return;
+    return null;
   }
-
-  mkdirSync(dirname(defaultTargetFile), { recursive: true });
-  writeFileSync(defaultTargetFile, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-  console.log(`[config-layout] Built ${relative(repoRoot, defaultTargetFile)}`);
+  return merged;
 }
 
 // ---------------------------------------------------------------------------

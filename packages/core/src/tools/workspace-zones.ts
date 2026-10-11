@@ -8,7 +8,7 @@
  * concurrent dynamic imports do) waited on each other for good. tools/workspace-path.ts re-exports
  * every one of them.
  */
-import { lstatSync } from "node:fs";
+import { lstatSync, statSync } from "node:fs";
 import { relative, sep } from "node:path";
 
 /**
@@ -97,6 +97,27 @@ export function sweepEntryKind(path: string): "file" | "directory" | "link" | "o
   if (stats.isSymbolicLink()) return "link";
   if (stats.isDirectory()) return "directory";
   return stats.isFile() ? "file" : "other";
+}
+
+/**
+ * Whether a link a sweep found at the TOP of a config tree (depth 0, a name the sweep reads: not
+ * hidden, not a working zone) stands for config: a directory, a shard by its name (`isShard`), or a
+ * link that leads nowhere, which could have been either. Mirrors topLevelLinkHoldsConfig in
+ * scripts/config-shards.mjs, where the build stops on one.
+ *
+ * Skipped like a link further down, with a warning, it dropped everything behind it from the
+ * configuration: config/gateway/ linked to a directory kept elsewhere took the gateway's settings
+ * out. No sandbox writes that depth, so such a link is the operator's layout; the loader says so as
+ * an error. A config or workspace directory that is itself a link is the swept directory, which is
+ * read through.
+ */
+export function topLevelLinkHoldsConfig(path: string, isShard: boolean): boolean {
+  if (isShard) return true;
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return true;
+  }
 }
 
 /**
