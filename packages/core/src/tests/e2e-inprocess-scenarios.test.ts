@@ -172,6 +172,9 @@ describe("in-process specialist scenarios", () => {
     const other = sh(command.replace("Polarstadt", "Nordhafen"), ws);
     expect(other.success).toBe(true);
     expect(evaluateEventExpectations(step.expect, run("shell_agent", [call("shell_agent", "shell_exec", { command }, other)]))).not.toEqual([]);
+    // ...and the file it wrote is not the one the GET after the turn accepts.
+    const otherFile = readFileSync(join(ws, "generated", "e2e-shell", "zeilen.txt"), "utf8");
+    expect((httpOf(scenario, "file-written").expect?.bodyIncludes ?? []).every((needle) => otherFile.includes(needle))).toBe(false);
     // A run that went to a remote host fails it as well.
     expect(evaluateEventExpectations(step.expect, run("shell_agent", [
       call("shell_agent", "shell_exec", { command }, printed),
@@ -181,6 +184,8 @@ describe("in-process specialist scenarios", () => {
     const checksum = (output: string) => /\b[0-9a-f]{64}\b/.exec(output)?.[0] ?? "";
     expect(checkReply(step.expect!.reply!, `Die Datei hat 3 Zeilen, die SHA-256-Prüfsumme beginnt mit ${checksum(printed.output).slice(0, 12)}.`)).toEqual([]);
     expect(checkReply(step.expect!.reply!, `Die Datei hat 3 Zeilen, die SHA-256-Prüfsumme beginnt mit ${checksum(other.output).slice(0, 12)}.`)).not.toEqual([]);
+    // The right checksum with a wrong line count.
+    expect(checkReply(step.expect!.reply!, `Die Datei hat 4 Zeilen, die SHA-256-Prüfsumme beginnt mit ${checksum(printed.output).slice(0, 12)}.`)).not.toEqual([]);
   });
 
   it.skipIf(!posixShell)("git_developer: the seed resets the repository, so every run commits the root commit of feature/hinweis, and nothing else passes", () => {
@@ -231,6 +236,37 @@ describe("in-process specialist scenarios", () => {
       // A commit of "." takes only the two seeded files: the state directory never enters the history.
       expect(git("ls-tree", "-r", "--name-only", "HEAD").output.trim().split(/\r?\n/)).toEqual([".gitignore", "generated/e2e-git/hinweis.txt"]);
     }
+
+    // A seed that staged only the .gitignore leaves the note untracked: its row fails.
+    const partialSeed = seed.replace("git add .gitignore generated/e2e-git/hinweis.txt", "git add .gitignore");
+    expect(partialSeed).not.toBe(seed);
+    const partial = sh(partialSeed, ws, env);
+    expect(partial.success, partial.output).toBe(true);
+    expect(evaluateEventExpectations(seedTurn.expect, run("shell_agent", [call("shell_agent", "shell_exec", { command: seed }, partial)]))).not.toEqual([]);
+
+    // Each binding field of the two rows: a run that differs in that field alone fails.
+    expect(sh(seed, ws, env).success).toBe(true);
+    const checkedOut = git("checkout", "-b", "feature/hinweis");
+    const committed = gitCommit("docs: add hinweis");
+    expect(committed.success, committed.output).toBe(true);
+    expect(evaluateEventExpectations(commitTurn.expect, commitRows(checkedOut, committed, "docs: add hinweis"))).toEqual([]);
+    const status = call("git_developer", "git_status", {}, git("status", "--porcelain=v2", "--branch"));
+    const commitRow = call("git_developer", "git_commit", { message: "docs: add hinweis", files: ["."] }, committed);
+    const checkoutRow = (args: Record<string, unknown>, outcome: ToolOutcome) => call("git_developer", "git_checkout", args, outcome);
+    const branchArgs = { ref: "feature/hinweis", createBranch: true };
+    for (const [label, rows] of [
+      // The branch made some other way (git_developer also holds shell_exec).
+      ["no git_checkout", [status, commitRow]],
+      ["a checkout of another ref", [status, checkoutRow({ ref: "main" }, checkedOut), commitRow]],
+      ["a failed checkout", [status, checkoutRow(branchArgs, { ...checkedOut, success: false, error: "Exit code 128" }), commitRow]],
+      ["a checkout through the repository mount", [status, checkoutRow(branchArgs, { ...checkedOut, metadata: { mountScope: "repo" } }), commitRow]],
+      ["a commit through the repository mount", [status, checkoutRow(branchArgs, checkedOut), call("git_developer", "git_commit", { message: "docs: add hinweis", files: ["."] }, { ...committed, metadata: { mountScope: "repo" } })]],
+      ["a pull request", [status, checkoutRow(branchArgs, checkedOut), commitRow, call("git_developer", "github_pr_create", { title: "docs: add hinweis", head: "feature/hinweis" }, { success: false, output: "", error: "no remote" })]],
+    ] as const) {
+      expect(evaluateEventExpectations(commitTurn.expect, run("git_developer", [...rows])), label).not.toEqual([]);
+    }
+    expect(checkReply(commitTurn.expect!.reply!, "Branch feature/hinweis angelegt und dort committet: docs: add hinweis.")).toEqual([]);
+    expect(checkReply(commitTurn.expect!.reply!, "Neuer Branch angelegt und committet: docs: add hinweis.")).not.toEqual([]);
 
     // Without the reset, the next commit on the branch is no root commit.
     writeFileSync(join(ws, "generated", "e2e-git", "hinweis.txt"), "Zweite Zeile\n", "utf8");
@@ -320,6 +356,22 @@ describe("in-process specialist scenarios", () => {
     const green = runSuite();
     expect(green.status).toBe(0);
     expect(green.output).not.toContain("245.64000000000001");
+    // The GETs after the turn see that fix, and a weakened assertion.
+    const unchanged = (id: string, content: string) => (httpOf(scenario, id).expect?.bodyIncludes ?? []).every((needle) => content.includes(needle));
+    expect(unchanged("code-unchanged", readFileSync(join(ws, files[0]!.path), "utf8"))).toBe(false);
+    expect(unchanged("test-unchanged", files[1]!.content.replace("assert.equal(zeilenpreis(8.9, 30), 245.64);", "assert.equal(Math.round(zeilenpreis(8.9, 30) * 100) / 100, 245.64);"))).toBe(false);
+    // A run whose output went nowhere (`> /dev/null`) shows nothing it could report.
+    expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [call("qa_guard", "shell_exec", { command: `${command} > /dev/null 2>&1` }, {
+      success: false,
+      output: "",
+      error: "Exit code 1",
+      metadata: { sandboxed: true, exitCode: 1, programOutputChars: 0 },
+    })]))).not.toEqual([]);
+    // Rewriting the test inside the verification run is a write of the seed.
+    expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [
+      viaShell,
+      call("qa_guard", "write_file", { path: "generated/e2e-qa/staffel.test.mjs", content: "// emptied\n" }, { success: true, output: "written" }),
+    ]))).not.toEqual([]);
     // Fixing it inside the verification run is an edit of the seed.
     expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [
       viaShell,
@@ -372,15 +424,27 @@ describe("in-process specialist scenarios", () => {
       output: "## Tool Development Session Started",
       metadata: { toolName: "celsius_to_fahrenheit" },
     });
-    const verdict = (tested: ToolOutcome, ...more: AuditEventLike[][]) => evaluateEventExpectations(step.expect, run("tool_developer", [
-      started,
+    const verdictAfter = (start: AuditEventLike[], tested: ToolOutcome, ...more: AuditEventLike[][]) => evaluateEventExpectations(step.expect, run("tool_developer", [
+      start,
       call("tool_developer", "tool_dev_test", { sessionId: "dev-1", testCases: [] }, tested),
       ...more,
     ]));
+    const verdict = (tested: ToolOutcome, ...more: AuditEventLike[][]) => verdictAfter(started, tested, ...more);
 
     const green = await report([passed(100, 212), passed(0, 32)]);
     expect(green.output).toMatch(/^## Test Results: 2\/2 passed/);
     expect(verdict(green)).toEqual([]);
+    // A session for another tool, or a start refused because every slot was taken.
+    expect(verdictAfter(call("tool_developer", "tool_dev_start", { toolName: "fahrenheit_to_celsius", description: "Fahrenheit in Celsius" }, {
+      success: true,
+      output: "## Tool Development Session Started",
+      metadata: { toolName: "fahrenheit_to_celsius" },
+    }), green)).not.toEqual([]);
+    expect(verdictAfter(call("tool_developer", "tool_dev_start", { toolName: "celsius_to_fahrenheit", description: "Celsius in Fahrenheit" }, {
+      success: false,
+      output: "",
+      error: "Maximum concurrent dev sessions reached (2). Wait for existing sessions to complete.",
+    }), green)).not.toEqual([]);
     // One case failed: tool_dev_test still succeeds, its report does not.
     expect(verdict(await report([passed(100, 212), { input: { celsius: 0 }, expectedOutput: "32", actualOutput: "-17.78", passed: false, error: "Expected output to contain: \"32\"", durationMs: 40 }]))).not.toEqual([]);
     // Every case passed, but none was 100 °C — durations of 100 and 212 ms are not the case.
@@ -426,6 +490,8 @@ describe("in-process specialist scenarios", () => {
     const ok = await answer(new Response(body, { status: 200, statusText: "OK", headers: { "Content-Type": "application/json; charset=utf-8" } }));
     expect(ok.success, ok.error).toBe(true);
     expect(evaluateEventExpectations(step.expect, run("api_integrator", [call("api_integrator", "http_request", { url, method: "GET" }, ok)]))).toEqual([]);
+    // The same answer for another endpoint is not this endpoint's.
+    expect(evaluateEventExpectations(step.expect, run("api_integrator", [call("api_integrator", "http_request", { url: url.replace("lieferstatus", "bestellungen"), method: "GET" }, ok)]))).not.toEqual([]);
 
     const missing = await answer(new Response("<html>404 Not Found</html>", { status: 404, statusText: "Not Found", headers: { "Content-Type": "text/html" } }));
     expect(evaluateEventExpectations(step.expect, run("api_integrator", [call("api_integrator", "http_request", { url, method: "GET" }, missing)]))).not.toEqual([]);
@@ -440,6 +506,14 @@ describe("in-process specialist scenarios", () => {
 
     expect(checkReply(step.expect!.reply!, `Status 200, Content-Type application/json; charset=utf-8. Das Feld auftraege enthält 3 Einträge, NW-A-2041 hat die Paketnummer ${parcel}.`)).toEqual([]);
     expect(checkReply(step.expect!.reply!, "Status 200, Content-Type application/json. Das Feld auftraege enthält 3 Einträge, NW-A-2041 hat die Paketnummer NWP-7731-0017.")).not.toEqual([]);
+    // Each fact the reply must carry, missing or wrong while the others are right.
+    for (const wrong of [
+      `Status OK, Content-Type application/json. Das Feld auftraege enthält 3 Einträge, NW-A-2041 hat die Paketnummer ${parcel}.`,
+      `Status 200. Das Feld auftraege enthält 3 Einträge, NW-A-2041 hat die Paketnummer ${parcel}.`,
+      `Status 200, Content-Type application/json. Das Feld auftraege enthält 4 Einträge, NW-A-2041 hat die Paketnummer ${parcel}.`,
+    ]) {
+      expect(checkReply(step.expect!.reply!, wrong), wrong).not.toEqual([]);
+    }
   });
 
   it("ops_triage: service_check meeting the fixture's 404 passes, a page that answered fails, and so does a write", async () => {
@@ -470,11 +544,17 @@ describe("in-process specialist scenarios", () => {
       expect(evaluateEventExpectations(step.expect, run("ops_triage", [call("ops_triage", "service_check", { protocol: "http", url }, notFound)]))).toEqual([]);
       // web_fetch meets the same 404 as its error (tools/web.ts).
       expect(evaluateEventExpectations(step.expect, run("ops_triage", [call("ops_triage", "web_fetch", { url }, { success: false, output: "", error: `HTTP 404 from ${url}` })]))).toEqual([]);
-      // A diagnosis that writes a report is no longer read-only.
+      // A diagnosis that writes or edits a file is no longer read-only.
       expect(evaluateEventExpectations(step.expect, run("ops_triage", [
         call("ops_triage", "service_check", { protocol: "http", url }, notFound),
         call("ops_triage", "write_file", { path: "befund.md", content: "404" }, { success: true, output: "written" }),
       ]))).not.toEqual([]);
+      expect(evaluateEventExpectations(step.expect, run("ops_triage", [
+        call("ops_triage", "service_check", { protocol: "http", url }, notFound),
+        call("ops_triage", "edit_file", { path: "befund.md", old_string: "?", new_string: "404" }, { success: true, output: "edited" }),
+      ]))).not.toEqual([]);
+      // A 404 of another address is not this page's.
+      expect(evaluateEventExpectations(step.expect, run("ops_triage", [call("ops_triage", "service_check", { protocol: "http", url: "http://www.nordlicht-werkzeuge.test/kaputt.htm" }, notFound)]))).not.toEqual([]);
 
       status = 200;
       const answered = await check();
@@ -546,10 +626,15 @@ describe("notification scenario with the e-mail channel off", () => {
     // A delivered mail, a mail to someone else, or a fallback to another channel is not this run.
     expect(evaluateEventExpectations(step.expect, run("notification_agent", [call("notification_agent", "send_email", args, { success: true, output: "Email sent to ops@e2e.test with subject \"Deploy OK\"" })]))).not.toEqual([]);
     expect(evaluateEventExpectations(step.expect, run("notification_agent", [call("notification_agent", "send_email", { ...args, to: "team@e2e.test" }, refused)]))).not.toEqual([]);
-    expect(evaluateEventExpectations(step.expect, run("notification_agent", [
-      call("notification_agent", "send_email", args, refused),
-      call("notification_agent", "send_slack", { channelId: "#ops", text: "Deploy OK" }, { success: false, output: "", error: "Slack channel not running" }),
-    ]))).not.toEqual([]);
+    expect(evaluateEventExpectations(step.expect, run("notification_agent", [call("notification_agent", "send_email", { ...args, subject: "Status" }, refused)]))).not.toEqual([]);
+    // A failure for another reason is not the channel being off.
+    expect(evaluateEventExpectations(step.expect, run("notification_agent", [call("notification_agent", "send_email", args, { success: false, output: "", error: "Invalid recipient address" })]))).not.toEqual([]);
+    for (const fallback of ["send_slack", "send_telegram", "send_discord"]) {
+      expect(evaluateEventExpectations(step.expect, run("notification_agent", [
+        call("notification_agent", "send_email", args, refused),
+        call("notification_agent", fallback, { text: "Deploy OK" }, { success: false, output: "", error: "Channel not running" }),
+      ])), fallback).not.toEqual([]);
+    }
 
     // Fail closed: a running channel stops the attempt before the turn.
     for (const type of ["email", "slack", "telegram", "discord"]) {

@@ -61,7 +61,7 @@
       id: "seeded-code",
       method: "GET",
       path: "/api/workspace/file?path=generated/e2e-qa/staffel.mjs",
-      expect: { status: 200, bodyIncludes: ["stueckpreis * menge * (1 - rabatt)"] },
+      expect: { status: 200, bodyIncludes: ["return stueckpreis * menge * (1 - rabatt);"] },
     },
     {
       kind: "http",
@@ -115,7 +115,7 @@
       id: "code-unchanged",
       method: "GET",
       path: "/api/workspace/file?path=generated/e2e-qa/staffel.mjs",
-      expect: { status: 200, bodyIncludes: ["stueckpreis * menge * (1 - rabatt)"] },
+      expect: { status: 200, bodyIncludes: ["return stueckpreis * menge * (1 - rabatt);"] },
     },
     {
       kind: "http",
