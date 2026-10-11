@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:464 | 18 |
 | `accessKeyId` | packages/core/src/config/schema.ts:524 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 141 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 142 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1739 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1770 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -92,7 +92,7 @@ Every public schema field, where it is declared, and how many production files r
 | `confidenceDemotion` | packages/core/src/config/schemas/retrieval.ts:133 | 1 |
 | `confidenceMinScoreGap` | packages/core/src/config/schemas/retrieval.ts:139 | 1 |
 | `confidenceMinTopRerank` | packages/core/src/config/schemas/retrieval.ts:147 | 1 |
-| `config` | packages/core/src/config/schema.ts:1271 | 303 |
+| `config` | packages/core/src/config/schema.ts:1271 | 304 |
 | `configRemovals` | packages/core/src/config/schema.ts:1756 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:228 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1583 | 1 |
@@ -107,7 +107,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:582 | 13 |
 | `customInstructions` | packages/core/src/config/schema.ts:312 | 2 |
 | `dailyUsd` | packages/core/src/config/schema.ts:585 | 2 |
-| `default` | packages/core/src/config/schema.ts:1329 | 291 |
+| `default` | packages/core/src/config/schema.ts:1329 | 292 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1197 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1796 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1219 | 1 |
@@ -201,7 +201,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
 | `id` | packages/core/src/config/schema.ts:405 | 321 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1421 | 2 |
-| `image` | packages/core/src/config/schema.ts:745 | 103 |
+| `image` | packages/core/src/config/schema.ts:745 | 104 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -296,8 +296,8 @@ Every public schema field, where it is declared, and how many production files r
 | `minSamples` | packages/core/src/config/schemas/decisions.ts:61 | 6 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1529 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
-| `mode` | packages/core/src/config/schema.ts:536 | 150 |
-| `model` | packages/core/src/config/schema.ts:1299 | 287 |
+| `mode` | packages/core/src/config/schema.ts:536 | 149 |
+| `model` | packages/core/src/config/schema.ts:1299 | 288 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1767 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1782 | 4 |
@@ -308,7 +308,7 @@ Every public schema field, where it is declared, and how many production files r
 | `mounts` | packages/core/src/config/schema.ts:748 | 11 |
 | `name` | packages/core/src/config/schema.ts:2038 | 403 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
-| `network` | packages/core/src/config/schema.ts:749 | 59 |
+| `network` | packages/core/src/config/schema.ts:749 | 60 |
 | `node` | packages/core/src/config/schema.ts:1107 | 255 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:583 | 3 |
 | `notes` | packages/core/src/config/schema.ts:855 | 62 |
@@ -454,7 +454,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:450 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1445 | 87 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
-| `store` | packages/core/src/config/schema.ts:1678 | 171 |
+| `store` | packages/core/src/config/schema.ts:1678 | 172 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:413 | 1 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:654 | 2 |
 | `subAgentHeadRewarm` | packages/core/src/config/schema.ts:1923 | 2 |

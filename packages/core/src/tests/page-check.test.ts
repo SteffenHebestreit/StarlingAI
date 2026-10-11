@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkBuiltPage, collectScripts, collectDeclaredElements, collectElementIds, runScripts, runScriptsIsolated } from "../tools/page-check.js";
@@ -251,6 +251,54 @@ describe("page execution is isolated from the gateway process", () => {
     const cwd = (report?.consoleErrors[0] ?? "").toLowerCase();
     expect(cwd.length).toBeGreaterThan(0);
     expect(cwd).not.toContain("starlingai");   // a relative write cannot reach the repo/workspace
+  }, 40_000);
+
+  // The escape still lands in a node process with the gateway's uid. Before the permission model
+  // that process could read /proc/<gateway pid>/environ, any account's files and the config,
+  // start programs and write anywhere; measured in the gateway image, all of it answered.
+  it("refuses an escaped page every file outside its own modules, every write and every program", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sai-pagecheck-confined-"));
+    const outside = join(dir, "outside-the-page.txt");
+    writeFileSync(outside, "canary-from-another-account");
+    const target = join(dir, "written-by-the-page.txt");
+    const report = await runScriptsIsolated([{
+      label: "escape",
+      code: `
+        var proc = document.getElementById.constructor("return process")();
+        var fs = proc.getBuiltinModule("node:fs");
+        var out = {};
+        function attempt(name, fn) { try { out[name] = fn(); } catch (e) { out[name] = "refused:" + (e.code || e.message); } }
+        attempt("outside", function () { return fs.readFileSync(${JSON.stringify(outside)}, "utf8"); });
+        attempt("parentEnviron", function () { return fs.readFileSync("/proc/" + proc.ppid + "/environ", "utf8").length; });
+        attempt("program", function () { return String(proc.getBuiltinModule("node:child_process").execSync("echo ran")); });
+        attempt("write", function () { fs.writeFileSync(${JSON.stringify(target)}, "x"); return "written"; });
+        console.error(JSON.stringify(out));
+      `,
+    }], new Set(), new Map());
+    expect(report).not.toBeNull();
+    const observed = JSON.parse(report!.consoleErrors[0] ?? "{}") as Record<string, unknown>;
+    expect(observed["outside"]).toBe("refused:ERR_ACCESS_DENIED");
+    // No /proc on Windows or macOS: there the read fails whatever the child may do.
+    if (process.platform === "linux") expect(observed["parentEnviron"]).toBe("refused:ERR_ACCESS_DENIED");
+    expect(observed["program"]).toBe("refused:ERR_ACCESS_DENIED");
+    expect(observed["write"]).toBe("refused:ERR_ACCESS_DENIED");
+    expect(existsSync(target)).toBe(false);
+  }, 40_000);
+
+  it("reports the refused read as the page's error instead of failing the check", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sai-pagecheck-confined-page-"));
+    const outside = join(dir, "outside-the-page.txt");
+    writeFileSync(outside, "canary-from-another-account");
+    mkdirSync(join(dir, "site"));
+    const page = join(dir, "site", "index.html");
+    writeFileSync(page, `<!DOCTYPE html><html><body><div id="app"></div><script>
+      var proc = document.getElementById.constructor("return process")();
+      document.getElementById("app").textContent = proc.getBuiltinModule("node:fs").readFileSync(${JSON.stringify(outside)}, "utf8");
+    </script></body></html>`);
+    const verdict = await checkBuiltPage(page, "site/index.html");
+    expect(verdict.ok).toBe(false);
+    expect(verdict.detail).toContain("Access to this API has been restricted");
+    expect(verdict.detail).not.toContain("canary-from-another-account");
   }, 40_000);
 });
 
