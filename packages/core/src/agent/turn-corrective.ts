@@ -354,9 +354,13 @@ export const runCorrectiveReroute = async (
     iteration: ctx.getIterationCount(),
   });
   try {
+    // Only the zero-work guard's reroute goes ahead after a Stop. The flag clears the Stop latch, and
+    // its safety argument (sub-agent.ts) is that the agent it unblocks holds no delegate tools;
+    // semantic routing promises no such thing. The runtime does not arm the loop-brake reroute after
+    // a Stop, and without the flag delegate_to_agent refuses one that lands first.
     const rerouteResult = await executeTool("delegate_to_agent", {
       task: userMessage,
-    }, { ...toolContext, allowDelegationAfterOperatorStop: true });
+    }, reason === "fabricated_zero_work" ? { ...toolContext, allowDelegationAfterOperatorStop: true } : toolContext);
     ctx.incrementDelegationCount();
     // Record a well-formed assistant+tool pair (same as the corrective build) so the
     // delegated evidence is in history and any artifacts surface as attachments.

@@ -14,7 +14,7 @@
  * wrote it, through delegate_to_agent with no agent named, and the specialist's answer is shipped as
  * written: the terminal backstops that replace a short or repeated synthesis leave it alone. Not on a
  * turn that delegated, ran with --auto, retrieved evidence of its own, or whose prefetch admitted no
- * agent.
+ * agent, or after the user pressed Stop.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -128,6 +128,7 @@ async function load(options: {
   await import("../tools/sub-agent.js");
   const { registerTool } = await import("../tools/registry.js");
   const { writeSharedFact } = await import("../swarm/memory.js");
+  const { longRunningGenerationManager } = await import("../agent/long-running-generation.js");
   resetSessionsForTests();
   registerTool({
     name: "delegate_to_agent",
@@ -160,7 +161,7 @@ async function load(options: {
     execute: async () => ({ success: true, output: "sommeraktion.pdf: Sommeraktion 2025, Rabatte bis 30 %." }),
   });
   const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
-  return { session, runTurn };
+  return { session, runTurn, longRunningGenerationManager };
 }
 
 function toolCallStream(callId: string, toolName: string, args: Record<string, unknown>, text?: string) {
@@ -174,15 +175,16 @@ function toolCallStream(callId: string, toolName: string, args: Record<string, u
 
 /**
  * A model that looks for a file tool it does not hold, on every call, after `first` if given, and
- * writes `narration` beside each call when given.
+ * writes `narration` beside each call when given. `onCall` runs as each call is made.
  */
 function scriptLoopingModel(
   first?: () => ReturnType<typeof toolCallStream>,
-  options: { narration?: string } = {},
+  options: { narration?: string; onCall?: (call: number) => void } = {},
 ) {
   let call = 0;
   streamMock.mockImplementation(() => {
     call += 1;
+    options.onCall?.(call);
     if (call === 1 && first) return first();
     return toolCallStream(`s${call}`, "search_tools", { query: `read file from workspace ${call}` }, options.narration);
   });
@@ -297,6 +299,25 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     // The model's delegation only.
     expect(delegations).toEqual([{ agentName: "content_writer", task: "Change the heading." }]);
     expect(auditRows("loop_brake_reroute_delegated")).toEqual([]);
+  });
+
+  // A graceful Stop (gateway POST /api/sessions/:id/stop without force) only latches; it does not end
+  // the orchestrator's loop, so a looping turn the user stopped still reaches the brake. The reroute
+  // would then start a fresh delegation the user asked not to have, and clear the latch doing it.
+  it("control: a turn the user stopped while it looped is not re-dispatched", async () => {
+    const { session, runTurn, longRunningGenerationManager } = await load();
+    scriptLoopingModel(undefined, {
+      onCall: (call) => {
+        if (call === 2) longRunningGenerationManager.requestStop(session.id, "user_cancel:test", "test");
+      },
+    });
+
+    await runTurn({ session, userMessage: REQUEST });
+
+    expect(brakeRows()).toEqual(["tool_streak_across_iterations"]);
+    expect(delegations).toEqual([]);
+    expect(auditRows("loop_brake_reroute_delegated")).toEqual([]);
+    expect(longRunningGenerationManager.isStopRequested(session.id)).toBe(true);
   });
 
   it("control: an --auto turn, a turn that retrieved evidence, and a turn whose prefetch admitted no agent are left as they were", async () => {

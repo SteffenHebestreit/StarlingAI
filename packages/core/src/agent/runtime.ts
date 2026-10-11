@@ -5712,7 +5712,9 @@ async function _runTurn(
   // (routing has a specialist to give it), on a turn that has delegated nothing, run no workflow and
   // retrieved no evidence of its own (a turn that searched its documents until the brake answers
   // from them, as before), outside workflows and --agent turns. When it returns nothing shippable,
-  // the synthesis below runs as before, with the specialist's result in its history.
+  // the synthesis below runs as before, with the specialist's result in its history. Not after a
+  // Stop: a graceful Stop only latches and does not end this loop, and a looping turn is the kind a
+  // user stops; a new delegation is what the Stop asked not to have.
   let loopBrakeRerouteAnswer: string | null = null;
   if (
     loopBrakeExit !== undefined
@@ -5726,6 +5728,7 @@ async function _runTurn(
     && !_turnRetrievedKnowledgeBaseContent
     && prefetchAdmittedAgentCount > 0
     && !signal.aborted
+    && !longRunningGenerationManager.isStopRequested(session.id)
   ) {
     loopBrakeRerouteAnswer = await runCorrectiveRerouteImpl(correctiveCtx, "loop_brake", { brake: loopBrakeExit });
     // The blocked-calls instruction says NOTHING was created or changed: after a specialist ran,

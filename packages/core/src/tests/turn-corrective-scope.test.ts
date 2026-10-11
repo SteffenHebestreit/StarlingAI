@@ -9,13 +9,18 @@ import type { ToolContext } from "../tools/registry.js";
 
 const delegations: Array<Record<string, unknown>> = [];
 const auditRows: Array<Record<string, unknown>> = [];
+/** The tool context each delegate_to_agent call ran with. */
+const delegationContexts: ToolContext[] = [];
 
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
-    executeTool: vi.fn(async (name: string, args: Record<string, unknown>) => {
-      if (name === "delegate_to_agent") delegations.push(args);
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, context: ToolContext) => {
+      if (name === "delegate_to_agent") {
+        delegations.push(args);
+        delegationContexts.push(context);
+      }
       return { success: true, output: "The brief, as text.", metadata: {} };
     }),
   };
@@ -58,6 +63,7 @@ function correctiveContext(allowedAgents: string[] | undefined) {
 
 afterEach(() => {
   delegations.length = 0;
+  delegationContexts.length = 0;
   auditRows.length = 0;
 });
 
@@ -100,5 +106,14 @@ describe("the corrective reroute", () => {
     expect(delegations).toEqual([{ task: REQUEST }]);
     expect(auditRows).toContainEqual(expect.objectContaining({ type: "loop_brake_reroute_delegated", brake: "tool_streak_across_iterations" }));
     expect(auditRows).not.toContainEqual(expect.objectContaining({ type: "fabricated_zero_work_reroute_delegated" }));
+  });
+
+  // allowDelegationAfterOperatorStop clears the operator's Stop latch (tools/sub-agent.ts), and the
+  // loop-brake reroute's semantic routing can pick a coordinator that delegates on.
+  it("lifts an operator Stop for the zero-work guard only, as before, and not at a loop brake", async () => {
+    await runCorrectiveReroute(correctiveContext(undefined).ctx, "loop_brake", { brake: "all_tool_calls_blocked" });
+    await runCorrectiveReroute(correctiveContext(undefined).ctx);
+
+    expect(delegationContexts.map((context) => context.allowDelegationAfterOperatorStop === true)).toEqual([false, true]);
   });
 });
