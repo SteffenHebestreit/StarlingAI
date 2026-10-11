@@ -405,8 +405,7 @@ function buildWorkflowParamContext(
     ].join(" ")).includes(normalizeSearchText(trimmedObjective));
     // Labelled as background: a step's turn read the request that started the workflow ("Nutze den
     // Workflow …", "Starte den Job …") as its own instruction and looked for that workflow until the
-    // loop brake ended it (E2E 2026-10-10). The label still opens with "Original user request:",
-    // which looksLikeDelegationTaskEcho reads.
+    // loop brake ended it (E2E 2026-10-10). The label keeps its old prefix, "Original user request:".
     if (!objectiveAlreadyPresent) {
       sections.push(`${ORIGINAL_REQUEST_BACKGROUND_LABEL}\n${trimmedObjective}`);
     }
