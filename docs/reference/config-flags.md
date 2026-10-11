@@ -296,7 +296,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minSamples` | packages/core/src/config/schemas/decisions.ts:61 | 6 |
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1529 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
-| `mode` | packages/core/src/config/schema.ts:536 | 152 |
+| `mode` | packages/core/src/config/schema.ts:536 | 156 |
 | `model` | packages/core/src/config/schema.ts:1299 | 287 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1767 | 1 |
