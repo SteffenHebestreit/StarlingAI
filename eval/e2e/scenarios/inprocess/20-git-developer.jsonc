@@ -20,6 +20,15 @@
 //     git_commit default) never stages the account's state directory or other runs' files;
 //   - stages .gitignore and generated/e2e-git/hinweis.txt and prints `git status --short`.
 //
+// NOT YET RUN AGAINST A LIVE SANDBOX. The seed and the git tools run git as the image's non-root
+// `sandbox` user (docker/sandbox/Dockerfile); neither tools/shell.ts nor tools/git.ts passes --user
+// or safe.directory. If the bind shows /workspace as another user's (a Docker Desktop bind of a
+// Windows path can show it as root's), git refuses the repository: "detected dubious ownership in
+// repository at '/workspace'". The seed's shell_exec then exits 128 and its row fails; git's message
+// is in the tool's output and the agent's reply, not in the row's preview (the docker command line
+// fills its 280 characters). That failure is the product's, not the scenario's, since the git tools
+// would refuse the same way.
+//
 // Ground truth: git commit prints "[<branch> (root-commit) <hash>] <subject>" for the first commit
 // of a history. On feature/hinweis with "(root-commit)" it proves the commit landed on the new
 // branch, and that the reset worked (a rerun without it would print no "(root-commit)"). The subject
