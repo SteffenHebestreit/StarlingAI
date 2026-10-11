@@ -22,6 +22,9 @@ import {
   snapshotLinks,
   type PageLink,
 } from "./page-links.js";
+import { reportedPageUrls } from "./browser-page-report.js";
+
+export { reportedPageUrls };
 
 const log = childLogger("tool:web");
 
@@ -1122,11 +1125,6 @@ export async function checkUrlSsrf(rawUrl: string): Promise<string | null> {
     return "requesting private/internal network addresses is not allowed";
   }
   return null;
-}
-
-/** The page URLs a Playwright MCP answer reports, from its "- Page URL: …" lines. */
-export function reportedPageUrls(output: string): string[] {
-  return [...output.matchAll(/^[ \t]*-[ \t]+Page URL:[ \t]*(\S+)/gm)].map((match) => match[1]!);
 }
 
 /**

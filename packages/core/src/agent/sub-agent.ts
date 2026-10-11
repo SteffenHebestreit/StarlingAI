@@ -75,7 +75,8 @@ import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
-import { agentCfgDomainTools, agentCfgHasNoUsableTools } from "../tools/agent-routing.js";
+import { agentCfgDomainTools, agentCfgHasNoUsableTools, isBrowserTabViewToolName } from "../tools/agent-routing.js";
+import { reportedPageUrls } from "../tools/browser-page-report.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { formatFlowMemoryGuidance } from "./flow-memory.js";
@@ -2486,6 +2487,8 @@ function buildSubAgentToolAuditPayload(params: {
 
 /** Failed tool calls a run hands back: the most recent, which are the ones any recovery followed. */
 const MAX_RECORDED_TOOL_FAILURES = 6;
+/** Distinct pages a run hands back from its views of the open browser tab. */
+const MAX_VIEWED_TAB_PAGES = 8;
 
 /**
  * The first line of a failed call's error, as the orchestrator is shown it. That frame is built
@@ -2727,6 +2730,11 @@ export interface SubAgentRunResult {
    *  digits or more) of the values it computed, at most 32. A reply that states one of them is not
    *  re-synthesized for coverage (agent/runtime.ts enforceDelegateCoverage). */
   computedAggregateKeys?: string[];
+  /** Present only when the run's own views of the open browser tab (a snapshot or screenshot) that
+   *  succeeded reported the page they showed: those page URLs, distinct, the first
+   *  MAX_VIEWED_TAB_PAGES. tools/sub-agent.ts fails a run of an agent that only reads the tab when
+   *  every one is the browser's empty page. */
+  viewedTabPages?: string[];
   /** QPR-004: the turn's quality scorecard when the transport surfaces one
    *  (gateway-routed eval runs capture the turn_scorecard audit event). */
   qualityScorecard?: import("./turn-scorecard.js").TurnQualityScorecard;
@@ -3967,6 +3975,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // from: the final text rarely mentions those, and a recovery onto a different path is exactly
     // what the orchestrator must not describe as the path the user asked for.
     const toolFailures: SubAgentToolFailure[] = [];
+    // The pages this run's own views of the open browser tab reported (SubAgentRunResult.viewedTabPages).
+    const viewedTabPages = new Set<string>();
     // THE CODE THIS RUN EXECUTED, AND THE FIGURES IT HAS SEEN (E2E 2026-10-07). All seven of the
     // coder's sandbox runs failed or printed nothing; its answer gave two figures no input of the
     // run contained, and the run reported success. Counted at the call site, uncapped: toolFailures
@@ -4622,6 +4632,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         ...(executions ? { executions } : {}),
         ...(maskedRuns ? { maskedRuns } : {}),
         ...(computedAggregateKeys.size > 0 ? { computedAggregateKeys: [...computedAggregateKeys] } : {}),
+        ...(viewedTabPages.size > 0 ? { viewedTabPages: [...viewedTabPages] } : {}),
       };
     };
 
@@ -7800,6 +7811,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         // A delegation brings its own specialists' failures along, so one two levels down reaches
         // the orchestrator too.
         toolFailures.push(...readToolFailures(result.metadata?.["specialistToolFailures"]));
+        if (result.success && isBrowserTabViewToolName(tc.name)) {
+          for (const pageUrl of reportedPageUrls(result.output)) {
+            if (viewedTabPages.size < MAX_VIEWED_TAB_PAGES) viewedTabPages.add(pageUrl);
+          }
+        }
         // And what they executed: a coordinator whose specialist masked figures did not succeed either.
         if (receivesExecutionRecords(tc.name)) {
           delegatedToAnotherAgent = true;

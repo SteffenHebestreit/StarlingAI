@@ -11,6 +11,7 @@ import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecuti
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
+import { isBlankBrowserPage } from "./browser-page-report.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
 import {
@@ -1362,13 +1363,35 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // this session's in the tab. c172d755 named vision_browser_analyst for both of its site steps: the
   // gather point went to researcher, which reads with web_fetch and leaves the tab where it was, and
   // the second step ran exempt on a page another session had opened. So on a turn the judge flagged,
-  // a step for tab readers alone is redirected the same way until an agent that drives the browser
-  // has run for this session (swarmHasDrivenSharedBrowser); a step that runs after one keeps it.
-  const tabReaderUnserved = ctx.turnEvidence?.required === true
-    && explicitAgentRequested
+  // a step does not start on a tab reader until an agent that drives the browser has run for this
+  // session (swarmHasDrivenSharedBrowser); a step that runs after one keeps it.
+  // Judged by the agent that would run first, not by the whole queue: 71d42257 (E2E 2026-10-10) ran
+  // [vision_browser_analyst, browser_agent, researcher, document_intake], a search's top match with
+  // its suggested fallbacks, and the tab reader read about:blank five times while the gatherers
+  // behind it never ran. When the queue names any other agent, the tab readers go last, held until a
+  // browser has been driven, and the other agents keep their order: the step is then theirs, held to
+  // the turn trigger above like any step naming them (which counts a tab reader as working from
+  // handed text), so a mailbox or upload agent keeps it and a builder renders facts already shared.
+  // A queue of tab readers alone is redirected. Before the attempt loop the queue holds only the
+  // agents the call named, so a call whose agentName is unknown and whose fallbacks lead with a tab
+  // reader is judged the same.
+  const queuedCfg = (name: string) => renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name];
+  const tabReaderLeads = ctx.turnEvidence?.required === true
     && candidateQueue.length > 0
-    && candidateQueue.every((name) => agentCfgOnlyReadsOpenBrowserTab(renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name]))
+    && agentCfgOnlyReadsOpenBrowserTab(queuedCfg(candidateQueue[0]!))
     && !swarmHasDrivenSharedBrowser(ctx);
+  const queuedTabReaders = tabReaderLeads ? candidateQueue.filter((name) => agentCfgOnlyReadsOpenBrowserTab(queuedCfg(name))) : [];
+  const tabReaderUnserved = tabReaderLeads && queuedTabReaders.length === candidateQueue.length;
+  const heldTabReaders = new Set<string>(tabReaderUnserved ? [] : queuedTabReaders);
+  if (heldTabReaders.size > 0) {
+    const requestedAgents = candidateQueue;
+    candidateQueue = [...requestedAgents.filter((name) => !heldTabReaders.has(name)), ...heldTabReaders];
+    logAudit("delegation_tab_reader_demoted", {
+      taskTitle: title,
+      requestedAgents,
+      queue: [...candidateQueue],
+    }, { sessionId: ctx.sessionId });
+  }
   let renderHasGatheredFacts = true;
   if (textRequiresResearch || turnTriggerCandidate) {
     try {
@@ -1881,6 +1904,15 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     // (and pollutes the attemptedAgents diagnostic with an agent that was never tried).
     if (ctx.allowedAgents && !ctx.allowedAgents.includes(candidate)) {
       skippedCandidates.add(candidate);
+      continue;
+    }
+    // A tab reader moved to the end of the queue (above) is reached only when every agent ahead of
+    // it failed, and a completed or partial attempt ends the delegation, so only a sibling of this
+    // delegation (a parallel slice, a graph node) can have driven the shared browser by then. It
+    // runs if one has; otherwise it would read the tab as it was.
+    if (heldTabReaders.has(candidate) && !swarmHasDrivenSharedBrowser(ctx)) {
+      skippedCandidates.add(candidate);
+      logAudit("delegation_tab_reader_held", { taskTitle: title, agentName: candidate }, { sessionId: ctx.sessionId });
       continue;
     }
 
@@ -2411,6 +2443,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // The figure keys of the aggregates the run computed with web_table, passed up so the turn's
       // coverage check leaves a reply that states one of them alone (agent/runtime.ts).
       let runComputedAggregateKeys: string[] = [];
+      // The pages the run's views of the open browser tab reported (agent/sub-agent.ts viewedTabPages).
+      let runViewedTabPages: string[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
         const maybeResult = await runSubAgentWithStats(subAgentArgs);
@@ -2433,6 +2467,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           runMaskedRuns = readMaskedRuns(maybeResult.maskedRuns);
           runComputedAggregateKeys = Array.isArray(maybeResult.computedAggregateKeys)
             ? maybeResult.computedAggregateKeys.filter((key): key is string => typeof key === "string").slice(0, 32)
+            : [];
+          runViewedTabPages = Array.isArray(maybeResult.viewedTabPages)
+            ? maybeResult.viewedTabPages.filter((page): page is string => typeof page === "string")
             : [];
           runLoopEnforced = maybeResult.loopEnforced;
           runWardenStop = maybeResult.wardenStop;
@@ -2525,7 +2562,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
       // D14: Consolidated classification — replaces the scattered acceptPartial /
       // coordinatorMicroCompletion / weak variables that used to live here.
-      const classification = classifyDelegationResult(
+      const classified = classifyDelegationResult(
         output, delegationOutcome, stats, agentCfg, candidate, request.task, artifacts,
         {
           explicitVerdict: Boolean(parsedOutcome?.status),
@@ -2533,6 +2570,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           ...(request.deliverable ? { deliverable: request.deliverable } : {}),
         },
       );
+      // AN AGENT THAT ONLY READS THE OPEN TAB, WHICH SHOWED NO PAGE. In 71d42257 (E2E 2026-10-10)
+      // vision_browser_analyst snapshotted about:blank five times, described a header it never saw,
+      // and ended as a success, so the agents queued behind it never ran. When every page its views
+      // of the tab reported is the browser's empty page, it read nothing: the attempt fails and its
+      // text is not kept as evidence. A run whose views reported no page is judged as before.
+      const sawOnlyBlankTab = runViewedTabPages.length > 0
+        && runViewedTabPages.every(isBlankBrowserPage)
+        && agentCfgOnlyReadsOpenBrowserTab(agentCfg);
+      const classification = sawOnlyBlankTab && classified !== "infrastructure_failure" ? "failure" : classified;
+      if (sawOnlyBlankTab) {
+        logAudit("delegation_tab_reader_saw_blank_tab", {
+          taskTitle: title,
+          agentName: candidate,
+          classified,
+          viewedTabPages: runViewedTabPages,
+        }, { sessionId: ctx.sessionId });
+      }
       // The result's own evidence, judged once here where the task is known (figures echoed from
       // the task do not count, nor does anything when every work call failed). The orchestrator's
       // frame reads it from the metadata instead of re-deriving it from the text (2026-10-05).
@@ -2560,7 +2614,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           classification, output, request.task, stats, agentCfg, request.deliverable,
           { artifacts, ...(runOwnFailedToolNames ? { failedToolNames: runOwnFailedToolNames } : {}) },
         );
-        if (narrativeOnly) {
+        if (sawOnlyBlankTab) {
+          taskState.error = `Sub-agent '${candidate}' saw only an empty browser tab (about:blank): no page was open for it to read, and it cannot open one.`;
+        } else if (narrativeOnly) {
           const expectedTools = (agentCfg?.tools ?? []).filter((name) =>
             /^(?:write_file|edit_file|generate_|bundle_artifact|shell_exec|send_|post_|browser_)/.test(name)
           );
@@ -2585,6 +2641,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // back to the caller as a successful partial.
         if (
           !lastFailureWasInfrastructure
+          && !sawOnlyBlankTab
           && stats?.terminalState !== "missing_tools"
           && output.trim().length > 200
           && (!bestPartialResult || output.length > bestPartialResult.output.length)
