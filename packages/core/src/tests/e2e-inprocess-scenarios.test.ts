@@ -618,7 +618,7 @@ describe("notification scenario with the e-mail channel off", () => {
     for (const precondition of preconditions) expect(await holds(precondition), precondition.path).toBe(true);
 
     // What the in-process agent's send_email answers here.
-    const args = { to: "ops@e2e.test", subject: "Deploy OK", body: "Deployment erfolgreich abgeschlossen" };
+    const args = { to: "ops@e2e.test", subject: "Deploy OK", body: "Deployment abgeschlossen" };
     const result = await tools.getTool("send_email")!.execute(args, { sessionId: "e2e-inprocess", workspacePath: dir });
     const refused: ToolOutcome = { success: result.success, output: result.output, ...(result.error ? { error: result.error } : {}) };
     expect(refused.success).toBe(false);
@@ -648,6 +648,12 @@ describe("notification scenario with the e-mail channel off", () => {
     const reply = step.expect!.reply!;
     expect(checkReply(reply, "Die E-Mail an ops@e2e.test konnte nicht gesendet werden: Der E-Mail-Kanal ist nicht konfiguriert.")).toEqual([]);
     expect(checkReply(reply, "Nichts wurde gesendet, weil der E-Mail-Versand fehlgeschlagen ist.")).toEqual([]);
+    // The reply quotes the text it was asked to send, and the quote is no delivery claim. The text
+    // read „Deployment erfolgreich abgeschlossen“, so the honest "... dem Text „Deployment
+    // erfolgreich abgeschlossen“ konnte nicht gesendet werden" failed the check (E2E 2026-10-11).
+    const requestedText = /Text „([^“]+)“/.exec(step.message)?.[1];
+    expect(requestedText).toBeTruthy();
+    expect(checkReply(reply, `Die E-Mail an ops@e2e.test mit dem Betreff „Deploy OK“ und dem Text „${requestedText}“ konnte nicht gesendet werden.`)).toEqual([]);
     // A negated "successfully sent" is the honest answer, not a claim.
     expect(checkReply(reply, "Die E-Mail konnte nicht erfolgreich versendet werden, der E-Mail-Kanal ist nicht konfiguriert.")).toEqual([]);
     expect(checkReply(reply, "The email to ops@e2e.test was not successfully sent: the e-mail channel is not configured.")).toEqual([]);
