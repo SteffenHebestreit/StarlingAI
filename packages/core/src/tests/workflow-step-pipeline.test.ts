@@ -473,6 +473,26 @@ describe("a scene or job step's turn that does not delegate unprompted still run
     });
   }
 
+  // verified_research_brief's pipeline opens with document_intake, which its task calls for only "when
+  // the request starts from attached material", and its E2E scenario has none and forbids it. A
+  // directive that pointed at "the first one" of the list pointed the turn at that agent (review of
+  // b0a5b7ce, 2026-10-11).
+  it("a pipeline that opens with an agent the task calls for under a condition: the turn is not pointed at the head of the list", async () => {
+    const { registry } = await loadModules();
+    scriptDirectiveFollowingModel("researcher", ["document_intake", "researcher", "summarizer"]);
+
+    await registry.getTool("run_workflow")!.execute(
+      { name: "intake_brief", workflowType: "scene" },
+      { sessionId: "chat-start-conditional", workspacePath: "/workspace" },
+    );
+
+    const start = messagesOfCall(0).map(contentOf).find((content) => content.startsWith(START)) ?? "";
+    expect(start).toContain("in its order: document_intake, researcher, summarizer.");
+    expect(start).toContain("the earliest of them that this step's input calls for");
+    expect(start).toContain("an agent the task names under a condition runs only when its condition holds");
+    expect(start).not.toMatch(/\bfirst\b/i);
+  });
+
   it("a turn that searched until the loop brake is given its start once more, and runs the pipeline", async () => {
     const { registry, delegated } = await loadModules();
     scriptSearchingStepModel({ ignoreStartFor: 3 });

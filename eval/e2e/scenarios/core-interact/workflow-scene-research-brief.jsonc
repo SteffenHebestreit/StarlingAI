@@ -26,9 +26,10 @@
 // document_intake, passed over once researcher ran, is not offered again. That held only after a first
 // delegation: in the run of 2026-10-10 the step's turn delegated nothing, searched for this scene with
 // search_tools until the loop brake, and the scene was blocked. Its tail now names the pipeline and says
-// to delegate to the first agent the task calls for ([WORKFLOW STEP]) until one has returned, and a
-// turn that still reaches a brake with nothing delegated is given that once more. mustRunAny follows
-// the scene's task.
+// to start with the earliest agent the step's input calls for, one the task names under a condition
+// only when that condition holds ([WORKFLOW STEP]), until one has returned; the pipeline opens with
+// document_intake, so the directive does not point at the head of the list. A turn that still reaches
+// a brake with nothing delegated is given that once more. mustRunAny follows the scene's task.
 {
   id: "core-ix-workflow-scene-research-brief",
   title: "Workflow: run the verified_research_brief scene on the fixture site",

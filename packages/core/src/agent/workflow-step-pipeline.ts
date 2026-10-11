@@ -107,11 +107,15 @@ export function remainingWorkflowStepAgents(input: WorkflowStepContinuationInput
  * E2E run of 2026-10-10 verified_research_brief's step turn called search_tools three times and
  * source_grounded_paper_packet's searched its documents three times, the loop brake ended both with
  * nothing delegated, and both workflows were blocked for running no specialist.
+ *
+ * It does not point at the head of the list: a pipeline can open with an agent its task calls for
+ * only under a condition (verified_research_brief opens with document_intake, "first when the request
+ * starts from attached material"), and which agent starts is read from the step's input.
  */
 export function renderWorkflowStepStartDirective(pipeline: readonly string[]): string {
   return "[WORKFLOW STEP] This turn carries out one step of a workflow that is already running: do not search for a workflow or try to start one. "
     + `The step's task names these agents, in its order: ${pipeline.join(", ")}. `
-    + "Call delegate_to_agent for the first one the task calls for now; skip one only where the task makes it conditional and the condition does not hold.";
+    + "Start now with delegate_to_agent to the earliest of them that this step's input calls for; an agent the task names under a condition runs only when its condition holds.";
 }
 
 /** The directive the step's turn gets instead of the synthesis requirement while named agents are left. */
