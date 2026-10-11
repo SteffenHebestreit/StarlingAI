@@ -14,7 +14,7 @@
  * wrote it, through delegate_to_agent with no agent named, and the specialist's answer is shipped as
  * written: the terminal backstops that replace a short or repeated synthesis leave it alone. Not on a
  * turn that delegated, ran with --auto, retrieved evidence of its own, or whose prefetch admitted no
- * agent, or after the user pressed Stop.
+ * agent, on a scene step's, directed or hybrid turn, or after the user pressed Stop.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,6 +89,7 @@ async function load(options: {
   delegationSucceeds?: boolean;
   /** A finding the specialist shares while it runs, as a sub-agent's share_finding would. */
   sharedFinding?: string;
+  toolMode?: "orchestration_only" | "hybrid";
   specialistAnswer?: string;
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sai-loop-brake-reroute-"));
@@ -97,7 +98,7 @@ async function load(options: {
   mkdirSync(join(workspacePath, ".starlingai"), { recursive: true });
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
     workspacePath,
-    agents: { mainAssistant: { toolMode: "orchestration_only" }, performance: { leanContextInjection: true } },
+    agents: { mainAssistant: { toolMode: options.toolMode ?? "orchestration_only" }, performance: { leanContextInjection: true } },
     subAgents: {
       content_writer: { description: "Writes and edits workspace files.", systemPrompt: "Write.", tools: ["read_file", "write_file", "edit_file", "list_files"] },
     },
@@ -318,6 +319,33 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     expect(delegations).toEqual([]);
     expect(auditRows("loop_brake_reroute_delegated")).toEqual([]);
     expect(longRunningGenerationManager.isStopRequested(session.id)).toBe(true);
+  });
+
+  // Each of these loops to the streak brake with the prefetch admitting an agent, as the turns that
+  // are re-dispatched do.
+  it("control: a scene step's turn is left as it was", async () => {
+    // Its message is the scene's step task, not a request the user wrote.
+    const { session, runTurn } = await load();
+    scriptLoopingModel();
+    await runTurn({ session, userMessage: REQUEST, _workflowExecutionStack: ["verified_research_brief"], _withoutWorkflowCatalog: true });
+    expect(brakeRows()).toEqual(["tool_streak_across_iterations"]);
+    expect(delegations).toEqual([]);
+  });
+
+  it("control: a turn directed to an agent is left as it was", async () => {
+    const { session, runTurn } = await load();
+    scriptLoopingModel();
+    await runTurn({ session, userMessage: REQUEST, directiveAgent: "content_writer" });
+    expect(brakeRows()).toEqual(["tool_streak_across_iterations"]);
+    expect(delegations).toEqual([]);
+  });
+
+  it("control: a hybrid turn, which holds file tools of its own, is left as it was", async () => {
+    const { session, runTurn } = await load({ toolMode: "hybrid" });
+    scriptLoopingModel();
+    await runTurn({ session, userMessage: REQUEST });
+    expect(brakeRows()).toEqual(["tool_streak_across_iterations"]);
+    expect(delegations).toEqual([]);
   });
 
   it("control: an --auto turn, a turn that retrieved evidence, and a turn whose prefetch admitted no agent are left as they were", async () => {
