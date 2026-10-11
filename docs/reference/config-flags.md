@@ -201,7 +201,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
 | `id` | packages/core/src/config/schema.ts:405 | 320 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1421 | 2 |
-| `image` | packages/core/src/config/schema.ts:745 | 102 |
+| `image` | packages/core/src/config/schema.ts:745 | 103 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -297,11 +297,11 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1529 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
 | `mode` | packages/core/src/config/schema.ts:536 | 150 |
-| `model` | packages/core/src/config/schema.ts:1299 | 283 |
+| `model` | packages/core/src/config/schema.ts:1299 | 285 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1767 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1782 | 4 |
-| `models` | packages/core/src/config/schema.ts:583 | 55 |
+| `models` | packages/core/src/config/schema.ts:583 | 56 |
 | `moderateInputs` | packages/core/src/config/schema.ts:1301 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1302 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:586 | 2 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:2038 | 402 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:749 | 59 |
-| `node` | packages/core/src/config/schema.ts:1107 | 254 |
+| `node` | packages/core/src/config/schema.ts:1107 | 255 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:583 | 3 |
 | `notes` | packages/core/src/config/schema.ts:855 | 62 |
 | `oneLiner` | packages/core/src/config/schema.ts:964 | 3 |
@@ -517,7 +517,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:457 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:852 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:634 | 4 |
-| `users` | packages/core/src/config/schema.ts:498 | 49 |
+| `users` | packages/core/src/config/schema.ts:498 | 50 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:372 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
