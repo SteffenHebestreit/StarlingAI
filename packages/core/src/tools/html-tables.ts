@@ -64,6 +64,33 @@ export function newCellBudget(): CellBudget {
   return { cellsLeft: TABLE_LIMITS.cellsPerCall };
 }
 
+// ─── Work counters ────────────────────────────────────────────────────────────
+
+/**
+ * Work counted at the steps whose repetition once made one page cost seconds or the heap: the
+ * parse counters for the last parseHtmlTables call, the computation counters for the last
+ * computeTables call. Tests bound each by the size of the input instead of timing the call;
+ * nothing else reads them.
+ */
+export interface TableWork {
+  /** Parse: characters the scanner's searches and tag reads passed over, at most the document's length. */
+  scannedChars: number;
+  /** Parse: characters of page text entity-decoded into cell, struck and caption text. */
+  decodedChars: number;
+  /** Parse: positions visited once the grid is laid out, header positions named and row positions built. */
+  gridPositions: number;
+  /** Computation: characters of cell text read for values, conditions, groups, labels and the page signature. */
+  cellTextChars: number;
+  /** Computation: column names normalized for comparison. */
+  namesNormalized: number;
+}
+
+const work: TableWork = { scannedChars: 0, decodedChars: 0, gridPositions: 0, cellTextChars: 0, namesNormalized: 0 };
+
+export function tableWorkForTests(): TableWork {
+  return { ...work };
+}
+
 // ─── Parsed model ─────────────────────────────────────────────────────────────
 
 export interface TableCell {
@@ -241,6 +268,7 @@ function appendDecoded(current: string, raw: string): string {
       const amp = raw.lastIndexOf("&", end - 1);
       if (amp >= 0 && end - amp < 40) end = amp;
     }
+    work.decodedChars += end;
     const decoded = decodeHTML(raw.slice(0, end));
     if (decoded.length >= room || end >= raw.length) {
       if (decoded.length <= room) return current + decoded;
@@ -262,8 +290,17 @@ function cellText(parts: string): string {
  * is marked truncated.
  */
 export function parseHtmlTables(html: string, budget: CellBudget = newCellBudget(), options: { cut?: boolean } = {}): ParsedDocument {
+  work.scannedChars = 0;
+  work.decodedChars = 0;
+  work.gridPositions = 0;
   const lower = asciiLower(html);
   const length = html.length;
+  /** Where `needle` next stands in `text` (html or lower) from `from`, or -1; what the search passed over is counted. */
+  const find = (text: string, needle: string, from: number): number => {
+    const at = text.indexOf(needle, from);
+    work.scannedChars += (at < 0 ? length : at) - from;
+    return at;
+  };
   const stack: OpenTable[] = [];
   const finished: OpenTable[] = [];
   let opened = 0;
@@ -408,7 +445,7 @@ export function parseHtmlTables(html: string, budget: CellBudget = newCellBudget
 
   let pos = 0;
   scan: while (pos < length) {
-    const lt = html.indexOf("<", pos);
+    const lt = find(html, "<", pos);
     if (lt < 0) {
       onText(html.slice(pos));
       break;
@@ -423,14 +460,14 @@ export function parseHtmlTables(html: string, budget: CellBudget = newCellBudget
         pos = lt + 6;
         continue;
       }
-      const close = html.indexOf("-->", lt + 4);
+      const close = find(html, "-->", lt + 4);
       if (close < 0) break;
       pos = close + 3;
       continue;
     }
     const next = html.charCodeAt(lt + 1);
     if (next === 33 || next === 63) {
-      const close = html.indexOf(">", lt + 2);
+      const close = find(html, ">", lt + 2);
       if (close < 0) break;
       pos = close + 1;
       continue;
@@ -442,16 +479,17 @@ export function parseHtmlTables(html: string, budget: CellBudget = newCellBudget
       continue;
     }
     const tag = scanTag(html, lt);
+    work.scannedChars += (tag ? tag.next : length) - lt;
     if (!tag) break;
     pos = tag.next;
     if (!tag.end && RAW_TEXT_ELEMENTS.has(tag.name)) {
       let search = pos;
       for (;;) {
-        const close = lower.indexOf(`</${tag.name}`, search);
+        const close = find(lower, `</${tag.name}`, search);
         if (close < 0) break scan;
         const after = html.charCodeAt(close + 2 + tag.name.length);
         if (Number.isNaN(after) || isSpaceCode(after) || after === 47 || after === 62) {
-          const gt = html.indexOf(">", close);
+          const gt = find(html, ">", close);
           if (gt < 0) break scan;
           pos = gt + 1;
           break;
@@ -577,6 +615,7 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
   const parts: string[][] = [];
   const partChars: number[] = [];
   for (const row of headerRows) {
+    work.gridPositions += row.cells.length;
     row.cells.forEach((cell, index) => {
       if (!cell) return;
       let text = shownHeader.get(cell);
@@ -604,7 +643,11 @@ function finishTable(raw: OpenTable, number: number, budget: CellBudget): Parsed
   // A row keeps its own positions only, and a reader takes a missing one as empty. Padding every
   // row to the widest row's width held rows × width cells for a page that paid for far fewer:
   // 64.5 kB of empty rows under one 100,000-column row ran the gateway out of heap.
-  const asRow = (row: { cells: Array<GridCell | undefined> }): TableCell[] => Array.from(row.cells, (cell) => cell?.cell ?? EMPTY_CELL);
+  const asRow = (row: { cells: Array<GridCell | undefined> }): TableCell[] => {
+    const cells = Array.from(row.cells, (cell) => cell?.cell ?? EMPTY_CELL);
+    work.gridPositions += cells.length;
+    return cells;
+  };
   const nonEmpty = (cells: TableCell[]): boolean => cells.some((cell) => cell.text || cell.struck);
   return {
     number,
@@ -810,6 +853,7 @@ const NORMALIZED_NAMES = new WeakMap<readonly string[], string[]>();
 function normalizedNames(columns: readonly string[]): string[] {
   let names = NORMALIZED_NAMES.get(columns);
   if (!names) {
+    work.namesNormalized += columns.length;
     names = columns.map(normalizeText);
     NORMALIZED_NAMES.set(columns, names);
   }
@@ -895,6 +939,7 @@ function rowSignature(rows: readonly TableCell[][], width: number, ids: CellIds)
   const idOf = (cell: TableCell): number => {
     let id = ids.byCell.get(cell);
     if (id === undefined) {
+      work.cellTextChars += cell.text.length + cell.struck.length;
       const text = normalizeText(`${cell.text} ${cell.struck}`);
       id = ids.byText.get(text);
       if (id === undefined) {
@@ -961,6 +1006,7 @@ function newCellTexts(): CellTexts {
       const key = cell ?? EMPTY_CELL;
       let result = cache.get(key);
       if (result === undefined) {
+        work.cellTextChars += key.text.length;
         result = compute(key.text);
         cache.set(key, result);
       }
@@ -1034,6 +1080,8 @@ function compares(op: ConditionOp, order: number): boolean {
  * table, a column, a condition value or a column's numbers are ambiguous.
  */
 export function computeTables(pages: readonly PageInput[], query: TableQuery, options: ComputeOptions): ComputeResult {
+  work.cellTextChars = 0;
+  work.namesNormalized = 0;
   if (pages.length === 0) return { ok: false, error: "no page was read" };
   if (pages.every((page) => page.doc.tables.length === 0)) return { ok: false, error: "no <table>", noTable: true };
   const extraction = query.column === undefined && (query.aggregates?.length ?? 0) === 0 && (query.where?.length ?? 0) === 0 && query.groupBy === undefined;
