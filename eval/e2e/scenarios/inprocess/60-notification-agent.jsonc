@@ -43,7 +43,7 @@
       kind: "turn",
       id: "notify-by-email",
       agent: "notification_agent",
-      message: "Schicke per E-Mail, und nur per E-Mail, eine kurze Status-Benachrichtigung an ops@e2e.test mit dem Betreff „Deploy OK“ und dem Text „Deployment erfolgreich abgeschlossen“. --auto",
+      message: "Schicke per E-Mail, und nur per E-Mail, eine kurze Status-Benachrichtigung an ops@e2e.test mit dem Betreff „Deploy OK“ und dem Text „Deployment abgeschlossen“. --auto",
       timeoutMs: 600000,
       expect: {
         reply: {
