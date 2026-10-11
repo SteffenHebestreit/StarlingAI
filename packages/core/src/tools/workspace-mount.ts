@@ -91,6 +91,40 @@ export function resolveDockerWorkspaceBind(
   return `${host}:${at ?? workspacePath}`;
 }
 
+/**
+ * The bind shell_exec, run_script and run_test_suite hand a sandbox: the caller's own root at
+ * /workspace (resolveDockerWorkspaceBind), or null where that root lies under users/ and the bind
+ * cannot be narrowed to it.
+ *
+ * FAIL CLOSED FOR AN ACCOUNT. Behind a named-volume source there is no host path to narrow, and the
+ * whole volume was bound instead. users/ is masked only where the caller's own root is NOT in it, so
+ * an account's sandbox had every other account's workspace in its bind, readable and, as the owner,
+ * writable (review 2026-10-11). An account's root is not given that bind; the caller refuses the run
+ * with UNNARROWED_ACCOUNT_SANDBOX_ERROR, as the git sandbox refuses one (requireNarrow). The shared
+ * root keeps the whole-volume bind, read-only with users/ masked (sandboxIsolationArgs).
+ */
+export function callerSandboxBind(workspacePath: string, host: SandboxHostOverrides = {}): string | null {
+  return liesUnderUsers(workspacePath, host.sharedRoot ?? configuredSharedRoot())
+    ? resolveDockerWorkspaceBind(workspacePath, { at: "/workspace", requireNarrow: true })
+    : resolveDockerWorkspaceBind(workspacePath, { at: "/workspace" });
+}
+
+/** What shell_exec, run_script and run_test_suite return where callerSandboxBind gave no bind. */
+export const UNNARROWED_ACCOUNT_SANDBOX_ERROR =
+  "Sandbox refused: the workspace mount source is a named volume, which cannot be narrowed to this account's own root, "
+  + "and the whole volume holds every other account's workspace. Nothing was run. "
+  + "Set SAI_WORKSPACE_MOUNT_SOURCE to the host path of the workspace mount to run sandboxes per account.";
+
+/** Whether a root lies under a users/ directory: an account's root, whose parent is users/, or
+ *  anything under the shared root's users/. Either separator, in any case. */
+function liesUnderUsers(workspacePath: string, sharedRoot: string | undefined): boolean {
+  const root = normalizeRoot(workspacePath);
+  if (root.split("/").at(-2)?.toLowerCase() === "users") return true;
+  if (!sharedRoot) return false;
+  const users = `${normalizeRoot(sharedRoot)}/users`.toLowerCase();
+  return root.toLowerCase() === users || root.toLowerCase().startsWith(`${users}/`);
+}
+
 export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions {
   /**
    * Expose the workspace at THIS container path instead of at its own.

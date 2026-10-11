@@ -393,17 +393,53 @@ describe("the path the model wrote, where the whole named volume is bound", () =
 
   it("stays as written for a named volume, and maps to /workspace where the caller's own root is bound", async () => {
     const { getTool } = await import("../tools/registry.js");
-    const ctx: ToolContext = { sessionId: "s-volume", workspacePath: CALLER_WS, workspaceScope: "generated" };
-    const command = `cd ${CALLER_WS} && ls generated`;
-
+    // Behind a named volume only the shared root runs (an account's root is refused, below).
+    const sharedCommand = `cd ${SHARED}/generated && ls`;
     delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
-    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
-    expect(flagValue(dockerArgs(), "-w")).toBe(CALLER_WS);
-    expect(dockerArgs().at(-1)).toContain(command);
+    await getTool("shell_exec")!.execute({ command: sharedCommand, workdir: SHARED }, { sessionId: "s-volume", workspacePath: SHARED, workspaceScope: "generated" });
+    expect(flagValue(dockerArgs(), "-w")).toBe(SHARED);
+    expect(dockerArgs().at(-1)).toContain(sharedCommand);
 
+    const command = `cd ${CALLER_WS} && ls generated`;
     process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
-    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
+    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, { sessionId: "s-host", workspacePath: CALLER_WS, workspaceScope: "generated" });
     expect(flagValue(dockerArgs(), "-w")).toBe("/workspace");
     expect(dockerArgs().at(-1)).toContain("cd /workspace && ls generated");
+  });
+});
+
+describe("an account's root where the bind cannot be narrowed to it (a named volume)", () => {
+  // The whole volume was bound, with users/ unmasked because the caller's own root is in it: an
+  // account's sandbox had every other account's workspace.
+  const ACCOUNT_WS = `/workspace/workspace/users/${ACCOUNT}`;
+
+  beforeEach(() => {
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+  });
+
+  it.each([
+    ["shell_exec", { command: "ls" }],
+    ["run_script", { path: "count.js" }],
+    ["run_test_suite", { suite: "vitest" }],
+  ] as const)("%s refuses and runs nothing", async (tool, args) => {
+    const { getTool } = await import("../tools/registry.js");
+    for (const workspacePath of [ACCOUNT_WS, CALLER_WS]) {
+      for (const workspaceScope of ["generated", undefined] as const) {
+        const result = await getTool(tool)!.execute({ ...args }, { sessionId: "s-unnarrowed", workspacePath, workspaceScope });
+        expect(result.success, `${workspacePath} ${workspaceScope}`).toBe(false);
+        expect(result.error).toMatch(/named volume.*Nothing was run/);
+      }
+    }
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+  });
+
+  it("is told apart from the shared root, which keeps the whole-volume bind, and from a host-path source", async () => {
+    const { callerSandboxBind } = await import("../tools/workspace-mount.js");
+    expect(callerSandboxBind(ACCOUNT_WS, { sharedRoot: SHARED })).toBeNull();
+    expect(callerSandboxBind(`${SHARED}/users/notes/deeper`, { sharedRoot: SHARED })).toBeNull();
+    expect(callerSandboxBind(SHARED, { sharedRoot: SHARED })).toBe("gc-workspace:/workspace");
+    process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
+    expect(callerSandboxBind(ACCOUNT_WS, { sharedRoot: SHARED })).toBe(`${HOST_SOURCE}/workspace/users/${ACCOUNT}:/workspace`);
   });
 });
