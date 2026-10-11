@@ -62,4 +62,10 @@ describe("OpenAI-compatible TTS model list", () => {
     expect(health).toMatchObject({ ok: false, status: 401 });
     expect(requested).toEqual(["/v1/models"]);
   });
+
+  it("hands the catalog that error too, instead of the list at /models", async () => {
+    const baseUrl = await upstream({ "/v1/models": 401, "/models": 200 });
+    expect((await fetchOpenAiTtsModels({ baseUrl, timeoutMs: 2000 })).status).toBe(401);
+    expect(requested).toEqual(["/v1/models"]);
+  });
 });

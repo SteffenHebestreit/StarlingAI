@@ -2384,6 +2384,99 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("reads an OpenAI-compatible TTS server's model list at /v1/models for the status check and the voice catalog", async () => {
+    // Such a server keeps its list beside /v1/audio/speech and serves nothing at /models: the status
+    // check reported TTS offline (404) while every speech request succeeded (2026-10-11).
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-openai-tts-"));
+    const port = 23500 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 24500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const requested: string[] = [];
+
+    upstreamServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      requested.push(`${req.method} ${req.url}`);
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ object: "list", data: [{ id: "tts-1", object: "model" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/audio/speech") {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(200, { "Content-Type": "audio/wav" });
+          res.end(Buffer.from("RIFFtest"));
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ detail: "Not Found" }));
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        port,
+        jwtSecret: "j".repeat(32),
+      },
+      multimodal: {
+        files: { baseUrl: `http://127.0.0.1:${upstreamPort}`, timeoutMs: 5_000 },
+        tts: { baseUrl: `http://127.0.0.1:${upstreamPort}`, api: "openai-compatible", model: "tts-1", defaultSpeaker: "alloy", timeoutMs: 5_000 },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const statusResponse = await fetch(`${baseUrl}/api/multimodal/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(statusResponse.status).toBe(200);
+      const statusBody = await statusResponse.json() as { tts: { ok: boolean; status?: number } };
+      expect(statusBody.tts).toMatchObject({ ok: true, status: 200 });
+
+      const voicesResponse = await fetch(`${baseUrl}/api/multimodal/voices`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(voicesResponse.status).toBe(200);
+      const voicesBody = await voicesResponse.json() as { voices: unknown[]; speakers: unknown[] };
+      expect(voicesBody.voices).toEqual([]);
+      expect(voicesBody.speakers).toEqual([]);
+
+      expect(requested).toContain("GET /v1/models");
+      expect(requested).not.toContain("GET /models");
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("falls back to plain qwen TTS when config supplies a default voice sample but the selected model lacks voice_clone", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-fallback-"));
     const port = 23500 + Math.floor(Math.random() * 1000);
