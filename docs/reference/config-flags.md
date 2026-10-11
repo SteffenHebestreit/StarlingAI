@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:464 | 18 |
 | `accessKeyId` | packages/core/src/config/schema.ts:524 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 142 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 143 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1739 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1770 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -493,7 +493,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:311 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:661 | 2 |
-| `tools` | packages/core/src/config/schema.ts:986 | 241 |
+| `tools` | packages/core/src/config/schema.ts:986 | 242 |
 | `topK` | packages/core/src/config/schema.ts:174 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:173 | 4 |
@@ -517,7 +517,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:457 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:852 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:634 | 4 |
-| `users` | packages/core/src/config/schema.ts:498 | 50 |
+| `users` | packages/core/src/config/schema.ts:498 | 51 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:372 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:380 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:377 | 1 |
