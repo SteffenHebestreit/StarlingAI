@@ -85,6 +85,12 @@ export interface AssembleTurnSystemMessagesParams {
    *  names it. Empty otherwise. */
   directiveAgentPrompt?: string;
   /**
+   * Whether the turn is offered search_workflows. The multi-domain plan-first nudge asks for it, and a
+   * step's turn, which runs without the catalog tools, was told to call it (E2E 2026-10-10). Absent,
+   * it is taken as offered.
+   */
+  workflowSearchOffered?: boolean;
+  /**
    * Every tool the turn has called so far, with how often (the runtime's per-turn tally), and the
    * delegations it has dispatched. Read after iteration 0 only, to decide whether the plan-first
    * nudge still applies (turnIsStillDiscovering). Absent, it is never re-armed.
@@ -212,6 +218,7 @@ export async function assembleTurnSystemMessages(
     approvedRunCandidateEnforcementPrompt,
     workflowExecutionEnforcementPrompt,
     directiveAgentPrompt = "",
+    workflowSearchOffered = true,
     applyRoutingTone,
     buildTemporalContextPrompt,
   } = params;
@@ -467,7 +474,10 @@ export async function assembleTurnSystemMessages(
     // the old path from iteration 2: no nudge, and search_agents' pointer says to delegate now
     // (planFirstPending below is false once the nudge is gone).
     const planFirst = getConfig().orchestration?.planFirst ?? true;
-    const multiDomainPlan = looksMultiDomainResearch(userMessage);
+    // The multi-domain text asks for search_workflows, so a turn that is not offered it gets the
+    // single-domain text: a scene's step turn looked for its own workflow with search_tools and
+    // search_documents instead (E2E 2026-10-10).
+    const multiDomainPlan = workflowSearchOffered && looksMultiDomainResearch(userMessage);
     const correctionPending = [
       delegatedResearchEnforcementPrompt,
       searchAgentsNoMatchFallbackPrompt,

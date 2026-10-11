@@ -208,6 +208,21 @@ describe("the plan-first nudge across iterations of a real turn", () => {
     expect(planNudge(messagesOfCall(2))).toBeUndefined();
   });
 
+  // A scene or job step's turn runs without the catalog tools (opts._withoutWorkflowCatalog), and the
+  // multi-domain nudge told it to call search_workflows ONCE (E2E 2026-10-10).
+  it("does not ask a turn without the catalog tools for search_workflows", async () => {
+    const { session, runTurn } = await loadRuntime();
+    streamMock.mockImplementation(() => textStream("146 employees."));
+
+    await runTurn({ session, userMessage: USER_MESSAGE, _withoutWorkflowCatalog: true });
+
+    expect(toolNamesOfCall(0)).not.toContain("search_workflows");
+    const nudge = planNudge(messagesOfCall(0));
+    expect(nudge, "iteration 0 carries a nudge").toBeDefined();
+    expect(nudge).not.toContain("search_workflows");
+    expect(nudge).toContain("call record_plan ONCE");
+  });
+
   it("does not reach iteration 1 once iteration 0 delegated", async () => {
     const { session, runTurn } = await loadRuntime();
     streamMock

@@ -2908,6 +2908,7 @@ async function _runTurn(
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
       directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
+      workflowSearchOffered: allowedToolNameSet.has("search_workflows"),
       turnToolCallCounts: _turnToolCallCounts,
       turnDelegationCount: _turnDelegationCount,
       injectedSkillSlugs,

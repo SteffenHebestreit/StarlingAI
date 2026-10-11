@@ -286,6 +286,23 @@ describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0"
     }
   });
 
+  // A scene or job step's turn runs without the catalog tools, and the multi-domain text told it to
+  // call search_workflows ONCE. It looked for its own workflow with search_tools and search_documents
+  // until the loop brake ended it (E2E 2026-10-10, verified_research_brief, source_grounded_paper_packet).
+  it("is the single-domain nudge on a turn that is not offered search_workflows, and is not repeated", async () => {
+    const { assemble, assembleResult } = setUp();
+    const withoutSearch = await assembleResult(0, { workflowSearchOffered: false });
+    const nudge = planNudge(withoutSearch.messages);
+    expect(nudge, "iteration 0 carries a nudge").toBeDefined();
+    expect(nudge).not.toContain("search_workflows");
+    expect(nudge).toBe(planNudge(await setUp({}, SINGLE_DOMAIN_MESSAGE).assemble(0)));
+    expect(withoutSearch.planFirstPending).toBe(false);
+    expect(planNudge(await assemble(1, { ...searchedOnly, workflowSearchOffered: false }))).toBeUndefined();
+    // Offered, and by default, the multi-domain text as before.
+    expect(planNudge(await assemble(0, { workflowSearchOffered: true }))).toContain(SEARCH_FIRST);
+    expect(planNudge(await assemble(0))).toContain(SEARCH_FIRST);
+  });
+
   it("stays off after iteration 0 when the caller passes no tally, as before", async () => {
     const { assemble } = setUp();
     expect(planNudge(await assemble(1))).toBeUndefined();
