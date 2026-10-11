@@ -262,7 +262,7 @@ describe("in-process specialist scenarios", () => {
     expect(evaluateEventExpectations(commitTurn.expect, pushed)).not.toEqual([]);
   });
 
-  it("qa_guard: the seeded suite exits 1 with the value the reply must name, and a green run, an edited seed or a reply without it fails", () => {
+  it("qa_guard: the seeded suite prints the value the reply must name, whatever the exit code, and a green run, an edited seed or a reply without it fails", () => {
     const scenario = scenarioById("inprocess-qa-guard-runs-seeded-tests");
     const seedTurn = turnOf(scenario, "seed-suite");
     const runTurn = turnOf(scenario, "run-suite");
@@ -304,16 +304,22 @@ describe("in-process specialist scenarios", () => {
     });
     expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [viaShell]))).toEqual([]);
     expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [viaRunner]))).toEqual([]);
+    // The same red run through a pipe exits 0 (tail's status), and still printed the actual value.
+    const piped = `${command} 2>&1 | tail -40`;
+    const tail = red.output.trimEnd().split(/\r?\n/).slice(-40).join("\n");
+    expect(tail).toContain("245.64000000000001");
+    expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [call("qa_guard", "shell_exec", { command: piped }, {
+      success: true,
+      output: tail,
+      metadata: { command: piped, sandboxed: true, exitCode: 0, programOutputChars: tail.trim().length },
+    })]))).toEqual([]);
 
-    // The defect fixed, the suite is green and exits 0: that is not the seeded suite's verdict.
+    // The defect fixed, the suite is green: its run never prints the actual value, so a report
+    // grounded in it cannot name it (the reply cases below).
     writeFileSync(join(ws, files[0]!.path), files[0]!.content.replace("return stueckpreis * menge * (1 - rabatt);", "return Math.round(stueckpreis * menge * (1 - rabatt) * 100) / 100;"), "utf8");
     const green = runSuite();
     expect(green.status).toBe(0);
-    expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [call("qa_guard", "shell_exec", { command }, {
-      success: true,
-      output: green.output,
-      metadata: { sandboxed: true, exitCode: 0, programOutputChars: green.output.trim().length },
-    })]))).not.toEqual([]);
+    expect(green.output).not.toContain("245.64000000000001");
     // Fixing it inside the verification run is an edit of the seed.
     expect(evaluateEventExpectations(runTurn.expect, run("qa_guard", [
       viaShell,

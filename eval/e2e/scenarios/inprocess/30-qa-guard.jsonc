@@ -10,12 +10,15 @@
 //                                                  245.64000000000001 in IEEE 754 doubles (node -e).
 // The business value 245,64 € is the site's volume-discount example (eval/e2e/ENVIRONMENT.md
 // "Prices & shipping": 30 × NW-3102 = 267,00 € − 8 % = 245,64 €); the code never rounds to cents.
-// node --test exits 1 when a test fails, so the run's exit code is the verdict.
+// Only a run prints the actual value 245.64000000000001, so the reply naming it is the verdict. The
+// exit code is not: node --test exits 1, but `| tail`, `|| true` or `; echo $?` turn the same red
+// run into exit 0.
 //
 // Audit row asserted: sub_agent_tool_call phase "done" with args and result (agent/sub-agent.ts
-// buildSubAgentToolAuditPayload). shell_exec and run_test_suite both report a failed run as
-// success false with metadata.exitCode and metadata.programOutputChars (tools/shell.ts,
-// tools/run-test-suite.ts), so either tool counts, provided its command ran node's test runner.
+// buildSubAgentToolAuditPayload). shell_exec and run_test_suite both report how much the run
+// printed as metadata.programOutputChars, whatever its exit code (tools/shell.ts,
+// tools/run-test-suite.ts), so either tool counts, provided its command ran node's test runner and
+// printed something.
 // Both need per-call approval (guardrails/tool-tiers.ts), hence --auto.
 // A verification run does not change what it verifies: no write or edit of the seeded files, and the
 // GETs after the turn find both unchanged (the failing assertion not weakened, the code not "fixed").
@@ -25,7 +28,7 @@
   title: "In-process qa_guard: a seeded node:test suite is run and its failure reported as printed",
   group: "inprocess",
   tags: ["inprocess", "qa_guard", "shell_agent", "sandbox", "tests"],
-  description: "Step 1 seeds generated/e2e-qa/staffel.mjs and staffel.test.mjs through shell_agent. In a fresh session qa_guard (in-process since 2026-10-09) runs the suite with node --test in the sandbox. Protects: the in-process test execution path (a node --test run that exits 1 with output), a report grounded in that output (the actual value 245.64000000000001 of the failing assertion), and a verification run that leaves the code and the test as they were.",
+  description: "Step 1 seeds generated/e2e-qa/staffel.mjs and staffel.test.mjs through shell_agent. In a fresh session qa_guard (in-process since 2026-10-09) runs the suite with node --test in the sandbox. Protects: the in-process test execution path (a node --test run with output), a report grounded in that output (the actual value 245.64000000000001 of the failing assertion), and a verification run that leaves the code and the test as they were.",
   requires: ["model", "sandbox"],
   timeoutMs: 1500000,
   steps: [
@@ -90,7 +93,6 @@
                 "data.tool": { in: ["shell_exec", "run_test_suite"] },
                 "data.phase": "done",
                 "data.args.command": { regex: "--test" },
-                "data.metadata.exitCode": 1,
                 "data.metadata.programOutputChars": { gte: 1 },
               },
             },
