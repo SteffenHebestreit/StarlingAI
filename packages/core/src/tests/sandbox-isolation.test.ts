@@ -212,6 +212,32 @@ describe("a new account's first sandbox run", () => {
   });
 });
 
+describe("a Windows-native gateway", () => {
+  // Node reports uid and gid 0 for every path on Windows, so --user would make every sandbox root.
+  it("passes no --user, and keeps the masks", async () => {
+    const { sandboxIsolationArgs, sandboxUserArgs } = await import("../tools/workspace-mount.js");
+    const root = join(shared, "users", "acct-1");
+    expect(sandboxUserArgs(root, "win32")).toEqual([]);
+    expect(sandboxUserArgs(root, "linux")).toEqual(["--user", `${fs.statSync(root).uid}:${fs.statSync(root).gid}`]);
+
+    const args = sandboxIsolationArgs({ workspacePath: root, bind: "caller" }, { platform: "win32", sharedRoot: shared });
+    expect(args).not.toContain("--user");
+    expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
+  });
+
+  it("reads the platform the gateway runs on", async () => {
+    Object.defineProperty(process, "platform", { ...realPlatform, value: "win32" });
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("shell_exec")!.execute({ command: "ls" }, { sessionId: "s-win32", workspacePath: join(shared, "users", "acct-1") });
+    expect(dockerArgs()).not.toContain("--user");
+
+    Object.defineProperty(process, "platform", { ...realPlatform, value: "linux" });
+    await getTool("shell_exec")!.execute({ command: "ls" }, { sessionId: "s-linux", workspacePath: join(shared, "users", "acct-1") });
+    expect(dockerArgs()).toContain("--user");
+  });
+});
+
 describe("the owner each git bind runs as", () => {
   it("is the owner of /workspace for the full-scope repo bind, and of the caller's root for the narrowed one", async () => {
     fakeOwners.set("/workspace", 1111).set(CALLER_WS, 2222);

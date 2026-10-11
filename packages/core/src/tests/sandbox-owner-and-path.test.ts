@@ -10,7 +10,8 @@
  *
  * execFile is mocked, so no docker runs: the assertions read the argument vector each tool passed.
  * workspace-mount is the REAL module, and the workspace is a real temporary directory, so the
- * owner comes from an actual stat.
+ * owner comes from an actual stat. The gateway is a Linux one whatever runs the tests: on Windows
+ * the sandbox gets no --user (sandbox-isolation covers that branch).
  */
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,7 @@ const ACCOUNT_ROOT = "/workspace/workspace/users/acct-1";
 
 let workspacePath = "";
 let owner = "";
+const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
 
 function dockerArgs(): string[] {
   return (execFileAsyncMock.mock.calls.at(-1)?.[1] ?? []) as string[];
@@ -48,6 +50,7 @@ function runFlags(args: string[]): string[] {
 }
 
 beforeAll(async () => {
+  Object.defineProperty(process, "platform", { ...realPlatform, value: "linux" });
   workspacePath = mkdtempSync(join(tmpdir(), "sai-sandbox-owner-"));
   const { uid, gid } = statSync(workspacePath);
   owner = `${uid}:${gid}`;
@@ -57,6 +60,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  Object.defineProperty(process, "platform", realPlatform);
   rmSync(workspacePath, { recursive: true, force: true });
 });
 

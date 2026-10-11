@@ -128,9 +128,12 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
  * is root in the compose deployment, which is why every sandbox keeps --cap-drop=ALL and
  * no-new-privileges (no DAC override, no chown, no mounts), as serve_app's root run already does.
  *
- * No flag when the directory cannot be read: the image's own user then applies, as before.
+ * No flag when the directory cannot be read: the image's own user then applies, as before. None on
+ * Windows either, where Node reports uid and gid 0 for every path: a Windows-native gateway would
+ * have run every sandbox as root.
  */
-export function sandboxUserArgs(gatewayPath: string): string[] {
+export function sandboxUserArgs(gatewayPath: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === "win32") return [];
   try {
     const { uid, gid } = statSync(gatewayPath);
     return ["--user", `${uid}:${gid}`];
@@ -159,6 +162,8 @@ export interface SandboxIsolationInput {
 
 /** What the isolation reads from the gateway's host. The tools pass nothing; tests pass these. */
 export interface SandboxHostOverrides {
+  /** The gateway's platform; process.platform when absent. */
+  platform?: NodeJS.Platform;
   /** The deployment's shared workspace root; getConfig().workspacePath when absent. */
   sharedRoot?: string;
 }
@@ -197,7 +202,7 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
   // cannot write. The gateway creates it first, as it creates everything else in the workspace.
   // The repo bind is the deployment mount, which the gateway does not create.
   if (input.bind === "caller") ensureGatewayDir(bound);
-  const args = sandboxUserArgs(bound);
+  const args = sandboxUserArgs(bound, host.platform);
 
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
   const masked = new Set<string>();
