@@ -1,0 +1,73 @@
+// IN-PROCESS: tool_developer starts a tool-development session and tests a pure-compute tool in the
+// no-network sandbox. It does not submit it.
+//
+// tool_developer has run in the gateway process since 2026-10-09 (container.disabled), and it is the
+// one specialist with its own turnTimeoutMs (360000). Its tools: tool_dev_start validates the code in
+// the sandbox and opens a session, and tool_dev_test runs test cases there (tools/tool-develop.ts,
+// tools/tool-sandbox-runner.ts).
+//
+// WHY THE SCENARIO STOPS BEFORE tool_dev_submit. Under --auto the turn's approval callback answers
+// yes to everything (agent/runtime.ts resolvedApprovalCallback), and tool_dev_submit's approval IS
+// the deployment: completeImprovement writes the bundle to the workspace tools/ zone and registers
+// selfdev__<name> live for every account (agent/self-improve.ts, tools/dynamic-tools.ts). No route
+// removes it again, so each run would leave a live tool behind, and the next run's tool_dev_start
+// would refuse the name as already in use. Without --auto, tool_dev_start (per-call approval) would
+// wait for a card the harness never answers. So the message asks for start and test only, and a
+// submit fails the scenario. If one happens anyway, remove workspace/tools/celsius_to_fahrenheit.json
+// by hand (and restart the gateway to unregister the tool).
+//
+// Ground truth: F = C × 9/5 + 32, so 100 °C -> 212 °F and 0 °C -> 32 °F. tool_dev_test answers
+// "## Test Results: <passed>/<total> passed" and then one block per case with its input, expected
+// substring and output (tools/tool-develop.ts). The audit keeps that text as resultPreview
+// (whitespace collapsed, 280 characters): every case passed, and the 100 °C case with 212 is among
+// them. The session sweeper marks an untouched session stuck after toolDevelopment.maxIdleMs
+// (5 minutes), and at most maxConcurrentSessions (2) may develop at once, so back-to-back repeats
+// share that budget.
+{
+  id: "inprocess-tool-developer-sandbox-tests",
+  title: "In-process tool_developer: a pure-compute tool is developed and passes its sandbox tests",
+  group: "inprocess",
+  tags: ["inprocess", "tool_developer", "sandbox", "self-improvement"],
+  description: "tool_developer (in-process since 2026-10-09) builds celsius_to_fahrenheit: tool_dev_start validates the code in the no-network sandbox, tool_dev_test runs 100 °C -> 212 and 0 °C -> 32 there, and every case passes. Protects: the in-process tool-development path (session start and sandbox tests, both dispatched by tool_developer), a reply grounded in the test result (212), and that the test run deploys nothing: tool_dev_submit, which --auto would approve into a live tool, must not run.",
+  requires: ["model", "sandbox"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "develop-and-test",
+      agent: "tool_developer",
+      message: "Entwickle ein reines Rechen-Tool `celsius_to_fahrenheit` mit einem Parameter `celsius` (Zahl), das Grad Celsius in Grad Fahrenheit umrechnet (F = C × 9/5 + 32). Starte dafür eine Entwicklungssitzung, teste es mit genau zwei Testfällen (100 °C ergibt 212, 0 °C ergibt 32) und nenne das Testergebnis. Dies ist nur ein Testlauf: Reiche das Tool nicht zur Freigabe ein, also kein tool_dev_submit. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: { matches: ["\\b212\\b"] },
+        agents: { mustRun: ["tool_developer"] },
+        tools: { mustNotCall: ["tool_dev_submit"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "tool_developer",
+                "data.tool": "tool_dev_start",
+                "data.phase": "done",
+                "data.success": true,
+                "data.args.toolName": "celsius_to_fahrenheit",
+              },
+            },
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "tool_developer",
+                "data.tool": "tool_dev_test",
+                "data.phase": "done",
+                "data.success": true,
+                // All cases passed, and the 100 °C case with 212 is among them.
+                "data.resultPreview": { regex: "^## Test Results: ([1-9]\\d*)/\\1 passed(?=.*\\b100\\b)(?=.*\\b212\\b)" },
+              },
+            },
+          ],
+        },
+      },
+    },
+  ],
+}
