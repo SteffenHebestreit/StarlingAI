@@ -1526,8 +1526,11 @@ async function readWorkspaceBinaryFile(path: string, workspacePath: string): Pro
     // had just denied — API keys, JWT secret, S3 credentials, rendered to markdown.
     // Using relativePath also repairs the accepted "/workspace/..." form, whose raw
     // key could never match what putUpload actually stored.
+    // The store resolves that path against the CALLER's own root and namespace: it used to join
+    // it to the shared root, so an account's "users/<other>/generated/x.pdf", a path that missed
+    // on its own disk, came back with the other account's file (storage/object-store.ts).
     const { getUpload } = await import("../storage/object-store.js");
-    const stored = await getUpload(resolved.relativePath.replace(/\\/g, "/").replace(/^\/+/, ""));
+    const stored = await getUpload(resolved.relativePath);
     if (!stored) throw err;
     return describe(Buffer.from(stored));
   }

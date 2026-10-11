@@ -29,6 +29,12 @@ export interface DocumentRegistryEntry {
   filename: string;
   /** Workspace-relative path of the persisted original file, when known. */
   relativePath?: string;
+  /**
+   * The object-store key of that file in the namespace of the caller that ingested it
+   * (storage/object-store.ts callerUploadKey). The download and removal routes read and delete by
+   * this, not by relativePath, which is relative to that caller's root and was named by a client.
+   */
+  storeKey?: string;
   contentType?: string;
   size?: number;
   chunkCount?: number;
@@ -144,7 +150,10 @@ export async function listRegistry(): Promise<DocumentRegistryEntry[]> {
   return readRegistry();
 }
 
-/** First registry entry for a document that has a persisted file (for download). */
-export async function getRegistryFileEntry(documentId: string): Promise<DocumentRegistryEntry | undefined> {
-  return (await readRegistry()).find((e) => e.documentId === documentId && e.relativePath);
+/**
+ * First registry entry for a document that has a persisted file (for download). With `sources`,
+ * only an entry recorded under one of them: the caller's own, under multi-user auth.
+ */
+export async function getRegistryFileEntry(documentId: string, sources?: ReadonlySet<string>): Promise<DocumentRegistryEntry | undefined> {
+  return (await readRegistry()).find((e) => e.documentId === documentId && e.relativePath && (!sources || sources.has(e.source)));
 }

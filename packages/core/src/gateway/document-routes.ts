@@ -238,6 +238,7 @@ export function registerDocumentRoutes(app: Hono): void {
     const id = c.req.param("id");
     try {
       // Multi-user mode: don't stream another user's / another session's file bytes.
+      let manageable: Set<string> | undefined;
       if (getConfig().auth.enabled) {
         const [{ engramListDocuments }, { callerManageableSources }] = await Promise.all([
           import("../retrieval/engram.js"),
@@ -245,17 +246,21 @@ export function registerDocumentRoutes(app: Hono): void {
         ]);
         const docs = await engramListDocuments();
         const doc = docs?.find((d) => d.id === id);
-        const manageable = callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) });
-        if (!doc || !doc.sources.some((s) => manageable.has(s))) {
+        manageable = callerManageableSources({ userId: user?.username, sessionId, identity: callerIdentity(user) });
+        if (!doc || !doc.sources.some((s) => manageable!.has(s))) {
           return c.json({ error: "No original file is stored for this document" }, 404);
         }
       }
+      // Of the document's files, one recorded for a source the caller holds: a document is stored
+      // once for every scope that holds the same text, and each scope's entry names the file of
+      // whoever ingested it there, which need not be the caller's.
       const { getRegistryFileEntry } = await import("../retrieval/document-registry.js");
-      const entry = await getRegistryFileEntry(id);
+      const entry = await getRegistryFileEntry(id, manageable);
       if (!entry?.relativePath) return c.json({ error: "No original file is stored for this document" }, 404);
-      // Read from the object store (S3/SeaweedFS) or local disk — same relative key.
-      const { getUpload } = await import("../storage/object-store.js");
-      const bytes = await getUpload(entry.relativePath);
+      // Read from the object store (S3/SeaweedFS) or local disk: by the key recorded at ingest,
+      // or, for an entry recorded before keys were, by the path in the caller's own namespace.
+      const { getUpload, getUploadByStoreKey } = await import("../storage/object-store.js");
+      const bytes = entry.storeKey ? await getUploadByStoreKey(entry.storeKey) : await getUpload(entry.relativePath);
       if (!bytes) return c.json({ error: "No original file is stored for this document" }, 404);
       return new Response(new Uint8Array(bytes), {
         headers: {

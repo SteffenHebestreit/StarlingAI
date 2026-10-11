@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { resolve, basename, extname } from "node:path";
+import { basename, extname } from "node:path";
 import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -514,12 +514,19 @@ export function createGateway() {
     );
   }
 
-  async function readWorkspaceBinaryFile(path: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
-    const workspaceRoot = resolve(getConfig().workspacePath);
-    const targetPath = resolve(workspaceRoot, path);
-    if (!targetPath.startsWith(workspaceRoot)) {
-      throw new Error("Audio example path escapes the workspace");
+  /**
+   * An audio sample under `root`. A path the REQUEST names is read from the caller's own root
+   * (userWorkspaceRoot), with the workspace boundary and the denylist read_file enforces: it was
+   * joined to the SHARED root behind a bare prefix check, so an account's "users/<other>/x.wav",
+   * or a secret file, went to the TTS service as the voice to clone.
+   */
+  async function readWorkspaceBinaryFile(path: string, root: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
+    const { guardPath } = await import("../tools/filesystem.js");
+    const guarded = guardPath(path, root);
+    if (!guarded.safe) {
+      throw new Error("Audio example path escapes the workspace or names protected workspace data");
     }
+    const targetPath = guarded.resolved;
     const fileStat = await stat(targetPath);
     if (!fileStat.isFile()) {
       throw new Error(`Audio example is not a file: ${path}`);
@@ -2246,7 +2253,10 @@ export function createGateway() {
           : typeof body["voice"] === "string" && body["voice"].trim()
             ? body["voice"].trim()
             : multimodalConfig.tts.defaultVoiceId,
-        audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath) : undefined,
+        // The configured sample belongs to the deployment and stays at the shared root.
+        audioExample: audioExamplePath
+          ? await readWorkspaceBinaryFile(audioExamplePath, explicitAudioExamplePath ? userWorkspaceRoot(getConfig().workspacePath) : getConfig().workspacePath)
+          : undefined,
         referenceText: explicitReferenceText ?? multimodalConfig.tts.voiceSampleText,
         saveVoiceAs: explicitSaveVoiceAs,
         allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,
