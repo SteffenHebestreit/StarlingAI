@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { logAudit } from "../audit/logger.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
-import type { ChatProvider } from "../providers/lmstudio.js";
+import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
@@ -63,11 +63,22 @@ export interface CorrectiveContext {
   getQaCorrectiveBuildUsed: () => boolean;
   setQaCorrectiveBuildUsed: (v: boolean) => void;
 
+  // --- the turn's one corrective re-dispatch of the request (runCorrectiveReroute), whichever
+  //     guard asks for it: set on entry, and a second call in the turn returns null ---
+  getCorrectiveRerouteUsed: () => boolean;
+  setCorrectiveRerouteUsed: (v: boolean) => void;
+
   // --- per-turn delegation counter mutation ---
   incrementDelegationCount: () => void;
 
   // --- runtime-private helpers / closures (passed as callbacks, never imported) ---
-  forceSynthesis: (session: AgentSession, provider: ChatProvider, signal: AbortSignal, instruction: string) => Promise<string | null>;
+  forceSynthesis: (
+    session: AgentSession,
+    provider: ChatProvider,
+    signal: AbortSignal,
+    instruction: string,
+    options?: { history?: readonly LLMMessage[] },
+  ) => Promise<string | null>;
   selectCorrectiveResumeTarget: (
     attachments: Array<Record<string, unknown>>,
     truncationProbe: (relativePath: string) => string | null,
@@ -167,6 +178,9 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
   ].filter(Boolean).join("\n\n");
   let buildResultMetadata: Record<string, unknown> | undefined;
   let buildResultOutput = "";
+  // What the confirmation below reads: the request and this build's own calls and results, not the
+  // turn's history (see where it is written).
+  const confirmationHistory: LLMMessage[] = [{ role: "user", content: userMessage }];
   try {
     const buildResult = await executeTool("delegate_to_agent", {
       agentName: builderAgent,
@@ -184,17 +198,19 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     // pair so the built artifact surfaces as a clickable attachment (collectTurnArtifactAttachments
     // only reads tool-role history) and history stays valid (audit 65f46046).
     const buildCallId = `qabuild_${Date.now().toString(36)}`;
-    session.addMessage({
+    const buildCall: LLMMessage = {
       role: "assistant",
       content: "",
       tool_calls: [{ id: buildCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: builderAgent, task: "BUILD TASK (final-QA corrective build)" }) } }],
-    });
-    session.addMessage({
+    };
+    const buildReport: LLMMessage = {
       role: "tool",
       content: (buildResult.success ? buildResult.output : (buildResult.error?.trim() ? `Error: ${buildResult.error}` : buildResult.output)).slice(0, 4_000),
       tool_call_id: buildCallId,
-      metadata: buildResult.metadata,
-    });
+    };
+    session.addMessage(buildCall);
+    session.addMessage({ ...buildReport, metadata: buildResult.metadata });
+    confirmationHistory.push(buildCall, buildReport);
   } catch (err) {
     ctx.logWarn({ err, sessionId: session.id }, "Final-QA corrective build delegation failed");
   }
@@ -216,17 +232,19 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
         const harvestWrite = await executeTool("write_file", { path: "app/index.html", content: inlineDoc }, toolContext);
         if (harvestWrite.success) {
           const harvestCallId = `qaharvest_${Date.now().toString(36)}`;
-          session.addMessage({
+          const harvestCall: LLMMessage = {
             role: "assistant",
             content: "",
             tool_calls: [{ id: harvestCallId, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "app/index.html", note: "harvested from builder's inline draft" }) } }],
-          });
-          session.addMessage({
+          };
+          const harvestReport: LLMMessage = {
             role: "tool",
             content: harvestWrite.output.slice(0, 1_000),
             tool_call_id: harvestCallId,
-            metadata: harvestWrite.metadata,
-          });
+          };
+          session.addMessage(harvestCall);
+          session.addMessage({ ...harvestReport, metadata: harvestWrite.metadata });
+          confirmationHistory.push(harvestCall, harvestReport);
           if (harvestWrite.metadata) ctx.extractArtifactsFromMetadata(harvestWrite.metadata, builtArtifacts, new Set<string>());
           logAudit("guardrail_flagged", {
             type: "final_qa_corrective_build_harvested_inline",
@@ -254,6 +272,11 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
       return `${String(name)}${String(size)}`;
     })
     .join(", ");
+  // FROM THE ARTIFACT FACTS, NOT FROM THE TURN'S HISTORY. A file was built, and the confirmation read
+  // everything the turn had done before the build: in the E2E run of 2026-10-10
+  // (guards-list-files-on-a-file, step 1) content_writer wrote generated/e2e-guards/inventur, and the
+  // reply, written after an earlier skill_manage refusal, said a system error had kept the file from
+  // being created. It reads the request, this build's own call and result, and the facts below.
   const synth = await ctx.forceSynthesis(
     session, ctx.getProvider(), signal,
     "The requested artifact has just been BUILT by the build specialist and is ALREADY attached to this message as a downloadable file. "
@@ -261,6 +284,7 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     + (harvestedIncomplete ? "IMPORTANT: the file was recovered from a draft that was CUT OFF before the end — tell the user plainly that the app file is incomplete (it may not run yet) and offer to finish it. " : "")
     + `Confirm to the user ${IN_REPLY_LANGUAGE}: state that the file was created, give its path(s) and size, and summarize ONLY what the builder's own report explicitly says it implemented — do NOT advertise features (quiz, simulator, flashcards, tracking, …) that the report does not state were built, and if the artifact is small or minimal, say so plainly and offer to extend it. `
     + "Do NOT dump raw evidence and do NOT paste the file's HTML/CSS/JS code or any fenced code block — the file is attached, so inlining its code is redundant and confusing.",
+    { history: confirmationHistory },
   );
   // Belt-and-suspenders: the slow model sometimes ignores the no-code instruction and
   // pastes a large (often fabricated, non-matching) code block — see audit ce8e2128 where
@@ -288,25 +312,55 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
 // specialist, the same path the user's manual follow-up would take) and ship the
 // specialist's answer. Returns the deliverable text, or null when the delegation
 // failed or returned nothing shippable (the caller then sends an honest denial).
-export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<string | null> => {
+//
+// The runtime calls it for a second reason (`loop_brake`): an orchestration turn that a loop brake
+// stopped before it had delegated anything (runtime.ts, before the terminal synthesis). The turn's
+// own tool choices were the loop, so the request goes out as the user wrote it, not as that turn
+// would have restated it.
+export type CorrectiveRerouteReason = "fabricated_zero_work" | "loop_brake";
+
+const REROUTE_STATUS: Record<CorrectiveRerouteReason, { de: string; en: string }> = {
+  fabricated_zero_work: {
+    de: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.",
+    en: "The previous answer was not backed by work that actually ran — passing the request to the right specialist.",
+  },
+  loop_brake: {
+    de: "Bisher hat kein Spezialist an der Anfrage gearbeitet — ich leite sie an den passenden weiter.",
+    en: "No specialist has worked on the request yet — passing it to the right one.",
+  },
+};
+
+const REROUTE_HISTORY_TASK: Record<CorrectiveRerouteReason, string> = {
+  fabricated_zero_work: "REROUTE (zero-work fabrication guard)",
+  loop_brake: "REROUTE (loop brake, nothing delegated)",
+};
+
+export const runCorrectiveReroute = async (
+  ctx: CorrectiveContext,
+  reason: CorrectiveRerouteReason = "fabricated_zero_work",
+  auditDetails: Record<string, unknown> = {},
+): Promise<string | null> => {
   const { signal, session, userMessage, toolContext } = ctx;
-  if (signal.aborted) return null;
+  if (ctx.getCorrectiveRerouteUsed() || signal.aborted) return null;
+  ctx.setCorrectiveRerouteUsed(true);
   logAudit("guardrail_flagged", {
-    type: "fabricated_zero_work_reroute_delegated",
+    type: `${reason}_reroute_delegated`,
     userMessageChars: userMessage.length,
+    ...auditDetails,
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
   ctx.onStatus?.({
     phase: "guardrail",
-    message: localizedFixedText({
-      de: "Die vorherige Antwort war nicht durch ausgeführte Arbeit gedeckt — ich leite die Anfrage an den passenden Spezialisten weiter.",
-      en: "The previous answer was not backed by work that actually ran — passing the request to the right specialist.",
-    }),
+    message: localizedFixedText(REROUTE_STATUS[reason]),
     iteration: ctx.getIterationCount(),
   });
   try {
+    // Only the zero-work guard's reroute goes ahead after a Stop. The flag clears the Stop latch, and
+    // its safety argument (sub-agent.ts) is that the agent it unblocks holds no delegate tools;
+    // semantic routing promises no such thing. The runtime does not arm the loop-brake reroute after
+    // a Stop, and without the flag delegate_to_agent refuses one that lands first.
     const rerouteResult = await executeTool("delegate_to_agent", {
       task: userMessage,
-    }, { ...toolContext, allowDelegationAfterOperatorStop: true });
+    }, reason === "fabricated_zero_work" ? { ...toolContext, allowDelegationAfterOperatorStop: true } : toolContext);
     ctx.incrementDelegationCount();
     // Record a well-formed assistant+tool pair (same as the corrective build) so the
     // delegated evidence is in history and any artifacts surface as attachments.
@@ -314,7 +368,7 @@ export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<stri
     session.addMessage({
       role: "assistant",
       content: "",
-      tool_calls: [{ id: rerouteCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: "REROUTE (zero-work fabrication guard)" }) } }],
+      tool_calls: [{ id: rerouteCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ task: REROUTE_HISTORY_TASK[reason] }) } }],
     });
     session.addMessage({
       role: "tool",
@@ -332,7 +386,7 @@ export const runCorrectiveReroute = async (ctx: CorrectiveContext): Promise<stri
     if (!body || looksLikeDegenerateRepetition(body) || looksLikeTruncatedCodeDeliverable(body)) return null;
     return body;
   } catch (err) {
-    ctx.logWarn({ err, sessionId: session.id }, "Zero-work fabrication reroute delegation failed");
+    ctx.logWarn({ err, sessionId: session.id }, reason === "loop_brake" ? "Loop-brake reroute delegation failed" : "Zero-work fabrication reroute delegation failed");
     return null;
   }
 };

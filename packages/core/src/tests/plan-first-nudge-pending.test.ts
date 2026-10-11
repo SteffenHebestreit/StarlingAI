@@ -286,6 +286,38 @@ describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0"
     }
   });
 
+  // A scene or job step's turn runs without the catalog tools, and the multi-domain text told it to
+  // call search_workflows ONCE. It looked for its own workflow with search_tools and search_documents
+  // until the loop brake ended it (E2E 2026-10-10, verified_research_brief, source_grounded_paper_packet).
+  it("is the single-domain nudge on a turn that is not offered search_workflows, and is not repeated", async () => {
+    const { assemble, assembleResult } = setUp();
+    const withoutSearch = await assembleResult(0, { workflowSearchOffered: false });
+    const nudge = planNudge(withoutSearch.messages);
+    expect(nudge, "iteration 0 carries a nudge").toBeDefined();
+    expect(nudge).not.toContain("search_workflows");
+    expect(nudge).toBe(planNudge(await setUp({}, SINGLE_DOMAIN_MESSAGE).assemble(0)));
+    expect(withoutSearch.planFirstPending).toBe(false);
+    expect(planNudge(await assemble(1, { ...searchedOnly, workflowSearchOffered: false }))).toBeUndefined();
+    // Offered, and by default, the multi-domain text as before.
+    expect(planNudge(await assemble(0, { workflowSearchOffered: true }))).toContain(SEARCH_FIRST);
+    expect(planNudge(await assemble(0))).toContain(SEARCH_FIRST);
+  });
+
+  // A step's pipeline is its plan, and the [WORKFLOW STEP] directive names its first call
+  // (agent/workflow-step-pipeline.ts): a nudge beside it asked for record_plan instead.
+  it("is not sent beside a step's start directive, on iteration 0 either", async () => {
+    const { assembleResult } = setUp();
+    const start = "[WORKFLOW STEP] Call delegate_to_agent for researcher now.";
+    for (const iterationCount of [0, 1]) {
+      const result = await assembleResult(iterationCount, { ...searchedOnly, workflowStepStartPrompt: start });
+      expect(planNudge(result.messages), `iteration ${iterationCount}`).toBeUndefined();
+      expect(result.planFirstPending).toBe(false);
+      // In the tail, after the history.
+      const userIndex = result.messages.findIndex((message) => message.role === "user" && message.content === USER_MESSAGE);
+      expect(result.messages.findIndex((message) => message.content === start)).toBeGreaterThan(userIndex);
+    }
+  });
+
   it("stays off after iteration 0 when the caller passes no tally, as before", async () => {
     const { assemble } = setUp();
     expect(planNudge(await assemble(1))).toBeUndefined();

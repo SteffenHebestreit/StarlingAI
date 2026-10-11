@@ -98,6 +98,26 @@ export function remainingWorkflowStepAgents(input: WorkflowStepContinuationInput
   return input.pipeline.slice(furthest + 1);
 }
 
+/**
+ * The directive a step's turn carries in its tail until one of the pipeline's agents has returned.
+ *
+ * The pipeline acted only after a delegation had returned, and nothing told the turn to make the
+ * first one. Its message quotes the request that started the workflow ("Nutze den Workflow …"), and
+ * the shared head says to look for a reusable scene or job, with the catalog tools withheld. In the
+ * E2E run of 2026-10-10 verified_research_brief's step turn called search_tools three times and
+ * source_grounded_paper_packet's searched its documents three times, the loop brake ended both with
+ * nothing delegated, and both workflows were blocked for running no specialist.
+ *
+ * It does not point at the head of the list: a pipeline can open with an agent its task calls for
+ * only under a condition (verified_research_brief opens with document_intake, "first when the request
+ * starts from attached material"), and which agent starts is read from the step's input.
+ */
+export function renderWorkflowStepStartDirective(pipeline: readonly string[]): string {
+  return "[WORKFLOW STEP] This turn carries out one step of a workflow that is already running: do not search for a workflow or try to start one. "
+    + `The step's task names these agents, in its order: ${pipeline.join(", ")}. `
+    + "Start now with delegate_to_agent to the earliest of them that this step's input calls for; an agent the task names under a condition runs only when its condition holds.";
+}
+
 /** The directive the step's turn gets instead of the synthesis requirement while named agents are left. */
 export function renderWorkflowStepContinuationDirective(remaining: readonly string[]): string {
   return `[CONTINUE PLAN] The step's task names agents that have not run yet this turn, in its order: ${remaining.join(", ")}. `

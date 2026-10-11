@@ -72,10 +72,11 @@ import {
   readNestedToolCalls,
   retrievedKnowledgeBaseContent,
   knowledgeBaseSourceUrls,
+  isRetrievalEvidenceResult,
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
-import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
+import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, renderWorkflowStepStartDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -1969,23 +1970,25 @@ async function _runTurn(
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
   // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
+  // How many agents the capsule admitted, when it came within its budget: the loop-brake reroute
+  // below re-dispatches the request only where routing found a specialist for it. Zero on a late,
+  // failed or empty prefetch, and with the prefetch off.
+  let prefetchAdmittedAgentCount = 0;
   const startedDiscoveryPrefetch = getConfig().orchestration?.discoveryPrefetch
     ? startDiscoveryPrefetch({
       userMessage,
       sessionId: session.id,
       ...(opts.allowedAgents ? { allowedAgents: opts.allowedAgents } : {}),
       ...(opts._withoutWorkflowCatalog ? { withoutWorkflows: true } : {}),
-      ...(autoArtifactArmed
-        ? {
-            onCapsuleAgents: (agents) => {
-              prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
-              if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
-                && directiveAgent === undefined) {
-                startIntentRead("routing");
-              }
-            },
-          }
-        : {}),
+      onCapsuleAgents: (agents) => {
+        prefetchAdmittedAgentCount = agents.length;
+        if (!autoArtifactArmed) return;
+        prefetchRoutedToDeliverable = prefetchRoutedToDeliverableEmitter(agents);
+        if (prefetchRoutedToDeliverable && !deliverableIntent.wantsArtifact && session.channel !== "workflow"
+          && directiveAgent === undefined) {
+          startIntentRead("routing");
+        }
+      },
     })
     : undefined;
 
@@ -2366,6 +2369,11 @@ async function _runTurn(
   // research delegation does, so it releases the turn's research requirement; see where
   // requiresDelegatedResearch is read below.
   let _turnRetrievedKnowledgeBaseContent = false;
+  // A retrieval tool (isRetrievalEvidenceResult: documents, the knowledge base, RAG, memory, the
+  // planning-context pack) came back this turn and reached the model. Such a turn has evidence of its
+  // own, and a loop brake on it ends in the synthesis from that evidence, as before (see the loop-brake
+  // reroute after the loop).
+  let _turnRetrievalReachedModel = false;
   // The page URLs those reads returned (knowledgeBaseSourceUrls). The citation guard keeps an
   // answer's citation of one of them and strips every other URL it cites.
   const _turnKnowledgeBaseSourceUrls = new Set<string>();
@@ -2392,6 +2400,9 @@ async function _runTurn(
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
+  // At most ONE corrective re-dispatch of the request per turn (runCorrectiveReroute), shared by the
+  // loop-brake reroute and the zero-work fabrication guard.
+  let correctiveRerouteUsed = false;
 
   // Dependency carrier for the two bounded corrective bodies (extracted verbatim to
   // ./turn-corrective.ts). Read-only fields are the turn's stable values; the getter
@@ -2412,6 +2423,8 @@ async function _runTurn(
     getStashedBuilderTaskSpec: () => stashedBuilderTaskSpec,
     getQaCorrectiveBuildUsed: () => qaCorrectiveBuildUsed,
     setQaCorrectiveBuildUsed: (v) => { qaCorrectiveBuildUsed = v; },
+    getCorrectiveRerouteUsed: () => correctiveRerouteUsed,
+    setCorrectiveRerouteUsed: (v) => { correctiveRerouteUsed = v; },
     incrementDelegationCount: () => { _turnDelegationCount += 1; },
     forceSynthesis,
     selectCorrectiveResumeTarget,
@@ -2609,9 +2622,45 @@ async function _runTurn(
   // Lean, droppable effort prompt-chunk (high/max tiers) — nudges the model toward
   // depth/completeness for the whole turn. Empty for low/medium.
   const effortPromptAddendum = currentEffortProfile()?.promptAddendum ?? "";
-  let terminalSynthesisInstruction =
+  const limitTerminalSynthesisInstruction =
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
+  let terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
   let terminalFinishReason = "max_tool_iterations";
+  // Which loop brake ended the loop, when one did: the one-tool streak or every call blocked. Read by
+  // the loop-brake reroute after the loop.
+  let loopBrakeExit: "tool_streak_across_iterations" | "all_tool_calls_blocked" | undefined;
+  // A scene or job step's turn that ran into a loop brake, or out of iterations, having delegated
+  // nothing, gets its start directive once more and one more go (workflowStepStartBackstop below).
+  // The ceiling is raised for that one iteration only; on every other turn it is maxToolIterations.
+  let iterationCeiling = maxToolIterations;
+  let workflowStepStartBackstopUsed = false;
+  /**
+   * Whether the turn goes on instead of ending at `exit`: true once, on a step's turn whose pipeline
+   * is non-empty and that has delegated nothing, after putting the [WORKFLOW STEP] directive in its
+   * history. Its tail already carries the directive, and a model that searched for the workflow it
+   * is running ignored it (E2E 2026-10-10: three search_tools calls, then the brake). Without this,
+   * the forced synthesis wrote the step's result from nothing and the workflow was blocked for
+   * running no specialist.
+   */
+  const workflowStepStartBackstop = (exit: string): boolean => {
+    if (
+      workflowStepStartBackstopUsed
+      || workflowStepPipeline.length === 0
+      || _turnDelegationCount > 0
+      || workflowRunCompletedThisTurn
+      || signal.aborted
+    ) return false;
+    workflowStepStartBackstopUsed = true;
+    iterationCeiling = Math.max(iterationCeiling, iterationCount + 1);
+    session.addMessage({ role: "system", content: renderWorkflowStepStartDirective(workflowStepPipeline) });
+    logAudit("guardrail_flagged", {
+      type: "workflow_step_start_backstop",
+      exit,
+      iteration: iterationCount,
+      pipeline: workflowStepPipeline,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    return true;
+  };
   // ── G33: Trajectory cache lookup ─────────────────────────────────────────
   // Cached-trajectory injection (semantic recent-query reuse) lifted to
   // lookupTrajectoryInjection in turn-setup.ts (god-file seam).
@@ -2629,7 +2678,7 @@ async function _runTurn(
   let shownTrajectoryIdentity: typeof injectedTrajectoryIdentity = null;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
-  while (iterationCount < maxToolIterations) {
+  while (iterationCount < iterationCeiling || workflowStepStartBackstop("max_tool_iterations")) {
     if (signal.aborted) {
       // Only synthesize when the INTERNAL timeout fired — not when the caller (WS) disconnected.
       // Synthesising after a WS close wastes LLM budget: the result can never be delivered.
@@ -2908,6 +2957,12 @@ async function _runTurn(
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
       directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
+      // A step's turn is told to start its pipeline until one of the pipeline's agents has returned:
+      // the pipeline otherwise acted only after a delegation, and the turn made none (E2E 2026-10-10).
+      workflowStepStartPrompt: workflowStepPipeline.length > 0 && workflowStepAgentsReturned.size === 0
+        ? renderWorkflowStepStartDirective(workflowStepPipeline)
+        : "",
+      workflowSearchOffered: allowedToolNameSet.has("search_workflows"),
       turnToolCallCounts: _turnToolCallCounts,
       turnDelegationCount: _turnDelegationCount,
       injectedSkillSlugs,
@@ -5151,6 +5206,7 @@ async function _runTurn(
         _turnRetrievedKnowledgeBaseContent = true;
         for (const url of knowledgeBaseSourceUrls(tc.name, result)) _turnKnowledgeBaseSourceUrls.add(url);
       }
+      if (!outputBlocked && result.success && isRetrievalEvidenceResult(tc.name)) _turnRetrievalReachedModel = true;
 
       if (workflowExecutionCorrectionExhausted) {
         session.addMessages(toolResultMessages);
@@ -5568,10 +5624,12 @@ async function _runTurn(
           consecutiveBlockedIterations: _consecutiveFullyBlockedIterations,
           iterations: iterationCount,
         }, { sessionId: session.id, severity: "warn" });
+        if (workflowStepStartBackstop("all_tool_calls_blocked")) continue;
         terminalFinishReason = "all_tool_calls_blocked";
         terminalSynthesisInstruction =
           "The model repeatedly attempted tool calls that were blocked or unavailable, so NOTHING was created or changed this turn. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the user asked you to create or modify an artifact and you have no direct file tool, say plainly that you could not apply the change and offer to delegate it — do NOT invent an artifact path, and do NOT repeat or re-paste an earlier turn's answer as if the change had been applied.";
         _forcedSynthesisFired = true;
+        loopBrakeExit = "all_tool_calls_blocked";
         log.warn({ iterationCount, blocked: _consecutiveFullyBlockedIterations }, "All tool calls blocked for consecutive iterations — forcing synthesis");
         break;
       }
@@ -5595,6 +5653,7 @@ async function _runTurn(
         toolSet: iterToolSet,
         iterations: iterationCount,
       }, { sessionId: session.id, severity: "warn" });
+      if (workflowStepStartBackstop("iteration_tool_set_repeat")) continue;
       log.warn({ iterationCount, toolSet: iterToolSet }, "Same tool-call set repeated across iterations — forcing synthesis");
       break; // falls through to forceSynthesis below
     }
@@ -5628,7 +5687,54 @@ async function _runTurn(
           break;
         }
       }
-      if (streakLoop) break; // falls through to forceSynthesis below
+      if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
+      if (streakLoop) {
+        loopBrakeExit = "tool_streak_across_iterations";
+        break; // falls through to forceSynthesis below
+      }
+    }
+  }
+
+  // ONE CORRECTIVE CHANCE BEFORE A LOOP BRAKE'S SYNTHESIS, FOR A TURN NO SPECIALIST WORKED ON.
+  // An orchestration_only turn without --auto is not forced to delegate, and the orchestrator holds
+  // no file tool. In the E2E run of 2026-10-10 "change the heading in <file>" called search_tools,
+  // then wrote "the heading was updated" into memory three times until the streak brake stopped it,
+  // and "list the folder <path>" called execute_plan with no plan and memory_store with no content
+  // until every call was blocked twice. Both went to the synthesis with nothing delegated, and the
+  // answers said only that no tool had run: nobody had looked at the workspace, although the
+  // discovery prefetch had admitted content_writer, and report_writer_agent, document_intake and
+  // code_analyst, for those requests.
+  // The original request is re-dispatched once through delegate_to_agent with no agent named
+  // (runCorrectiveReroute), and the specialist's answer is shipped. Not one more forced iteration:
+  // the turn's own tool choices were the loop, its history now holds the false memory notes, and
+  // the reroute's routing reads the request as the user wrote it. Not a build (runCorrectiveBuild):
+  // it would create the file the user asked to change. Only where the prefetch admitted an agent
+  // (routing has a specialist to give it), on a turn that has delegated nothing, run no workflow and
+  // retrieved no evidence of its own (a turn that searched its documents until the brake answers
+  // from them, as before), outside workflows and --agent turns. When it returns nothing shippable,
+  // the synthesis below runs as before, with the specialist's result in its history. Not after a
+  // Stop: a graceful Stop only latches and does not end this loop, and a looping turn is the kind a
+  // user stops; a new delegation is what the Stop asked not to have.
+  let loopBrakeRerouteAnswer: string | null = null;
+  if (
+    loopBrakeExit !== undefined
+    && activeMainAssistantToolMode === "orchestration_only"
+    && opts.autoApprove !== true
+    && _turnDelegationCount === 0
+    && !workflowRunCompletedThisTurn
+    && !isWorkflowExecutionTurn
+    && directiveAgent === undefined
+    && !_turnRetrievalReachedModel
+    && !_turnRetrievedKnowledgeBaseContent
+    && prefetchAdmittedAgentCount > 0
+    && !signal.aborted
+    && !longRunningGenerationManager.isStopRequested(session.id)
+  ) {
+    loopBrakeRerouteAnswer = await runCorrectiveRerouteImpl(correctiveCtx, "loop_brake", { brake: loopBrakeExit });
+    // The blocked-calls instruction says NOTHING was created or changed: after a specialist ran,
+    // that is no longer known.
+    if (loopBrakeRerouteAnswer === null && terminalFinishReason === "all_tool_calls_blocked") {
+      terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
     }
   }
 
@@ -5642,11 +5748,11 @@ async function _runTurn(
     { preferHigherScore: false },
   );
   const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
-  let synthesized = bypassTerminalSynthesis
+  let synthesized = loopBrakeRerouteAnswer ?? (bypassTerminalSynthesis
     ? null
     : await forceSynthesis(
         session, provider, signal, terminalSynthesisInstruction,
-      );
+      ));
   // Honesty guard for terminal turns that did NOT deliver the user's NEW request,
   // yet "answer" by re-pasting an EARLIER turn's deliverable summary almost verbatim —
   // shipping a stale false success. First seen on all_tool_calls_blocked (audit
@@ -5664,8 +5770,16 @@ async function _runTurn(
     "max_tool_iterations",
     "delegation_failures_terminal",
   ]);
+  // The loop-brake reroute's answer is the specialist's, written this turn for this request, and it
+  // ships as written. The backstops below replace a weak SYNTHESIS: a reply under 300 characters, a
+  // copy of an earlier answer. The honest answers the reroute exists for are short ("<file> does not
+  // exist in the workspace; nothing was changed"), and a request asked again is answered again. A
+  // review reproduction shipped neither: the orchestrator's narration beside its looping calls ("the
+  // heading was updated", 259 characters) replaced the answer, and a fresh synthesis replaced that.
+  const rerouteAnswered = loopBrakeRerouteAnswer !== null;
   if (
-    REGURGITATION_GUARD_REASONS.has(terminalFinishReason)
+    !rerouteAnswered
+    && REGURGITATION_GUARD_REASONS.has(terminalFinishReason)
     && synthesized
     && looksLikeRegurgitatedPriorAnswer(synthesized, session.getHistory())
   ) {
@@ -5741,6 +5855,7 @@ async function _runTurn(
     }, { sessionId: session.id, severity: "warn" });
   }
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
+    && !rerouteAnswered
     && terminalEvidenceBackstop
     && !evidenceLooksRaw
     && looksLikeUnderpoweredSynthesis(synthesized);
@@ -5753,6 +5868,7 @@ async function _runTurn(
   // (or when synthesis is underpowered AND no delegate evidence exists),
   // surface that suppressed text as the response.
   const useSuppressedTextOverSynthesis = !bypassTerminalSynthesis
+    && !rerouteAnswered
     && !useEvidenceOverSynthesis
     && lastSuppressedAssistantText !== null
     && !suppressedTextLooksRaw
@@ -6027,11 +6143,18 @@ export async function forceSynthesis(
   _provider: ChatProvider,
   signal: AbortSignal,
   instruction: string,
+  /**
+   * `history`: the messages the synthesis reads in place of the session's history, and then without
+   * the shared findings. For a reply that must rest on given facts alone: the corrective build's
+   * confirmation read the turn's earlier failures and told the user the file it had just written
+   * was not created (turn-corrective.ts).
+   */
+  options: { history?: readonly LLMMessage[] } = {},
 ): Promise<string | null> {
   try {
     // Don't attempt synthesis if already aborted and we have nothing
     if (signal.aborted && session.getHistory().length < 3) return null;
-    const sharedFindingsPrompt = await formatSharedFactsForFinalSynthesis(session.id);
+    const sharedFindingsPrompt = options.history ? "" : await formatSharedFactsForFinalSynthesis(session.id);
 
     // S1 (staged orchestration): a forced-synthesis call runs with NO tools — it
     // cannot route or delegate — so the full ~24.7K orchestrator system prompt is
@@ -6066,7 +6189,7 @@ export async function forceSynthesis(
       { role: "system", content: synthSystemPrompt },
       { role: "system", content: buildTemporalContextPrompt() },
       ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
-      ...session.getCollapsedHistory(),
+      ...(options.history ?? session.getCollapsedHistory()),
       { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.${languageLine}` },
     ];
 
