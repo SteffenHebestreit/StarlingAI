@@ -199,15 +199,17 @@ describe("sandboxIsolationArgs in the compose layout", () => {
     expect(() => sandboxIsolationArgs(input, { sharedRoot: SHARED })).toThrow(/only the zones/);
   });
 
-  it("makes the full-scope git repo bind read-only, binds the zones writable at their place in it, and masks the repo root's and the shared root's state", async () => {
+  it("makes the full-scope git repo bind read-only, binds the zones writable at their place in it but tools/, and masks the repo root's and the shared root's state", async () => {
     const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
     for (const zone of ["agents", "jobs", "scenes", "tools", "generated"]) fakeExisting.add(`${SHARED}/${zone}`);
     const input = { workspacePath: SHARED, workspaceScope: "full", bind: "repo" } as const;
     expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace:ro");
     const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
-    expect(writableBinds(args)).toEqual(["agents", "jobs", "scenes", "tools", "generated"]
+    expect(writableBinds(args)).toEqual(["agents", "jobs", "scenes", "generated"]
       .map((zone) => `${HOST_SOURCE}/workspace/${zone}:/workspace/workspace/${zone}`));
+    // As for the full-scope shell: a tool bundle comes through the tool pipeline, not a checkout.
+    expect(readOnlyBinds(args)).toEqual([`${HOST_SOURCE}/workspace/tools:/workspace/workspace/tools:ro`]);
   });
 
   it("keeps a full-scope named-volume repo bind read-only, and refuses the shell, with no zone to bind from a host path", async () => {
