@@ -1,4 +1,7 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { getConfig } from "../config/loader.js";
+import { PRODUCT } from "../product/index.js";
 
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
@@ -137,6 +140,119 @@ export function sandboxUserArgs(gatewayPath: string): string[] {
 }
 
 /**
+ * Which directory a gateway-issued sandbox is handed:
+ *   - "caller": the caller's own workspace root, as resolveDockerWorkspaceBind binds it (shell_exec,
+ *     run_script, run_test_suite, and the git sandbox of every agent that is not full-scope);
+ *   - "repo": the deployment mount the git sandbox keeps for the full-scope maintenance agent.
+ */
+export type SandboxBind = "caller" | "repo";
+
+export interface SandboxIsolationInput {
+  /** The agent's workspace root in the GATEWAY's terms (ToolContext.workspacePath). */
+  workspacePath: string;
+  /** ToolContext.workspaceScope. */
+  workspaceScope?: string;
+  bind: SandboxBind;
+  /** Where the sandbox has the bound directory. */
+  at?: string;
+}
+
+/** What the isolation reads from the gateway's host. The tools pass nothing; tests pass these. */
+export interface SandboxHostOverrides {
+  /** The deployment's shared workspace root; getConfig().workspacePath when absent. */
+  sharedRoot?: string;
+}
+
+/**
+ * The isolation flags every gateway-issued sandbox adds after its workspace bind (shell_exec,
+ * run_script, run_test_suite and the git tools all spread these).
+ *
+ * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
+ * the deployment mount, /workspace on the gateway side, not the agent's own root.
+ *
+ * GATEWAY STATE IS MASKED. Running as the owner made the sandbox root in the compose deployment,
+ * and the bind holds gateway state the sandbox must not write: the bound directory's own state
+ * directory (workspace-scope durable memory, memory/service.ts) and, where the shared root lies
+ * inside the bind, the shared root's (accounts.json, approvals/). Only the shell's token-level
+ * guard (findSensitiveWorkspaceReference) stood in the way, and a script, a variable or a relative
+ * path past it reaches the files. Each such directory gets an empty read-only tmpfs over it, which a
+ * cap-less root cannot remount or write ("Read-only file system", verified live 2026-10-11). It is
+ * masked whether or not it exists yet, so a sandbox cannot create it and plant memory the gateway
+ * then reads.
+ *
+ * THE CONFIG ZONES ARE READ-ONLY for a sandbox that is not full-scope and has the shared root in its
+ * bind (an auth-off session, whose root is the shared root): agents/, jobs/, scenes/ and tools/
+ * hold live configuration that is written only through the validated tools (PROTECTED_WORKSPACE_ZONES),
+ * and the config loader merges what it finds there on the next reload. Each zone that exists is
+ * bound again read-only from its host path. A named-volume mount source has no host path for a
+ * zone, so the zones stay as the bind has them there. The full-scope git repo bind keeps them
+ * writable and unmasked: swarm_maintainer commits configuration through git, and a mask would show
+ * git every file in a zone as deleted.
+ */
+export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
+  const at = input.at ?? "/workspace";
+  const bound = boundGatewayPath(input.workspacePath, input.bind);
+  const args = sandboxUserArgs(bound);
+
+  const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
+  const masked = new Set<string>();
+  for (const root of [bound, input.workspacePath, sharedRoot]) {
+    if (!root) continue;
+    const sandboxPath = sandboxPathWithin(`${normalizeRoot(root)}/${PRODUCT.stateDirName}`, bound, at);
+    if (sandboxPath === null || masked.has(sandboxPath)) continue;
+    masked.add(sandboxPath);
+    args.push(`--tmpfs=${sandboxPath}:ro,size=4k`);
+  }
+
+  if (input.workspaceScope !== "full" && sharedRoot) {
+    const sharedAt = sandboxPathWithin(sharedRoot, bound, at);
+    if (sharedAt !== null) {
+      for (const zone of PROTECTED_WORKSPACE_ZONES) {
+        if (!existsSync(join(sharedRoot, zone))) continue;
+        // Null for a named-volume source, which has no host path to bind the zone from.
+        const hostZone = resolveHostWorkspacePath(sharedRoot, zone);
+        if (hostZone !== null) args.push("-v", `${hostZone}:${sharedAt}/${zone}:ro`);
+      }
+    }
+  }
+  return args;
+}
+
+/**
+ * The GATEWAY's path to the directory a sandbox has at /workspace. The caller's own root, except
+ * where resolveDockerWorkspaceBind binds the whole mount source instead (a named volume, which has
+ * no host path to narrow): that is /workspace on the gateway side, as it is for the git repo bind.
+ * Outside a container the bound directory is the workspace itself either way.
+ */
+function boundGatewayPath(workspacePath: string, bind: SandboxBind): string {
+  if (!mountSourceMapsToWorkspaceRoot(workspacePath)) return workspacePath;
+  if (bind === "repo") return "/workspace";
+  const source = resolveDockerWorkspaceMountSource(workspacePath);
+  return resolveHostPathUnderWorkspace(workspacePath, source) === null ? "/workspace" : workspacePath;
+}
+
+/** Where a sandbox sees a gateway path, or null when the path is outside the bound directory. */
+function sandboxPathWithin(gatewayPath: string, boundGatewayPath: string, at: string): string | null {
+  const path = normalizeRoot(gatewayPath);
+  const bound = normalizeRoot(boundGatewayPath);
+  if (!bound) return null;
+  if (path === bound) return at;
+  return path.startsWith(`${bound}/`) ? `${at}${path.slice(bound.length)}` : null;
+}
+
+/** The deployment's shared workspace root. getConfig() loads the config on first use, so this is
+ *  undefined only when the config cannot load at all; the bound directory's own state directory and
+ *  the caller's are masked all the same. */
+function configuredSharedRoot(): string | undefined {
+  try {
+    const root = getConfig().workspacePath;
+    return typeof root === "string" && root.trim() ? root : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * A path in the GATEWAY's terms, mapped to where a sandbox sees it.
  *
  * Every sub-agent is told "Current workspace: <workspacePath>", the gateway-side path (in the
@@ -215,12 +331,14 @@ export function resolveHostWorkspacePath(
 export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "scenes", "tools"] as const;
 
 /* NOTE: a read-only overlay of these config zones INTO the shell/test sandbox was
- * considered as extra defense-in-depth, but it is deployment-layout fragile — the
- * sandbox mount source is the host workspace/repo path and its /workspace mapping
- * varies (e.g. the repo root can be the mount source, putting the zones at
- * /workspace/workspace/<zone>), so a naive overlay produces a wrong/empty mount.
- * The write-allowlist is therefore enforced where it is robust and layout-
- * independent: write_file re-roots scope-confined agents into generated/
+ * first rejected as deployment-layout fragile: while the sandboxes bound the mount
+ * SOURCE, which in the compose layout is the repo root, the zones sat at
+ * /workspace/workspace/<zone> in one deployment and /workspace/<zone> in another,
+ * and a naive overlay produced a wrong or empty mount. Every sandbox now binds
+ * exactly the directory it was handed (resolveDockerWorkspaceBind), so the zones'
+ * place in it follows from the gateway paths, and sandboxIsolationArgs re-binds them
+ * read-only where a non-full-scope sandbox has the shared root in its bind. The
+ * other layers stay: write_file re-roots scope-confined agents into generated/
  * (workspace-path.ts, so they cannot address the config zones at all), live-config
  * authoring goes ONLY through the dedicated validated/approval-gated tools
  * (swarm_define_agent / _save_scene / _save_job), and assertSafeDockerRunArgs

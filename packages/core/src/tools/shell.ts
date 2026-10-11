@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, sandboxUserArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, sandboxIsolationArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
@@ -94,8 +94,8 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
-      ...sandboxUserArgs(ctx.workspacePath),
       "-v", workspaceBind,
+      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -319,8 +319,8 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      ...sandboxUserArgs(ctx.workspacePath),
       "-v", workspaceBind,
+      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,
