@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, sandboxIsolationArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, sandboxBindSpec, sandboxIsolationArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -128,7 +128,7 @@ registerTool({
       "--pids-limit=128",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", workspaceBind,
+      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       "-w", workdir,
       SANDBOX_IMAGE,

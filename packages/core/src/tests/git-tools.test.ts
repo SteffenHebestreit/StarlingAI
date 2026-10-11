@@ -17,6 +17,7 @@ vi.mock("../tools/workspace-mount.js", () => ({
   resolveDockerWorkspaceBind: vi.fn((workspacePath: string, options?: { at?: string }) => `${workspacePath}:${options?.at ?? workspacePath}`),
   // The isolation flags have their own tests (sandbox-isolation); none here keeps these vectors as written.
   sandboxIsolationArgs: vi.fn(() => []),
+  sandboxBindSpec: vi.fn((bindSpec: string) => bindSpec),
   // So does the path mapping (sandbox-owner-and-path); it leaves the relative paths here as written.
   toSandboxPath: vi.fn((path: string) => path),
 }));

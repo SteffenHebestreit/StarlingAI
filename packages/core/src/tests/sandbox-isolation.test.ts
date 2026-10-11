@@ -4,10 +4,12 @@
  * Running each sandbox as the owner of its workspace made it root in the compose deployment, and
  * the bind holds gateway state: the bound directory's own state directory (workspace-scope durable
  * memory) and, where the shared root lies inside it, the shared root's (accounts.json, approvals/).
- * An auth-off session's root IS the shared root, so its sandbox also had the live config zones.
- * sandboxIsolationArgs masks every state directory in the bind with an empty read-only tmpfs and
- * binds the config zones again read-only for a sandbox that is not full-scope; the full-scope git
- * repo bind keeps its zones as they are, because swarm_maintainer commits configuration through git.
+ * An auth-off session's root IS the shared root, so its sandbox also had every place the config
+ * loader reads (the zones, a new .jsonc at the root, runtime/runtime.overrides.json).
+ * sandboxIsolationArgs masks every state directory in the bind with an empty read-only tmpfs; for a
+ * sandbox that is not full-scope with the shared root in its bind, sandboxBindSpec makes the bind
+ * read-only, only generated/ is bound again writable, and users/ is masked. The full-scope git
+ * repo bind keeps the tree writable, because swarm_maintainer commits configuration through git.
  *
  * node:fs is the real module behind spies: a test can give a path an owner (statSync) or a zone
  * (existsSync) in the compose layout, which does not exist on the machine running the tests.
@@ -74,7 +76,7 @@ function flagValue(args: string[], flag: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-/** Every `-v` spec that binds something read-only: the re-bound config zones. */
+/** Every `-v` spec that binds something read-only. */
 function readOnlyBinds(args: string[]): string[] {
   return args.flatMap((arg, i) => (args[i - 1] === "-v" && arg.endsWith(":ro") ? [arg] : []));
 }
@@ -125,12 +127,13 @@ afterEach(() => {
 });
 
 describe("sandboxIsolationArgs in the compose layout", () => {
-  it("masks an account's own state directory, and nothing of the shared root outside its bind", async () => {
-    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    for (const zone of ["agents", "jobs", "scenes", "tools"]) fakeExisting.add(`${SHARED}/${zone}`);
-    const args = sandboxIsolationArgs({ workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+  it("masks an account's own state directory, keeps its bind writable, and adds nothing of the shared root outside it", async () => {
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const input = { workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" } as const;
+    const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
-    expect(readOnlyBinds(args)).toEqual([]);
+    expect(args.filter((arg) => arg === "-v")).toEqual([]);
+    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace");
   });
 
   it("masks it even before it exists, so a sandbox cannot create it and plant memory there", async () => {
@@ -140,40 +143,43 @@ describe("sandboxIsolationArgs in the compose layout", () => {
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
   });
 
-  it("re-binds each existing config zone read-only from its HOST path for a non-full sandbox on the shared root", async () => {
-    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    fakeExisting.add(`${SHARED}/agents`).add(`${SHARED}/scenes`);
+  it("makes the shared root read-only to a non-full sandbox, binds generated/ writable from its HOST path and masks users/", async () => {
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
     for (const workspaceScope of [undefined, "generated"]) {
-      const args = sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope, bind: "caller" }, { sharedRoot: SHARED });
-      expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
-      expect(readOnlyBinds(args)).toEqual([
-        `${HOST_SOURCE}/workspace/agents:/workspace/agents:ro`,
-        `${HOST_SOURCE}/workspace/scenes:/workspace/scenes:ro`,
-      ]);
+      const input = { workspacePath: SHARED, workspaceScope, bind: "caller" } as const;
+      expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace:ro");
+      const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
+      expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/users")]);
+      expect(flagValue(args, "-v")).toBe(`${HOST_SOURCE}/workspace/generated:/workspace/generated`);
+      expect(readOnlyBinds(args)).toEqual([]);
     }
   });
 
-  it("leaves the zones to a full-scope sandbox on the shared root, and still masks its state", async () => {
-    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    fakeExisting.add(`${SHARED}/agents`).add(`${SHARED}/scenes`);
-    const args = sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind: "caller" }, { sharedRoot: SHARED });
+  it("leaves the shared root writable to a full-scope sandbox, and still masks its state", async () => {
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const input = { workspacePath: SHARED, workspaceScope: "full", bind: "caller" } as const;
+    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace");
+    const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai")]);
-    expect(readOnlyBinds(args)).toEqual([]);
+    expect(args.filter((arg) => arg === "-v")).toEqual([]);
   });
 
-  it("masks the repo root's and the shared root's state for the full-scope git repo bind, and binds no zone", async () => {
-    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    fakeExisting.add(`${SHARED}/agents`).add(`${SHARED}/scenes`);
-    const args = sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind: "repo" }, { sharedRoot: SHARED });
+  it("masks the repo root's and the shared root's state for the full-scope git repo bind, and keeps the tree writable", async () => {
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const input = { workspacePath: SHARED, workspaceScope: "full", bind: "repo" } as const;
+    expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace");
+    const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
     expect(args.filter((arg) => arg === "-v")).toEqual([]);
   });
 
-  it("masks every state directory in a named-volume bind, which has no host path to bind a zone from", async () => {
+  it("masks every state directory in a named-volume bind and keeps that whole-volume bind read-only", async () => {
     delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
-    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
-    fakeExisting.add(`${SHARED}/agents`);
-    const args = sandboxIsolationArgs({ workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED });
+    const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    const input = { workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" } as const;
+    // The shared root is in the whole-volume bind, and there is no host path to bind generated/ from.
+    expect(sandboxBindSpec("gc-workspace:/workspace", input, { sharedRoot: SHARED })).toBe("gc-workspace:/workspace:ro");
+    const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     // The whole volume is bound at /workspace, so each directory sits at its gateway path.
     expect(masks(args)).toEqual([
       MASK("/workspace/.starlingai"),
@@ -254,10 +260,7 @@ describe("the owner each git bind runs as", () => {
 
 describe("the sandbox tools on an auth-off session's root, which is the shared root", () => {
   const ctx = (workspaceScope?: "full" | "generated"): ToolContext => ({ sessionId: "s-isolation", workspacePath: shared, workspaceScope });
-  const zones = () => [
-    `${shared.replace(/[/\\]+$/, "")}/agents:/workspace/agents:ro`,
-    `${shared.replace(/[/\\]+$/, "")}/scenes:/workspace/scenes:ro`,
-  ];
+  const root = () => shared.replace(/[/\\]+$/, "");
 
   beforeEach(() => {
     execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
@@ -268,14 +271,15 @@ describe("the sandbox tools on an auth-off session's root, which is the shared r
     ["run_script", { path: "count.js" }],
     ["run_test_suite", { suite: "vitest" }],
     ["git_status", {}],
-  ] as const)("%s masks the state directory and binds the existing zones read-only", async (tool, args) => {
+  ] as const)("%s binds the shared root read-only with generated/ writable, and masks its state and users/", async (tool, args) => {
     const { getTool } = await import("../tools/registry.js");
     await getTool(tool)!.execute({ ...args }, ctx("generated"));
-    expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai")]);
-    expect(readOnlyBinds(dockerArgs())).toEqual(zones());
+    expect(readOnlyBinds(dockerArgs())).toEqual([`${root()}:/workspace:ro`]);
+    expect(dockerArgs()).toContain(`${root()}/generated:/workspace/generated`);
+    expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/users")]);
   });
 
-  it("a full-scope sandbox keeps the zones as they are", async () => {
+  it("a full-scope sandbox keeps the tree writable", async () => {
     const { getTool } = await import("../tools/registry.js");
     await getTool("shell_exec")!.execute({ command: "ls" }, ctx("full"));
     expect(masks(dockerArgs())).toEqual([MASK("/workspace/.starlingai")]);

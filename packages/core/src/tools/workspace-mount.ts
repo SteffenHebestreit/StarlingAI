@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
@@ -185,14 +185,17 @@ export interface SandboxHostOverrides {
  * masked whether or not it exists yet, so a sandbox cannot create it and plant memory the gateway
  * then reads.
  *
- * THE CONFIG ZONES ARE READ-ONLY for a sandbox that is not full-scope and has the shared root in its
- * bind (an auth-off session, whose root is the shared root): agents/, jobs/, scenes/ and tools/
- * hold live configuration that is written only through the validated tools (PROTECTED_WORKSPACE_ZONES),
- * and the config loader merges what it finds there on the next reload. Each zone that exists is
- * bound again read-only from its host path. A named-volume mount source has no host path for a
- * zone, so the zones stay as the bind has them there. The full-scope git repo bind keeps them
- * writable and unmasked: swarm_maintainer commits configuration through git, and a mask would show
- * git every file in a zone as deleted.
+ * THE SHARED ROOT IS READ-ONLY, EXCEPT generated/, for a sandbox that is not full-scope and has the
+ * shared root in its bind (an auth-off session, whose root is the shared root, or the whole-volume
+ * fallback). The config loader merges every .json/.jsonc it finds in the shared root outside the
+ * working zones, and applies runtime/runtime.overrides.json last, so a root sandbox that could
+ * write there could rewrite the live configuration on the next reload; re-binding agents/, jobs/,
+ * scenes/ and tools/ read-only did not cover a new file at the root or in a new directory (review
+ * 2026-10-11). sandboxBindSpec makes the bind read-only, and generated/, where write_file puts a
+ * working agent's output, is bound again writable from its host path. A named-volume source has no
+ * host path for it, so that sandbox stays read-only. users/ holds every account's workspace and is
+ * masked, unless the caller's own root is in it. The full-scope git repo bind keeps the tree
+ * writable: swarm_maintainer commits configuration through git.
  */
 export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
   const at = input.at ?? "/workspace";
@@ -217,18 +220,35 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
     args.push(`--tmpfs=${sandboxPath}:ro,size=4k`);
   }
 
-  if (input.workspaceScope !== "full" && sharedRoot) {
-    const sharedAt = sandboxPathWithin(sharedRoot, bound, at);
-    if (sharedAt !== null) {
-      for (const zone of PROTECTED_WORKSPACE_ZONES) {
-        if (!existsSync(join(sharedRoot, zone))) continue;
-        // Null for a named-volume source, which has no host path to bind the zone from.
-        const hostZone = resolveHostWorkspacePath(sharedRoot, zone);
-        if (hostZone !== null) args.push("-v", `${hostZone}:${sharedAt}/${zone}:ro`);
-      }
+  const sharedAt = lockedSharedRootAt(input, bound, sharedRoot, at);
+  if (sharedAt !== null && sharedRoot) {
+    // Null for a named-volume source, which has no host path to bind generated/ from.
+    const hostGenerated = resolveHostWorkspacePath(sharedRoot, "generated");
+    if (hostGenerated !== null) {
+      ensureGatewayDir(join(sharedRoot, "generated"));
+      args.push("-v", `${hostGenerated}:${sharedAt}/generated`);
+    }
+    const users = join(sharedRoot, "users");
+    if (sandboxPathWithin(input.workspacePath, users, at) === null) {
+      ensureGatewayDir(users);
+      args.push(`--tmpfs=${sharedAt}/users:ro,size=4k`);
     }
   }
   return args;
+}
+
+/** The workspace bind, read-only where sandboxIsolationArgs re-binds only generated/ writable. */
+export function sandboxBindSpec(bindSpec: string, input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string {
+  const bound = boundGatewayPath(input.workspacePath, input.bind);
+  const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
+  return lockedSharedRootAt(input, bound, sharedRoot, input.at ?? "/workspace") === null ? bindSpec : `${bindSpec}:ro`;
+}
+
+/** Where a sandbox that is not full-scope sees the shared root in its bind, or null when it is
+ *  full-scope or the shared root is not in its bind. */
+function lockedSharedRootAt(input: SandboxIsolationInput, bound: string, sharedRoot: string | undefined, at: string): string | null {
+  if (input.workspaceScope === "full" || !sharedRoot) return null;
+  return sandboxPathWithin(sharedRoot, bound, at);
 }
 
 /**
@@ -375,8 +395,9 @@ export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "
  * /workspace/workspace/<zone> in one deployment and /workspace/<zone> in another,
  * and a naive overlay produced a wrong or empty mount. Every sandbox now binds
  * exactly the directory it was handed (resolveDockerWorkspaceBind), so the zones'
- * place in it follows from the gateway paths, and sandboxIsolationArgs re-binds them
- * read-only where a non-full-scope sandbox has the shared root in its bind. The
+ * place in it follows from the gateway paths: a non-full-scope sandbox with the shared
+ * root in its bind gets the whole tree read-only except generated/ (sandboxBindSpec,
+ * sandboxIsolationArgs), which covers the zones and every other place the loader reads. The
  * other layers stay: write_file re-roots scope-confined agents into generated/
  * (workspace-path.ts, so they cannot address the config zones at all), live-config
  * authoring goes ONLY through the dedicated validated/approval-gated tools

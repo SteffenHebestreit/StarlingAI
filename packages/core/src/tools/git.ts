@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxIsolationArgs, toSandboxPath } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxBindSpec, sandboxIsolationArgs, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
@@ -68,7 +68,7 @@ async function runGitInSandbox(
     "--pids-limit=64",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
-    "-v", bind,
+    "-v", sandboxBindSpec(bind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
     // As the owner of the directory bound at /workspace, which git also requires before it reads
     // a repository at all, with the gateway's state in the bind masked.
     ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
