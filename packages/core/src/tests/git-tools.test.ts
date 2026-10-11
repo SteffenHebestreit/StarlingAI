@@ -15,6 +15,8 @@ vi.mock("../tools/workspace-mount.js", () => ({
   // workspace path is a bare host path (not under /workspace), where the real helper returns
   // `<path>:<at>` — mirror that so the -v spec these assertions expect is unchanged.
   resolveDockerWorkspaceBind: vi.fn((workspacePath: string, options?: { at?: string }) => `${workspacePath}:${options?.at ?? workspacePath}`),
+  // The --user flag has its own test (sandbox-owner-and-path); none here keeps these vectors as written.
+  sandboxUserArgs: vi.fn(() => []),
 }));
 
 describe("git tools", () => {

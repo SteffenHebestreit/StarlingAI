@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxUserArgs } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
@@ -68,6 +68,9 @@ async function runGitInSandbox(
     "--pids-limit=64",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
+    // As the owner of the directory bound at /workspace, which git also requires before it reads
+    // a repository at all. The repo bind is the deployment mount, /workspace on the gateway side.
+    ...sandboxUserArgs(mountScope === "repo" && isUnderContainerWorkspace(ctx.workspacePath) ? "/workspace" : ctx.workspacePath),
     "-v", bind,
     "-w", workdir,
     SANDBOX_IMAGE,
@@ -89,6 +92,11 @@ async function runGitInSandbox(
     const output = [e.stdout, e.stderr].filter(Boolean).join("\n");
     return { success: false, output, error: `Exit code ${e.code ?? "?"}: ${e.message?.split("\n")[0] ?? "Unknown error"}`, metadata: { mountScope } };
   }
+}
+
+function isUnderContainerWorkspace(workspacePath: string): boolean {
+  const normalized = workspacePath.replace(/\\/g, "/");
+  return normalized === "/workspace" || normalized.startsWith("/workspace/");
 }
 
 // ── git_status (Tier 0 — read-only) ─────────────────────────────────────

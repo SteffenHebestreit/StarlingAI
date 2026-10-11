@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, sandboxUserArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -76,9 +76,10 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const suite = String(args["suite"] ?? "custom");
-    const customCommand = args["command"] != null ? String(args["command"]).trim() : "";
+    // The gateway-side workspace path, wherever the model wrote it, is /workspace in the sandbox.
+    const customCommand = args["command"] != null ? toSandboxCommand(String(args["command"]).trim(), ctx.workspacePath) : "";
     const filter = args["filter"] != null ? String(args["filter"]).trim() : "";
-    const rawWorkdir = String(args["workdir"] ?? "/workspace").trim().replace(/\\/g, "/");
+    const rawWorkdir = toSandboxPath(String(args["workdir"] ?? "/workspace").trim(), ctx.workspacePath).replace(/\\/g, "/");
     const timeoutMs = Math.min(
       Math.max(Number(args["timeoutMs"] ?? DEFAULT_TIMEOUT_MS), 5_000),
       MAX_TIMEOUT_MS,
@@ -127,6 +128,7 @@ registerTool({
       "--pids-limit=128",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
+      ...sandboxUserArgs(ctx.workspacePath),
       "-v", workspaceBind,
       "-w", workdir,
       SANDBOX_IMAGE,

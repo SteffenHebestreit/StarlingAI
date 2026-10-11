@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
 interface DockerWorkspaceMountOptions {
@@ -108,6 +110,61 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
    * rejects one.
    */
   requireNarrow?: boolean;
+}
+
+/**
+ * `--user` for a sandbox: the owner of the directory it is handed (`gatewayPath`, the GATEWAY's
+ * own path to it).
+ *
+ * The sandbox image runs as its own unprivileged user (uid 1000), which owns nothing in the
+ * mount. In the compose deployment the gateway runs as root and creates each account's workspace
+ * 0755, so every write in the sandbox failed with "Permission denied" (E2E 2026-10-11: shell_agent's
+ * `mkdir -p generated/...`, git_developer's `git init`, qa_guard's test writes), and git refuses a
+ * repository its user does not own ("dubious ownership") even to read it. Running as the owner gives
+ * the sandbox the access the gateway already has to that one directory and nothing more; that owner
+ * is root in the compose deployment, which is why every sandbox keeps --cap-drop=ALL and
+ * no-new-privileges (no DAC override, no chown, no mounts), as serve_app's root run already does.
+ *
+ * No flag when the directory cannot be read: the image's own user then applies, as before.
+ */
+export function sandboxUserArgs(gatewayPath: string): string[] {
+  try {
+    const { uid, gid } = statSync(gatewayPath);
+    return ["--user", `${uid}:${gid}`];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A path in the GATEWAY's terms, mapped to where a sandbox sees it.
+ *
+ * Every sub-agent is told "Current workspace: <workspacePath>", the gateway-side path (in the
+ * compose deployment /workspace/workspace/users/<account>), and passes it back: as shell_exec's
+ * workdir, or in `cd <workspacePath> && ...`. The sandbox has that directory at `at`, and nothing
+ * at the gateway path, so each such run failed before the command started (E2E 2026-10-11). A path
+ * outside the workspace root is returned unchanged; the callers' own /workspace check still applies.
+ */
+export function toSandboxPath(path: string, workspacePath: string, at = "/workspace"): string {
+  const root = normalizeRoot(workspacePath);
+  const normalized = path.replace(/\\/g, "/");
+  if (!root || root === at) return path;
+  if (normalized === root || normalized === `${root}/`) return at;
+  if (normalized.startsWith(`${root}/`)) return `${at}/${normalized.slice(root.length + 1)}`;
+  return path;
+}
+
+/** The same mapping for every place a command names the workspace root, at a path boundary only
+ *  (`<root>-old` is another directory and stays as written). */
+export function toSandboxCommand(command: string, workspacePath: string, at = "/workspace"): string {
+  const root = normalizeRoot(workspacePath);
+  if (!root || root === at || !command.includes(root)) return command;
+  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return command.replace(new RegExp(`${escaped}(?=$|[/\\s'"\`;&|<>()])`, "g"), at);
+}
+
+function normalizeRoot(workspacePath: string): string {
+  return workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
 }
 
 /** The host path for a container path under /workspace, or null for a named-volume source. */

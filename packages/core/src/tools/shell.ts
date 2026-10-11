@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, sandboxUserArgs, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
@@ -37,8 +37,9 @@ registerTool({
     required: ["command"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const command = String(args["command"] ?? "");
-    const workdir = normalizeWorkdir(String(args["workdir"] ?? "/workspace"));
+    // The gateway-side workspace path, wherever the model wrote it, is /workspace in here.
+    const command = toSandboxCommand(String(args["command"] ?? ""), ctx.workspacePath);
+    const workdir = normalizeWorkdir(toSandboxPath(String(args["workdir"] ?? "/workspace"), ctx.workspacePath));
     const userEnv = (args["env"] as Record<string, string> | undefined) ?? {};
 
     if (!command.trim()) {
@@ -93,6 +94,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
+      ...sandboxUserArgs(ctx.workspacePath),
       "-v", workspaceBind,
       "-w", workdir,
       ...envArgs,
@@ -259,7 +261,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const scriptPath = String(args["path"] ?? "").replace(/\\/g, "/");
-    const scriptArgs = (args["args"] as string[] | undefined) ?? [];
+    const scriptArgs = ((args["args"] as string[] | undefined) ?? []).map((arg) => toSandboxCommand(String(arg), ctx.workspacePath));
     const userEnv = (args["env"] as Record<string, string> | undefined) ?? {};
 
     if (!scriptPath || scriptPath.includes("..")) {
@@ -317,6 +319,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
+      ...sandboxUserArgs(ctx.workspacePath),
       "-v", workspaceBind,
       "-w", "/workspace",
       ...envArgs,
