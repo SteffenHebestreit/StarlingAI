@@ -15,8 +15,10 @@ vi.mock("../tools/workspace-mount.js", () => ({
   // workspace path is a bare host path (not under /workspace), where the real helper returns
   // `<path>:<at>` — mirror that so the -v spec these assertions expect is unchanged.
   resolveDockerWorkspaceBind: vi.fn((workspacePath: string, options?: { at?: string }) => `${workspacePath}:${options?.at ?? workspacePath}`),
-  // The isolation flags have their own test (sandbox-owner-and-path); none here keeps these vectors as written.
+  // The isolation flags have their own tests (sandbox-isolation); none here keeps these vectors as written.
   sandboxIsolationArgs: vi.fn(() => []),
+  // So does the path mapping (sandbox-owner-and-path); it leaves the relative paths here as written.
+  toSandboxPath: vi.fn((path: string) => path),
 }));
 
 describe("git tools", () => {

@@ -72,7 +72,8 @@ registerTool({
     const envArgs: string[] = [];
     for (const [k, v] of Object.entries(userEnv)) {
       if (/^[A-Z_][A-Z0-9_]*$/i.test(k)) {
-        envArgs.push("-e", `${k}=${v}`);
+        // A value that names the gateway-side workspace path names /workspace in the sandbox.
+        envArgs.push("-e", `${k}=${toSandboxCommand(String(v), ctx.workspacePath)}`);
       }
     }
 
@@ -303,7 +304,8 @@ registerTool({
     const envArgs: string[] = [];
     for (const [k, v] of Object.entries(userEnv)) {
       if (/^[A-Z_][A-Z0-9_]*$/i.test(k)) {
-        envArgs.push("-e", `${k}=${v}`);
+        // A value that names the gateway-side workspace path names /workspace in the sandbox.
+        envArgs.push("-e", `${k}=${toSandboxCommand(String(v), ctx.workspacePath)}`);
       }
     }
 

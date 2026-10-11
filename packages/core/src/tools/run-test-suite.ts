@@ -78,7 +78,7 @@ registerTool({
     const suite = String(args["suite"] ?? "custom");
     // The gateway-side workspace path, wherever the model wrote it, is /workspace in the sandbox.
     const customCommand = args["command"] != null ? toSandboxCommand(String(args["command"]).trim(), ctx.workspacePath) : "";
-    const filter = args["filter"] != null ? String(args["filter"]).trim() : "";
+    const filter = args["filter"] != null ? toSandboxPath(String(args["filter"]).trim(), ctx.workspacePath) : "";
     const rawWorkdir = toSandboxPath(String(args["workdir"] ?? "/workspace").trim(), ctx.workspacePath).replace(/\\/g, "/");
     const timeoutMs = Math.min(
       Math.max(Number(args["timeoutMs"] ?? DEFAULT_TIMEOUT_MS), 5_000),

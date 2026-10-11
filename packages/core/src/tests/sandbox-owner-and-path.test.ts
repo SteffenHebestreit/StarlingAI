@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "../tools/registry.js";
 
 const execFileAsyncMock = vi.fn();
@@ -196,5 +196,72 @@ describe("the sandbox tools", () => {
     const { getTool } = await import("../tools/registry.js");
     await getTool("git_status")!.execute({}, { ...ctx(), workspaceScope: "generated" });
     expect(flagValue(runFlags(dockerArgs()), "--user")).toBe(owner);
+  });
+});
+
+describe("the other paths a model hands a sandbox", () => {
+  const ctx = (workspaceScope?: "full" | "generated"): ToolContext => ({ sessionId: "s-paths", workspacePath, workspaceScope });
+  const root = () => workspacePath.replace(/\\/g, "/");
+  /** The git argv after the image: `git <args...>`. */
+  const gitArgv = (call = execFileAsyncMock.mock.calls.length - 1) => {
+    const args = execFileAsyncMock.mock.calls[call]?.[1] as string[];
+    return args.slice(runFlags(args).length + 2);
+  };
+
+  beforeEach(() => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+  });
+
+  it("maps a gateway-side path in every git path argument of a sandbox narrowed to the caller", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const gen = `${root()}/generated`;
+
+    await getTool("git_status")!.execute({ path: gen }, ctx("generated"));
+    expect(flagValue(dockerArgs(), "-w")).toBe("/workspace/generated");
+
+    await getTool("git_log")!.execute({ path: `${gen}/a.txt` }, ctx("generated"));
+    expect(gitArgv().slice(-2)).toEqual(["--", "/workspace/generated/a.txt"]);
+
+    await getTool("git_diff")!.execute({ path: `${gen}/a.txt` }, ctx("generated"));
+    expect(gitArgv().slice(-2)).toEqual(["--", "/workspace/generated/a.txt"]);
+
+    await getTool("git_clone")!.execute({ url: "https://example.com/r.git", destination: `${gen}/repo` }, ctx("generated"));
+    expect(gitArgv().at(-1)).toBe("/workspace/generated/repo");
+
+    execFileAsyncMock.mockClear();
+    await getTool("git_commit")!.execute({ message: "m", files: [`${gen}/a.txt`, "b.txt"] }, ctx("generated"));
+    expect(gitArgv(0)).toEqual(["add", "--", "/workspace/generated/a.txt", "b.txt"]);
+
+    await getTool("git_checkout")!.execute({ ref: "main", files: [`${gen}/a.txt`, "b.txt"] }, ctx("generated"));
+    expect(gitArgv().slice(-3)).toEqual(["--", "/workspace/generated/a.txt", "b.txt"]);
+  });
+
+  it("keeps a relative git path relative, and maps nothing for the full-scope repo bind", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_status")!.execute({ path: "generated" }, ctx("generated"));
+    expect(flagValue(dockerArgs(), "-w")).toBe("/workspace/generated");
+    await getTool("git_log")!.execute({ path: "generated/a.txt" }, ctx("generated"));
+    expect(gitArgv().slice(-2)).toEqual(["--", "generated/a.txt"]);
+
+    await getTool("git_log")!.execute({ path: `${root()}/generated/a.txt` }, ctx("full"));
+    expect(gitArgv().slice(-2)).toEqual(["--", `${root()}/generated/a.txt`]);
+    await getTool("git_commit")!.execute({ message: "m", files: [`${root()}/a.txt`] }, ctx("full"));
+    expect(execFileAsyncMock.mock.calls.some((call) => (call[1] as string[]).includes(`${root()}/a.txt`))).toBe(true);
+  });
+
+  it("maps the run_test_suite filter and keeps a test name as written", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("run_test_suite")!.execute({ suite: "vitest", filter: `${root()}/generated/a.test.ts` }, ctx());
+    expect(dockerArgs().at(-1)).toBe("pnpm vitest run '/workspace/generated/a.test.ts'");
+    await getTool("run_test_suite")!.execute({ suite: "vitest", filter: "adds two numbers" }, ctx());
+    expect(dockerArgs().at(-1)).toBe("pnpm vitest run 'adds two numbers'");
+  });
+
+  it.each(["shell_exec", "run_script"])("%s maps a gateway-side path in an env value", async (tool) => {
+    const { getTool } = await import("../tools/registry.js");
+    const args = tool === "shell_exec" ? { command: "ls" } : { path: "count.js" };
+    await getTool(tool)!.execute({ ...args, env: { OUT: `${root()}/generated/out`, LIBS: `${root()}/a:${root()}/b`, PLAIN: "x" } }, ctx());
+    const env = dockerArgs().flatMap((arg, i, all) => (all[i - 1] === "-e" ? [arg] : []));
+    expect(env).toEqual(["OUT=/workspace/generated/out", "LIBS=/workspace/a:/workspace/b", "PLAIN=x"]);
   });
 });

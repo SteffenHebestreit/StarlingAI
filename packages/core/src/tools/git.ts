@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxIsolationArgs } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxIsolationArgs, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
@@ -94,7 +94,17 @@ async function runGitInSandbox(
   }
 }
 
-// ── git_status (Tier 0 — read-only) ─────────────────────────────────────
+/**
+ * A path the model supplied, where the sandbox sees it. A sandbox narrowed to the caller has the
+ * caller's root at /workspace, so the gateway path every sub-agent is told maps there, as it does for
+ * shell_exec; a relative path stays relative. The full-scope repo bind needs nothing: its gateway
+ * path under /workspace already is the sandbox path.
+ */
+function sandboxPathFor(path: string, ctx: ToolContext): string {
+  return ctx.workspaceScope === "full" ? path : toSandboxPath(path, ctx.workspacePath);
+}
+
+// ── git_status (Tier 0 — read-only)─────────────────────────────────────
 
 registerTool({
   name: "git_status",
@@ -111,7 +121,8 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const subdir = String(args["path"] ?? "");
-    const workdir = subdir ? `/workspace/${subdir.replace(/\\/g, "/")}` : "/workspace";
+    const mapped = sandboxPathFor(subdir, ctx);
+    const workdir = mapped !== subdir ? mapped : subdir ? `/workspace/${subdir.replace(/\\/g, "/")}` : "/workspace";
     log.info({ workdir, sessionId: ctx.sessionId }, "git_status");
     return runGitInSandbox(["status", "--porcelain=v2", "--branch"], ctx, { workdir });
   },
@@ -144,7 +155,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const count = Math.min(Math.max(Number(args["count"] ?? 20), 1), 100);
-    const filePath = args["path"] ? String(args["path"]) : undefined;
+    const filePath = args["path"] ? sandboxPathFor(String(args["path"]), ctx) : undefined;
     const oneline = Boolean(args["oneline"]);
 
     const gitArgs = ["log", `--max-count=${count}`];
@@ -199,7 +210,7 @@ registerTool({
       gitArgs.push(String(args["ref1"]));
       if (args["ref2"]) gitArgs.push(String(args["ref2"]));
     }
-    if (args["path"]) gitArgs.push("--", String(args["path"]));
+    if (args["path"]) gitArgs.push("--", sandboxPathFor(String(args["path"]), ctx));
 
     log.info({ sessionId: ctx.sessionId }, "git_diff");
     return runGitInSandbox(gitArgs, ctx);
@@ -233,7 +244,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const message = String(args["message"] ?? "");
-    const files = (Array.isArray(args["files"]) ? args["files"] : ["."]).map(String);
+    const files = (Array.isArray(args["files"]) ? args["files"] : ["."]).map((file) => sandboxPathFor(String(file), ctx));
     const author = args["author"] ? String(args["author"]) : undefined;
 
     if (!message.trim()) {
@@ -282,7 +293,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const url = String(args["url"] ?? "");
-    const destination = args["destination"] ? String(args["destination"]) : undefined;
+    const destination = args["destination"] ? sandboxPathFor(String(args["destination"]), ctx) : undefined;
     const branch = args["branch"] ? String(args["branch"]) : undefined;
     const depth = args["depth"] ? Number(args["depth"]) : undefined;
 
@@ -329,7 +340,7 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const ref = String(args["ref"] ?? "");
     const createBranch = Boolean(args["createBranch"]);
-    const files = Array.isArray(args["files"]) ? args["files"].map(String) : undefined;
+    const files = Array.isArray(args["files"]) ? args["files"].map((file) => sandboxPathFor(String(file), ctx)) : undefined;
 
     if (!ref.trim()) {
       return { success: false, output: "", error: "ref is required" };
