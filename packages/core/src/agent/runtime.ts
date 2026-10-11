@@ -6130,11 +6130,18 @@ export async function forceSynthesis(
   _provider: ChatProvider,
   signal: AbortSignal,
   instruction: string,
+  /**
+   * `history`: the messages the synthesis reads in place of the session's history, and then without
+   * the shared findings. For a reply that must rest on given facts alone: the corrective build's
+   * confirmation read the turn's earlier failures and told the user the file it had just written
+   * was not created (turn-corrective.ts).
+   */
+  options: { history?: readonly LLMMessage[] } = {},
 ): Promise<string | null> {
   try {
     // Don't attempt synthesis if already aborted and we have nothing
     if (signal.aborted && session.getHistory().length < 3) return null;
-    const sharedFindingsPrompt = await formatSharedFactsForFinalSynthesis(session.id);
+    const sharedFindingsPrompt = options.history ? "" : await formatSharedFactsForFinalSynthesis(session.id);
 
     // S1 (staged orchestration): a forced-synthesis call runs with NO tools — it
     // cannot route or delegate — so the full ~24.7K orchestrator system prompt is
@@ -6169,7 +6176,7 @@ export async function forceSynthesis(
       { role: "system", content: synthSystemPrompt },
       { role: "system", content: buildTemporalContextPrompt() },
       ...(sharedFindingsPrompt ? [{ role: "system" as const, content: sharedFindingsPrompt }] : []),
-      ...session.getCollapsedHistory(),
+      ...(options.history ?? session.getCollapsedHistory()),
       { role: "user", content: `[SYSTEM INSTRUCTION — RESPOND NOW]: ${instruction} Before drafting, verify every assumption against the tool results and shared findings in this conversation. If a claim is not supported there, omit it or mark it unverified.${languageLine}` },
     ];
 

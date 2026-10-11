@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { logAudit } from "../audit/logger.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
-import type { ChatProvider } from "../providers/lmstudio.js";
+import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
 import { artifactFileLooksTruncated } from "./sub-agent.js";
@@ -72,7 +72,13 @@ export interface CorrectiveContext {
   incrementDelegationCount: () => void;
 
   // --- runtime-private helpers / closures (passed as callbacks, never imported) ---
-  forceSynthesis: (session: AgentSession, provider: ChatProvider, signal: AbortSignal, instruction: string) => Promise<string | null>;
+  forceSynthesis: (
+    session: AgentSession,
+    provider: ChatProvider,
+    signal: AbortSignal,
+    instruction: string,
+    options?: { history?: readonly LLMMessage[] },
+  ) => Promise<string | null>;
   selectCorrectiveResumeTarget: (
     attachments: Array<Record<string, unknown>>,
     truncationProbe: (relativePath: string) => string | null,
@@ -172,6 +178,9 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
   ].filter(Boolean).join("\n\n");
   let buildResultMetadata: Record<string, unknown> | undefined;
   let buildResultOutput = "";
+  // What the confirmation below reads: the request and this build's own calls and results, not the
+  // turn's history (see where it is written).
+  const confirmationHistory: LLMMessage[] = [{ role: "user", content: userMessage }];
   try {
     const buildResult = await executeTool("delegate_to_agent", {
       agentName: builderAgent,
@@ -189,17 +198,19 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     // pair so the built artifact surfaces as a clickable attachment (collectTurnArtifactAttachments
     // only reads tool-role history) and history stays valid (audit 65f46046).
     const buildCallId = `qabuild_${Date.now().toString(36)}`;
-    session.addMessage({
+    const buildCall: LLMMessage = {
       role: "assistant",
       content: "",
       tool_calls: [{ id: buildCallId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: builderAgent, task: "BUILD TASK (final-QA corrective build)" }) } }],
-    });
-    session.addMessage({
+    };
+    const buildReport: LLMMessage = {
       role: "tool",
       content: (buildResult.success ? buildResult.output : (buildResult.error?.trim() ? `Error: ${buildResult.error}` : buildResult.output)).slice(0, 4_000),
       tool_call_id: buildCallId,
-      metadata: buildResult.metadata,
-    });
+    };
+    session.addMessage(buildCall);
+    session.addMessage({ ...buildReport, metadata: buildResult.metadata });
+    confirmationHistory.push(buildCall, buildReport);
   } catch (err) {
     ctx.logWarn({ err, sessionId: session.id }, "Final-QA corrective build delegation failed");
   }
@@ -221,17 +232,19 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
         const harvestWrite = await executeTool("write_file", { path: "app/index.html", content: inlineDoc }, toolContext);
         if (harvestWrite.success) {
           const harvestCallId = `qaharvest_${Date.now().toString(36)}`;
-          session.addMessage({
+          const harvestCall: LLMMessage = {
             role: "assistant",
             content: "",
             tool_calls: [{ id: harvestCallId, type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: "app/index.html", note: "harvested from builder's inline draft" }) } }],
-          });
-          session.addMessage({
+          };
+          const harvestReport: LLMMessage = {
             role: "tool",
             content: harvestWrite.output.slice(0, 1_000),
             tool_call_id: harvestCallId,
-            metadata: harvestWrite.metadata,
-          });
+          };
+          session.addMessage(harvestCall);
+          session.addMessage({ ...harvestReport, metadata: harvestWrite.metadata });
+          confirmationHistory.push(harvestCall, harvestReport);
           if (harvestWrite.metadata) ctx.extractArtifactsFromMetadata(harvestWrite.metadata, builtArtifacts, new Set<string>());
           logAudit("guardrail_flagged", {
             type: "final_qa_corrective_build_harvested_inline",
@@ -259,6 +272,11 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
       return `${String(name)}${String(size)}`;
     })
     .join(", ");
+  // FROM THE ARTIFACT FACTS, NOT FROM THE TURN'S HISTORY. A file was built, and the confirmation read
+  // everything the turn had done before the build: in the E2E run of 2026-10-10
+  // (guards-list-files-on-a-file, step 1) content_writer wrote generated/e2e-guards/inventur, and the
+  // reply, written after an earlier skill_manage refusal, said a system error had kept the file from
+  // being created. It reads the request, this build's own call and result, and the facts below.
   const synth = await ctx.forceSynthesis(
     session, ctx.getProvider(), signal,
     "The requested artifact has just been BUILT by the build specialist and is ALREADY attached to this message as a downloadable file. "
@@ -266,6 +284,7 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
     + (harvestedIncomplete ? "IMPORTANT: the file was recovered from a draft that was CUT OFF before the end — tell the user plainly that the app file is incomplete (it may not run yet) and offer to finish it. " : "")
     + `Confirm to the user ${IN_REPLY_LANGUAGE}: state that the file was created, give its path(s) and size, and summarize ONLY what the builder's own report explicitly says it implemented — do NOT advertise features (quiz, simulator, flashcards, tracking, …) that the report does not state were built, and if the artifact is small or minimal, say so plainly and offer to extend it. `
     + "Do NOT dump raw evidence and do NOT paste the file's HTML/CSS/JS code or any fenced code block — the file is attached, so inlining its code is redundant and confusing.",
+    { history: confirmationHistory },
   );
   // Belt-and-suspenders: the slow model sometimes ignores the no-code instruction and
   // pastes a large (often fabricated, non-matching) code block — see audit ce8e2128 where
