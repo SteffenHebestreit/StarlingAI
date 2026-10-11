@@ -4,6 +4,7 @@ import { currentWorkspaceScope } from "../runtime/request-context.js";
 import { segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { GENERATED_SUBDIR, UPLOADS_SUBDIR, USERS_SUBDIR } from "./workspace-zones.js";
+import { containedWorkspaceRealPath, type WorkspaceContainmentOptions } from "./workspace-containment.js";
 
 // The zones and the config-shard rules live in a leaf module the config loader can import without
 // a cycle (tools/workspace-zones.ts); they stay importable from here.
@@ -19,6 +20,13 @@ export {
 // Where the gateway keeps its state for a root lives in a leaf module the outcomes ledger can import
 // (tools/workspace-state.ts); it stays importable from here.
 export { isAccountWorkspaceRoot, stripUserWorkspaceRoots, workspaceStateDir } from "./workspace-state.js";
+// Where a path really leads through the links in the workspace: a leaf module the page-check worker
+// can import (tools/workspace-containment.ts); it stays importable from here.
+export {
+  containedWorkspaceRealPath,
+  type WorkspaceContainmentOptions,
+  type WorkspaceRealPath,
+} from "./workspace-containment.js";
 
 /** True when a filesystem path exists (stat succeeds), false otherwise. */
 export async function pathExists(target: string): Promise<boolean> {
@@ -144,13 +152,29 @@ function stripVirtualWorkspacePrefix(inputPath: string): string {
   return inputPath.trim();
 }
 
+function assertContained(resolvedPath: string, workspacePath: string, options: WorkspaceContainmentOptions | undefined): void {
+  if (!containedWorkspaceRealPath(resolvedPath, workspacePath, options)) throw new Error("Path escapes workspace boundary");
+}
+
 /**
  * A workspace path exactly as named: the boundary check of resolvePathWithinWorkspace without its
  * zone re-root. For the one caller that needs what a sandbox sees: a container is handed the whole
  * working root at /workspace, whatever the agent's zone, so a script a scope-confined agent's shell
  * left at the root is there and nowhere under generated/.
+ *
+ * Each resolver here also holds the path to its zone through any link (containedWorkspaceRealPath).
  */
-export function resolveLiteralWorkspacePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+export function resolveLiteralWorkspacePath(
+  inputPath: string,
+  workspacePath: string,
+  options?: WorkspaceContainmentOptions,
+): { resolved: string; relativePath: string } {
+  const literal = lexicalLiteralWorkspacePath(inputPath, workspacePath);
+  assertContained(literal.resolved, workspacePath, options);
+  return literal;
+}
+
+function lexicalLiteralWorkspacePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
   const candidatePath = stripVirtualWorkspacePrefix(inputPath);
   const resolvedPath = isAbsolute(candidatePath)
     ? resolve(candidatePath)
@@ -162,8 +186,18 @@ export function resolveLiteralWorkspacePath(inputPath: string, workspacePath: st
   return { resolved: resolvedPath, relativePath: rel === "" ? "." : rel.replace(/\\/g, "/") };
 }
 
-export function resolvePathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
-  const literal = resolveLiteralWorkspacePath(inputPath, workspacePath);
+export function resolvePathWithinWorkspace(
+  inputPath: string,
+  workspacePath: string,
+  options?: WorkspaceContainmentOptions,
+): { resolved: string; relativePath: string } {
+  const within = lexicalPathWithinWorkspace(inputPath, workspacePath);
+  assertContained(within.resolved, workspacePath, options);
+  return within;
+}
+
+function lexicalPathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const literal = lexicalLiteralWorkspacePath(inputPath, workspacePath);
   const relativePath = literal.relativePath;
 
   // Zone enforcement for scope-confined executions (set per-agent via
@@ -198,8 +232,18 @@ export function resolvePathWithinWorkspace(inputPath: string, workspacePath: str
  * write target is taken literally. Everything else (scoped agents AND runtime
  * internals with no scope set) keeps the rooting.
  */
-export function resolveWorkspaceWritePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
-  const within = resolvePathWithinWorkspace(inputPath, workspacePath);
+export function resolveWorkspaceWritePath(
+  inputPath: string,
+  workspacePath: string,
+  options?: WorkspaceContainmentOptions,
+): { resolved: string; relativePath: string } {
+  const target = lexicalWorkspaceWritePath(inputPath, workspacePath);
+  assertContained(target.resolved, workspacePath, options);
+  return target;
+}
+
+function lexicalWorkspaceWritePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
+  const within = lexicalPathWithinWorkspace(inputPath, workspacePath);
   if (currentWorkspaceScope() === "full") {
     return within;
   }

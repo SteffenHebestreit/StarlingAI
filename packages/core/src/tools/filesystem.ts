@@ -1,10 +1,10 @@
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, mkdirSync, existsSync, unlinkSync, realpathSync } from "node:fs";
-import { basename, resolve, extname, join, relative, isAbsolute } from "node:path";
+import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { basename, resolve, extname, join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { containedWorkspaceRealPath, generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 import { buildArtifactTextPreview } from "./artifact-preview.js";
 
@@ -167,13 +167,11 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
     if (isSensitiveWorkspacePath(relative(workspacePath, resolved))) {
       return { safe: false, resolved };
     }
-    let real: string | null = null;
-    try { real = realpathSync(resolved); } catch { /* not created yet — the lexical check stands */ }
-    if (real !== null) {
-      const realRel = relative(workspacePath, real);
-      if (realRel.startsWith("..") || isAbsolute(realRel) || isSensitiveWorkspacePath(realRel)) {
-        return { safe: false, resolved };
-      }
+    // The resolver above held the path to its zone through any link (containedWorkspaceRealPath);
+    // where it really leads must not be a denied file either.
+    const real = containedWorkspaceRealPath(resolved, workspacePath);
+    if (!real || isSensitiveWorkspacePath(relative(real.root, real.real))) {
+      return { safe: false, resolved };
     }
     return { safe: true, resolved };
   } catch {
@@ -186,13 +184,40 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
  * under the workspace's `generated/` subfolder so agent output never clutters
  * the config zone. Reads keep guardPath (workspace-wide). Returns the
  * workspace-rooted relativePath (e.g. "generated/index.html") for artifacts.
+ *
+ * AND WRITES THROUGH NO LINK. A sandbox can leave links where it can write, and the write tools
+ * followed them: write_file to generated/evil.jsonc linked to ../agents/evil.jsonc overwrote a
+ * config shard, and generated/up linked to .. reached the parent (review 2026-10-11). The directory
+ * the target is in must really be in the target's zone (resolveWorkspaceWritePath,
+ * containedWorkspaceRealPath), and its real path, like its own, must not be one the file tools
+ * refuse to read. The target itself must not be a link: write_file, edit_file and create_dir refuse
+ * one, which would write wherever it leads; delete_file (`finalLink: "remove"`) removes the link and
+ * leaves what it leads to.
  */
-function guardWritePath(path: string, workspacePath: string): { safe: boolean; resolved: string; relativePath: string } {
+function guardWritePath(
+  path: string,
+  workspacePath: string,
+  finalLink: "refuse" | "remove" = "refuse",
+): { safe: boolean; resolved: string; relativePath: string } {
   try {
-    const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath);
-    return { safe: true, resolved, relativePath };
+    const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath, { final: "link" });
+    const real = containedWorkspaceRealPath(resolved, workspacePath, { final: "link" });
+    const safe = real !== null
+      && !isSensitiveWorkspacePath(relative(workspacePath, resolved))
+      && !isSensitiveWorkspacePath(relative(real.root, real.real))
+      && !(finalLink === "refuse" && isLink(resolved));
+    return { safe, resolved, relativePath };
   } catch {
     return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path };
+  }
+}
+
+/** Whether the path itself is a link (a junction too), without following it. */
+function isLink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -892,12 +917,16 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved } = guardWritePath(path, ctx.workspacePath, "remove");
 
     if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
-    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}` };
-
-    const stat = statSync(resolved);
+    // lstat: a link is removed itself, never what it leads to, and one that leads nowhere is there too.
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(resolved);
+    } catch {
+      return { success: false, output: "", error: `File not found: ${path}` };
+    }
     if (stat.isDirectory()) {
       return { success: false, output: "", error: "Cannot delete directories with this tool — use shell_exec for recursive removal" };
     }
@@ -959,7 +988,8 @@ function listDir(dir: string, depth: number, recursive: boolean, relDir: string,
     const rel = relDir ? `${relDir}/${name}` : name;
     let stat;
     try {
-      stat = statSync(full);
+      // lstat: a link is listed by its name and not followed; a sandbox can leave one leading out.
+      stat = lstatSync(full);
     } catch (err) {
       notes.unreadable++;
       entries.push(`${name} (unreadable: ${errorCode(err)})`);
