@@ -1,0 +1,74 @@
+// IN-PROCESS: shell_agent runs a local command in the Docker sandbox and reports what it printed.
+//
+// shell_agent has run in the gateway process since 2026-10-09 (container.disabled). Inside the old
+// agent-worker its tool registry was empty, so no live turn had executed its tools before. This
+// proves the in-process path end to end: shell_agent dispatches shell_exec, the sandbox runs it with
+// the eval account's own workspace root at /workspace (tools/shell.ts resolveDockerWorkspaceBind), the
+// file it writes is in that root over HTTP afterwards, and the reply carries what the command printed.
+//
+// Ground truth, computed with printf | sha256sum and wc -l (the content is fixed in the message):
+//   printf 'Nordlicht\nWerkzeuge\nPolarstadt\n' -> 3 lines,
+//   SHA-256 64155d1939c49fdff5ddf7bddaa29ea13d5fef0ff58fe8f7160c5b8164853296.
+// The checksum cannot be worked out from the message, so a reply that carries it read the output.
+//
+// Audit row asserted (agent/sub-agent.ts buildSubAgentToolAuditPayload, phase "done" with the call's
+// args and result): sub_agent_tool_call {agentName, tool, phase, success, metadata.programOutputChars,
+// resultPreview = the output with whitespace collapsed, at most 280 characters}.
+// shell_exec needs per-call approval (guardrails/tool-tiers.ts), hence --auto. The message names no
+// remote host, so ssh_exec must not run.
+// The file sits under generated/, so the attempt deletes it first (204 removed, 404 not there) and
+// the GET afterwards shows that this run wrote it.
+{
+  id: "inprocess-shell-agent-sandbox-output",
+  title: "In-process shell_agent: a sandbox command's output reaches the reply",
+  group: "inprocess",
+  tags: ["inprocess", "shell_agent", "sandbox"],
+  description: "shell_agent (in-process since 2026-10-09) runs one command in the Docker sandbox: it writes three fixed lines to generated/e2e-shell/zeilen.txt, counts them and prints their SHA-256. Protects: the in-process shell_exec path (dispatched by shell_agent, exit 0, output captured), the sandbox writing into the eval account's own workspace root (the file is there over HTTP), and a reply grounded in the printed output (the checksum prefix 64155d1939c4 is only known from running it).",
+  requires: ["model", "sandbox"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "http",
+      id: "remove-leftover",
+      method: "DELETE",
+      path: "/api/workspace/file?path=generated/e2e-shell/zeilen.txt",
+      expect: { status: [204, 404] },
+    },
+    {
+      kind: "turn",
+      id: "run-command",
+      agent: "shell_agent",
+      message: "Führe im Workspace genau diesen Befehl mit shell_exec aus: `mkdir -p generated/e2e-shell && printf 'Nordlicht\\nWerkzeuge\\nPolarstadt\\n' > generated/e2e-shell/zeilen.txt && wc -l < generated/e2e-shell/zeilen.txt && sha256sum generated/e2e-shell/zeilen.txt` Nenne danach die Zeilenzahl und die ersten 12 Zeichen der SHA-256-Prüfsumme aus der Ausgabe. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          matches: ["64155d1939c4", "\\b3\\b"],
+        },
+        agents: { mustRun: ["shell_agent"] },
+        tools: { mustNotCall: ["ssh_exec"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "shell_agent",
+                "data.tool": "shell_exec",
+                "data.phase": "done",
+                "data.success": true,
+                "data.metadata.programOutputChars": { gte: 1 },
+                "data.resultPreview": { regex: "\\b64155d1939c49fdff5ddf7bddaa29ea13d5fef0ff58fe8f7160c5b8164853296\\b" },
+              },
+            },
+          ],
+        },
+      },
+    },
+    {
+      kind: "http",
+      id: "file-written",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-shell/zeilen.txt",
+      expect: { status: 200, bodyIncludes: ["Nordlicht", "Polarstadt"] },
+    },
+  ],
+}

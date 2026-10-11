@@ -1,0 +1,56 @@
+// IN-PROCESS: ops_triage diagnoses an unreachable page read-only, from the status the page answered.
+//
+// ops_triage has run in the gateway process since 2026-10-09 (container.disabled). It is a
+// diagnose-only agent: it gathers the cheapest evidence and hands any fix to another agent. Here the
+// evidence is one request to a page the fixture site does not have.
+//
+// Ground truth: eval/e2e/site has no kaputt.html, and nginx answers a missing path with 404
+// (eval/e2e/env/nginx.conf: try_files $uri $uri/ =404).
+//
+// Audit row asserted: sub_agent_tool_call phase "done" with args and result (agent/sub-agent.ts
+// buildSubAgentToolAuditPayload; resultPreview is the output, or the error of a failed call, with
+// whitespace collapsed). Every way the agent's read tools can meet that 404 puts it there:
+//   - service_check http: "HTTP check failed after 1 attempt(s): HTTP 404 from <url>", or with
+//     expectedStatus 404 "... returned HTTP 404" (tools/service-check.ts);
+//   - web_fetch: "HTTP 404 from <url>", or, when the browser rendered nginx's error page,
+//     "(browser-rendered; a direct request was answered HTTP 404)" before "404 Not Found"
+//     (tools/web.ts).
+// So the row is matched on the 404 in its preview, not on success. service_check needs per-call
+// approval (guardrails/tool-tiers.ts), hence --auto. Read-only: no file is written or edited.
+{
+  id: "inprocess-ops-triage-404-diagnosis",
+  title: "In-process ops_triage: an unreachable page is diagnosed read-only as HTTP 404",
+  group: "inprocess",
+  tags: ["inprocess", "ops_triage", "site", "diagnosis"],
+  description: "ops_triage (in-process since 2026-10-09) is told that http://www.nordlicht-werkzeuge.test/kaputt.html is unreachable and asked for the cause, read-only. Protects: the in-process diagnostic path to the fixture site (web_fetch or service_check dispatched by ops_triage on that URL and observing the 404), a finding grounded in that observation (the reply names 404), and a diagnosis that changes nothing (no write_file or edit_file).",
+  requires: ["model", "e2e-site"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "diagnose",
+      agent: "ops_triage",
+      message: "Die Seite http://www.nordlicht-werkzeuge.test/kaputt.html ist für Kunden nicht erreichbar. Finde die Ursache nur lesend heraus: Prüfe die Adresse selbst und nenne den HTTP-Status als Befund. Ändere nichts. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: { matches: ["\\b404\\b"] },
+        agents: { mustRun: ["ops_triage"] },
+        tools: { mustNotCall: ["write_file", "edit_file"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "ops_triage",
+                "data.tool": { in: ["web_fetch", "service_check"] },
+                "data.phase": "done",
+                "data.args.url": { regex: "^https?://www\\.nordlicht-werkzeuge\\.test/kaputt\\.html$" },
+                "data.resultPreview": { regex: "\\b404\\b" },
+              },
+            },
+          ],
+        },
+      },
+    },
+  ],
+}
