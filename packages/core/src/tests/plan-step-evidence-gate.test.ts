@@ -610,14 +610,36 @@ describe("the research gate's turn trigger", () => {
     expect(ran()).toEqual(["browser_agent"]);
   }, 30_000);
 
-  it("replaces the tab reader at the head when nothing behind it opens a page or gathers", async () => {
+  it("keeps the step on an agent with a source of its own behind the tab reader: a mailbox, an upload", async () => {
     const { getTool } = await import("../tools/registry.js");
     await import("../tools/sub-agent.js");
-    await getTool("delegate_to_agent")!.execute({ ...RECOVERED_SITE_CALL, fallbackAgents: ["document_intake"] }, turnCtx("s-tab-no-gatherer"));
+    await getTool("delegate_to_agent")!.execute({
+      agentName: "vision_browser_analyst", fallbackAgents: ["mail_agent"], task: "Die Rechnung von Nordlicht im Postfach suchen und den Betrag nennen.", deliverable: "answer",
+    }, turnCtx("s-tab-mail"));
+    await getTool("delegate_to_agent")!.execute({
+      agentName: "vision_browser_analyst", fallbackAgents: ["document_intake"], task: "Das hochgeladene Foto uploads/aushang.jpg auslesen und die Öffnungszeiten nennen.", deliverable: "answer",
+    }, turnCtx("s-tab-upload"));
 
-    expect(ran()).toEqual(["researcher"]);
+    expect(ran()).toEqual(["mail_agent", "document_intake"]);
+    expect(rows("delegation_tab_reader_demoted")).toEqual([
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst", "mail_agent"], queue: ["mail_agent", "vision_browser_analyst"] }),
+      expect.objectContaining({ requestedAgents: ["vision_browser_analyst", "document_intake"], queue: ["document_intake", "vision_browser_analyst"] }),
+    ]);
+    expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([]);
+  }, 30_000);
+
+  it("leaves a tab reader and a builder to the turn trigger: researcher while the session holds no facts, the builder once it does", async () => {
+    agentsDeliver();
+    const BUILD_CALL = { agentName: "vision_browser_analyst", fallbackAgents: ["web_coder"], task: "Eine Übersichtsseite mit den Angaben bauen.", deliverable: "file" };
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute(BUILD_CALL, turnCtx("s-tab-build-empty"));
+    await (await import("../swarm/memory.js")).writeSharedFact("s-tab-build-facts", "founding_year", "1987 (impressum)");
+    await getTool("delegate_to_agent")!.execute(BUILD_CALL, turnCtx("s-tab-build-facts"));
+
+    expect(ran()).toEqual(["researcher", "web_coder"]);
     expect(rows("delegation_explicit_redirected_research_incapable")).toEqual([
-      expect.objectContaining({ requestedAgents: ["vision_browser_analyst", "document_intake"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+      expect.objectContaining({ requestedAgents: ["web_coder", "vision_browser_analyst"], redirectedTo: "researcher", trigger: "turn_evidence" }),
     ]);
   }, 30_000);
 
@@ -725,6 +747,24 @@ describe("the research gate's turn trigger", () => {
     // Its queue spent, the delegation routes, and the router's tab reader is barred the same way.
     expect(ran()).toEqual(["browser_agent", "researcher"]);
     expect(rows("delegation_tab_reader_held")).toEqual([expect.objectContaining({ agentName: "vision_browser_analyst" })]);
+  }, 30_000);
+
+  it("runs a held tab reader once a sibling delegation's browser agent has opened a page", async () => {
+    // A completed or partial attempt ends the delegation, so only a sibling of it (a parallel slice,
+    // a graph node) can drive the browser before the loop reaches the held tab reader.
+    const ctx = turnCtx("s-tab-held-sibling");
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      if (args.agentName !== "browser_agent") return { output: `${args.agentName}: done`, stats: statsFor(args) };
+      ctx.swarmState!.tasks["task_sibling"] = swarmDrivenBy("browser_agent").tasks["task_prev"]!;
+      return { output: "browser_agent: the page did not load.", stats: { ...statsFor(args), outcome: "failure" } };
+    });
+    routeAs(LIVE_SITE_RANKING);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ ...RECOVERED_SITE_CALL, fallbackAgents: ["browser_agent"] }, ctx);
+
+    expect(ran()).toEqual(["browser_agent", "vision_browser_analyst"]);
+    expect(rows("delegation_tab_reader_held")).toEqual([]);
   }, 30_000);
 
   it("routes a step that names a web address past an agent with a workspace source of its own, to one that reaches outside", async () => {

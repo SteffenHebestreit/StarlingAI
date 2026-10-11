@@ -35,7 +35,6 @@ import {
   taskRequiresExternalResearch,
   agentIsResearchCapable,
   agentGathersDirectly,
-  agentCfgGathersDirectly,
   preferResearchCapableCandidates,
   preferFormatProducingCandidates,
   agentCfgIsMetaFactory,
@@ -1368,37 +1367,30 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // Judged by the agent that would run first, not by the whole queue: 71d42257 (E2E 2026-10-10) ran
   // [vision_browser_analyst, browser_agent, researcher, document_intake], a search's top match with
   // its suggested fallbacks, and the tab reader read about:blank five times while the gatherers
-  // behind it never ran. When the queue names an agent that opens a page or gathers itself, that one
-  // runs first and the tab readers go last, held until a browser has been driven; otherwise the step
-  // is redirected. Before the attempt loop the queue holds only the agents the call named, so a call
-  // whose agentName is unknown and whose fallbacks lead with a tab reader is judged the same.
+  // behind it never ran. When the queue names any other agent, the tab readers go last, held until a
+  // browser has been driven, and the other agents keep their order: the step is then theirs, held to
+  // the turn trigger above like any step naming them (which counts a tab reader as working from
+  // handed text), so a mailbox or upload agent keeps it and a builder renders facts already shared.
+  // A queue of tab readers alone is redirected. Before the attempt loop the queue holds only the
+  // agents the call named, so a call whose agentName is unknown and whose fallbacks lead with a tab
+  // reader is judged the same.
   const queuedCfg = (name: string) => renderCfgConfig.subAgents[name] ?? renderCfgPromoted[name];
   const tabReaderLeads = ctx.turnEvidence?.required === true
     && candidateQueue.length > 0
     && agentCfgOnlyReadsOpenBrowserTab(queuedCfg(candidateQueue[0]!))
     && !swarmHasDrivenSharedBrowser(ctx);
-  const leadGatherer = tabReaderLeads
-    ? candidateQueue.find((name) => {
-      const cfg = queuedCfg(name);
-      return cfg !== undefined && !agentCfgOnlyReadsOpenBrowserTab(cfg) && (agentCfgDrivesSharedBrowser(cfg) || agentCfgGathersDirectly(cfg));
-    })
-    : undefined;
-  const heldTabReaders = new Set<string>();
-  if (leadGatherer) {
+  const queuedTabReaders = tabReaderLeads ? candidateQueue.filter((name) => agentCfgOnlyReadsOpenBrowserTab(queuedCfg(name))) : [];
+  const tabReaderUnserved = tabReaderLeads && queuedTabReaders.length === candidateQueue.length;
+  const heldTabReaders = new Set<string>(tabReaderUnserved ? [] : queuedTabReaders);
+  if (heldTabReaders.size > 0) {
     const requestedAgents = candidateQueue;
-    for (const name of requestedAgents) if (agentCfgOnlyReadsOpenBrowserTab(queuedCfg(name))) heldTabReaders.add(name);
-    candidateQueue = [
-      leadGatherer,
-      ...requestedAgents.filter((name) => name !== leadGatherer && !heldTabReaders.has(name)),
-      ...heldTabReaders,
-    ];
+    candidateQueue = [...requestedAgents.filter((name) => !heldTabReaders.has(name)), ...heldTabReaders];
     logAudit("delegation_tab_reader_demoted", {
       taskTitle: title,
       requestedAgents,
       queue: [...candidateQueue],
     }, { sessionId: ctx.sessionId });
   }
-  const tabReaderUnserved = tabReaderLeads && !leadGatherer;
   let renderHasGatheredFacts = true;
   if (textRequiresResearch || turnTriggerCandidate) {
     try {
@@ -1913,9 +1905,10 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       skippedCandidates.add(candidate);
       continue;
     }
-    // A tab reader moved behind a gatherer (above) is reached only when every agent ahead of it
-    // failed. It runs only if an agent has driven the shared browser by then; otherwise it would
-    // read the tab as it was.
+    // A tab reader moved to the end of the queue (above) is reached only when every agent ahead of
+    // it failed, and a completed or partial attempt ends the delegation, so only a sibling of this
+    // delegation (a parallel slice, a graph node) can have driven the shared browser by then. It
+    // runs if one has; otherwise it would read the tab as it was.
     if (heldTabReaders.has(candidate) && !swarmHasDrivenSharedBrowser(ctx)) {
       skippedCandidates.add(candidate);
       logAudit("delegation_tab_reader_held", { taskTitle: title, agentName: candidate }, { sessionId: ctx.sessionId });
