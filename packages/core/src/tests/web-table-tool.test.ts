@@ -90,6 +90,7 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   mcpConnections.clear();
@@ -225,9 +226,20 @@ describe("web_table source url: pages", () => {
         },
       }), { status: 200, headers: { "Content-Type": "text/html" } }),
     });
-    const started = Date.now();
-    const r = await webTable({ url: [`${PUBLIC}/endlos.html`, `${PUBLIC}/lager.html`], aggregates: ["count"] });
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // On a faked clock, so a slow runner cannot move the result: still reading 1 ms before the
+    // deadline, stopped at it. The call imports web.js on its first use; loaded before the clock is
+    // faked, the call meets no real I/O it would wait on past the faked deadline.
+    await import("../tools/web.js");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let settled = false;
+    const call = webTable({ url: [`${PUBLIC}/endlos.html`, `${PUBLIC}/lager.html`], aggregates: ["count"] }).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    const r = await call;
     expect(r.success).toBe(false);
     expect(r.error).toBe(`stopped at the call's 0.3 s deadline; 0 of 2 pages had been read (${PUBLIC}/endlos.html was not); nothing was computed`);
     expect(cancelled).toBe(true);

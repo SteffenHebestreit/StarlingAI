@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeChain, findArithmeticMismatches } from "../agent/arithmetic-check.js";
+import { arithmeticCheckWorkForTests, describeChain, findArithmeticMismatches } from "../agent/arithmetic-check.js";
 
 /**
  * The arithmetic-chain detector behind orchestration.subAgentArithmeticCheck. Its target is the
@@ -68,6 +68,8 @@ describe("findArithmeticMismatches", () => {
     // The space before a chain was trimmed by a regex over the whole line before it, once per
     // chain: 150,000 spaces before one chain took seconds, and a 70 kB line of chains after a
     // comma took longer, while every sub-agent answer in shadow mode passes through here.
+    // Every chain below stands after one space and a letter, comma or digit: the lead checks read
+    // those two characters per chain, never the text before them.
     const lines = [
       `${" ".repeat(150_000)}x 1 + 1 = 3`,
       `${" ".repeat(2_000)}${", 1 + 1 = 3".repeat(6_000)}`,
@@ -76,9 +78,9 @@ describe("findArithmeticMismatches", () => {
     ];
     const found: number[] = [];
     for (const line of lines) {
-      const started = Date.now();
       found.push(findArithmeticMismatches(line).length);
-      expect(Date.now() - started, line.slice(0, 20)).toBeLessThan(300);
+      const chains = line.split("=").length - 1;
+      expect(arithmeticCheckWorkForTests().leadCharsRead, line.slice(0, 20)).toBeLessThanOrEqual(2 * chains);
     }
     expect(found).toEqual([1, 0, 0, 15_000]);
   });

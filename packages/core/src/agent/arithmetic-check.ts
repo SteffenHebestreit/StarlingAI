@@ -164,6 +164,17 @@ function lineMarkerEnd(line: string): number {
 }
 
 /**
+ * Characters of the text before a chain that the last findArithmeticMismatches call's lead checks
+ * read: the spaces right before each chain and the character before them. Tests bound it by the
+ * number of chains instead of timing the call; nothing else reads it.
+ */
+let leadCharsRead = 0;
+
+export function arithmeticCheckWorkForTests(): { leadCharsRead: number } {
+  return { leadCharsRead };
+}
+
+/**
  * Whether a chain may start at `start`: the text before it, without the spaces right before it,
  * is empty, ends in a letter, ":" or "|", or is a list or quote marker. The spaces are stepped over
  * backwards; trimmed off the whole text before the chain by a regex, once per chain, they made a
@@ -172,6 +183,7 @@ function lineMarkerEnd(line: string): number {
 function leadAllowed(line: string, start: number, markerEnd: number): boolean {
   let end = start;
   while (end > 0 && LINE_SPACE_RE.test(line[end - 1]!)) end--;
+  leadCharsRead += start - end + 1;
   if (end === 0) return true;
   const last = line[end - 1]!;
   return /\p{L}/u.test(last) || LEAD_MARKS.has(last) || end === markerEnd;
@@ -244,6 +256,7 @@ function lineMismatches(line: string, original: string): ArithmeticMismatch[] {
  * decimal convention. Empty for a text over 200,000 characters.
  */
 export function findArithmeticMismatches(text: string): ArithmeticMismatch[] {
+  leadCharsRead = 0;
   if (!text || text.length > MAX_TEXT_CHARS) return [];
   const blanked = blankMarkup(text);
   const lines = blanked.split("\n");

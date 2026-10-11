@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { computeTables, decodeHtmlBytes, newCellBudget, parseHtmlTables, resolveColumn, TABLE_LIMITS, type PageInput, type TableQuery } from "../tools/html-tables.js";
+import { computeTables, decodeHtmlBytes, newCellBudget, parseHtmlTables, resolveColumn, TABLE_LIMITS, tableWorkForTests, type PageInput, type TableQuery } from "../tools/html-tables.js";
 import { readCellValue } from "../tools/table-numbers.js";
 
 // vitest runs from packages/core; the fixture site lives at the repo root.
@@ -292,20 +292,27 @@ describe("web_table bounds", () => {
   });
 
   it("parses a hostile 5 MB page of unclosed scripts, comments and quotes in linear time", () => {
+    // One forward pass: the scanner's searches and tag reads pass over each character at most once.
+    // Each tail is read at 1/100 of its size first, where a scanner that searched again from every
+    // later "<" fails the count in about a second; at 5 MB it would not finish.
     const head = table(["Artikel", "Bestand"], [["A", "1"], ["B", "2"]]);
-    const hostile = [
-      "<script>x".repeat(600_000),
-      "<!--x".repeat(1_000_000),
-      "<a title=\"x".repeat(500_000),
-      "<td a='".repeat(700_000),
-      "<x".repeat(2_500_000),
-      `<script>${"</scriptx".repeat(550_000)}`,
-    ];
-    for (const tail of hostile) {
-      const started = Date.now();
-      const doc = parseHtmlTables(head + tail);
-      expect(Date.now() - started, tail.slice(0, 12)).toBeLessThan(2_000);
-      expect(doc.tables[0]!.rows.length).toBe(2);
+    const hostile = (scale: number): string[] => {
+      const times = (count: number): number => Math.round(count * scale);
+      return [
+        "<script>x".repeat(times(600_000)),
+        "<!--x".repeat(times(1_000_000)),
+        "<a title=\"x".repeat(times(500_000)),
+        "<td a='".repeat(times(700_000)),
+        "<x".repeat(times(2_500_000)),
+        `<script>${"</scriptx".repeat(times(550_000))}`,
+      ];
+    };
+    for (const scale of [0.01, 1]) {
+      for (const tail of hostile(scale)) {
+        const doc = parseHtmlTables(head + tail);
+        expect(tableWorkForTests().scannedChars, `${tail.slice(0, 12)} at ${scale}`).toBeLessThanOrEqual(head.length + tail.length);
+        expect(doc.tables[0]!.rows.length).toBe(2);
+      }
     }
   });
 
@@ -315,8 +322,9 @@ describe("web_table bounds", () => {
     // positions for 100,500 paid cells.
     const narrow = "<tr><td>1</td></tr>".repeat(100);
     const wide = `<tr>${"<td colspan=50>x</td>".repeat(1_990)}</tr>`;
-    const started = Date.now();
     const page = inlinePage(1, `<table>${narrow}${wide}</table>`);
+    // The rows are built from the 100 + 99,500 positions the page paid for, not 101 × 99,500.
+    expect(tableWorkForTests().gridPositions).toBeLessThanOrEqual(100 + 99_500);
     const parsed = page.doc.tables[0]!;
     expect(parsed.columns.length).toBe(99_500);
     expect(parsed.rows.length).toBe(101);
@@ -324,26 +332,28 @@ describe("web_table bounds", () => {
     const result = ok([page], { column: "1", aggregates: ["sum"] });
     expect(result.output.split("\n")[0]).toBe("sum(column 1 \"1\") = 100 — all 101 rows, 100 numeric of 101 (whole numbers)");
     expect(result.output).toMatch(/^1·1 \| 1 \| {2}\| /m);
-    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it("parses 2,500 empty rows under a 100,000-column row, and 2,000 header rows over a wide one, without walking rows × width", () => {
-    // The reviewer's page: 64.5 kB that ran the gateway out of heap (2,500 × 100,000 positions).
-    const emptyRows = `<table>${"<tr></tr>".repeat(2_500)}<tr>${"<td colspan=50></td>".repeat(2_000)}</tr></table>`;
-    let started = Date.now();
-    const empty = parseHtmlTables(emptyRows).tables[0]!;
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(empty.columns.length).toBe(100_000);
-    expect(empty.rows).toEqual([]);
+    // Laying out the grid visits the positions the page paid for, never rows × width. Each page
+    // is read with 1/100 of its rows first, where walking rows × width fails the count in
+    // milliseconds; on the full page it exhausts the heap.
+    for (const emptyRows of [25, 2_500]) {
+      // The reviewer's page: 64.5 kB that ran the gateway out of heap (2,500 × 100,000 positions).
+      const empty = parseHtmlTables(`<table>${"<tr></tr>".repeat(emptyRows)}<tr>${"<td colspan=50></td>".repeat(2_000)}</tr></table>`).tables[0]!;
+      expect(tableWorkForTests().gridPositions, `${emptyRows} empty rows`).toBeLessThanOrEqual(100_000);
+      expect(empty.columns.length).toBe(100_000);
+      expect(empty.rows).toEqual([]);
+    }
 
-    // 2,000 one-cell header rows over a 98,000-column body row: the header was named column by
-    // column through every header row, 196 million steps.
-    const headed = `<table>${"<tr><th>h</th></tr>".repeat(2_000)}<tr>${"<td colspan=50>1</td>".repeat(1_960)}</tr></table>`;
-    started = Date.now();
-    const page = inlinePage(1, headed);
-    expect(page.doc.tables[0]!.columns.slice(0, 2)).toEqual(["h", "2"]);
-    expect(ok([page], { column: "h", aggregates: ["sum"] }).output.split("\n")[0]).toBe("sum(column 1 \"h\") = 1 — all 1 rows, 1 numeric of 1 (whole numbers)");
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // One-cell header rows over a 98,000-column body row: the header was named column by column
+    // through every header row, 196 million steps for 2,000 of them.
+    for (const headerRows of [20, 2_000]) {
+      const page = inlinePage(1, `<table>${"<tr><th>h</th></tr>".repeat(headerRows)}<tr>${"<td colspan=50>1</td>".repeat(1_960)}</tr></table>`);
+      expect(tableWorkForTests().gridPositions, `${headerRows} header rows`).toBeLessThanOrEqual(headerRows + 98_000);
+      expect(page.doc.tables[0]!.columns.slice(0, 2)).toEqual(["h", "2"]);
+      expect(ok([page], { column: "h", aggregates: ["sum"] }).output.split("\n")[0]).toBe("sum(column 1 \"h\") = 1 — all 1 rows, 1 numeric of 1 (whole numbers)");
+    }
   });
 
   it("keeps at most 10,000 characters of a cell however its text arrives, and names a column with at most 200", () => {
@@ -352,8 +362,10 @@ describe("web_table bounds", () => {
     const huge = "x".repeat(4_800_000);
     const html = `<table><thead><tr><th colspan=40>${huge}</th></tr></thead>`
       + `<tbody><tr>${"<td>1</td>".repeat(39)}<td>${"y".repeat(1_000_000)} &amp; ${huge}</td></tr></tbody></table>`;
-    const started = Date.now();
     const page = inlinePage(1, html);
+    // Of the 10.6 MB of cell text, only what the two long cells keep and the 39 one-character cells
+    // are decoded: the cap applies as the text arrives, not after decoding all of it.
+    expect(tableWorkForTests().decodedChars).toBeLessThanOrEqual(2 * TABLE_LIMITS.cellChars + 39);
     const parsed = page.doc.tables[0]!;
     expect(parsed.rows[0]![39]!.text.length).toBe(TABLE_LIMITS.cellChars);
     expect(parsed.columns).toHaveLength(40);
@@ -363,7 +375,6 @@ describe("web_table bounds", () => {
     const result = ok([page], { column: "1", aggregates: ["sum"] });
     expect(result.output.split("\n")[0]).toBe(`sum(column 1 "${"x".repeat(59)}…") = 1 — all 1 rows, 1 numeric of 1 (whole numbers)`);
     expect(result.columns.join("").length).toBeLessThan(40 * 210);
-    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it("reads a cell spanning 50 rows once, not once per row it covers", () => {
@@ -376,11 +387,15 @@ describe("web_table bounds", () => {
       return inlinePage(n, `<table><thead><tr><th>Name</th><th>Wert</th></tr></thead><tbody>${rows.join("")}</tbody></table>`);
     };
     const pages = [1, 2, 3, 4, 5, 6].map(page);
-    const started = Date.now();
     const result = ok(pages, { column: "Wert", aggregates: ["sum"], where: [{ column: "Name", op: "contains", value: "a 1-49" }], groupBy: "Name" });
     expect(result.output.split("\n")[0]).toBe("where column 1 \"Name\" contains \"a 1-49\" → 99 of 29994 rows kept");
     expect(result.output.split("\n")[1]).toBe("sum(column 2 \"Wert\") per column 1 \"Name\" — 2 groups over 99 rows kept (whole numbers):");
-    expect(Date.now() - started).toBeLessThan(1_500);
+    // A cell's text is read once for each use (page signature, value, condition and group text,
+    // label), however many rows it covers: at most 4 × the text the cells hold. Read once per row
+    // covered, the name cells alone came to 50 times that.
+    const cells = new Set(pages.flatMap(({ doc }) => doc.tables[0]!.rows.flat()));
+    const held = [...cells].reduce((chars, cell) => chars + cell.text.length + cell.struck.length, 0);
+    expect(tableWorkForTests().cellTextChars).toBeLessThanOrEqual(4 * held);
   });
 
   it("normalizes a 50,000-column header once per call, not once per named column", () => {
@@ -391,10 +406,10 @@ describe("web_table bounds", () => {
     const page = inlinePage(1, html);
     expect(page.doc.tables[0]!.columns).toHaveLength(49_901);
     const where = Array.from({ length: 20 }, (_, k) => ({ column: String(k * 2_000 + 2), op: "=" as const, value: "1" }));
-    const started = Date.now();
     const result = ok([page], { column: "49901", aggregates: ["sum"], where });
     expect(result.output.split("\n")[1]).toMatch(/^sum\(column 49901 "Spalte Spalte .*"\) = 1 — 1 rows kept, 1 numeric of 1/);
-    expect(Date.now() - started).toBeLessThan(1_500);
+    // Each of the 49,901 names once for the call; once per named column it was 42 times that.
+    expect(tableWorkForTests().namesNormalized).toBeLessThanOrEqual(49_901);
   });
 
   it("lists at most 12 of the columns an ambiguous name matches", () => {
