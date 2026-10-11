@@ -70,7 +70,8 @@ async function runGitInSandbox(
     "--security-opt=no-new-privileges",
     "-v", sandboxBindSpec(bind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
     // As the owner of the directory bound at /workspace, which git also requires before it reads
-    // a repository at all, with the gateway's state in the bind masked.
+    // a repository at all, with the gateway's state in the bind masked. Never as root for the
+    // full-scope repo bind (sandboxIsolationArgs).
     ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
     "-w", workdir,
     SANDBOX_IMAGE,

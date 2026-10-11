@@ -294,6 +294,36 @@ describe("the owner each git bind runs as", () => {
   });
 });
 
+describe("a full-scope sandbox never runs as root", () => {
+  // Its bind is read-write and holds the gateway's own state (the shared root's, and for the git
+  // repo bind the repo root's credentials.enc and audit.jsonl), masked by path only, which a
+  // case-insensitive bind does not honour: `.STARLINGAI/` is the same directory as `.starlingai/`.
+  it("gets no --user where the owner of its bind is root, and the owner's where it is not", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    for (const bind of ["repo", "caller"] as const) {
+      const bound = bind === "repo" ? "/workspace" : SHARED;
+      fakeOwners.set(bound, 0);
+      expect(sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind }, { sharedRoot: SHARED })).not.toContain("--user");
+      fakeOwners.set(bound, 1111);
+      expect(flagValue(sandboxIsolationArgs({ workspacePath: SHARED, workspaceScope: "full", bind }, { sharedRoot: SHARED }), "--user")).toBe("1111:1111");
+    }
+  });
+
+  it("leaves a sandbox that is not full-scope running as the owner, root included", async () => {
+    const { sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
+    fakeOwners.set(CALLER_WS, 0);
+    expect(flagValue(sandboxIsolationArgs({ workspacePath: CALLER_WS, workspaceScope: "generated", bind: "caller" }, { sharedRoot: SHARED }), "--user")).toBe("0:0");
+  });
+
+  it("applies to the full-scope git repo bind the git tools issue", async () => {
+    fakeOwners.set("/workspace", 0);
+    execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_status")!.execute({}, { sessionId: "s-full-root", workspacePath: CALLER_WS, workspaceScope: "full" });
+    expect(dockerArgs()).not.toContain("--user");
+  });
+});
+
 describe("the sandbox tools on an auth-off session's root, which is the shared root", () => {
   const ctx = (workspaceScope?: "full" | "generated"): ToolContext => ({ sessionId: "s-isolation", workspacePath: shared, workspaceScope });
   const root = () => shared.replace(/[/\\]+$/, "");

@@ -132,11 +132,19 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
  * No flag when the directory cannot be read: the image's own user then applies, as before. None on
  * Windows either, where Node reports uid and gid 0 for every path: a Windows-native gateway would
  * have run every sandbox as root.
+ *
+ * `allowRoot: false` also gives none where the owner is root (sandboxIsolationArgs passes it for a
+ * full-scope sandbox).
  */
-export function sandboxUserArgs(gatewayPath: string, platform: NodeJS.Platform = process.platform): string[] {
+export function sandboxUserArgs(
+  gatewayPath: string,
+  platform: NodeJS.Platform = process.platform,
+  options: { allowRoot?: boolean } = {},
+): string[] {
   if (platform === "win32") return [];
   try {
     const { uid, gid } = statSync(gatewayPath);
+    if (uid === 0 && options.allowRoot === false) return [];
     return ["--user", `${uid}:${gid}`];
   } catch {
     return [];
@@ -176,6 +184,14 @@ export interface SandboxHostOverrides {
  * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
  * the deployment mount, /workspace on the gateway side, not the agent's own root.
  *
+ * A FULL-SCOPE SANDBOX NEVER RUNS AS ROOT. Its bind is read-write and holds the gateway's own state:
+ * the shared root for its shell, and for the git repo bind the repo root as well, with
+ * credentials.enc, audit.jsonl and accounts.json. The masks below are placed by path, and a path does
+ * not hold on a case-insensitive bind (Docker Desktop on Windows and macOS): `.STARLINGAI/...` went
+ * past the tmpfs at `.starlingai` and wrote the real directory (review 2026-10-11). Where the owner
+ * is root it gets no --user, and the image's unprivileged user applies, as it did before sandboxes
+ * ran as the owner.
+ *
  * NO GATEWAY STATE IS KEPT IN AN ACCOUNT'S ROOT. An account's sandboxes run as the owner of that
  * root, root in the compose deployment, and can write anything in it, under any spelling; the
  * gateway keeps that account's state outside it (tools/workspace-state.ts workspaceStateDir). Where
@@ -208,7 +224,7 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
   // cannot write. The gateway creates it first, as it creates everything else in the workspace.
   // The repo bind is the deployment mount, which the gateway does not create.
   if (input.bind === "caller") ensureGatewayDir(bound);
-  const args = sandboxUserArgs(bound, host.platform);
+  const args = sandboxUserArgs(bound, host.platform, { allowRoot: input.workspaceScope !== "full" });
 
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
   const masked = new Set<string>();
