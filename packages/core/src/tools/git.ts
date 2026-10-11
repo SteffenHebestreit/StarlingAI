@@ -70,9 +70,16 @@ async function runGitInSandbox(
     "--security-opt=no-new-privileges",
     "-v", sandboxBindSpec(bind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
     // As the owner of the directory bound at /workspace, which git also requires before it reads
-    // a repository at all, with the gateway's state in the bind masked. Never as root for the
-    // full-scope repo bind (sandboxIsolationArgs).
+    // a repository at all, with the gateway's state in the bind masked. The full-scope repo bind is
+    // read-only but for the config zones and generated/ (sandboxIsolationArgs).
     ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
+    // Where the sandbox does not run as that owner (no --user on a Windows-native gateway, or an
+    // owner the stat could not read), git refuses the repository at /workspace as of "dubious
+    // ownership". safe.directory names it for this run only, through the environment, which is the
+    // command scope: git honours safe.directory only from protected configuration.
+    "-e", "GIT_CONFIG_COUNT=1",
+    "-e", "GIT_CONFIG_KEY_0=safe.directory",
+    "-e", "GIT_CONFIG_VALUE_0=/workspace",
     "-w", workdir,
     SANDBOX_IMAGE,
     "git", ...args,

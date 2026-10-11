@@ -132,19 +132,11 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
  * No flag when the directory cannot be read: the image's own user then applies, as before. None on
  * Windows either, where Node reports uid and gid 0 for every path: a Windows-native gateway would
  * have run every sandbox as root.
- *
- * `allowRoot: false` also gives none where the owner is root (sandboxIsolationArgs passes it for a
- * full-scope sandbox).
  */
-export function sandboxUserArgs(
-  gatewayPath: string,
-  platform: NodeJS.Platform = process.platform,
-  options: { allowRoot?: boolean } = {},
-): string[] {
+export function sandboxUserArgs(gatewayPath: string, platform: NodeJS.Platform = process.platform): string[] {
   if (platform === "win32") return [];
   try {
     const { uid, gid } = statSync(gatewayPath);
-    if (uid === 0 && options.allowRoot === false) return [];
     return ["--user", `${uid}:${gid}`];
   } catch {
     return [];
@@ -184,13 +176,21 @@ export interface SandboxHostOverrides {
  * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
  * the deployment mount, /workspace on the gateway side, not the agent's own root.
  *
- * A FULL-SCOPE SANDBOX NEVER RUNS AS ROOT. Its bind is read-write and holds the gateway's own state:
- * the shared root for its shell, and for the git repo bind the repo root as well, with
- * credentials.enc, audit.jsonl and accounts.json. The masks below are placed by path, and a path does
- * not hold on a case-insensitive bind (Docker Desktop on Windows and macOS): `.STARLINGAI/...` went
- * past the tmpfs at `.starlingai` and wrote the real directory (review 2026-10-11). Where the owner
- * is root it gets no --user, and the image's unprivileged user applies, as it did before sandboxes
- * ran as the owner.
+ * A FULL-SCOPE SANDBOX'S BIND IS READ-ONLY, EXCEPT WHAT THE MAINTAINER MAINTAINS. Its bind holds the
+ * gateway's own state: the shared root's state directory for its shell (accounts.json, approvals/,
+ * and every account's workspace state, tools/workspace-state.ts), and for the git repo bind the repo
+ * root's as well (credentials.enc, audit.jsonl). On Docker Desktop neither the masks below nor file
+ * modes hold there: the bind is case-insensitive, so `.STARLINGAI/...` went past the tmpfs at
+ * `.starlingai` and wrote the real directory, and every entry the host created shows as root's, mode
+ * 0777, writable by any uid (review 2026-10-11). A read-only bind holds against both, since every
+ * spelling resolves through the same read-only mount (verified live 2026-10-11). sandboxBindSpec
+ * makes it read-only, and the shared root's config zones (PROTECTED_WORKSPACE_ZONES) and generated/
+ * are bound again writable from their host paths, at their place in the bind: /workspace/<zone> for
+ * the shell, /workspace/workspace/<zone> for the repo bind in the compose layout. A zone that is not
+ * there, or has no host path (a named volume), stays read-only. The sandbox runs as the bind's owner,
+ * root in the compose deployment, which git needs to read the repository at all; .git stays
+ * read-only, as no full-scope agent holds a git tool that writes it (swarm_maintainer has git_status
+ * and git_diff).
  *
  * NO GATEWAY STATE IS KEPT IN AN ACCOUNT'S ROOT. An account's sandboxes run as the owner of that
  * root, root in the compose deployment, and can write anything in it, under any spelling; the
@@ -199,8 +199,8 @@ export interface SandboxHostOverrides {
  * bind), its state directory (accounts.json, approvals/, the ledgers) gets an empty read-only tmpfs
  * over it, which a cap-less root cannot remount or write ("Read-only file system", verified live
  * 2026-10-11), as does the repo root's. That directory is created first, so docker does not create
- * the mount point as root; a sandbox that is not full-scope has that bind read-only (below). An old
- * state directory in an account's root, which the boot moved out (runtime/workspace-state-relocation.ts)
+ * the mount point as root; the bind itself is read-only around it (above and below). An old state
+ * directory in an account's root, which the boot moved out (runtime/workspace-state-relocation.ts)
  * or a sandbox made since, is masked too where it exists. A missing one is not: docker would create
  * the mount point on the host, an empty directory at the place the gateway no longer reads.
  *
@@ -213,8 +213,7 @@ export interface SandboxHostOverrides {
  * 2026-10-11). sandboxBindSpec makes the bind read-only, and generated/, where write_file puts a
  * working agent's output, is bound again writable from its host path. A named-volume source has no
  * host path for it, so that sandbox stays read-only. users/ holds every account's workspace and is
- * masked, unless the caller's own root is in it. The full-scope git repo bind keeps the tree
- * writable: swarm_maintainer commits configuration through git.
+ * masked, unless the caller's own root is in it.
  */
 export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
   const at = input.at ?? "/workspace";
@@ -224,7 +223,7 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
   // cannot write. The gateway creates it first, as it creates everything else in the workspace.
   // The repo bind is the deployment mount, which the gateway does not create.
   if (input.bind === "caller") ensureGatewayDir(bound);
-  const args = sandboxUserArgs(bound, host.platform, { allowRoot: input.workspaceScope !== "full" });
+  const args = sandboxUserArgs(bound, host.platform);
 
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
   const masked = new Set<string>();
@@ -259,11 +258,24 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
       args.push(`--tmpfs=${sharedAt}/users:ro,size=4k`);
     }
   }
+
+  if (input.workspaceScope === "full" && sharedRoot) {
+    for (const zone of [...PROTECTED_WORKSPACE_ZONES, "generated"]) {
+      const gatewayZone = join(sharedRoot, zone);
+      const sandboxZone = sandboxPathWithin(gatewayZone, bound, at);
+      // Null for a named-volume source, which has no host path to bind a zone from.
+      const hostZone = resolveHostWorkspacePath(sharedRoot, zone);
+      if (sandboxZone === null || hostZone === null || !existsSync(gatewayZone)) continue;
+      args.push("-v", `${hostZone}:${sandboxZone}`);
+    }
+  }
   return args;
 }
 
-/** The workspace bind, read-only where sandboxIsolationArgs re-binds only generated/ writable. */
+/** The workspace bind, read-only for a full-scope sandbox and where sandboxIsolationArgs re-binds
+ *  only generated/ writable; each re-binds its writable zones over it. */
 export function sandboxBindSpec(bindSpec: string, input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string {
+  if (input.workspaceScope === "full") return `${bindSpec}:ro`;
   const bound = boundGatewayPath(input.workspacePath, input.bind);
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
   return lockedSharedRootAt(input, bound, sharedRoot, input.at ?? "/workspace") === null ? bindSpec : `${bindSpec}:ro`;
@@ -421,6 +433,9 @@ export function resolveHostWorkspacePath(
  * already re-roots scope-confined agents into generated/, but the shell sandbox
  * bind-mounts the whole workspace read-write; these zones are the write-allowlist
  * complement — everything here is off-limits to sandboxed agent commands.
+ * The one exception is the full-scope maintenance agent, whose job these zones are:
+ * its sandbox gets exactly these, and generated/, writable in an otherwise read-only
+ * bind (sandboxIsolationArgs).
  */
 export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "scenes", "tools"] as const;
 
@@ -432,7 +447,8 @@ export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "
  * exactly the directory it was handed (resolveDockerWorkspaceBind), so the zones'
  * place in it follows from the gateway paths: a non-full-scope sandbox with the shared
  * root in its bind gets the whole tree read-only except generated/ (sandboxBindSpec,
- * sandboxIsolationArgs), which covers the zones and every other place the loader reads. The
+ * sandboxIsolationArgs), which covers the zones and every other place the loader reads, and a
+ * full-scope sandbox gets it read-only except these zones and generated/. The
  * other layers stay: write_file re-roots scope-confined agents into generated/
  * (workspace-path.ts, so they cannot address the config zones at all), live-config
  * authoring goes ONLY through the dedicated validated/approval-gated tools

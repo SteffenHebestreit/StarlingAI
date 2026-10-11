@@ -92,7 +92,7 @@ describe("git sandbox scope narrowing (slice 0)", () => {
     expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}/workspace/users/acct-1:/workspace`);
   });
 
-  it("keeps the whole-repo mount for a full-scope agent (swarm_maintainer's git)", async () => {
+  it("keeps the whole-repo mount, read-only, for a full-scope agent (swarm_maintainer's git)", async () => {
     process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
     execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
     const { getTool } = await import("../tools/registry.js");
@@ -105,7 +105,7 @@ describe("git sandbox scope narrowing (slice 0)", () => {
 
     expect(result.success).toBe(true);
     expect(result.metadata?.["mountScope"]).toBe("repo");
-    expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}:/workspace`);
+    expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}:/workspace:ro`);
   });
 
   it("refuses WITHOUT spawning when a named-volume source cannot be narrowed", async () => {
