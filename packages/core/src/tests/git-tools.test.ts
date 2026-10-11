@@ -128,3 +128,58 @@ describe("git tools", () => {
     ]), expect.any(Object));
   });
 });
+
+/**
+ * NO GIT TOOL PRINTS AN UNTRACKED OR IGNORED FILE (review 2026-10-12). The full-scope repo bind keeps
+ * the gateway's state readable under a case alias on Docker Desktop, which is acceptable only while
+ * git, run with the arguments its tool fixes, prints nothing but tracked content. A value the model
+ * supplies that git reads as an option broke that: `--no-index` (or two refs naming paths outside the
+ * repository) made git_diff print any file, and `--receive-pack` on a push to a local path ran a
+ * command through a shell.
+ */
+describe("git tools: what the model supplies is never a git option", () => {
+  const ctx = { sessionId: "session-git-options", workspacePath: "F:/StarlingAI", workspaceScope: "full" as const };
+  const gitArgv = () => {
+    const args = (execFileAsyncMock.mock.calls.at(-1)?.[1] ?? []) as string[];
+    return args.slice(args.indexOf("git") + 1);
+  };
+
+  afterEach(() => {
+    execFileAsyncMock.mockReset();
+  });
+
+  it.each([
+    ["git_diff", { ref1: "--no-index", ref2: "/dev/null" }],
+    ["git_diff", { ref1: "HEAD", ref2: "--output=/workspace/workspace/agents/x.jsonc" }],
+    ["git_checkout", { ref: "--orphan" }],
+    ["git_tag", { name: "--list" }],
+    ["git_tag", { name: "v1", ref: "--contains" }],
+    ["git_push", { remote: "-v" }],
+    ["git_push", { remote: ".", branch: "--receive-pack=cat /workspace/.STARLINGAI/credentials.enc >&2; false" }],
+    ["git_clone", { url: "https://example.com/repo.git", destination: "--config=core.fsmonitor=cat /etc/passwd" }],
+  ] as const)("%s refuses %j and runs nothing", async (tool, args) => {
+    const { getTool } = await import("../tools/registry.js");
+    const result = await getTool(tool)!.execute({ ...args }, ctx);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/would be read as a git option/);
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+  });
+
+  it("git_diff closes its refs with --, so two paths are refs to git and never a no-index diff", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_diff")!.execute({ ref1: "/dev/null", ref2: "/workspace/.STARLINGAI/accounts.json" }, ctx);
+    expect(gitArgv()).toEqual(["diff", "/dev/null", "/workspace/.STARLINGAI/accounts.json", "--"]);
+    await getTool("git_diff")!.execute({ ref1: "HEAD~1", path: "agents" }, ctx);
+    expect(gitArgv()).toEqual(["diff", "HEAD~1", "--", "agents"]);
+    await getTool("git_diff")!.execute({ staged: true, stat: true }, ctx);
+    expect(gitArgv()).toEqual(["diff", "--cached", "--stat", "--"]);
+  });
+
+  it("git_clone puts its URL and destination after --", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+    const { getTool } = await import("../tools/registry.js");
+    await getTool("git_clone")!.execute({ url: "https://example.com/repo.git", destination: "vendor/repo" }, ctx);
+    expect(gitArgv()).toEqual(["clone", "--", "https://example.com/repo.git", "vendor/repo"]);
+  });
+});

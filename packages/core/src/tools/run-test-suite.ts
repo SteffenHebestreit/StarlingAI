@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { callerSandboxBind, sandboxBindSpec, sandboxIsolationArgs, sandboxMappedRoot, toSandboxCommand, toSandboxPath, UNNARROWED_ACCOUNT_SANDBOX_ERROR } from "./workspace-mount.js";
+import { callerSandboxMounts, sandboxMappedRoot, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -119,9 +119,10 @@ registerTool({
 
     // The WORKSPACE at /workspace — see resolveDockerWorkspaceBind. Binding the deployment
     // mount source there made /workspace the repo in the compose layout.
-    // Null for an account's root behind a named volume, which would bind every account (callerSandboxBind).
-    const workspaceBind = callerSandboxBind(ctx.workspacePath);
-    if (workspaceBind === null) return { success: false, output: "", error: UNNARROWED_ACCOUNT_SANDBOX_ERROR };
+    // Only the zones a full-scope agent maintains, and nothing for an account's root behind a named
+    // volume (callerSandboxMounts).
+    const mounts = callerSandboxMounts({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope });
+    if ("error" in mounts) return { success: false, output: "", error: mounts.error };
 
     const dockerArgs = [
       "run", "--rm",
@@ -131,8 +132,7 @@ registerTool({
       "--pids-limit=128",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
-      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
+      ...mounts.args,
       "-w", workdir,
       SANDBOX_IMAGE,
       "sh", "-lc", fullCommand,

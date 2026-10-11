@@ -115,6 +115,65 @@ export const UNNARROWED_ACCOUNT_SANDBOX_ERROR =
   + "and the whole volume holds every other account's workspace. Nothing was run. "
   + "Set SAI_WORKSPACE_MOUNT_SOURCE to the host path of the workspace mount to run sandboxes per account.";
 
+/** What shell_exec, run_script and run_test_suite return for a full-scope agent where no zone it
+ *  maintains could be bound (fullScopeZoneMounts). */
+export const FULL_SCOPE_NO_ZONES_SANDBOX_ERROR =
+  "Sandbox refused: none of the workspace zones a full-scope sandbox works in (agents/, jobs/, scenes/, tools/, generated/) "
+  + "exists with a host path to bind; the workspace mount source is a named volume, or the zones are missing. Nothing was run. "
+  + "Set SAI_WORKSPACE_MOUNT_SOURCE to the host path of the workspace mount.";
+
+/** The mounts of a shell, script or test sandbox, or the error its tool returns without running it. */
+export type CallerSandboxMounts = { args: string[] } | { error: string };
+
+/**
+ * The `-v` binds and isolation flags shell_exec, run_script and run_test_suite hand a sandbox: the
+ * caller's own root at /workspace (callerSandboxBind, sandboxBindSpec, sandboxIsolationArgs), or for
+ * the full-scope maintenance agent only the zones it maintains (fullScopeZoneMounts).
+ */
+export function callerSandboxMounts(
+  input: { workspacePath: string; workspaceScope?: string },
+  host: SandboxHostOverrides = {},
+): CallerSandboxMounts {
+  if (input.workspaceScope === "full") {
+    const args = fullScopeZoneMounts(input.workspacePath, host);
+    return args === null ? { error: FULL_SCOPE_NO_ZONES_SANDBOX_ERROR } : { args };
+  }
+  const bind = callerSandboxBind(input.workspacePath, host);
+  if (bind === null) return { error: UNNARROWED_ACCOUNT_SANDBOX_ERROR };
+  const isolation: SandboxIsolationInput = { workspacePath: input.workspacePath, workspaceScope: input.workspaceScope, bind: "caller" };
+  return { args: ["-v", sandboxBindSpec(bind, isolation, host), ...sandboxIsolationArgs(isolation, host)] };
+}
+
+/**
+ * A FULL-SCOPE SHELL, SCRIPT OR TEST SANDBOX HAS ONLY THE ZONES IT MAINTAINS. Its root is the shared
+ * root, which holds the gateway's own state: the state directory (accounts.json, approvals/, and every
+ * account's workspace state under users/<seg>, tools/workspace-state.ts) and users/, every account's
+ * workspace. On Docker Desktop a bind of it cannot hide any of that: the bind is case-insensitive, so
+ * a tmpfs over `.starlingai` left `.STARLINGAI` readable, and a read-only bind stops writes, not reads
+ * (review 2026-10-11). So the shared root is not bound at all. Each zone the maintainer maintains
+ * (PROTECTED_WORKSPACE_ZONES and generated/) is bound read-write from its host path at
+ * /workspace/<zone>, and /workspace is the image's own directory: docker makes the mount points in
+ * the container's root filesystem, --read-only included, and nothing on the host (verified live
+ * 2026-10-12 against starlingai/sandbox). The state directory, users/ and everything else at the root
+ * are then not in the sandbox under any spelling, and `..` from a zone is the image's /workspace.
+ *
+ * The zones are those of the agent's own root, which for a full-scope agent is the shared root
+ * (agent/sub-agent.ts), and which the tools map the model's paths against (sandboxMappedRoot). A zone
+ * that is not there, or has no host path (a named-volume source), is skipped; null where none is left
+ * to bind, and the tool refuses the run. It runs as the owner of that root, root in the compose
+ * deployment, as before (sandboxUserArgs).
+ */
+function fullScopeZoneMounts(workspacePath: string, host: SandboxHostOverrides): string[] | null {
+  const binds: string[] = [];
+  for (const zone of [...PROTECTED_WORKSPACE_ZONES, "generated"]) {
+    // Null for a named-volume source, which has no host path to bind a zone from.
+    const hostZone = resolveHostWorkspacePath(workspacePath, zone);
+    if (hostZone === null || !existsSync(join(workspacePath, zone))) continue;
+    binds.push("-v", `${hostZone}:/workspace/${zone}`);
+  }
+  return binds.length === 0 ? null : [...sandboxUserArgs(workspacePath, host.platform), ...binds];
+}
+
 /** Whether a root lies under a users/ directory: an account's root, whose parent is users/, or
  *  anything under the shared root's users/. Either separator, in any case. */
 function liesUnderUsers(workspacePath: string, sharedRoot: string | undefined): boolean {
@@ -180,7 +239,8 @@ export function sandboxUserArgs(gatewayPath: string, platform: NodeJS.Platform =
 /**
  * Which directory a gateway-issued sandbox is handed:
  *   - "caller": the caller's own workspace root, as resolveDockerWorkspaceBind binds it (shell_exec,
- *     run_script, run_test_suite, and the git sandbox of every agent that is not full-scope);
+ *     run_script, run_test_suite, and the git sandbox of every agent that is not full-scope); a
+ *     full-scope agent's shell, script and test sandboxes get no such bind (callerSandboxMounts);
  *   - "repo": the deployment mount the git sandbox keeps for the full-scope maintenance agent.
  */
 export type SandboxBind = "caller" | "repo";
@@ -204,27 +264,37 @@ export interface SandboxHostOverrides {
 }
 
 /**
- * The isolation flags every gateway-issued sandbox adds after its workspace bind (shell_exec,
- * run_script, run_test_suite and the git tools all spread these).
+ * The isolation flags every gateway-issued sandbox with a workspace bind adds after it (shell_exec,
+ * run_script and run_test_suite through callerSandboxMounts, and the git tools). A full-scope shell,
+ * script or test sandbox has no such bind, only its zones (callerSandboxMounts), and asking for its
+ * flags here is refused.
  *
  * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
  * the deployment mount, /workspace on the gateway side, not the agent's own root.
  *
- * A FULL-SCOPE SANDBOX'S BIND IS READ-ONLY, EXCEPT WHAT THE MAINTAINER MAINTAINS. Its bind holds the
- * gateway's own state: the shared root's state directory for its shell (accounts.json, approvals/,
- * and every account's workspace state, tools/workspace-state.ts), and for the git repo bind the repo
- * root's as well (credentials.enc, audit.jsonl). On Docker Desktop neither the masks below nor file
- * modes hold there: the bind is case-insensitive, so `.STARLINGAI/...` went past the tmpfs at
- * `.starlingai` and wrote the real directory, and every entry the host created shows as root's, mode
- * 0777, writable by any uid (review 2026-10-11). A read-only bind holds against both, since every
- * spelling resolves through the same read-only mount (verified live 2026-10-11). sandboxBindSpec
- * makes it read-only, and the shared root's config zones (PROTECTED_WORKSPACE_ZONES) and generated/
- * are bound again writable from their host paths, at their place in the bind: /workspace/<zone> for
- * the shell, /workspace/workspace/<zone> for the repo bind in the compose layout. A zone that is not
- * there, or has no host path (a named volume), stays read-only. The sandbox runs as the bind's owner,
- * root in the compose deployment, which git needs to read the repository at all; .git stays
+ * THE FULL-SCOPE GIT REPO BIND IS READ-ONLY, EXCEPT WHAT THE MAINTAINER MAINTAINS. It holds the
+ * gateway's own state: the repo root's state directory (credentials.enc, audit.jsonl) and the shared
+ * root's (accounts.json, approvals/, every account's workspace state, tools/workspace-state.ts), and
+ * users/. On Docker Desktop neither the masks below nor file modes hold there: the bind is
+ * case-insensitive, so `.STARLINGAI/...` went past the tmpfs at `.starlingai` and wrote the real
+ * directory, and every entry the host created shows as root's, mode 0777, writable by any uid
+ * (review 2026-10-11). A read-only bind holds against both, since every spelling resolves through the
+ * same read-only mount (verified live 2026-10-11). sandboxBindSpec makes it read-only, and the shared
+ * root's config zones (PROTECTED_WORKSPACE_ZONES) and generated/ are bound again writable from their
+ * host paths at their place in it, /workspace/workspace/<zone> in the compose layout. A zone that is
+ * not there, or has no host path (a named volume), stays read-only. The sandbox runs as the bind's
+ * owner, root in the compose deployment, which git needs to read the repository at all; .git stays
  * read-only, as no full-scope agent holds a git tool that writes it (swarm_maintainer has git_status
  * and git_diff).
+ *
+ * THAT THE STATE IN IT STAYS READABLE UNDER AN ALIAS IS ACCEPTABLE THERE, AND ONLY THERE. A read-only
+ * bind stops writes, not reads, and the shell gets no such bind for that reason (fullScopeZoneMounts).
+ * The git sandbox runs git itself, with no shell, on arguments its tool fixes: every value the model
+ * supplies is a pathspec after `--`, an option's value, or refused where git would parse it as an
+ * option (tools/git.ts refuseOptionLike). git then prints file content only from its object database
+ * and index, never an untracked or ignored file: `git diff --no-index`, or two paths given as refs,
+ * which git treats as one, is the one way it does, and git_diff refuses an option and closes its refs
+ * with `--`.
  *
  * NO GATEWAY STATE IS KEPT IN AN ACCOUNT'S ROOT. An account's sandboxes run as the owner of that
  * root, root in the compose deployment, and can write anything in it, under any spelling; the
@@ -252,6 +322,7 @@ export interface SandboxHostOverrides {
  * masked, unless the caller's own root is in it.
  */
 export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
+  refuseFullScopeCallerBind(input);
   const at = input.at ?? "/workspace";
   const bound = boundGatewayPath(input.workspacePath, input.bind);
   // A new account's root does not exist before its first run: the stat found nothing, no --user
@@ -298,6 +369,7 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
     }
   }
 
+  // The full-scope git repo bind: a full-scope caller bind was refused above.
   if (input.workspaceScope === "full" && sharedRoot) {
     for (const zone of [...PROTECTED_WORKSPACE_ZONES, "generated"]) {
       const gatewayZone = join(sharedRoot, zone);
@@ -311,13 +383,22 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
   return args;
 }
 
-/** The workspace bind, read-only for a full-scope sandbox and where sandboxIsolationArgs re-binds
- *  only generated/ writable; each re-binds its writable zones over it. */
+/** The workspace bind, read-only for the full-scope git repo bind and where sandboxIsolationArgs
+ *  re-binds only generated/ writable; each re-binds its writable zones over it. */
 export function sandboxBindSpec(bindSpec: string, input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string {
+  refuseFullScopeCallerBind(input);
   if (input.workspaceScope === "full") return `${bindSpec}:ro`;
   const bound = boundGatewayPath(input.workspacePath, input.bind);
   const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
   return lockedSharedRootAt(input, bound, sharedRoot, input.at ?? "/workspace") === null ? bindSpec : `${bindSpec}:ro`;
+}
+
+/** A full-scope agent's own root is the shared root, and a bind of it hands its shell the gateway's
+ *  state under a case alias (fullScopeZoneMounts): such a sandbox binds only its zones. */
+function refuseFullScopeCallerBind(input: SandboxIsolationInput): void {
+  if (input.workspaceScope === "full" && input.bind === "caller") {
+    throw new Error("A full-scope sandbox is not given its root: it binds only the zones it maintains (callerSandboxMounts).");
+  }
 }
 
 /** Where a sandbox that is not full-scope sees the shared root in its bind, or null when it is
@@ -473,8 +554,9 @@ export function resolveHostWorkspacePath(
  * bind-mounts the whole workspace read-write; these zones are the write-allowlist
  * complement — everything here is off-limits to sandboxed agent commands.
  * The one exception is the full-scope maintenance agent, whose job these zones are:
- * its sandbox gets exactly these, and generated/, writable in an otherwise read-only
- * bind (sandboxIsolationArgs).
+ * its shell, script and test sandboxes get exactly these, and generated/, writable and
+ * nothing else (fullScopeZoneMounts), and its git repo bind has them writable in an
+ * otherwise read-only bind (sandboxIsolationArgs).
  */
 export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "scenes", "tools"] as const;
 
@@ -486,8 +568,9 @@ export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "
  * exactly the directory it was handed (resolveDockerWorkspaceBind), so the zones'
  * place in it follows from the gateway paths: a non-full-scope sandbox with the shared
  * root in its bind gets the whole tree read-only except generated/ (sandboxBindSpec,
- * sandboxIsolationArgs), which covers the zones and every other place the loader reads, and a
- * full-scope sandbox gets it read-only except these zones and generated/. The
+ * sandboxIsolationArgs), which covers the zones and every other place the loader reads, a
+ * full-scope shell, script or test sandbox gets only these zones and generated/, and the
+ * full-scope git repo bind gets the tree read-only except these zones and generated/. The
  * other layers stay: write_file re-roots scope-confined agents into generated/
  * (workspace-path.ts, so they cannot address the config zones at all), live-config
  * authoring goes ONLY through the dedicated validated/approval-gated tools

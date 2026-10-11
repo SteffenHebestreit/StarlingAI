@@ -39,6 +39,16 @@ async function runGitInSandbox(
   // git agent cannot reach the deployment repo or another account's workspace. When the mount
   // source is a named volume there is no host path to subdivide, so the narrow fails CLOSED
   // (requireNarrow → null) rather than silently falling back to the whole tree.
+  //
+  // The full-scope repo bind is read-only but for the config zones and generated/, and the gateway's
+  // state in it (the repo root's and the shared root's state directories, users/) stays READABLE
+  // there under a case alias on Docker Desktop, where the tmpfs masks hold one spelling only. The
+  // shell gets no such bind for that reason (workspace-mount.ts fullScopeZoneMounts). This one is
+  // acceptable because nothing but git runs in it: no shell, arguments this module fixes, and every
+  // value the model supplies is an option's value, a pathspec after `--`, or refused where git would
+  // read it as an option (refuseOptionLike). git prints file content only from its object database
+  // and index, never an untracked or ignored file; the one way it does, a no-index diff (`--no-index`,
+  // or two refs that name paths outside the repository), git_diff closes off.
   let bind: string;
   let mountScope: "caller" | "repo";
   if (ctx.workspaceScope === "full") {
@@ -110,6 +120,23 @@ async function runGitInSandbox(
  */
 function sandboxPathFor(path: string, ctx: ToolContext): string {
   return ctx.workspaceScope === "full" ? path : toSandboxPath(path, ctx.workspacePath);
+}
+
+/**
+ * The refusal for a value the model supplied that git would parse as an option where the tool puts
+ * it: a ref, a tag or branch name, a remote, a clone destination. No ref, branch, tag or remote name
+ * can start with "-" (git check-ref-format), so nothing real is refused. Taken as an option, such a
+ * value changed what git does: `--no-index` turned git_diff into a diff of any two files, the
+ * gateway's state under a case alias included (workspace-mount.ts), `--output=<file>` wrote one, and
+ * `--receive-pack=<command>` on a push to a local path ran a command through a shell.
+ */
+function refuseOptionLike(fields: Record<string, string | undefined>): ToolResult | null {
+  for (const [field, value] of Object.entries(fields)) {
+    if (value !== undefined && value.trimStart().startsWith("-")) {
+      return { success: false, output: "", error: `Invalid ${field} "${value}": it would be read as a git option. Nothing was run.` };
+    }
+  }
+  return null;
 }
 
 // ── git_status (Tier 0 — read-only)─────────────────────────────────────
@@ -211,14 +238,20 @@ registerTool({
     },
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const ref1 = args["ref1"] ? String(args["ref1"]) : undefined;
+    const ref2 = ref1 && args["ref2"] ? String(args["ref2"]) : undefined;
+    const refused = refuseOptionLike({ ref1, ref2 });
+    if (refused) return refused;
     const gitArgs = ["diff"];
     if (args["staged"]) gitArgs.push("--cached");
     if (args["stat"]) gitArgs.push("--stat");
-    if (args["ref1"]) {
-      gitArgs.push(String(args["ref1"]));
-      if (args["ref2"]) gitArgs.push(String(args["ref2"]));
-    }
-    if (args["path"]) gitArgs.push("--", sandboxPathFor(String(args["path"]), ctx));
+    if (ref1) gitArgs.push(ref1);
+    if (ref2) gitArgs.push(ref2);
+    // `--` closes the refs, always. Two arguments with none after them, where one names a path
+    // outside the repository (`/dev/null` and a file), are a no-index diff to git, which prints any
+    // file: an untracked or ignored one, or the gateway's state under a case alias.
+    gitArgs.push("--");
+    if (args["path"]) gitArgs.push(sandboxPathFor(String(args["path"]), ctx));
 
     log.info({ sessionId: ctx.sessionId }, "git_diff");
     return runGitInSandbox(gitArgs, ctx);
@@ -310,10 +343,13 @@ registerTool({
       return { success: false, output: "", error: "Only https:// repository URLs are allowed" };
     }
 
+    const refused = refuseOptionLike({ destination });
+    if (refused) return refused;
+
     const gitArgs = ["clone"];
     if (branch) gitArgs.push("--branch", branch);
     if (depth && depth > 0) gitArgs.push("--depth", String(Math.floor(depth)));
-    gitArgs.push(url);
+    gitArgs.push("--", url);
     if (destination) gitArgs.push(destination);
 
     log.info({ url, destination, branch, depth, sessionId: ctx.sessionId }, "git_clone");
@@ -353,6 +389,8 @@ registerTool({
     if (!ref.trim()) {
       return { success: false, output: "", error: "ref is required" };
     }
+    const refused = refuseOptionLike({ ref });
+    if (refused) return refused;
 
     const gitArgs = ["checkout"];
     if (createBranch) gitArgs.push("-b");
@@ -405,6 +443,8 @@ registerTool({
     if (!name || !/^[a-zA-Z0-9._/-]+$/.test(name)) {
       return { success: false, output: "", error: "Invalid tag name." };
     }
+    const refused = refuseOptionLike({ name, ref: ref || undefined });
+    if (refused) return refused;
 
     const gitArgs = ["tag"];
     if (force) gitArgs.push("-f");
@@ -465,6 +505,8 @@ registerTool({
     if (!/^[a-zA-Z0-9_.-]+$/.test(remote)) {
       return { success: false, output: "", error: "Invalid remote name." };
     }
+    const refused = refuseOptionLike({ remote, branch: branch || undefined });
+    if (refused) return refused;
 
     const gitArgs = ["push"];
     if (force) gitArgs.push("--force");

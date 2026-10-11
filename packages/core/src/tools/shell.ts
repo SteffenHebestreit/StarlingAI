@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { callerSandboxBind, sandboxBindSpec, sandboxIsolationArgs, sandboxMappedRoot, toSandboxCommand, toSandboxPath, UNNARROWED_ACCOUNT_SANDBOX_ERROR } from "./workspace-mount.js";
+import { callerSandboxMounts, sandboxMappedRoot, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
@@ -83,9 +83,10 @@ registerTool({
     // sandbox's own contract ("paths are relative to /workspace") was false — and, now that
     // the workspace root is per-user, binding it is also what keeps one account's shell out of
     // another's files.
-    // Null for an account's root behind a named volume, which would bind every account (callerSandboxBind).
-    const workspaceBind = callerSandboxBind(ctx.workspacePath);
-    if (workspaceBind === null) return { success: false, output: "", error: UNNARROWED_ACCOUNT_SANDBOX_ERROR };
+    // A full-scope agent's sandbox gets only the zones it maintains, and an account's root behind a
+    // named volume, which would bind every account, gets nothing (callerSandboxMounts).
+    const mounts = callerSandboxMounts({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope });
+    if ("error" in mounts) return { success: false, output: "", error: mounts.error };
     const wrappedCommand = buildSandboxCommand(command, workdir);
 
     const dockerArgs = [
@@ -98,8 +99,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
-      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
-      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
+      ...mounts.args,
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -313,9 +313,10 @@ registerTool({
       }
     }
 
-    // Null for an account's root behind a named volume, which would bind every account (callerSandboxBind).
-    const workspaceBind = callerSandboxBind(ctx.workspacePath);
-    if (workspaceBind === null) return { success: false, output: "", error: UNNARROWED_ACCOUNT_SANDBOX_ERROR };
+    // Only the zones a full-scope agent maintains, and nothing for an account's root behind a named
+    // volume (callerSandboxMounts).
+    const mounts = callerSandboxMounts({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope });
+    if ("error" in mounts) return { success: false, output: "", error: mounts.error };
 
     const dockerArgs = [
       "run", "--rm",
@@ -327,8 +328,7 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
-      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
+      ...mounts.args,
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,
