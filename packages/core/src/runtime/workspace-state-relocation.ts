@@ -140,7 +140,14 @@ export async function relocateAccountWorkspaceState(sharedRoot: string): Promise
 
 /** The move is complete: an old state directory still in an account's root is the account's own file. */
 function finished(sharedRoot: string, result: WorkspaceStateRelocation): WorkspaceStateRelocation {
-  for (const { segment, root } of accountRoots(sharedRoot)) {
+  let roots: Array<{ segment: string; root: string }> = [];
+  try {
+    roots = accountRoots(sharedRoot);
+  } catch (err) {
+    // Only the debug lines below need the list; the marker already says the move is complete.
+    log.debug({ err }, "The account roots could not be listed after the move; nothing is read from them");
+  }
+  for (const { segment, root } of roots) {
     const old = join(root, PRODUCT.stateDirName);
     if (entryKind(old) !== "missing") {
       log.debug({ segment, path: old }, "A state directory in an account's root, after the move: a file of the account's workspace, not read");
@@ -150,14 +157,18 @@ function finished(sharedRoot: string, result: WorkspaceStateRelocation): Workspa
 }
 
 /** Each account's root under `<sharedRoot>/users`: a directory, not a link, that workspaceStateDir
- *  keeps no state in (users/.retired and a name that is no segment are not). */
+ *  keeps no state in (users/.retired and a name that is no segment are not). None when there is no
+ *  users/ yet. Any other error listing it throws: an empty list taken from a users/ that could not be
+ *  read completed the pass and wrote the marker with every account's old state still in its root,
+ *  never to be moved (review 2026-10-12). */
 function accountRoots(sharedRoot: string): Array<{ segment: string; root: string }> {
   const users = resolve(sharedRoot, USERS_SUBDIR);
   let entries;
   try {
     entries = readdirSync(users, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
   }
   return entries
     .filter((entry) => entry.isDirectory())

@@ -32,10 +32,12 @@ import { _resetTrajectoryInvalidationForTests, invalidateTrajectory } from "../m
 import { listSkills, skillsDir, writeSkill } from "../skills/store.js";
 import { buildSessionDebugMarkdownFromSnapshot } from "../agent/debug-session-export.js";
 
-/** Renames and opens the relocation tests make fail (an open handle on Windows, an unreadable file). */
+/** Renames, opens and listings the relocation tests make fail (an open handle on Windows, an
+ *  unreadable file or directory). */
 const fsHooks = vi.hoisted(() => ({
   renameFails: null as ((from: string) => boolean) | null,
   openFails: null as ((path: string) => boolean) | null,
+  readdirFails: null as ((path: string) => boolean) | null,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -48,7 +50,11 @@ vi.mock("node:fs", async (importOriginal) => {
     if (fsHooks.openFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, open '${String(path)}'`), { code: "EACCES" });
     return (real.openSync as (...args: unknown[]) => number)(path, ...rest);
   }) as typeof real.openSync;
-  return { ...real, renameSync, openSync, default: { ...real, renameSync, openSync } };
+  const readdirSync = ((path: Parameters<typeof real.readdirSync>[0], ...rest: unknown[]) => {
+    if (fsHooks.readdirFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, scandir '${String(path)}'`), { code: "EACCES" });
+    return (real.readdirSync as (...args: unknown[]) => unknown)(path, ...rest);
+  }) as typeof real.readdirSync;
+  return { ...real, renameSync, openSync, readdirSync, default: { ...real, renameSync, openSync, readdirSync } };
 });
 
 /** The relocation's own logger, to read what it says and at which level. */
@@ -99,6 +105,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   fsHooks.renameFails = null;
   fsHooks.openFails = null;
+  fsHooks.readdirFails = null;
   for (const fn of Object.values(relocationLogger)) fn.mockClear();
   _clearDurableMemoryCaches();
   _resetTrajectoryInvalidationForTests();
@@ -291,6 +298,25 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(existsSync(join(shared, "users", "notes", STATE))).toBe(true);
     expect(existsSync(join(shared, "users", ".retired", STATE))).toBe(true);
     expect(readdirSync(join(shared, STATE, "users")).sort()).toEqual([".relocated-v1", ALICE]);
+  });
+
+  it("does not complete a pass that could not list the account roots", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const users = join(shared, "users");
+    fsHooks.readdirFails = (path) => resolve(path) === resolve(users);
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [], kept: [], failed: [], complete: false });
+    expect(existsSync(marker(shared))).toBe(false);
+    expect(existsSync(state)).toBe(false);
+    expect(readdirSync(join(old, "memory"))).toEqual(["editor.json"]);
+    expect(relocationLogger.error).toHaveBeenCalledWith(expect.objectContaining({ marker: marker(shared) }), expect.stringMatching(/could not run.*next boot tries again/));
+    expect(relocationLogger.info).not.toHaveBeenCalled();
+
+    // The next boot, which can list them, moves her state.
+    fsHooks.readdirFails = null;
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFileSync(join(state, "memory", "editor.json"), "utf8")).toBe("{}");
   });
 
   it("does not adopt a link in place of the old directory", async () => {
