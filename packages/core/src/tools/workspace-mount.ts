@@ -264,6 +264,16 @@ function boundGatewayPath(workspacePath: string, bind: SandboxBind): string {
   return resolveHostPathUnderWorkspace(workspacePath, source) === null ? "/workspace" : workspacePath;
 }
 
+/**
+ * The root toSandboxPath / toSandboxCommand map for the caller's own bind: the directory the sandbox
+ * has at /workspace. Where the whole named volume is bound instead, that is /workspace itself, and the
+ * sandbox sees the caller's root at its gateway path, so nothing is mapped; mapping the caller's root
+ * there sent `cd <root>` to the volume's top.
+ */
+export function sandboxMappedRoot(workspacePath: string): string {
+  return boundGatewayPath(workspacePath, "caller");
+}
+
 /** `mkdir -p` on the gateway side. On a failure docker creates the directory, as it did before. */
 function ensureGatewayDir(path: string): void {
   try {

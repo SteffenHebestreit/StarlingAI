@@ -290,3 +290,27 @@ describe("the sandbox tools on an auth-off session's root, which is the shared r
     expect(readOnlyBinds(dockerArgs())).toEqual([]);
   });
 });
+
+describe("the path the model wrote, where the whole named volume is bound", () => {
+  // The sandbox has the whole volume at /workspace there and sees the caller's root at its gateway
+  // path, so mapping that path to /workspace sent `cd <root>` to the volume's top.
+  beforeEach(() => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+  });
+
+  it("stays as written for a named volume, and maps to /workspace where the caller's own root is bound", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const ctx: ToolContext = { sessionId: "s-volume", workspacePath: CALLER_WS, workspaceScope: "generated" };
+    const command = `cd ${CALLER_WS} && ls generated`;
+
+    delete process.env["SAI_WORKSPACE_MOUNT_SOURCE"];
+    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
+    expect(flagValue(dockerArgs(), "-w")).toBe(CALLER_WS);
+    expect(dockerArgs().at(-1)).toContain(command);
+
+    process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
+    await getTool("shell_exec")!.execute({ command, workdir: CALLER_WS }, ctx);
+    expect(flagValue(dockerArgs(), "-w")).toBe("/workspace");
+    expect(dockerArgs().at(-1)).toContain("cd /workspace && ls generated");
+  });
+});
