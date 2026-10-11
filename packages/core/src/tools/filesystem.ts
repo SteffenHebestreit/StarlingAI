@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
+import { readdirSync, statSync, lstatSync, existsSync } from "node:fs";
 import { basename, resolve, extname, join, relative } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
@@ -6,6 +6,14 @@ import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { PRODUCT } from "../product/index.js";
 import { containedWorkspaceRealPath, generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import {
+  isWorkspaceContainmentError,
+  makeContainedWorkspaceDir,
+  openContainedWorkspaceFile,
+  removeContainedWorkspaceFile,
+  withContainedWorkspaceFile,
+  type OpenContainedFile,
+} from "./workspace-containment.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 import { buildArtifactTextPreview } from "./artifact-preview.js";
 
@@ -257,6 +265,13 @@ function refusedWriteTarget(named: string, real: string): boolean {
   return norm(named) !== norm(real) && isSensitiveWorkspacePath(real);
 }
 
+/** refusedWriteTarget for a path guardWritePath accepted, applied again where the write tools open,
+ *  make or remove it (tools/workspace-containment.ts). */
+function writeTargetRefuser(resolved: string, workspacePath: string): (real: string) => boolean {
+  const named = relative(workspacePath, resolved);
+  return (real) => refusedWriteTarget(named, real);
+}
+
 /** Whether the path itself is a link (a junction too), without following it. */
 function isLink(path: string): boolean {
   try {
@@ -345,7 +360,14 @@ registerTool({
     }
 
     try {
-      const content = readFileSync(resolved, "utf-8");
+      // Through the open descriptor, held to its zone as it is opened: guardPath judged the path when
+      // it was resolved, and a sandbox can swap a directory on the way for a link in between.
+      const content = withContainedWorkspaceFile(
+        resolved,
+        ctx.workspacePath,
+        { mode: "read", refuse: isSensitiveWorkspacePath },
+        (file) => file.read().toString("utf-8"),
+      );
       // Windowed read. Without it the only way to see part of a large file was to
       // pull the whole thing into context and let the model find its way — the
       // single biggest source of wasted prompt on a big source tree.
@@ -396,6 +418,7 @@ registerTool({
         metadata: { path, size: stat.size, ext, totalLines },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "read_file failed");
       return { success: false, output: "", error: `Read failed: ${String(err)}` };
     }
@@ -707,10 +730,25 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for writing` };
     }
 
-    const fileExists = existsSync(resolved);
-    if (mode === "create" && fileExists) {
-      return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
+    // Opened once, held to its zone as it is opened (openContainedWorkspaceFile): guardWritePath
+    // judged the path when it was resolved, and a sandbox can swap a directory on the way for a link
+    // in between. The file is not truncated by the open; every read and write below goes through it.
+    let file: OpenContainedFile;
+    try {
+      file = openContainedWorkspaceFile(resolved, ctx.workspacePath, {
+        mode: mode === "create" ? "create" : "write",
+        createDirs,
+        refuse: writeTargetRefuser(resolved, ctx.workspacePath),
+      });
+    } catch (err) {
+      if (mode === "create" && (err as NodeJS.ErrnoException).code === "EEXIST") {
+        return { success: false, output: "", error: `File already exists: ${relativePath} (use mode:"append" to add to it, or mode:"overwrite" to replace it)` };
+      }
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
+      log.error({ err, path }, "write_file failed");
+      return { success: false, output: "", error: `Write failed: ${String(err)}` };
     }
+    const fileExists = !file.created;
 
     // write_file regeneration nudge (orchestration.detectWriteChurnOverwrite, default off): a builder that
     // re-emits a file from the top after a completion-limit cut-off — instead of appending the remainder —
@@ -725,7 +763,7 @@ registerTool({
     // the whole point is that the bytes on disk are worth more than the bytes in the call.
     if (mode === "overwrite" && fileExists) {
       try {
-        const previous = readFileSync(resolved, "utf-8");
+        const previous = file.read().toString("utf-8");
         const regression = evaluateStubRegression(previous, content);
         if (regression.replacesFinished) {
           // Allowed, but never silent: this is the shape of a deliberate rebuild AND the shape
@@ -747,6 +785,7 @@ registerTool({
             existingChars: previous.length,
             newChars: content.length,
           }, { sessionId: ctx.sessionId, severity: "warn" });
+          file.close();
           return {
             success: false,
             output: "",
@@ -763,7 +802,7 @@ registerTool({
     let churnNudge = "";
     if (mode === "overwrite" && fileExists && getConfig().orchestration?.detectWriteChurnOverwrite === true) {
       try {
-        const existing = readFileSync(resolved, "utf-8");
+        const existing = file.read().toString("utf-8");
         if (!ctx._turnWriteChurnTracker) ctx._turnWriteChurnTracker = new Map();
         const tracker = ctx._turnWriteChurnTracker.get(relativePath) ?? { count: 0 };
         const churn = evaluateWriteChurn(existing, content, tracker);
@@ -784,18 +823,15 @@ registerTool({
     }
 
     try {
-      if (createDirs) {
-        mkdirSync(resolve(resolved, ".."), { recursive: true });
-      }
       const appended = mode === "append" && fileExists;
       if (appended) {
-        appendFileSync(resolved, content, "utf-8");
+        file.append(content);
       } else {
-        writeFileSync(resolved, content, "utf-8");
+        file.replace(content);
       }
       // On append, preview/size reflect the full resulting file so the artifact
       // shows the whole deliverable as it is assembled — not just the last chunk.
-      const fullContent = appended ? readFileSync(resolved, "utf-8") : content;
+      const fullContent = appended ? file.read().toString("utf-8") : content;
       const contentType = inferArtifactContentType(relativePath);
       const textPreview = buildArtifactTextPreview(fullContent);
       const verb = appended ? "appended to" : "written";
@@ -820,6 +856,8 @@ registerTool({
     } catch (err) {
       log.error({ err, path }, "write_file failed");
       return { success: false, output: "", error: `Write failed: ${String(err)}` };
+    } finally {
+      file.close();
     }
   },
 });
@@ -861,8 +899,11 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for editing` };
     }
 
+    let file: OpenContainedFile | undefined;
     try {
-      const content = readFileSync(resolved, "utf-8");
+      // Read and written through one open file, held to its zone as it is opened, as write_file does.
+      file = openContainedWorkspaceFile(resolved, ctx.workspacePath, { mode: "edit", refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
+      const content = file.read().toString("utf-8");
       if (!content.includes(oldStr)) {
         // "old_string not found in file" is true and useless: it tells the caller the edit
         // missed but not what to aim at instead. During a staged build the overwhelmingly
@@ -901,7 +942,7 @@ registerTool({
         };
       }
       const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
-      writeFileSync(resolved, updated, "utf-8");
+      file.replace(updated);
       const replacements = replaceAll ? occurrences : 1;
       return {
         success: true,
@@ -909,8 +950,11 @@ registerTool({
         metadata: { path, replacements },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "edit_file failed");
       return { success: false, output: "", error: `Edit failed: ${String(err)}` };
+    } finally {
+      file?.close();
     }
   },
 });
@@ -936,13 +980,15 @@ registerTool({
     if (!path.trim()) return { success: false, output: "", error: "path is required" };
 
     try {
-      mkdirSync(resolved, { recursive: true });
+      // One level at a time, none entered through a link, held to its zone as it is made.
+      makeContainedWorkspaceDir(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
       return {
         success: true,
         output: `Directory created: ${path}`,
         metadata: { path },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "create_dir failed");
       return { success: false, output: "", error: `Create directory failed: ${String(err)}` };
     }
@@ -979,7 +1025,8 @@ registerTool({
     }
 
     try {
-      unlinkSync(resolved);
+      // Removed in the directory it is found in, held to its zone as that is opened.
+      removeContainedWorkspaceFile(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
       log.info({ path, sessionId: ctx.sessionId }, "delete_file: file deleted");
       return {
         success: true,
@@ -987,6 +1034,7 @@ registerTool({
         metadata: { path },
       };
     } catch (err) {
+      if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
       log.error({ err, path }, "delete_file failed");
       return { success: false, output: "", error: `Delete failed: ${String(err)}` };
     }
