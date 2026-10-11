@@ -240,6 +240,31 @@ export async function checkEndpointHealth(input: {
   }
 }
 
+/**
+ * The model list of an OpenAI-compatible TTS server, which sits beside its speech route.
+ *
+ * Speech goes to `{baseUrl}/v1/audio/speech`, so the list is `{baseUrl}/v1/models`. The status
+ * check and the voice catalog read `{baseUrl}/models`, which such a server does not serve: the
+ * dashboard reported TTS offline (404) while every speech request succeeded (2026-10-11, an
+ * OpenAI-compatible speech frontend). `/models` stays the fallback, for a server that keeps its
+ * list at the root.
+ */
+export async function fetchOpenAiTtsModels(config: { baseUrl: string; apiKey?: string; timeoutMs: number }): Promise<Response> {
+  const fetchList = (path: string) =>
+    fetchWithTimeout(upstreamUrl(config.baseUrl, path), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs);
+  const v1 = await fetchList("/v1/models");
+  if (v1.status !== 404 && v1.status !== 405) return v1;
+  await v1.body?.cancel();
+  return fetchList("/models");
+}
+
+/** The status check over the same two paths, in the same order. */
+export async function checkOpenAiTtsHealth(config: { baseUrl: string; apiKey?: string; timeoutMs: number }): Promise<{ ok: boolean; status?: number; error?: string }> {
+  const v1 = await checkEndpointHealth({ ...config, path: "/v1/models" });
+  if (v1.ok || (v1.status !== 404 && v1.status !== 405)) return v1;
+  return checkEndpointHealth({ ...config, path: "/models" });
+}
+
 export function multimodalServiceConfigured(baseUrl: string | undefined): boolean {
   return typeof baseUrl === "string" && baseUrl.trim().length > 0;
 }

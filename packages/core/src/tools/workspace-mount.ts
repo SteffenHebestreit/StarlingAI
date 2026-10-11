@@ -1,3 +1,8 @@
+import { mkdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { getConfig } from "../config/loader.js";
+import { PRODUCT } from "../product/index.js";
+
 const DEFAULT_WORKSPACE_VOLUME = process.env["SAI_SANDBOX_WORKSPACE_VOLUME"] ?? "gc-workspace";
 
 interface DockerWorkspaceMountOptions {
@@ -110,6 +115,243 @@ export interface DockerWorkspaceBindOptions extends DockerWorkspaceMountOptions 
   requireNarrow?: boolean;
 }
 
+/**
+ * `--user` for a sandbox: the owner of the directory it is handed (`gatewayPath`, the GATEWAY's
+ * own path to it).
+ *
+ * The sandbox image runs as its own unprivileged user (uid 1000), which owns nothing in the
+ * mount. In the compose deployment the gateway runs as root and creates each account's workspace
+ * 0755, so every write in the sandbox failed with "Permission denied" (E2E 2026-10-11: shell_agent's
+ * `mkdir -p generated/...`, git_developer's `git init`, qa_guard's test writes), and git refuses a
+ * repository its user does not own ("dubious ownership") even to read it. Running as the owner gives
+ * the sandbox the access the gateway already has to that one directory and nothing more; that owner
+ * is root in the compose deployment, which is why every sandbox keeps --cap-drop=ALL and
+ * no-new-privileges (no DAC override, no chown, no mounts), as serve_app's root run already does.
+ *
+ * No flag when the directory cannot be read: the image's own user then applies, as before. None on
+ * Windows either, where Node reports uid and gid 0 for every path: a Windows-native gateway would
+ * have run every sandbox as root.
+ */
+export function sandboxUserArgs(gatewayPath: string, platform: NodeJS.Platform = process.platform): string[] {
+  if (platform === "win32") return [];
+  try {
+    const { uid, gid } = statSync(gatewayPath);
+    return ["--user", `${uid}:${gid}`];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Which directory a gateway-issued sandbox is handed:
+ *   - "caller": the caller's own workspace root, as resolveDockerWorkspaceBind binds it (shell_exec,
+ *     run_script, run_test_suite, and the git sandbox of every agent that is not full-scope);
+ *   - "repo": the deployment mount the git sandbox keeps for the full-scope maintenance agent.
+ */
+export type SandboxBind = "caller" | "repo";
+
+export interface SandboxIsolationInput {
+  /** The agent's workspace root in the GATEWAY's terms (ToolContext.workspacePath). */
+  workspacePath: string;
+  /** ToolContext.workspaceScope. */
+  workspaceScope?: string;
+  bind: SandboxBind;
+  /** Where the sandbox has the bound directory. */
+  at?: string;
+}
+
+/** What the isolation reads from the gateway's host. The tools pass nothing; tests pass these. */
+export interface SandboxHostOverrides {
+  /** The gateway's platform; process.platform when absent. */
+  platform?: NodeJS.Platform;
+  /** The deployment's shared workspace root; getConfig().workspacePath when absent. */
+  sharedRoot?: string;
+}
+
+/**
+ * The isolation flags every gateway-issued sandbox adds after its workspace bind (shell_exec,
+ * run_script, run_test_suite and the git tools all spread these).
+ *
+ * `--user`: the owner of the bound directory, see sandboxUserArgs. For the git repo bind that is
+ * the deployment mount, /workspace on the gateway side, not the agent's own root.
+ *
+ * GATEWAY STATE IS MASKED. Running as the owner made the sandbox root in the compose deployment,
+ * and the bind holds gateway state the sandbox must not write: the bound directory's own state
+ * directory (workspace-scope durable memory, memory/service.ts) and, where the shared root lies
+ * inside the bind, the shared root's (accounts.json, approvals/). Only the shell's token-level
+ * guard (findSensitiveWorkspaceReference) stood in the way, and a script, a variable or a relative
+ * path past it reaches the files. Each such directory gets an empty read-only tmpfs over it, which a
+ * cap-less root cannot remount or write ("Read-only file system", verified live 2026-10-11). It is
+ * masked whether or not it exists yet, so a sandbox cannot create it and plant memory the gateway
+ * then reads.
+ *
+ * THE SHARED ROOT IS READ-ONLY, EXCEPT generated/, for a sandbox that is not full-scope and has the
+ * shared root in its bind (an auth-off session, whose root is the shared root, or the whole-volume
+ * fallback). The config loader merges every .json/.jsonc it finds in the shared root outside the
+ * working zones, and applies runtime/runtime.overrides.json last, so a root sandbox that could
+ * write there could rewrite the live configuration on the next reload; re-binding agents/, jobs/,
+ * scenes/ and tools/ read-only did not cover a new file at the root or in a new directory (review
+ * 2026-10-11). sandboxBindSpec makes the bind read-only, and generated/, where write_file puts a
+ * working agent's output, is bound again writable from its host path. A named-volume source has no
+ * host path for it, so that sandbox stays read-only. users/ holds every account's workspace and is
+ * masked, unless the caller's own root is in it. The full-scope git repo bind keeps the tree
+ * writable: swarm_maintainer commits configuration through git.
+ */
+export function sandboxIsolationArgs(input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string[] {
+  const at = input.at ?? "/workspace";
+  const bound = boundGatewayPath(input.workspacePath, input.bind);
+  // A new account's root does not exist before its first run: the stat found nothing, no --user
+  // went out, and docker created the bind source itself, as root 0755, which the image's user
+  // cannot write. The gateway creates it first, as it creates everything else in the workspace.
+  // The repo bind is the deployment mount, which the gateway does not create.
+  if (input.bind === "caller") ensureGatewayDir(bound);
+  const args = sandboxUserArgs(bound, host.platform);
+
+  const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
+  const masked = new Set<string>();
+  for (const root of [bound, input.workspacePath, sharedRoot]) {
+    if (!root) continue;
+    const sandboxPath = sandboxPathWithin(`${normalizeRoot(root)}/${PRODUCT.stateDirName}`, bound, at);
+    if (sandboxPath === null || masked.has(sandboxPath)) continue;
+    masked.add(sandboxPath);
+    // Docker creates a missing mount point itself, owned by root, where a gateway that does not
+    // run as root could then not write its own state.
+    ensureGatewayDir(join(root, PRODUCT.stateDirName));
+    args.push(`--tmpfs=${sandboxPath}:ro,size=4k`);
+  }
+
+  const sharedAt = lockedSharedRootAt(input, bound, sharedRoot, at);
+  if (sharedAt !== null && sharedRoot) {
+    // Null for a named-volume source, which has no host path to bind generated/ from.
+    const hostGenerated = resolveHostWorkspacePath(sharedRoot, "generated");
+    if (hostGenerated !== null) {
+      ensureGatewayDir(join(sharedRoot, "generated"));
+      args.push("-v", `${hostGenerated}:${sharedAt}/generated`);
+    }
+    const users = join(sharedRoot, "users");
+    if (sandboxPathWithin(input.workspacePath, users, at) === null) {
+      ensureGatewayDir(users);
+      args.push(`--tmpfs=${sharedAt}/users:ro,size=4k`);
+    }
+  }
+  return args;
+}
+
+/** The workspace bind, read-only where sandboxIsolationArgs re-binds only generated/ writable. */
+export function sandboxBindSpec(bindSpec: string, input: SandboxIsolationInput, host: SandboxHostOverrides = {}): string {
+  const bound = boundGatewayPath(input.workspacePath, input.bind);
+  const sharedRoot = host.sharedRoot ?? configuredSharedRoot();
+  return lockedSharedRootAt(input, bound, sharedRoot, input.at ?? "/workspace") === null ? bindSpec : `${bindSpec}:ro`;
+}
+
+/** Where a sandbox that is not full-scope sees the shared root in its bind, or null when it is
+ *  full-scope or the shared root is not in its bind. */
+function lockedSharedRootAt(input: SandboxIsolationInput, bound: string, sharedRoot: string | undefined, at: string): string | null {
+  if (input.workspaceScope === "full" || !sharedRoot) return null;
+  return sandboxPathWithin(sharedRoot, bound, at);
+}
+
+/**
+ * The GATEWAY's path to the directory a sandbox has at /workspace. The caller's own root, except
+ * where resolveDockerWorkspaceBind binds the whole mount source instead (a named volume, which has
+ * no host path to narrow): that is /workspace on the gateway side, as it is for the git repo bind.
+ * Outside a container the bound directory is the workspace itself either way.
+ */
+function boundGatewayPath(workspacePath: string, bind: SandboxBind): string {
+  if (!mountSourceMapsToWorkspaceRoot(workspacePath)) return workspacePath;
+  if (bind === "repo") return "/workspace";
+  const source = resolveDockerWorkspaceMountSource(workspacePath);
+  return resolveHostPathUnderWorkspace(workspacePath, source) === null ? "/workspace" : workspacePath;
+}
+
+/**
+ * The root toSandboxPath / toSandboxCommand map for the caller's own bind: the directory the sandbox
+ * has at /workspace. Where the whole named volume is bound instead, that is /workspace itself, and the
+ * sandbox sees the caller's root at its gateway path, so nothing is mapped; mapping the caller's root
+ * there sent `cd <root>` to the volume's top.
+ */
+export function sandboxMappedRoot(workspacePath: string): string {
+  return boundGatewayPath(workspacePath, "caller");
+}
+
+/** `mkdir -p` on the gateway side. On a failure docker creates the directory, as it did before. */
+function ensureGatewayDir(path: string): void {
+  try {
+    mkdirSync(path, { recursive: true });
+  } catch {
+    // Left to docker.
+  }
+}
+
+/** Where a sandbox sees a gateway path, or null when the path is outside the bound directory. */
+function sandboxPathWithin(gatewayPath: string, boundGatewayPath: string, at: string): string | null {
+  const path = normalizeRoot(gatewayPath);
+  const bound = normalizeRoot(boundGatewayPath);
+  if (!bound) return null;
+  if (path === bound) return at;
+  return path.startsWith(`${bound}/`) ? `${at}${path.slice(bound.length)}` : null;
+}
+
+/** The deployment's shared workspace root. getConfig() loads the config on first use, so this is
+ *  undefined only when the config cannot load at all; the bound directory's own state directory and
+ *  the caller's are masked all the same. */
+function configuredSharedRoot(): string | undefined {
+  try {
+    const root = getConfig().workspacePath;
+    return typeof root === "string" && root.trim() ? root : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A path in the GATEWAY's terms, mapped to where a sandbox sees it.
+ *
+ * Every sub-agent is told "Current workspace: <workspacePath>", the gateway-side path (in the
+ * compose deployment /workspace/workspace/users/<account>), and passes it back: as shell_exec's
+ * workdir, or in `cd <workspacePath> && ...`. The sandbox has that directory at `at`, and nothing
+ * at the gateway path, so each such run failed before the command started (E2E 2026-10-11). A path
+ * outside the workspace root is returned unchanged; the callers' own /workspace check still applies.
+ */
+export function toSandboxPath(path: string, workspacePath: string, at = "/workspace"): string {
+  const root = normalizeRoot(workspacePath);
+  const normalized = path.replace(/\\/g, "/");
+  if (!root || root === at) return path;
+  if (normalized === root || normalized === `${root}/`) return at;
+  if (normalized.startsWith(`${root}/`)) return `${at}/${normalized.slice(root.length + 1)}`;
+  return path;
+}
+
+/**
+ * The same mapping for every place a command names the workspace root, at a path boundary on both
+ * sides. After it: the end, a separator, or what ends a shell word, an assignment, a list item or a
+ * `host:path` pair (`<root>-old` is another directory and stays as written). Before it: the start,
+ * or what can open such a word (`/mnt<root>/x` is another path and stays as written). A Windows
+ * root also matches in its backslash form.
+ */
+export function toSandboxCommand(command: string, workspacePath: string, at = "/workspace"): string {
+  const root = normalizeRoot(workspacePath);
+  if (!root || root === at) return command;
+  const windows = /^[a-zA-Z]:\//.test(root);
+  const forms = windows ? [root, root.replace(/\//g, "\\")] : [root];
+  if (!forms.some((form) => command.includes(form))) return command;
+  const after = windows ? WINDOWS_ROOT_AFTER : ROOT_AFTER;
+  const pattern = forms.map((form) => `${ROOT_BEFORE}${escapeRegExp(form)}${after}`).join("|");
+  return command.replace(new RegExp(pattern, "g"), at);
+}
+
+const ROOT_BEFORE = /(?<=^|[\s'"`=:;&|<>(){},])/.source;
+const ROOT_AFTER = /(?=$|[/\s'"`;&|<>(){},:=])/.source;
+const WINDOWS_ROOT_AFTER = /(?=$|[/\\\s'"`;&|<>(){},:=])/.source;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeRoot(workspacePath: string): string {
+  return workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
 /** The host path for a container path under /workspace, or null for a named-volume source. */
 function resolveHostPathUnderWorkspace(containerPath: string, source: string): string | null {
   const trimmed = source.replace(/[/\\]+$/, "");
@@ -158,12 +400,15 @@ export function resolveHostWorkspacePath(
 export const PROTECTED_WORKSPACE_ZONES: readonly string[] = ["agents", "jobs", "scenes", "tools"] as const;
 
 /* NOTE: a read-only overlay of these config zones INTO the shell/test sandbox was
- * considered as extra defense-in-depth, but it is deployment-layout fragile — the
- * sandbox mount source is the host workspace/repo path and its /workspace mapping
- * varies (e.g. the repo root can be the mount source, putting the zones at
- * /workspace/workspace/<zone>), so a naive overlay produces a wrong/empty mount.
- * The write-allowlist is therefore enforced where it is robust and layout-
- * independent: write_file re-roots scope-confined agents into generated/
+ * first rejected as deployment-layout fragile: while the sandboxes bound the mount
+ * SOURCE, which in the compose layout is the repo root, the zones sat at
+ * /workspace/workspace/<zone> in one deployment and /workspace/<zone> in another,
+ * and a naive overlay produced a wrong or empty mount. Every sandbox now binds
+ * exactly the directory it was handed (resolveDockerWorkspaceBind), so the zones'
+ * place in it follows from the gateway paths: a non-full-scope sandbox with the shared
+ * root in its bind gets the whole tree read-only except generated/ (sandboxBindSpec,
+ * sandboxIsolationArgs), which covers the zones and every other place the loader reads. The
+ * other layers stay: write_file re-roots scope-confined agents into generated/
  * (workspace-path.ts, so they cannot address the config zones at all), live-config
  * authoring goes ONLY through the dedicated validated/approval-gated tools
  * (swarm_define_agent / _save_scene / _save_job), and assertSafeDockerRunArgs

@@ -101,11 +101,13 @@ import {
   parseUpstreamJsonResponse,
   callMultimodalToolViaMcp,
   checkEndpointHealth,
+  checkOpenAiTtsHealth,
   multimodalServiceConfigured,
   unwrapConversionResult,
   disabledServiceStatus,
   disabledServiceResponse,
 } from "./upstream-http.js";
+import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { handleMcpHttpRequest, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
 import { browserSessionManager } from "../agent/browser-session.js";
@@ -572,63 +574,6 @@ export function createGateway() {
 
   function normalizeTtsLanguage(language: string, api: "qwen-compatible" | "openai-compatible"): string {
     return api === "qwen-compatible" ? normalizeQwenLanguage(language) : language.trim();
-  }
-
-  async function fetchTtsVoiceCatalog(config: {
-    api: "qwen-compatible" | "openai-compatible";
-    baseUrl: string;
-    apiKey?: string;
-    timeoutMs: number;
-  }): Promise<Record<string, unknown>> {
-    if (!multimodalServiceConfigured(config.baseUrl)) {
-      throw new Error("TTS is disabled: no endpoint configured.");
-    }
-
-    if (config.api === "openai-compatible") {
-      const [voicesResponse, modelsResponse] = await Promise.all([
-        fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-        fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      ]);
-
-      if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
-
-      const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
-      let voices: unknown[] = [];
-
-      if (voicesResponse.ok) {
-        const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
-        voices = Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [];
-      } else if (voicesResponse.status !== 404 && voicesResponse.status !== 405) {
-        throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
-      }
-
-      return {
-        voices,
-        speakers: [],
-        models: modelsBody["models"] ?? {},
-        currentModel: modelsBody["current_model"] ?? undefined,
-      };
-    }
-
-    const [voicesResponse, speakersResponse, modelsResponse] = await Promise.all([
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/speakers"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-    ]);
-
-    if (!voicesResponse.ok) throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
-    if (!speakersResponse.ok) throw new Error(await extractUpstreamError(speakersResponse, "Failed to load speakers"));
-    if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
-
-    const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
-    const speakersBody = await parseUpstreamJsonResponse(speakersResponse, "Speaker list returned a non-JSON response");
-    const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
-    return {
-      voices: Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [],
-      speakers: Array.isArray(speakersBody["speakers"]) ? speakersBody["speakers"] : [],
-      models: modelsBody["models"] ?? {},
-      currentModel: modelsBody["current_model"] ?? undefined,
-    };
   }
 
   // TTL-cached TTS capability snapshot (avoid hitting /models on every TTS request)
@@ -1599,11 +1544,10 @@ export function createGateway() {
       !multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
         ? Promise.resolve(disabledServiceStatus("Disabled: no TTS endpoint configured."))
         : multimodalConfig.tts.api === "openai-compatible"
-          ? checkEndpointHealth({
+          ? checkOpenAiTtsHealth({
               baseUrl: multimodalConfig.tts.baseUrl,
               apiKey: multimodalConfig.tts.apiKey,
               timeoutMs: multimodalConfig.tts.timeoutMs,
-              path: "/models",
             })
           : checkEndpointHealth({
               baseUrl: multimodalConfig.tts.baseUrl,

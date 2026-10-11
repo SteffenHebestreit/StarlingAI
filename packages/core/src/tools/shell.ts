@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, sandboxBindSpec, sandboxIsolationArgs, sandboxMappedRoot, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 import { isSensitiveWorkspacePath } from "./filesystem.js";
 import { resolveLiteralWorkspacePath, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
@@ -37,8 +37,10 @@ registerTool({
     required: ["command"],
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
-    const command = String(args["command"] ?? "");
-    const workdir = normalizeWorkdir(String(args["workdir"] ?? "/workspace"));
+    // The gateway-side workspace path, wherever the model wrote it, is /workspace in here.
+    const mappedRoot = sandboxMappedRoot(ctx.workspacePath);
+    const command = toSandboxCommand(String(args["command"] ?? ""), mappedRoot);
+    const workdir = normalizeWorkdir(toSandboxPath(String(args["workdir"] ?? "/workspace"), mappedRoot));
     const userEnv = (args["env"] as Record<string, string> | undefined) ?? {};
 
     if (!command.trim()) {
@@ -71,7 +73,8 @@ registerTool({
     const envArgs: string[] = [];
     for (const [k, v] of Object.entries(userEnv)) {
       if (/^[A-Z_][A-Z0-9_]*$/i.test(k)) {
-        envArgs.push("-e", `${k}=${v}`);
+        // A value that names the gateway-side workspace path names /workspace in the sandbox.
+        envArgs.push("-e", `${k}=${toSandboxCommand(String(v), mappedRoot)}`);
       }
     }
 
@@ -93,7 +96,8 @@ registerTool({
       "--tmpfs=/tmp:size=64m",            // Writable /tmp in memory
       "--cap-drop=ALL",                   // Drop all capabilities
       "--security-opt=no-new-privileges",
-      "-v", workspaceBind,
+      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
+      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       "-w", workdir,
       ...envArgs,
       SANDBOX_IMAGE,
@@ -259,7 +263,8 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const scriptPath = String(args["path"] ?? "").replace(/\\/g, "/");
-    const scriptArgs = (args["args"] as string[] | undefined) ?? [];
+    const mappedRoot = sandboxMappedRoot(ctx.workspacePath);
+    const scriptArgs = ((args["args"] as string[] | undefined) ?? []).map((arg) => toSandboxCommand(String(arg), mappedRoot));
     const userEnv = (args["env"] as Record<string, string> | undefined) ?? {};
 
     if (!scriptPath || scriptPath.includes("..")) {
@@ -301,7 +306,8 @@ registerTool({
     const envArgs: string[] = [];
     for (const [k, v] of Object.entries(userEnv)) {
       if (/^[A-Z_][A-Z0-9_]*$/i.test(k)) {
-        envArgs.push("-e", `${k}=${v}`);
+        // A value that names the gateway-side workspace path names /workspace in the sandbox.
+        envArgs.push("-e", `${k}=${toSandboxCommand(String(v), mappedRoot)}`);
       }
     }
 
@@ -317,7 +323,8 @@ registerTool({
       "--tmpfs=/tmp:size=64m",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", workspaceBind,
+      "-v", sandboxBindSpec(workspaceBind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
+      ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: "caller" }),
       "-w", "/workspace",
       ...envArgs,
       SANDBOX_IMAGE,
