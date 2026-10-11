@@ -13,7 +13,7 @@ import { Buffer } from "node:buffer";
 import { dirname, extname, join, posix } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { pathExists, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { containedWorkspaceRealPath, pathExists, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { inlineLocalImagesInHtml } from "./inline-images.js";
 import { coerceJsonArrayArg } from "./json-arg-coercion.js";
 
@@ -36,6 +36,16 @@ interface AssetSpec {
   path: string;
   content: string;
   encoding: "utf8" | "base64";
+}
+
+/**
+ * A file in the output directory, or a throw where it is a link out of its zone of the workspace.
+ * The directory was resolved and checked; the names written into it were not, and a sandbox can
+ * leave a link under any of them (containedWorkspaceRealPath), which the write would follow.
+ */
+function inOutputDir(fullPath: string, workspacePath: string): string {
+  if (!containedWorkspaceRealPath(fullPath, workspacePath)) throw new Error("Path escapes workspace boundary");
+  return fullPath;
 }
 
 registerTool({
@@ -170,7 +180,7 @@ registerTool({
     // Write theme.css once (shared across pages)
     const css = buildThemeCss(theme);
     try {
-      await writeFile(join(resolvedDir.resolved, "theme.css"), css, "utf8");
+      await writeFile(inOutputDir(join(resolvedDir.resolved, "theme.css"), ctx.workspacePath), css, "utf8");
     } catch (err) {
       return fail(`Failed to write theme.css: ${String(err)}`);
     }
@@ -195,8 +205,8 @@ registerTool({
       });
       const fullPath = join(resolvedDir.resolved, page.path);
       try {
-        await mkdir(dirname(fullPath), { recursive: true });
-        await writeFile(fullPath, pageHtml, "utf8");
+        await mkdir(dirname(inOutputDir(fullPath, ctx.workspacePath)), { recursive: true });
+        await writeFile(inOutputDir(fullPath, ctx.workspacePath), pageHtml, "utf8");
         writtenPages.push({ path: page.path, bytes: Buffer.byteLength(pageHtml, "utf8") });
       } catch (err) {
         return fail(`Failed to write ${page.path}: ${String(err)}`);
@@ -373,7 +383,7 @@ registerTool({
     // under the query-param workspace preview (which can't resolve relative srcs).
     const html = await inlineLocalImagesInHtml(rawHtml, resolvedDir.resolved);
     try {
-      await writeFile(indexPath, html, "utf8");
+      await writeFile(inOutputDir(indexPath, ctx.workspacePath), html, "utf8");
     } catch (err) {
       return fail(`Failed to write index.html: ${String(err)}`);
     }
@@ -385,7 +395,7 @@ registerTool({
     const notesMd = buildDeckNotesMarkdown(title, slides.slides);
     const notesRelative = posix.join(resolvedDir.relativePath.replace(/\\/g, "/"), "notes.md");
     try {
-      await writeFile(join(resolvedDir.resolved, "notes.md"), notesMd, "utf8");
+      await writeFile(inOutputDir(join(resolvedDir.resolved, "notes.md"), ctx.workspacePath), notesMd, "utf8");
       extraArtifacts.push({
         artifactKind: "document",
         outputPath: notesRelative,

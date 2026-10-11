@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve as resolvePath } from "node:path";
 import { createContext, runInContext, Script } from "node:vm";
 import { createRecordingContext, type CanvasPaintReport } from "./canvas-geometry.js";
+import { containedWorkspaceRealPath } from "./workspace-containment.js";
 import { describeErrorSite, SCRIPT_VM_FILENAME } from "./error-site.js";
 
 /** Wall-clock ceiling for one script. A game loop that never yields must not run unbounded. */
@@ -108,7 +109,8 @@ export function collectScripts(html: string, htmlPath: string): { scripts: Scrip
         externalMisses.push(ref);
         continue;
       }
-      if (existsSync(abs) && statSync(abs).isFile()) {
+      // And through no link out of it: a sandbox can leave one under the ref's name.
+      if (containedWorkspaceRealPath(abs, dirname(htmlPath)) && existsSync(abs) && statSync(abs).isFile()) {
         scripts.push({ label: ref, code: readFileSync(abs, "utf-8"), ...marks });
       } else {
         externalMisses.push(ref);

@@ -9,6 +9,7 @@
  */
 import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
+import { containedWorkspaceRealPath } from "./workspace-containment.js";
 
 const INLINE_IMAGE_MAX_BYTES = 4_000_000; // skip one oversized image
 const INLINE_TOTAL_MAX_BYTES = 24_000_000; // overall cap per document
@@ -38,6 +39,9 @@ async function buildDataUriMap(srcs: Set<string>, baseDir: string): Promise<Map<
     try {
       const target = resolve(baseDir, src.replace(/^\.?\//, ""));
       if (target !== root && !target.startsWith(root + sep)) continue; // stay inside the document dir
+      // And through no link out of it: a sandbox can leave one under an image's name, and the
+      // bytes it leads to would be inlined into the document.
+      if (!containedWorkspaceRealPath(target, root)) continue;
       const mime = imageMimeFromExt(target);
       if (!mime) continue;
       const st = await stat(target);

@@ -160,7 +160,7 @@ import {
   STAGED_BUILD_REQUIRED_TOOLS,
   UNFINISHED_STUB_MARKER,
 } from "./sub-agent-prompt-guidance.js";
-import { generatedZoneRel, resolveWorkspaceWritePath } from "../tools/workspace-path.js";
+import { containedWorkspaceRealPath, generatedZoneRel, resolveWorkspaceWritePath } from "../tools/workspace-path.js";
 import { buildArtifactTextPreview } from "../tools/artifact-preview.js";
 import { checkBuiltPage } from "../tools/page-check.js";
 import { mergeAgentModelOverride, applyEffortModelOverlay, applyStreamCapOverlay } from "./sub-agent-model-config.js";
@@ -1622,7 +1622,9 @@ export function refreshWorkspaceArtifactSnapshot(
     const candidate = [rel, raw]
       .filter(Boolean)
       .map((p) => resolvePath(workspacePath, p))
-      .find((p) => fs.existsSync(p));
+      // Only a file that stays in its zone of the workspace: the path is what a tool reported, and
+      // the file there may be a link a sandbox left, whose target this would preview to the user.
+      .find((p) => fs.existsSync(p) && containedWorkspaceRealPath(p, workspacePath) !== null);
     if (!candidate) return copy;
     const stat = fs.statSync(candidate);
     if (!stat.isFile() || stat.size > 5_000_000) return copy;
@@ -1901,7 +1903,8 @@ export function findUnfilledStubFiles(
   // evidence about another's — the same reason the mtime scope above exists, one tenant over.
   const zoneRel = generatedZoneRel();
   const artifactRoot = resolvePath(workspaceRoot, zoneRel);
-  if (!fs.existsSync(artifactRoot)) return { files: [], count: 0, markers: [] };
+  // The walk below skips links, all but the zone itself: a sandbox can replace generated/ with one.
+  if (!fs.existsSync(artifactRoot) || !containedWorkspaceRealPath(artifactRoot, workspaceRoot)) return { files: [], count: 0, markers: [] };
   return scanForStubMarkers(artifactRoot, zoneRel, scope);
 }
 
@@ -1993,7 +1996,8 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: Artifac
 export async function findBrokenBuiltPages(workspaceRoot: string, scope?: ArtifactScanScope): Promise<string[]> {
   const zoneRel = generatedZoneRel();
   const artifactRoot = resolvePath(workspaceRoot, zoneRel);
-  if (!fs.existsSync(artifactRoot)) return [];
+  // As findUnfilledStubFiles: the zone itself may be a link a sandbox left.
+  if (!fs.existsSync(artifactRoot) || !containedWorkspaceRealPath(artifactRoot, workspaceRoot)) return [];
   const MAX_PAGES = 4;
   const MAX_DEPTH = 4;
   const broken: string[] = [];

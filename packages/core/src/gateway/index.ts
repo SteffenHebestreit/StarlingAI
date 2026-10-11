@@ -74,7 +74,7 @@ import { getBidderWorkerStatus } from "../swarm/bidder-worker.js";
 import { getSceneJobWorkerStatus } from "../agent/scene-worker.js";
 import { getAgentMessageBacklog, readAllFacts } from "../swarm/memory.js";
 import { deriveSharedSessionId } from "../tools/memory.js";
-import { userWorkspaceRoot } from "../tools/workspace-path.js";
+import { containedWorkspaceRealPath, userWorkspaceRoot } from "../tools/workspace-path.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { userInputBroker } from "../agent/user-input-broker.js";
 import { getLoadedDynamicTools, listPromotionCandidates, approvePromotion, rejectPromotion, getDynamicToolStats } from "../tools/dynamic-tools.js";
@@ -517,7 +517,8 @@ export function createGateway() {
   async function readWorkspaceBinaryFile(path: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
     const workspaceRoot = resolve(getConfig().workspacePath);
     const targetPath = resolve(workspaceRoot, path);
-    if (!targetPath.startsWith(workspaceRoot)) {
+    // And through no link out of its zone, which a sandbox can leave in a directory it writes.
+    if (!targetPath.startsWith(workspaceRoot) || !containedWorkspaceRealPath(targetPath, workspaceRoot)) {
       throw new Error("Audio example path escapes the workspace");
     }
     const fileStat = await stat(targetPath);
