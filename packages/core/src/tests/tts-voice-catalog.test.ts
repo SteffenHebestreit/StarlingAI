@@ -78,4 +78,43 @@ describe("list_tts_voices on an OpenAI-compatible speech server", () => {
     expect(requested).toContain("/v1/models");
     expect(requested).not.toContain("/models");
   });
+
+  it("lists the server's models, from OpenAI's list shape", async () => {
+    routes = OPENAI_SPEECH_SERVER;
+    const { getTool } = await import("../tools/registry.js");
+    const result = await getTool("list_tts_voices")!.execute({}, { sessionId: "s-tts-catalog", workspacePath: tempDir });
+    expect(JSON.parse(result.output).models).toEqual({ "tts-1": { name: "tts-1" }, kokoro: { name: "kokoro" } });
+  });
+});
+
+describe("the models of the catalog", () => {
+  it("are an OpenAI list's ids, keyed as a qwen-compatible server keys its own", async () => {
+    const { fetchTtsVoiceCatalog } = await import("../multimodal/tts-voice-catalog.js");
+    routes = {
+      "/v1/models": { status: 200, body: { object: "list", data: [{ id: "tts-1" }, { object: "model" }, "kokoro"] } },
+      "/voices": { status: 200, body: { voices: [{ id: "saved-1" }] } },
+    };
+    expect(await fetchTtsVoiceCatalog({ api: "openai-compatible", baseUrl, timeoutMs: 2000 })).toEqual({
+      voices: [{ id: "saved-1" }],
+      speakers: [],
+      models: { "tts-1": { name: "tts-1" } },
+      currentModel: undefined,
+    });
+  });
+
+  it("are the server's own map where it has one", async () => {
+    const { fetchTtsVoiceCatalog } = await import("../multimodal/tts-voice-catalog.js");
+    const qwenModels = { "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct": { capabilities: ["tts", "voice_clone"] } };
+    routes = {
+      "/voices": { status: 200, body: { voices: [] } },
+      "/speakers": { status: 200, body: { speakers: ["Vivian"] } },
+      "/models": { status: 200, body: { models: qwenModels, current_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct" } },
+    };
+    expect(await fetchTtsVoiceCatalog({ api: "qwen-compatible", baseUrl, timeoutMs: 2000 })).toEqual({
+      voices: [],
+      speakers: ["Vivian"],
+      models: qwenModels,
+      currentModel: "Qwen/Qwen3-TTS-12Hz-0.6B-Instruct",
+    });
+  });
 });

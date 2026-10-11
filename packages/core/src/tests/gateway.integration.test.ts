@@ -2463,9 +2463,10 @@ describe("gateway HTTP bridge", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
       expect(voicesResponse.status).toBe(200);
-      const voicesBody = await voicesResponse.json() as { voices: unknown[]; speakers: unknown[] };
+      const voicesBody = await voicesResponse.json() as { voices: unknown[]; speakers: unknown[]; models: Record<string, unknown> };
       expect(voicesBody.voices).toEqual([]);
       expect(voicesBody.speakers).toEqual([]);
+      expect(voicesBody.models).toEqual({ "tts-1": { name: "tts-1" } });
 
       expect(requested).toContain("GET /v1/models");
       expect(requested).not.toContain("GET /models");

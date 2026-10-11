@@ -71,7 +71,18 @@ export async function fetchTtsVoiceCatalog(config: TtsCatalogConfig): Promise<Re
   };
 }
 
-/** The `models` of a model-list body: the server's own map, or `{}` when it has none. */
+/**
+ * The `models` of a model-list body, in the shape the qwen-compatible server's /models has them: a
+ * map from model id to its details. An OpenAI-compatible server lists `{ object: "list", data:
+ * [{ id }] }` instead, which read as no models at all; its ids become the keys, each named by its id.
+ */
 function catalogModels(body: Record<string, unknown>): unknown {
-  return body["models"] ?? {};
+  const models = body["models"];
+  if (models != null) return models;
+  const data = body["data"];
+  if (!Array.isArray(data)) return {};
+  return Object.fromEntries(data.flatMap((entry: unknown) => {
+    const id = entry !== null && typeof entry === "object" ? (entry as Record<string, unknown>)["id"] : undefined;
+    return typeof id === "string" && id.trim() ? [[id, { name: id }]] : [];
+  }));
 }
