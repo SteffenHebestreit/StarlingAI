@@ -11,9 +11,10 @@
  * the discovery prefetch had admitted file-capable specialists for both requests.
  *
  * The runtime now calls runCorrectiveReroute once (agent/turn-corrective.ts): the request as the user
- * wrote it, through delegate_to_agent with no agent named, and the specialist's answer is shipped.
- * Not on a turn that delegated, ran with --auto, retrieved evidence of its own, or whose prefetch
- * admitted no agent.
+ * wrote it, through delegate_to_agent with no agent named, and the specialist's answer is shipped as
+ * written: the terminal backstops that replace a short or repeated synthesis leave it alone. Not on a
+ * turn that delegated, ran with --auto, retrieved evidence of its own, or whose prefetch admitted no
+ * agent.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,7 +84,13 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-async function load(options: { capsule?: CapsuleAgent[]; delegationSucceeds?: boolean } = {}) {
+async function load(options: {
+  capsule?: CapsuleAgent[];
+  delegationSucceeds?: boolean;
+  /** A finding the specialist shares while it runs, as a sub-agent's share_finding would. */
+  sharedFinding?: string;
+  specialistAnswer?: string;
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sai-loop-brake-reroute-"));
   tempDirs.push(dir);
   const workspacePath = join(dir, "workspace");
@@ -120,16 +127,18 @@ async function load(options: { capsule?: CapsuleAgent[]; delegationSucceeds?: bo
   // Registers delegate_to_agent and the other orchestration tools, as the gateway does.
   await import("../tools/sub-agent.js");
   const { registerTool } = await import("../tools/registry.js");
+  const { writeSharedFact } = await import("../swarm/memory.js");
   resetSessionsForTests();
   registerTool({
     name: "delegate_to_agent",
     description: "delegate a task",
     parameters: { type: "object", properties: { agentName: { type: "string" }, task: { type: "string" } } },
-    execute: async (args: Record<string, unknown>) => {
+    execute: async (args: Record<string, unknown>, ctx: { sessionId: string }) => {
       delegations.push(args);
+      if (options.sharedFinding) await writeSharedFact(ctx.sessionId, "content_writer_finding", options.sharedFinding);
       return options.delegationSucceeds === false
         ? { success: false, output: "", error: "The specialist could not run." }
-        : { success: true, output: SPECIALIST_ANSWER, metadata: { delegationOutcome: "success", agentName: "content_writer" } };
+        : { success: true, output: options.specialistAnswer ?? SPECIALIST_ANSWER, metadata: { delegationOutcome: "success", agentName: "content_writer" } };
     },
   });
   registerTool({
@@ -154,23 +163,36 @@ async function load(options: { capsule?: CapsuleAgent[]; delegationSucceeds?: bo
   return { session, runTurn };
 }
 
-function toolCallStream(callId: string, toolName: string, args: Record<string, unknown>) {
+function toolCallStream(callId: string, toolName: string, args: Record<string, unknown>, text?: string) {
   return (async function* () {
+    if (text) yield { type: "text_delta", content: text };
     yield { type: "tool_call_start", toolCallId: callId, toolName };
     yield { type: "tool_call_delta", toolCallId: callId, argumentsDelta: JSON.stringify(args) };
     yield { type: "done", finishReason: "tool_calls", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
   })();
 }
 
-/** A model that looks for a file tool it does not hold, on every call, after `first` if given. */
-function scriptLoopingModel(first?: () => ReturnType<typeof toolCallStream>) {
+/**
+ * A model that looks for a file tool it does not hold, on every call, after `first` if given, and
+ * writes `narration` beside each call when given.
+ */
+function scriptLoopingModel(
+  first?: () => ReturnType<typeof toolCallStream>,
+  options: { narration?: string } = {},
+) {
   let call = 0;
   streamMock.mockImplementation(() => {
     call += 1;
     if (call === 1 && first) return first();
-    return toolCallStream(`s${call}`, "search_tools", { query: `read file from workspace ${call}` });
+    return toolCallStream(`s${call}`, "search_tools", { query: `read file from workspace ${call}` }, options.narration);
   });
 }
+
+// What the looping model wrote beside its calls in the review's reproduction: a claim that the change
+// was made, long enough (200 characters or more) for the runtime to keep it as a fallback answer.
+const NARRATION = "Die Hauptüberschrift in generated/e2e-guards/sommeraktion.html wurde auf „Sommeraktion 2026“ aktualisiert. "
+  + "Ich habe die Änderung im Workspace-Gedächtnis festgehalten, damit sie beim nächsten Schritt berücksichtigt wird, "
+  + "und prüfe jetzt noch einmal die verfügbaren Werkzeuge.";
 
 const auditRows = (type: string) => auditMock.mock.calls
   .filter(([event, data]) => event === "guardrail_flagged" && (data as { type?: string }).type === type)
@@ -196,6 +218,49 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     ]);
     // The answer is the specialist's: no synthesis was written over it.
     expect(completeMock.mock.calls.some(([messages]) => JSON.stringify(messages).includes("tool-call limit"))).toBe(false);
+  });
+
+  it("ships the specialist's short answer over what the looping model narrated beside its calls", async () => {
+    const { session, runTurn } = await load();
+    scriptLoopingModel(undefined, { narration: NARRATION });
+
+    const result = await runTurn({ session, userMessage: REQUEST });
+
+    expect(NARRATION.length).toBeGreaterThanOrEqual(200);
+    expect(delegations).toEqual([{ task: REQUEST }]);
+    expect(result.response).toContain(SPECIALIST_ANSWER);
+    expect(result.response).not.toContain("aktualisiert");
+    expect(auditMock.mock.calls.filter(([event]) => event === "sub_agent_synthesis_forced")).toEqual([]);
+  });
+
+  it("ships the specialist's short answer over the findings it shared", async () => {
+    const finding = "generated/e2e-guards/sommeraktion.html: not found in the workspace (list_files generated/e2e-guards).";
+    const { session, runTurn } = await load({ sharedFinding: finding });
+    scriptLoopingModel();
+
+    const result = await runTurn({ session, userMessage: REQUEST });
+
+    expect(delegations).toEqual([{ task: REQUEST }]);
+    expect(result.response).toContain(SPECIALIST_ANSWER);
+    expect(result.response).not.toContain("content_writer_finding");
+    expect(auditMock.mock.calls.filter(([event]) => event === "sub_agent_synthesis_forced")).toEqual([]);
+  });
+
+  it("ships the specialist's answer to a request asked again, though it repeats the earlier answer", async () => {
+    const request = "Liste den Inhalt des Ordners generated/e2e-guards auf.";
+    const listing = "Der Ordner generated/e2e-guards enthält drei Dateien: inventur (34 Bytes, Text „Inventur Westmark: Regal 4, Fach 9“), "
+      + "sommeraktion-entwurf.md (1,2 KB, der Entwurf der Sommeraktion) und preise.csv (812 Bytes, 14 Zeilen mit Artikelnummern und Preisen).";
+    const { session, runTurn } = await load({ specialistAnswer: listing });
+    session.addMessage({ role: "user", content: request });
+    session.addMessage({ role: "assistant", content: listing });
+    scriptLoopingModel();
+
+    const result = await runTurn({ session, userMessage: request });
+
+    expect(listing.length).toBeGreaterThanOrEqual(180);
+    expect(delegations).toEqual([{ task: request }]);
+    expect(result.response).toContain(listing);
+    expect(auditRows("blocked_turn_regurgitated_prior_answer")).toEqual([]);
   });
 
   it("re-dispatches it once when every call was blocked", async () => {

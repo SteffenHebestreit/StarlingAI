@@ -5767,8 +5767,16 @@ async function _runTurn(
     "max_tool_iterations",
     "delegation_failures_terminal",
   ]);
+  // The loop-brake reroute's answer is the specialist's, written this turn for this request, and it
+  // ships as written. The backstops below replace a weak SYNTHESIS: a reply under 300 characters, a
+  // copy of an earlier answer. The honest answers the reroute exists for are short ("<file> does not
+  // exist in the workspace; nothing was changed"), and a request asked again is answered again. A
+  // review reproduction shipped neither: the orchestrator's narration beside its looping calls ("the
+  // heading was updated", 259 characters) replaced the answer, and a fresh synthesis replaced that.
+  const rerouteAnswered = loopBrakeRerouteAnswer !== null;
   if (
-    REGURGITATION_GUARD_REASONS.has(terminalFinishReason)
+    !rerouteAnswered
+    && REGURGITATION_GUARD_REASONS.has(terminalFinishReason)
     && synthesized
     && looksLikeRegurgitatedPriorAnswer(synthesized, session.getHistory())
   ) {
@@ -5844,6 +5852,7 @@ async function _runTurn(
     }, { sessionId: session.id, severity: "warn" });
   }
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
+    && !rerouteAnswered
     && terminalEvidenceBackstop
     && !evidenceLooksRaw
     && looksLikeUnderpoweredSynthesis(synthesized);
@@ -5856,6 +5865,7 @@ async function _runTurn(
   // (or when synthesis is underpowered AND no delegate evidence exists),
   // surface that suppressed text as the response.
   const useSuppressedTextOverSynthesis = !bypassTerminalSynthesis
+    && !rerouteAnswered
     && !useEvidenceOverSynthesis
     && lastSuppressedAssistantText !== null
     && !suppressedTextLooksRaw
