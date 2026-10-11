@@ -75,7 +75,7 @@ import {
   STATE_DEPENDENT_TOOL_NAMES,
 } from "./turn-tool-contribution.js";
 import { buildDirectiveDelegationContext, delegationRanAgent, isDelegationToAgent, nestedCallRanAgent } from "./directive-agent.js";
-import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
+import { remainingWorkflowStepAgents, renderWorkflowStepContinuationDirective, renderWorkflowStepStartDirective, WORKFLOW_STEP_DISCOVERY_TOOL_NAMES } from "./workflow-step-pipeline.js";
 import { longRunningGenerationManager } from "./long-running-generation.js";
 import { recordUnconsumedSteering, turnSteeringManager, type SteeringMessage } from "./turn-steering.js";
 import { registerSessionAbortController, deregisterSessionAbortController } from "./warden.js";
@@ -2612,6 +2612,38 @@ async function _runTurn(
   let terminalSynthesisInstruction =
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalFinishReason = "max_tool_iterations";
+  // A scene or job step's turn that ran into a loop brake, or out of iterations, having delegated
+  // nothing, gets its start directive once more and one more go (workflowStepStartBackstop below).
+  // The ceiling is raised for that one iteration only; on every other turn it is maxToolIterations.
+  let iterationCeiling = maxToolIterations;
+  let workflowStepStartBackstopUsed = false;
+  /**
+   * Whether the turn goes on instead of ending at `exit`: true once, on a step's turn whose pipeline
+   * is non-empty and that has delegated nothing, after putting the [WORKFLOW STEP] directive in its
+   * history. Its tail already carries the directive, and a model that searched for the workflow it
+   * is running ignored it (E2E 2026-10-10: three search_tools calls, then the brake). Without this,
+   * the forced synthesis wrote the step's result from nothing and the workflow was blocked for
+   * running no specialist.
+   */
+  const workflowStepStartBackstop = (exit: string): boolean => {
+    if (
+      workflowStepStartBackstopUsed
+      || workflowStepPipeline.length === 0
+      || _turnDelegationCount > 0
+      || workflowRunCompletedThisTurn
+      || signal.aborted
+    ) return false;
+    workflowStepStartBackstopUsed = true;
+    iterationCeiling = Math.max(iterationCeiling, iterationCount + 1);
+    session.addMessage({ role: "system", content: renderWorkflowStepStartDirective(workflowStepPipeline) });
+    logAudit("guardrail_flagged", {
+      type: "workflow_step_start_backstop",
+      exit,
+      iteration: iterationCount,
+      pipeline: workflowStepPipeline,
+    }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    return true;
+  };
   // ── G33: Trajectory cache lookup ─────────────────────────────────────────
   // Cached-trajectory injection (semantic recent-query reuse) lifted to
   // lookupTrajectoryInjection in turn-setup.ts (god-file seam).
@@ -2629,7 +2661,7 @@ async function _runTurn(
   let shownTrajectoryIdentity: typeof injectedTrajectoryIdentity = null;
 
   // ── Main agent loop ───────────────────────────────────────────────────────
-  while (iterationCount < maxToolIterations) {
+  while (iterationCount < iterationCeiling || workflowStepStartBackstop("max_tool_iterations")) {
     if (signal.aborted) {
       // Only synthesize when the INTERNAL timeout fired — not when the caller (WS) disconnected.
       // Synthesising after a WS close wastes LLM budget: the result can never be delivered.
@@ -2908,6 +2940,11 @@ async function _runTurn(
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
       directiveAgentPrompt: directiveAgentPending ? buildDirectiveAgentPrompt(directiveAgent) : "",
+      // A step's turn is told to start its pipeline until one of the pipeline's agents has returned:
+      // the pipeline otherwise acted only after a delegation, and the turn made none (E2E 2026-10-10).
+      workflowStepStartPrompt: workflowStepPipeline.length > 0 && workflowStepAgentsReturned.size === 0
+        ? renderWorkflowStepStartDirective(workflowStepPipeline)
+        : "",
       workflowSearchOffered: allowedToolNameSet.has("search_workflows"),
       turnToolCallCounts: _turnToolCallCounts,
       turnDelegationCount: _turnDelegationCount,
@@ -5569,6 +5606,7 @@ async function _runTurn(
           consecutiveBlockedIterations: _consecutiveFullyBlockedIterations,
           iterations: iterationCount,
         }, { sessionId: session.id, severity: "warn" });
+        if (workflowStepStartBackstop("all_tool_calls_blocked")) continue;
         terminalFinishReason = "all_tool_calls_blocked";
         terminalSynthesisInstruction =
           "The model repeatedly attempted tool calls that were blocked or unavailable, so NOTHING was created or changed this turn. Stop trying tools. Using ONLY the evidence already present in the conversation, write the best possible final answer now. If the user asked you to create or modify an artifact and you have no direct file tool, say plainly that you could not apply the change and offer to delegate it — do NOT invent an artifact path, and do NOT repeat or re-paste an earlier turn's answer as if the change had been applied.";
@@ -5596,6 +5634,7 @@ async function _runTurn(
         toolSet: iterToolSet,
         iterations: iterationCount,
       }, { sessionId: session.id, severity: "warn" });
+      if (workflowStepStartBackstop("iteration_tool_set_repeat")) continue;
       log.warn({ iterationCount, toolSet: iterToolSet }, "Same tool-call set repeated across iterations — forcing synthesis");
       break; // falls through to forceSynthesis below
     }
@@ -5629,6 +5668,7 @@ async function _runTurn(
           break;
         }
       }
+      if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
       if (streakLoop) break; // falls through to forceSynthesis below
     }
   }

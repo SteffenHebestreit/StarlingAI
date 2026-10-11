@@ -405,6 +405,134 @@ describe("a scene or job step's turn whose task names its agents goes without ag
   });
 });
 
+const START = "[WORKFLOW STEP]";
+
+/** The messages of the turn's model call `index`, as sent. */
+const messagesOfCall = (index: number): LLMMessage[] => (streamMock.mock.calls[index]?.[0] ?? []) as LLMMessage[];
+
+const contentOf = (message: LLMMessage): string => (typeof message.content === "string" ? message.content : "");
+
+/**
+ * A step's model that does not delegate unprompted. It looks for the workflow it is running with
+ * search_tools, as the step turns of the E2E run of 2026-10-10 did, unless a [WORKFLOW STEP]
+ * directive is in its messages; then it delegates to the first agent the directive names. After a
+ * delegation it follows the runtime's directive as scriptDirectiveFollowingModel does. With
+ * `ignoreStartFor`, it searches on its first calls whatever its messages say.
+ */
+function scriptSearchingStepModel(options: { ignoreStartFor?: number } = {}) {
+  let call = 0;
+  streamMock.mockImplementation((messages: LLMMessage[]) => {
+    call += 1;
+    const firstNamed = (directive: string) => PIPELINE
+      .map((agent) => ({ agent, at: directive.indexOf(agent) }))
+      .filter((mention) => mention.at !== -1)
+      .sort((a, b) => a.at - b.at)[0]?.agent;
+    const directive = lastDirective(messages);
+    if (directive?.startsWith(SYNTHESIS)) return textStream("Brief: founded 1987, 146 employees, warehouses Nordhafen, Südtal and Westmark.");
+    if (directive?.startsWith(CONTINUE)) {
+      const next = firstNamed(directive);
+      if (next) return toolCallStream(`d${call}`, "delegate_to_agent", { agentName: next, task: "Do your part of the brief." });
+    }
+    const start = messages.map(contentOf).find((content) => content.startsWith(START));
+    if (start && call > (options.ignoreStartFor ?? 0)) {
+      const first = firstNamed(start);
+      if (first) return toolCallStream(`d${call}`, "delegate_to_agent", { agentName: first, task: "Do your part of the brief." });
+    }
+    return toolCallStream(`s${call}`, "search_tools", { query: `run workflow sourced_brief ${call}` });
+  });
+}
+
+// The pipeline acted only after a delegation had returned, and nothing told the step's turn to make
+// the first one. Both step turns of the E2E run of 2026-10-10 searched for the workflow they were
+// running until the loop brake ended them, with nothing delegated, and the workflows were blocked.
+describe("a scene or job step's turn that does not delegate unprompted still runs its pipeline", () => {
+  for (const workflow of [
+    { name: "sourced_brief", workflowType: "scene" },
+    { name: "sourced_brief_packet", workflowType: "job" },
+  ] as const) {
+    it(`${workflow.workflowType}: the turn is told to start with the pipeline's first agent, and runs them in order`, async () => {
+      const { registry, delegated } = await loadModules();
+      scriptSearchingStepModel();
+
+      const result = await registry.getTool("run_workflow")!.execute({ ...workflow }, {
+        sessionId: `chat-start-${workflow.workflowType}`,
+        workspacePath: "/workspace",
+      });
+
+      expect(result.success).toBe(true);
+      expect(delegated).toEqual(PIPELINE);
+      // In the tail of the first call, after the step's message, and without a plan nudge beside it.
+      const first = messagesOfCall(0);
+      const startIndex = first.findIndex((message) => contentOf(message).startsWith(START));
+      const stepIndex = first.findIndex((message) => message.role === "user");
+      expect(startIndex).toBeGreaterThan(stepIndex);
+      expect(contentOf(first[startIndex]!)).toContain(`in its order: ${PIPELINE.join(", ")}.`);
+      expect(first.some((message) => contentOf(message).startsWith("PLAN FIRST"))).toBe(false);
+      // Gone from the tail once a pipeline agent has returned.
+      expect(messagesOfCall(1).some((message) => contentOf(message).startsWith(START))).toBe(false);
+    });
+  }
+
+  it("a turn that searched until the loop brake is given its start once more, and runs the pipeline", async () => {
+    const { registry, delegated } = await loadModules();
+    scriptSearchingStepModel({ ignoreStartFor: 3 });
+
+    const result = await registry.getTool("run_workflow")!.execute(
+      { name: "sourced_brief", workflowType: "scene" },
+      { sessionId: "chat-start-brake", workspacePath: "/workspace" },
+    );
+
+    expect(result.success).toBe(true);
+    expect(delegated).toEqual(PIPELINE);
+    // Three searches with the directive in the tail, the brake, then the directive in the history too.
+    const starts = (index: number) => messagesOfCall(index).filter((message) => contentOf(message).startsWith(START)).length;
+    expect([starts(0), starts(1), starts(2), starts(3)]).toEqual([1, 1, 1, 2]);
+  });
+
+  it("a turn that ran out of iterations searching is given its start once more, and runs the pipeline", async () => {
+    const { registry, delegated } = await loadModules();
+    scriptSearchingStepModel({ ignoreStartFor: 2 });
+
+    const result = await registry.getTool("run_workflow")!.execute(
+      { name: "sourced_brief", workflowType: "scene" },
+      { sessionId: "chat-start-ceiling", workspacePath: "/workspace", maxIterationsOverride: 2 },
+    );
+
+    expect(result.success).toBe(true);
+    expect(delegated).toEqual(PIPELINE);
+  });
+
+  it("the start is given once: a turn that keeps searching ends at the next brake", async () => {
+    const { registry, delegated } = await loadModules();
+    scriptSearchingStepModel({ ignoreStartFor: 100 });
+
+    await registry.getTool("run_workflow")!.execute(
+      { name: "sourced_brief", workflowType: "scene" },
+      { sessionId: "chat-start-once", workspacePath: "/workspace" },
+    );
+
+    expect(delegated).toEqual([]);
+    // Three searches to the brake, one more after the start, and the brake again.
+    expect(streamMock.mock.calls).toHaveLength(4);
+  });
+
+  it("control: a chat turn that searches until the loop brake ends there, as before", async () => {
+    const { runtime, session, delegated } = await loadModules();
+    scriptSearchingStepModel({ ignoreStartFor: 100 });
+
+    await runtime.runTurn({
+      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      userMessage: "Use researcher for the sources, evidence_analyst to weigh them, and summarizer to write the brief.",
+    });
+
+    expect(delegated).toEqual([]);
+    expect(streamMock.mock.calls).toHaveLength(3);
+    for (let index = 0; index < 3; index += 1) {
+      expect(messagesOfCall(index).some((message) => contentOf(message).startsWith(START))).toBe(false);
+    }
+  });
+});
+
 // A step's turn read the request that started the workflow, which it was handed as "Original user
 // request", as its own instruction: "Nutze den Workflow „verified_research_brief“ …" sent it looking
 // for that workflow until the loop brake ended it (E2E 2026-10-10).

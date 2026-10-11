@@ -84,6 +84,9 @@ export interface AssembleTurnSystemMessagesParams {
   /** The agent the user directed this turn to (`--agent`), until that agent has run: the line that
    *  names it. Empty otherwise. */
   directiveAgentPrompt?: string;
+  /** A scene or job step's turn, until one of its pipeline's agents has returned: the [WORKFLOW STEP]
+   *  directive that names them (agent/workflow-step-pipeline.ts). Empty otherwise. */
+  workflowStepStartPrompt?: string;
   /**
    * Whether the turn is offered search_workflows. The multi-domain plan-first nudge asks for it, and a
    * step's turn, which runs without the catalog tools, was told to call it (E2E 2026-10-10). Absent,
@@ -218,6 +221,7 @@ export async function assembleTurnSystemMessages(
     approvedRunCandidateEnforcementPrompt,
     workflowExecutionEnforcementPrompt,
     directiveAgentPrompt = "",
+    workflowStepStartPrompt = "",
     workflowSearchOffered = true,
     applyRoutingTone,
     buildTemporalContextPrompt,
@@ -487,8 +491,11 @@ export async function assembleTurnSystemMessages(
       approvedRunCandidateEnforcementPrompt,
       workflowExecutionEnforcementPrompt,
       directiveAgentPrompt,
+      workflowStepStartPrompt,
     ].some((prompt) => prompt.length > 0);
-    const planNudgeArmed = planFirst && (
+    // A step's pipeline is its plan, and its directive names the first call: a plan nudge beside it
+    // would ask for record_plan instead, on iteration 0 too.
+    const planNudgeArmed = planFirst && !workflowStepStartPrompt && (
       iterationCount === 0
       || (iterationCount === 1
         && multiDomainPlan
@@ -590,6 +597,7 @@ export async function assembleTurnSystemMessages(
       ...(workflowCatalogGuidance ? [{ role: "system" as const, content: workflowCatalogGuidance }] : []),
       ...(approvedRunCandidateGuidance ? [{ role: "system" as const, content: approvedRunCandidateGuidance }] : []),
       ...(directiveAgentPrompt ? [{ role: "system" as const, content: directiveAgentPrompt }] : []),
+      ...(workflowStepStartPrompt ? [{ role: "system" as const, content: workflowStepStartPrompt }] : []),
       ...(delegatedResearchEnforcementPrompt ? [{ role: "system" as const, content: delegatedResearchEnforcementPrompt }] : []),
       ...(searchAgentsNoMatchFallbackPrompt ? [{ role: "system" as const, content: applyRoutingTone(searchAgentsNoMatchFallbackPrompt) }] : []),
       ...(maintenanceDelegationEnforcementPrompt ? [{ role: "system" as const, content: applyRoutingTone(maintenanceDelegationEnforcementPrompt) }] : []),
@@ -662,7 +670,8 @@ export async function assembleTurnSystemMessages(
           + unresolvedDelegationEnforcementPrompt.length
           + workflowCatalogEnforcementPrompt.length
           + approvedRunCandidateEnforcementPrompt.length
-          + workflowExecutionEnforcementPrompt.length,
+          + workflowExecutionEnforcementPrompt.length
+          + workflowStepStartPrompt.length,
         sharedFindings: sharedFindingsSystemMessage.length,
         agentPerformance: agentPerformanceNote.length,
         // Head vs tail is the cache-relevant split: head bytes are the KV prefix key,

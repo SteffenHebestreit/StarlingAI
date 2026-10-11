@@ -303,6 +303,21 @@ describe("assembleTurnSystemMessages — the plan-first nudge after iteration 0"
     expect(planNudge(await assemble(0))).toContain(SEARCH_FIRST);
   });
 
+  // A step's pipeline is its plan, and the [WORKFLOW STEP] directive names its first call
+  // (agent/workflow-step-pipeline.ts): a nudge beside it asked for record_plan instead.
+  it("is not sent beside a step's start directive, on iteration 0 either", async () => {
+    const { assembleResult } = setUp();
+    const start = "[WORKFLOW STEP] Call delegate_to_agent for researcher now.";
+    for (const iterationCount of [0, 1]) {
+      const result = await assembleResult(iterationCount, { ...searchedOnly, workflowStepStartPrompt: start });
+      expect(planNudge(result.messages), `iteration ${iterationCount}`).toBeUndefined();
+      expect(result.planFirstPending).toBe(false);
+      // In the tail, after the history.
+      const userIndex = result.messages.findIndex((message) => message.role === "user" && message.content === USER_MESSAGE);
+      expect(result.messages.findIndex((message) => message.content === start)).toBeGreaterThan(userIndex);
+    }
+  });
+
   it("stays off after iteration 0 when the caller passes no tally, as before", async () => {
     const { assemble } = setUp();
     expect(planNudge(await assemble(1))).toBeUndefined();
