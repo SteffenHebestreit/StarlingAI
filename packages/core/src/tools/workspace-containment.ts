@@ -41,6 +41,11 @@ export interface WorkspaceRealPath {
  * real path of that zone in the real root, so a link can neither leave the workspace nor cross into
  * another zone, the state directory included.
  *
+ * A ZONE DIRECTORY THAT IS ITSELF A LINK IS REFUSED, DELIBERATELY, with every path through it. The
+ * zone is the segment's place in the real root, not where the segment leads, so even a link that
+ * stays in the workspace does not pass: a sandbox could otherwise replace generated/ with a link to
+ * agents/, and every write the gateway makes into generated/ would land in a config shard.
+ *
  * The nearest part of the path that exists is resolved, the last component too unless `final` is
  * "link"; what does not exist yet cannot be a link. A link that leads nowhere is refused: a write
  * through it creates its target, wherever that is. A workspace root that does not exist has nothing

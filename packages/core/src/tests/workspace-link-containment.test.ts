@@ -104,6 +104,14 @@ describe("containedWorkspaceRealPath", () => {
     }
   });
 
+  it("refuses every path through a zone directory that is itself a link, even one into the workspace", () => {
+    rmSync(join(ws, "generated"), { recursive: true, force: true });
+    linkDir(join(ws, "agents"), join(ws, "generated"));
+    expect(containedWorkspaceRealPath(join(ws, "generated", "evil.jsonc"), ws)).toBeNull();
+    expect(containedWorkspaceRealPath(join(ws, "generated", "new", "x.txt"), ws)).toBeNull();
+    expect(containedWorkspaceRealPath(join(ws, "generated"), ws)).toBeNull();
+  });
+
   it("allows a link that stays in its zone", () => {
     mkdirSync(join(ws, "generated", "site"), { recursive: true });
     linkDir(join(ws, "generated", "site"), join(ws, "generated", "alias"));
@@ -186,11 +194,13 @@ describe("the write tools through a link in a directory on the way", () => {
     unchanged();
   });
 
-  it("list_files names a link and does not list what it leads to", async () => {
+  it("list_files names a link, marks it, says what the mark is, and does not list what it leads to", async () => {
     linkDir(outside, join(ws, "generated", "out"));
     const result = await run("list_files", { path: ".", recursive: true });
     expect(result.success).toBe(true);
-    expect(result.output).toContain("out");
+    expect(result.output.split("\n").map((line) => line.trim())).toContain("out@");
+    expect(result.output).toMatch(/entries are links, marked "@" above: listed, not followed\./);
+    expect(result.metadata?.["links"]).toBe(4);
     expect(result.output).not.toContain("secret.txt");
   });
 
@@ -234,10 +244,39 @@ describe("the write tools on a link that is the target itself", () => {
     expect(existsSync(join(ws, "agents", "new.jsonc"))).toBe(false);
   });
 
-  it("a full-scope agent cannot write the state directory by name either", async () => {
-    const result = await run("write_file", { path: ".starlingai/accounts.json", content: "{}", mode: "overwrite" }, "full");
-    expect(result.success).toBe(false);
+  it("a full-scope agent cannot write the state directory by name either, under any spelling", async () => {
+    for (const path of [".starlingai/accounts.json", ".STARLINGAI/accounts.json"]) {
+      const result = await run("write_file", { path, content: "{}", mode: "overwrite" }, "full");
+      expect(result.success, path).toBe(false);
+      expect(result.error, path).toMatch(/protected path/);
+    }
     unchanged();
+  });
+
+  it("the write tools refuse by name only the state directory: a project's dotenv file is written again", async () => {
+    // read_file's denylist applied to the name refused these as escaping the workspace.
+    for (const path of ["app/.env", ".envrc"]) {
+      const written = await run("write_file", { path, content: "KEY=value\n", mode: "overwrite" });
+      expect(written.success, `${path}: ${written.error}`).toBe(true);
+    }
+    expect((await run("edit_file", { path: "app/.env", old_string: "value", new_string: "other" })).success).toBe(true);
+    expect(readFileSync(join(ws, "generated", "app", ".env"), "utf8")).toBe("KEY=other\n");
+    expect((await run("delete_file", { path: "app/.env" })).success).toBe(true);
+
+    // The state directory is refused by name in any zone, and the refusal says why.
+    const state = await run("write_file", { path: "app/.starlingai/memory/x.json", content: "{}", mode: "overwrite" });
+    expect(state.success).toBe(false);
+    expect(state.error).toMatch(/protected path/);
+    expect(state.error).not.toMatch(/escapes workspace boundary/);
+  });
+
+  it("a link on the way to a file read_file refuses is refused as a protected path", async () => {
+    mkdirSync(join(ws, "generated", "repo", ".git"), { recursive: true });
+    linkDir(join(ws, "generated", "repo", ".git"), join(ws, "generated", "notes"));
+    const result = await run("write_file", { path: "notes/config", content: "[core]\n", mode: "overwrite" });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/protected path/);
+    expect(existsSync(join(ws, "generated", "repo", ".git", "config"))).toBe(false);
   });
 
   it("an ordinary write still works", async () => {

@@ -4,6 +4,7 @@ import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
+import { PRODUCT } from "../product/index.js";
 import { containedWorkspaceRealPath, generatedZoneDir, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
 import { UNFINISHED_STUB_MARKER } from "../agent/sub-agent-prompt-guidance.js";
 import { buildArtifactTextPreview } from "./artifact-preview.js";
@@ -189,27 +190,71 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
  * followed them: write_file to generated/evil.jsonc linked to ../agents/evil.jsonc overwrote a
  * config shard, and generated/up linked to .. reached the parent (review 2026-10-11). The directory
  * the target is in must really be in the target's zone (resolveWorkspaceWritePath,
- * containedWorkspaceRealPath), and its real path, like its own, must not be one the file tools
- * refuse to read. The target itself must not be a link: write_file, edit_file and create_dir refuse
- * one, which would write wherever it leads; delete_file (`finalLink: "remove"`) removes the link and
- * leaves what it leads to.
+ * containedWorkspaceRealPath), and where a link on the way makes its real path differ from the path
+ * as named, the real path must not be one the file tools refuse to read (refusedWriteTarget). The
+ * target itself must not be a link: write_file, edit_file and create_dir refuse one, which would
+ * write wherever it leads; delete_file (`finalLink: "remove"`) removes the link and leaves what it
+ * leads to.
+ *
+ * BY NAME, ONLY THE GATEWAY'S STATE DIRECTORY. Applying read_file's whole denylist to the path as
+ * named refused `app/.env` and `.envrc`, which a coder scaffolding a project writes, and said the
+ * path escaped the workspace (review 2026-10-11). The write tools never refused a name before; the
+ * state directory is the one they must not write under any name or spelling (a full-scope agent's
+ * root holds accounts.json and approvals/ there), and a refusal by name says "protected path".
  */
 function guardWritePath(
   path: string,
   workspacePath: string,
   finalLink: "refuse" | "remove" = "refuse",
-): { safe: boolean; resolved: string; relativePath: string } {
+): { safe: boolean; resolved: string; relativePath: string; refusal?: WriteRefusal } {
   try {
     const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath, { final: "link" });
+    const named = relative(workspacePath, resolved);
+    if (isGatewayStatePath(named)) return { safe: false, resolved, relativePath, refusal: "protected" };
     const real = containedWorkspaceRealPath(resolved, workspacePath, { final: "link" });
-    const safe = real !== null
-      && !isSensitiveWorkspacePath(relative(workspacePath, resolved))
-      && !isSensitiveWorkspacePath(relative(real.root, real.real))
-      && !(finalLink === "refuse" && isLink(resolved));
-    return { safe, resolved, relativePath };
+    if (real === null || (finalLink === "refuse" && isLink(resolved))) {
+      return { safe: false, resolved, relativePath, refusal: "boundary" };
+    }
+    if (refusedWriteTarget(named, relative(real.root, real.real))) {
+      return { safe: false, resolved, relativePath, refusal: "protected" };
+    }
+    return { safe: true, resolved, relativePath };
   } catch {
-    return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path };
+    return { safe: false, resolved: resolve(workspacePath, path.replace(/^\//, "")), relativePath: path, refusal: "boundary" };
   }
+}
+
+/** Why guardWritePath refused a path: it leads out of its zone, or it is a protected path. */
+type WriteRefusal = "boundary" | "protected";
+
+/** The error a write tool returns for a path guardWritePath refused. */
+function writeRefusalError(refusal: WriteRefusal | undefined): string {
+  return refusal === "protected"
+    ? `Refused: protected path (the gateway's state directory, ${PRODUCT.stateDirName}/, or a file a link on the way leads to that read_file refuses)`
+    : "Path escapes workspace boundary";
+}
+
+/** Whether a workspace-relative path names the gateway's state directory or anything in it, in
+ *  any case: a case-insensitive bind opens `.STARLINGAI/` as `.starlingai/`. */
+function isGatewayStatePath(relativePath: string): boolean {
+  const state = PRODUCT.stateDirName.toLowerCase();
+  return relativePath.replace(/\\/g, "/").toLowerCase().split("/").includes(state);
+}
+
+/**
+ * Whether a write tool refuses where a path really leads (`real`, relative to the real root) for the
+ * path as named (`named`, relative to the root): always where that is the state directory, and,
+ * only where a link on the way makes the two differ, where it is a file read_file refuses
+ * (isSensitiveWorkspacePath): `notes` linked to `.git` must not turn a write into a write of
+ * `.git/config`. A path reached through no link is judged by name alone (guardWritePath).
+ */
+function refusedWriteTarget(named: string, real: string): boolean {
+  if (isGatewayStatePath(real)) return true;
+  const norm = (rel: string) => {
+    const slashed = rel.replace(/\\/g, "/");
+    return process.platform === "win32" ? slashed.toLowerCase() : slashed;
+  };
+  return norm(named) !== norm(real) && isSensitiveWorkspacePath(real);
 }
 
 /** Whether the path itself is a link (a junction too), without following it. */
@@ -401,7 +446,7 @@ registerTool({
       };
     }
 
-    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0 };
+    const notes: ListDirNotes = { unreadable: 0, cutByDepth: 0, links: 0 };
     let entries: string[];
     try {
       entries = listDir(resolved, recursive ? LIST_RECURSIVE_DEPTH : 0, recursive, listHintPrefix(path), notes);
@@ -411,6 +456,7 @@ registerTool({
     const footer = [
       notes.unreadable > 0 ? `${notes.unreadable} entr${notes.unreadable === 1 ? "y" : "ies"} could not be read — marked "unreadable" above.` : "",
       notes.cutByDepth > 0 ? `${notes.cutByDepth} director${notes.cutByDepth === 1 ? "y was" : "ies were"} not expanded: the recursive listing stops ${LIST_RECURSIVE_DEPTH} levels down — call list_files on the path shown to see inside.` : "",
+      notes.links > 0 ? `${notes.links} entr${notes.links === 1 ? "y is a link" : "ies are links"}, marked "@" above: listed, not followed.` : "",
     ].filter(Boolean).join("\n");
     // An empty-string output reads as "something went wrong" to the model — it
     // retries the same listing over and over (audit a438ef4a: 5 identical
@@ -424,6 +470,7 @@ registerTool({
         count: entries.length,
         ...(notes.unreadable > 0 ? { unreadable: notes.unreadable } : {}),
         ...(notes.cutByDepth > 0 ? { cutByDepth: notes.cutByDepth } : {}),
+        ...(notes.links > 0 ? { links: notes.links } : {}),
       },
     };
   },
@@ -649,10 +696,10 @@ registerTool({
       return { success: false, output: "", error: "content is required — write_file needs the file content (or, for mode:\"append\", the chunk to append). Refusing to write a 0-byte file. If the content is large, build it in bounded chunks with mode:\"append\"." };
     }
 
-    const { safe, resolved, relativePath } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, relativePath, refusal } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) {
-      return { success: false, output: "", error: "Path escapes workspace boundary" };
+      return { success: false, output: "", error: writeRefusalError(refusal) };
     }
 
     const ext = extname(resolved).toLowerCase();
@@ -798,9 +845,9 @@ registerTool({
     const oldStr = String(args["old_string"] ?? "");
     const newStr = String(args["new_string"] ?? "");
     const replaceAll = args["replace_all"] === true;
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
     if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
 
@@ -883,9 +930,9 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!path.trim()) return { success: false, output: "", error: "path is required" };
 
     try {
@@ -917,9 +964,9 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved } = guardWritePath(path, ctx.workspacePath, "remove");
+    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath, "remove");
 
-    if (!safe) return { success: false, output: "", error: "Path escapes workspace boundary" };
+    if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     // lstat: a link is removed itself, never what it leads to, and one that leads nowhere is there too.
     let stat: ReturnType<typeof lstatSync>;
     try {
@@ -951,7 +998,7 @@ registerTool({
 /** How many levels below the listed directory a recursive list_files descends. */
 const LIST_RECURSIVE_DEPTH = 3;
 
-interface ListDirNotes { unreadable: number; cutByDepth: number }
+interface ListDirNotes { unreadable: number; cutByDepth: number; links: number }
 
 /** The error's code (EACCES, ENOENT, …) when it has one, else its message. */
 function errorCode(err: unknown): string {
@@ -993,6 +1040,12 @@ function listDir(dir: string, depth: number, recursive: boolean, relDir: string,
     } catch (err) {
       notes.unreadable++;
       entries.push(`${name} (unreadable: ${errorCode(err)})`);
+      continue;
+    }
+    // Marked, so a link to a directory does not read as an empty file (the footer says what @ is).
+    if (stat.isSymbolicLink()) {
+      notes.links++;
+      entries.push(`${name}@`);
       continue;
     }
     if (!stat.isDirectory()) {
