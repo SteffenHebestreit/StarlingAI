@@ -232,6 +232,23 @@ describe("the dashboard's workspace routes", () => {
     expect((await get(`/api/workspace/archive?path=${encodeURIComponent("generated/out")}`)).status).toBe(400);
   });
 
+  it("the archive walks no link swapped in after the path was resolved", async () => {
+    const workspacePath = await import("../tools/workspace-path.js");
+    mkdirSync(join(ws, "generated", "site"), { recursive: true });
+    writeFileSync(join(ws, "generated", "site", "kept.txt"), "kept");
+    const resolveLexically = workspacePath.resolvePathWithinWorkspace;
+    vi.spyOn(workspacePath, "resolvePathWithinWorkspace").mockImplementation((...args) => {
+      const resolved = resolveLexically(...args);
+      // A sandbox at the same moment: generated/site, checked and resolved, becomes a link out.
+      rmSync(join(ws, "generated", "site"), { recursive: true, force: true });
+      linkDir(outside, join(ws, "generated", "site"));
+      return resolved;
+    });
+    const response = await get(`/api/workspace/archive?path=${encodeURIComponent("generated/site")}`);
+    expect(response.status).toBe(400);
+    expect(Buffer.from(await response.arrayBuffer()).includes(Buffer.from("secret.txt"))).toBe(false);
+  });
+
   it.skipIf(!fileLinks)(`an upload is not written through a link at its own name (${FILE_LINK_REASON})`, async () => {
     symlinkSync(join(outside, "secret.txt"), join(ws, "generated", "notes.txt"));
     const form = new FormData();

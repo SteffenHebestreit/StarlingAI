@@ -18,6 +18,7 @@ import {
   GENERATED_SUBDIR,
   UPLOADS_SUBDIR,
   type WorkspaceContainmentOptions,
+  type WorkspaceRealPath,
 } from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
@@ -180,7 +181,13 @@ export function registerWorkspaceRoutes(app: Hono): void {
   /** Whether a path these routes built themselves under a resolved root stays in its zone of the
    *  caller's own root through any link (containedWorkspaceRealPath). */
   function staysInCallerRoot(resolved: string): boolean {
-    return containedWorkspaceRealPath(resolved, userWorkspaceRoot(getConfig().workspacePath)) !== null;
+    return staysInCallerZone(resolved) !== null;
+  }
+
+  /** Where a path in the caller's own root really is, checked to be in its zone; null when a link
+   *  takes it out (containedWorkspaceRealPath). */
+  function staysInCallerZone(resolved: string): WorkspaceRealPath | null {
+    return containedWorkspaceRealPath(resolved, userWorkspaceRoot(getConfig().workspacePath));
   }
 
   function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
@@ -475,10 +482,14 @@ export function registerWorkspaceRoutes(app: Hono): void {
     try {
       const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
       // The archive leaves out every link INSIDE the directory (addWorkspacePathToZip), so the walk
-      // starts at where the requested path really is: the resolver held it to its zone through any
-      // link, and a requested path that is itself a link inside its zone (generated/latest ->
-      // generated/v2) came back as an empty archive.
-      const walkRoot = await realpath(resolved);
+      // starts at where the requested path really is: a requested path that is itself a link inside
+      // its zone (generated/latest -> generated/v2) came back as an empty archive. That real path is
+      // the one the containment check returns, taken again here: the resolver held the path to its
+      // zone when it resolved it, and a link a sandbox swapped in after that sent a realpath of its
+      // own, which nothing checked, and the walk with it, anywhere the gateway can read.
+      const contained = staysInCallerZone(resolved);
+      if (contained === null) return c.json({ error: "Path must stay within the workspace" }, 400);
+      const walkRoot = contained.real;
       const fileStat = await stat(walkRoot);
       if (!fileStat.isFile() && !fileStat.isDirectory()) {
         return c.json({ error: "Requested workspace path must be a file or directory" }, 400);
