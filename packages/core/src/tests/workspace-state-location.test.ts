@@ -470,6 +470,46 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(existsSync(marker(shared))).toBe(true);
   });
 
+  it("joins an append-only ledger both sides have, older lines first, and keeps the other files both have aside", async () => {
+    const { shared, root, state } = deployment();
+    const users = join(shared, STATE, "users");
+    const staged = join(users, `.${ALICE}.relocating`);
+    const line = (summary: string) => `${JSON.stringify({ id: summary, ts: new Date().toISOString(), scope: "workflow", request: "r", summary, actions: [], outcome: "success", tags: [] })}\n`;
+    // What an earlier boot staged whole before its move failed, and what that boot's stores wrote since.
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, "flow_memory.ndjson"), line("old-1") + line("old-2"));
+    writeFileSync(join(staged, "agent_outcomes.ndjson"), "{\"task\":\"old\"}"); // its last line cut short by a crash
+    writeFileSync(join(staged, "promoted_agents.json"), "{\"old\":{}}");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "flow_memory.ndjson"), line("new-1"));
+    writeFileSync(join(state, "agent_outcomes.ndjson"), "{\"task\":\"new\"}\n");
+    writeFileSync(join(state, "promoted_agents.json"), "{\"new\":{}}");
+
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFlowMemoryEntries(root).map((entry) => entry.summary)).toEqual(["old-1", "old-2", "new-1"]);
+    expect(readFileSync(join(state, "agent_outcomes.ndjson"), "utf8")).toBe("{\"task\":\"old\"}\n{\"task\":\"new\"}\n");
+    expect(readFileSync(join(state, "promoted_agents.json"), "utf8")).toBe("{\"new\":{}}");
+    const conflicts = readdirSync(users).filter((name) => name.startsWith(`.${ALICE}.conflicts-`));
+    expect(conflicts).toHaveLength(1);
+    expect(readdirSync(join(users, conflicts[0]!))).toEqual(["promoted_agents.json"]);
+    expect(readdirSync(state).sort()).toEqual([".relocated", "agent_outcomes.ndjson", "flow_memory.ndjson", "promoted_agents.json"]);
+  });
+
+  it("joins a ledger once, when a pass stopped after joining it and before removing the older one", async () => {
+    const { shared, state } = deployment();
+    const staged = join(shared, STATE, "users", `.${ALICE}.relocating`);
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, "flow_memory.ndjson"), "{\"n\":1}\n");
+    // A joined file that pass wrote and never renamed into place: removed, not adopted.
+    writeFileSync(join(staged, `.${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}.copy`), "{\"n\":1}\n{\"n\":2}\n");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "flow_memory.ndjson"), "{\"n\":1}\n{\"n\":2}\n");
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFileSync(join(state, "flow_memory.ndjson"), "utf8")).toBe("{\"n\":1}\n{\"n\":2}\n");
+    expect(readdirSync(state).sort()).toEqual([".relocated", "flow_memory.ndjson"]);
+    expect(readdirSync(join(shared, STATE, "users")).sort()).toEqual([".relocated-v1", ALICE]);
+  });
+
   it("waits for a pass another live process runs, and takes over the lock of one that died", async () => {
     const { shared, old, state } = deployment();
     mkdirSync(join(old, "memory"), { recursive: true });

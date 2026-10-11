@@ -34,7 +34,8 @@
  * names the account and how to recover; and the marker is not written, so the next boot tries again.
  * That boot's stores do make the new directory when the account writes, so the next pass can find
  * both without the account's ACCOUNT_DONE: it then stages the old state as above and merges it in,
- * entry by entry, overwriting nothing; what both have stays in a conflicts directory beside it, and
+ * entry by entry, overwriting nothing. An append-only ledger both have (`*.ndjson`, `*.jsonl`) is
+ * joined, the older lines first; what else both have stays in a conflicts directory beside it, and
  * is logged.
  *
  * ONE PASS AT A TIME. A standalone scene worker can boot beside the gateway; a lock file beside the
@@ -50,6 +51,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -264,9 +266,11 @@ async function stage(from: string, staging: string, copying: string, beat: () =>
 }
 
 /** Merges the staged old state into a new directory a failed boot's stores made: every entry the new
- *  one lacks moves in; what both have stays, in a conflicts directory beside them. */
+ *  one lacks moves in; an append-only ledger both have is joined (joinLedger); anything else both
+ *  have stays, in a conflicts directory beside them. */
 async function mergeStaged(segment: string, staging: string, to: string, beat: () => void): Promise<void> {
   const conflicts: string[] = [];
+  const joined: string[] = [];
   const merge = async (src: string, dst: string): Promise<void> => {
     for (const entry of readdirSync(src, { withFileTypes: true })) {
       beat();
@@ -275,25 +279,65 @@ async function mergeStaged(segment: string, staging: string, to: string, beat: (
       const kind = entryKind(into);
       if (kind === "missing") await renameRetrying(from, into);
       else if (entry.isDirectory() && kind === "directory") await merge(from, into);
-      else conflicts.push(relative(staging, from).replace(/\\/g, "/"));
+      else if (entry.isFile() && LEDGER.test(entry.name) && lstatSync(into).isFile()) {
+        await joinLedger(from, into);
+        joined.push(relative(staging, from).replace(/\\/g, "/"));
+      } else conflicts.push(relative(staging, from).replace(/\\/g, "/"));
     }
   };
   await merge(staging, to);
   if (conflicts.length === 0) {
     rmSync(staging, { recursive: true, force: true });
-    log.warn({ segment, path: to }, "An account's old workspace state was merged into the state its account wrote while the move had failed");
+    log.warn({ segment, path: to, joined }, "An account's old workspace state was merged into the state its account wrote while the move had failed");
     return;
   }
   const kept = join(dirname(to), `.${segment}.conflicts-${new Date().toISOString().replace(/[-:.]/g, "")}`);
   await renameRetrying(staging, kept);
   log.warn(
-    { segment, path: to, conflicts: conflicts.slice(0, 20), conflictCount: conflicts.length, oldCopies: kept },
-    "An account's old workspace state was merged into the state its account wrote while the move had failed; where both had "
-      + "a file the newer one was kept, and the older one is in `oldCopies`",
+    { segment, path: to, joined, conflicts: conflicts.slice(0, 20), conflictCount: conflicts.length, oldCopies: kept },
+    "An account's old workspace state was merged into the state its account wrote while the move had failed; ledgers both had "
+      + "were joined, and where both had another file the newer one was kept, and the older one is in `oldCopies`",
   );
 }
 
-/** The name a file's own copy is made under in `dir` before it is renamed over the file. */
+/** An append-only ledger of one record per line (flow_memory.ndjson, agent_outcomes.ndjson, the
+ *  trajectory cache): two of them joined are one ledger in the same format. Moving the older one
+ *  aside, as any other file both sides have, dropped its history out of what the stores read. */
+const LEDGER = /\.(ndjson|jsonl)$/i;
+
+/** The older ledger's lines, then the live one's, into the live ledger. The two are written whole
+ *  to a file of their own beside the older one (an OWN_COPY name, which the next pass removes if
+ *  this one stops before the rename), synced, and renamed over the live ledger, so a crash leaves
+ *  either ledger whole. Only then is the older one removed. A live ledger that already starts with
+ *  the older one is from a pass that stopped after the rename: it is not joined twice. */
+async function joinLedger(older: string, live: string): Promise<void> {
+  const before = readFileSync(older);
+  const after = readFileSync(live);
+  if (!(after.length >= before.length && after.subarray(0, before.length).equals(before))) {
+    // A last line a crash cut short still ends before the first line of the live ledger.
+    const separator = before.length > 0 && before[before.length - 1] !== 0x0a ? Buffer.from("\n") : Buffer.alloc(0);
+    const both = join(dirname(older), `.${randomUUID()}.copy`);
+    const fd = openSync(both, "wx");
+    try {
+      for (const part of [before, separator, after]) {
+        for (let written = 0; written < part.length; ) written += writeSync(fd, part, written, part.length - written);
+      }
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      await renameRetrying(both, live);
+    } catch (err) {
+      rmSync(both, { force: true });
+      throw err;
+    }
+  }
+  rmSync(older, { force: true });
+}
+
+/** The name a file this pass writes in the staging directory has until it is renamed into place: a
+ *  file's own copy (clean), or two ledgers joined (joinLedger). */
 const OWN_COPY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.copy$/;
 
 /** Removes everything under `dir` that is not a plain file or directory, following none, and gives a
