@@ -16,6 +16,7 @@ import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { resolveSecretRef } from "../tools/infrastructure-shared.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
+import { multiUserAuthActive, segmentFor } from "../runtime/user-scope.js";
 import { USERS_SUBDIR } from "../tools/workspace-zones.js";
 import type { S3Client } from "@aws-sdk/client-s3";
 
@@ -67,6 +68,14 @@ export async function callerUploadKey(relativePath: string): Promise<{ key: stri
   const sharedRoot = resolve(getConfig().workspacePath);
   const root = userWorkspaceRoot(sharedRoot);
   const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+  // Under multi-user auth a caller without an identity resolves at the shared root, where users/
+  // holds every account's root, so a path there names another account's file. No caller today gets
+  // here without one (review 2026-10-12); this fails closed for the next that does, and leaves an
+  // identity-less run its own shared-root files.
+  const firstSegment = normalized.split("/").find((part) => part !== "" && part !== ".");
+  if (firstSegment?.toLowerCase() === USERS_SUBDIR && !segmentFor() && multiUserAuthActive()) {
+    throw new UploadPathRefusedError(relativePath, "no signed-in account owns a path under users/");
+  }
   const file = resolve(root, normalized);
   const withinRoot = relative(root, file);
   if (withinRoot === "" || !isWithin(root, file)) throw new UploadPathRefusedError(relativePath, "it is not a file in your own workspace");

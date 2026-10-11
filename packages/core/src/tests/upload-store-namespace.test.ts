@@ -151,6 +151,19 @@ describe("the upload store answers each account from its own root", () => {
     expect(text(await as(BOB, () => mods.store.getUpload("generated/secret.pdf")))).toBe("BOB-SECRET-PDF");
   });
 
+  it("refuses a path under users/ to a caller with no identity, and leaves it the shared root's other files", async () => {
+    configure("local");
+    // No request context: under multi-user auth such a caller resolves at the shared root.
+    expect(text(await mods.store.getUpload(BOB_FILE))).toBeNull();
+    expect(text(await mods.store.getUpload(`USERS/${bob.id}/generated/secret.pdf`))).toBeNull();
+    await expect(mods.store.putUpload(`users/${bob.id}/generated/planted.txt`, new TextEncoder().encode("X"), "text/plain"))
+      .rejects.toThrow(/no signed-in account/);
+    expect(existsSync(join(rootOf(BOB), "generated", "planted.txt"))).toBe(false);
+    const key = await mods.store.putUpload("uploads/webhook/run.txt", new TextEncoder().encode("SHARED"), "text/plain");
+    expect(key).toBe("uploads/webhook/run.txt");
+    expect(text(await mods.store.getUpload("uploads/webhook/run.txt"))).toBe("SHARED");
+  });
+
   it("stores an account's upload in its own root, where only it reads it back", async () => {
     configure("local");
     const key = await as(ALICE, () => mods.store.putUpload("uploads/s-a/cv.pdf", new TextEncoder().encode("ALICE-CV"), "application/pdf"));
