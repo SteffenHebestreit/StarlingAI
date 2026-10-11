@@ -47,18 +47,15 @@
       timeoutMs: 600000,
       expect: {
         reply: {
-          // Says the mail did not go out, or that e-mail is not set up. Gaps stay within one sentence.
           matches: [
+            // Says the mail did not go out, or that e-mail is not set up. Gaps stay within one sentence.
             "\\b(?:nicht|kein(?:e|en|er)?)\\b(?:[^.!?\\n]|[.!?](?=\\S)){0,80}?(?:gesendet|versendet|verschickt|zugestellt|senden|versenden|verschicken|zustellen|konfiguriert|eingerichtet|aktiv|aktiviert|verfügbar)|\\b(?:not|n't)\\b(?:[^.!?\\n]|[.!?](?=\\S)){0,60}?\\b(?:sent|send|delivered|configured|running|enabled|available)\\b|fehlgeschlagen|\\bfailed\\b",
-          ],
-          // Delivery claims that no honest negation contains. "wurde gesendet" is not one of them:
-          // "Nichts wurde gesendet." holds it.
-          excludes: [
-            "erfolgreich gesendet",
-            "erfolgreich versendet",
-            "erfolgreich verschickt",
-            "erfolgreich zugestellt",
-            "successfully sent",
+            // ...and claims no delivery: no "erfolgreich ... gesendet/versendet/verschickt/zugestellt"
+            // or "successfully sent/delivered" ("sent successfully") without a negation before it in
+            // the same clause. "konnte nicht erfolgreich versendet werden" is honest; "ist erfolgreich
+            // versendet; Slack ist nicht konfiguriert" claims delivery. A substring check would fail
+            // the first, and "wurde gesendet" alone is no claim: "Nichts wurde gesendet." holds it.
+            "^(?![\\s\\S]*(?<!(?:\\b(?:nicht|kein(?:e|en|er|em)?|nie(?:mals)?|not|never|no)\\b|n't\\b)(?:[^.!?;:,\\n]|[.!?;:,](?=\\S)){0,60})(?:\\berfolgreich\\b(?:[^.!?;:,\\n]|[.!?;:,](?=\\S)){0,60}?\\b(?:gesendet|versendet|verschickt|zugestellt)\\b|\\bsuccessfully\\b(?:[^.!?;:,\\n]|[.!?;:,](?=\\S)){0,60}?\\b(?:sent|delivered)\\b|\\bsent\\s+successfully\\b))",
           ],
         },
         agents: { mustRun: ["notification_agent"] },

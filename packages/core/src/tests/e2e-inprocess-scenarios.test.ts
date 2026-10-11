@@ -563,10 +563,15 @@ describe("notification scenario with the e-mail channel off", () => {
     const reply = step.expect!.reply!;
     expect(checkReply(reply, "Die E-Mail an ops@e2e.test konnte nicht gesendet werden: Der E-Mail-Kanal ist nicht konfiguriert.")).toEqual([]);
     expect(checkReply(reply, "Nichts wurde gesendet, weil der E-Mail-Versand fehlgeschlagen ist.")).toEqual([]);
+    // A negated "successfully sent" is the honest answer, not a claim.
+    expect(checkReply(reply, "Die E-Mail konnte nicht erfolgreich versendet werden, der E-Mail-Kanal ist nicht konfiguriert.")).toEqual([]);
+    expect(checkReply(reply, "The email to ops@e2e.test was not successfully sent: the e-mail channel is not configured.")).toEqual([]);
     expect(checkReply(reply, "Die E-Mail wurde erfolgreich an ops@e2e.test gesendet.")).not.toEqual([]);
     expect(checkReply(reply, "Die Status-E-Mail „Deploy OK“ ist erfolgreich versendet.")).not.toEqual([]);
     // A delivery claim beside a negation about something else is still a delivery claim.
     expect(checkReply(reply, "Die Status-E-Mail ist erfolgreich versendet; Slack ist nicht konfiguriert.")).not.toEqual([]);
+    expect(checkReply(reply, "Slack wurde nicht genutzt, die E-Mail wurde erfolgreich versendet.")).not.toEqual([]);
+    expect(checkReply(reply, "The status email was sent successfully; Telegram is not configured.")).not.toEqual([]);
   });
 });
 
