@@ -987,9 +987,13 @@ function loadCompanionStacks() {
   });
 }
 
-/** `docker compose` on one companion stack, in the environment `sai` was started with (HOST_ENV). */
+/**
+ * `docker compose` on one companion stack, in the environment `sai` was started with (HOST_ENV) and
+ * in its compose file's directory: run from this checkout, on another drive than the stack's build
+ * context, compose's build failed before building anything ("failed to execute bake").
+ */
 function runCompanion(stack, args) {
-  return run([...companionCompose(stack, GATEWAY_NETWORK), ...args], undefined, HOST_ENV);
+  return run([...companionCompose(stack, GATEWAY_NETWORK), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
 }
 
 /** Takes the declared companion stacks down, without their volumes; one that fails is reported, not fatal. */
@@ -1010,9 +1014,9 @@ async function stopCompanionStacks() {
  * Run a command. Accepts either:
  *   run("cmd", ["arg1", "arg2"])
  *   run(["cmd", "arg1", "arg2"])
- * `env` replaces the environment the command runs in (default: this process's).
+ * `env` replaces the environment the command runs in, `cwd` its directory (default: this process's).
  */
-function run(cmdOrParts, args, env) {
+function run(cmdOrParts, args, { env, cwd } = {}) {
   let parts;
   if (Array.isArray(cmdOrParts)) {
     parts = cmdOrParts;
@@ -1025,7 +1029,7 @@ function run(cmdOrParts, args, env) {
   // and ensure arguments are passed correctly on all platforms
   const shellCmd = parts.join(" ");
   return new Promise((resolve, reject) => {
-    const child = spawn(shellCmd, [], { stdio: "inherit", shell: true, ...(env ? { env } : {}) });
+    const child = spawn(shellCmd, [], { stdio: "inherit", shell: true, ...(env ? { env } : {}), ...(cwd ? { cwd } : {}) });
     child.on("close", (code) => {
       if (code !== 0) {
         process.exitCode = code ?? 1;
