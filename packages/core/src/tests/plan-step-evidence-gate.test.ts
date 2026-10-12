@@ -905,6 +905,12 @@ describe("the research gate's turn trigger", () => {
 
     /** The nested step, verbatim in its opening: German, so the task's words arm nothing. */
     const NESTED_SITE_STEP = "Rufe die Website http://www.nordlicht-werkzeuge.test/ auf und suche nach dem Gründungsjahr und der Mitarbeiterzahl der Nordlicht Werkzeuge GmbH.";
+    /** The shortened route's ranking, in the order the router returned it: none of these agents opens a page. */
+    const SHORTENED_RANKING = [
+      { name: "evidence_analyst", score: 0.7561 },
+      { name: "data_analyst", score: 0.7568 },
+      { name: "calendar_agent", score: 0.7507 },
+    ];
     /** Stands in for the embedding router: `full` for a delegation's own task, `other` for any other query (the shortened one). */
     const routeByQuery = (tasks: readonly string[], full: ReadonlyArray<{ name: string; score: number }>, other: ReadonlyArray<{ name: string; score: number }>) =>
       vi.doMock("../tools/agent-routing.js", async (importOriginal) => {
@@ -921,11 +927,44 @@ describe("the research gate's turn trigger", () => {
           }),
         };
       });
+    /** A delegation web_task_coordinator makes from its own run: a nested session, no verdict of its own. */
+    const specialistCtx = (id: string): ToolContext => {
+      const ctx = turnCtx(`sub:${id}:web_task_coordinator:a1b2c3`, { currentAgentName: "web_task_coordinator" });
+      delete ctx.turnEvidence;
+      return ctx;
+    };
     const delegate = async (args: Record<string, unknown>, ctx: ToolContext) => {
       const { getTool } = await import("../tools/registry.js");
       await import("../tools/sub-agent.js");
       return getTool("delegate_to_agent")!.execute(args, ctx);
     };
+
+    it("keeps the router's top pick under the threshold when it opens pages itself and the step names a web address", async () => {
+      routeByQuery([NESTED_SITE_STEP], [{ name: "researcher", score: 0.7213 }], SHORTENED_RANKING);
+      const result = await delegate({ task: NESTED_SITE_STEP, deliverable: "answer" }, specialistCtx("s-nested-site"));
+
+      expect(result.success).toBe(true);
+      expect(ran()).toEqual(["researcher"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([]);
+    }, 30_000);
+
+    it("still recovers through the shortened query for the same ranking when the step names no web address", async () => {
+      const step = "Rufe die Website der Nordlicht Werkzeuge GmbH auf und suche nach dem Gründungsjahr und der Mitarbeiterzahl.";
+      routeByQuery([step], [{ name: "researcher", score: 0.7213 }], SHORTENED_RANKING);
+      await delegate({ task: step, deliverable: "answer" }, specialistCtx("s-nested-no-url"));
+
+      expect(ran()).toEqual(["evidence_analyst"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([expect.objectContaining({ agent: "evidence_analyst" })]);
+    }, 30_000);
+
+    it("does not keep a builder at the top for naming a web address, nor reach past it for a gatherer", async () => {
+      const step = "Baue eine Landingpage für die Nordlicht Werkzeuge GmbH, die auf http://www.nordlicht-werkzeuge.test/ verlinkt.";
+      routeByQuery([step], [{ name: "web_coder", score: 0.7213 }, { name: "researcher", score: 0.71 }], [{ name: "web_coder", score: 0.7561 }, { name: "content_writer", score: 0.7507 }]);
+      await delegate({ task: step }, specialistCtx("s-nested-build"));
+
+      expect(ran()).toEqual(["web_coder"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([expect.objectContaining({ agent: "web_coder" })]);
+    }, 30_000);
 
     it("holds the shortened ranking to the turn trigger: a step naming a web address goes to the research fallback", async () => {
       routeByQuery([NESTED_SITE_STEP], [], [{ name: "evidence_analyst", score: 0.7561 }, { name: "calendar_agent", score: 0.7507 }]);

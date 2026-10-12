@@ -1757,8 +1757,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // and loses its facts to the parent (audit 9b5196ad: embeddings unavailable →
           // bestAutoMatchScore 0.25 → ephemeral → starved build). A real research agent is
           // strictly better here than a fabricated one.
+          // The task's words match English only, so the same holds by structure: a step that names
+          // a web address, or that the turn trigger holds to outside facts, keeps the router's top
+          // pick when that agent opens pages itself (agentGathersDirectly). In the E2E case
+          // core-build-site-company-facts web_task_coordinator delegated "Rufe die Website http://…
+          // auf und suche …" naming no agent; the router ranked researcher first at 0.7213, under the
+          // deployment's 0.75, so nothing was queued, and Step 1b's shortened query, which had lost
+          // the address's scheme, ranked five agents within 0.007 of each other and gave the step to
+          // evidence_analyst. A top pick that does not open pages itself (a builder, a coordinator) is
+          // not kept on this ground, so "build a page linking to https://…" still goes where the
+          // threshold sends it.
           const researchTaskHasCapableCandidate =
-            taskRequiresExternalResearch(request.task) && agentIsResearchCapable(topCandidate.name);
+            (textRequiresResearch && agentIsResearchCapable(topCandidate.name))
+            || ((routedTurnTriggered || WEB_ADDRESS_RE.test(request.task)) && agentGathersDirectly(topCandidate.name));
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
             || researchTaskHasCapableCandidate
