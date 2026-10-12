@@ -199,6 +199,12 @@ describe("the QA delivery verdict at runtime", () => {
     expect(afterAnswer.indexOf(QA_DISCLOSURE_RULE)).toBeGreaterThan(afterAnswer.indexOf("Also FAIL when the answer reveals work OUTSIDE"));
   });
 
+  it("does not tell the reviewer the rewrites' rule: an answer whose agent changed the user's value still fails", async () => {
+    const { QA_ACTION_HONESTY_RULE } = await import("../agent/qa-delivery-loop.js");
+    const prompts = await runImageTurn({ artifacts: [] });
+    expect(prompts[0]).not.toContain(QA_ACTION_HONESTY_RULE);
+  });
+
   it("leaves the verdict prompt as it was when there is no file and no user's words", async () => {
     const prompts = await runImageTurn({ artifacts: [] });
     expect(prompts).toHaveLength(1);

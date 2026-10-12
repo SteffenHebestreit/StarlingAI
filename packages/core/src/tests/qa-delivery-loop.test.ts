@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence,
   buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit,
-  answerFitsRepair, answerRepairMaxChars, QA_DISCLOSURE_RULE,
+  answerFitsRepair, answerRepairMaxChars, QA_DISCLOSURE_RULE, QA_ACTION_HONESTY_RULE,
 } from "../agent/qa-delivery-loop.js";
 import { BUILTIN_EFFORT_PROFILES, runWithEffortContext } from "../runtime/effort-context.js";
 
@@ -407,6 +407,15 @@ describe("repair instructions carry the answer they repair", () => {
       buildCriteriaVerifyInstruction(ANSWER, ["documents the page's output word for word"]) ?? "",
     ]) {
       expect(instruction).toContain(QA_DISCLOSURE_RULE);
+    }
+  });
+
+  it("both repairs are told that a flaw in what was done cannot be rewritten away (E2E 2026-10-12: a repair denied a resubmission)", () => {
+    for (const instruction of [
+      buildQaImproveInstruction(ANSWER, "Quantity was changed from 1200 to 999 without user consent") ?? "",
+      buildCriteriaVerifyInstruction(ANSWER, ["the form is submitted with the requested quantity"]) ?? "",
+    ]) {
+      expect(instruction).toContain(QA_ACTION_HONESTY_RULE);
     }
   });
 

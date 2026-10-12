@@ -19,7 +19,7 @@
  */
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { answerFitsRepair, answerRepairMaxChars, currentAnswerBlock, QA_DISCLOSURE_RULE } from "./qa-delivery-loop.js";
+import { answerFitsRepair, answerRepairMaxChars, currentAnswerBlock, QA_DISCLOSURE_RULE, QA_ACTION_HONESTY_RULE } from "./qa-delivery-loop.js";
 
 /** Don't spend a slow-model check on a one-liner; only audit a real synthesized deliverable. */
 export const DELIVERABLE_CONSISTENCY_MIN_CHARS = 600;
@@ -121,7 +121,7 @@ export function buildDeliverableConsistencyRepairInstruction(
     `\n\nFix ONLY these contradictions so every figure, calculation, and claim is mutually consistent (and consistent with the user's stated facts), ${IN_REPLY_LANGUAGE}. ` +
     "Recompute any dependent totals. Keep everything else that was already correct. " +
     "Do NOT collapse tiers, options, phases, or line-item breakdowns into a single figure, and do NOT remove caveats, assumptions, or conditional estimates — preserve every legitimate distinction; only reconcile the values that actually conflict. " +
-    `${QA_DISCLOSURE_RULE} ` +
+    `${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE} ` +
     "Do NOT invent new facts; if resolving a conflict needs a value you do not have, state the assumption explicitly rather than guessing. " +
     "Return the COMPLETE corrected answer (not a diff, not a note)."
   );

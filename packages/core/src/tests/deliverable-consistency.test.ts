@@ -7,7 +7,7 @@ import {
   DELIVERABLE_CONSISTENCY_CRITERION,
   DELIVERABLE_CONSISTENCY_MIN_CHARS,
 } from "../agent/deliverable-consistency.js";
-import { parseQaVerdict, runQaDeliveryLoop, QA_DISCLOSURE_RULE } from "../agent/qa-delivery-loop.js";
+import { parseQaVerdict, runQaDeliveryLoop, QA_DISCLOSURE_RULE, QA_ACTION_HONESTY_RULE } from "../agent/qa-delivery-loop.js";
 
 /**
  * Deliverable self-consistency gate (audit 17f53ed0): a plan-less price quote recommended
@@ -105,6 +105,8 @@ describe("buildDeliverableConsistencyRepairInstruction", () => {
     expect(instr).toMatch(/do NOT remove caveats/);
     // Nor a note of a refusal or a deviation (E2E 2026-10-12: a repair dropped one).
     expect(instr).toContain(QA_DISCLOSURE_RULE);
+    // And a flaw in what was done is stated, never rewritten away.
+    expect(instr).toContain(QA_ACTION_HONESTY_RULE);
   });
 
   it("carries the answer it repairs, disclosure included: the draft is not in the history the repair reads", () => {
