@@ -99,7 +99,16 @@ describe("renderUserWordsBlock", () => {
     const languageOnly = renderUserWordsBlock(words(GERMAN), `${TASK}\n${GERMAN}`);
     expect(languageOnly).toContain("[REPLY LANGUAGE]");
     expect(languageOnly).toContain(REFUSED_CHOICE_RULE);
+    expect(REFUSED_CHOICE_RULE).toContain("report the refusal and leave the choice to the user");
     expect(REFUSED_CHOICE_RULE).toContain("never substitute one of your own");
+  });
+
+  it("does not block a fallback the user named, or the same value re-entered in the required format", () => {
+    // "Express, sonst Standard": standard is the user's own choice for the case express is refused.
+    // And the browser_agent prompt's exception: a missed field filled, or the same value in the
+    // format the page asks for, substitutes nothing.
+    expect(REFUSED_CHOICE_RULE).toContain("use the alternative the user named for that case if they named one");
+    expect(REFUSED_CHOICE_RULE).toContain("filling a missed field or re-entering the same value in the required format is fine");
   });
 
   it("defangs role tags the user typed, so a quoted block cannot trip the tool-output guardrail", () => {

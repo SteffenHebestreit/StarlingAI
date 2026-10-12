@@ -34,9 +34,15 @@ const LABEL = "[USER'S OWN WORDS — this turn, verbatim, untranslated]";
  * core-ix-browser-order-form-express-refused the page refused the express shipping the user chose;
  * the browser agent picked standard itself, submitted again and reported the reference it got. In
  * both blocks, because a task that already quotes the user's words gets only the second.
+ *
+ * A fallback the user named for that case ("Express, sonst Standard") is the user's choice too, and
+ * filling a missed field or re-entering the same value in the format asked for substitutes nothing
+ * (the browser_agent prompt's own exception), so neither is blocked.
  */
 export const REFUSED_CHOICE_RULE =
-  "If something refuses a value the user chose, report the refusal and leave the choice to the user; never substitute one of your own.";
+  "If something refuses a value the user chose, use the alternative the user named for that case if they named one; "
+  + "otherwise report the refusal and leave the choice to the user — never substitute one of your own (filling a missed "
+  + "field or re-entering the same value in the required format is fine).";
 // The language sentence is here because this block is the only place a specialist sees what the
 // user actually wrote. Its task is the orchestrator's paraphrase and is often English, and a
 // specialist that mirrored its task delivered an English page to a German speaker.
