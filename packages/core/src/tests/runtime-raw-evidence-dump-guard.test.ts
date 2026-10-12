@@ -101,6 +101,29 @@ describe("terminal junk guard — looksLikeRawToolEvidenceDump", () => {
       + "- Versorgungsspannung: 3,3 V. Insgesamt ein robuster Baustein für tragbare Aufnahmegeräte mit hoher Qualität.";
     expect(looksLikeRawToolEvidenceDump(list)).toBe(false);
   });
+
+  // E2E 2026-10-12: the model server dropped after a browser run, and its page results became the reply.
+  const pageResult =
+    "### Ran Playwright code ```js await page.getByRole('link', { name: 'Seite 2' }).click(); ``` "
+    + "### Page - Page URL: http://shop.example.test/produkte/seite-2.html - Page Title: Produkte – Seite 2 "
+    + "### Snapshot yaml - generic [active] [ref=e1]: - banner [ref=e2]: - strong [ref=e3]: Example GmbH "
+    + "- navigation [ref=e4]: - link \"Start\" [ref=e5] [cursor=pointer]: - /url: /index.html "
+    + "- link \"Produkte\" [ref=e6] [cursor=pointer]: - /url: /produkte/seite-1.html "
+    + "- main [ref=e9]: - table [ref=e10]: - rowgroup [ref=e11]: - row \"NW-3101 Bithalter 19,90 €\" [ref=e12]";
+
+  it("flags a browser tool's page result, by its lead and by its element handles", () => {
+    expect(looksLikeRawToolEvidenceDump(pageResult)).toBe(true);
+    // Without the lead, the page tree's handles still give it away.
+    expect(looksLikeRawToolEvidenceDump(pageResult.slice(pageResult.indexOf("### Snapshot")))).toBe(true);
+  });
+
+  it("does NOT flag an answer that mentions the browser or a single element handle", () => {
+    const answer =
+      "Ich habe den Katalog mit dem Browser über alle drei Seiten durchgesehen (Playwright). Acht Artikel kosten "
+      + "weniger als 50 €, zusammen 227,40 €. Der günstigste ist der Bithalter für 8,90 €; das Element [ref=e7] "
+      + "auf Seite 3 war der Link zur nächsten Seite, den ich zum Weiterblättern benutzt habe.";
+    expect(looksLikeRawToolEvidenceDump(answer)).toBe(false);
+  });
 });
 
 // Auto-build-after-research (audit 33df2aec): a source-sensitive turn whose request asks

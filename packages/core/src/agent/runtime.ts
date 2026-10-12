@@ -3405,7 +3405,9 @@ async function _runTurn(
         const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
         const sharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
         const recoveryEvidence = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false });
-        if (recoveryEvidence) {
+        // No model writes this reply, so a raw tool dump would ship as it stands; the turn reports the
+        // model error instead, as when there is no evidence at all.
+        if (recoveryEvidence && !looksLikeRawToolEvidenceDump(recoveryEvidence.evidence)) {
           const finalResponse = formatRecoveryEvidenceForFinalUser(recoveryEvidence.evidence, {
             sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           });

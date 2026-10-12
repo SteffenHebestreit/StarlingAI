@@ -118,6 +118,11 @@ export function looksLikeRawToolEvidenceDump(value: string): boolean {
   if (/^[\s>*#`_-]{0,8}(?:Web Search Results for:|Content from:\s*https?:\/\/|Recovered evidence snippets|Partial progress before interruption)/i.test(v)) {
     return true;
   }
+  // A browser tool's page result (Playwright MCP) leads with the code it ran or the page's state, and
+  // carries the page tree's element handles ("[ref=e12]"), which no written answer does (E2E
+  // 2026-10-12: with the model server unreachable, three page results shipped as the reply).
+  if (/^[\s>*#`_-]{0,8}(?:Ran Playwright code|Page state\b)/i.test(v)) return true;
+  if ((v.match(/\[ref=e\d+\]/g) ?? []).length >= 3) return true;
   // A user-facing answer that LEADS with an agent-label echo ("[researcher]:",
   // "**[mission_coordinator]**:", often doubled "[researcher]:\n[researcher]:") is a
   // verbatim regurgitation of a delegate / parallel_delegate evidence block, never a

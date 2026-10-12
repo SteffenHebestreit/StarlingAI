@@ -67,6 +67,7 @@ import { getConfig, resetConfigForTests } from "../config/loader.js";
 import { registerTool, unregisterTool } from "../tools/registry.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
+import { writeSharedFact } from "../swarm/memory.js";
 
 interface DelegationLoopFixtures {
   identicalLoop: {
@@ -283,6 +284,70 @@ describe("runtime delegated-loop regressions", () => {
     const transcript = session.toTranscript();
     expect(transcript.at(-1)?.role).toBe("assistant");
     expect(transcript.at(-1)?.content).toContain("workspace/esp32-recorder-project/README.md");
+  });
+
+  describe("a browser run's page results after a model error (E2E 2026-10-12)", () => {
+    // The browser agent summed the catalogue and shared the total as a finding; then the model server
+    // dropped, its run ended with its last page results, and the orchestrator's next call failed too.
+    // The backstop shipped the page results as the reply, over the total the run had shared.
+    const pageResults = [1, 2, 3].map((page) =>
+      `### Ran Playwright code \`\`\`js await page.getByRole('link', { name: 'Seite ${page}' }).click(); \`\`\` `
+      + `### Page - Page URL: http://shop.example.test/produkte/seite-${page}.html - Page Title: Produkte – Seite ${page} `
+      + "### Snapshot yaml - generic [active] [ref=e1]: - banner [ref=e2]: - strong [ref=e3]: Example GmbH "
+      + "- navigation [ref=e4]: - link \"Start\" [ref=e5] [cursor=pointer]: - /url: /index.html");
+
+    async function runBrowserTurnThatLosesTheModel(sharesTheTotal: boolean) {
+      let llmCallCount = 0;
+      streamMock.mockImplementation(() => {
+        llmCallCount += 1;
+        if (llmCallCount === 1) {
+          return createDelegateToolCallStream("delegate_browser", {
+            agentName: "browser_agent",
+            task: "Sum the prices of all catalogue items under 50 EUR.",
+          });
+        }
+        return createThrowingStream("Connection error.");
+      });
+      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      registerTool({
+        name: "delegate_to_agent",
+        description: "Delegate to a specialist.",
+        parameters: { type: "object", properties: {} },
+        execute: vi.fn(async () => {
+          if (sharesTheTotal) {
+            await writeSharedFact(session.id, "articles_under_50_total", "227,40 € — 8 Artikel kosten weniger als 50 €");
+          }
+          return {
+            success: true,
+            output: [
+              "Delegated result from browser_agent — PARTIAL PROGRESS.",
+              "Observed evidence:",
+              "Recovered evidence snippets from completed tools:",
+              ...pageResults.map((result) => `- ${result}`),
+            ].join("\n"),
+            metadata: { agentName: "browser_agent", delegationSucceeded: true, delegationOutcome: "partial", terminalState: "completed" },
+          };
+        }),
+      });
+      return runTurn({ session, userMessage: "What do all catalogue items under 50 EUR cost together?" });
+    }
+
+    it("ships the finding the run shared", async () => {
+      const result = await runBrowserTurnThatLosesTheModel(true);
+
+      expect(result.performance?.finishReason).toBe("llm_error_evidence_backstop");
+      expect(result.response).toContain("227,40");
+      expect(result.response).not.toContain("Ran Playwright code");
+      expect(result.response).not.toContain("[ref=e");
+    });
+
+    it("reports the model error rather than ship the page results, when the run shared nothing", async () => {
+      const result = await runBrowserTurnThatLosesTheModel(false);
+
+      expect(result.performance?.finishReason).toBe("llm_error");
+      expect(result.response).not.toContain("Ran Playwright code");
+      expect(result.response).not.toContain("[ref=e");
+    });
   });
 
   it("treats a Stop that cuts the model call short as a cancel, not as an error to back-stop", async () => {
