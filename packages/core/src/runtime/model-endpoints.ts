@@ -120,12 +120,14 @@ async function requestEndpoint(target: EndpointTarget, url: string, body?: unkno
  * A cross-encoder rerank server (retrieval.reranker in "tei" mode) is not an OpenAI server: it serves
  * POST /rerank and GET /health at its root and no /models, so the model-list check reported it
  * unhealthy (HTTP 404) while it reranked every turn. Its /health answers once the model is loaded;
- * the bundled server also names the model it loaded, and that has to be the configured one.
+ * the bundled server also names the model it loaded, and that has to be the configured one. A server
+ * with no /health (404), one that lists its models the OpenAI way instead, is read by that list.
  */
 async function checkHealthEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
   const base = { role: target.role, model: target.model, baseUrl: target.baseUrl, source: target.source };
   try {
     const response = await requestEndpoint(target, `${target.baseUrl.replace(/\/+$/, "")}/health`);
+    if (response.status === 404) return checkModelsEndpoint(target);
     if (!response.ok) return { ...base, ok: false, status: response.status, error: `HTTP ${response.status}` };
     const body = await response.json().catch(() => null) as { model?: unknown; loaded?: unknown } | null;
     if (body?.loaded === false) return { ...base, ok: false, status: response.status, error: "Model not loaded" };
@@ -166,7 +168,11 @@ async function embedsUnderConfiguredName(target: EndpointTarget): Promise<boolea
 }
 
 async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
-  if (target.probe === "health") return checkHealthEndpoint(target);
+  return target.probe === "health" ? checkHealthEndpoint(target) : checkModelsEndpoint(target);
+}
+
+/** The endpoint read by its OpenAI model list (/models): healthy when it lists the configured model. */
+async function checkModelsEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
   try {
     const response = await requestEndpoint(target, toModelsUrl(target.baseUrl));
     if (!response.ok) {
