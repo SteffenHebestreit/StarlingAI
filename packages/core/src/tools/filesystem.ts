@@ -204,11 +204,14 @@ export function guardPath(path: string, workspacePath: string): { safe: boolean;
  * write wherever it leads; delete_file (`finalLink: "remove"`) removes the link and leaves what it
  * leads to.
  *
- * BY NAME, ONLY THE GATEWAY'S STATE DIRECTORY. Applying read_file's whole denylist to the path as
- * named refused `app/.env` and `.envrc`, which a coder scaffolding a project writes, and said the
- * path escaped the workspace (review 2026-10-11). The write tools never refused a name before; the
- * state directory is the one they must not write under any name or spelling (a full-scope agent's
- * root holds accounts.json and approvals/ there), and a refusal by name says "protected path".
+ * BY NAME, THE GATEWAY'S STATE DIRECTORY AND A REPOSITORY'S INTERNALS. Applying read_file's whole
+ * denylist to the path as named refused `app/.env` and `.envrc`, which a coder scaffolding a project
+ * writes, and said the path escaped the workspace (review 2026-10-11); dotenv names stay writable.
+ * The state directory is one the write tools must not write under any name or spelling (a
+ * full-scope agent's root holds accounts.json and approvals/ there). `.git` is the other: write_file
+ * and edit_file run with no per-call approval, and wrote a hook, or a config with core.fsmonitor or
+ * core.hooksPath, which the git tools (git_status among them, Tier 0) then ran in the git sandbox
+ * (review 2026-10-12). A refusal by name says "protected path".
  */
 function guardWritePath(
   path: string,
@@ -218,7 +221,7 @@ function guardWritePath(
   try {
     const { resolved, relativePath } = resolveWorkspaceWritePath(path, workspacePath, { final: "link" });
     const named = relative(workspacePath, resolved);
-    if (isGatewayStatePath(named)) return { safe: false, resolved, relativePath, refusal: "protected" };
+    if (isWriteProtectedName(named)) return { safe: false, resolved, relativePath, refusal: "protected" };
     const real = containedWorkspaceRealPath(resolved, workspacePath, { final: "link" });
     if (real === null || (finalLink === "refuse" && isLink(resolved))) {
       return { safe: false, resolved, relativePath, refusal: "boundary" };
@@ -242,22 +245,25 @@ function writeRefusalError(refusal: WriteRefusal | undefined): string {
     : "Path escapes workspace boundary";
 }
 
-/** Whether a workspace-relative path names the gateway's state directory or anything in it, in
- *  any case: a case-insensitive bind opens `.STARLINGAI/` as `.starlingai/`. */
-function isGatewayStatePath(relativePath: string): boolean {
-  const state = PRODUCT.stateDirName.toLowerCase();
-  return relativePath.replace(/\\/g, "/").toLowerCase().split("/").includes(state);
+/** Whether a workspace-relative path names, under either separator and in any case (a
+ *  case-insensitive bind opens `.STARLINGAI/` as `.starlingai/`), what the write tools refuse by
+ *  name: the gateway's state directory or anything in it, or a `.git` segment anywhere (a
+ *  repository's internals, or a `.git` file that points git at another directory). */
+function isWriteProtectedName(relativePath: string): boolean {
+  const segments = relativePath.replace(/\\/g, "/").toLowerCase().split("/");
+  return segments.includes(PRODUCT.stateDirName.toLowerCase()) || segments.includes(".git");
 }
 
 /**
  * Whether a write tool refuses where a path really leads (`real`, relative to the real root) for the
- * path as named (`named`, relative to the root): always where that is the state directory, and,
- * only where a link on the way makes the two differ, where it is a file read_file refuses
- * (isSensitiveWorkspacePath): `notes` linked to `.git` must not turn a write into a write of
- * `.git/config`. A path reached through no link is judged by name alone (guardWritePath).
+ * path as named (`named`, relative to the root): always where that is the state directory or a
+ * repository's internals (isWriteProtectedName), and, only where a link on the way makes the two
+ * differ, where it is a file read_file refuses (isSensitiveWorkspacePath): `app` linked to another
+ * directory must not turn a write of `app/.env` into one of that directory's `.env`. A path reached
+ * through no link is judged by name alone (guardWritePath).
  */
 function refusedWriteTarget(named: string, real: string): boolean {
-  if (isGatewayStatePath(real)) return true;
+  if (isWriteProtectedName(real)) return true;
   const norm = (rel: string) => {
     const slashed = rel.replace(/\\/g, "/");
     return process.platform === "win32" ? slashed.toLowerCase() : slashed;

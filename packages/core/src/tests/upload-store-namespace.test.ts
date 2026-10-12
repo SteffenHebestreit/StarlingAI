@@ -159,6 +159,13 @@ describe("the upload store answers each account from its own root", () => {
     await expect(mods.store.putUpload(`users/${bob.id}/generated/planted.txt`, new TextEncoder().encode("X"), "text/plain"))
       .rejects.toThrow(/no signed-in account/);
     expect(existsSync(join(rootOf(BOB), "generated", "planted.txt"))).toBe(false);
+    // The segment that counts is the first one AFTER resolving: `uploads/../users/<B>` is B's root.
+    for (const path of [`uploads/../users/${bob.id}/generated/secret.pdf`, `./uploads/..\\Users/${bob.id}/generated/secret.pdf`]) {
+      expect(text(await mods.store.getUpload(path)), path).toBeNull();
+    }
+    await expect(mods.store.putUpload(`uploads/../users/${bob.id}/generated/planted.txt`, new TextEncoder().encode("X"), "text/plain"))
+      .rejects.toThrow(/no signed-in account/);
+    expect(existsSync(join(rootOf(BOB), "generated", "planted.txt"))).toBe(false);
     const key = await mods.store.putUpload("uploads/webhook/run.txt", new TextEncoder().encode("SHARED"), "text/plain");
     expect(key).toBe("uploads/webhook/run.txt");
     expect(text(await mods.store.getUpload("uploads/webhook/run.txt"))).toBe("SHARED");

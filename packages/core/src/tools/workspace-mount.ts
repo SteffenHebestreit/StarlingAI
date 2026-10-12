@@ -163,10 +163,11 @@ export function callerSandboxMounts(
  * to bind, and the tool refuses the run. It runs as the owner of that root, root in the compose
  * deployment, as before (sandboxUserArgs).
  *
- * tools/ is bound READ-ONLY. A dynamic tool bundle there registers on the next load, and the loader
- * checks only that its approval fields are filled in, so a shell that wrote one registered a tool
- * past the tool-development pipeline and its approval (review 2026-10-12). The maintainer edits
- * agents, jobs and scenes; tools come through that pipeline.
+ * tools/ is bound READ-ONLY, here and in the full-scope git repo bind (sandboxIsolationArgs). A
+ * dynamic tool bundle there registers on the next load, and the loader checks only that its approval
+ * fields are filled in, so a shell that wrote one registered a tool past the tool-development
+ * pipeline and its approval (review 2026-10-12). The maintainer edits agents, jobs and scenes; tools
+ * come through that pipeline.
  */
 const READ_ONLY_FULL_SCOPE_ZONE = "tools";
 
@@ -287,9 +288,10 @@ export interface SandboxHostOverrides {
  * directory, and every entry the host created shows as root's, mode 0777, writable by any uid
  * (review 2026-10-11). A read-only bind holds against both, since every spelling resolves through the
  * same read-only mount (verified live 2026-10-11). sandboxBindSpec makes it read-only, and the shared
- * root's config zones (PROTECTED_WORKSPACE_ZONES) and generated/ are bound again writable from their
- * host paths at their place in it, /workspace/workspace/<zone> in the compose layout. A zone that is
- * not there, or has no host path (a named volume), stays read-only. The sandbox runs as the bind's
+ * root's config zones (PROTECTED_WORKSPACE_ZONES) and generated/ are bound again from their host
+ * paths at their place in it, /workspace/workspace/<zone> in the compose layout: writable, except
+ * tools/, read-only for the reason the shell has it so (fullScopeZoneMounts). A zone that is not
+ * there, or has no host path (a named volume), stays read-only. The sandbox runs as the bind's
  * owner, root in the compose deployment, which git needs to read the repository at all; .git stays
  * read-only, as no full-scope agent holds a git tool that writes it (swarm_maintainer has git_status
  * and git_diff).
@@ -384,7 +386,9 @@ export function sandboxIsolationArgs(input: SandboxIsolationInput, host: Sandbox
       // Null for a named-volume source, which has no host path to bind a zone from.
       const hostZone = resolveHostWorkspacePath(sharedRoot, zone);
       if (sandboxZone === null || hostZone === null || !existsSync(gatewayZone)) continue;
-      args.push("-v", `${hostZone}:${sandboxZone}`);
+      // tools/ read-only, as for the full-scope shell (fullScopeZoneMounts): a tool bundle comes
+      // through the tool pipeline, never from a sandbox.
+      args.push("-v", `${hostZone}:${sandboxZone}${zone === READ_ONLY_FULL_SCOPE_ZONE ? ":ro" : ""}`);
     }
   }
   return args;

@@ -68,17 +68,19 @@ export async function callerUploadKey(relativePath: string): Promise<{ key: stri
   const sharedRoot = resolve(getConfig().workspacePath);
   const root = userWorkspaceRoot(sharedRoot);
   const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-  // Under multi-user auth a caller without an identity resolves at the shared root, where users/
-  // holds every account's root, so a path there names another account's file. No caller today gets
-  // here without one (review 2026-10-12); this fails closed for the next that does, and leaves an
-  // identity-less run its own shared-root files.
-  const firstSegment = normalized.split("/").find((part) => part !== "" && part !== ".");
-  if (firstSegment?.toLowerCase() === USERS_SUBDIR && !segmentFor() && multiUserAuthActive()) {
-    throw new UploadPathRefusedError(relativePath, "no signed-in account owns a path under users/");
-  }
   const file = resolve(root, normalized);
   const withinRoot = relative(root, file);
   if (withinRoot === "" || !isWithin(root, file)) throw new UploadPathRefusedError(relativePath, "it is not a file in your own workspace");
+  // Under multi-user auth a caller without an identity resolves at the shared root, where users/
+  // holds every account's root, so a path there names another account's file. No caller today gets
+  // here without one (review 2026-10-12); this fails closed for the next that does, and leaves an
+  // identity-less run its own shared-root files. The test reads the RESOLVED path: the first
+  // segment as written let `uploads/../users/<B>/...` through, which resolve() then turned into B's
+  // file. Case-insensitively, since a Docker Desktop bind is, and `Users/` is the same directory.
+  const firstSegment = withinRoot.split(sep)[0];
+  if (firstSegment?.toLowerCase() === USERS_SUBDIR && !segmentFor() && multiUserAuthActive()) {
+    throw new UploadPathRefusedError(relativePath, "no signed-in account owns a path under users/");
+  }
   // Loaded on use: the denylist lives with the file tools, which this store must not load eagerly.
   const { isSensitiveWorkspacePath } = await import("../tools/filesystem.js");
   if (isSensitiveWorkspacePath(withinRoot)) throw new UploadPathRefusedError(relativePath, "it names protected workspace data");

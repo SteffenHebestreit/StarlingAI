@@ -199,15 +199,17 @@ describe("sandboxIsolationArgs in the compose layout", () => {
     expect(() => sandboxIsolationArgs(input, { sharedRoot: SHARED })).toThrow(/only the zones/);
   });
 
-  it("makes the full-scope git repo bind read-only, binds the zones writable at their place in it, and masks the repo root's and the shared root's state", async () => {
+  it("makes the full-scope git repo bind read-only, binds the zones writable at their place in it but tools/, and masks the repo root's and the shared root's state", async () => {
     const { sandboxBindSpec, sandboxIsolationArgs } = await import("../tools/workspace-mount.js");
     for (const zone of ["agents", "jobs", "scenes", "tools", "generated"]) fakeExisting.add(`${SHARED}/${zone}`);
     const input = { workspacePath: SHARED, workspaceScope: "full", bind: "repo" } as const;
     expect(sandboxBindSpec("src:/workspace", input, { sharedRoot: SHARED })).toBe("src:/workspace:ro");
     const args = sandboxIsolationArgs(input, { sharedRoot: SHARED });
     expect(masks(args)).toEqual([MASK("/workspace/.starlingai"), MASK("/workspace/workspace/.starlingai")]);
-    expect(writableBinds(args)).toEqual(["agents", "jobs", "scenes", "tools", "generated"]
+    expect(writableBinds(args)).toEqual(["agents", "jobs", "scenes", "generated"]
       .map((zone) => `${HOST_SOURCE}/workspace/${zone}:/workspace/workspace/${zone}`));
+    // As for the full-scope shell: a tool bundle comes through the tool pipeline, not a checkout.
+    expect(readOnlyBinds(args)).toEqual([`${HOST_SOURCE}/workspace/tools:/workspace/workspace/tools:ro`]);
   });
 
   it("keeps a full-scope named-volume repo bind read-only, and refuses the shell, with no zone to bind from a host path", async () => {
@@ -376,7 +378,7 @@ describe("a full-scope sandbox runs as its bind's owner, root included", () => {
     }
   });
 
-  it("as the git tools issue it, read-only, with safe.directory for a run that is not the owner's", async () => {
+  it("as the git tools issue it, read-only, with safe.directory for a run that is not the owner's (any repository in the bind), and no bare repository", async () => {
     fakeOwners.set("/workspace", 0);
     execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
     const { getTool } = await import("../tools/registry.js");
@@ -384,7 +386,18 @@ describe("a full-scope sandbox runs as its bind's owner, root included", () => {
     expect(flagValue(dockerArgs(), "--user")).toBe("0:0");
     expect(readOnlyBinds(dockerArgs())).toEqual([`${HOST_SOURCE}:/workspace:ro`]);
     const env = dockerArgs().flatMap((arg, i, all) => (all[i - 1] === "-e" ? [arg] : []));
-    expect(env).toEqual(["GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=/workspace"]);
+    expect(env).toEqual([
+      // `*`: a repository in a subdirectory of the bind (generated/<clone>) is not /workspace.
+      "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*",
+      // A directory the write tools made in the shape of a bare repository is not one to git.
+      "GIT_CONFIG_KEY_1=safe.bareRepository", "GIT_CONFIG_VALUE_1=explicit",
+      // The deployment's own repository by name: never a `.git` a full-scope shell left in a zone.
+      "GIT_DIR=/workspace/.git", "GIT_WORK_TREE=/workspace",
+    ]);
+    // An account's git sandbox keeps discovery: its repositories are wherever it made them.
+    fakeOwners.set(CALLER_WS, 2222);
+    await getTool("git_status")!.execute({}, { sessionId: "s-account", workspacePath: CALLER_WS, workspaceScope: "generated" });
+    expect(dockerArgs().some((arg) => arg.startsWith("GIT_DIR="))).toBe(false);
     // Before the image: docker's own flags, not git's.
     expect(dockerArgs().indexOf("GIT_CONFIG_COUNT=1")).toBeLessThan(dockerArgs().indexOf("starlingai/sandbox:latest"));
   });

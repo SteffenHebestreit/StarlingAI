@@ -14,7 +14,7 @@
  * (Windows without the privilege); a junction is a link to a directory, which is what these cases
  * need.
  */
-import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -32,10 +32,14 @@ import { _resetTrajectoryInvalidationForTests, invalidateTrajectory } from "../m
 import { listSkills, skillsDir, writeSkill } from "../skills/store.js";
 import { buildSessionDebugMarkdownFromSnapshot } from "../agent/debug-session-export.js";
 
-/** Renames and opens the relocation tests make fail (an open handle on Windows, an unreadable file). */
+/** Renames, opens and listings the relocation tests make fail (an open handle on Windows, an
+ *  unreadable file or directory). */
 const fsHooks = vi.hoisted(() => ({
   renameFails: null as ((from: string) => boolean) | null,
   openFails: null as ((path: string) => boolean) | null,
+  readdirFails: null as ((path: string) => boolean) | null,
+  touched: null as ((path: string) => void) | null,
+  notAFile: null as ((path: string) => boolean) | null,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -44,11 +48,27 @@ vi.mock("node:fs", async (importOriginal) => {
     if (fsHooks.renameFails?.(String(from))) throw Object.assign(new Error(`EPERM: operation not permitted, rename '${String(from)}'`), { code: "EPERM" });
     return real.renameSync(from, to);
   }) as typeof real.renameSync;
+  const opened = new Map<number, string>();
   const openSync = ((path: Parameters<typeof real.openSync>[0], ...rest: unknown[]) => {
     if (fsHooks.openFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, open '${String(path)}'`), { code: "EACCES" });
-    return (real.openSync as (...args: unknown[]) => number)(path, ...rest);
+    const fd = (real.openSync as (...args: unknown[]) => number)(path, ...rest);
+    opened.set(fd, String(path));
+    return fd;
   }) as typeof real.openSync;
-  return { ...real, renameSync, openSync, default: { ...real, renameSync, openSync } };
+  // What is open turns out to be something else than a plain file (swapped since it was listed).
+  const fstatSync = ((fd: number, ...rest: unknown[]) => {
+    const stat = (real.fstatSync as (...args: unknown[]) => import("node:fs").Stats)(fd, ...rest);
+    return fsHooks.notAFile?.(opened.get(fd) ?? "") ? Object.assign(Object.create(stat), { isFile: () => false }) : stat;
+  }) as typeof real.fstatSync;
+  const readdirSync = ((path: Parameters<typeof real.readdirSync>[0], ...rest: unknown[]) => {
+    if (fsHooks.readdirFails?.(String(path))) throw Object.assign(new Error(`EACCES: permission denied, scandir '${String(path)}'`), { code: "EACCES" });
+    return (real.readdirSync as (...args: unknown[]) => unknown)(path, ...rest);
+  }) as typeof real.readdirSync;
+  const utimesSync = ((path: Parameters<typeof real.utimesSync>[0], ...rest: unknown[]) => {
+    fsHooks.touched?.(String(path));
+    return (real.utimesSync as (...args: unknown[]) => void)(path, ...rest);
+  }) as typeof real.utimesSync;
+  return { ...real, renameSync, openSync, fstatSync, readdirSync, utimesSync, default: { ...real, renameSync, openSync, fstatSync, readdirSync, utimesSync } };
 });
 
 /** The relocation's own logger, to read what it says and at which level. */
@@ -99,6 +119,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   fsHooks.renameFails = null;
   fsHooks.openFails = null;
+  fsHooks.readdirFails = null;
+  fsHooks.touched = null;
+  fsHooks.notAFile = null;
   for (const fn of Object.values(relocationLogger)) fn.mockClear();
   _clearDurableMemoryCaches();
   _resetTrajectoryInvalidationForTests();
@@ -293,6 +316,25 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(readdirSync(join(shared, STATE, "users")).sort()).toEqual([".relocated-v1", ALICE]);
   });
 
+  it("does not complete a pass that could not list the account roots", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const users = join(shared, "users");
+    fsHooks.readdirFails = (path) => resolve(path) === resolve(users);
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [], kept: [], failed: [], complete: false });
+    expect(existsSync(marker(shared))).toBe(false);
+    expect(existsSync(state)).toBe(false);
+    expect(readdirSync(join(old, "memory"))).toEqual(["editor.json"]);
+    expect(relocationLogger.error).toHaveBeenCalledWith(expect.objectContaining({ marker: marker(shared) }), expect.stringMatching(/could not run.*next boot tries again/));
+    expect(relocationLogger.info).not.toHaveBeenCalled();
+
+    // The next boot, which can list them, moves her state.
+    fsHooks.readdirFails = null;
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFileSync(join(state, "memory", "editor.json"), "utf8")).toBe("{}");
+  });
+
   it("does not adopt a link in place of the old directory", async () => {
     const { shared, old, state } = deployment();
     const elsewhere = join(shared, "agents");
@@ -332,6 +374,37 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(statSync(moved).nlink).toBe(1);
     writeFileSync(moved, "{ \"planted\": true }");
     expect(readFileSync(join(shared, "agents", "10-core.jsonc"), "utf8")).toBe("{}");
+  });
+
+  it("keeps a file with another name under its own name until its copy replaces it, and finishes that at the next boot", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(shared, "agents"), { recursive: true });
+    writeFileSync(join(shared, "agents", "10-core.jsonc"), "{}");
+    mkdirSync(join(old, "memory"), { recursive: true });
+    linkSync(join(shared, "agents", "10-core.jsonc"), join(old, "memory", "editor.json"));
+    // The copy is made, and the pass stops before it is renamed over the file (a crash, a held handle).
+    fsHooks.renameFails = (from) => from.endsWith(".copy");
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ failed: [ALICE], complete: false });
+    const staged = join(shared, STATE, "users", `.${ALICE}.relocating`, "memory");
+    expect(readFileSync(join(staged, "editor.json"), "utf8")).toBe("{}");
+
+    fsHooks.renameFails = null;
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readdirSync(join(state, "memory"))).toEqual(["editor.json"]);
+    expect(statSync(join(state, "memory", "editor.json")).nlink).toBe(1);
+  });
+
+  it("fails the account, losing nothing, when a file it copies is no longer a plain file", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    writeFileSync(join(old, "memory", "other.json"), "{}");
+    fsHooks.renameFails = (from) => from === old;
+    fsHooks.notAFile = (path) => path === join(old, "memory", "editor.json");
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [], kept: [], failed: [ALICE], complete: false });
+    expect(readdirSync(join(old, "memory")).sort()).toEqual(["editor.json", "other.json"]);
+    expect(existsSync(state)).toBe(false);
+    expect(readdirSync(join(shared, STATE, "users"))).toEqual([]);
   });
 
   it("picks up what an earlier boot staged whole, and throws away a copy a crash cut short", async () => {
@@ -397,6 +470,46 @@ describe("the boot's move of the state still in an account's root", () => {
     expect(existsSync(marker(shared))).toBe(true);
   });
 
+  it("joins an append-only ledger both sides have, older lines first, and keeps the other files both have aside", async () => {
+    const { shared, root, state } = deployment();
+    const users = join(shared, STATE, "users");
+    const staged = join(users, `.${ALICE}.relocating`);
+    const line = (summary: string) => `${JSON.stringify({ id: summary, ts: new Date().toISOString(), scope: "workflow", request: "r", summary, actions: [], outcome: "success", tags: [] })}\n`;
+    // What an earlier boot staged whole before its move failed, and what that boot's stores wrote since.
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, "flow_memory.ndjson"), line("old-1") + line("old-2"));
+    writeFileSync(join(staged, "agent_outcomes.ndjson"), "{\"task\":\"old\"}"); // its last line cut short by a crash
+    writeFileSync(join(staged, "promoted_agents.json"), "{\"old\":{}}");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "flow_memory.ndjson"), line("new-1"));
+    writeFileSync(join(state, "agent_outcomes.ndjson"), "{\"task\":\"new\"}\n");
+    writeFileSync(join(state, "promoted_agents.json"), "{\"new\":{}}");
+
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFlowMemoryEntries(root).map((entry) => entry.summary)).toEqual(["old-1", "old-2", "new-1"]);
+    expect(readFileSync(join(state, "agent_outcomes.ndjson"), "utf8")).toBe("{\"task\":\"old\"}\n{\"task\":\"new\"}\n");
+    expect(readFileSync(join(state, "promoted_agents.json"), "utf8")).toBe("{\"new\":{}}");
+    const conflicts = readdirSync(users).filter((name) => name.startsWith(`.${ALICE}.conflicts-`));
+    expect(conflicts).toHaveLength(1);
+    expect(readdirSync(join(users, conflicts[0]!))).toEqual(["promoted_agents.json"]);
+    expect(readdirSync(state).sort()).toEqual([".relocated", "agent_outcomes.ndjson", "flow_memory.ndjson", "promoted_agents.json"]);
+  });
+
+  it("joins a ledger once, when a pass stopped after joining it and before removing the older one", async () => {
+    const { shared, state } = deployment();
+    const staged = join(shared, STATE, "users", `.${ALICE}.relocating`);
+    mkdirSync(staged, { recursive: true });
+    writeFileSync(join(staged, "flow_memory.ndjson"), "{\"n\":1}\n");
+    // A joined file that pass wrote and never renamed into place: removed, not adopted.
+    writeFileSync(join(staged, `.${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}.copy`), "{\"n\":1}\n{\"n\":2}\n");
+    mkdirSync(state, { recursive: true });
+    writeFileSync(join(state, "flow_memory.ndjson"), "{\"n\":1}\n{\"n\":2}\n");
+    expect(await relocateAccountWorkspaceState(shared)).toEqual({ moved: [ALICE], kept: [], failed: [], complete: true });
+    expect(readFileSync(join(state, "flow_memory.ndjson"), "utf8")).toBe("{\"n\":1}\n{\"n\":2}\n");
+    expect(readdirSync(state).sort()).toEqual([".relocated", "flow_memory.ndjson"]);
+    expect(readdirSync(join(shared, STATE, "users")).sort()).toEqual([".relocated-v1", ALICE]);
+  });
+
   it("waits for a pass another live process runs, and takes over the lock of one that died", async () => {
     const { shared, old, state } = deployment();
     mkdirSync(join(old, "memory"), { recursive: true });
@@ -415,6 +528,86 @@ describe("the boot's move of the state still in an account's root", () => {
     rmSync(marker(shared));
     writeFileSync(lock, `${hostname()} ${process.pid}\n`);
     expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ complete: true });
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("says that it waits for the lock, and again while it keeps waiting", async () => {
+    const { shared, old } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, `${hostname()} ${process.ppid}\n`);
+    const pass = relocateAccountWorkspaceState(shared);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(relocationLogger.info).toHaveBeenCalledTimes(1);
+    expect(relocationLogger.info).toHaveBeenCalledWith({ lock, holder: `${hostname()} ${process.ppid}` }, expect.stringMatching(/^Waiting for another process/));
+    expect(relocationLogger.warn).not.toHaveBeenCalled();
+
+    // Half a minute on, it says so again, and for how long.
+    const realNow = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 31_000);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(relocationLogger.warn).toHaveBeenCalledTimes(1);
+    expect(relocationLogger.warn).toHaveBeenCalledWith(expect.objectContaining({ lock, waitedMs: expect.any(Number) }), expect.stringMatching(/^Still waiting/));
+    expect((relocationLogger.warn.mock.calls[0]![0] as { waitedMs: number }).waitedMs).toBeGreaterThanOrEqual(30_000);
+    rmSync(lock);
+    expect(await pass).toMatchObject({ moved: [ALICE], complete: true });
+  });
+
+  it("keeps its lock touched while it copies, not only between accounts", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    for (const name of ["a.json", "b.json", "c.json"]) writeFileSync(join(old, "memory", name), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    const copying = join(shared, STATE, "users", `.${ALICE}.copying`);
+    fsHooks.renameFails = (from) => from === old;
+    // Each reading of the clock is two seconds after the last, so no chance to touch the lock is skipped.
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => (clock += 2_000));
+    const touchedWhileCopying: boolean[] = [];
+    fsHooks.touched = (path) => {
+      if (path === lock) touchedWhileCopying.push(existsSync(copying));
+    };
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ moved: [ALICE], complete: true });
+    expect(readdirSync(join(state, "memory")).sort()).toEqual(["a.json", "b.json", "c.json"]);
+    expect(touchedWhileCopying.filter(Boolean).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("leaves the lock at the end to another process that took it over meanwhile", async () => {
+    const { shared, old } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    const theirs = `${hostname()} ${process.ppid} their-token\n`;
+    // While this pass moves her state, another process judges it dead and takes the lock over.
+    fsHooks.renameFails = (from) => {
+      if (from === old) writeFileSync(lock, theirs);
+      return false;
+    };
+    expect(await relocateAccountWorkspaceState(shared)).toMatchObject({ moved: [ALICE], complete: true });
+    expect(readFileSync(lock, "utf8")).toBe(theirs);
+    expect(relocationLogger.warn).toHaveBeenCalledWith({ lock, holder: `${hostname()} ${process.ppid}` }, expect.stringMatching(/took over the lock/));
+  });
+
+  it("waits for another host's lock while it is touched, and takes it over once it was left before this process started", async () => {
+    const { shared, old, state } = deployment();
+    mkdirSync(join(old, "memory"), { recursive: true });
+    writeFileSync(join(old, "memory", "editor.json"), "{}");
+    const lock = join(shared, STATE, "users", ".relocating.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    // A scene worker's pass in another container, touched just now: waited for.
+    writeFileSync(lock, "another-host 1 their-token\n");
+    const pass = relocateAccountWorkspaceState(shared);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(existsSync(state)).toBe(false);
+
+    // Its last touch was before this process started (that container is gone; a restarted one has
+    // another hostname): taken over without waiting out the ten minutes.
+    const started = Date.now() - process.uptime() * 1000;
+    const before = new Date(started - 120_000);
+    utimesSync(lock, before, before);
+    const outcome = await Promise.race([pass, new Promise((done) => setTimeout(() => done("still waiting"), 2_000))]);
+    expect(outcome).toMatchObject({ moved: [ALICE], complete: true });
     expect(existsSync(lock)).toBe(false);
   });
 });

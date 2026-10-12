@@ -270,6 +270,41 @@ describe("the write tools on a link that is the target itself", () => {
     expect(state.error).not.toMatch(/escapes workspace boundary/);
   });
 
+  it("the write tools refuse a repository's internals by name, in any spelling, as a protected path", async () => {
+    // What git runs: a hook, a config with core.fsmonitor or core.hooksPath, a .git file pointing elsewhere.
+    mkdirSync(join(ws, "generated", "repo", ".git", "hooks"), { recursive: true });
+    writeFileSync(join(ws, "generated", "repo", ".git", "config"), ORIGINAL);
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ["write_file", { path: "repo/.git/hooks/pre-commit", content: "#!/bin/sh\nid\n", mode: "overwrite" }],
+      ["write_file", { path: "repo/.GIT/config", content: "[core]\n\tfsmonitor = id\n", mode: "overwrite" }],
+      ["write_file", { path: "repo\\.git\\config", content: "[core]\n\thooksPath = /workspace/x\n", mode: "overwrite" }],
+      ["write_file", { path: "repo/sub/.git", content: "gitdir: ../../planted\n", mode: "create" }],
+      ["edit_file", { path: "repo/.git/config", old_string: "original", new_string: "fsmonitor" }],
+      ["create_dir", { path: "repo/.git/hooks/more" }],
+      ["delete_file", { path: "repo/.git/config" }],
+    ];
+    for (const [tool, args] of attempts) {
+      const result = await run(tool, args);
+      expect(result.success, `${tool} ${String(args["path"])}`).toBe(false);
+      expect(result.error, `${tool} ${String(args["path"])}`).toMatch(/protected path/);
+    }
+    expect(readdirSync(join(ws, "generated", "repo", ".git", "hooks"))).toEqual([]);
+    expect(readFileSync(join(ws, "generated", "repo", ".git", "config"), "utf8")).toBe(ORIGINAL);
+    expect(existsSync(join(ws, "generated", "repo", "sub"))).toBe(false);
+
+    // A full-scope agent, whose root is the repository, is refused the same.
+    const full = await run("write_file", { path: ".git/hooks/post-checkout", content: "id\n", mode: "overwrite" }, "full");
+    expect(full.success).toBe(false);
+    expect(full.error).toMatch(/protected path/);
+    expect(existsSync(join(ws, ".git"))).toBe(false);
+
+    // Names that only begin like it are a project's own files.
+    for (const path of ["repo/.gitignore", "repo/.gitattributes", "repo/.github/workflows/ci.yml", "repo/site.git/notes.md"]) {
+      const written = await run("write_file", { path, content: "x\n", mode: "overwrite" });
+      expect(written.success, `${path}: ${written.error}`).toBe(true);
+    }
+  });
+
   it("a link on the way to a file read_file refuses is refused as a protected path", async () => {
     mkdirSync(join(ws, "generated", "repo", ".git"), { recursive: true });
     linkDir(join(ws, "generated", "repo", ".git"), join(ws, "generated", "notes"));
