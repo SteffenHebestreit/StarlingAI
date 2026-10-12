@@ -3507,10 +3507,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // reaches a tool call — the measured f08195d2 failure: 20,129 completion tokens,
     // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
     // classifier is structural (holds write_file AND edit_file; the task longer than
-    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input excluded unless the run
-    // holds a builder tool: stagedBuildTaskChars) so no topic words decide it, and it is
-    // split across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
-    // record and the on-disk salvage reporting on the interrupted paths — while
+    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input and an execute_plan step's turn
+    // context excluded unless the run holds a builder tool: stagedBuildTaskChars) so no topic words
+    // decide it, and it is split across two flags: `stagedArtifactBuilds` arms the mechanical
+    // half — this audit record and the on-disk salvage reporting on the interrupted paths — while
     // `stagedArtifactBuildDirective` is what actually changes the prompt the model sees.
     // BOTH default ON: run 3959f3ac measured the staged shape working (13 iterations, 5
     // files, reasoning collapsed from 23,876 chars on the plan pass to ~100-1,300 per fill
@@ -3519,12 +3519,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     //
     // A run whose delegator declared deliverable "answer" is not a build, whatever its size. An
     // execute_plan step carries the turn's objective and acceptance criteria beside its one-line
-    // description (buildStepTask), and they count as the delegator's own words. In the E2E fan-out
-    // new-delegation-routing-bounded-fanout (session 62b04e8b, 2026-10-09) three lookup steps
-    // reached browser_agent at 594, 603 and 640 chars. The two over the threshold were staged,
-    // because browser_agent holds write_file and edit_file, and spent 329 s and 612 s writing files
-    // instead of navigating; the 594-char one finished in 92 s. All three had declared "answer",
-    // which the delegation gates already read as "no file is asked for" (delegationAsksForFile).
+    // description (buildStepTask). In the E2E fan-out new-delegation-routing-bounded-fanout (session
+    // 62b04e8b, 2026-10-09) three lookup steps reached browser_agent at 594, 603 and 640 chars. The
+    // two over the threshold were staged, because browser_agent holds write_file and edit_file, and
+    // spent 329 s and 612 s writing files instead of navigating; the 594-char one finished in 92 s.
+    // All three had declared "answer", which the delegation gates already read as "no file is asked
+    // for" (delegationAsksForFile). An UNDECLARED step was staged the same way (E2E
+    // core-build-site-company-facts, session d20e3c0a, 2026-10-12: a 124-char step at 604 chars,
+    // answered in two characters), so that context no longer counts toward the size of a run without
+    // a builder tool (taskOwnWordChars): a plan step is measured on its own text, as a delegation of
+    // the same words would be. A builder is still measured on all of it (stagedBuildTaskChars).
     const stagedBuildFlags = effectiveOrchestration();
     const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
       && opts.deliverable !== "answer"

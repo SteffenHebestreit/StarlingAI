@@ -10,6 +10,7 @@
  */
 
 import { getConfig } from "../config/loader.js";
+import { withoutPlanStepTurnContext } from "./plan-step-task.js";
 
 export const ORCHESTRATION_DISCOVERY_TOOL_NAMES = new Set<string>([
   "list_agents",
@@ -87,8 +88,18 @@ const FENCE_RUN = /`{3,}|~{3,}/g;
 const QUOTED_LINE = /^ {0,3}>/;
 
 /**
- * How long a task is in its delegator's OWN words: fenced blocks and quoted lines do not
- * count. They are material the specialist works from, not requirements it has to plan.
+ * How long a task is in its delegator's OWN words: fenced blocks, quoted lines and the turn
+ * context execute_plan appends to a step do not count. They are material the specialist works
+ * from, or the plan's, not requirements of its own it has to plan.
+ *
+ * The turn context is set aside first (agent/plan-step-task.ts): the turn's objective, the
+ * results the step depends on, the turn's acceptance criteria and its stop conditions, which
+ * buildStepTask writes after the step's own line. In E2E core-build-site-company-facts (session
+ * d20e3c0a, 2026-10-12) they carried a 124-char "read this website" step to 604 chars, past the
+ * threshold. browser_agent holds write_file and edit_file, so it was told to write a file skeleton
+ * first, and it answered in two characters without opening the page. The bounded fan-out before it
+ * (session 62b04e8b) staged two lookup steps the same way, at 603 and 640 chars. Everything below
+ * reads the text before that context.
  *
  * In the cart assessment the user pasted cart.js and asked why its total goes negative.
  * The orchestrator copied the code into the delegation, which made the task 681 chars,
@@ -105,15 +116,16 @@ const QUOTED_LINE = /^ {0,3}>/;
  * read wrongly pairs the next one wrongly, and what lies between two blocks is then set
  * aside as material, which in such a task is usually its instructions: a task with a
  * ```js title="a.js" block, twelve numbered requirements and a second block measured 57
- * of its 1,175 chars. A task with nothing fenced or quoted is measured exactly as
- * before: its trimmed length. One pass over the lines, because a delegation task has no
- * length cap.
+ * of its 1,175 chars. A task with nothing fenced, quoted or appended by execute_plan is
+ * measured exactly as before: its trimmed length. One pass over the lines, because a
+ * delegation task has no length cap.
  */
 export function taskOwnWordChars(task: string): number {
-  const whole = task.trim().length;
+  const stepText = withoutPlanStepTurnContext(task);
+  const whole = stepText.trim().length;
   const own: string[] = [];
   let open: { run: string; before: string } | null = null;
-  for (const line of task.split("\n")) {
+  for (const line of stepText.split("\n")) {
     const runs = line.match(FENCE_RUN) ?? [];
     if (open) {
       const openRun = open.run;
@@ -156,11 +168,14 @@ export function taskOwnWordChars(task: string): number {
  * task, fenced and quoted text included. What such a run is handed in a fence is often what it
  * builds: a requirement list the delegator fenced, or a Markdown body to turn into a page or a
  * deck. Not staging a build that needed it costs the whole run (f08195d2), so a builder keeps
- * the measure it was staged on before. Any other write-capable run (code_analyst, the
- * researcher, the summarizer, the coder) is measured on its own words (taskOwnWordChars): what
- * it is handed in a fence is input it reads, analyses or changes. In the cart assessment a
- * pasted cart.js made code_analyst's "why" question 681 chars long, and it was told to build a
- * report file.
+ * the measure it was staged on before. That includes the turn context an execute_plan step
+ * carries (agent/plan-step-task.ts): a build plan's objective and acceptance criteria are the
+ * requirements of what its builder builds. Any other write-capable run (code_analyst, the
+ * researcher, the summarizer, the coder, browser_agent) is measured on its own words
+ * (taskOwnWordChars): what it is handed in a fence is input it reads, analyses or changes, and a
+ * plan's turn context is the plan's. In the cart assessment a pasted cart.js made code_analyst's
+ * "why" question 681 chars long, and it was told to build a report file; in d20e3c0a a plan's
+ * context made browser_agent's one-line "read this website" step 604 chars long.
  */
 export function stagedBuildTaskChars(toolNames: readonly string[] | undefined, task: string): number {
   return holdsArtifactBuilderTool(toolNames) ? task.trim().length : taskOwnWordChars(task);
@@ -171,7 +186,7 @@ export function stagedBuildTaskChars(toolNames: readonly string[] | undefined, t
  * create and amend a file, and the task is a specification rather than an
  * instruction. Capability + size only — no topic words, no language tables.
  * Size is stagedBuildTaskChars: the whole task for a run holding a builder tool, the
- * task's own words for any other.
+ * task's own words (no fenced or quoted material, no plan turn context) for any other.
  */
 export function isStagedArtifactBuildRun(toolNames: string[] | undefined, task: string): boolean {
   const available = new Set(toolNames ?? []);

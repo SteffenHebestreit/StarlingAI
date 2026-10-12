@@ -62,7 +62,8 @@ export interface TurnPlanStep {
    * What a delegate step must hand back (DelegationDeliverable): passed to delegate_to_agent by
    * execute_plan, so a plan's build step is judged as one and its research step is not. The step's
    * task carries the turn's OBJECTIVE, so a verb test over it read every step of a build plan as
-   * the build.
+   * the build. An undeclared step is now read on its own text (agent/plan-step-task.ts), for its
+   * verbs (delegationAsksForFile) and for its size as a staged build (taskOwnWordChars).
    */
   deliverable?: DelegationDeliverable;
 }
