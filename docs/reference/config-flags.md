@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:436 | 54 |
 | `agents` | packages/core/src/config/schema.ts:1760 | 190 |
 | `alertmanager` | packages/core/src/config/schema.ts:1200 | 1 |
-| `all` | packages/core/src/config/schema.ts:1353 | 314 |
+| `all` | packages/core/src/config/schema.ts:1353 | 315 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1373 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1316 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -166,7 +166,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:739 | 128 |
-| `evidence` | packages/core/src/config/schema.ts:1723 | 107 |
+| `evidence` | packages/core/src/config/schema.ts:1723 | 109 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:296 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:276 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:559 | 3 |
@@ -418,7 +418,7 @@ Every public schema field, where it is declared, and how many production files r
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
 | `secret` | packages/core/src/config/schema.ts:1048 | 55 |
 | `secretAccessKey` | packages/core/src/config/schema.ts:525 | 4 |
-| `seed` | packages/core/src/config/schema.ts:177 | 24 |
+| `seed` | packages/core/src/config/schema.ts:177 | 25 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 1 |
 | `servers` | packages/core/src/config/schema.ts:827 | 25 |
 | `serverSideScopeFilter` | packages/core/src/config/schemas/retrieval.ts:154 | 1 |
