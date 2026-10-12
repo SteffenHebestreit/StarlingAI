@@ -3,7 +3,9 @@
 // uTime * speed: with the latter, lerping a speed during a state transition
 // multiplies the *total elapsed time* by the speed delta, which makes the
 // waves whip around violently in long-lived sessions.
-export const vertexShader = `
+import { POINT_SCALE_VERTEX, POINT_SCALE_FRAGMENT } from "./pointScale";
+
+export const vertexShader = `${POINT_SCALE_VERTEX}
   attribute float particleAngle;
   attribute float particleRadius;
   attribute float particlePhase;
@@ -99,11 +101,11 @@ export const vertexShader = `
 
     vec4 mvPosition = modelViewMatrix * vec4(finalPosition, 1.0);
     gl_Position     = projectionMatrix * mvPosition;
-    gl_PointSize    = 2.0;
+    gl_PointSize    = scaledPointSize(2.0);
   }
 `;
 
-export const fragmentShader = `
+export const fragmentShader = `${POINT_SCALE_FRAGMENT}
   varying vec3  vColor;
   varying float vOpacity;
 
@@ -112,7 +114,7 @@ export const fragmentShader = `
     vec3  brightColor = vColor * 1.4;
     float glowFactor  = max(0.0, 1.5 - dist * 1.5);
     vec3  finalColor  = brightColor * glowFactor * 2.0;
-    float alpha       = vOpacity * smoothstep(1.0, 0.0, dist * 1.8);
+    float alpha       = vOpacity * smoothstep(1.0, 0.0, dist * 1.8) * vPointFade;
     gl_FragColor = vec4(finalColor, alpha);
   }
 `;
