@@ -571,7 +571,9 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     await run();
     const without = String(calls[0]?.args["task"] ?? "");
     expect(without).not.toContain("STOP CONDITIONS");
-    // Appended, not inserted: the head the reuse signature reads is the same either way.
+    // Appended, not inserted: the text before them is unchanged. The reuse signature (the task
+    // whitespace-collapsed and cut at 240 characters, "..." when longer) is therefore unchanged only
+    // when that text is already longer than 240 characters; this one is shorter, so it is not.
     expect(withStop.startsWith(without)).toBe(true);
   });
 

@@ -104,7 +104,11 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   // a confirmation page alone sent a browser step to get one: the page refused the shipping the user
   // chose, the step chose another itself and submitted again, and reported the reference. The plan's
   // own stop conditions ("an error on submit: report it") were recorded and never reached the step.
-  // Last, so the head the reuse signature reads is the same with or without them.
+  // Last, so the text before them is unchanged. delegate_to_agent's reuse signature
+  // (buildTaskSignature in tools/sub-agent.ts) reads the task whitespace-collapsed and cut at 240
+  // characters, with "..." when longer, so it is the same with or without them only when the text
+  // before them is already longer than that. A shorter task's signature does change, for every step
+  // of the plan alike, and each still opens with its own step id.
   if (plan.stopConditions.length > 0) {
     parts.push(`STOP CONDITIONS for the turn — stop and report when one holds: ${plan.stopConditions.join("; ")}`);
   }
