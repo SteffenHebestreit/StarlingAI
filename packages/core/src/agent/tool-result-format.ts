@@ -662,7 +662,7 @@ function frameToolResult(
         .filter(Boolean)
       : [];
     const completedInstruction = workflowArtifactPaths.length > 0
-      ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary ${IN_REPLY_LANGUAGE}: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
+      ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write the final answer ${IN_REPLY_LANGUAGE}: give what the request asked for from the evidence below, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
         + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
       : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
     const head = [

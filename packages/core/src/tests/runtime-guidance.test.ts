@@ -574,7 +574,7 @@ describe("runtime turn guidance", () => {
         tool_call_id: "call_workflow_ok",
         content: [
           "Workflow sourced_presentation [job] completed. Executed steps: 4/4.",
-          "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.",
+          "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write the final answer in the user's language: give what the request asked for from the evidence below, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.",
           "Artifact files (already attached):",
           "- generated/presentation/paper.md",
           "- generated/presentation/notes.md",

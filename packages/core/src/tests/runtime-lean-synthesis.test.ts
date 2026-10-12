@@ -57,12 +57,17 @@ describe("buildSynthesisRequiredDirective", () => {
     expect(d.toLowerCase()).toContain("copy the exact names");
   });
 
-  it("artifact path: a SHORT completion summary that lists the attached files", () => {
+  it("artifact path: the answer the request asked for, with the attached files listed and not pasted", () => {
     const d = buildSynthesisRequiredDirective({ artifactPaths: ["app/index.html", "report.pdf"] });
     expect(d).toContain("attached to this message as files");
     expect(d).toContain("app/index.html");
     expect(d).toContain("report.pdf");
-    expect(d.toLowerCase()).toContain("short final answer");
+    // A SHORT summary of what was completed asked for no part of the answer: the reply to a job
+    // whose report held the error codes asked for did not give them (E2E core-ix-workflow-job-sourced-report).
+    expect(d).toContain("Write the final answer");
+    expect(d).toContain("give what the request asked for from the evidence above, list each attached file with a one-line description");
+    expect(d).toContain("Do NOT paste the files' contents");
+    expect(d).not.toMatch(/SHORT|state what was completed/);
     // Must NOT carry the "copy exact names/numbers" framing — there is no evidence block to copy.
     expect(d.toLowerCase()).not.toContain("copy the exact names");
   });

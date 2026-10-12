@@ -3927,10 +3927,11 @@ async function _runTurn(
         // DONE — telling the model "research incomplete, write a partial answer"
         // made it relay the deliverable's truncated head as the final message
         // (audit 2445da2e: a completed 4/4-step workflow ended as 1600 chars of
-        // the paper's TOC ending in "…"). Pivot to a completion summary.
+        // the paper's TOC ending in "…"). Pivot to the answer from the evidence, with the files
+        // listed and not pasted (agent/citation-honesty.ts buildSynthesisRequiredDirective).
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
-          ? `THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer ${IN_REPLY_LANGUAGE} that: (1) states what was completed, (2) lists every attached artifact path with a one-line description (`
+          ? `THE WORK IS COMPLETE — WRITE THE FINAL ANSWER NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the files' contents into the chat. Write the final answer ${IN_REPLY_LANGUAGE} that: (1) gives what the request asked for from the evidence above, (2) lists every attached file with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
             + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
           : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
@@ -5490,8 +5491,8 @@ async function _runTurn(
           };
         }
         // Artifact-aware variant: when the orchestration produced attached files,
-        // the final answer is a completion SUMMARY (paths + what was built), never
-        // a relay of the documents' contents (audit 2445da2e).
+        // the final answer gives what the request asked for and lists the files,
+        // never a relay of the documents' contents (audit 2445da2e).
         const synthesisArtifacts = collectTurnArtifactAttachments(session);
         // Honesty floor (audit 0dc158ad): on a turn whose research came back partial/
         // cancelled/below the substance floor, the normal "copy the exact names and
