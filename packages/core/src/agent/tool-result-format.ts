@@ -42,7 +42,7 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult, isWorkflowRunResult } from "./turn-tool-contribution.js";
 import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
@@ -121,6 +121,17 @@ export function retrievalEvidenceAllowance(charsShown: number): number {
  * maxDelegatedResultChars, 10,000 characters by default.
  */
 export function knowledgeBaseWorkerReportMaxChars(): number {
+  return effectiveMaxDelegatedResultChars();
+}
+
+/**
+ * What one workflow run's frame (isWorkflowRunResult) may show the model, in characters, its header
+ * and instruction included, in the frame and in the history snippet of the turn that made the call.
+ * The run's answer is the evidence the turn answers from, so it gets the budget of a delegated result
+ * relayed verbatim, the effort-scaled maxDelegatedResultChars, as a knowledge-base worker's report
+ * does. The frame as a whole fits it, so the snippet of the turn that made the call never cuts it.
+ */
+export function workflowRunResultMaxChars(): number {
   return effectiveMaxDelegatedResultChars();
 }
 
@@ -640,7 +651,6 @@ function frameToolResult(
     const blocked = metadata?.["blocked"] === true;
     const stepCount = Number(metadata?.["stepCount"] ?? 1);
     const executedSteps = Number(metadata?.["executedSteps"] ?? stepCount);
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
     // Artifact-bearing completion: the deliverables are FILES attached to the
     // turn, not chat text. Without this pivot the model relays the document
     // body verbatim and ships its truncated head as the final answer
@@ -655,13 +665,22 @@ function frameToolResult(
       ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary ${IN_REPLY_LANGUAGE}: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
         + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
       : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
-    return [
+    const head = [
       `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
       blocked
         ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
         : completedInstruction,
-      `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
+      "Observed evidence:\n",
     ].join("\n");
+    // The run's answer is the evidence, not a summary of it: kept as the steps wrote it, newlines
+    // and table rows intact, up to what the frame's budget leaves after the header, with a line
+    // saying how much a cut left out. The tool's own "Workflow … completed." line would only repeat
+    // the header. A call that ran no workflow keeps the 1,600 characters it had.
+    const answer = stripPresentationFormatting(stripWorkflowPreamble(resultText));
+    const evidence = isWorkflowRunResult(toolName, metadata)
+      ? holdToBudget(answer, Math.max(0, workflowRunResultMaxChars() - head.length), frameContext?.runtimeNote)
+      : truncatePlainText(answer, 1600);
+    return `${head}${evidence || "No usable workflow result returned."}`;
   }
 
   if (toolName === "create_ephemeral_agent") {
