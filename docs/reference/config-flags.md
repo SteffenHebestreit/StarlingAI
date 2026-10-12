@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:983 | 139 |
 | `rolesClaim` | packages/core/src/config/schema.ts:459 | 1 |
-| `routing` | packages/core/src/config/schema.ts:276 | 111 |
+| `routing` | packages/core/src/config/schema.ts:276 | 112 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:861 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:818 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:769 | 1 |
