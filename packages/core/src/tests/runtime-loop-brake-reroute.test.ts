@@ -219,6 +219,8 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     const result = await runTurn({ session, userMessage: REQUEST });
 
     expect(brakeRows()).toEqual(["tool_streak_across_iterations"]);
+    // The turn ended at the brake, not at the iteration cap it was reported as.
+    expect(result.performance?.finishReason).toBe("tool_streak_across_iterations");
     expect(delegations).toHaveLength(1);
     expect(delegations[0]).toEqual({ task: REQUEST });
     expect(result.response).toContain(SPECIALIST_ANSWER);

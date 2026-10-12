@@ -689,10 +689,19 @@ export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksL
  *    message ("I've gathered partial results...") is technically truthful
  *    but throws away the partial results.
  */
+/**
+ * The finish reasons of the two loop brakes that end the tool loop before its iteration cap: one tool
+ * in every iteration (the streak brake) and the same set of tools iteration after iteration. Both
+ * turns were reported as max_tool_iterations; each set below that holds that reason holds these too,
+ * and so does workflow-catalog.ts's give-up set.
+ */
+const LOOP_BRAKE_FINISH_REASONS: readonly string[] = ["tool_streak_across_iterations", "iteration_tool_set_repeat"];
+
 const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "synthesis_required_tool_call_rejected",
   "all_tool_calls_blocked",
   "max_tool_iterations",
+  ...LOOP_BRAKE_FINISH_REASONS,
   // Warden hard-stop after two consecutive delegation failures: same contract — the
   // runtime is giving up on orchestration, so surface the evidence already gathered
   // (e.g. shared findings) instead of a generic synthesis (audit 0602f246).
@@ -5655,6 +5664,7 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "warn" });
       if (workflowStepStartBackstop("iteration_tool_set_repeat")) continue;
       log.warn({ iterationCount, toolSet: iterToolSet }, "Same tool-call set repeated across iterations — forcing synthesis");
+      terminalFinishReason = "iteration_tool_set_repeat";
       break; // falls through to forceSynthesis below
     }
 
@@ -5690,6 +5700,8 @@ async function _runTurn(
       if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
       if (streakLoop) {
         loopBrakeExit = "tool_streak_across_iterations";
+        // The turn ended at the brake, not at the iteration cap (LOOP_BRAKE_FINISH_REASONS).
+        terminalFinishReason = "tool_streak_across_iterations";
         break; // falls through to forceSynthesis below
       }
     }
@@ -5768,6 +5780,7 @@ async function _runTurn(
     "all_tool_calls_blocked",
     "synthesis_required_tool_call_rejected",
     "max_tool_iterations",
+    ...LOOP_BRAKE_FINISH_REASONS,
     "delegation_failures_terminal",
   ]);
   // The loop-brake reroute's answer is the specialist's, written this turn for this request, and it
@@ -5813,7 +5826,7 @@ async function _runTurn(
     ? (looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
         ? buildRecoveryEvidenceUserMessage(terminalEvidenceBackstop.evidence)
         : terminalEvidenceBackstop.evidence)
-    : terminalFinishReason === "max_tool_iterations"
+    : terminalFinishReason === "max_tool_iterations" || LOOP_BRAKE_FINISH_REASONS.includes(terminalFinishReason)
       ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
       : resolveEmptyAssistantResponseFallback("", "", session);
   // Second-chance evidence backstop.  Even when the synthesis call ran,
