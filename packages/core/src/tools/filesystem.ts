@@ -848,7 +848,7 @@ registerTool({
           : `File ${verb}: ${relativePath} (${content.length} chars)`) + defaultedPathNote + churnNudge,
         metadata: {
           artifactKind: "workspace_file",
-          path,
+          path: relativePath,
           outputPath: relativePath,
           filename: artifactFilename(relativePath, ctx.workspacePath),
           contentType,
@@ -889,7 +889,7 @@ registerTool({
     const oldStr = String(args["old_string"] ?? "");
     const newStr = String(args["new_string"] ?? "");
     const replaceAll = args["replace_all"] === true;
-    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, relativePath, refusal } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
@@ -952,8 +952,8 @@ registerTool({
       const replacements = replaceAll ? occurrences : 1;
       return {
         success: true,
-        output: `File edited: ${path} (${replacements} replacement${replacements === 1 ? "" : "s"}).`,
-        metadata: { path, replacements },
+        output: `File edited: ${relativePath} (${replacements} replacement${replacements === 1 ? "" : "s"}).`,
+        metadata: { path: relativePath, replacements },
       };
     } catch (err) {
       if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
@@ -980,7 +980,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath);
+    const { safe, resolved, relativePath, refusal } = guardWritePath(path, ctx.workspacePath);
 
     if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!path.trim()) return { success: false, output: "", error: "path is required" };
@@ -990,8 +990,8 @@ registerTool({
       makeContainedWorkspaceDir(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
       return {
         success: true,
-        output: `Directory created: ${path}`,
-        metadata: { path },
+        output: `Directory created: ${relativePath}`,
+        metadata: { path: relativePath },
       };
     } catch (err) {
       if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };
@@ -1016,7 +1016,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const path = String(args["path"] ?? "");
-    const { safe, resolved, refusal } = guardWritePath(path, ctx.workspacePath, "remove");
+    const { safe, resolved, relativePath, refusal } = guardWritePath(path, ctx.workspacePath, "remove");
 
     if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     // lstat: a link is removed itself, never what it leads to, and one that leads nowhere is there too.
@@ -1033,11 +1033,11 @@ registerTool({
     try {
       // Removed in the directory it is found in, held to its zone as that is opened.
       removeContainedWorkspaceFile(resolved, ctx.workspacePath, { refuse: writeTargetRefuser(resolved, ctx.workspacePath) });
-      log.info({ path, sessionId: ctx.sessionId }, "delete_file: file deleted");
+      log.info({ path, relativePath, sessionId: ctx.sessionId }, "delete_file: file deleted");
       return {
         success: true,
-        output: `File deleted: ${path}`,
-        metadata: { path },
+        output: `File deleted: ${relativePath}`,
+        metadata: { path: relativePath },
       };
     } catch (err) {
       if (isWorkspaceContainmentError(err)) return { success: false, output: "", error: err.message };

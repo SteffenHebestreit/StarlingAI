@@ -77,6 +77,16 @@ describe("DELETE /api/workspace/file", () => {
     expect(existsSync(join(zone("alice"), "page.html"))).toBe(true);
   });
 
+  it("answers 404 for such a name that is not there, and leaves the file of the plain name alone", async () => {
+    // The file tools drop a repeated root from a name that is not on disk; a route deletes only
+    // the name it was given.
+    const segment = basename(root("alice"));
+    writeFileSync(join(zone("alice"), "page.html"), "<h1>new</h1>", "utf8");
+    const res = await remove("alice", `generated/users/${segment}/page.html`);
+    expect(res.status).toBe(404);
+    expect(existsSync(join(zone("alice"), "page.html"))).toBe(true);
+  });
+
   it("answers 404 for a file that is not there", async () => {
     const res = await remove("alice", "generated/e2e/missing.html");
     expect(res.status).toBe(404);

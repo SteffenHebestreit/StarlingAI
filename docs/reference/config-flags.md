@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:772 | 125 |
 | `http` | packages/core/src/config/schema.ts:817 | 94 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
-| `id` | packages/core/src/config/schema.ts:405 | 322 |
+| `id` | packages/core/src/config/schema.ts:405 | 323 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1421 | 2 |
 | `image` | packages/core/src/config/schema.ts:745 | 104 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |

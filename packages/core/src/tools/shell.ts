@@ -221,19 +221,22 @@ function shellQuote(value: string): string {
  * is at the root and was not found after the change above (review, 2026-10-08). The sandbox is
  * handed the whole working root, so running it exposes nothing shell_exec could not reach.
  *
- * And then with a repeated root kept (withoutRepeatedWorkspaceRoot drops it everywhere else): a
- * shell does not drop it, so `users/<segment>/run.py` written there is a directory of that name.
+ * Each of those first as named, a repeated root kept, and only then with it dropped
+ * (withoutRepeatedWorkspaceRoot): a shell does not drop it, so `users/<segment>/run.py` it just
+ * wrote is a directory of that name, and dropping it first ran a stale generated/run.py instead.
  */
 export function resolveScriptPath(scriptPath: string, workspacePath: string): string {
   try {
-    const within = resolvePathWithinWorkspace(scriptPath, workspacePath);
-    if (existsSync(within.resolved)) return within.relativePath;
-    const written = resolveWorkspaceWritePath(scriptPath, workspacePath);
-    if (existsSync(written.resolved)) return written.relativePath;
-    const literal = resolveLiteralWorkspacePath(scriptPath, workspacePath);
-    if (existsSync(literal.resolved)) return literal.relativePath;
-    const asNamed = resolveLiteralWorkspacePath(scriptPath, workspacePath, { asNamedOnDisk: true });
-    return existsSync(asNamed.resolved) ? asNamed.relativePath : within.relativePath;
+    const places = [true, false].flatMap((asNamedOnDisk) => [
+      () => resolvePathWithinWorkspace(scriptPath, workspacePath, { asNamedOnDisk }),
+      () => resolveWorkspaceWritePath(scriptPath, workspacePath, { asNamedOnDisk }),
+      () => resolveLiteralWorkspacePath(scriptPath, workspacePath, { asNamedOnDisk }),
+    ]);
+    for (const place of places) {
+      const found = place();
+      if (existsSync(found.resolved)) return found.relativePath;
+    }
+    return resolvePathWithinWorkspace(scriptPath, workspacePath).relativePath;
   } catch {
     return scriptPath;
   }

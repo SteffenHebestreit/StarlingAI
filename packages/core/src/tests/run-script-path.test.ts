@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { resolveScriptPath } from "../tools/shell.js";
 import { getTool } from "../tools/registry.js";
@@ -74,19 +74,28 @@ describe("run_script path resolution", () => {
     expect(runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("fib.py", ws))).toBe("generated/fib.py");
   });
 
-  // The file tools read a path that repeats the root as the root itself; a shell does not, so
-  // `<root name>/run.py` written by one is a directory of that name in the root.
-  it("finds a script a shell left under a repeated root, after the place the file tools have for it", () => {
-    const shellOnly = workspace([]);
-    const named = `${basename(shellOnly)}/run.py`;
-    mkdirSync(join(shellOnly, basename(shellOnly)));
-    writeFileSync(join(shellOnly, named), "print(1)\n", "utf8");
-    expect(resolveScriptPath(named, shellOnly)).toBe(named);
+  // The file tools read a path that repeats the root as the root itself where nothing is there as
+  // named; a shell does not, so `users/<segment>/run.py` written by one is a directory of that name
+  // in the root, and a stale generated/run.py ran in its place (review 2026-10-12).
+  it("runs the script a shell left under a repeated root, not a stale one where the plain name goes", () => {
+    const segment = "acct-0123456789abcdef";
+    const account = (files: string[]) => {
+      const root = join(workspace([]), "users", segment);
+      for (const file of files) {
+        mkdirSync(join(root, file, ".."), { recursive: true });
+        writeFileSync(join(root, file), "print(1)\n", "utf8");
+      }
+      return root;
+    };
+    const scoped = (path: string, root: string) =>
+      runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath(path, root));
+    const named = `users/${segment}/run.py`;
 
-    const both = workspace(["run.py"]);
-    mkdirSync(join(both, basename(both)));
-    writeFileSync(join(both, basename(both), "run.py"), "print(2)\n", "utf8");
-    expect(resolveScriptPath(`${basename(both)}/run.py`, both)).toBe("run.py");
+    const both = account(["generated/run.py", named]);
+    expect(scoped(named, both)).toBe(named);
+    expect(resolveScriptPath(named, both)).toBe(named);
+    // Where nothing is there as named, the plain name's place still finds what write_file put there.
+    expect(scoped(named, account(["generated/run.py"]))).toBe("generated/run.py");
   });
 
   // The tests above pin the helper; this one pins that run_script hands the sandbox what it found.

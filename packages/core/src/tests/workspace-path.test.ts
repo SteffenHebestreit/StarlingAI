@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, resolveLiteralWorkspacePath, withoutRepeatedWorkspaceRoot, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
@@ -321,10 +322,69 @@ describe("a relative path that repeats the workspace root", () => {
     }
     expect(inScope("full", () => resolveWorkspaceWritePath(other, SHARED)).relativePath).toBe(other);
     expect(resolvePathWithinWorkspace(other, SHARED).relativePath).toBe(other);
-    // The shared root's own name in front of it is the root, so the zone is reached the same way.
-    expectSameAs(`workspace/${other}`, other, SHARED);
-    expectSameAs("workspace/a.html", "a.html", SHARED);
+    // Two segments of the shared root's own path in front of it are the root.
+    expectSameAs(`workspace/workspace/${other}`, other, SHARED);
     expectSameAs("workspace/workspace/a.html", "a.html", SHARED);
+  });
+
+  it("drops nothing on the root's plain name alone where the root is not an account's", () => {
+    // The shared root ends in `workspace`, an ordinary name in it: `workspace/index.html` next to
+    // `index.html` are two files, and so are generated/workspace/app.js and generated/app.js, and a
+    // Bazel WORKSPACE file is a file, not the root (review 2026-10-12).
+    const twoFiles: Array<[string, string]> = [
+      ["workspace/index.html", "index.html"],
+      [`workspace/users/${OTHER}/notes.md`, `users/${OTHER}/notes.md`],
+      ["generated/workspace/app.js", "generated/app.js"],
+      ["Workspace/BUILD", "BUILD"],
+    ];
+    for (const [path, plain] of twoFiles) {
+      expect(withoutRepeatedWorkspaceRoot(path, SHARED)).toBe(path);
+      for (const scope of SCOPES) {
+        for (const [resolver, resolveIt] of Object.entries(RESOLVERS)) {
+          const same = inScope(scope, () => resolveIt(path, SHARED)).resolved === inScope(scope, () => resolveIt(plain, SHARED)).resolved;
+          expect({ path, scope, resolver, same }).toEqual({ path, scope, resolver, same: false });
+        }
+      }
+    }
+    expect(withoutRepeatedWorkspaceRoot("WORKSPACE", SHARED)).toBe("WORKSPACE");
+    for (const scope of SCOPES) {
+      expect(inScope(scope, () => resolveLiteralWorkspacePath("WORKSPACE", SHARED)).relativePath).toBe("WORKSPACE");
+    }
+    // An account's root ends in its id, which nothing else in it is named: one segment is enough.
+    expectSameAs(`${SEGMENT}/a.html`, "a.html", ACCOUNT);
+  });
+
+  it("takes a name that is on disk as named, and drops a repeated root only from one that is not", () => {
+    // Files a turn left under a repeated root before the rule are still there, and listed under that
+    // name: a read, an edit or a delete of that name is of that file (review 2026-10-12).
+    const base = mkdtempSync(join(tmpdir(), "sai-repeated-root-"));
+    try {
+      const account = join(base, "users", SEGMENT);
+      const legacy = join(account, "generated", "users", SEGMENT);
+      mkdirSync(legacy, { recursive: true });
+      writeFileSync(join(legacy, "old.html"), "stale", "utf8");
+      writeFileSync(join(account, "generated", "old.html"), "current", "utf8");
+      const named = `generated/users/${SEGMENT}/old.html`;
+      for (const scope of SCOPES) {
+        for (const [resolver, resolveIt] of Object.entries(RESOLVERS)) {
+          expect({ scope, resolver, at: inScope(scope, () => resolveIt(named, account)).relativePath })
+            .toEqual({ scope, resolver, at: named });
+        }
+      }
+      // A scope-confined agent's own spelling of it, re-rooted into its zone, is there too.
+      expect(inScope("generated", () => resolvePathWithinWorkspace(`users/${SEGMENT}/old.html`, account)).relativePath).toBe(named);
+      expect(inScope("generated", () => resolveWorkspaceWritePath(`users/${SEGMENT}/old.html`, account)).relativePath).toBe(named);
+      // The directory, as listed.
+      expect(inScope("generated", () => resolvePathWithinWorkspace(`generated/users/${SEGMENT}`, account)).relativePath)
+        .toBe(`generated/users/${SEGMENT}`);
+      // A name that is not there yet still lands where the plain name goes, beside the old files.
+      expect(inScope("generated", () => resolveWorkspaceWritePath(`users/${SEGMENT}/new.html`, account)).relativePath)
+        .toBe("generated/new.html");
+      expect(inScope("generated", () => resolveWorkspaceWritePath(`generated/users/${SEGMENT}/new.html`, account)).relativePath)
+        .toBe("generated/new.html");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("keeps a path that shares only segments before the root's last", () => {
@@ -348,7 +408,7 @@ describe("a relative path that repeats the workspace root", () => {
   it("matches a Windows root and a POSIX one, in any case and with either separator", () => {
     const windowsShared = "C:\\Users\\steffen\\StarlingAI\\workspace";
     const windowsAccount = `${windowsShared}\\users\\acct-0123456789abcdef`;
-    expect(withoutRepeatedWorkspaceRoot("workspace/a.html", windowsShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("workspace/a.html", windowsShared)).toBe("workspace/a.html");
     expect(withoutRepeatedWorkspaceRoot("StarlingAI\\Workspace\\a.html", windowsShared)).toBe("a.html");
     expect(withoutRepeatedWorkspaceRoot("Users/steffen/StarlingAI/workspace/a.html", windowsShared)).toBe("a.html");
     expect(withoutRepeatedWorkspaceRoot("Users/steffen/a.html", windowsShared)).toBe("Users/steffen/a.html");
@@ -357,8 +417,9 @@ describe("a relative path that repeats the workspace root", () => {
     expect(withoutRepeatedWorkspaceRoot("generated\\workspace\\users\\acct-0123456789abcdef\\a.html", windowsAccount)).toBe("generated/a.html");
 
     const posixShared = "/home/x/ws";
-    expect(withoutRepeatedWorkspaceRoot("ws/a.html", posixShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("ws/a.html", posixShared)).toBe("ws/a.html");
     expect(withoutRepeatedWorkspaceRoot("x/ws/a.html", posixShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("X/WS/ws/a.html", posixShared)).toBe("ws/a.html");
     expect(withoutRepeatedWorkspaceRoot("home/x/ws/a.html", posixShared)).toBe("a.html");
     expect(withoutRepeatedWorkspaceRoot("x/a.html", posixShared)).toBe("x/a.html");
     expect(withoutRepeatedWorkspaceRoot("home/a.html", posixShared)).toBe("home/a.html");
