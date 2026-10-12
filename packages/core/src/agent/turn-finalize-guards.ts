@@ -17,8 +17,11 @@
 // straight from their sibling modules (never through runtime.js), so the audit events,
 // severities, conditions, and ordering are byte-identical to the inline original.
 
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { logAudit } from "../audit/logger.js";
-import { findUnfilledStubFiles, findBrokenBuiltPages } from "./sub-agent.js";
+import { findUnfilledStubFiles, findBrokenBuiltPageFiles, type ArtifactScanScope } from "./sub-agent.js";
+import { MIN_SUBSTANTIVE_REPLY_CHARS } from "./turn-corrective.js";
 import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
@@ -63,7 +66,7 @@ import {
 } from "./citation-honesty.js";
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
-import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
 import { buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit } from "./qa-delivery-loop.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
@@ -254,6 +257,36 @@ export function answerReferencedFileExists(session: Pick<AgentSession, "getWorks
       return false;
     }
   };
+}
+
+/**
+ * The one line a kept answer gains after the completion gate's corrective build: the files it
+ * repaired, and the ones it could not. Null when there are neither. Fixed text, so in the language
+ * the person wrote in (localizedFixedText); file paths as the workspace names them.
+ */
+export function repairedArtifactsNote(repaired: readonly string[], unrepaired: readonly string[]): string | null {
+  const de: string[] = [];
+  const en: string[] = [];
+  if (repaired.length > 0) {
+    const files = repaired.join(", ");
+    de.push(repaired.length === 1
+      ? `${files} war unvollständig oder fehlerhaft und wurde nachträglich repariert.`
+      : `${files} waren unvollständig oder fehlerhaft und wurden nachträglich repariert.`);
+    en.push(repaired.length === 1
+      ? `${files} was incomplete or broken and has been repaired since.`
+      : `${files} were incomplete or broken and have been repaired since.`);
+  }
+  if (unrepaired.length > 0) {
+    const files = unrepaired.join(", ");
+    de.push(unrepaired.length === 1
+      ? `${files} ist weiterhin unvollständig oder fehlerhaft; die automatische Reparatur hat das nicht behoben.`
+      : `${files} sind weiterhin unvollständig oder fehlerhaft; die automatische Reparatur hat das nicht behoben.`);
+    en.push(unrepaired.length === 1
+      ? `${files} is still incomplete or broken; the automatic repair did not fix it.`
+      : `${files} are still incomplete or broken; the automatic repair did not fix them.`);
+  }
+  if (de.length === 0) return null;
+  return localizedFixedText({ de: `Hinweis: ${de.join(" ")}`, en: `Note: ${en.join(" ")}` });
 }
 
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
@@ -724,70 +757,115 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
 
   // Completion QA gate (normal-stop path): the user asked to BUILD an interactive/served
   // app, the model finished a turn (finishReason stop) describing a CONCEPT, but no real
-  // Unfilled markers or a page that does not run, read straight off disk — the same evidence
-  // the sub-agent's own resume detection uses, so the corrective build it triggers arrives in
-  // repair mode with the fault named rather than starting over.
-  const artifactScope = { modifiedSinceMs: turnStartedAtMs };
-  const turnLeftAnIncompleteArtifact = async (workspacePath: string): Promise<boolean> => {
-    try {
-      if (findUnfilledStubFiles(workspacePath, artifactScope).count > 0) return true;
-      return (await findBrokenBuiltPages(workspacePath, artifactScope)).length > 0;
-    } catch {
-      return false;   // a scan failure must never manufacture a rebuild
-    }
-  };
-
   // artifact was produced → run ONE corrective build and ship the built app instead of the
   // description. Scoped to app/served deliverables (web_coder/backend_coder) so plain
   // reports/decks the model already wrote inline still ship as-is. Bounded by the shared
   // qaCorrectiveBuildUsed latch. (The forced-terminal path has its own build gate above.)
+  //
+  // Unfilled markers or a page that does not run, read straight off disk — the same evidence
+  // the sub-agent's own resume detection uses, so the corrective build it triggers arrives in
+  // repair mode with the fault named rather than starting over. The files, workspace-relative,
+  // so the reply can name what the build repaired. Markers are counted first: establishing
+  // whether a page runs costs a child process, so it is only asked when no marker answered.
+  const artifactScope: ArtifactScanScope = { modifiedSinceMs: turnStartedAtMs };
+  const incompleteArtifactFiles = async (workspacePath: string): Promise<string[]> => {
+    try {
+      const unfilled = findUnfilledStubFiles(workspacePath, artifactScope).files;
+      if (unfilled.length > 0) return unfilled;
+      return (await findBrokenBuiltPageFiles(workspacePath, artifactScope)).map((page) => page.file);
+    } catch {
+      return [];   // a scan failure must never manufacture a rebuild
+    }
+  };
+
   // Hoisted out of the condition below: establishing whether a page runs now costs a child
   // process, so it is only asked when everything cheaper has already said yes.
   const qaGateEligible = effectiveOrchestration().finalResponseQaGate
     && !ctx.getQaCorrectiveBuildUsed()
     && !signal.aborted
     && deliverableIntent.wantsArtifact;
+  // "Described it instead of building it" stays scoped to app builds: for a deck or a
+  // report the model writing the content inline IS the deliverable, and forcing a build
+  // there would be wrong.
   const describedInsteadOfBuilding = qaGateEligible
     && deliverableIntent.isAppBuild
     && ctx.collectTurnArtifactAttachments(session).length === 0;
-  if (
-    qaGateEligible
-    && (
-      // "Described it instead of building it" stays scoped to app builds: for a deck or a
-      // report the model writing the content inline IS the deliverable, and forcing a build
-      // there would be wrong.
-      describedInsteadOfBuilding
-      // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
-      //
-      // This gate asked only "was an artifact produced", because it was written for the
-      // model that DESCRIBES an app instead of building one. The clean-slate validation run
-      // hit the other shape: a real 20 KB artifact with two subsystems unwritten, failing its
-      // probe and its QA gate — and because a file existed, the one mechanism that could have
-      // finished it was skipped, and the turn shipped a partial with an honest apology.
-      //
-      // The QA loop cannot close this itself: its improve() rewrites the ANSWER, never the
-      // file. Only a build can fix a build, and the evidence for needing one is on disk.
-      // A BROKEN ARTIFACT IS BROKEN WHOEVER BUILT IT.
-      //
-      // isAppBuild is `builder !== "content_writer"` — which agent won the bid — and the
-      // second validation run routed a playable browser game to content_writer. So a page
-      // that throws before it draws was classified as not-an-app-build and skipped the one
-      // guard that could have repaired it, on the basis of a routing decision that has
-      // nothing to do with whether the file works. The disk evidence is structural and does
-      // not care who wrote it.
-      || (!describedInsteadOfBuilding && await turnLeftAnIncompleteArtifact(session.getWorkspacePath()))
-    )
-  ) {
+  // AN ARTIFACT THAT EXISTS BUT DOES NOT WORK NEEDS THE BUILD JUST AS MUCH.
+  //
+  // This gate asked only "was an artifact produced", because it was written for the
+  // model that DESCRIBES an app instead of building one. The clean-slate validation run
+  // hit the other shape: a real 20 KB artifact with two subsystems unwritten, failing its
+  // probe and its QA gate — and because a file existed, the one mechanism that could have
+  // finished it was skipped, and the turn shipped a partial with an honest apology.
+  //
+  // The QA loop cannot close this itself: its improve() rewrites the ANSWER, never the
+  // file. Only a build can fix a build, and the evidence for needing one is on disk.
+  // A BROKEN ARTIFACT IS BROKEN WHOEVER BUILT IT.
+  //
+  // isAppBuild is `builder !== "content_writer"` — which agent won the bid — and the
+  // second validation run routed a playable browser game to content_writer. So a page
+  // that throws before it draws was classified as not-an-app-build and skipped the one
+  // guard that could have repaired it, on the basis of a routing decision that has
+  // nothing to do with whether the file works. The disk evidence is structural and does
+  // not care who wrote it.
+  const faultyArtifacts = qaGateEligible && !describedInsteadOfBuilding
+    ? await incompleteArtifactFiles(session.getWorkspacePath())
+    : [];
+  if (qaGateEligible && (describedInsteadOfBuilding || faultyArtifacts.length > 0)) {
     const factsCtx = initialDynamicGuidance?.sourceSensitive
       ? ((await getSharedFactsEvidenceForFinalSynthesis(session.id))?.evidence ?? "")
       : "";
     // A source-sensitive build still needs gathered facts (don't build from nothing).
     if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
       const built = await ctx.runCorrectiveBuild(factsCtx);
-      if (built) {
-        finalResponse = built;
-        invalidateQaSignals();
-        guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" });
+      // A REPAIR DOES NOT REPLACE THE ANSWER IT WAS NOT ABOUT.
+      //
+      // The build's confirmation is the answer when the turn described an app instead of
+      // building it, or wrote too little to be one. A turn that answered and left a faulty
+      // file has an answer of its own: in the E2E run of 2026-10-12 a scene's research brief
+      // (the founding year, the headcount, the three sites, the 18 articles) was replaced by
+      // the build's fixed "Die angeforderte Datei wurde erstellt: …" after content_writer
+      // repaired one function of the evidence ledger the scene had also written, and the
+      // user got none of the facts. Such a turn keeps its answer and gains one line naming
+      // what the build repaired, or what it could not, as the files say once it has run.
+      const keepsAnswer = !describedInsteadOfBuilding && finalResponse.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS;
+      if (!keepsAnswer) {
+        if (built) {
+          finalResponse = built;
+          invalidateQaSignals();
+          guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" });
+        }
+      } else if (ctx.getQaCorrectiveBuildUsed()) {
+        // The build ran (the latch is set as it delegates). Both scans again, held to the files
+        // it was asked to repair and without the marker shortcut: a file with neither markers nor
+        // a failing page that is still there is repaired, whatever the build reported about
+        // itself. A scan that fails says nothing either way, so the answer then gains no line.
+        const workspacePath = session.getWorkspacePath();
+        const asked = new Set(faultyArtifacts.map((file) => resolvePath(workspacePath, file)));
+        const recheckScope: ArtifactScanScope = { ...artifactScope, acceptPath: (abs) => asked.has(resolvePath(abs)) };
+        let stillFaulty: Set<string> | null;
+        try {
+          stillFaulty = new Set([
+            ...findUnfilledStubFiles(workspacePath, recheckScope).files,
+            ...(await findBrokenBuiltPageFiles(workspacePath, recheckScope)).map((page) => page.file),
+          ]);
+        } catch {
+          stillFaulty = null;
+        }
+        if (stillFaulty) {
+          const faulty = stillFaulty;
+          const repaired = faultyArtifacts.filter((file) => !faulty.has(file) && existsSync(resolvePath(workspacePath, file)));
+          const unrepaired = faultyArtifacts.filter((file) => !repaired.includes(file));
+          const note = repairedArtifactsNote(repaired, unrepaired);
+          if (note) finalResponse = `${finalResponse.trimEnd()}\n\n${note}`;
+          if (repaired.length > 0) guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_repaired_artifact" });
+          logAudit("guardrail_flagged", {
+            type: "final_qa_corrective_build_repair_checked",
+            repaired,
+            unrepaired,
+            buildReturned: Boolean(built),
+          }, { sessionId: session.id, channel: session.channel, severity: unrepaired.length > 0 ? "warn" : "info" });
+        }
       }
     }
   }

@@ -133,6 +133,49 @@ for(let x=0;x<960;x+=120){ ctx.fillRect(x,10,100,80); }
 });
 
 /**
+ * AN ID IS AN ATTRIBUTE NAMED `id`, HOWEVER IT IS QUOTED.
+ *
+ * E2E 2026-10-12 (core-ix-workflow-scene-research-brief): a working evidence ledger declared
+ * `<span id=total>`, valid unquoted HTML. The id scan only knew quoted values, so the check's
+ * getElementById("total") returned null, the page was reported broken with "Cannot set
+ * properties of null", and the finished page went to a corrective build.
+ */
+describe("verify_page — reads every id the markup declares, and only those", () => {
+  const UNQUOTED = `<!DOCTYPE html><html><body>
+<table><tr><td data-id="row-7">Kiel</td></tr></table>
+<p>Summe: <span id=total>0</span> · <b id='count'>0</b></p>
+<script>
+"use strict";
+document.getElementById("total").textContent = "146";
+document.getElementById("count").textContent = "18";
+</script>
+</body></html>`;
+
+  it("collects unquoted and single-quoted ids, and not a data-id", () => {
+    const ids = collectElementIds(UNQUOTED);
+    expect(ids.has("total")).toBe(true);
+    expect(ids.has("count")).toBe(true);
+    expect(ids.has("row-7")).toBe(false);
+    expect([...ids].sort()).toEqual(["count", "total"]);
+  });
+
+  it("passes a page whose script writes to an element with an unquoted id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sai-pagecheck-unquoted-"));
+    mkdirSync(join(root, "generated"), { recursive: true });
+    const page = join(root, "generated", "evidence_ledger.html");
+    writeFileSync(page, UNQUOTED);
+    expect(await checkBuiltPage(page, "generated/evidence_ledger.html")).toEqual({ ok: true, detail: "" });
+  }, 40_000);
+
+  it("still fails a script asking for an id only a data-id carries", () => {
+    const html = '<html><body><div data-id="total"></div><script>document.getElementById("total").textContent = "1";</script></body></html>';
+    const { scripts } = collectScripts(html, "/w/index.html");
+    const r = runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+    expect(r.errors.join(" ")).toMatch(/TypeError/);
+  });
+});
+
+/**
  * WHAT THIS PROBE MUST NOT DO TO THE PROCESS IT RUNS IN.
  *
  * checkBuiltPage is called with no tool call at all — artifact-probes runs it on every

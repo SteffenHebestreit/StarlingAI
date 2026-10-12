@@ -93,6 +93,13 @@ export interface CorrectiveContext {
   logWarn: (obj: Record<string, unknown>, msg: string) => void;
 }
 
+/**
+ * The shortest reply that counts as an answer. A build confirmation under it is replaced by the
+ * fixed text at the end of runCorrectiveBuild, and the completion gate keeps a turn's own answer
+ * from this length up when the build only repaired a file (turn-finalize-guards.ts).
+ */
+export const MIN_SUBSTANTIVE_REPLY_CHARS = 80;
+
 // One bounded corrective build for the completion QA gate: when the user asked to BUILD an
 // artifact and none was produced, delegate to the right builder, record the assistant+tool
 // pair so the artifact surfaces as a download, and synthesize a confirmation. Returns the
@@ -296,9 +303,9 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
   logAudit("guardrail_flagged", {
     type: "final_qa_corrective_build_synthesized",
     artifacts: paths.length,
-    synthesized: Boolean(candidate && candidate.trim().length >= 80),
+    synthesized: Boolean(candidate && candidate.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS),
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-  return candidate && candidate.trim().length >= 80
+  return candidate && candidate.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS
     ? candidate
     : `Die angeforderte Datei wurde erstellt: ${paths.join(", ")}.\n\n(The requested file was built: ${paths.join(", ")}.)`;
 };

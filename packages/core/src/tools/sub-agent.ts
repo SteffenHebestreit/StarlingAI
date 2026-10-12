@@ -9,7 +9,9 @@ import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, toolCal
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
 import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
-import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
+import { extractTaskNamedPaths, runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
+import { workspaceFileExists } from "../agent/artifact-path-repair.js";
+import { parentSessionOf } from "../agent/session-ids.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
 import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 import { isBlankBrowserPage } from "./browser-page-report.js";
@@ -45,6 +47,7 @@ import {
   agentCfgIsResearchCapable,
   agentCfgReachesOutsideWorkspace,
   agentCfgWorksOnlyFromHandedText,
+  agentCfgReadsOnlyUploads,
   agentCfgOnlyReadsOpenBrowserTab,
   agentCfgDrivesSharedBrowser,
   evidenceGatherPoint,
@@ -1246,6 +1249,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // The research gate's turn trigger for a ROUTED pick: decided at this delegation's first routing
   // round and kept for the rest (see Step 1 below).
   let routedTurnTriggered: boolean | undefined;
+  // Whether the delegation has a file of the user's to read (delegationHasUserFile), asked once and
+  // only when a ranking offers an agent that reads nothing else.
+  let hasUserFile: boolean | undefined;
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1531,6 +1537,28 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         droppedAgents: ranked.map((c) => c.name),
         ...auditExtra,
       }, { sessionId: ctx.sessionId });
+    }
+    // AN AGENT THAT READS ONLY UPLOADS IS NOT ROUTED A STEP WITH NO FILE TO READ. The router ranks
+    // by what a description shares with the task, and an intake agent's "extract the content" reads
+    // like any step that extracts anything. In the E2E run of 2026-10-12 (f08cee40) a workflow step
+    // with nothing attached delegated "Fetch and read the website http://… and extract all factual
+    // data", routed as "web browsing and website content extraction"; the rerank put the upload
+    // reader ahead of researcher, and it listed an empty folder for half a minute before the step
+    // went to researcher. A workflow step carries no turn trigger, so the web-address rule below
+    // never saw it. With no file attached in the conversation and none the task names, such an
+    // agent is dropped (agentCfgReadsOnlyUploads, read from the taxonomy's input facet), as long as
+    // another candidate is left.
+    if (routingCandidates.length > 1) {
+      const uploadReaders = routingCandidates.filter((cand) => agentCfgReadsOnlyUploads(lookupAgentCapabilities(cand.name)));
+      if (uploadReaders.length > 0 && uploadReaders.length < routingCandidates.length
+        && !(hasUserFile ??= delegationHasUserFile(ctx, [request.task, request.context]))) {
+        logAudit("delegation_routing_filtered_no_user_file", {
+          taskTitle: title,
+          droppedAgents: uploadReaders.map((cand) => cand.name),
+          ...auditExtra,
+        }, { sessionId: ctx.sessionId });
+        routingCandidates = routingCandidates.filter((cand) => !uploadReaders.includes(cand));
+      }
     }
     // Research-capability gate: a source-sensitive / "search online and
     // validate" task must go to an agent that can actually reach the web (or
@@ -4148,6 +4176,34 @@ registerTool({
     };
   },
 });
+
+/**
+ * Whether a delegation has a file of the user's to read: one attached to a user message in the
+ * conversation it runs in (its own session and every one above it, through sub-agent and workflow
+ * runs, as far as this process holds them), or one its task or context names that is in the
+ * workspace. True when no session of that chain is held here: a conversation this process cannot
+ * see is not one without files.
+ */
+function delegationHasUserFile(ctx: ToolContext, texts: ReadonlyArray<string | undefined>): boolean {
+  let known = false;
+  let id: string | null = ctx.sessionId;
+  for (let depth = 0; id && depth < 16; depth += 1) {
+    const session = getSession(id);
+    if (session) {
+      known = true;
+      const attached = session.getHistory().some((message) => {
+        const attachments = message.role === "user" ? message.metadata?.["attachments"] : undefined;
+        return Array.isArray(attachments) && attachments.length > 0;
+      });
+      if (attached) return true;
+    }
+    const parent = parentSessionOf(id, ["sub:", "workflow:"]);
+    id = parent === id ? null : parent;
+  }
+  if (!known) return true;
+  const exists = workspaceFileExists(ctx.workspacePath);
+  return texts.some((text) => (text ? extractTaskNamedPaths(text).some(exists) : false));
+}
 
 /**
  * The files the user handed over in this session: the attachments on its user messages. An
