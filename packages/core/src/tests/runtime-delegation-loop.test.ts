@@ -456,6 +456,68 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("delegate_to_agent");
   });
 
+  describe("the failed-research honesty block on a review of pasted code (E2E 2026-10-12)", () => {
+    // The analyst grepped the workspace for the code the person had pasted, found nothing, and came
+    // back partial; the orchestrator then answered from the pasted code, and the honesty block
+    // replaced that answer with "Research did not complete".
+    const PASTED_CODE = [
+      "```python",
+      "def invoice_total(line_items):",
+      "    subtotal = sum(item[\"price\"] * item[\"qty\"] for item in line_items)",
+      "    return int(subtotal * 1.2)",
+      "",
+      "def receipt_total(lines):",
+      "    return int(sum(line[\"amount\"] for line in lines) * 1.2)",
+      "```",
+    ].join("\n");
+    const ANALYSIS = "Der Fehler ist int(): Es schneidet die Nachkommastellen ab, statt zu runden. "
+      + "Derselbe Fehler steckt in receipt_total in receipts.py.";
+
+    async function runReviewTurn(userMessage: string) {
+      const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+        orchestration: { failedResearchHonestyBackstop: true },
+      });
+      let llmCallCount = 0;
+      streamMock.mockImplementation(() => {
+        llmCallCount += 1;
+        return llmCallCount === 1
+          ? createDelegateToolCallStream("delegate_review", { agentName: "code_analyst", task: "Review the invoice code for the rounding bug." })
+          : createTextStream(ANALYSIS);
+      });
+      freshRuntime.registerTool({
+        name: "delegate_to_agent",
+        description: "Delegate to a specialist.",
+        parameters: { type: "object", properties: {} },
+        execute: vi.fn(async () => ({
+          success: true,
+          output: "[code_analyst]: No matches for /int\\(/ in **/*.py.",
+          metadata: { agentName: "code_analyst", delegationSucceeded: true, delegationOutcome: "partial", terminalState: "completed" },
+        })),
+      });
+      const session = new freshRuntime.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      const result = await freshRuntime.runTurn({ session, userMessage });
+      freshRuntime.unregisterTool("delegate_to_agent");
+      return result;
+    }
+
+    it("ships the answer from the pasted code", async () => {
+      const result = await runReviewTurn(
+        `Statische Code-Analyse, bitte nichts ausführen: Die Summen von invoice_total fallen um bis zu einen Cent zu niedrig aus. Benenne den Fehler und jede weitere Stelle mit demselben Fehler.\n\n${PASTED_CODE}`,
+      );
+
+      expect(result.response).toContain("receipts.py");
+      expect(result.response).not.toContain("Research did not complete");
+    });
+
+    it("control: still blocks the same answer to a question that pasted nothing", async () => {
+      const result = await runReviewTurn(
+        "Die Summen von invoice_total in unserem Repository fallen um bis zu einen Cent zu niedrig aus. Benenne den Fehler und jede weitere Stelle mit demselben Fehler.",
+      );
+
+      expect(result.response).toContain("Research did not complete");
+    });
+  });
+
   it("does NOT force a fetch when urlFetchEnforcement is off (default) — structural flag gate", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {}); // flag defaults off
     streamMock.mockImplementation(() => createTextStream("A brief note that references https://example.com/x."));

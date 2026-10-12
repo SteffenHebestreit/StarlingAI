@@ -4415,6 +4415,7 @@ async function _runTurn(
         workflowRunCompletedThisTurn,
         releasedWithoutResearchEvidence,
         autoResearchAnswer,
+        upfrontSourceSensitive,
         outputScan,
         getTurnDelegationCount: () => _turnDelegationCount,
         getQaCorrectiveBuildUsed: () => qaCorrectiveBuildUsed,
