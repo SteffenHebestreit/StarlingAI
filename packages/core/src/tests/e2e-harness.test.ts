@@ -119,6 +119,10 @@ class FakeGateway {
   private memoryCounter = 0;
   /** The dialectic user model by store (user-model/service.ts): its lists only. */
   readonly userModels = new Map<string, Record<string, string[]>>();
+  /** The files in generated/ of each workspace root: the account's own, or "shared" with auth off. */
+  readonly generated = new Map<string, Set<string>>();
+  /** What DELETE /api/workspace/generated answers with instead of emptying (404: a gateway without the route). */
+  workspaceResetStatus: number | null = null;
   /** What GET /api/models/preset answers: the dashboard's Local ⇄ Claude switch. */
   modelPreset: { active: string | null; activePrimary: string | null } = { active: null, activePrimary: null };
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
@@ -156,6 +160,22 @@ class FakeGateway {
 
   memoryKeys(store: string, scope: MemoryScope): string[] {
     return [...(this.memory.get(`${store}:${scope}`)?.keys() ?? [])];
+  }
+
+  /** The workspace root a request of `user` reaches: the account's own, the shared one with auth off. */
+  rootOf(user: string): string {
+    return this.authEnabled ? user : "shared";
+  }
+
+  /** A file a turn writes into generated/ of a root. */
+  writeGenerated(root: string, file: string): void {
+    const files = this.generated.get(root) ?? new Set<string>();
+    this.generated.set(root, files);
+    files.add(file);
+  }
+
+  generatedFiles(root: string): string[] {
+    return [...(this.generated.get(root) ?? [])];
   }
 
   async start(): Promise<void> {
@@ -371,6 +391,14 @@ class FakeGateway {
       this.userModels.delete(this.storeOf(user, "user"));
       return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], revision: 2, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "user" });
     }
+    if (req.method === "DELETE" && url.pathname === "/api/workspace/generated") {
+      if (this.workspaceResetStatus === 404) return json(404, { error: "not found" });
+      if (this.workspaceResetStatus !== null) return json(this.workspaceResetStatus, { error: "1 entry of generated/ could not be removed (EBUSY)", removed: 0, failed: 1 });
+      const files = this.generated.get(this.rootOf(user));
+      const removed = files?.size ?? 0;
+      files?.clear();
+      return json(200, { removed });
+    }
     const memoryEntry = /^\/api\/memory\/entries\/([^/]+)$/.exec(url.pathname);
     if (req.method === "DELETE" && memoryEntry) {
       const scope = url.searchParams.get("scope") === "user" ? "user" : "workspace";
@@ -514,6 +542,8 @@ beforeEach(() => {
   gateway.startedAt = Date.now() - 3_600_000;
   gateway.memory.clear();
   gateway.userModels.clear();
+  gateway.generated.clear();
+  gateway.workspaceResetStatus = null;
   gateway.modelPreset = { active: null, activePrimary: null };
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
@@ -804,6 +834,8 @@ describe("e2e harness against a fake gateway", () => {
     expect(gateway.memoryKeys("shared", "workspace")).toEqual(["operator_decision"]);
     expect(authOff.attempts[0]!.notes).toEqual([
       "memory reset skipped: the gateway runs with auth off, so every account's memory is the shared single-operator store",
+      // The workspace route would empty the shared root's generated/: the operator's own files.
+      "workspace reset skipped: the gateway runs with auth off, so every account's generated/ is the shared root's, the operator's own files",
     ]);
 
     // A credentials file that maps the identity "eval" to another account of the deployment.
@@ -817,7 +849,10 @@ describe("e2e harness against a fake gateway", () => {
     try {
       const otherAccount = await runScenario(loaded(scenario), deps({ client: mapped }), FAST);
       expect(gateway.memoryKeys("alice", "user")).toEqual(["alice_pref"]);
-      expect(otherAccount.attempts[0]!.notes).toEqual(['memory reset skipped: eval logs in as account "alice", not as its eval account "eval"']);
+      expect(otherAccount.attempts[0]!.notes).toEqual([
+        'memory reset skipped: eval logs in as account "alice", not as its eval account "eval"',
+        'workspace reset skipped: eval logs in as account "alice", not as its eval account "eval"',
+      ]);
     } finally {
       mapped.close();
     }
@@ -889,6 +924,7 @@ describe("e2e harness against a fake gateway", () => {
     expect(viewer.attempts[0]!.notes).toEqual([
       "memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)",
       "memory reset: 1 entry of eval-viewer's workspace memory not deleted (HTTP 403)",
+      "workspace reset: eval-viewer's generated/ not emptied (HTTP 403: Operator role required for this action)",
     ]);
     // A 403 is the role's answer: the other entries are not tried.
     expect(gateway.httpPaths.filter((path) => path.startsWith("DELETE /api/memory/entries/")).length - deletesBefore).toBe(1);
@@ -930,7 +966,11 @@ describe("e2e harness against a fake gateway", () => {
     expect(stopped.attempts[0]!.steps[0]!.turn!.cancel).toEqual({ cancelled: true, known: true });
 
     const next = await runScenario(loaded(scenario), deps(), options);
-    expect(next.attempts[0]!.notes).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+    expect(next.attempts[0]!.notes).toEqual([
+      `memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`,
+      // It may write files after a reset as well.
+      `workspace reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`,
+    ]);
     expect(gateway.memoryKeys("eval", "user")).toEqual(["late_fact"]);
 
     finishLingering?.();
@@ -979,7 +1019,10 @@ describe("e2e harness against a fake gateway", () => {
       await turn.stored;
 
       const blocked = await runScenario(loaded(next), deps(), options);
-      expect(blocked.attempts[0]!.notes, drop).toEqual([`memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`]);
+      expect(blocked.attempts[0]!.notes, drop).toEqual([
+        `memory reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`,
+        `workspace reset skipped: turn ${requestId} of eval was stopped earlier and has not been seen to end`,
+      ]);
       expect(gateway.memoryKeys("eval", "user"), drop).toEqual(["late_fact"]);
 
       turn.release();
@@ -997,7 +1040,10 @@ describe("e2e harness against a fake gateway", () => {
     gateway.remember("eval", "user", "favorite_tea");
     const scenario: E2EScenario = { id: "fake-after-wipe", title: "After a wipe", group: "core", steps: [{ ...helloTurn }] };
     const waiting = await runScenario(loaded(scenario), deps(), options);
-    expect(waiting.attempts[0]!.notes).toEqual(["memory reset skipped: turn e2e-before-the-wipe of eval was stopped earlier and has not been seen to end"]);
+    expect(waiting.attempts[0]!.notes).toEqual([
+      "memory reset skipped: turn e2e-before-the-wipe of eval was stopped earlier and has not been seen to end",
+      "workspace reset skipped: turn e2e-before-the-wipe of eval was stopped earlier and has not been seen to end",
+    ]);
     expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
 
     gateway.startedAt = Date.now();
@@ -1063,7 +1109,10 @@ describe("e2e harness against a fake gateway", () => {
     expect(other).not.toBe(own);
     expect(attempt.sessions).toEqual([own, other]);
     expect(attempt.steps[3]!.http?.path).toBe(`/api/echo/${own}`);
-    expect(attempt.notes).toEqual(["memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)"]);
+    expect(attempt.notes).toEqual([
+      "memory reset: 1 entry of eval-viewer's user memory not deleted (HTTP 403)",
+      "workspace reset: eval-viewer's generated/ not emptied (HTTP 403: Operator role required for this action)",
+    ]);
   });
 
   it("checks that eval-viewer cannot recall eval's preference with that preference in place, whatever ran before", async () => {
@@ -1123,10 +1172,104 @@ describe("e2e harness against a fake gateway", () => {
     // The viewer may not reset it (operator-only, like every mutating route): noted. An empty model
     // is not reset at all.
     const viewerScenario: E2EScenario = { id: "fake-reset-model-viewer", title: "Reset as the viewer", group: "core", identity: "eval-viewer", steps: [{ ...helloTurn }] };
-    expect((await runScenario(loaded(viewerScenario), deps(), FAST)).attempts[0]!.notes).toEqual(["memory reset: eval-viewer's user model not emptied (HTTP 403)"]);
+    expect((await runScenario(loaded(viewerScenario), deps(), FAST)).attempts[0]!.notes).toEqual([
+      "memory reset: eval-viewer's user model not emptied (HTTP 403)",
+      "workspace reset: eval-viewer's generated/ not emptied (HTTP 403: Operator role required for this action)",
+    ]);
     const resets = gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length;
     await runScenario(loaded(scenario), deps(), FAST);
     expect(gateway.sequence.filter((entry) => entry === "POST /api/user-model/reset").length).toBe(resets);
+  });
+
+  it("empties generated/ once per attempt, before its first step: what an earlier run left is gone, what the steps write stays", async () => {
+    // Turns read what earlier runs had left as evidence: a reply answered from a two-day-old
+    // briefing, another cited a chart an earlier run had made (2026-10-10).
+    gateway.writeGenerated("eval", "briefing-2026-10-08.md");
+    gateway.writeGenerated("eval-viewer", "viewer-notes.md");
+    const foundByTurn: string[][] = [];
+    gateway.setScripts([{ match: /^chart/, run: async (turn) => {
+      foundByTurn.push(gateway.generatedFiles(turn.user));
+      gateway.writeGenerated(turn.user, `Hofladen_Besucherzahlen-${foundByTurn.length}.html`);
+      turn.finish("ok", "Chart written.");
+    } }]);
+    const scenario: E2EScenario = {
+      id: "fake-reset-workspace",
+      title: "Reset the workspace",
+      group: "core",
+      repeat: 2,
+      steps: [
+        { kind: "http", id: "first-step", method: "GET", path: "/api/echo/first-step" },
+        { kind: "turn", id: "chart", message: "chart the visitors" },
+      ],
+    };
+    const start = gateway.sequence.length;
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    expect(result.attempts.map((attempt) => attempt.outcome)).toEqual(["passed", "passed"]);
+    expect(result.attempts.map((attempt) => attempt.notes)).toEqual([[], []]);
+    // Each attempt's turn found generated/ empty: neither the earlier run's briefing nor the chart
+    // of the attempt before.
+    expect(foundByTurn).toEqual([[], []]);
+    // What the last attempt's steps wrote stays.
+    expect(gateway.generatedFiles("eval")).toEqual(["Hofladen_Besucherzahlen-2.html"]);
+    // Once per attempt, before its first step.
+    const order = gateway.sequence.slice(start).filter((entry) => ["DELETE /api/workspace/generated", "GET /api/echo/first-step", "chat.send"].includes(entry));
+    expect(order).toEqual([
+      "DELETE /api/workspace/generated", "GET /api/echo/first-step", "chat.send",
+      "DELETE /api/workspace/generated", "GET /api/echo/first-step", "chat.send",
+    ]);
+    // Only the attempt's own identities.
+    expect(gateway.generatedFiles("eval-viewer")).toEqual(["viewer-notes.md"]);
+  });
+
+  it("leaves generated/ alone when switched off and while attempts run at once; each reset runs without the other", async () => {
+    const scenario: E2EScenario = { id: "fake-keep-workspace", title: "Keep the workspace", group: "core", steps: [{ ...helloTurn }] };
+    const emptied = () => gateway.httpPaths.filter((path) => path === "DELETE /api/workspace/generated").length;
+    const before = emptied();
+    gateway.writeGenerated("eval", "kept.md");
+    gateway.remember("eval", "user", "favorite_tea");
+    await runScenario(loaded(scenario), deps(), { ...FAST, resetWorkspace: false });
+    expect(emptied()).toBe(before);
+    expect(gateway.generatedFiles("eval")).toEqual(["kept.md"]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual([]);
+
+    // Attempts that run at once share the account: one would delete what another's steps wrote.
+    await runScenario(loaded(scenario), deps(), { ...FAST, concurrency: 2 });
+    expect(emptied()).toBe(before);
+    expect(gateway.generatedFiles("eval")).toEqual(["kept.md"]);
+
+    gateway.remember("eval", "user", "favorite_tea");
+    await runScenario(loaded(scenario), deps(), { ...FAST, resetDurableMemory: false });
+    expect(emptied()).toBe(before + 1);
+    expect(gateway.generatedFiles("eval")).toEqual([]);
+    expect(gateway.memoryKeys("eval", "user")).toEqual(["favorite_tea"]);
+  });
+
+  it("notes a workspace reset that fails, and runs the attempt all the same; with auth off it asks nothing", async () => {
+    // A file left from earlier is a confound the report names, not a verdict: the attempt runs.
+    const scenario: E2EScenario = { id: "fake-reset-workspace-fails", title: "A reset that fails", group: "core", steps: [{ ...helloTurn }] };
+    gateway.writeGenerated("eval", "stale.md");
+    gateway.workspaceResetStatus = 500;
+    const failed = await runScenario(loaded(scenario), deps(), FAST);
+    expect(failed.attempts[0]!.notes).toEqual(["workspace reset: eval's generated/ not emptied (HTTP 500: 1 entry of generated/ could not be removed (EBUSY))"]);
+    expect(failed.attempts[0]!.outcome).toBe("passed");
+    expect(failed.attempts[0]!.steps.map((step) => step.passed)).toEqual([true]);
+
+    // A gateway built before the route.
+    gateway.workspaceResetStatus = 404;
+    const older = await runScenario(loaded(scenario), deps(), FAST);
+    expect(older.attempts[0]!.notes).toEqual(["workspace reset: eval's generated/ not emptied (HTTP 404: the gateway has no DELETE /api/workspace/generated yet)"]);
+    expect(older.attempts[0]!.outcome).toBe("passed");
+    expect(gateway.generatedFiles("eval")).toEqual(["stale.md"]);
+
+    // With auth off the route would empty the shared root's generated/, the operator's own files.
+    gateway.workspaceResetStatus = null;
+    gateway.authEnabled = false;
+    gateway.writeGenerated("shared", "operator-report.pdf");
+    const emptied = gateway.httpPaths.filter((path) => path === "DELETE /api/workspace/generated").length;
+    await runScenario(loaded(scenario), deps(), FAST);
+    gateway.authEnabled = true;
+    expect(gateway.httpPaths.filter((path) => path === "DELETE /api/workspace/generated").length).toBe(emptied);
+    expect(gateway.generatedFiles("shared")).toEqual(["operator-report.pdf"]);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {
@@ -1845,6 +1988,26 @@ describe("e2e CLI (in process, against the fake gateway)", () => {
     const regressed = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--repeat", "3", "--out", "out-4", "--baseline", threePath]);
     expect(regressed.code).toBe(1);
     expect(regressed.out).toContain("Baseline: 1 regression(s) (cli-pass), 0 flaky, 0 inconclusive, 0 improvement(s);");
+  });
+
+  it("empties generated/ before each attempt unless --keep-workspace or --keep-memory says otherwise", async () => {
+    const emptied = () => gateway.httpPaths.filter((path) => path === "DELETE /api/workspace/generated").length;
+    let runs = 0;
+    const run = async (...flags: string[]) => {
+      runs += 1;
+      gateway.writeGenerated("eval", "stale.md");
+      gateway.remember("eval", "user", "favorite_tea");
+      const before = emptied();
+      const result = await cli(["evaluate", "--scenarios", "scenarios", "--id", "cli-pass", "--out", `keep-${runs}`, ...flags]);
+      expect(result.code, flags.join(" ")).toBe(0);
+      return { emptied: emptied() - before, files: gateway.generatedFiles("eval"), memory: gateway.memoryKeys("eval", "user") };
+    };
+    expect(await run()).toEqual({ emptied: 1, files: [], memory: [] });
+    // The files only.
+    expect(await run("--keep-workspace")).toEqual({ emptied: 0, files: ["stale.md"], memory: [] });
+    // What the account had, its files with it.
+    expect(await run("--keep-memory")).toEqual({ emptied: 0, files: ["stale.md"], memory: ["favorite_tea"] });
+    expect(await run("--keep-memory", "--keep-workspace")).toEqual({ emptied: 0, files: ["stale.md"], memory: ["favorite_tea"] });
   });
 
   it("names a scenario whose baseline attempts all ended on a harness error as having no trial, with no estimate", async () => {
