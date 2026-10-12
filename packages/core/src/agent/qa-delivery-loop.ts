@@ -343,6 +343,26 @@ export function answerFitsRepair(current: string, maxChars = answerRepairMaxChar
   return current.length <= maxChars;
 }
 
+/**
+ * What every QA call is told about an answer's own disclosures. The reviewer FAILed an answer for
+ * its note that the page had refused the user's choice and a different one was submitted, reading
+ * it as unrequested content against a "word for word" criterion, and the repair then dropped the
+ * note: an honest answer left the loop claiming the request went through as asked (E2E 2026-10-12).
+ * The verdict prompt, the repair, the verification and the consistency repair all carry it.
+ */
+export const QA_DISCLOSURE_RULE = "A note that something was refused, failed, not done, or done differently than asked is required, "
+  + "never unrequested content: do not fail an answer for it, and keep it in any rewrite.";
+
+/**
+ * What a rewrite is told about a flaw in what was DONE. The reviewer rightly failed an answer
+ * whose agent had resubmitted a form with 999 after the page refused the user's 1200; told to
+ * "fix" that, the repair could not undo the submission, so it rewrote the answer to say the
+ * quantity had NOT been changed, against the tool results (E2E 2026-10-12). Only the rewrites
+ * carry it: the reviewer's verdict is right to fail such an answer.
+ */
+export const QA_ACTION_HONESTY_RULE = "A flaw in what was done (a value submitted, an action taken) cannot be fixed by rewriting: "
+  + "say what the tool results show was actually done and that it does not meet the request; never state that it did not happen.";
+
 const REPAIR_ANSWER_LABEL = "Current answer to improve:";
 /** The verification is told to return the answer unchanged when it holds, so it is not labelled as one to improve. */
 const VERIFY_ANSWER_LABEL = "Your answer:";
@@ -374,6 +394,7 @@ export function buildQaImproveInstruction(current: string, flaws: string, maxCha
     + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
     + flaws
     + currentAnswerBlock(current, REPAIR_ANSWER_LABEL, maxChars)
+    + `\n\n${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE}`
     + "\n\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
 }
 
@@ -390,6 +411,7 @@ export function buildCriteriaVerifyInstruction(
   return "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
     + criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
     + currentAnswerBlock(current, VERIFY_ANSWER_LABEL, maxChars)
+    + `\n\n${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE}`
     + "\n\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
     + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
 }
