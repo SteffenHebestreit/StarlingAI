@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence} from "../agent/qa-delivery-loop.js";
+import {
+  runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence,
+  buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit,
+  answerFitsRepair, answerRepairMaxChars,
+} from "../agent/qa-delivery-loop.js";
+import { BUILTIN_EFFORT_PROFILES, runWithEffortContext } from "../runtime/effort-context.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
 
@@ -362,3 +367,130 @@ describe("qaRequiresEvidence — strict implies the evidence request", () => {
   });
 });
 
+/**
+ * The repairs see the answer they repair.
+ *
+ * E2E core-ix-browser-order-form-express-refused: both QA rounds failed, and every shipped reply was
+ * the improve step's rewrite. That rewrite ran through forceSynthesis, which reads the session's
+ * history, and the draft is not in it until the turn ships: it got the flaws and not the answer, and
+ * one rewrite turned the browser agent's disclosure (it had changed the shipping) into "no
+ * automatic change was made". Only the coordinator escalation passed the answer; these pin that
+ * every repair instruction does, in the escalation's form.
+ */
+describe("repair instructions carry the answer they repair", () => {
+  const DISCLOSURE = "Hinweis: Die Seite hat Express für Speditionsware abgelehnt; der Browser-Agent hat daraufhin auf "
+    + "Standardversand umgestellt und erneut abgeschickt.";
+  const ANSWER = `Die Bestellung wurde abgeschickt, Referenz NW-B-2106-2-S.\n\n${DISCLOSURE}`;
+
+  it("the QA improve step gets the flaws and the answer, disclosure included", () => {
+    const instruction = buildQaImproveInstruction(ANSWER, "the reply does not say the user's express choice was refused") ?? "";
+    expect(instruction).toContain("QA REVIEW found");
+    expect(instruction).toContain("the reply does not say the user's express choice was refused");
+    expect(instruction).toContain(`Current answer to improve:\n${ANSWER}`);
+    expect(instruction).toContain(DISCLOSURE);
+    // What to return comes after the answer, so the instruction is the last thing the call reads.
+    expect(instruction.indexOf("Return the COMPLETE corrected answer")).toBeGreaterThan(instruction.indexOf(DISCLOSURE));
+  });
+
+  it("riskGatedQA's one-shot verification gets the criteria and the answer, labelled neutrally: it is to return it unchanged", () => {
+    const instruction = buildCriteriaVerifyInstruction(ANSWER, ["reports what the page showed after submit"]) ?? "";
+    expect(instruction).toContain("1. reports what the page showed after submit");
+    expect(instruction).toContain(`Your answer:\n${ANSWER}`);
+    expect(instruction).not.toContain("Current answer to improve");
+    expect(instruction).toContain(DISCLOSURE);
+    expect(instruction.indexOf("return the SAME answer")).toBeGreaterThan(instruction.indexOf(DISCLOSURE));
+  });
+
+  it("passes the answer in the coordinator escalation's form, and marks a cut", () => {
+    expect(currentAnswerBlock(ANSWER)).toBe(`\n\nCurrent answer to improve:\n${ANSWER}`);
+    expect(currentAnswerBlock("a".repeat(50) + "TAIL", undefined, 50))
+      .toBe(`\n\nCurrent answer to improve:\n${"a".repeat(50)}\n[… 4 more characters not shown]`);
+  });
+
+  it("hands over the whole answer up to the delegated-result budget of the turn's effort, not a fixed 6,000", () => {
+    const answer = `${"Absatz. ".repeat(1_125)}TAIL-OF-A-9K-ANSWER`;   // 9,019 characters
+    for (const tier of ["low", "high"] as const) {
+      expect(runWithEffortContext(tier, () => answerRepairMaxChars())).toBe(BUILTIN_EFFORT_PROFILES[tier].maxDelegatedResultChars);
+    }
+    const high = runWithEffortContext("high", () => buildQaImproveInstruction(answer, "f")) ?? "";
+    expect(high).toContain(`Current answer to improve:\n${answer}`);
+    expect(high).not.toContain("more characters not shown");
+  });
+
+  it("skips a cheap rewrite of an answer that does not fit, rather than hand it the head and ship a shortened answer", () => {
+    // A rewrite asked for the COMPLETE answer that saw only the head returns the head: the improve
+    // step's shrink guard rejects only a stub, and the verification accepts half the length.
+    const answer = `${"a".repeat(50)}TAIL`;
+    expect(buildQaImproveInstruction(answer, "f", 50)).toBeNull();
+    expect(buildCriteriaVerifyInstruction(answer, ["c"], 50)).toBeNull();
+    expect(answerFitsRepair(answer, 50)).toBe(false);
+    // The control: at the bound it runs, with the whole answer.
+    expect(buildQaImproveInstruction(answer, "f", 54)).toContain(answer);
+    expect(buildCriteriaVerifyInstruction(answer, ["c"], 54)).toContain(answer);
+    // Under the low effort tier (6,000) a 9,000-character answer is not rewritten at all.
+    expect(runWithEffortContext("low", () => buildQaImproveInstruction("x".repeat(9_000), "f"))).toBeNull();
+  });
+});
+
+/**
+ * What the verdicts asked to fix is recorded. In E2E core-ix-browser-order-form-express-refused
+ * both rounds failed and the reply was a repair, and the verdicts' text was logged nowhere.
+ */
+describe("the failing verdicts' flaws", () => {
+  it("come back with the result, each round's in order — whatever the loop ends on", async () => {
+    let n = 0;
+    const exhausted = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: `round ${++n} flaw` }),
+      maxRounds: 2,
+    }));
+    expect(exhausted.flaws).toEqual(["round 1 flaw", "round 2 flaw"]);
+
+    n = 0;
+    const passedLater = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => (++n === 1 ? { pass: false, flaws: "missing sources" } : { pass: true, evidence: "cites rfc 9110" }),
+      maxRounds: 3,
+    }));
+    expect(passedLater.passed).toBe(true);
+    expect(passedLater.flaws).toEqual(["missing sources"]);
+
+    const repairFailed = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "no winner named" }),
+      improve: async () => null,
+    }));
+    expect(repairFailed.flaws).toEqual(["no winner named"]);
+  });
+
+  it("are absent when no verdict failed", async () => {
+    const r = await runQaDeliveryLoop("good", CRITERIA, deps({ check: async () => ({ pass: true }) }));
+    expect(r).not.toHaveProperty("flaws");
+  });
+
+  it("go into the audit row clipped to 300 characters, the cut marked, and not at all when there are none", () => {
+    const long = "f".repeat(500);
+    expect(qaFlawsForAudit([long, "short"])).toEqual({ qaFlaws: [`${"f".repeat(300)}…`, "short"] });
+    expect(qaFlawsForAudit(undefined)).toEqual({});
+    expect(qaFlawsForAudit([])).toEqual({});
+  });
+
+  // Assembled at run time, so the repository holds no key-shaped literal: the OpenAI key shape the
+  // output scanner knows (sk- and 20 or more letters and digits), 33 characters.
+  const fakeKey = (): string => ["s", "k", "-", "Zq9".repeat(10)].join("");
+
+  it("redacts a secret before clipping, so one straddling the cut leaves no head behind for the scan to miss", () => {
+    // Glued to the text before it, so no word boundary rescues it: clipped first, the row kept
+    // "sk-Zq9Zq9", which is shorter than the pattern logAudit's own scan would have matched.
+    const key = fakeKey();
+    const flaw = `${"w".repeat(290)}=${key} and more`;   // the key spans characters 291 to 324
+    const [entry] = qaFlawsForAudit([flaw]).qaFlaws ?? [];
+    expect(entry).toBeDefined();
+    expect(entry).not.toContain(key.slice(0, 6));
+    expect(entry!.length).toBeLessThanOrEqual(301);
+  });
+
+  it("cuts on a word boundary, so a token no pattern knows is kept whole or dropped", () => {
+    const token = `zz${"Q".repeat(30)}`;
+    const flaw = `${"word ".repeat(58)}${token} tail`;   // the token spans characters 290 to 321
+    const [entry] = qaFlawsForAudit([flaw]).qaFlaws ?? [];
+    expect(entry).toBe(`${"word ".repeat(58).trimEnd()}…`);
+  });
+});

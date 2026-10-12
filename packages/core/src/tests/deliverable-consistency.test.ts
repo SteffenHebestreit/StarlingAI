@@ -95,7 +95,7 @@ describe("buildDeliverableConsistencyCheckMessages", () => {
 
 describe("buildDeliverableConsistencyRepairInstruction", () => {
   it("fixes ONLY the named contradictions and recomputes dependent totals", () => {
-    const instr = buildDeliverableConsistencyRepairInstruction("10k for 10 weeks contradicts the stated 90€/h rate");
+    const instr = buildDeliverableConsistencyRepairInstruction("Angebot: 10.000 €", "10k for 10 weeks contradicts the stated 90€/h rate");
     expect(instr).toContain("10k for 10 weeks contradicts the stated 90€/h rate");
     expect(instr).toMatch(/Fix ONLY these/);
     expect(instr).toMatch(/Recompute any dependent totals/i);
@@ -103,6 +103,22 @@ describe("buildDeliverableConsistencyRepairInstruction", () => {
     // Red-team fix B: a false-fire must not collapse legitimate structure/caveats.
     expect(instr).toMatch(/Do NOT collapse tiers, options, phases, or line-item breakdowns/);
     expect(instr).toMatch(/do NOT remove caveats/);
+  });
+
+  it("carries the answer it repairs, disclosure included: the draft is not in the history the repair reads", () => {
+    const disclosure = "Annahme: 40 Stunden pro Woche; bei Teilzeit verlängert sich die Laufzeit entsprechend.";
+    const answer = `Empfehlung: 36.000 € für 10 Wochen bei 90 €/h.\n\n${disclosure}`;
+    const instr = buildDeliverableConsistencyRepairInstruction(answer, "the weekly hours are not stated") ?? "";
+    expect(instr).toContain(`Current answer to improve:\n${answer}`);
+    expect(instr).toContain(disclosure);
+    // What to do comes after the answer, so the instruction is the last thing the call reads.
+    expect(instr.indexOf("Fix ONLY these")).toBeGreaterThan(instr.indexOf(disclosure));
+  });
+
+  it("is skipped for an answer that does not fit, rather than handed its head and asked for all of it", () => {
+    const answer = `${"a".repeat(50)}TAIL`;
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 50)).toBeNull();
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 54)).toContain(answer);
   });
 });
 

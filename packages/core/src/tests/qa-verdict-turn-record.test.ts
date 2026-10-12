@@ -79,6 +79,9 @@ describe("formatQaTurnRecord", () => {
     expect(lines).toContain(USER_WORDS);
     expect(block).toContain("attributes a file to an engine, tier or model other than the one recorded above FAILS");
     expect(block).toContain("ignores a constraint the user stated in these words");
+    // A value the user chose is one: a reply that reports a result the user's choice did not
+    // produce (another shipping option than the one asked for) without saying so fails.
+    expect(block).toContain("a value they chose");
     expect(block).not.toContain("data:image");
   });
 

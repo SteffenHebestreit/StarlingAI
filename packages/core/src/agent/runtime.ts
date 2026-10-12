@@ -27,7 +27,7 @@ import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js"
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import type { TurnUserWords } from "./delegation-user-words.js";
 import {
@@ -6302,7 +6302,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6467,12 +6467,16 @@ async function runQaDeliveryGate(
     }
   };
 
+  // Set when the answer was too long to hand a rewrite whole (answerFitsRepair), so the audit row
+  // says why the repair did not run.
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
-    const instruction = "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
-      + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
-      + flaws
-      + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
+    const instruction = buildQaImproveInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
       forceSynthesis(session, provider, signal, instruction)));
@@ -6529,6 +6533,8 @@ async function runQaDeliveryGate(
     escalated: result.escalated,
     unverified: result.unverified,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 
@@ -6546,7 +6552,7 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
@@ -6563,10 +6569,16 @@ async function runDeliverableConsistencyGate(
     }
   };
 
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
+    const instruction = buildDeliverableConsistencyRepairInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
-      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws))));
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
@@ -6589,6 +6601,8 @@ async function runDeliverableConsistencyGate(
     // a reader counting "pass" saw none (review of the thinking-off verdicts, D1).
     status: result.passed && !result.noVerdict ? "pass" : result.status,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 

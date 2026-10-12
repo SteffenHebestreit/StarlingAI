@@ -64,6 +64,7 @@ import {
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit } from "./qa-delivery-loop.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -91,6 +92,10 @@ interface QaDeliveryGateResult {
   unverified: boolean;
   /** The reviewer returned no verdict (empty/unparseable reply or a thrown check). */
   noVerdict?: boolean;
+  /** What each failing verdict named, in round order. */
+  flaws?: string[];
+  /** The repair did not run: the answer was too long to hand it whole (answerFitsRepair). */
+  repairSkipped?: "answer_exceeds_repair_budget";
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -101,6 +106,10 @@ interface DeliverableConsistencyGateResult {
   passed: boolean;
   status: "pass" | "fail" | "unverified";
   noVerdict?: boolean;
+  /** What each failing verdict named, in round order. */
+  flaws?: string[];
+  /** The repair did not run: the answer was too long to hand it whole (answerFitsRepair). */
+  repairSkipped?: "answer_exceeds_repair_budget";
 }
 
 /**
@@ -510,11 +519,13 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     if (risk === "high" && !evidenceAnchoringRepairRan && !qaLoopWillVerify) {
       if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
         acceptanceCriteriaQaRan = true;
-        const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
-          + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
-          + "\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
-          + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
-        const verified = await ctx.forceSynthesis(session, provider, signal, verifyInstruction);
+        // The answer rides in the instruction: it is not in the history forceSynthesis reads, so
+        // "return the SAME answer" asked for one the call had never seen.
+        const verifyInstruction = buildCriteriaVerifyInstruction(finalResponse, qaPlan.acceptanceCriteria);
+        // Null for an answer too long to hand over whole (answerFitsRepair): a verification that saw
+        // only its head would return the head as "the SAME answer", and half the length passes the
+        // guard below. Such an answer ships as it is.
+        const verified = verifyInstruction ? await ctx.forceSynthesis(session, provider, signal, verifyInstruction) : null;
         const candidate = verified ? sanitizeUserFacingAssistantResponse(verified, 0) : null;
         // Guard against catastrophic truncation — a legitimate repair may
         // shorten the answer (dropping unsupported claims), so allow down to
@@ -527,10 +538,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             { sessionId: session.id, severity: repaired ? "warn" : "info" });
           if (repaired) guardrailEvents.push({ type: "guardrail_flagged", details: "risk_gated_qa_repaired" });
         } else {
-          // Nothing usable came back — no reply, or a stub — so nothing was checked. It logged as
-          // flow_verification_passed, a pass nobody gave (review of the thinking-off verdicts, D3b).
+          // Nothing usable came back — no reply, a stub, or no call for an answer too long to hand
+          // over — so nothing was checked. It logged as flow_verification_passed, a pass nobody gave
+          // (review of the thinking-off verdicts, D3b).
           logAudit("flow_high_stakes_unverified", {
-            reason: verified ? "verify_returned_a_stub" : "verify_returned_nothing",
+            reason: !verifyInstruction ? "answer_exceeds_repair_budget" : verified ? "verify_returned_a_stub" : "verify_returned_nothing",
             invokedApprovalGatedTool,
           }, { sessionId: session.id, severity: "info" });
         }
@@ -567,7 +579,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
               + `${IN_REPLY_LANGUAGE}. Ground every claim in tool results; do not fabricate to satisfy a criterion — if `
               + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
-              + "\n\nCurrent answer to improve:\n" + current.slice(0, 6_000);
+              + currentAnswerBlock(current);
             try {
               const res = await executeTool("delegate_to_agent", {
                 agentName: "mission_coordinator",
@@ -642,6 +654,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         improved: gate.changed,
         escalated: gate.escalated,
         acceptanceCriteria: criteria.length,
+        ...qaFlawsForAudit(gate.flaws),
+        ...(gate.repairSkipped ? { repairSkipped: gate.repairSkipped } : {}),
       }, { sessionId: session.id, severity: gate.changed || gate.unverified ? "warn" : "info" });
     }
   }
@@ -704,7 +718,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         ? "deliverable_consistency_repaired"
         : gate.noVerdict ? "deliverable_consistency_unverified"
           : gate.passed ? "deliverable_consistency_passed" : "deliverable_consistency_failed",
-      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}) },
+      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}), ...qaFlawsForAudit(gate.flaws), ...(gate.repairSkipped ? { repairSkipped: gate.repairSkipped } : {}) },
       { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
   }
 
