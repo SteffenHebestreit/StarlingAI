@@ -10,7 +10,7 @@ const { companionCompose, companionOverrideYaml, readCompanionStacks } = compani
   companionCompose: (
     stack: CompanionStack,
     network: string,
-    io: { dir: string; write: (path: string, text: string) => void },
+    io: { dir: string; write: (path: string, text: string) => void; override?: boolean },
   ) => string[];
 };
 
@@ -35,10 +35,19 @@ describe("readCompanionStacks", () => {
     }`));
     expect(error).toBeUndefined();
     expect(stacks).toEqual([
-      { name: "notes", compose: "d:/notes/docker-compose.yml", join: { service: "api", alias: "notes" } },
-      { name: "batch-jobs", compose: "d:/jobs/compose.yml" },
+      { name: "notes", compose: "D:/notes/docker-compose.yml", join: { service: "api", alias: "notes" } },
+      { name: "batch-jobs", compose: "D:/jobs/compose.yml" },
     ]);
     expect(readCompanionStacks("missing.jsonc", { exists: () => false, read: () => "" })).toEqual({ stacks: [] });
+  });
+
+  it("names a Windows compose path's drive in upper case: compose's build failed on a lower-case one", () => {
+    const { stacks } = readCompanionStacks("c.jsonc", fileWith(String.raw`{ stacks: [
+      { name: "a", compose: "e:/notes/docker-compose.yml" },
+      { name: "b", compose: "e:\\notes\\compose.yml" },
+      { name: "c", compose: "/srv/notes/compose.yml" },
+    ] }`));
+    expect(stacks.map((stack) => stack.compose)).toEqual(["E:/notes/docker-compose.yml", "E:\\notes\\compose.yml", "/srv/notes/compose.yml"]);
   });
 
   it("fails the whole file on a malformed stack, so a typo is reported instead of a stack silently not starting", () => {
@@ -73,6 +82,17 @@ describe("companionCompose", () => {
     expect(written).toHaveLength(1);
     expect(parts[7]).toBe(written[0]!.path);
     expect(written[0]!.text).toContain("- notes");
+  });
+
+  it("leaves the override out when asked, for a build, which the network does not concern", () => {
+    const written: unknown[] = [];
+    const parts = companionCompose(
+      { name: "notes", compose: "d:/notes/docker-compose.yml", join: { service: "api", alias: "notes" } },
+      "stack_stack-internal",
+      { dir: "/tmp/x", write: () => { written.push(1); }, override: false },
+    );
+    expect(parts).toEqual(["docker", "compose", "-p", "notes", "-f", "d:/notes/docker-compose.yml"]);
+    expect(written).toHaveLength(0);
   });
 
   it("writes no override for a stack the gateway does not reach, and quotes a path with spaces", () => {

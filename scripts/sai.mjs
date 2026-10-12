@@ -310,7 +310,9 @@ async function cmdStart() {
     for (const stack of companions) {
       const exitCode = process.exitCode;
       try {
-        await runCompanion(stack, ["up", "-d", "--wait", ...(wantBuild ? ["--build"] : [])]);
+        // Built first, without the network override it does not need, then started without a build.
+        if (wantBuild) await runCompanion(stack, ["build"], { override: false });
+        await runCompanion(stack, ["up", "-d", "--wait"]);
         ok(`${stack.name} up${stack.join ? ` — the gateway reaches its ${stack.join.service} as ${stack.join.alias}` : ""}`);
       } catch (err) {
         process.exitCode = exitCode;
@@ -992,8 +994,8 @@ function loadCompanionStacks() {
  * in its compose file's directory: run from this checkout, on another drive than the stack's build
  * context, compose's build failed before building anything ("failed to execute bake").
  */
-function runCompanion(stack, args) {
-  return run([...companionCompose(stack, GATEWAY_NETWORK), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
+function runCompanion(stack, args, { override = true } = {}) {
+  return run([...companionCompose(stack, GATEWAY_NETWORK, { override }), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
 }
 
 /** Takes the declared companion stacks down, without their volumes; one that fails is reported, not fatal. */
