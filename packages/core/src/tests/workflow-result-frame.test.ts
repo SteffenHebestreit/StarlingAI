@@ -136,6 +136,42 @@ describe("the model-visible frame of a workflow run", () => {
     expect(low).toMatch(CUT_LINE_AT_END);
   });
 
+  it("shows no more than 40,000 characters, whatever an effort tier allows a delegated result", () => {
+    // The max tier relays 120,000 characters of a delegated result, the high tier 40,000.
+    const long = `${OUTPUT}\n\n${"Weitere Hinweise zur Wartung des Zubehörs. ".repeat(1_500)}SCHLUSS`;
+    expect(long.length).toBeGreaterThan(60_000);
+    for (const tier of ["max", "high"] as const) {
+      expect(runWithEffortContext(tier, () => workflowRunResultMaxChars())).toBe(40_000);
+      const visible = runWithEffortContext(tier, () => buildModelVisibleToolResult("run_workflow", long, METADATA));
+      expect(visible.length, tier).toBeLessThanOrEqual(40_000);
+      expect(visible.length, tier).toBeGreaterThan(39_000);
+    }
+  });
+
+  it("holds a turn's runs to one budget, and a late one to a quarter of it", () => {
+    // A retry, a duplicate or a second run of the turn shares what the first left, instead of
+    // carrying a second whole budget into every prompt after it.
+    const shown = { chars: 0 };
+    const first = buildModelVisibleToolResult("run_workflow", OUTPUT, METADATA, { workflowShown: shown });
+    expect(first).toContain(E45_ROW);
+    expect(shown.chars).toBe(first.length);
+    const long = `${OUTPUT}\n\n${"Weitere Hinweise zur Wartung des Zubehörs. ".repeat(250)}SCHLUSS`;
+    expect(long.length).toBeGreaterThan(10_000);
+    const second = buildModelVisibleToolResult("run_workflow", long, METADATA, { workflowShown: shown });
+    expect(second.length).toBeLessThanOrEqual(10_000 - first.length);
+    expect(second.length).toBeGreaterThan(10_000 - first.length - 200);
+    expect(shown.chars).toBe(first.length + second.length);
+    const third = buildModelVisibleToolResult("run_workflow", long, METADATA, { workflowShown: shown });
+    expect(third.length).toBeLessThanOrEqual(2_500);
+    expect(third.length).toBeGreaterThan(2_300);
+    // Without a tally a run is allowed the whole budget, as before.
+    expect(buildModelVisibleToolResult("run_workflow", long, METADATA).length).toBeGreaterThan(9_800);
+    // A call that ran no workflow does not draw on it.
+    const before = shown.chars;
+    buildModelVisibleToolResult("run_workflow", "Error: Workflow name 'packet' is ambiguous.", { workflowMatches: [] }, { workflowShown: shown });
+    expect(shown.chars).toBe(before);
+  });
+
   it("keeps a call that ran no workflow at the 1,600 characters it had", () => {
     // An ambiguous name is refused with the matches and no workflow named (tools/workflow-catalog.ts).
     const refusal = `Error: Workflow name 'packet' is ambiguous. Matching workflows: ${"source_grounded_paper_packet [job], ".repeat(60)}end.`;

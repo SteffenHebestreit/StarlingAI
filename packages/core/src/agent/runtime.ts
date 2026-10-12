@@ -2351,6 +2351,8 @@ async function _runTurn(
   // The retrieval evidence this turn's frames have shown the model, in characters: the turn's
   // retrieval results share one budget (tool-result-format.ts retrievalEvidenceAllowance).
   const _turnRetrievalShown = { chars: 0 };
+  // ...and the workflow-run frames, which share one budget too (workflowRunResultAllowance).
+  const _turnWorkflowShown = { chars: 0 };
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -4845,7 +4847,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown }),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown, workflowShown: _turnWorkflowShown }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
@@ -5215,6 +5217,7 @@ async function _runTurn(
         session,
         runtimeNote,
         retrievalShown: _turnRetrievalShown,
+        workflowShown: _turnWorkflowShown,
         onIntervention: opts.onIntervention,
         onToolResult: opts.onToolResult,
         guardrailEvents,

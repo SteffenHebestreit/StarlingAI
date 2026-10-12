@@ -78,6 +78,12 @@ export interface ToolResultFrameContext {
    * result is allowed the whole budget.
    */
   readonly retrievalShown?: { chars: number };
+  /**
+   * The turn's tally of the workflow-run frames it has shown the model, in characters (agent/runtime.ts
+   * keeps one per turn). A run's frame is held to what the tally leaves of the turn's budget
+   * (workflowRunResultAllowance) and adds what it shows. Without a tally it is allowed the whole budget.
+   */
+  readonly workflowShown?: { chars: number };
 }
 
 /** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
@@ -124,15 +130,30 @@ export function knowledgeBaseWorkerReportMaxChars(): number {
   return effectiveMaxDelegatedResultChars();
 }
 
+/** The most the workflow-run frames of one turn show, whatever an effort tier allows a delegated result. */
+const WORKFLOW_RUN_RESULT_CEILING = 40_000;
+
 /**
- * What one workflow run's frame (isWorkflowRunResult) may show the model, in characters, its header
- * and instruction included, in the frame and in the history snippet of the turn that made the call.
- * The run's answer is the evidence the turn answers from, so it gets the budget of a delegated result
- * relayed verbatim, the effort-scaled maxDelegatedResultChars, as a knowledge-base worker's report
- * does. The frame as a whole fits it, so the snippet of the turn that made the call never cuts it.
+ * What the workflow-run frames (isWorkflowRunResult) of one turn may show the model, in characters,
+ * headers and instructions included: a total for the turn, which is also what the history snippet of
+ * the turn that made a call allows one. A run's answer is the evidence the turn answers from, so it
+ * gets the budget of a delegated result relayed verbatim, the effort-scaled maxDelegatedResultChars,
+ * as a knowledge-base worker's report does, up to 40,000 characters: the max tier's 120,000 went into
+ * every later prompt of the turn.
  */
 export function workflowRunResultMaxChars(): number {
-  return effectiveMaxDelegatedResultChars();
+  return Math.min(effectiveMaxDelegatedResultChars(), WORKFLOW_RUN_RESULT_CEILING);
+}
+
+/**
+ * What one workflow run's frame may show, after the turn's earlier run frames have shown
+ * `charsShown`: what they left of the turn's budget, and no less than a quarter of it, as for
+ * retrieval results (retrievalEvidenceAllowance). A retry, a duplicate or a second run of the turn
+ * would otherwise carry a second whole budget into every prompt after it.
+ */
+export function workflowRunResultAllowance(charsShown: number): number {
+  const budget = workflowRunResultMaxChars();
+  return Math.max(Math.floor(budget / 4), budget - Math.max(0, charsShown));
 }
 
 /**
@@ -671,14 +692,18 @@ function frameToolResult(
       "Observed evidence:\n",
     ].join("\n");
     // The run's answer is the evidence, not a summary of it: kept as the steps wrote it, newlines
-    // and table rows intact, up to what the frame's budget leaves after the header, with a line
+    // and table rows intact, up to what the turn's allowance leaves after the header, with a line
     // saying how much a cut left out. The tool's own "Workflow … completed." line would only repeat
     // the header. A call that ran no workflow keeps the 1,600 characters it had.
     const answer = stripPresentationFormatting(stripWorkflowPreamble(resultText));
-    const evidence = isWorkflowRunResult(toolName, metadata)
-      ? holdToBudget(answer, Math.max(0, workflowRunResultMaxChars() - head.length), frameContext?.runtimeNote)
-      : truncatePlainText(answer, 1600);
-    return `${head}${evidence || "No usable workflow result returned."}`;
+    if (!isWorkflowRunResult(toolName, metadata)) {
+      return `${head}${truncatePlainText(answer, 1600) || "No usable workflow result returned."}`;
+    }
+    const shown = frameContext?.workflowShown;
+    const allowance = workflowRunResultAllowance(shown?.chars ?? 0);
+    const framed = `${head}${holdToBudget(answer, Math.max(0, allowance - head.length), frameContext?.runtimeNote) || "No usable workflow result returned."}`;
+    if (shown) shown.chars += framed.length;
+    return framed;
   }
 
   if (toolName === "create_ephemeral_agent") {

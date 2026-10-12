@@ -22,9 +22,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const streamMock = vi.hoisted(() => vi.fn());
 const completeMock = vi.hoisted(() => vi.fn());
 const logAuditMock = vi.hoisted(() => vi.fn());
-type ToolResult = { success: boolean; output: string; metadata: Record<string, unknown> };
+type ToolResult = { success: boolean; output: string; error?: string; metadata: Record<string, unknown> };
 type Message = { role: string; content?: unknown };
-const workflow = vi.hoisted(() => ({ result: null as null | ToolResult }));
+const workflow = vi.hoisted(() => ({ result: null as null | ToolResult, byName: {} as Record<string, ToolResult> }));
 
 vi.mock("../providers/index.js", () => {
   const provider = {
@@ -62,7 +62,7 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
   return {
     ...actual,
     executeTool: vi.fn(async (name: string, args: Record<string, unknown>, ctx: never, meta?: never) => {
-      const stubbed = name === "run_workflow" ? workflow.result : null;
+      const stubbed = name === "run_workflow" ? (workflow.byName[String(args["name"])] ?? workflow.result) : null;
       return stubbed ?? actual.executeTool(name, args, ctx, meta);
     }),
   };
@@ -141,8 +141,14 @@ function answerStream(text: string) {
 
 const tempDirs: string[] = [];
 
-/** One turn: the model runs the job, then does what `afterJob` streams for the prompt it is given. */
-async function runTurn(afterJob: (messages: readonly Message[]) => AsyncGenerator<unknown>) {
+/**
+ * One turn: the model runs the job (or what `first` streams), then does what `afterJob` streams for
+ * the prompt it is given.
+ */
+async function runTurn(
+  afterJob: (messages: readonly Message[]) => AsyncGenerator<unknown>,
+  first: () => AsyncGenerator<unknown> = () => toolCallStream("call_job", "run_workflow", { name: JOB, workflowType: "job" }),
+) {
   workflow.result = JOB_RESULT;
   const configDir = mkdtempSync(join(tmpdir(), "sai-workflow-turn-"));
   const workspacePath = mkdtempSync(join(tmpdir(), "sai-workflow-turn-ws-"));
@@ -154,7 +160,7 @@ async function runTurn(afterJob: (messages: readonly Message[]) => AsyncGenerato
   let call = 0;
   streamMock.mockImplementation((messages: readonly Message[]) => {
     call += 1;
-    return call === 1 ? toolCallStream("call_job", "run_workflow", { name: JOB, workflowType: "job" }) : afterJob(messages);
+    return call === 1 ? first() : afterJob(messages);
   });
   completeMock.mockImplementation(async (messages: readonly Message[]) => ({
     content: answerFromPrompt(messages),
@@ -180,6 +186,7 @@ describe("the turn that ran a job whose files are attached", () => {
     completeMock.mockReset();
     logAuditMock.mockReset();
     workflow.result = null;
+    workflow.byName = {};
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -222,5 +229,30 @@ describe("the turn that ran a job whose files are attached", () => {
     expect(reply.length).toBeLessThan(300);
     for (const code of ALL_CODES) expect(turn.response).toContain(code);
     expect(turn.response).not.toContain(PASTED);
+  }, 60_000);
+
+  it("shows a retry what the blocked run before it left of the turn's budget", async () => {
+    // The job is blocked and the model runs another one. The second answer fits a budget of its own
+    // (10,000 characters by default), not what the first frame left of it.
+    const RETRY = "source_grounded_paper_packet_wartung";
+    const blockedOutput = `Workflow ${JOB} [job] blocked.\n\n${ANSWER}`;
+    workflow.byName[JOB] = { success: false, output: blockedOutput, error: blockedOutput, metadata: { ...JOB_RESULT.metadata, blocked: true, artifacts: [] } };
+    const retryAnswer = `ZWEITER LAUF: Wartungsplan\n\n${Array.from({ length: 40 }, (_, n) => point("Plan", n + 1)).join("\n")}`;
+    expect(retryAnswer.length).toBeGreaterThan(7_000);
+    expect(retryAnswer.length).toBeLessThan(9_000);
+    workflow.byName[RETRY] = { ...JOB_RESULT, output: `Workflow ${RETRY} [job] completed.\n\n${retryAnswer}`, metadata: { ...JOB_RESULT.metadata, workflowName: RETRY } };
+    let after = 0;
+    await runTurn((messages) => {
+      after += 1;
+      return after === 1
+        ? toolCallStream("call_retry", "run_workflow", { name: RETRY, workflowType: "job" })
+        : answerStream(answerFromPrompt(messages));
+    });
+    expect(streamMock.mock.calls.length, "no model call after the retry").toBeGreaterThanOrEqual(3);
+    const prompt = promptText(streamMock.mock.calls[2]![0] as Message[]);
+    expect(prompt).toContain(E45_ROW);
+    expect(prompt).toContain("ZWEITER LAUF: Wartungsplan");
+    expect(prompt).not.toContain(point("Plan", 40).trim());
+    expect(prompt).toMatch(/\[Cut to fit the context budget: [^\]]* characters [^\]]*not shown[^\]]*\]/);
   }, 60_000);
 });
