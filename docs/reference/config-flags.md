@@ -234,7 +234,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1851 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1841 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 56 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 57 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1558 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:850 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:539 | 8 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:2038 | 408 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:749 | 60 |
-| `node` | packages/core/src/config/schema.ts:1107 | 259 |
+| `node` | packages/core/src/config/schema.ts:1107 | 260 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:583 | 3 |
 | `notes` | packages/core/src/config/schema.ts:855 | 62 |
 | `oneLiner` | packages/core/src/config/schema.ts:964 | 3 |
@@ -412,7 +412,7 @@ Every public schema field, where it is declared, and how many production files r
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:769 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:616 | 2 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1286 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1396 | 92 |
+| `scene` | packages/core/src/config/schema.ts:1396 | 93 |
 | `scopes` | packages/core/src/config/schema.ts:455 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |

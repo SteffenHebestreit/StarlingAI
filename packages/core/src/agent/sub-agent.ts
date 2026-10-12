@@ -1994,13 +1994,28 @@ function scanForStubMarkers(scanRoot: string, relPrefix: string, scope?: Artifac
  * count alone gave the wrong answer twice running.
  */
 export async function findBrokenBuiltPages(workspaceRoot: string, scope?: ArtifactScanScope): Promise<string[]> {
+  return (await findBrokenBuiltPageFiles(workspaceRoot, scope)).map((page) => page.detail);
+}
+
+/** A built page that does not work: its workspace-relative path, and its check's verdict naming the fault. */
+export interface BrokenBuiltPage {
+  file: string;
+  detail: string;
+}
+
+/**
+ * findBrokenBuiltPages with each page's path beside its verdict, for a caller that has to name the
+ * file rather than hand the fault on: the turn's completion gate tells the user which file its
+ * corrective build repaired.
+ */
+export async function findBrokenBuiltPageFiles(workspaceRoot: string, scope?: ArtifactScanScope): Promise<BrokenBuiltPage[]> {
   const zoneRel = generatedZoneRel();
   const artifactRoot = resolvePath(workspaceRoot, zoneRel);
   // As findUnfilledStubFiles: the zone itself may be a link a sandbox left.
   if (!fs.existsSync(artifactRoot) || !containedWorkspaceRealPath(artifactRoot, workspaceRoot)) return [];
   const MAX_PAGES = 4;
   const MAX_DEPTH = 4;
-  const broken: string[] = [];
+  const broken: BrokenBuiltPage[] = [];
   const pages: Array<{ abs: string; relPath: string }> = [];
 
   // Collect first, execute after: checkBuiltPage now runs each page in a child process, and a
@@ -2034,7 +2049,9 @@ export async function findBrokenBuiltPages(workspaceRoot: string, scope?: Artifa
     }
   }));
   // In walk order, as before: the first broken page is the one the resume directive names first.
-  for (const verdict of verdicts) if (!verdict.ok) broken.push(verdict.detail);
+  verdicts.forEach((verdict, index) => {
+    if (!verdict.ok) broken.push({ file: pages[index]!.relPath, detail: verdict.detail });
+  });
   return broken;
 }
 

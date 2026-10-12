@@ -36,4 +36,13 @@ describe("findBrokenBuiltPages", () => {
     // Sorted: the walk follows readdir order, which the filesystem decides.
     expect([...broken].sort()).toEqual(["generated/a-bad/index.html: broken", "generated/c-bad/index.html: broken"]);
   });
+
+  it("names each broken page's file beside its verdict, for a caller that reports which file it repaired", async () => {
+    const { findBrokenBuiltPageFiles } = await import("../agent/sub-agent.js");
+    const broken = await findBrokenBuiltPageFiles(dir);
+    expect([...broken].sort((a, b) => a.file.localeCompare(b.file))).toEqual([
+      { file: "generated/a-bad/index.html", detail: "generated/a-bad/index.html: broken" },
+      { file: "generated/c-bad/index.html", detail: "generated/c-bad/index.html: broken" },
+    ]);
+  });
 });
