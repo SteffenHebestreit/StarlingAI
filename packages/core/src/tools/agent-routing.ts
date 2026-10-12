@@ -339,9 +339,15 @@ const ROUTING_QUERY_FILLER = new Set<string>([
  * Deliberately narrow: a colon inside the opening clause only, with substantial text after it.
  * A user-typed query rarely opens that way, and one that does ("error: cannot find module")
  * loses only its label.
+ *
+ * A label's colon is followed by whitespace or the end. The first colon of all was taken before,
+ * so a task naming a web address lost everything up to its scheme: "Rufe die Website
+ * http://www.example.test/ auf …" routed on "//www.example.test/ auf …", where five unrelated
+ * agents scored within 0.007 of each other (E2E 2026-10-12). A time (12:30) or a drive (C:\)
+ * is no label either.
  */
 export function stripDelegationFraming(query: string): string {
-  const colon = query.indexOf(":");
+  const colon = query.search(/:(?=\s|$)/);
   if (colon < 0) return query;
   const head = query.slice(0, colon);
   if (head.split(/\s+/).filter(Boolean).length > 8) return query;   // not an opening clause
