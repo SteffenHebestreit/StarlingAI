@@ -15,6 +15,7 @@
  * because every round costs extra LLM calls on a slow local model.
  */
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { effectiveMaxDelegatedResultChars } from "../runtime/effort-context.js";
 
 export type QaVerdictStatus = "pass" | "fail" | "unverified";
 
@@ -300,11 +301,32 @@ export function qaFlawsForAudit(flaws: readonly string[] | undefined): { qaFlaws
   return { qaFlaws: flaws.map((text) => (text.length > AUDIT_FLAWS_MAX_CHARS ? `${text.slice(0, AUDIT_FLAWS_MAX_CHARS)}…` : text)) };
 }
 
-/** How much of the answer a repair call is handed: the coordinator escalation's bound. */
-const CURRENT_ANSWER_MAX_CHARS = 6_000;
+/**
+ * How much of its own answer a repair call is handed: the budget a delegated result relayed verbatim
+ * gets (performance.maxDelegatedResultChars, effort-scaled; tool-result-format.ts). The answer is the
+ * model's own output, written in a turn whose prompts were sized to carry a result that large.
+ */
+export function answerRepairMaxChars(): number {
+  return effectiveMaxDelegatedResultChars();
+}
 
 /**
- * The answer a "fix your previous answer" call is about, for its instruction.
+ * Whether a repair call can be handed the whole answer. One asked for the complete answer that saw
+ * only its head returns the head, and nothing downstream catches that: the improve step's shrink
+ * guard rejects only a stub, and the verification accepts half the length. So a cheap rewrite does
+ * not run on an answer that does not fit; the answer ships as it is.
+ */
+export function answerFitsRepair(current: string, maxChars = answerRepairMaxChars()): boolean {
+  return current.length <= maxChars;
+}
+
+const REPAIR_ANSWER_LABEL = "Current answer to improve:";
+/** The verification is told to return the answer unchanged when it holds, so it is not labelled as one to improve. */
+const VERIFY_ANSWER_LABEL = "Your answer:";
+
+/**
+ * The answer a "fix your previous answer" call is about, for its instruction: whole up to
+ * `maxChars`, and past that the head with the cut marked, so a reader never takes it for all of it.
  *
  * Those calls run through forceSynthesis, which reads the session's history, and the draft is not in
  * it yet: it is added only once the turn ships. So a rewrite saw the flaws and not the answer they
@@ -314,24 +336,37 @@ const CURRENT_ANSWER_MAX_CHARS = 6_000;
  * made". The coordinator escalation was the only repair that passed the answer; every repair now
  * passes it the same way.
  */
-export function currentAnswerBlock(current: string): string {
-  return "\n\nCurrent answer to improve:\n" + current.slice(0, CURRENT_ANSWER_MAX_CHARS);
+export function currentAnswerBlock(current: string, label = REPAIR_ANSWER_LABEL, maxChars = answerRepairMaxChars()): string {
+  if (current.length <= maxChars) return `\n\n${label}\n${current}`;
+  return `\n\n${label}\n${current.slice(0, maxChars)}\n[… ${current.length - maxChars} more characters not shown]`;
 }
 
-/** The QA delivery loop's cheap repair: fix the verdict's flaws in the answer it judged. */
-export function buildQaImproveInstruction(current: string, flaws: string): string {
+/**
+ * The QA delivery loop's cheap repair: fix the verdict's flaws in the answer it judged. Null when the
+ * answer does not fit a repair call (answerFitsRepair): that rewrite is skipped.
+ */
+export function buildQaImproveInstruction(current: string, flaws: string, maxChars = answerRepairMaxChars()): string | null {
+  if (!answerFitsRepair(current, maxChars)) return null;
   return "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
     + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
     + flaws
-    + currentAnswerBlock(current)
+    + currentAnswerBlock(current, REPAIR_ANSWER_LABEL, maxChars)
     + "\n\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
 }
 
-/** riskGatedQA's one-shot verification: check the answer against the criteria, repair only a gap. */
-export function buildCriteriaVerifyInstruction(current: string, criteria: readonly string[]): string {
+/**
+ * riskGatedQA's one-shot verification: check the answer against the criteria, repair only a gap.
+ * Null when the answer does not fit a repair call (answerFitsRepair): the verification is skipped.
+ */
+export function buildCriteriaVerifyInstruction(
+  current: string,
+  criteria: readonly string[],
+  maxChars = answerRepairMaxChars(),
+): string | null {
+  if (!answerFitsRepair(current, maxChars)) return null;
   return "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
     + criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
-    + currentAnswerBlock(current)
+    + currentAnswerBlock(current, VERIFY_ANSWER_LABEL, maxChars)
     + "\n\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
     + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
 }

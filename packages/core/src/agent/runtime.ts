@@ -6282,7 +6282,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[] }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6447,11 +6447,19 @@ async function runQaDeliveryGate(
     }
   };
 
+  // Set when the answer was too long to hand a rewrite whole (answerFitsRepair), so the audit row
+  // says why the repair did not run.
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
+    const instruction = buildQaImproveInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
-      forceSynthesis(session, provider, signal, buildQaImproveInstruction(current, flaws))));
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the improver collapsed the answer to a stub).
@@ -6506,6 +6514,7 @@ async function runQaDeliveryGate(
     unverified: result.unverified,
     ...(result.noVerdict ? { noVerdict: true } : {}),
     ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 
@@ -6523,7 +6532,7 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean; flaws?: string[] }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
@@ -6540,10 +6549,16 @@ async function runDeliverableConsistencyGate(
     }
   };
 
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
+    const instruction = buildDeliverableConsistencyRepairInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
-      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(current, flaws))));
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
@@ -6567,6 +6582,7 @@ async function runDeliverableConsistencyGate(
     status: result.passed && !result.noVerdict ? "pass" : result.status,
     ...(result.noVerdict ? { noVerdict: true } : {}),
     ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 

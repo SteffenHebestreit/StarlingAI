@@ -243,7 +243,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxActiveTimeMs` | packages/core/src/config/schema.ts:1703 | 2 |
 | `maxBaseCandidates` | packages/core/src/config/schemas/multimodal.ts:230 | 1 |
 | `maxBodyBytes` | packages/core/src/config/schema.ts:355 | 3 |
-| `maxChars` | packages/core/src/config/schema.ts:1303 | 26 |
+| `maxChars` | packages/core/src/config/schema.ts:1303 | 27 |
 | `maxConcurrent` | packages/core/src/config/schema.ts:993 | 3 |
 | `maxConcurrentCrawls` | packages/core/src/config/schemas/retrieval.ts:200 | 1 |
 | `maxConcurrentPerModel` | packages/core/src/config/schemas/multimodal.ts:124 | 1 |
@@ -253,7 +253,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxConsolidatedPerSession` | packages/core/src/config/schema.ts:1572 | 1 |
 | `maxContextChars` | packages/core/src/config/schemas/retrieval.ts:114 | 4 |
 | `maxCrawlMs` | packages/core/src/config/schemas/retrieval.ts:198 | 1 |
-| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1932 | 2 |
+| `maxDelegatedResultChars` | packages/core/src/config/schema.ts:1932 | 3 |
 | `maxDelegationDepth` | packages/core/src/config/schemas/effort.ts:27 | 2 |
 | `maxDepthCap` | packages/core/src/config/schemas/retrieval.ts:188 | 1 |
 | `maxDiscoveredPeers` | packages/core/src/config/schema.ts:678 | 1 |
@@ -334,7 +334,7 @@ Every public schema field, where it is declared, and how many production files r
 | `patterns` | packages/core/src/config/schema.ts:1356 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 30 |
 | `peers` | packages/core/src/config/schema.ts:650 | 15 |
-| `performance` | packages/core/src/config/schema.ts:1817 | 48 |
+| `performance` | packages/core/src/config/schema.ts:1817 | 49 |
 | `permitTtlMs` | packages/core/src/config/schema.ts:1741 | 2 |
 | `perSenderRateLimitCount` | packages/core/src/config/schemas/channels.ts:24 | 5 |
 | `perSenderRateLimitWindowMs` | packages/core/src/config/schemas/channels.ts:26 | 5 |

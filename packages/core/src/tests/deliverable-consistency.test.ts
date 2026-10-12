@@ -108,11 +108,17 @@ describe("buildDeliverableConsistencyRepairInstruction", () => {
   it("carries the answer it repairs, disclosure included: the draft is not in the history the repair reads", () => {
     const disclosure = "Annahme: 40 Stunden pro Woche; bei Teilzeit verlängert sich die Laufzeit entsprechend.";
     const answer = `Empfehlung: 36.000 € für 10 Wochen bei 90 €/h.\n\n${disclosure}`;
-    const instr = buildDeliverableConsistencyRepairInstruction(answer, "the weekly hours are not stated");
+    const instr = buildDeliverableConsistencyRepairInstruction(answer, "the weekly hours are not stated") ?? "";
     expect(instr).toContain(`Current answer to improve:\n${answer}`);
     expect(instr).toContain(disclosure);
     // What to do comes after the answer, so the instruction is the last thing the call reads.
     expect(instr.indexOf("Fix ONLY these")).toBeGreaterThan(instr.indexOf(disclosure));
+  });
+
+  it("is skipped for an answer that does not fit, rather than handed its head and asked for all of it", () => {
+    const answer = `${"a".repeat(50)}TAIL`;
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 50)).toBeNull();
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 54)).toContain(answer);
   });
 });
 
