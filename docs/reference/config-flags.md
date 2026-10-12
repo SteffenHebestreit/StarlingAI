@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 81 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
-| `budget` | packages/core/src/config/schema.ts:1696 | 96 |
+| `budget` | packages/core/src/config/schema.ts:1696 | 97 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:973 | 48 |
@@ -135,7 +135,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverable` | packages/core/src/config/schema.ts:951 | 63 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
-| `description` | packages/core/src/config/schema.ts:630 | 185 |
+| `description` | packages/core/src/config/schema.ts:630 | 186 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:434 | 2 |
 | `digest` | packages/core/src/config/schema.ts:2039 | 59 |
 | `dir` | packages/core/src/config/schema.ts:2028 | 61 |
@@ -199,7 +199,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:772 | 125 |
 | `http` | packages/core/src/config/schema.ts:817 | 94 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
-| `id` | packages/core/src/config/schema.ts:405 | 322 |
+| `id` | packages/core/src/config/schema.ts:405 | 324 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1421 | 2 |
 | `image` | packages/core/src/config/schema.ts:745 | 104 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:983 | 139 |
 | `rolesClaim` | packages/core/src/config/schema.ts:459 | 1 |
-| `routing` | packages/core/src/config/schema.ts:276 | 110 |
+| `routing` | packages/core/src/config/schema.ts:276 | 111 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:861 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:818 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:769 | 1 |
@@ -452,7 +452,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stableToolBlock` | packages/core/src/config/schemas/orchestration.ts:750 | 4 |
 | `stagedArtifactBuildDirective` | packages/core/src/config/schemas/orchestration.ts:478 | 1 |
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:450 | 1 |
-| `steps` | packages/core/src/config/schema.ts:1445 | 88 |
+| `steps` | packages/core/src/config/schema.ts:1445 | 90 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:238 | 3 |
 | `store` | packages/core/src/config/schema.ts:1678 | 172 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:413 | 1 |
@@ -493,7 +493,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:311 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:661 | 2 |
-| `tools` | packages/core/src/config/schema.ts:986 | 248 |
+| `tools` | packages/core/src/config/schema.ts:986 | 249 |
 | `topK` | packages/core/src/config/schema.ts:174 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:173 | 4 |

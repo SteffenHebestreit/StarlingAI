@@ -192,3 +192,63 @@ export function stripDelegateRelayFrame(output: string): string {
   }
   return text.replace(/^\s*\[[^\]\n]+\]:\s*/, "").trim();
 }
+
+/**
+ * The plan report (tools/plan-executor.ts), which record_plan carries too once it has folded the plan
+ * round: a roll-call, the steps still owed, "COMPLETED:", then the step results under
+ * PLAN_RESULTS_HEADING, each "[<step id>] <description>\n<result>" (formatPlanStepResult), and after
+ * them only sections that open with one of the leads below. The executor writes these strings from
+ * here, so planReportResultsForDisplay reads what it writes.
+ */
+export const PLAN_RESULTS_HEADING = "RESULTS — write the final answer from these:";
+export const PLAN_FINAL_STEP_HEADING = "FINAL STEP — yours, in the reply (nothing dispatches it):";
+export const PLAN_MARKED_DONE_LEAD = "Marked done: ";
+export const PLAN_RETRIED_LEAD = "Retried: ";
+export const PLAN_IGNORED_IDS_LEAD = "Ignored — no such step id: ";
+export const PLAN_CLOSING_ALL_RAN = "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.";
+export const PLAN_CLOSING_OUTSTANDING = "Do NOT write the final answer while steps above are outstanding.";
+const PLAN_RESULTS_OMITTED_TAIL = " further result(s) omitted for length.)";
+
+/** The note under the results when the report's budget left some out. */
+export function planResultsOmittedNote(omitted: number): string {
+  return `(${omitted}${PLAN_RESULTS_OMITTED_TAIL}`;
+}
+
+/** One step's block in the report's results. */
+export function formatPlanStepResult(id: string, description: string, result: string): string {
+  return `[${id}] ${description}\n${result}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The step results of a plan report, for a reply the user reads: without the report's roll-call and
+ * its instructions to the orchestrator, and without the relay frame of a delegated step's result. A
+ * coverage backstop (hallucinated_truncation_bypass) shipped a folded record_plan report as the
+ * reply, "Plan recorded … do NOT call execute_plan again" and the "[browser_agent]:" labels included
+ * (E2E new-plan-round-fold-site-facts). `stepIds` (execute_plan's reportedResultIds) are the steps
+ * whose "[<id>] <description>" header goes too; without them the headers stay. Null when the report
+ * carries no result.
+ */
+export function planReportResultsForDisplay(report: string, stepIds: readonly string[] = []): string | null {
+  const text = (report ?? "").replace(/\r\n/g, "\n");
+  const at = text.indexOf(PLAN_RESULTS_HEADING);
+  if (at < 0) return null;
+  let results = text.slice(at + PLAN_RESULTS_HEADING.length);
+  const ends = [PLAN_FINAL_STEP_HEADING, PLAN_MARKED_DONE_LEAD, PLAN_RETRIED_LEAD, PLAN_IGNORED_IDS_LEAD, PLAN_CLOSING_ALL_RAN, PLAN_CLOSING_OUTSTANDING]
+    .map((lead) => results.indexOf(`\n\n${lead}`))
+    .filter((index) => index >= 0);
+  const omitted = new RegExp(`\\n\\n\\(\\d+${escapeRegExp(PLAN_RESULTS_OMITTED_TAIL)}`).exec(results);
+  if (omitted) ends.push(omitted.index);
+  if (ends.length > 0) results = results.slice(0, Math.min(...ends));
+  let blocks = `\n\n${results.trim()}`;
+  // A delegated step's result opens with its relay label, on the line under the step's header.
+  blocks = blocks.replace(/(\n\n\[[^\]\n]+\] [^\n]*\n)[ \t]*\[[^\]\n]+\]:[ \t]*/g, "$1");
+  for (const id of stepIds) {
+    blocks = blocks.replace(new RegExp(`\\n\\n\\[${escapeRegExp(id)}\\] [^\\n]*\\n`), "\n\n");
+  }
+  blocks = blocks.replace(new RegExp(`${escapeRegExp(AUTO_ROUTED_NOTE_LEAD)}[^\\n]*`, "g"), "");
+  return blocks.trim() || null;
+}

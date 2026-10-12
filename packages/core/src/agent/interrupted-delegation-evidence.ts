@@ -24,7 +24,12 @@ import {
   looksLikeOrchestrationOnlyEvidence,
   stripPresentationFormatting,
 } from "./runtime-utils.js";
-import { looksLikeRawWorkspaceToolDump, stripLeadingDelegateLabelEcho } from "./runtime-evidence-dump.js";
+import {
+  looksLikeRawWorkspaceToolDump,
+  planReportResultsForDisplay,
+  stripDelegateRelayFrame,
+  stripLeadingDelegateLabelEcho,
+} from "./runtime-evidence-dump.js";
 
 export const WORKFLOW_TOOL_RESULT_RE = /^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:completed|blocked)\./i;
 export const EVIDENCE_SECTION_RE = /^Observed evidence:\s*/m;
@@ -223,7 +228,14 @@ function findRecentDelegateEvidence(
     const rawEvidence = evidenceMatch
       ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
       : content.trim();
-    const evidence = stripLeadingDelegateLabelEcho(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence);
+    // What a backstop may ship as the reply. A plan's report is its steps' results among the
+    // executor's instructions to the orchestrator, and only the results are evidence; a delegated
+    // result loses its relay frame, the routing note at its end included.
+    const evidence = isPlanResult
+      ? (planReportResultsForDisplay(content, Array.isArray(meta["reportedResultIds"])
+        ? (meta["reportedResultIds"] as unknown[]).filter((id): id is string => typeof id === "string")
+        : []) ?? "")
+      : stripLeadingDelegateLabelEcho(stripDelegateRelayFrame(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence));
     const delegationOutcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : "";
