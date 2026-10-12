@@ -192,6 +192,33 @@ describe("routing a step past an agent that reads only uploads", () => {
     expect(ran()).toEqual(["document_intake", "document_intake"]);
     expect(rows("delegation_routing_filtered_no_user_file")).toEqual([]);
   }, 30_000);
+
+  // ── Review of 891f902b: the conversation is decided by its root ───────────────────────────────
+
+  it("decides by the root chat: a workflow run this process holds without its chat keeps the upload reader (the scene worker)", async () => {
+    routeAs(LIVE_RANKING);
+    const { createSession } = await import("../agent/session.js");
+    const step = stepCtx("chat-held-elsewhere");
+    createSession({ sessionId: step.sessionId, channel: "workflow", workspacePath: tempDir })
+      .addMessage({ role: "user", content: "Use document_intake first when the request starts from attached material …" });
+    await delegate(LIVE_CALL, step);
+
+    expect(ran()).toEqual(["document_intake"]);
+    expect(rows("delegation_routing_filtered_no_user_file")).toEqual([]);
+  }, 30_000);
+
+  it("keeps the upload reader when the root chat is archived, even with its workflow run held", async () => {
+    routeAs(LIVE_RANKING);
+    const { createSession, archiveSession } = await import("../agent/session.js");
+    await chat("chat-archived", [{ filename: "lieferschein.pdf", relativePath: "uploads/chat-archived/lieferschein.pdf" }]);
+    const step = stepCtx("chat-archived");
+    createSession({ sessionId: step.sessionId, channel: "workflow", workspacePath: tempDir })
+      .addMessage({ role: "user", content: "Use document_intake first when the request starts from attached material …" });
+    archiveSession("chat-archived");
+    await delegate(LIVE_CALL, step);
+
+    expect(ran()).toEqual(["document_intake"]);
+  }, 30_000);
 });
 
 describe("agentCfgReadsOnlyUploads", () => {

@@ -11,7 +11,7 @@ import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecuti
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { extractTaskNamedPaths, runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { workspaceFileExists } from "../agent/artifact-path-repair.js";
-import { parentSessionOf } from "../agent/session-ids.js";
+import { parentSessionOf, rootSessionOf } from "../agent/session-ids.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
 import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 import { isBlankBrowserPage } from "./browser-page-report.js";
@@ -4181,26 +4181,25 @@ registerTool({
  * Whether a delegation has a file of the user's to read: one attached to a user message in the
  * conversation it runs in (its own session and every one above it, through sub-agent and workflow
  * runs, as far as this process holds them), or one its task or context names that is in the
- * workspace. True when no session of that chain is held here: a conversation this process cannot
- * see is not one without files.
+ * workspace. True when the chain's root is not held here: a conversation this process cannot see
+ * is not one without files.
  */
 function delegationHasUserFile(ctx: ToolContext, texts: ReadonlyArray<string | undefined>): boolean {
-  let known = false;
+  // DECIDED BY THE ROOT. A conversation's attachments are on its chat's messages, and the first
+  // session of the chain this process held used to stand for it: the scene worker holds a workflow
+  // run but not the chat it came from, and an archived chat is not held either, so their files went
+  // unseen and the upload reader was dropped. A root this process does not hold cannot be asked.
+  if (!getSession(rootSessionOf(ctx.sessionId, ["sub:", "workflow:"]))) return true;
   let id: string | null = ctx.sessionId;
   for (let depth = 0; id && depth < 16; depth += 1) {
-    const session = getSession(id);
-    if (session) {
-      known = true;
-      const attached = session.getHistory().some((message) => {
-        const attachments = message.role === "user" ? message.metadata?.["attachments"] : undefined;
-        return Array.isArray(attachments) && attachments.length > 0;
-      });
-      if (attached) return true;
-    }
+    const attached = getSession(id)?.getHistory().some((message) => {
+      const attachments = message.role === "user" ? message.metadata?.["attachments"] : undefined;
+      return Array.isArray(attachments) && attachments.length > 0;
+    });
+    if (attached) return true;
     const parent = parentSessionOf(id, ["sub:", "workflow:"]);
     id = parent === id ? null : parent;
   }
-  if (!known) return true;
   const exists = workspaceFileExists(ctx.workspacePath);
   return texts.some((text) => (text ? extractTaskNamedPaths(text).some(exists) : false));
 }
