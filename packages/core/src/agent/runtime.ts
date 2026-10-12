@@ -5998,7 +5998,7 @@ async function _runTurn(
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
     // The turn's answer did not reach the user, whatever the fallback says: its scorecard is partial.
-    turnQualitySignals.answerWithheld = true;
+    turnQualitySignals.answerWithheld = "raw_tool_output";
   }
   // Fabricated-inline-artifact guard: a turn that RESEARCHED (≥1 curated shared fact) but
   // produced NO real artifact (the build was stopped/blocked/never ran) sometimes has the
@@ -6031,6 +6031,8 @@ async function _runTurn(
         curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
       }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       presentableFinalMsg = buildResearchGatheredFallback(curatedForHonest);
+      // As at the raw-dump guard above: the answer did not ship, so the turn did not complete.
+      turnQualitySignals.answerWithheld = "fabricated_inline_artifact";
     }
   }
   // Converge on the SAME terminal treatment as the normal in-loop exit
