@@ -163,13 +163,26 @@ export function workflowRunResultAllowance(charsShown: number): number {
  * note the turn loop appended stays after that line, when the text still ends with exactly that
  * note: a cut from the end would otherwise take the loop warning with it. Anything else at the end of
  * the text is the tool's and is cut with the rest.
+ *
+ * With `keepEnd` the cut is from the middle instead: the end keeps two thirds of the room, starting
+ * on a line of its own, the head the rest, and the line between them says how much is missing there.
+ * A workflow run's answer ends with its last step, the one that writes the deliverable, which a cut
+ * from the end took first.
  */
-function holdToBudget(resultText: string, maxChars: number, runtimeNote = ""): string {
+function holdToBudget(resultText: string, maxChars: number, runtimeNote = "", opts: { keepEnd?: boolean } = {}): string {
   const text = resultText.trim();
   if (text.length <= maxChars) return text;
   const note = runtimeNote.trimEnd();
   const notice = note && text.endsWith(note) ? note : "";
   const body = text.slice(0, text.length - notice.length);
+  if (opts.keepEnd) {
+    const room = Math.max(0, maxChars - notice.length - budgetCutLine(body.length, "middle").length);
+    const from = body.length - Math.floor((room * 2) / 3);
+    const lineStart = body.indexOf("\n", from) + 1;
+    const end = body.slice(lineStart > 0 && lineStart < body.length ? lineStart : from).trimStart();
+    const head = body.slice(0, Math.max(0, room - end.length)).trimEnd();
+    return `${head}${budgetCutLine(body.length - head.length - end.length, "middle")}${end}${notice}`;
+  }
   const head = body.slice(0, Math.max(0, maxChars - notice.length - budgetCutLine(body.length).length)).trimEnd();
   return `${head}${budgetCutLine(body.length - head.length)}${notice}`;
 }
@@ -692,16 +705,18 @@ function frameToolResult(
       "Observed evidence:\n",
     ].join("\n");
     // The run's answer is the evidence, not a summary of it: kept as the steps wrote it, newlines
-    // and table rows intact, up to what the turn's allowance leaves after the header, with a line
-    // saying how much a cut left out. The tool's own "Workflow … completed." line would only repeat
-    // the header. A call that ran no workflow keeps the 1,600 characters it had.
+    // and table rows intact, up to what the turn's allowance leaves after the header. A cut is from
+    // the middle, so the last step's section at the end stays, with a line saying how much is
+    // missing there. The tool's own "Workflow … completed." line would only repeat the header. A call
+    // that ran no workflow keeps the 1,600 characters it had.
     const answer = stripPresentationFormatting(stripWorkflowPreamble(resultText));
     if (!isWorkflowRunResult(toolName, metadata)) {
       return `${head}${truncatePlainText(answer, 1600) || "No usable workflow result returned."}`;
     }
     const shown = frameContext?.workflowShown;
     const allowance = workflowRunResultAllowance(shown?.chars ?? 0);
-    const framed = `${head}${holdToBudget(answer, Math.max(0, allowance - head.length), frameContext?.runtimeNote) || "No usable workflow result returned."}`;
+    const held = holdToBudget(answer, Math.max(0, allowance - head.length), frameContext?.runtimeNote, { keepEnd: true });
+    const framed = `${head}${held || "No usable workflow result returned."}`;
     if (shown) shown.chars += framed.length;
     return framed;
   }

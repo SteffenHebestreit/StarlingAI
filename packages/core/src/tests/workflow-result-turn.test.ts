@@ -252,7 +252,9 @@ describe("the turn that ran a job whose files are attached", () => {
     const prompt = promptText(streamMock.mock.calls[2]![0] as Message[]);
     expect(prompt).toContain(E45_ROW);
     expect(prompt).toContain("ZWEITER LAUF: Wartungsplan");
-    expect(prompt).not.toContain(point("Plan", 40).trim());
+    // The retry is cut from the middle: its beginning and its last lines stay.
+    expect(prompt).toContain(point("Plan", 40).trim());
+    expect(prompt).not.toContain(point("Plan", 15).trim());
     expect(prompt).toMatch(/\[Cut to fit the context budget: [^\]]* characters [^\]]*not shown[^\]]*\]/);
   }, 60_000);
 });

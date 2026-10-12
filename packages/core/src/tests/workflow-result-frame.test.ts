@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildModelVisibleToolResult,
+  stripWorkflowPreamble,
   truncatePlainText,
   workflowRunResultMaxChars,
 } from "../agent/tool-result-format.js";
-import { stripPresentationFormatting } from "../agent/runtime-utils.js";
+import { budgetCutLine, stripBudgetCutLines, stripPresentationFormatting } from "../agent/runtime-utils.js";
 import { findRecentDelegateEvidence } from "../agent/interrupted-delegation-evidence.js";
 import { AgentSession } from "../agent/session.js";
 import { getConfig } from "../config/loader.js";
@@ -66,8 +67,21 @@ const METADATA = {
 };
 /** The job's answer as the frame shows it within budget: no status line, markdown unmarked as before. */
 const EVIDENCE = stripPresentationFormatting(ANSWER);
-const CUT_LINE_AT_END = /\[Cut to fit the context budget: the remaining (\d+) characters of this result are not shown\.\]$/;
+const MIDDLE_CUT_LINE = /\n\n\[Cut to fit the context budget: (\d+) characters between the beginning above and the end below are not shown\.\]\n\n/;
 const EVIDENCE_MARKER = "Observed evidence:\n";
+/** A frame cut from the middle, split at its cut line: the beginning it kept, the count, the end. */
+function splitAtCut(visible: string, note = ""): { head: string; missing: number; end: string } {
+  const evidence = visible.slice(visible.indexOf(EVIDENCE_MARKER) + EVIDENCE_MARKER.length, visible.length - note.length);
+  const cut = MIDDLE_CUT_LINE.exec(evidence);
+  expect(cut, "no cut line in the middle of the bounded run").not.toBeNull();
+  return { head: evidence.slice(0, cut!.index), missing: Number(cut![1]), end: evidence.slice(cut!.index + cut![0].length) };
+}
+/** The cut left out exactly what the line says, between what it kept of `whole`. */
+function expectCutOf(whole: string, kept: { head: string; missing: number; end: string }): void {
+  expect(whole.startsWith(kept.head)).toBe(true);
+  expect(whole.endsWith(kept.end)).toBe(true);
+  expect(kept.missing).toBe(whole.length - kept.head.length - kept.end.length);
+}
 
 let savedMaxDelegatedResultChars: number;
 beforeEach(() => {
@@ -97,28 +111,53 @@ describe("the model-visible frame of a workflow run", () => {
     expect(visible.match(/completed\./g)).toHaveLength(1);
   });
 
-  it("holds a run over budget to it, header included, and says how much of the answer is missing", () => {
+  it("holds a run over budget to it, header included, keeping its beginning and its end and counting what is missing between", () => {
     getConfig().agents.performance.maxDelegatedResultChars = 2_000;
     const visible = buildModelVisibleToolResult("run_workflow", OUTPUT, METADATA);
     expect(visible.length).toBeLessThanOrEqual(2_000);
     expect(visible.startsWith(`Workflow ${JOB} [job] completed. Executed steps: 1/1.`)).toBe(true);
     expect(visible).toContain(`- ${ARTIFACTS[2]}`);
     expect(visible).toContain(point("Wartung", 1));
-    expect(visible).not.toContain(E45_ROW);
-    const cut = CUT_LINE_AT_END.exec(visible);
-    expect(cut, "no cut line at the end of the bounded run").not.toBeNull();
-    const kept = visible.slice(visible.indexOf(EVIDENCE_MARKER) + EVIDENCE_MARKER.length, cut!.index).trimEnd();
-    expect(EVIDENCE.startsWith(kept)).toBe(true);
-    expect(Number(cut![1])).toBe(EVIDENCE.length - kept.length);
+    expect(visible).not.toContain(point("Garantie", 1));
+    expect(visible).toContain(E45_ROW);
+    expectCutOf(EVIDENCE, splitAtCut(visible));
   });
 
-  it("keeps the turn loop's note after the cut line", () => {
+  it("keeps the last step's section whole and cuts from the middle", () => {
+    // A job's answer has a section per step, the last one the step that writes the deliverable
+    // (tools/workflow-catalog.ts runJobInline); a cut from the end took it first.
+    getConfig().agents.performance.maxDelegatedResultChars = 3_000;
+    const report = [
+      "## Bericht",
+      "",
+      "Fehlercodes laut Fehlercode-Tabelle:",
+      "| Code | Bedeutung |",
+      "| --- | --- |",
+      "| E17 | Motor überhitzt |",
+      "| E22 | Akku-Unterspannung |",
+      "| E31 | Drehmomentsensor ohne Signal |",
+      E45_ROW,
+      "",
+      `${"Zusammenfassung der Wartungs- und Garantiehinweise. ".repeat(8)}SCHLUSS`,
+    ].join("\n");
+    const steps = `Workflow ${JOB} [job] completed.\n\n## Recherche\n\n${[...Array(20).keys()].map((n) => point("Quelle", n + 1)).join("\n")}\n\n${report}`;
+    const visible = buildModelVisibleToolResult("run_workflow", steps, METADATA);
+    expect(visible.length).toBeLessThanOrEqual(3_000);
+    expect(visible).toContain(point("Quelle", 1));
+    expect(visible).not.toContain(point("Quelle", 10));
+    const kept = splitAtCut(visible);
+    expect(kept.end.endsWith(stripPresentationFormatting(report))).toBe(true);
+    expectCutOf(stripPresentationFormatting(stripWorkflowPreamble(steps)), kept);
+  });
+
+  it("keeps the turn loop's note after the end it keeps", () => {
     getConfig().agents.performance.maxDelegatedResultChars = 2_000;
     const cachedNote = "\n\n[Note: This is a cached result — you already called 'run_workflow' with identical arguments earlier in this turn. "
       + "Do NOT call it again. Use this result and move to a different step.]";
     const visible = buildModelVisibleToolResult("run_workflow", `${OUTPUT}${cachedNote}`, METADATA, { runtimeNote: cachedNote });
     expect(visible.length).toBeLessThanOrEqual(2_000);
-    expect(visible.endsWith(`characters of this result are not shown.]${cachedNote}`)).toBe(true);
+    expect(visible.endsWith(`Fundstelle: ${PAGE_URL}${cachedNote}`)).toBe(true);
+    expectCutOf(EVIDENCE, splitAtCut(visible, cachedNote));
   });
 
   it("takes the budget of a delegated result relayed verbatim, effort-scaled", () => {
@@ -132,8 +171,9 @@ describe("the model-visible frame of a workflow run", () => {
     expect(full).toContain("SCHLUSS");
     const low = runWithEffortContext("low", () => buildModelVisibleToolResult("run_workflow", long, METADATA));
     expect(low.length).toBeLessThanOrEqual(6_000);
-    expect(low).not.toContain("SCHLUSS");
-    expect(low).toMatch(CUT_LINE_AT_END);
+    expect(low).toContain("SCHLUSS");
+    expect(low).not.toContain(E45_ROW);
+    expect(low).toMatch(MIDDLE_CUT_LINE);
   });
 
   it("shows no more than 40,000 characters, whatever an effort tier allows a delegated result", () => {
@@ -223,7 +263,7 @@ describe("the evidence the backstops can hand the user", () => {
     // this text as the answer; the cut line is the harness speaking to the model.
     getConfig().agents.performance.maxDelegatedResultChars = 2_000;
     const framed = buildModelVisibleToolResult("run_workflow", OUTPUT, METADATA);
-    expect(framed).toMatch(CUT_LINE_AT_END);
+    expect(framed).toMatch(MIDDLE_CUT_LINE);
     const history = [
       { role: "user", content: "Erstelle einen quellenbasierten Bericht zum NW-AS 18." },
       { role: "assistant", content: "" },
@@ -232,7 +272,10 @@ describe("the evidence the backstops can hand the user", () => {
     const found = findRecentDelegateEvidence(history, { scopeToCurrentTurn: true });
     expect(found).not.toBeNull();
     expect(found!.evidence).not.toContain("Cut to fit the context budget");
-    expect(found!.evidence.endsWith("[…]")).toBe(true);
+    expect(found!.evidence).toContain("\n\n[…]\n\n");
+    expect(found!.evidence.endsWith(`Fundstelle: ${PAGE_URL}`)).toBe(true);
+    // A cut from the end, as a knowledge-base worker's report gets, leaves "[…]" at the end.
+    expect(stripBudgetCutLines(`${EVIDENCE.slice(0, 500)}${budgetCutLine(EVIDENCE.length - 500)}`).endsWith("\n\n[…]")).toBe(true);
     expect(found!.evidence).toContain(point("Wartung", 1).trim());
   });
 });

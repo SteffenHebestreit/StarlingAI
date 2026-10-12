@@ -200,8 +200,10 @@ export function collapseWhitespace(value: string): string {
  * holdToBudget). It is the harness speaking to the model, so text that can reach the user does not
  * carry it: stripBudgetCutLines puts a plain "[…]" in its place.
  */
-export function budgetCutLine(left: number): string {
-  return `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
+export function budgetCutLine(left: number, where: "end" | "middle" = "end"): string {
+  return where === "end"
+    ? `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`
+    : `\n\n[Cut to fit the context budget: ${left} characters between the beginning above and the end below are not shown.]\n\n`;
 }
 
 const BUDGET_CUT_LINE_RE = /\n*\[Cut to fit the context budget: [^\]\n]*\]\n*/g;
