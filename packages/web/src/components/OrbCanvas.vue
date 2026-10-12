@@ -111,12 +111,14 @@ const ORB_SCALE               = 0.42;
 // Framing. The camera's 60° field of view is vertical, so the orb is sized by the canvas height;
 // below MIN_FRAMED_ASPECT (a canvas far narrower than it is tall) the orbits would run off the
 // sides, and the fov widens there to keep the horizontal view that aspect has. Point sprites follow
-// the orb's size on screen (shaders/pointScale): their authored sizes are the look at a 1350-pixel
-// frame in the drawing buffer — a full-window desktop canvas — and a smaller orb scales them down
-// in proportion instead of keeping their pixel size while everything around them shrinks.
+// the orb's size on screen (shaders/pointScale): their authored sizes are the look at a 1900-pixel
+// frame in the drawing buffer — a maximized window on a 4K screen at 150 % — and every other size
+// scales them in proportion, so a smaller orb is that look made smaller. Capped at the authored
+// size, a frame under the reference kept points too large for its orb, and a half-size window
+// still showed a washed-out core.
 const BASE_FOV_DEG            = 60;
 const MIN_FRAMED_ASPECT       = 0.4;
-const REFERENCE_FRAME_PX      = 1350;
+const REFERENCE_FRAME_PX      = 1900;
 const pointScaleUniform       = { value: 1 };
 
 // ─── Visual state ─────────────────────────────────────────────────────────────
@@ -655,7 +657,7 @@ function frameCanvas(w: number, h: number) {
   camera.updateProjectionMatrix();
   const buffer = renderer.getDrawingBufferSize(new THREE.Vector2());
   const framePx = buffer.y * baseHalfTan / halfTan;
-  pointScaleUniform.value = Math.min(1, framePx / REFERENCE_FRAME_PX);
+  pointScaleUniform.value = framePx / REFERENCE_FRAME_PX;
 }
 
 function handleVisibilityChange() {
