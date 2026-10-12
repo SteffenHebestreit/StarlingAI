@@ -166,7 +166,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:739 | 128 |
-| `evidence` | packages/core/src/config/schema.ts:1723 | 107 |
+| `evidence` | packages/core/src/config/schema.ts:1723 | 108 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:296 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:276 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:559 | 3 |

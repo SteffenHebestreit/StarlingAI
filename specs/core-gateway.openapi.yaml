@@ -439,6 +439,28 @@ paths:
         '401': { description: Missing or invalid bearer token }
         '403': { description: Role below operator }
         '404': { description: Not there }
+  /api/workspace/generated:
+    delete:
+      tags: [Workspace]
+      summary: Empty generated/ in the caller's own workspace root
+      description: |
+        Removes every file, link and directory under `generated/`, the zone a turn writes to,
+        and keeps the directory. Under multi-user auth that is the caller's own root
+        (`users/<account>/generated/`), with one operator the shared root's. Nothing outside
+        `generated/` is touched (uploads, config shards, ledgers, the state directory, a
+        repository at the root). A link is removed itself, never followed: its target stays.
+        Requires an operator bearer token (a token with no role claim counts as operator).
+        The E2E harness calls it before each attempt.
+      responses:
+        '200':
+          description: Emptied (also when there was no `generated/`)
+          content: { application/json: { schema: { type: object, properties: { removed: { type: integer, description: 'Entries removed: files, links and directories' } } } } }
+        '400': { description: '`generated/` is not a directory of the caller''s root (a link in its place), or that root is a link' }
+        '401': { description: Missing or invalid bearer token }
+        '403': { description: 'Role below operator, or no workspace root of the caller''s own under multi-user auth' }
+        '500':
+          description: Some entries stayed
+          content: { application/json: { schema: { type: object, properties: { error: { type: string }, removed: { type: integer }, failed: { type: integer } } } } }
   /api/workspace/archive:
     get:
       tags: [Workspace]
