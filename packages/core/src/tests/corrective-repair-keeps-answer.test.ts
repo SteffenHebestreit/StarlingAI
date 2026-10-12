@@ -82,7 +82,10 @@ describe("the completion gate's corrective build, on a turn that answered and le
     buildRan: () => boolean;
   }) => {
     const session = new AgentSession({ channel: "test", workspacePath: workspace, systemPrompt: "You are a test agent." });
+    /** What each corrective build was asked for: { confirm: false } when the turn keeps its answer. */
+    const buildOptions: unknown[] = [];
     return {
+      buildOptions,
       signal: new AbortController().signal,
       session,
       provider: {} as never,
@@ -116,7 +119,7 @@ describe("the completion gate's corrective build, on a turn that answered and le
       collectTurnArtifactAttachments: opts.attachments,
       runQaDeliveryGate: async () => { throw new Error("no plan, so the QA delivery loop must not run"); },
       runDeliverableConsistencyGate: async () => { throw new Error("deliverableConsistencyQa is off"); },
-      runCorrectiveBuild: opts.build,
+      runCorrectiveBuild: (_context: string, options?: unknown) => { buildOptions.push(options); return opts.build(); },
       runCorrectiveReroute: async () => null,
       logWarn: () => undefined,
     };
@@ -139,13 +142,15 @@ describe("the completion gate's corrective build, on a turn that answered and le
       build: async () => {
         buildRan = true;
         writeFileSync(join(workspace, LEDGER), REPAIRED_LEDGER, "utf8");
-        return BUILD_CONFIRMATION;
+        return LEDGER;
       },
     });
 
     const reply = await applyTerminalResponseGuards(ctx as never);
 
     expect(buildRan).toBe(true);
+    // The answer is kept, so the build writes no confirmation of its own.
+    expect(ctx.buildOptions).toEqual([{ confirm: false }]);
     // Every fact the scenario checks is still in the reply.
     for (const fact of ["1987", "146", "Kiel", "Lübeck", "Flensburg", "18 Artikel"]) expect(reply).toContain(fact);
     expect(reply.startsWith(BRIEF)).toBe(true);
@@ -211,6 +216,7 @@ describe("the completion gate's corrective build, on a turn that answered and le
     });
 
     expect(await applyTerminalResponseGuards(ctx as never)).toBe(BUILD_CONFIRMATION);
+    expect(ctx.buildOptions).toEqual([undefined]);
     expect(ctx.guardrailEvents).toEqual([{ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" }]);
   }, 60_000);
 
@@ -235,6 +241,7 @@ describe("the completion gate's corrective build, on a turn that answered and le
     });
 
     expect(await applyTerminalResponseGuards(ctx as never)).toBe(built);
+    expect(ctx.buildOptions).toEqual([undefined]);
     expect(ctx.guardrailEvents).toEqual([{ type: "guardrail_flagged", details: "final_qa_corrective_build_normal_path" }]);
   }, 60_000);
 });

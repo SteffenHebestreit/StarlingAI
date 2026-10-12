@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { logAudit } from "../audit/logger.js";
 import { findUnfilledStubFiles, findBrokenBuiltPageFiles, type ArtifactScanScope } from "./sub-agent.js";
-import { MIN_SUBSTANTIVE_REPLY_CHARS } from "./turn-corrective.js";
+import { MIN_SUBSTANTIVE_REPLY_CHARS, type CorrectiveBuildOptions } from "./turn-corrective.js";
 import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
@@ -215,7 +215,7 @@ export interface TerminalGuardContext {
     userStatements: string,
     maxRounds: number,
   ) => Promise<DeliverableConsistencyGateResult>;
-  runCorrectiveBuild: (buildContext: string) => Promise<string | null>;
+  runCorrectiveBuild: (buildContext: string, options?: CorrectiveBuildOptions) => Promise<string | null>;
   runCorrectiveReroute: () => Promise<string | null>;
   logWarn: (obj: Record<string, unknown>, msg: string) => void;
 }
@@ -817,7 +817,6 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       : "";
     // A source-sensitive build still needs gathered facts (don't build from nothing).
     if (!initialDynamicGuidance?.sourceSensitive || factsCtx.trim().length > 0) {
-      const built = await ctx.runCorrectiveBuild(factsCtx);
       // A REPAIR DOES NOT REPLACE THE ANSWER IT WAS NOT ABOUT.
       //
       // The build's confirmation is the answer when the turn described an app instead of
@@ -828,7 +827,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       // repaired one function of the evidence ledger the scene had also written, and the
       // user got none of the facts. Such a turn keeps its answer and gains one line naming
       // what the build repaired, or what it could not, as the files say once it has run.
+      // Decided before the build, which then writes no confirmation: one synthesis call on the
+      // slow model, whose text this path would discard.
       const keepsAnswer = !describedInsteadOfBuilding && finalResponse.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS;
+      const built = keepsAnswer
+        ? await ctx.runCorrectiveBuild(factsCtx, { confirm: false })
+        : await ctx.runCorrectiveBuild(factsCtx);
       if (!keepsAnswer) {
         if (built) {
           finalResponse = built;
