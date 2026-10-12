@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { resolveScriptPath } from "../tools/shell.js";
 import { getTool } from "../tools/registry.js";
@@ -72,6 +72,21 @@ describe("run_script path resolution", () => {
   it("keeps the generated/ copy a scope-confined agent's file tools see when the root has one too", () => {
     const ws = workspace(["fib.py", "generated/fib.py"]);
     expect(runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("fib.py", ws))).toBe("generated/fib.py");
+  });
+
+  // The file tools read a path that repeats the root as the root itself; a shell does not, so
+  // `<root name>/run.py` written by one is a directory of that name in the root.
+  it("finds a script a shell left under a repeated root, after the place the file tools have for it", () => {
+    const shellOnly = workspace([]);
+    const named = `${basename(shellOnly)}/run.py`;
+    mkdirSync(join(shellOnly, basename(shellOnly)));
+    writeFileSync(join(shellOnly, named), "print(1)\n", "utf8");
+    expect(resolveScriptPath(named, shellOnly)).toBe(named);
+
+    const both = workspace(["run.py"]);
+    mkdirSync(join(both, basename(both)));
+    writeFileSync(join(both, basename(both), "run.py"), "print(2)\n", "utf8");
+    expect(resolveScriptPath(`${basename(both)}/run.py`, both)).toBe("run.py");
   });
 
   // The tests above pin the helper; this one pins that run_script hands the sandbox what it found.

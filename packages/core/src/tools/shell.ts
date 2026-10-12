@@ -220,6 +220,9 @@ function shellQuote(value: string): string {
  * generated/, but its shell_exec runs at /workspace, so a script it wrote there (or a build's dist/)
  * is at the root and was not found after the change above (review, 2026-10-08). The sandbox is
  * handed the whole working root, so running it exposes nothing shell_exec could not reach.
+ *
+ * And then with a repeated root kept (withoutRepeatedWorkspaceRoot drops it everywhere else): a
+ * shell does not drop it, so `users/<segment>/run.py` written there is a directory of that name.
  */
 export function resolveScriptPath(scriptPath: string, workspacePath: string): string {
   try {
@@ -228,7 +231,9 @@ export function resolveScriptPath(scriptPath: string, workspacePath: string): st
     const written = resolveWorkspaceWritePath(scriptPath, workspacePath);
     if (existsSync(written.resolved)) return written.relativePath;
     const literal = resolveLiteralWorkspacePath(scriptPath, workspacePath);
-    return existsSync(literal.resolved) ? literal.relativePath : within.relativePath;
+    if (existsSync(literal.resolved)) return literal.relativePath;
+    const asNamed = resolveLiteralWorkspacePath(scriptPath, workspacePath, { asNamedOnDisk: true });
+    return existsSync(asNamed.resolved) ? asNamed.relativePath : within.relativePath;
   } catch {
     return scriptPath;
   }

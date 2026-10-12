@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
+import { resolvePathWithinWorkspace, resolveWorkspaceWritePath, resolveLiteralWorkspacePath, withoutRepeatedWorkspaceRoot, generatedZoneRel, userWorkspaceRoot, deploymentWorkspaceRoot, GENERATED_SUBDIR } from "../tools/workspace-path.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
 import * as configLoader from "../config/loader.js";
@@ -97,7 +97,7 @@ describe("workspace zoning — scope-confined path resolution", () => {
   });
 });
 
-import { PROTECTED_WORKSPACE_ZONES } from "../tools/workspace-mount.js";
+import { PROTECTED_WORKSPACE_ZONES, toSandboxPath } from "../tools/workspace-mount.js";
 
 describe("write-zoning: scope-confined agents cannot write live-config zones via file tools", () => {
   it("re-roots a scoped agent's write to a config zone into generated/ (deny-by-reroot)", () => {
@@ -237,5 +237,156 @@ describe("deploymentWorkspaceRoot", () => {
     const shared = join("/srv", "workspace");
     const perUser = join(shared, "users", "someone-0123456789abcdef");
     expect(deploymentWorkspaceRoot(perUser)).toBe(shared);
+  });
+});
+
+/**
+ * A RELATIVE PATH THAT REPEATS THE ROOT.
+ *
+ * Every sub-agent is told "Current workspace: <root>", /workspace/workspace/users/<segment> in the
+ * compose deployment, and writes relative paths that start with that root's tail. Taken as
+ * relative, `workspace/users/<segment>/x.html` landed at generated/workspace/users/<segment>/x.html,
+ * a read of `x.html` found nothing, and the agent wrote the whole file again (E2E, several runs). Such
+ * a path names what the plain name names, for every resolver in every scope.
+ */
+describe("a relative path that repeats the workspace root", () => {
+  const SEGMENT = "eval-19e81d52fcab8153";
+  const OTHER = "bob-0123456789abcdef";
+  // The compose deployment's roots, as the platform running the test spells them.
+  const SHARED = resolve("/workspace/workspace");
+  const ACCOUNT = resolve(SHARED, "users", SEGMENT);
+  const REPEATED = [
+    `workspace/users/${SEGMENT}/a.html`,
+    `users/${SEGMENT}/a.html`,
+    `workspace/workspace/users/${SEGMENT}/a.html`,
+    `generated/workspace/users/${SEGMENT}/a.html`,
+  ];
+
+  type Scope = "generated" | "full" | undefined;
+  const SCOPES: Scope[] = ["generated", undefined, "full"];
+  const inScope = <T,>(scope: Scope, fn: () => T): T => (scope ? runWithRequestContext({ workspaceScope: scope }, fn) : fn());
+  const RESOLVERS = { write: resolveWorkspaceWritePath, read: resolvePathWithinWorkspace, literal: resolveLiteralWorkspacePath };
+
+  /** Every resolver, in every scope, resolves `path` where it resolves `plain`. */
+  const expectSameAs = (path: string, plain: string, root: string): void => {
+    for (const scope of SCOPES) {
+      for (const [resolver, resolveIt] of Object.entries(RESOLVERS)) {
+        const got = inScope(scope, () => resolveIt(path, root));
+        const want = inScope(scope, () => resolveIt(plain, root));
+        expect({ path, scope, resolver, at: got.relativePath }).toEqual({ path, scope, resolver, at: want.relativePath });
+        expect(got.resolved).toBe(want.resolved);
+      }
+    }
+  };
+
+  it("writes a scope-confined agent's file where the plain name goes, and reads it back by that name", () => {
+    for (const path of REPEATED) {
+      const written = inScope("generated", () => resolveWorkspaceWritePath(path, ACCOUNT));
+      expect({ path, at: written.relativePath }).toEqual({ path, at: "generated/a.html" });
+      expect(inScope("generated", () => resolvePathWithinWorkspace("a.html", ACCOUNT)).resolved).toBe(written.resolved);
+      expect(inScope("generated", () => resolvePathWithinWorkspace(path, ACCOUNT)).resolved).toBe(written.resolved);
+    }
+  });
+
+  it("writes an unscoped caller's file where the plain name goes, and reads it back by the name it was given", () => {
+    // Unscoped reads are workspace-wide, so the name that reads it back is the one the write returned.
+    for (const path of REPEATED) {
+      const written = resolveWorkspaceWritePath(path, ACCOUNT);
+      expect({ path, at: written.relativePath }).toEqual({ path, at: "generated/a.html" });
+      expect(resolvePathWithinWorkspace(written.relativePath, ACCOUNT).resolved).toBe(written.resolved);
+      expect(resolvePathWithinWorkspace(`generated/workspace/users/${SEGMENT}/a.html`, ACCOUNT).resolved).toBe(written.resolved);
+    }
+  });
+
+  it("names what the plain name names, for every resolver in every scope", () => {
+    for (const path of REPEATED.slice(0, 3)) expectSameAs(path, "a.html", ACCOUNT);
+    expectSameAs(`${SEGMENT}/a.html`, "a.html", ACCOUNT);
+    // The doubled form the generated/ rooting made, and what an earlier turn reported.
+    expectSameAs(`generated/workspace/users/${SEGMENT}/a.html`, "generated/a.html", ACCOUNT);
+    expectSameAs(`generated/users/${SEGMENT}/site/index.html`, "generated/site/index.html", ACCOUNT);
+    // However often it repeats, and however the two nest.
+    expectSameAs(`users/${SEGMENT}/users/${SEGMENT}/a.html`, "a.html", ACCOUNT);
+    expectSameAs(`workspace/users/${SEGMENT}/generated/users/${SEGMENT}/a.png`, "generated/a.png", ACCOUNT);
+    // The root itself, in any case and with either separator.
+    expectSameAs(`./workspace/users/${SEGMENT}/`, ".", ACCOUNT);
+    expectSameAs(`Users\\${SEGMENT.toUpperCase()}\\a.html`, "a.html", ACCOUNT);
+  });
+
+  it("keeps the shared root's real users/ zone: another account's path there is not the root", () => {
+    // Auth off, or a full-scope agent: the root is the shared one, and users/<segment> in it is
+    // that account's directory.
+    const other = `users/${OTHER}/notes.md`;
+    for (const scope of SCOPES) {
+      expect(inScope(scope, () => resolveLiteralWorkspacePath(other, SHARED)).relativePath).toBe(other);
+    }
+    expect(inScope("full", () => resolveWorkspaceWritePath(other, SHARED)).relativePath).toBe(other);
+    expect(resolvePathWithinWorkspace(other, SHARED).relativePath).toBe(other);
+    // The shared root's own name in front of it is the root, so the zone is reached the same way.
+    expectSameAs(`workspace/${other}`, other, SHARED);
+    expectSameAs("workspace/a.html", "a.html", SHARED);
+    expectSameAs("workspace/workspace/a.html", "a.html", SHARED);
+  });
+
+  it("keeps a path that shares only segments before the root's last", () => {
+    for (const path of [
+      "workspace/a.html",
+      "workspace/users/a.html",
+      "users/a.html",
+      `users/${OTHER}/a.html`,
+      `workspace/workspace/users/${OTHER}/a.html`,
+      `generated/users/${OTHER}/a.html`,
+      `${SEGMENT}-old/a.html`,
+    ]) {
+      expect(withoutRepeatedWorkspaceRoot(path, ACCOUNT)).toBe(path);
+      for (const scope of SCOPES) {
+        expect({ path, scope, at: inScope(scope, () => resolveLiteralWorkspacePath(path, ACCOUNT)).relativePath })
+          .toEqual({ path, scope, at: path });
+      }
+    }
+  });
+
+  it("matches a Windows root and a POSIX one, in any case and with either separator", () => {
+    const windowsShared = "C:\\Users\\steffen\\StarlingAI\\workspace";
+    const windowsAccount = `${windowsShared}\\users\\acct-0123456789abcdef`;
+    expect(withoutRepeatedWorkspaceRoot("workspace/a.html", windowsShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("StarlingAI\\Workspace\\a.html", windowsShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("Users/steffen/StarlingAI/workspace/a.html", windowsShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("Users/steffen/a.html", windowsShared)).toBe("Users/steffen/a.html");
+    expect(withoutRepeatedWorkspaceRoot("users/acct-0123456789abcdef/a.html", windowsShared)).toBe("users/acct-0123456789abcdef/a.html");
+    expect(withoutRepeatedWorkspaceRoot("users/ACCT-0123456789ABCDEF/a.html", windowsAccount)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("generated\\workspace\\users\\acct-0123456789abcdef\\a.html", windowsAccount)).toBe("generated/a.html");
+
+    const posixShared = "/home/x/ws";
+    expect(withoutRepeatedWorkspaceRoot("ws/a.html", posixShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("x/ws/a.html", posixShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("home/x/ws/a.html", posixShared)).toBe("a.html");
+    expect(withoutRepeatedWorkspaceRoot("x/a.html", posixShared)).toBe("x/a.html");
+    expect(withoutRepeatedWorkspaceRoot("home/a.html", posixShared)).toBe("home/a.html");
+    expect(withoutRepeatedWorkspaceRoot("wsx/a.html", posixShared)).toBe("wsx/a.html");
+  });
+
+  it("reaches nothing the path did not, and returns one with nothing to drop as it came", () => {
+    // Normalized first: what is left of the path once its `..` are applied is what is matched.
+    expect(withoutRepeatedWorkspaceRoot(`users/${SEGMENT}/../../etc/passwd`, ACCOUNT)).toBe(`users/${SEGMENT}/../../etc/passwd`);
+    expect(withoutRepeatedWorkspaceRoot(`../${SEGMENT}/a.html`, ACCOUNT)).toBe(`../${SEGMENT}/a.html`);
+    expect(() => resolvePathWithinWorkspace(`users/${SEGMENT}/../../../x`, ACCOUNT)).toThrow(/escapes workspace boundary/);
+    expect(withoutRepeatedWorkspaceRoot("site\\index.html", ACCOUNT)).toBe("site\\index.html");
+    expect(withoutRepeatedWorkspaceRoot("a.html", resolve("/"))).toBe("a.html");
+  });
+
+  it("takes an absolute path inside the root as it is, where a sandbox has it too", () => {
+    // The root every sub-agent is told, written back. In a container it starts with /workspace,
+    // which the resolvers otherwise read as a sandbox's view of the root.
+    const told = `/workspace/workspace/users/${SEGMENT}`;
+    expectSameAs(`${told}/a.html`, "a.html", ACCOUNT);
+    expectSameAs(told, ".", ACCOUNT);
+    // As it is: a repeated root after it is a directory a turn left there, which this names exactly.
+    expect(inScope("generated", () => resolvePathWithinWorkspace(`${told}/generated/users/${SEGMENT}/a.html`, ACCOUNT)).relativePath)
+      .toBe(`generated/users/${SEGMENT}/a.html`);
+    // Where it does not lead into the root, /workspace is still a sandbox's view of it.
+    expectSameAs("/workspace/a.html", "a.html", ACCOUNT);
+    // A sandbox has that path, and what the resolvers made of it, at the same place, mapped once.
+    expect(toSandboxPath(`${told}/a.html`, told)).toBe("/workspace/a.html");
+    expect(toSandboxPath(resolveLiteralWorkspacePath(`${told}/a.html`, ACCOUNT).resolved, ACCOUNT)).toBe("/workspace/a.html");
   });
 });
