@@ -91,6 +91,7 @@ import { join } from "node:path";
 import {
   runCorrectiveBuild as runCorrectiveBuildImpl,
   runCorrectiveReroute as runCorrectiveRerouteImpl,
+  type CorrectiveBuildOptions,
   type CorrectiveContext,
 } from "./turn-corrective.js";
 // Tool-output post-processing sub-phase of the main loop's per-tool-call body
@@ -2469,7 +2470,7 @@ async function _runTurn(
   // artifact and none was produced, delegate to the right builder, record the assistant+tool
   // pair so the artifact surfaces as a download, and synthesize a confirmation. Returns the
   // confirmation message if a real artifact was produced, else null (caller keeps its draft).
-  const runCorrectiveBuild = (buildContext: string): Promise<string | null> => runCorrectiveBuildImpl(buildContext, correctiveCtx);
+  const runCorrectiveBuild = (buildContext: string, options?: CorrectiveBuildOptions): Promise<string | null> => runCorrectiveBuildImpl(buildContext, correctiveCtx, options);
 
   // One bounded corrective RE-ROUTE for the zero-work fabrication guard on NON-artifact
   // requests: the model fabricated a tool-minted deliverable for a question that never

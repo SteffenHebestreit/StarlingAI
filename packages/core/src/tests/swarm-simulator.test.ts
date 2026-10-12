@@ -17,7 +17,7 @@
  *  S3 honesty floor   — when the corrective build produces NOTHING, the turn must NOT claim
  *     success: the concept ships as-is, with no fabricated file path or completion banner.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -657,4 +657,54 @@ describe("swarm simulator — non-artifact question is never dragged into the bu
     expect(result.response).not.toContain("/api/workspace/file");
     expect(result.response).not.toMatch(/Bau der angeforderten Datei/);
   });
+});
+
+describe("swarm simulator — a repair keeps the answer and writes no confirmation (S8, E2E 2026-10-12)", () => {
+  it("a turn that answered and left a broken page gets the page repaired, its answer kept, and no confirmation synthesis", async () => {
+    pinHybridConfig();
+    const workspace = mkdtempSync(join(tmpdir(), "starlingai-swarm-sim-repair-"));
+    tempConfigDirs.push(workspace);
+    mkdirSync(join(workspace, "generated"), { recursive: true });
+    const ledger = join(workspace, "generated", "evidence_ledger.html");
+    const page = (lookup: string) => `<!DOCTYPE html><html><body><span id="total"></span><script>document.getElementById("${lookup}").textContent = "4";</script></body></html>`;
+    const brief = "## Briefing: Nordlicht Werkzeuge GmbH\n\n- Gegründet 1987\n- 146 Mitarbeitende\n"
+      + "- Drei Lagerstandorte: Kiel, Lübeck und Flensburg\n- Sortiment: 18 Artikel\n\nOffene Frage: Stand der Mitarbeiterzahl.";
+    // The turn's own work leaves the ledger broken (written during the turn, so it is this turn's).
+    streamMock.mockImplementation(() => {
+      writeFileSync(ledger, page("summe"), "utf8");
+      return textStream(brief);
+    });
+    const delegateCalls: Array<Record<string, unknown>> = [];
+    registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: vi.fn(async (args: Record<string, unknown>) => {
+        delegateCalls.push(args);
+        writeFileSync(ledger, page("total"), "utf8");
+        return {
+          success: true,
+          output: "Repaired generated/evidence_ledger.html: renderTotal now writes to #total.",
+          metadata: {
+            agentName: args["agentName"],
+            attemptedAgents: [args["agentName"]],
+            delegationOutcome: "success",
+            artifacts: [{ sourceAgent: args["agentName"], sourceTool: "edit_file", filename: "evidence_ledger.html", outputPath: "generated/evidence_ledger.html", contentType: "text/html; charset=utf-8", size: 200 }],
+          },
+        };
+      }),
+    });
+
+    const result = await runTurn({
+      session: new AgentSession({ channel: "test", workspacePath: workspace, systemPrompt: "You are a test agent." }),
+      userMessage: "Erstelle ein kurzes, faktengeprüftes Briefing über die Nordlicht Werkzeuge GmbH als Markdown-Datei und ein Evidenz-Ledger als HTML-Seite.",
+    });
+
+    expect(delegateCalls).toHaveLength(1);
+    for (const fact of ["1987", "146", "Flensburg", "18 Artikel"]) expect(result.response).toContain(fact);
+    expect(result.response).toContain("generated/evidence_ledger.html");
+    // The build wrote no confirmation: no model call was asked to confirm what was built.
+    const asked = completeMock.mock.calls.map((call) => JSON.stringify(call));
+    expect(asked.some((text) => text.includes("ARTIFACT FACTS"))).toBe(false);
+  }, 60_000);
 });

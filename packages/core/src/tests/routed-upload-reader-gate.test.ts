@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ToolContext } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
@@ -191,6 +191,96 @@ describe("routing a step past an agent that reads only uploads", () => {
 
     expect(ran()).toEqual(["document_intake", "document_intake"]);
     expect(rows("delegation_routing_filtered_no_user_file")).toEqual([]);
+  }, 30_000);
+
+  // ── Review of 891f902b ───────────────────────────────────────────────────────────────────────
+
+  /** A file in the workspace, as an upload route or a build left it. */
+  const place = (relativePath: string) => {
+    const file = join(tempDir, ...relativePath.split("/"));
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "%PDF-1.4\n", "utf8");
+    return file;
+  };
+  const READ_THE_FILE = "Den Lieferschein auslesen und die Zahl der Positionen nennen.";
+
+  it("decides by the root chat: a workflow run this process holds without its chat keeps the upload reader (the scene worker)", async () => {
+    routeAs(LIVE_RANKING);
+    const { createSession } = await import("../agent/session.js");
+    const step = stepCtx("chat-held-elsewhere");
+    createSession({ sessionId: step.sessionId, channel: "workflow", workspacePath: tempDir })
+      .addMessage({ role: "user", content: "Use document_intake first when the request starts from attached material …" });
+    await delegate(LIVE_CALL, step);
+
+    expect(ran()).toEqual(["document_intake"]);
+    expect(rows("delegation_routing_filtered_no_user_file")).toEqual([]);
+  }, 30_000);
+
+  it("keeps the upload reader when the root chat is archived, even with its workflow run held", async () => {
+    routeAs(LIVE_RANKING);
+    const { createSession, archiveSession } = await import("../agent/session.js");
+    await chat("chat-archived", [{ filename: "lieferschein.pdf", relativePath: "uploads/chat-archived/lieferschein.pdf" }]);
+    const step = stepCtx("chat-archived");
+    createSession({ sessionId: step.sessionId, channel: "workflow", workspacePath: tempDir })
+      .addMessage({ role: "user", content: "Use document_intake first when the request starts from attached material …" });
+    archiveSession("chat-archived");
+    await delegate(LIVE_CALL, step);
+
+    expect(ran()).toEqual(["document_intake"]);
+  }, 30_000);
+
+  it("keeps the upload reader when the chat's own upload folder holds a file its compacted history no longer shows", async () => {
+    routeAs(LIVE_RANKING);
+    await chat("chat-compacted");
+    place("uploads/chat-compacted/1760000000000-Lieferschein.pdf");
+    await delegate({ task: READ_THE_FILE, deliverable: "answer" }, stepCtx("chat-compacted"));
+
+    expect(ran()).toEqual(["document_intake"]);
+  }, 30_000);
+
+  it("still drops it when only another conversation's upload folder holds a file", async () => {
+    routeAs(LIVE_RANKING);
+    await chat("chat-own-empty");
+    place("uploads/chat-someone-else/1760000000000-Lieferschein.pdf");
+    await delegate(LIVE_CALL, stepCtx("chat-own-empty"));
+
+    expect(ran()).toEqual(["researcher"]);
+  }, 30_000);
+
+  it("keeps it for a bare file name the task gives, found under uploads/ (a dashboard upload) or generated/", async () => {
+    routeAs(LIVE_RANKING);
+    await chat("chat-bare-name");
+    place("uploads/rechnung.pdf");
+    place("generated/bericht.docx");
+    await delegate({ task: "rechnung.pdf auslesen und den Betrag nennen.", deliverable: "answer" }, stepCtx("chat-bare-name"));
+    await delegate({ task: "Die Tabelle aus bericht.docx extrahieren.", deliverable: "answer" }, stepCtx("chat-bare-name"));
+    // A bare name that is nowhere is no file.
+    await delegate({ task: "mahnung.pdf auslesen.", deliverable: "answer" }, stepCtx("chat-bare-name"));
+
+    expect(ran()).toEqual(["document_intake", "document_intake", "researcher"]);
+  }, 30_000);
+
+  it("keeps it for a name with umlauts, bare or quoted with spaces, stored the way the upload routes store it", async () => {
+    routeAs(LIVE_RANKING);
+    await chat("chat-umlaut");
+    place("uploads/user-acct/1760000000000-Lieferschein_M_ller.pdf");
+    await delegate({ task: "Lieferschein_Müller.pdf auslesen.", deliverable: "answer" }, stepCtx("chat-umlaut"));
+    await delegate({ task: "Die Datei „Lieferschein Müller.pdf“ auslesen.", deliverable: "answer" }, stepCtx("chat-umlaut"));
+
+    expect(ran()).toEqual(["document_intake", "document_intake"]);
+  }, 30_000);
+
+  it("keeps it for an absolute path inside the workspace, and for a folder that holds a file", async () => {
+    routeAs(LIVE_RANKING);
+    await chat("chat-paths");
+    const scan = place("uploads/inbox/scan.pdf");
+    await delegate({ task: `Den Scan ${scan} auslesen.`, deliverable: "answer" }, stepCtx("chat-paths"));
+    await delegate({ task: "Alle Dateien in uploads/inbox/ auslesen.", deliverable: "answer" }, stepCtx("chat-paths"));
+    // An empty folder holds no file.
+    mkdirSync(join(tempDir, "uploads", "leer"), { recursive: true });
+    await delegate({ task: "Alle Dateien in uploads/leer/ auslesen.", deliverable: "answer" }, stepCtx("chat-paths"));
+
+    expect(ran()).toEqual(["document_intake", "document_intake", "researcher"]);
   }, 30_000);
 });
 

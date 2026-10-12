@@ -2001,6 +2001,8 @@ export async function findBrokenBuiltPages(workspaceRoot: string, scope?: Artifa
 export interface BrokenBuiltPage {
   file: string;
   detail: string;
+  /** The verdict came from a timeout (checkBuiltPage), which can be the machine's load, not the page. */
+  timedOut?: true;
 }
 
 /**
@@ -2050,7 +2052,7 @@ export async function findBrokenBuiltPageFiles(workspaceRoot: string, scope?: Ar
   }));
   // In walk order, as before: the first broken page is the one the resume directive names first.
   verdicts.forEach((verdict, index) => {
-    if (!verdict.ok) broken.push({ file: pages[index]!.relPath, detail: verdict.detail });
+    if (!verdict.ok) broken.push({ file: pages[index]!.relPath, detail: verdict.detail, ...(verdict.timedOut ? { timedOut: true as const } : {}) });
   });
   return broken;
 }
