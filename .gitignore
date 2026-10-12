@@ -108,6 +108,10 @@ packages/*/package-lock.json
 # the numbered sibling, never committed.
 workspace/**/*.local.jsonc
 
+# Companion stacks this machine runs next to the stack (scripts/companion-stacks.mjs): their
+# compose files are paths on this machine.
+docker/companions.local.jsonc
+
 # Per-deployment routing eval cases — they name YOUR catalog and carry your own queries.
 # The committed starting point is live-cases.example.jsonl.
 eval/routing/live-cases.jsonl
