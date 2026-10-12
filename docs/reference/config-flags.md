@@ -330,7 +330,7 @@ Every public schema field, where it is declared, and how many production files r
 | `passwordHash` | packages/core/src/config/schema.ts:394 | 5 |
 | `passwordSelector` | packages/core/src/config/schema.ts:853 | 5 |
 | `path` | packages/core/src/config/schemas/decisions.ts:111 | 319 |
-| `pattern` | packages/core/src/config/schema.ts:1419 | 62 |
+| `pattern` | packages/core/src/config/schema.ts:1419 | 63 |
 | `patterns` | packages/core/src/config/schema.ts:1356 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 30 |
 | `peers` | packages/core/src/config/schema.ts:650 | 15 |
@@ -416,7 +416,7 @@ Every public schema field, where it is declared, and how many production files r
 | `scopes` | packages/core/src/config/schema.ts:455 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
-| `secret` | packages/core/src/config/schema.ts:1048 | 56 |
+| `secret` | packages/core/src/config/schema.ts:1048 | 55 |
 | `secretAccessKey` | packages/core/src/config/schema.ts:525 | 4 |
 | `seed` | packages/core/src/config/schema.ts:177 | 24 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 1 |
@@ -484,7 +484,7 @@ Every public schema field, where it is declared, and how many production files r
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:215 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:275 | 40 |
 | `timeoutMs` | packages/core/src/config/schema.ts:70 | 106 |
-| `token` | packages/core/src/config/schema.ts:1211 | 202 |
+| `token` | packages/core/src/config/schema.ts:1211 | 203 |
 | `tokenId` | packages/core/src/config/schema.ts:1110 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1111 | 1 |
 | `toolCallPrefill` | packages/core/src/config/schema.ts:262 | 3 |

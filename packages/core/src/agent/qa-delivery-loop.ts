@@ -16,6 +16,7 @@
  */
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 import { effectiveMaxDelegatedResultChars } from "../runtime/effort-context.js";
+import { scanOutput } from "../guardrails/output.js";
 
 export type QaVerdictStatus = "pass" | "fail" | "unverified";
 
@@ -293,12 +294,34 @@ const AUDIT_FLAWS_MAX_CHARS = 300;
  * The failing verdicts' flaws as an audit row keeps them: each clipped, the cut marked; nothing when
  * no verdict failed. In E2E core-ix-browser-order-form-express-refused both rounds failed and the
  * reply was a repair, and what the verdicts had asked to fix could not be read back from anywhere.
- * These are the reviewer's sentences about the answer; logAudit's secret scan runs over them as
- * over every string it writes.
+ *
+ * These are the reviewer's sentences about the answer, and they can quote it. Each is redacted
+ * BEFORE it is clipped: logAudit scans what it writes, but a token cut at the boundary is shorter
+ * than the pattern that would have caught it whole, and its head passed the scan. The redaction is
+ * the one logAudit applies to a string (scanOutput, as sanitizeAuditData calls it), called here
+ * rather than through the audit module, which most runtime tests replace with a bare logAudit mock.
+ * The cut then falls on a word boundary, so even a token no pattern knows is kept whole or dropped.
  */
 export function qaFlawsForAudit(flaws: readonly string[] | undefined): { qaFlaws?: string[] } {
   if (!flaws || flaws.length === 0) return {};
-  return { qaFlaws: flaws.map((text) => (text.length > AUDIT_FLAWS_MAX_CHARS ? `${text.slice(0, AUDIT_FLAWS_MAX_CHARS)}…` : text)) };
+  return { qaFlaws: flaws.map((text) => clipAtWord(redactLikeAudit(text), AUDIT_FLAWS_MAX_CHARS)) };
+}
+
+/** What logAudit's sanitizer makes of a string; unchanged when the scanner cannot run (as there). */
+function redactLikeAudit(text: string): string {
+  try {
+    return scanOutput(text).redacted ?? text;
+  } catch {
+    return text;
+  }
+}
+
+/** The text up to `maxChars`, cut at the last whitespace before it when there is one, the cut marked. */
+function clipAtWord(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const head = text.slice(0, maxChars);
+  const lastBreak = head.search(/\s\S*$/);
+  return `${lastBreak > 0 ? head.slice(0, lastBreak) : head}…`;
 }
 
 /**

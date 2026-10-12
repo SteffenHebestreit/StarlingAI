@@ -209,13 +209,21 @@ describe("the QA delivery loop's verdict", () => {
     // Both rounds failed and the reply was a repair, and nothing recorded what the verdicts had
     // asked to fix (E2E core-ix-browser-order-form-express-refused).
     getConfig().orchestration.qaDeliveryLoop = true;
-    const long = `the answer reports a reference the user's choice did not produce ${"x".repeat(400)}`;
+    const long = "the answer reports a reference the user's choice did not produce. ".repeat(8).trim();
     spyProvider({ qa_verdict: [`FAIL: ${long}`, "FAIL: the answer does not say why"] });
     await runDeliverableTurn({ plan: true });
 
     const rows = auditRows("flow_verification_passed").filter((row) => row["reason"] === "qa_delivery_loop");
     expect(rows).toHaveLength(1);
-    expect(rows[0]!["qaFlaws"]).toEqual([`${long.slice(0, 300)}…`, "the answer does not say why"]);
+    const [first, second] = rows[0]!["qaFlaws"] as string[];
+    // Clipped to at most 300 characters on a word boundary, the cut marked.
+    expect(first!.endsWith("…")).toBe(true);
+    const kept = first!.slice(0, -1);
+    expect(kept.length).toBeLessThanOrEqual(300);
+    expect(kept.length).toBeGreaterThan(200);
+    expect(long.startsWith(kept)).toBe(true);
+    expect(long[kept.length]).toMatch(/\s/);
+    expect(second).toBe("the answer does not say why");
   });
 
   it("records an empty verdict as no verdict — passed:false, status unverified — and asks for no rewrite", async () => {

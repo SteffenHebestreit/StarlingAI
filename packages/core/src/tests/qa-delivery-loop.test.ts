@@ -471,4 +471,26 @@ describe("the failing verdicts' flaws", () => {
     expect(qaFlawsForAudit(undefined)).toEqual({});
     expect(qaFlawsForAudit([])).toEqual({});
   });
+
+  // Assembled at run time, so the repository holds no key-shaped literal: the OpenAI key shape the
+  // output scanner knows (sk- and 20 or more letters and digits), 33 characters.
+  const fakeKey = (): string => ["s", "k", "-", "Zq9".repeat(10)].join("");
+
+  it("redacts a secret before clipping, so one straddling the cut leaves no head behind for the scan to miss", () => {
+    // Glued to the text before it, so no word boundary rescues it: clipped first, the row kept
+    // "sk-Zq9Zq9", which is shorter than the pattern logAudit's own scan would have matched.
+    const key = fakeKey();
+    const flaw = `${"w".repeat(290)}=${key} and more`;   // the key spans characters 291 to 324
+    const [entry] = qaFlawsForAudit([flaw]).qaFlaws ?? [];
+    expect(entry).toBeDefined();
+    expect(entry).not.toContain(key.slice(0, 6));
+    expect(entry!.length).toBeLessThanOrEqual(301);
+  });
+
+  it("cuts on a word boundary, so a token no pattern knows is kept whole or dropped", () => {
+    const token = `zz${"Q".repeat(30)}`;
+    const flaw = `${"word ".repeat(58)}${token} tail`;   // the token spans characters 290 to 321
+    const [entry] = qaFlawsForAudit([flaw]).qaFlaws ?? [];
+    expect(entry).toBe(`${"word ".repeat(58).trimEnd()}…`);
+  });
 });
