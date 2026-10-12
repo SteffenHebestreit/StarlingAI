@@ -69,7 +69,7 @@ Every public schema field, where it is declared, and how many production files r
 | `captureMessageAs` | packages/core/src/config/schema.ts:1425 | 2 |
 | `captureRemainderAs` | packages/core/src/config/schema.ts:1426 | 3 |
 | `cdpUrl` | packages/core/src/config/schemas/render.ts:21 | 1 |
-| `channels` | packages/core/src/config/schema.ts:1416 | 39 |
+| `channels` | packages/core/src/config/schema.ts:1416 | 40 |
 | `childReserveActiveTimeMs` | packages/core/src/config/schema.ts:1707 | 1 |
 | `childReserveTokens` | packages/core/src/config/schema.ts:1705 | 1 |
 | `childReserveToolCalls` | packages/core/src/config/schema.ts:1706 | 1 |
@@ -197,7 +197,7 @@ Every public schema field, where it is declared, and how many production files r
 | `holdoutRate` | packages/core/src/config/schema.ts:1551 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:612 | 1 |
 | `host` | packages/core/src/config/schema.ts:772 | 125 |
-| `http` | packages/core/src/config/schema.ts:817 | 94 |
+| `http` | packages/core/src/config/schema.ts:817 | 96 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
 | `id` | packages/core/src/config/schema.ts:405 | 322 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1421 | 2 |

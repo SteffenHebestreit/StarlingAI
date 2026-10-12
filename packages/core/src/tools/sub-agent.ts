@@ -41,6 +41,7 @@ import {
   agentCfgIsMetaFactory,
   agentIsMetaFactory,
   pickResearchFallbackAgent,
+  agentCfgIsResearchCapable,
   agentCfgReachesOutsideWorkspace,
   agentCfgWorksOnlyFromHandedText,
   agentCfgOnlyReadsOpenBrowserTab,
@@ -362,6 +363,17 @@ export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyA
 
 /** An absolute web address in a task: a page the step has to open from outside the workspace. */
 const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
+/**
+ * How far a routed agent that opens pages itself has to lead the next candidate for Step 1 of
+ * executeDelegationWithFallback to keep it under skillMatchThreshold; a lone candidate leads by
+ * definition, as routing-fusion counts a lone candidate decisive. It is the routing canary's margin
+ * over the admission floor (agent/routing-canary.ts), on the same agent-score scale: there a score
+ * that clears the floor by less is one description edit away from falling through it, here a lead
+ * of less is one edit away from another order. Scores that close are noise: the shortened ranking
+ * in core-build-site-company-facts held five agents within 0.007.
+ */
+const ROUTED_GATHERER_LEAD_MARGIN = 0.05;
 
 /** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
 async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
@@ -1485,6 +1497,163 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     ctx.turnEvidence.outsideEngaged = candidateQueue[0];
   }
 
+  // THE ROUTED-CANDIDATE GATES: what a ranking the router returned passes before its top pick is
+  // weighed against the threshold. They are the deliverable the step asks for, the research gate,
+  // the turn trigger with its web-address rule, and the execution-capability filter. Step 1 below
+  // ranks the full task and Step 1b a shortened query, and both rankings pass through here. Step 1b
+  // used to apply only the deliverable check, so on a turn the judge flagged it could recover an
+  // agent the full ranking would have lost to the turn trigger. In the E2E case
+  // core-build-site-company-facts its ranking for a step naming a web address led with
+  // evidence_analyst, which works only from what it is handed, with calendar_agent beside it; the
+  // step ran on evidence_analyst, which served a two-day-old file from generated/ as the site's
+  // evidence. That delegation came from a nested run with no verdict of its own, which Step 1 now
+  // covers by keeping the router's own gatherer (see there); on a flagged turn these gates stop the
+  // same ranking. When a gate leaves no candidate and a research fallback may take the step, the
+  // fallback is queued and no candidate is returned.
+  // `turnTriggered` is the routed turn trigger, decided at the delegation's first routing round.
+  // `shortenedQuery` marks Step 1b's ranking: the web-address rule holds it tighter (see there), and
+  // every row a gate leaves for it names the query.
+  const gateRoutedCandidates = (
+    ranked: AgentRoutingCandidate[],
+    turnTriggered: boolean,
+    shortenedQuery?: string,
+  ): AgentRoutingCandidate[] => {
+    const auditExtra = shortenedQuery === undefined ? {} : { shortenedQuery };
+    // Drop candidates that cannot produce the deliverable the task asks
+    // for. See agentCanFulfillArtifactTask for the regression context.
+    let routingCandidates = ranked.filter((cand) =>
+      agentCanFulfillArtifactTask(cand.name, request, ctx)
+    );
+    if (routingCandidates.length === 0 && ranked.length > 0) {
+      logAudit("delegation_routing_filtered_artifact_incapable", {
+        taskTitle: title,
+        droppedAgents: ranked.map((c) => c.name),
+        ...auditExtra,
+      }, { sessionId: ctx.sessionId });
+    }
+    // Research-capability gate: a source-sensitive / "search online and
+    // validate" task must go to an agent that can actually reach the web (or
+    // a coordinator that can). This stops generation specialists like
+    // image_creator / chart_designer from being routed a research task and
+    // returning narrative-only "Let me search online…" non-answers.
+    // (Regression: session 64b90fcc, 2026-05-29.)
+    if (textRequiresResearch && routingCandidates.length > 0) {
+      const researchCapable = routingCandidates.filter((cand) => agentIsResearchCapable(cand.name));
+      if (researchCapable.length === 0) {
+        logAudit("delegation_routing_filtered_research_incapable", {
+          taskTitle: title,
+          droppedAgents: routingCandidates.map((c) => c.name),
+          ...auditExtra,
+        }, { sessionId: ctx.sessionId });
+        const fallback = pickResearchFallbackAgent(attemptedAgents);
+        if (fallback) {
+          routingCandidateMap.set(fallback, {
+            confidence: "medium",
+            matchedTerms: ["research", "search-online", "source-sensitive"],
+            score: 0.7,
+          });
+          candidateQueue.push(fallback);
+        }
+        routingCandidates = [];
+      } else {
+        routingCandidates = researchCapable;
+      }
+    }
+    // THE TURN TRIGGER, for a routed pick (decided in Step 1, see there). A candidate that works
+    // only from what it is handed (agentCfgWorksOnlyFromHandedText) cannot gather the facts the
+    // judge asked for, so it is dropped; when no other candidate was routed, the research fallback
+    // takes the step if this turn may still dispatch one, and otherwise the candidates stay (never a
+    // dead end). A candidate with a source of its own (the web, a mailbox, a codebase) keeps its rank.
+    // Once the trigger stands down, a routed tab reader is still held to the explicit path's tab
+    // rule (tabReaderUnserved): on a turn the judge flagged, it is dropped until an agent that
+    // drives the browser has run for this session.
+    const tabReadersBarred = !turnTriggered && ctx.turnEvidence?.required === true && !swarmHasDrivenSharedBrowser(ctx);
+    if ((turnTriggered || tabReadersBarred) && !textRequiresResearch && routingCandidates.length > 0) {
+      const turnCfg = getConfig();
+      const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
+      const unfitForTurn = turnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
+      const lookupCfg = (cand: AgentRoutingCandidate) => turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name];
+      let gatherable = routingCandidates.filter((cand) => !unfitForTurn(lookupCfg(cand)));
+      // What keeps the step when no candidate is left and no fallback this turn may dispatch can
+      // take it: the candidates that passed the trigger, or, when none did, all of them (never a
+      // dead end). The web-address rule below never hands the step back to an agent the trigger
+      // dropped.
+      const keptWithoutFallback = gatherable.length > 0 ? gatherable : routingCandidates;
+      if (turnTriggered && WEB_ADDRESS_RE.test(request.task)) {
+        if (shortenedQuery === undefined) {
+          // A step that names a web address has to be read from outside, so a candidate whose source
+          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
+          // outside, when the router offered one. A routed step names no agent whose source it is
+          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
+          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
+          // cannot open the page either. Without a web address such a candidate keeps its rank. A
+          // candidate with an outside source of its own keeps it too: the full ranking read the whole
+          // step, and a mailbox agent it puts first for "die Mail mit dem Link https://…" is the
+          // step's agent.
+          const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(lookupCfg(cand)));
+          if (reaching.length > 0) gatherable = reaching;
+        } else {
+          // Step 1b's ranking is held tighter: only a candidate that can open the page, or delegate
+          // to one that can (agentCfgIsResearchCapable), keeps a step that names a web address, and
+          // when the shortened route offered none, the research fallback takes the step. A shortened
+          // query keeps a handful of rare words, so its ranking says nothing about whether the step
+          // is about a source of the candidate's own: in core-build-site-company-facts it put
+          // calendar_agent, which reaches only the user's own channels, beside evidence_analyst.
+          gatherable = gatherable.filter((cand) => agentCfgIsResearchCapable(lookupCfg(cand)));
+        }
+      }
+      if (gatherable.length < routingCandidates.length) {
+        const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
+          attemptedAgents,
+          (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
+            && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
+        );
+        const kept = gatherable.length > 0 || fallback ? gatherable : keptWithoutFallback;
+        logAudit("delegation_routing_filtered_research_incapable", {
+          taskTitle: title,
+          droppedAgents: routingCandidates.filter((cand) => !kept.includes(cand)).map((cand) => cand.name),
+          redirectedTo: fallback ?? null,
+          trigger: "turn_evidence",
+          ...auditExtra,
+        }, { sessionId: ctx.sessionId });
+        if (gatherable.length > 0 || !fallback) {
+          routingCandidates = kept;
+        } else {
+          routingCandidateMap.set(fallback, {
+            confidence: "medium",
+            matchedTerms: ["research", "turn-evidence", "redirected"],
+            score: 0.7,
+          });
+          candidateQueue.push(fallback);
+          routingCandidates = [];
+        }
+      }
+    }
+    // Capability-aware gate: when the task needs a concrete execution tool class
+    // (shell/code-exec/browser interaction) and both capable and incapable agents
+    // were routed, keep the capable ones so bidding/routing can't elect an agent
+    // that lacks the tool the task needs.
+    if (routingCandidates.length > 1) {
+      const capCfg = getConfig();
+      const capPromoted = readPromotedAgents(capCfg.workspacePath);
+      const { kept, dropped, capabilities } = filterCandidatesByExecutionCapability(
+        routingCandidates.map((c) => c.name),
+        request.task,
+        (name) => capCfg.subAgents[name] ?? capPromoted[name],
+      );
+      if (dropped.length > 0) {
+        logAudit("delegation_routing_filtered_capability_incapable", {
+          taskTitle: title,
+          droppedAgents: dropped,
+          capabilities,
+          ...auditExtra,
+        }, { sessionId: ctx.sessionId });
+        routingCandidates = routingCandidates.filter((c) => kept.includes(c.name));
+      }
+    }
+    return routingCandidates;
+  };
+
   while (true) {
     // Abort early if the parent turn was cancelled
     if (ctx.signal?.aborted) {
@@ -1561,45 +1730,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
         const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting());
-        // Drop candidates that cannot produce the deliverable the task asks
-        // for. See agentCanFulfillArtifactTask for the regression context.
-        let routingCandidates = allRoutingCandidates.filter((cand) =>
-          agentCanFulfillArtifactTask(cand.name, request, ctx)
-        );
-        if (routingCandidates.length === 0 && allRoutingCandidates.length > 0) {
-          logAudit("delegation_routing_filtered_artifact_incapable", {
-            taskTitle: title,
-            droppedAgents: allRoutingCandidates.map((c) => c.name),
-          }, { sessionId: ctx.sessionId });
-        }
-        // Research-capability gate: a source-sensitive / "search online and
-        // validate" task must go to an agent that can actually reach the web (or
-        // a coordinator that can). This stops generation specialists like
-        // image_creator / chart_designer from being routed a research task and
-        // returning narrative-only "Let me search online…" non-answers.
-        // (Regression: session 64b90fcc, 2026-05-29.)
-        if (taskRequiresExternalResearch(request.task) && routingCandidates.length > 0) {
-          const researchCapable = routingCandidates.filter((cand) => agentIsResearchCapable(cand.name));
-          if (researchCapable.length === 0) {
-            logAudit("delegation_routing_filtered_research_incapable", {
-              taskTitle: title,
-              droppedAgents: routingCandidates.map((c) => c.name),
-            }, { sessionId: ctx.sessionId });
-            const fallback = pickResearchFallbackAgent(attemptedAgents);
-            if (fallback) {
-              routingCandidateMap.set(fallback, {
-                confidence: "medium",
-                matchedTerms: ["research", "search-online", "source-sensitive"],
-                score: 0.7,
-              });
-              candidateQueue.push(fallback);
-            }
-            routingCandidates = [];
-          } else {
-            routingCandidates = researchCapable;
-          }
-        }
-        // THE TURN TRIGGER, for a routed pick. The gate above reads the task's words, which match
+        // THE TURN TRIGGER, for a routed pick. The research gate reads the task's words, which match
         // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
         // asking in German to fetch a page named an agent the catalog does not have (web_crawler),
         // so it was routed, and the router put vision_browser_analyst, which can read the shared
@@ -1607,14 +1738,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         // 3c91cb68). It answered from a page another session had left there. The explicit path's
         // turn trigger never saw the step: a plan leaves a step naming no known agent to routing
         // (evidenceGatherPoint), so the step ran exempt.
-        // The router is therefore held to the same rule here, on the same conditions: the judge said
-        // this turn needs outside facts, nothing this turn has reached outside the workspace yet, and
-        // the session holds no shared facts. A candidate that works only from what it is handed
-        // (agentCfgWorksOnlyFromHandedText) cannot gather them, so it is dropped; when no other
-        // candidate was routed, the research fallback takes the step if this turn may still dispatch
-        // one, and otherwise the candidates stay (never a dead end). A candidate with a source of its
-        // own (the web, a mailbox, a codebase) keeps its rank. Decided at the first routing round and
-        // kept, so a gatherer that fails does not leave the next round free to pick the tab reader.
+        // The router is therefore held to the same rule (gateRoutedCandidates), on the same
+        // conditions: the judge said this turn needs outside facts, nothing this turn has reached
+        // outside the workspace yet, and the session holds no shared facts. Decided at the first
+        // routing round and kept, so a gatherer that fails does not leave the next round free to pick
+        // the tab reader.
         if (routedTurnTriggered === undefined) {
           routedTurnTriggered = ctx.turnEvidence?.required === true
             && !ctx.turnEvidence.outsideEngaged
@@ -1622,76 +1750,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
             // Re-read after the await, as the explicit path does: a sibling may have engaged one.
             && !ctx.turnEvidence.outsideEngaged;
         }
-        // Once the trigger stands down, a routed tab reader is still held to the explicit path's tab
-        // rule (tabReaderUnserved): on a turn the judge flagged, it is dropped until an agent that
-        // drives the browser has run for this session.
-        const tabReadersBarred = !routedTurnTriggered && ctx.turnEvidence?.required === true && !swarmHasDrivenSharedBrowser(ctx);
-        if ((routedTurnTriggered || tabReadersBarred) && !textRequiresResearch && routingCandidates.length > 0) {
-          const turnCfg = getConfig();
-          const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
-          const unfitForTurn = routedTurnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
-          let gatherable = routingCandidates.filter((cand) =>
-            !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
-          // A step that names a web address has to be read from outside, so a candidate whose source
-          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
-          // outside, when the router offered one. A routed step names no agent whose source it is
-          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
-          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
-          // cannot open the page either. Without a web address such a candidate keeps its rank.
-          if (routedTurnTriggered && WEB_ADDRESS_RE.test(request.task)) {
-            const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
-            if (reaching.length > 0) gatherable = reaching;
-          }
-          if (gatherable.length < routingCandidates.length) {
-            const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
-              attemptedAgents,
-              (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
-                && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
-            );
-            // With no other candidate and no fallback this turn may dispatch, nothing is dropped.
-            const dropped = gatherable.length > 0 || fallback
-              ? routingCandidates.filter((cand) => !gatherable.includes(cand)).map((cand) => cand.name)
-              : [];
-            logAudit("delegation_routing_filtered_research_incapable", {
-              taskTitle: title,
-              droppedAgents: dropped,
-              redirectedTo: fallback ?? null,
-              trigger: "turn_evidence",
-            }, { sessionId: ctx.sessionId });
-            if (gatherable.length > 0) {
-              routingCandidates = gatherable;
-            } else if (fallback) {
-              routingCandidateMap.set(fallback, {
-                confidence: "medium",
-                matchedTerms: ["research", "turn-evidence", "redirected"],
-                score: 0.7,
-              });
-              candidateQueue.push(fallback);
-              routingCandidates = [];
-            }
-          }
-        }
-        // Capability-aware gate: when the task needs a concrete execution tool class
-        // (shell/code-exec/browser interaction) and both capable and incapable agents
-        // were routed, keep the capable ones so bidding/routing can't elect an agent
-        // that lacks the tool the task needs.
-        if (routingCandidates.length > 1) {
-          const capCfg = getConfig();
-          const capPromoted = readPromotedAgents(capCfg.workspacePath);
-          const { kept, dropped, capabilities } = filterCandidatesByExecutionCapability(
-            routingCandidates.map((c) => c.name),
-            request.task,
-            (name) => capCfg.subAgents[name] ?? capPromoted[name],
-          );
-          if (dropped.length > 0) {
-            logAudit("delegation_routing_filtered_capability_incapable", {
-              taskTitle: title,
-              droppedAgents: dropped,
-              capabilities,
-            }, { sessionId: ctx.sessionId });
-            routingCandidates = routingCandidates.filter((c) => kept.includes(c.name));
-          }
-        }
+        const routingCandidates = gateRoutedCandidates(allRoutingCandidates, routedTurnTriggered);
         if (routingCandidates.length > 0) {
           const topCandidate = routingCandidates[0]!;
           bestAutoMatchScore = topCandidate.score;
@@ -1723,8 +1782,33 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // and loses its facts to the parent (audit 9b5196ad: embeddings unavailable →
           // bestAutoMatchScore 0.25 → ephemeral → starved build). A real research agent is
           // strictly better here than a fabricated one.
+          // The task's words match English only, so the same holds by structure: a step that names
+          // a web address, or that the turn trigger holds to outside facts, keeps the router's top
+          // pick when that agent opens pages itself (agentGathersDirectly). In the E2E case
+          // core-build-site-company-facts web_task_coordinator delegated "Rufe die Website http://…
+          // auf und suche …" naming no agent; the router ranked researcher first at 0.7213, under the
+          // deployment's 0.75, so nothing was queued, and Step 1b's shortened query, which had lost
+          // the address's scheme, ranked five agents within 0.007 of each other and gave the step to
+          // evidence_analyst. A top pick that does not open pages itself (a builder, a coordinator) is
+          // not kept on this ground, so "build a page linking to https://…" still goes where the
+          // threshold sends it.
+          // Two limits keep it to the step that has to read the page. A step that asks for a file or a
+          // workspace change (delegationAsksForFile: the declared deliverable, else the verb test the
+          // routing filter reads) produces something, and the address it names is a source or a
+          // target: "make a deck about https://…" with researcher first goes where the threshold
+          // sends it. And the gatherer has to lead the ranking by ROUTED_GATHERER_LEAD_MARGIN over
+          // the next candidate the gates left, or stand alone in it: a top pick a hair ahead of an
+          // agent that owns the step's subject ("add the event at https://… to my calendar",
+          // researcher a hair ahead of calendar_agent) is the router being unsure, not the step
+          // being a read.
+          const runnerUp = routingCandidates[1];
+          const gathererLeads = !runnerUp || topCandidate.score - runnerUp.score >= ROUTED_GATHERER_LEAD_MARGIN;
           const researchTaskHasCapableCandidate =
-            taskRequiresExternalResearch(request.task) && agentIsResearchCapable(topCandidate.name);
+            (textRequiresResearch && agentIsResearchCapable(topCandidate.name))
+            || ((routedTurnTriggered || WEB_ADDRESS_RE.test(request.task))
+              && agentGathersDirectly(topCandidate.name)
+              && !delegationAsksForFile(request.task, request.deliverable)
+              && gathererLeads);
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
             || researchTaskHasCapableCandidate
@@ -1736,17 +1820,6 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               score: topCandidate.score,
             });
             candidateQueue.push(topCandidate.name);
-          }
-        }
-        // Claimed here, synchronously after the decision, as the explicit path claims its pick. The
-        // dispatch below claims it too, but only after the lease, budget and admission waits: two
-        // routed builder slices of one parallel_delegate each decided before either got there, both
-        // dropped web_coder, and the build never ran.
-        if (routedTurnTriggered && ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]) {
-          const pickConfig = getConfig();
-          const pick = candidateQueue[0];
-          if (agentCfgReachesOutsideWorkspace(pickConfig.subAgents[pick] ?? readPromotedAgents(pickConfig.workspacePath)[pick])) {
-            ctx.turnEvidence.outsideEngaged = pick;
           }
         }
       }
@@ -1765,11 +1838,22 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // honor, so it can turn a zero-attempt failure into a match but never regress
       // a working delegation. shortenOverspecifiedRoutingQuery returns null for
       // already-short queries, so short tasks incur no extra routing call.
+      // Its ranking passes the same gates as Step 1's (gateRoutedCandidates), judged on the full
+      // task: a shortened query keeps only a handful of rare words, so its ranking says less about
+      // the step than the full route's, and a gate that leaves nothing queues the research fallback
+      // here as it does there. The turn trigger is read again after this routing call, as Step 1
+      // reads it after its own: a sibling that engaged the turn's outside source meanwhile has taken
+      // the one redirect, and two routed builder slices sent to research leave the build unbuilt.
       if (candidateQueue.length === 0 && !request.routingQuery && !explicitAgentRequested) {
         const shortened = shortenOverspecifiedRoutingQuery(request.task);
         if (shortened) {
-          const shortlisted = (await routeAgentCandidates(shortened, ctx, excludedFromRouting()))
-            .filter((cand) => agentCanFulfillArtifactTask(cand.name, request, ctx));
+          const engagedBeforeRoute = ctx.turnEvidence?.outsideEngaged;
+          const shortRanked = await routeAgentCandidates(shortened, ctx, excludedFromRouting());
+          const shortlisted = gateRoutedCandidates(
+            shortRanked,
+            routedTurnTriggered === true && ctx.turnEvidence?.outsideEngaged === engagedBeforeRoute,
+            shortened,
+          );
           const top = shortlisted[0];
           if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {
             bestAutoMatchScore = top.score;
@@ -1788,6 +1872,18 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               confidence: top.confidence,
             }, { sessionId: ctx.sessionId });
           }
+        }
+      }
+      // Claimed here, synchronously after the decision, as the explicit path claims its pick. The
+      // dispatch below claims it too, but only after the lease, budget and admission waits: two
+      // routed builder slices of one parallel_delegate each decided before either got there, both
+      // dropped web_coder, and the build never ran. Step 1b's pick, or the research fallback its
+      // gates queued, claims it the same way.
+      if (routedTurnTriggered && ctx.turnEvidence && !ctx.turnEvidence.outsideEngaged && candidateQueue[0]) {
+        const pickConfig = getConfig();
+        const pick = candidateQueue[0];
+        if (agentCfgReachesOutsideWorkspace(pickConfig.subAgents[pick] ?? readPromotedAgents(pickConfig.workspacePath)[pick])) {
+          ctx.turnEvidence.outsideEngaged = pick;
         }
       }
 
