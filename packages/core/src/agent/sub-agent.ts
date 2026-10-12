@@ -75,7 +75,7 @@ import { runSubAgentInContainer } from "./container-runner.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
-import { agentCfgDomainTools, agentCfgHasNoUsableTools, isBrowserTabViewToolName } from "../tools/agent-routing.js";
+import { agentCfgDomainTools, agentCfgGathersDirectly, agentCfgHasNoUsableTools, isBrowserTabViewToolName, taskNamesWebAddress } from "../tools/agent-routing.js";
 import { reportedPageUrls } from "../tools/browser-page-report.js";
 import { appendOutcome, computeAdaptiveSubAgentTimeoutMs, extractTaskKeywords } from "./outcomes.js";
 import { recordAccount } from "../runtime/user-scope.js";
@@ -123,7 +123,7 @@ import { isRunInternalWithdrawalReason } from "./run-blocked-tool-reasons.js";
 import { claimAgentMessages, readAllFacts, type AgentMessageClaim } from "../swarm/memory.js";
 import { sanitizeTranscriptContent } from "./sanitize-response.js";
 import { truncateToolResult, extractKeyFacts, extractedFindingIsLowValue, stripEditorialNotes } from "../tools/result-shaping.js";
-import { inferCompletedRunOutcome, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
+import { inferCompletedRunOutcome, parseFinalAnswerTag, type DelegationDeliverable } from "../tools/delegation-artifact-classification.js";
 import { coerceJsonArrayArg } from "../tools/json-arg-coercion.js";
 import { clearWebTableSessionState } from "../tools/web-table-budget.js";
 import { describeChain, findArithmeticMismatches, type ArithmeticMismatch } from "./arithmetic-check.js";
@@ -2267,12 +2267,58 @@ export function looksLikeExhaustedBudgetNoTool(output: string, stats: SubAgentEx
   return stats.usage.completionTokens >= 1500;
 }
 
+/** What normalizeSubAgentOutput puts in place of a final answer the model left empty. */
+const NO_FINAL_RESPONSE = "Sub-agent produced no final response.";
+
+/** Shorter than this once trimmed, a final answer carries no finding: a token, a word, a bare number. */
+export const NEAR_EMPTY_ANSWER_CHARS = 16;
+
+/** The answer a run gave: its `<final_answer>` tag's content when it closed with one, else its text, and nothing for the runtime's placeholder. */
+function finalAnswerText(output: string): string {
+  const text = output.trim();
+  return text === NO_FINAL_RESPONSE ? "" : (parseFinalAnswerTag(text)?.data ?? text).trim();
+}
+
+/**
+ * A run that did nothing and said essentially nothing: it called no tool, left no artifact, and its
+ * final answer (a `<final_answer>` tag's content when it closed with one) is empty — "empty" — or
+ * shorter than NEAR_EMPTY_ANSWER_CHARS while the task asked it to gather — "near_empty". Undefined
+ * for every other run.
+ *
+ * E2E core-build-site-company-facts (session d20e3c0a, 2026-10-12): browser_agent, handed
+ * "Firmenwebsite http://www.nordlicht-werkzeuge.test/ lesen …", answered in two characters with no
+ * tool call and 0 iterations. The run reported success, execute_plan counted the step done, and the
+ * reply told the user the site had been visited and held no such data.
+ *
+ * Structural only. An empty answer is never a result, so it fails whatever the run was asked. A
+ * short one can be a result — "Ja" to a yes/no question, "17" to a sum — and its length cannot tell
+ * the two apart, so a short answer fails only when the task asked for gathering: the run holds a
+ * tool that gathers from the web itself (agentCfgGathersDirectly, the reason such an agent is
+ * picked), or the task names a web address. A run like that which called nothing read nothing, and
+ * a handful of characters is not a finding from a page. A run that called any tool is judged as
+ * before, however short its answer.
+ */
+export function emptyAnswerWithoutWork(
+  output: string,
+  run: { toolCount: number; artifactCount: number; availableTools: readonly string[] | undefined; task: string },
+): "empty" | "near_empty" | undefined {
+  if (run.toolCount > 0 || run.artifactCount > 0) return undefined;
+  const answer = finalAnswerText(output);
+  if (answer.length === 0) return "empty";
+  if (answer.length >= NEAR_EMPTY_ANSWER_CHARS) return undefined;
+  const askedToGather = agentCfgGathersDirectly({ ...(run.availableTools ? { tools: [...run.availableTools] } : {}) })
+    || taskNamesWebAddress(run.task);
+  return askedToGather ? "near_empty" : undefined;
+}
+
 function rejectSuspiciousNoToolOutput(
   opts: SubAgentRunOptions,
   stats: SubAgentExecutionStats,
   output: string,
   turnTimeoutMs: number | undefined,
   runStartedAt: number,
+  /** The tools the agent holds and the artifacts the run left, for emptyAnswerWithoutWork. */
+  run: { availableTools: readonly string[] | undefined; artifactCount: number },
 ): SubAgentRunResult | null {
   if (stats.toolCount > 0) return null;
 
@@ -2315,6 +2361,19 @@ function rejectSuspiciousNoToolOutput(
     reason = output.trim().length > 400
       ? "produced a long answer but called no tool — the model inlined a large artifact instead of using a focused write_file/generate_website call"
       : "reasoned without acting: it generated at length, called no tool, and produced almost no output. Raising the token budget will not help — the budget was not the limit. Give it a smaller, more concrete first step, or one that names the file to write";
+  } else {
+    // Last, so a run the checks above can name more precisely keeps their reason.
+    const nothing = emptyAnswerWithoutWork(output, {
+      toolCount: stats.toolCount,
+      artifactCount: run.artifactCount,
+      availableTools: run.availableTools,
+      task: opts.task,
+    });
+    if (nothing === "empty") {
+      reason = "returned no answer and called no tool";
+    } else if (nothing === "near_empty") {
+      reason = `answered in ${finalAnswerText(output).length} characters without calling any tool, so it gathered nothing for this task`;
+    }
   }
 
   if (!reason) return null;
@@ -2364,7 +2423,7 @@ function rejectSuspiciousNoToolOutput(
 
 function normalizeSubAgentOutput(content: string | null | undefined): string {
   const normalized = typeof content === "string" ? content.trim() : "";
-  return normalized.length > 0 ? normalized : "Sub-agent produced no final response.";
+  return normalized.length > 0 ? normalized : NO_FINAL_RESPONSE;
 }
 
 export function summarizeToolAuditMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
@@ -3507,10 +3566,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // reaches a tool call — the measured f08195d2 failure: 20,129 completion tokens,
     // ~17,250 of them reasoning, zero tool calls, guillotined by the stream cap. The
     // classifier is structural (holds write_file AND edit_file; the task longer than
-    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input excluded unless the run
-    // holds a builder tool: stagedBuildTaskChars) so no topic words decide it, and it is
-    // split across two flags: `stagedArtifactBuilds` arms the mechanical half — this audit
-    // record and the on-disk salvage reporting on the interrupted paths — while
+    // STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced and quoted input and an execute_plan step's turn
+    // context excluded unless the run holds a builder tool: stagedBuildTaskChars) so no topic words
+    // decide it, and it is split across two flags: `stagedArtifactBuilds` arms the mechanical
+    // half — this audit record and the on-disk salvage reporting on the interrupted paths — while
     // `stagedArtifactBuildDirective` is what actually changes the prompt the model sees.
     // BOTH default ON: run 3959f3ac measured the staged shape working (13 iterations, 5
     // files, reasoning collapsed from 23,876 chars on the plan pass to ~100-1,300 per fill
@@ -3519,12 +3578,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     //
     // A run whose delegator declared deliverable "answer" is not a build, whatever its size. An
     // execute_plan step carries the turn's objective and acceptance criteria beside its one-line
-    // description (buildStepTask), and they count as the delegator's own words. In the E2E fan-out
-    // new-delegation-routing-bounded-fanout (session 62b04e8b, 2026-10-09) three lookup steps
-    // reached browser_agent at 594, 603 and 640 chars. The two over the threshold were staged,
-    // because browser_agent holds write_file and edit_file, and spent 329 s and 612 s writing files
-    // instead of navigating; the 594-char one finished in 92 s. All three had declared "answer",
-    // which the delegation gates already read as "no file is asked for" (delegationAsksForFile).
+    // description (buildStepTask). In the E2E fan-out new-delegation-routing-bounded-fanout (session
+    // 62b04e8b, 2026-10-09) three lookup steps reached browser_agent at 594, 603 and 640 chars. The
+    // two over the threshold were staged, because browser_agent holds write_file and edit_file, and
+    // spent 329 s and 612 s writing files instead of navigating; the 594-char one finished in 92 s.
+    // All three had declared "answer", which the delegation gates already read as "no file is asked
+    // for" (delegationAsksForFile). An UNDECLARED step was staged the same way (E2E
+    // core-build-site-company-facts, session d20e3c0a, 2026-10-12: a 124-char step at 604 chars,
+    // answered in two characters), so that context no longer counts toward the size of a run without
+    // a builder tool (taskOwnWordChars): a plan step is measured on its own text, as a delegation of
+    // the same words would be. A builder is still measured on all of it (stagedBuildTaskChars).
     const stagedBuildFlags = effectiveOrchestration();
     const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
       && opts.deliverable !== "answer"
@@ -5273,6 +5336,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           result,
           turnTimeoutMs,
           runStartedAt,
+          { availableTools: agentCfg.tools, artifactCount: artifacts.length },
         );
         if (suspicious) {
           return suspicious;
@@ -5417,6 +5481,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           result,
           turnTimeoutMs,
           runStartedAt,
+          { availableTools: agentCfg.tools, artifactCount: artifacts.length },
         );
         if (suspicious) {
           return suspicious;
@@ -6943,6 +7008,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           result,
           turnTimeoutMs,
           runStartedAt,
+          { availableTools: agentCfg.tools, artifactCount: artifacts.length },
         );
         if (suspicious) {
           return suspicious;
@@ -9115,6 +9181,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
             result,
             turnTimeoutMs,
             runStartedAt,
+            { availableTools: agentCfg.tools, artifactCount: artifacts.length },
           );
           if (suspicious) {
             return suspicious;

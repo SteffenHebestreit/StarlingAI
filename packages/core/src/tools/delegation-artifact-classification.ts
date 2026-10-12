@@ -11,6 +11,7 @@ import { isCanonicalResearchSliceTask } from "../agent/source-sensitive-delegati
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact } from "../agent/container-failure.js";
 import { claimsArtifactWrittenButUnproduced } from "../agent/deliverable-intent.js";
 import { NARRATED_TOOL_TEXT_RE } from "../agent/sanitize-response.js";
+import { withoutPlanStepTurnContext } from "../agent/plan-step-task.js";
 
 // ── Concrete evidence in a result's OWN text (2026-10-05) ──────────────────────────────────
 // Units of measure and currencies: symbols, not words of any language. Durations are left out
@@ -138,10 +139,16 @@ export function deliverableParameterSchema(scope?: "delegate_step"): Record<stri
  * research, 2d810e7d; an app pasted inline and lost, 1ac79471). The verdict on a finished run does
  * not use this: it reads the declaration (looksLikeArtifactDeliverableMiss) and what the run's own
  * output claims (looksLikeClaimedWriteMiss), never the verb table.
+ *
+ * The verb test reads an execute_plan step's own text only (agent/plan-step-task.ts). The turn's
+ * objective, criteria and stop conditions that buildStepTask appends are the same on every step, so
+ * "Erstelle eine Lernwebsite" in the objective read every lookup step of that plan as the build; the
+ * results the step depends on are material, whose verbs are not the delegator's ("the company set up
+ * a third warehouse"). A task that is not a plan step is read whole, as before.
  */
 export function delegationAsksForFile(task: string, deliverable: DelegationDeliverable | undefined): boolean {
   if (deliverable) return deliverable === "file";
-  return WORKSPACE_MUTATION_TASK_RE.test(task.trim());
+  return WORKSPACE_MUTATION_TASK_RE.test(withoutPlanStepTurnContext(task).trim());
 }
 
 /**
