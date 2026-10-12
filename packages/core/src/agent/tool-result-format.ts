@@ -16,7 +16,7 @@
  */
 import { effectiveMaxDelegatedResultChars, effectiveOrchestration } from "../runtime/effort-context.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
-import { collapseWhitespace, stripPresentationFormatting, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
+import { budgetCutLine, collapseWhitespace, stripPresentationFormatting, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
 import {
   looksLikeRawWorkspaceToolDump,
   formatRawWorkspaceToolDumpFailure,
@@ -149,10 +149,8 @@ function holdToBudget(resultText: string, maxChars: number, runtimeNote = ""): s
   const note = runtimeNote.trimEnd();
   const notice = note && text.endsWith(note) ? note : "";
   const body = text.slice(0, text.length - notice.length);
-  const cutLine = (left: number): string =>
-    `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
-  const head = body.slice(0, Math.max(0, maxChars - notice.length - cutLine(body.length).length)).trimEnd();
-  return `${head}${cutLine(body.length - head.length)}${notice}`;
+  const head = body.slice(0, Math.max(0, maxChars - notice.length - budgetCutLine(body.length).length)).trimEnd();
+  return `${head}${budgetCutLine(body.length - head.length)}${notice}`;
 }
 
 export function stripAgentPrefix(value: string): string {

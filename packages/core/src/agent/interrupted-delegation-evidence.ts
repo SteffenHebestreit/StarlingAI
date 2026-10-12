@@ -23,6 +23,7 @@ import {
   stripToolEvidencePrefix,
   looksLikeOrchestrationOnlyEvidence,
   stripPresentationFormatting,
+  stripBudgetCutLines,
 } from "./runtime-utils.js";
 import { looksLikeRawWorkspaceToolDump, stripLeadingDelegateLabelEcho } from "./runtime-evidence-dump.js";
 
@@ -223,7 +224,9 @@ function findRecentDelegateEvidence(
     const rawEvidence = evidenceMatch
       ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
       : content.trim();
-    const evidence = stripLeadingDelegateLabelEcho(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence);
+    // What this returns can reach the user as it stands (the coverage check, the terminal and
+    // empty-reply backstops, the delegation-loop reply), so the frame's own cut line does not.
+    const evidence = stripBudgetCutLines(stripLeadingDelegateLabelEcho(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence));
     const delegationOutcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : "";

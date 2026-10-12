@@ -195,6 +195,21 @@ export function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The line a result held to its context budget carries where it was cut (tool-result-format.ts
+ * holdToBudget). It is the harness speaking to the model, so text that can reach the user does not
+ * carry it: stripBudgetCutLines puts a plain "[…]" in its place.
+ */
+export function budgetCutLine(left: number): string {
+  return `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
+}
+
+const BUDGET_CUT_LINE_RE = /\n*\[Cut to fit the context budget: [^\]\n]*\]\n*/g;
+
+export function stripBudgetCutLines(value: string): string {
+  return value.replace(BUDGET_CUT_LINE_RE, "\n\n[…]\n\n").trim();
+}
+
 export function stripPresentationFormatting(value: string): string {
   return value
     .replace(/^\s{0,3}#{1,6}\s+/gm, "")

@@ -5,6 +5,7 @@ import {
   workflowRunResultMaxChars,
 } from "../agent/tool-result-format.js";
 import { stripPresentationFormatting } from "../agent/runtime-utils.js";
+import { findRecentDelegateEvidence } from "../agent/interrupted-delegation-evidence.js";
 import { AgentSession } from "../agent/session.js";
 import { getConfig } from "../config/loader.js";
 import { runWithEffortContext } from "../runtime/effort-context.js";
@@ -177,5 +178,25 @@ describe("the collapsed history the turn's prompts are built from", () => {
     const collapsed = collapsedText(session);
     expect(collapsed).toContain(`${framed.substring(0, 2_000)} [snippet summarized for prior-turn history; full result preserved in the original tool call above, ${framed.length} chars total]`);
     expect(collapsed).not.toContain(E45_ROW);
+  });
+});
+
+describe("the evidence the backstops can hand the user", () => {
+  it("carries a plain […] where the frame cut the run, not the frame's cut line", () => {
+    // The coverage check, the terminal and empty-reply backstops and the delegation-loop reply ship
+    // this text as the answer; the cut line is the harness speaking to the model.
+    getConfig().agents.performance.maxDelegatedResultChars = 2_000;
+    const framed = buildModelVisibleToolResult("run_workflow", OUTPUT, METADATA);
+    expect(framed).toMatch(CUT_LINE_AT_END);
+    const history = [
+      { role: "user", content: "Erstelle einen quellenbasierten Bericht zum NW-AS 18." },
+      { role: "assistant", content: "" },
+      { role: "tool", content: framed, metadata: METADATA },
+    ];
+    const found = findRecentDelegateEvidence(history, { scopeToCurrentTurn: true });
+    expect(found).not.toBeNull();
+    expect(found!.evidence).not.toContain("Cut to fit the context budget");
+    expect(found!.evidence.endsWith("[…]")).toBe(true);
+    expect(found!.evidence).toContain(point("Wartung", 1).trim());
   });
 });

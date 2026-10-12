@@ -726,14 +726,18 @@ function shouldBypassTerminalSynthesisWithEvidence(
  * user actually wants is the evidence — not whatever 50-100 char fragment
  * the synthesis produced.
  */
-function looksLikeUnderpoweredSynthesis(synthesized: string | null): boolean {
+function looksLikeUnderpoweredSynthesis(
+  synthesized: string | null,
+  /** The turn's deliverables are attached files: a reply that lists them is short by design. */
+  opts: { filesAttached?: boolean } = {},
+): boolean {
   if (synthesized === null) return true;
   const trimmed = synthesized.trim();
   if (trimmed.length === 0) return true;
   // 300 chars is roughly two paragraphs of substantive text — anything
   // shorter for a turn that did real tool work is almost certainly an
   // apology, an empty acknowledgement, or a refusal.
-  if (trimmed.length < 300) return true;
+  if (trimmed.length < 300 && !opts.filesAttached) return true;
   if (looksLikeGenericNoUsableReply(trimmed)) return true;
   // Refusal / apology shapes that don't carry information.
   if (/^(?:i\s+(?:am\s+)?(?:sorry|unable|can(?:not|'?t)|wasn'?t\s+able)|sorry,\s+i)\b/i.test(trimmed)
@@ -752,6 +756,11 @@ async function enforceDelegateCoverage(
 ): Promise<string> {
   if (toolIterations === 0) return finalResponse;
   if (!finalResponse || finalResponse.length < 50) return finalResponse;
+  // A turn whose deliverables are attached files is told to answer what was asked and list the
+  // files, not to paste them (agent/citation-honesty.ts buildSynthesisRequiredDirective). Held to
+  // the length of the evidence, a correct reply naming the four error codes asked for and the job's
+  // three files was rewritten "for every item", and the job's whole answer shipped in its place.
+  if (collectTurnArtifactAttachments(session).length > 0) return finalResponse;
 
   // Coverage is about THIS turn's delegated evidence only — never a prior
   // turn's deliverable (which would otherwise win the richness score).
@@ -2638,6 +2647,9 @@ async function _runTurn(
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
   let terminalFinishReason = "max_tool_iterations";
+  // The terminal instruction in force is the one for a turn whose deliverables are attached files
+  // (set where a tool call after [SYNTHESIS REQUIRED] is turned away). Read by the evidence backstop.
+  let terminalInstructionNamesAttachedFiles = false;
   // Which loop brake ended the loop, when one did: the one-tool streak or every call blocked. Read by
   // the loop-brake reroute after the loop.
   let loopBrakeExit: "tool_streak_across_iterations" | "all_tool_calls_blocked" | undefined;
@@ -3938,6 +3950,7 @@ async function _runTurn(
         // the paper's TOC ending in "…"). Pivot to the answer from the evidence, with the files
         // listed and not pasted (agent/citation-honesty.ts buildSynthesisRequiredDirective).
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
+        terminalInstructionNamesAttachedFiles = rejectedTurnArtifacts.length > 0;
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
           ? `THE WORK IS COMPLETE — WRITE THE FINAL ANSWER NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the files' contents into the chat. Write the final answer ${IN_REPLY_LANGUAGE} that: (1) gives what the request asked for from the evidence above, (2) lists every attached file with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
@@ -5760,7 +5773,11 @@ async function _runTurn(
     terminalSharedFactsEvidence,
     { preferHigherScore: false },
   );
-  const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
+  // Not on a turn whose deliverables are attached files: the instruction written for it asks for the
+  // answer and the file list, and the bypass shipped the job's whole answer, its files' text among
+  // it, as the reply instead (audit 2445da2e).
+  const bypassTerminalSynthesis = !(terminalFinishReason === "synthesis_required_tool_call_rejected" && terminalInstructionNamesAttachedFiles)
+    && shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
   let synthesized = loopBrakeRerouteAnswer ?? (bypassTerminalSynthesis
     ? null
     : await forceSynthesis(
@@ -5867,11 +5884,16 @@ async function _runTurn(
       suppressedTextLength: lastSuppressedAssistantText?.length ?? 0,
     }, { sessionId: session.id, severity: "warn" });
   }
+  // A short reply on a turn whose deliverables are attached files is what it was asked for, the
+  // files listed: replaced by the evidence it shipped the files' text instead.
+  const synthesisUnderpowered = looksLikeUnderpoweredSynthesis(synthesized, {
+    filesAttached: collectTurnArtifactAttachments(session).length > 0,
+  });
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
     && !rerouteAnswered
     && terminalEvidenceBackstop
     && !evidenceLooksRaw
-    && looksLikeUnderpoweredSynthesis(synthesized);
+    && synthesisUnderpowered;
   // Last-resort: the runtime suppresses the model's text when it's
   // emitted alongside tool calls (correct in the common case — that text
   // is usually narration like "I'll call X next").  But after several
@@ -5886,7 +5908,7 @@ async function _runTurn(
     && lastSuppressedAssistantText !== null
     && !suppressedTextLooksRaw
     && lastSuppressedAssistantText.length >= 200
-    && looksLikeUnderpoweredSynthesis(synthesized);
+    && synthesisUnderpowered;
   if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
     logAudit("sub_agent_synthesis_forced", {
       reason: "underpowered_synthesis_replaced_with_evidence",
