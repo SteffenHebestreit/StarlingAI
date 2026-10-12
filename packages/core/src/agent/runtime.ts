@@ -693,7 +693,8 @@ export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksL
  * The finish reasons of the two loop brakes that end the tool loop before its iteration cap: one tool
  * in every iteration (the streak brake) and the same set of tools iteration after iteration. Both
  * turns were reported as max_tool_iterations; each set below that holds that reason holds these too,
- * and so does workflow-catalog.ts's give-up set.
+ * and so do workflow-catalog.ts's give-up set and the dashboard's mirror of these names
+ * (packages/web/src/composables/finishReasons.ts).
  */
 const LOOP_BRAKE_FINISH_REASONS: readonly string[] = ["tool_streak_across_iterations", "iteration_tool_set_repeat"];
 

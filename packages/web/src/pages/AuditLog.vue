@@ -313,6 +313,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useAuditStore, type AuditEvent } from "@/stores/audit";
 import { useProductStore } from "@/stores/product";
+import { ITERATION_STOP_FINISH_REASONS } from "@/composables/finishReasons";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -329,13 +330,6 @@ const PERFORMANCE_THRESHOLDS = {
   criticalPromptChars: 20_000,
   toolHeavyCalls: 6,
 };
-
-/**
- * A turn that ran out of tool iterations, or that a loop brake stopped before the cap (agent/runtime.ts
- * LOOP_BRAKE_FINISH_REASONS). The brakes reported max_tool_iterations until they had finish reasons
- * of their own, and they count here as they did.
- */
-const ITERATION_STOP_FINISH_REASONS = new Set(["max_tool_iterations", "tool_streak_across_iterations", "iteration_tool_set_repeat"]);
 
 const audit = useAuditStore();
 const severityFilter = ref("");
