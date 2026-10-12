@@ -43,6 +43,8 @@ export interface ToolResultPostProcessContext {
   /** The turn's tally of the retrieval evidence its frames have shown, which the frame reads and
    *  advances in place (tool-result-format.ts ToolResultFrameContext). */
   readonly retrievalShown?: { chars: number };
+  /** The turn's tally of the workflow-run frames it has shown, likewise. */
+  readonly workflowShown?: { chars: number };
 
   // --- enclosing `opts` callbacks (passed through, never imported) ---
   readonly onIntervention?: (notice: InterventionNotice) => void;
@@ -151,6 +153,7 @@ export const postProcessToolResult = async (
   const modelVisibleResultText = buildModelVisibleToolResult(tc.name, resultText, result.metadata, {
     runtimeNote: ctx.runtimeNote,
     retrievalShown: ctx.retrievalShown,
+    workflowShown: ctx.workflowShown,
   });
 
   ctx.toolResultMessages.push({

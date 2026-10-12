@@ -14,7 +14,10 @@ export function looksLikeTransparentIncompleteReport(text: string): boolean {
 /**
  * Build the `[SYNTHESIS REQUIRED]` directive injected after orchestration. Three
  * shapes, pure so the selection is unit-testable:
- *  - artifacts attached → a SHORT completion summary (don't paste file contents);
+ *  - artifacts attached → any question the request asked, answered with the evidence's facts, and
+ *    each file listed, not pasted; only the list when the files are what was asked for. It was a
+ *    SHORT summary of what was completed: a job's report held the error codes the user had asked
+ *    for, and nothing asked the reply to give them (E2E core-ix-workflow-job-sourced-report);
  *  - partial/thin evidence on a source-sensitive turn → an HONESTY directive that
  *    forbids asserting any unverified specific (audit 0dc158ad: the normal "copy the
  *    exact names and numbers" wording oversold ~500 chars of off-topic evidence and
@@ -73,7 +76,7 @@ export function buildSynthesisRequiredDirective(opts: {
   if (artifactPaths.length > 0) {
     return "[SYNTHESIS REQUIRED] The orchestration is COMPLETE and its deliverables are attached to this message as files ("
       + artifactPaths.slice(0, 12).join(", ")
-      + `). Write a SHORT final answer ${IN_REPLY_LANGUAGE}: state what was completed, list each attached artifact with a one-line description, and note anything the evidence marks as incomplete. Do NOT paste the documents' contents into the chat and do NOT delegate again.`;
+      + `). Write the final answer ${IN_REPLY_LANGUAGE}: answer any question the request asked, with the specific facts from the evidence above; list each attached file with a one-line description; when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into the chat and do NOT delegate again.`;
   }
   if (opts.partialEvidence) {
     return "[SYNTHESIS REQUIRED] The research for this turn did NOT complete — the evidence above is PARTIAL and is probably missing the specifics the request needs. "

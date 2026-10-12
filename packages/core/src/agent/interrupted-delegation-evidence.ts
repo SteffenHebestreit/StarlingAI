@@ -23,6 +23,7 @@ import {
   stripToolEvidencePrefix,
   looksLikeOrchestrationOnlyEvidence,
   stripPresentationFormatting,
+  stripBudgetCutLines,
 } from "./runtime-utils.js";
 import {
   looksLikeRawWorkspaceToolDump,
@@ -248,12 +249,14 @@ function findRecentDelegateEvidence(
     const rawEvidence = evidenceMatch
       ? content.slice(evidenceMatch.index + evidenceMatch[0].length).trim()
       : content.trim();
-    // What a backstop may ship as the reply. A plan's report is its steps' results among the
-    // executor's instructions to the orchestrator, and only the results are evidence; a delegated
-    // result loses its relay frame, the routing note at its end included.
-    const evidence = isPlanResult
+    // What a backstop may ship as the reply: it can reach the user as it stands (the coverage check,
+    // the terminal and empty-reply backstops, the delegation-loop reply). A plan's report is its
+    // steps' results among the executor's instructions to the orchestrator, and only the results are
+    // evidence; a delegated result loses its relay frame, the routing note at its end included; and
+    // neither carries the frame's own budget cut line.
+    const evidence = stripBudgetCutLines(isPlanResult
       ? (planReportResultsForDisplay(content, planReportFacts(meta)) ?? "")
-      : stripLeadingDelegateLabelEcho(stripDelegateRelayFrame(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence));
+      : stripLeadingDelegateLabelEcho(stripDelegateRelayFrame(extractUsefulInterruptedDelegationEvidence(rawEvidence) ?? rawEvidence)));
     const delegationOutcome = typeof meta["delegationOutcome"] === "string"
       ? String(meta["delegationOutcome"]).toLowerCase()
       : "";

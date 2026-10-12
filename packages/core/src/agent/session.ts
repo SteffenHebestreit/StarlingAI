@@ -36,8 +36,8 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
-import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
-import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars } from "./tool-result-format.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult, isWorkflowRunResult } from "./turn-tool-contribution.js";
+import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars, workflowRunResultMaxChars } from "./tool-result-format.js";
 
 const log = childLogger("agent:session");
 const TRANSIENT_TURN_SYSTEM_PREFIXES = [
@@ -454,13 +454,17 @@ export class AgentSession {
           // A knowledge-base worker's report is what the turn is told to relay as-is, and the frame
           // has already held it to the budget of a delegated result relayed verbatim. On the turn
           // that made the call it keeps that budget; afterwards it gets the delegation snippet.
+          // A workflow run's answer likewise: the frame has held it, header and all, to the same
+          // budget, and at the delegation snippet the turn that ran the job read only its head.
           const snippetLimit = isPlanReportResult(call.function.name, resultMetadata.get(call.id))
             ? (i > currentTurnStart ? 12000 : 2000)
             : isRetrievalEvidenceResult(call.function.name) && i > currentTurnStart
               ? retrievalEvidenceMaxChars()
               : kbWorkerReport && i > currentTurnStart
                 ? knowledgeBaseWorkerReportMaxChars()
-                : (isDelegation ? 2000 : 500);
+                : isWorkflowRunResult(call.function.name, resultMetadata.get(call.id)) && i > currentTurnStart
+                  ? workflowRunResultMaxChars()
+                  : (isDelegation ? 2000 : 500);
           // Use an explicit marker instead of a bare ellipsis. Local models
           // sometimes mistake "…" for evidence that was cut off in the
           // current turn and then falsely claim "abgeschnitten" /

@@ -1835,6 +1835,10 @@ registerTool({
           blocked: result.blocked,
           toolCallsExecuted: result.toolCallsExecuted,
           stepCount: 1,
+          // A scene is one step, and the turn reads whether it ran from here as it does a job's
+          // (agent/runtime.ts classifyPostOrchestrationDisposition). Without it a scene that finished
+          // read as never having run, and its answer met the text sniffs a finished run skips.
+          executedSteps: result.blocked ? 0 : 1,
           bootstrapAgent: result.bootstrapAgent,
           // Propagate scene-built artifacts (deck/images/paper) so the parent turn
           // surfaces them as clickable downloads and the auto-build doesn't re-fire.

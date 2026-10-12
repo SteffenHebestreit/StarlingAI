@@ -145,6 +145,22 @@ export function isKnowledgeBaseWorkerReport(toolName: string, metadata: Record<s
   return toolName === "use_knowledge_base" && typeof metadata?.["kbId"] === "string";
 }
 
+/**
+ * Whether a tool result is a workflow run's answer: run_workflow resolved a scene or job and returns
+ * what its steps answered, which is the evidence the turn answers from. The frame cut it to 1,600
+ * characters and the history snippet to 2,000, both on the turn that made the call. In E2E
+ * core-ix-workflow-job-sourced-report all five step agents ran and the job's 3,070-character answer
+ * held the four error codes asked for, after its sections on maintenance and warranty: the model
+ * read its first 1,164 characters and the codes were not among them. Every place that sizes a tool
+ * result by its tool (the frame, the history snippet) asks this.
+ *
+ * The tool names the workflow it resolved (metadata.workflowName) on every run, blocked ones and
+ * those it refused to start included. A routing miss names none and says so (workflowNotFound).
+ */
+export function isWorkflowRunResult(toolName: string, metadata: Record<string, unknown> | undefined): boolean {
+  return toolName === "run_workflow" && typeof metadata?.["workflowName"] === "string" && metadata["workflowNotFound"] !== true;
+}
+
 /** What is known BEFORE the call runs, from the tool name alone. */
 export interface ToolCallContribution {
   /** How much this call adds to the turn's delegation tally. */

@@ -574,7 +574,7 @@ describe("runtime turn guidance", () => {
         tool_call_id: "call_workflow_ok",
         content: [
           "Workflow sourced_presentation [job] completed. Executed steps: 4/4.",
-          "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary in the user's language: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.",
+          "IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message. Write the final answer in the user's language: answer any question the request asked, with the specific facts from the evidence below; list each attached file below with a one-line description; when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into your answer. Do NOT start fresh ad hoc delegation or rerun research for the same request.",
           "Artifact files (already attached):",
           "- generated/presentation/paper.md",
           "- generated/presentation/notes.md",
@@ -622,6 +622,102 @@ describe("runtime turn guidance", () => {
     ]);
 
     expect(disposition).toBe("failure");
+  });
+
+  // E2E core-ix-workflow-job-sourced-report: the frame now carries the run's whole answer, and the
+  // ask_user cue is a text sniff over the whole frame. A step that wrote "please confirm" into its
+  // report turned the reply to a finished job into a question to the user.
+  describe("a workflow run's answer that happens to say \"please confirm\"", () => {
+    const jobOutput = (status: "completed" | "blocked") => [
+      `Workflow source_grounded_paper_packet [job] ${status}.`,
+      "",
+      "## Quellenbericht",
+      "",
+      ...Array.from({ length: 18 }, (_, n) => `- Wartung ${n + 1}: laut Dokumentation zu beachten; Hinweise zu Inbetriebnahme, Pflege und Zubehör.`),
+      "",
+      "| Code | Bedeutung |",
+      "| --- | --- |",
+      "| E45 | Kommunikation mit dem Akku gestört |",
+      "",
+      "Hinweis: Garantiefälle bitte vor dem Versand mit dem Händler klären — please confirm the serial number with the dealer.",
+    ].join("\n");
+    const jobMetadata = (blocked: boolean) => ({
+      workflowName: "source_grounded_paper_packet",
+      workflowType: "job",
+      blocked,
+      stepCount: 1,
+      executedSteps: 1,
+      artifacts: blocked ? [] : [{ outputPath: "generated/bericht.md" }, { outputPath: "generated/folien.html" }],
+    });
+    const framed = (status: "completed" | "blocked") => {
+      const metadata = jobMetadata(status === "blocked");
+      const output = jobOutput(status);
+      return [{
+        role: "tool" as const,
+        tool_call_id: "call_workflow_cue",
+        // As the turn loop frames it (agent/turn-tool-execution.ts); a blocked run arrives as the error.
+        content: buildModelVisibleToolResult("run_workflow", status === "blocked" ? `Error: ${output}` : output, metadata),
+        metadata,
+      }];
+    };
+
+    it("synthesizes a completed job instead of asking the user", () => {
+      const [message] = framed("completed");
+      // The cue lies past the head the old 1,600-character cut kept, so only the whole answer has it.
+      expect(jobOutput("completed").indexOf("please confirm")).toBeGreaterThan(1_600);
+      expect(message!.content).toContain("please confirm the serial number");
+      expect(classifyPostOrchestrationDisposition([message!])).toBe("synthesize");
+    });
+
+    it("still classifies a blocked job as failure", () => {
+      const [message] = framed("blocked");
+      expect(message!.content).toContain("please confirm the serial number");
+      expect(classifyPostOrchestrationDisposition([message!])).toBe("failure");
+    });
+  });
+
+  // The text cues that still read a workflow run's answer read the head the frame showed before it
+  // carried the whole answer, 1,600 characters, so the whole answer adds no cue they did not see.
+  describe("the text cues read the head of a workflow run's answer", () => {
+    const filler = Array.from({ length: 18 }, (_, n) => `- Wartung ${n + 1}: laut Dokumentation zu beachten; Hinweise zu Inbetriebnahme, Pflege und Zubehör.`);
+    const output = (status: "completed" | "blocked", parts: { head?: string[]; tail?: string[] }) => [
+      `Workflow source_grounded_paper_packet [job] ${status}.`,
+      "",
+      "## Quellenbericht",
+      "",
+      ...(parts.head ?? []),
+      ...filler,
+      "",
+      ...(parts.tail ?? []),
+    ].join("\n");
+    const classify = (status: "completed" | "blocked", parts: { head?: string[]; tail?: string[] }) => {
+      const blocked = status === "blocked";
+      const metadata = {
+        workflowName: "source_grounded_paper_packet",
+        workflowType: "job",
+        blocked,
+        stepCount: 1,
+        executedSteps: 1,
+        artifacts: blocked ? [] : [{ outputPath: "generated/bericht.md" }],
+      };
+      const text = output(status, parts);
+      const content = buildModelVisibleToolResult("run_workflow", blocked ? `Error: ${text}` : text, metadata);
+      return classifyPostOrchestrationDisposition([{ role: "tool", tool_call_id: "call_workflow_head", content, metadata }]);
+    };
+    const NEXT_STEP = "Next step: fetch the contents of the dealer portal for the 2027 price list.";
+
+    it("does not continue a finished job for a next step its report names late", () => {
+      expect(output("completed", { tail: [NEXT_STEP] }).indexOf("Next step")).toBeGreaterThan(1_600);
+      expect(classify("completed", { tail: [NEXT_STEP] })).toBe("synthesize");
+    });
+
+    it("still continues one whose report opens with it", () => {
+      expect(classify("completed", { head: [NEXT_STEP] })).toBe("continue");
+    });
+
+    it("asks the user when a blocked job's report opens with a confirmation it needs", () => {
+      expect(classify("blocked", { head: ["Blocker: please confirm the dealer portal credentials before the price list can be read."] })).toBe("ask_user");
+    });
   });
 
   it("still classifies a partially executed workflow with failing evidence as failure", () => {
