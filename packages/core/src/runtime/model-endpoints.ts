@@ -20,6 +20,8 @@ interface EndpointTarget {
   baseUrl: string;
   apiKey?: string;
   source?: string;
+  /** How the endpoint is read: its OpenAI model list (the default), or a rerank server's /health. */
+  probe?: "models" | "health";
 }
 
 let lastSnapshot: ModelEndpointHealth[] = [];
@@ -95,14 +97,78 @@ function findMatchingModel(configuredModel: string, availableModels: string[]): 
   return undefined;
 }
 
-async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
+/** A request to the endpoint with its key, given up on after 10 s. */
+async function requestEndpoint(target: EndpointTarget, url: string, body?: unknown): Promise<Response> {
+  const headers = new Headers();
+  if (target.apiKey) headers.set("Authorization", `Bearer ${target.apiKey}`);
+  if (body !== undefined) headers.set("Content-Type", "application/json");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
   try {
-    const headers = new Headers();
-    if (target.apiKey) headers.set("Authorization", `Bearer ${target.apiKey}`);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    const response = await fetch(toModelsUrl(target.baseUrl), { method: "GET", headers, signal: controller.signal });
+    return await fetch(url, {
+      method: body === undefined ? "GET" : "POST",
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: controller.signal,
+    });
+  } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * A cross-encoder rerank server (retrieval.reranker in "tei" mode) is not an OpenAI server: it serves
+ * POST /rerank and GET /health at its root and no /models, so the model-list check reported it
+ * unhealthy (HTTP 404) while it reranked every turn. Its /health answers once the model is loaded;
+ * the bundled server also names the model it loaded, and that has to be the configured one.
+ */
+async function checkHealthEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
+  const base = { role: target.role, model: target.model, baseUrl: target.baseUrl, source: target.source };
+  try {
+    const response = await requestEndpoint(target, `${target.baseUrl.replace(/\/+$/, "")}/health`);
+    if (!response.ok) return { ...base, ok: false, status: response.status, error: `HTTP ${response.status}` };
+    const body = await response.json().catch(() => null) as { model?: unknown; loaded?: unknown } | null;
+    if (body?.loaded === false) return { ...base, ok: false, status: response.status, error: "Model not loaded" };
+    const served = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
+    if (served && !findMatchingModel(target.model, [served])) {
+      return { ...base, ok: false, status: response.status, error: `Endpoint serves ${served}, not the configured model` };
+    }
+    return { ...base, ok: true, status: response.status, matchedModel: served ?? target.model };
+  } catch (error) {
+    return { ...base, ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Whether the endpoint embeds under the configured name, sent as the provider sends it (the part after
+ * "<provider>/"). llama-swap serves a model's aliases without listing them in /v1/models, so an alias
+ * failed the list check while every embedding call succeeded. One small request settles it, and the
+ * embedding model is in use by every turn's routing, so it loads nothing. Chat models are not probed
+ * this way: a generation could make the server swap the model it has loaded.
+ */
+async function embedsUnderConfiguredName(target: EndpointTarget): Promise<boolean> {
+  const parts = target.model.split("/");
+  const modelId = parts.length > 1 ? parts.slice(1).join("/") : target.model;
+  try {
+    const normalized = target.baseUrl.endsWith("/") ? target.baseUrl : `${target.baseUrl}/`;
+    const response = await requestEndpoint(target, new URL("embeddings", normalized).toString(), {
+      model: modelId,
+      input: "health probe",
+      encoding_format: "float",
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => null) as { data?: Array<{ embedding?: unknown }> } | null;
+    const vector = body?.data?.[0]?.embedding;
+    return Array.isArray(vector) && vector.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
+  if (target.probe === "health") return checkHealthEndpoint(target);
+  try {
+    const response = await requestEndpoint(target, toModelsUrl(target.baseUrl));
     if (!response.ok) {
       return {
         role: target.role,
@@ -130,7 +196,8 @@ async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealt
       };
     }
 
-    const matchedModel = findMatchingModel(target.model, availableModels);
+    const matchedModel = findMatchingModel(target.model, availableModels)
+      ?? (target.role === "embeddings" && await embedsUnderConfiguredName(target) ? target.model : undefined);
     if (!matchedModel) {
       const advertised = availableModels.slice(0, 6).join(", ");
       return {
@@ -229,6 +296,8 @@ function collectTargets(): EndpointTarget[] {
       baseUrl: config.retrieval.reranker.baseUrl,
       apiKey: config.retrieval.reranker.apiKey,
       source: "retrieval.reranker",
+      // "llm" scores through an OpenAI-compatible chat model; "tei" is a rerank server with no model list.
+      probe: config.retrieval.reranker.mode === "llm" ? "models" : "health",
     });
   }
 
