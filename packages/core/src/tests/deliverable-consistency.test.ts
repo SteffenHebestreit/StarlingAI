@@ -82,6 +82,8 @@ describe("buildDeliverableConsistencyCheckMessages", () => {
     expect(sys).toMatch(/tiers, options, phases, line items, or scenarios are NOT contradictions/);
     expect(sys).toMatch(/SUM correctly/);
     expect(sys).toMatch(/8\.000–12\.000 € is ONE range/);
+    // An openly reported deviation from the user's facts is not a contradiction (review 2026-10-12).
+    expect(sys).toMatch(/openly reports that something the user stated was refused, failed, or done differently does NOT contradict/);
     // The verdict vocabulary round-trips through the existing parser.
     expect(parseQaVerdict("PASS").pass).toBe(true);
     expect(parseQaVerdict("FAIL: recommends 10k for ~10 weeks at a stated 90-120€/h rate (≈37€/h)").pass).toBe(false);

@@ -191,12 +191,16 @@ describe("the QA delivery verdict at runtime", () => {
   });
 
   it("tells the reviewer that an answer's note of a refusal or a deviation is required, not unrequested content", async () => {
-    const { QA_DISCLOSURE_RULE } = await import("../agent/qa-delivery-loop.js");
+    const { QA_DISCLOSURE_VERDICT_RULE, QA_DISCLOSURE_RULE } = await import("../agent/qa-delivery-loop.js");
     const prompts = await runImageTurn({ artifacts: [] });
     const afterAnswer = prompts[0]!.split("\nANSWER:\n")[1]!;
-    expect(afterAnswer).toContain(QA_DISCLOSURE_RULE);
+    expect(afterAnswer).toContain(QA_DISCLOSURE_VERDICT_RULE);
     // After the scope row it qualifies: a disclosure is not the "unrequested" work that row fails.
-    expect(afterAnswer.indexOf(QA_DISCLOSURE_RULE)).toBeGreaterThan(afterAnswer.indexOf("Also FAIL when the answer reveals work OUTSIDE"));
+    expect(afterAnswer.indexOf(QA_DISCLOSURE_VERDICT_RULE)).toBeGreaterThan(afterAnswer.indexOf("Also FAIL when the answer reveals work OUTSIDE"));
+    // It shields the note only: what the note reports is still judged (review 2026-10-12).
+    expect(QA_DISCLOSURE_VERDICT_RULE).toContain("still judged against the criteria");
+    // The rewrites' wording ("keep it in any rewrite") is no instruction for a reviewer told not to rewrite.
+    expect(prompts[0]).not.toContain(QA_DISCLOSURE_RULE);
   });
 
   it("does not tell the reviewer the rewrites' rule: an answer whose agent changed the user's value still fails", async () => {

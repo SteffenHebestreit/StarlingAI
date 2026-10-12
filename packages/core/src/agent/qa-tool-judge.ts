@@ -15,7 +15,7 @@
  * The runner is injected (DI) so the pure pieces and the check wrapper are unit-testable
  * without module mocks; the runtime supplies a thin runSubAgent adapter.
  */
-import { parseQaVerdict, type QaVerdict } from "./qa-delivery-loop.js";
+import { parseQaVerdict, QA_DISCLOSURE_VERDICT_RULE, type QaVerdict } from "./qa-delivery-loop.js";
 
 /** A concrete artifact the judge can open: a workspace file or a served/external URL. */
 export interface QaJudgeArtifactRef {
@@ -97,6 +97,7 @@ export function buildQaToolJudgeTask(
     // Fraud-check rows — the two frauds an artifact inspector is
     // uniquely positioned to catch. Verdict vocabulary stays strictly PASS/FAIL.
     "Fraud checks while inspecting: (1) SCOPE — files or changes beyond what the criteria asked for are a FAIL even when well-made; name the out-of-scope item. (2) DEBRIS — debug prints, TODO/placeholder text, commented-out code scraps, or leftover scratch files inside the deliverables are a FAIL; name the file.",
+    QA_DISCLOSURE_VERDICT_RULE,
     "",
     "After inspecting, reply with ONLY a single-line verdict:",
     "PASS — evidence: <one concrete fact you OBSERVED with your tools (file content/size, probe status) that proves the criteria are met>",

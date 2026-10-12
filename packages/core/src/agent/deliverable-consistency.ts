@@ -83,6 +83,10 @@ export function buildDeliverableConsistencyCheckMessages(answer: string, userSta
     "If the deliverable does arithmetic (rate × time = total, sums, percentages, discounts), check it actually adds up. " +
     "Do NOT invent facts and do NOT impose external benchmarks the deliverable never claimed. " +
     "Different figures for clearly-labeled different tiers, options, phases, line items, or scenarios are NOT contradictions — only two mutually-exclusive claims about the SAME thing are. " +
+    // An answer reporting that the page refused the user's 1200 and 999 went in states the gap;
+    // read as a contradiction of the user's figure, its repair is told to be "consistent with the
+    // user's stated facts" and can only lose the report (review 2026-10-12).
+    "A deliverable that openly reports that something the user stated was refused, failed, or done differently does NOT contradict the user by saying so. " +
     "When a total is broken into line items or phases, verify they SUM correctly rather than treating them as conflicting. " +
     "Read European number formatting correctly (1.000,00 € = one thousand euros; a range like 8.000–12.000 € is ONE range, not two conflicting figures).";
   const user = [

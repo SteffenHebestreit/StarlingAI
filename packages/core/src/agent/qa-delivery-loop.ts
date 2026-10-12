@@ -348,10 +348,20 @@ export function answerFitsRepair(current: string, maxChars = answerRepairMaxChar
  * its note that the page had refused the user's choice and a different one was submitted, reading
  * it as unrequested content against a "word for word" criterion, and the repair then dropped the
  * note: an honest answer left the loop claiming the request went through as asked (E2E 2026-10-12).
- * The verdict prompt, the repair, the verification and the consistency repair all carry it.
+ * The repair, the verification and the consistency repair carry this one; the verdicts carry
+ * QA_DISCLOSURE_VERDICT_RULE.
  */
-export const QA_DISCLOSURE_RULE = "A note that something was refused, failed, not done, or done differently than asked is required, "
-  + "never unrequested content: do not fail an answer for it, and keep it in any rewrite.";
+export const QA_DISCLOSURE_RULE = "A note that something was refused, failed, not done, or done differently than asked is required: "
+  + "keep it in any rewrite.";
+
+/**
+ * The verdicts' half of the same rule. It shields the NOTE, not what the note reports: a reviewer
+ * told only "do not fail an answer for it" could pass an answer saying 999 was submitted where the
+ * user asked for 1200, or a refusal of work that could have been done (review 2026-10-12). The
+ * prose verdict and the tool judge carry it.
+ */
+export const QA_DISCLOSURE_VERDICT_RULE = "A note that something was refused, failed, not done, or done differently than asked is required, "
+  + "never unrequested content: never FAIL an answer for including the note; what the note reports is still judged against the criteria.";
 
 /**
  * What a rewrite is told about a flaw in what was DONE. The reviewer rightly failed an answer
