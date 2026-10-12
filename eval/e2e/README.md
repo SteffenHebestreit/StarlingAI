@@ -70,8 +70,9 @@ account's `generated/` files with it (below).
 A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
 attempt's notes in the report say what it left and why:
 
-- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset) — with auth off every
-  account's memory is the shared single-operator store, and a token from before the switch still works;
+- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset, after any wait for a
+  stopped turn) — with auth off every account's memory is the shared single-operator store, and a token
+  from before the switch still works;
 - the identity logs in as its own eval account (`GET /api/auth/me`: `eval` → `eval`, `eval-viewer` →
   `eval-viewer`) — a credentials file may map it to any account;
 - no other eval account lists the same entries — a gateway older than the per-user workspace routes
@@ -102,8 +103,11 @@ account's own workspace root, and later turns read what is there as evidence: on
 two-day-old briefing, another cited a chart an earlier run had made (2026-10-10). Under the memory reset's
 conditions (one attempt at a time, auth on, the identity logged in as its own eval account, no stopped turn
 of it that may still run), every identity a turn of the attempt runs as has its `generated/` emptied
-before the attempt's first step: `DELETE /api/workspace/generated`, which removes every file, link and
-directory in the caller's own `generated/` (a link itself, never what it leads to) and keeps the directory.
+before the attempt's first step: `DELETE /api/workspace/generated?scope=account`, which removes every
+file, link and directory in the caller's own `generated/` (a link itself, never what it leads to) and
+keeps the directory. Both resets wait for a stopped turn first and ask whether auth is on right before
+they delete; `scope=account` makes the route itself refuse (`HTTP 409`, noted) should auth be switched
+off in between, when the caller's root would be the shared one and its `generated/` the operator's files.
 A scenario therefore cannot rely on a file an earlier attempt or scenario wrote; one that needs a file
 writes it in its own steps, which run after the reset (guards-list-files-on-a-file, the `inprocess`
 scenarios). `--keep-workspace` keeps the files; `--keep-memory` keeps them too.

@@ -631,12 +631,15 @@ export async function resetDurableMemory(identity: string, deps: RunnerDeps, sig
   // A 401 or 403 is the account's answer, not the entry's: the remaining deletes are not tried.
   let forbidden: string | null = null;
   try {
-    const refusal = await resetRefusal(identity, deps, "every account's memory is the shared single-operator store", signal);
-    const running = refusal ? [] : await turnsStillRunning(identity, deps, turnWaitMs, signal);
-    if (refusal) {
-      notes.push(`memory reset skipped: ${refusal}`);
-    } else if (running.length > 0) {
+    // The wait first, the refusal right before the deletes: asked before a wait of up to turnWaitMs,
+    // it could miss auth being switched off in the meantime, and the deletes would reach the shared
+    // single-operator stores with a token that still verifies.
+    const running = await turnsStillRunning(identity, deps, turnWaitMs, signal);
+    const refusal = running.length > 0 ? null : await resetRefusal(identity, deps, "every account's memory is the shared single-operator store", signal);
+    if (running.length > 0) {
       notes.push(`memory reset skipped: ${stillRunningReason(identity, running)}`);
+    } else if (refusal) {
+      notes.push(`memory reset skipped: ${refusal}`);
     } else {
       for (const scope of ["user", "workspace"] as const) {
         for (let pass = 1; ; pass += 1) {
@@ -709,10 +712,12 @@ export interface WorkspaceResetResult {
 
 /**
  * Empty the identity's generated/ before an attempt (DELETE /api/workspace/generated, which
- * empties the caller's own), under the memory reset's gates: auth on and the identity logged in as
- * its own eval account (resetRefusal: with auth off the route empties the shared root's generated/,
- * the operator's own files), and no turn stopped on the account that may still run and write into
- * the next attempt (waited for up to turnWaitMs).
+ * empties the caller's own), under the memory reset's gates: no turn stopped on the account that
+ * may still run and write into the next attempt (waited for up to turnWaitMs), then, right before
+ * the delete, auth on and the identity logged in as its own eval account (resetRefusal: with auth
+ * off the route empties the shared root's generated/, the operator's own files). The delete asks
+ * for `scope=account` as well, so the route itself refuses the shared root should auth be switched
+ * off in between.
  *
  * Only generated/, the zone a turn writes to. The rest of the account's root stays: uploads/ (no
  * scenario reads a file there that an earlier attempt left) and the git repository the
@@ -729,14 +734,17 @@ export async function resetWorkspace(identity: string, deps: RunnerDeps, signal?
   const notes: string[] = [];
   let removed = 0;
   try {
-    const refusal = await resetRefusal(identity, deps, "every account's generated/ is the shared root's, the operator's own files", signal);
-    const running = refusal ? [] : await turnsStillRunning(identity, deps, turnWaitMs, signal);
-    if (refusal) {
-      notes.push(`workspace reset skipped: ${refusal}`);
-    } else if (running.length > 0) {
+    // The wait first, the refusal right before the delete, as for the memory reset.
+    const running = await turnsStillRunning(identity, deps, turnWaitMs, signal);
+    const refusal = running.length > 0 ? null : await resetRefusal(identity, deps, "every account's generated/ is the shared root's, the operator's own files", signal);
+    if (running.length > 0) {
       notes.push(`workspace reset skipped: ${stillRunningReason(identity, running)}`);
+    } else if (refusal) {
+      notes.push(`workspace reset skipped: ${refusal}`);
     } else {
-      const emptied = await deps.client.http(identity, "DELETE", "/api/workspace/generated", signal ? { signal } : {});
+      // scope=account: the route refuses (409) when the caller's root is the shared one, so auth
+      // switched off after the refusal above was asked still empties nothing of the operator's.
+      const emptied = await deps.client.http(identity, "DELETE", "/api/workspace/generated?scope=account", signal ? { signal } : {});
       const body = isRecord(emptied.json) ? emptied.json : {};
       if (emptied.ok) {
         removed = typeof body["removed"] === "number" ? body["removed"] : 0;

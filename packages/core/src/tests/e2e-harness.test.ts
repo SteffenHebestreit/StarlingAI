@@ -123,6 +123,10 @@ class FakeGateway {
   readonly generated = new Map<string, Set<string>>();
   /** What DELETE /api/workspace/generated answers with instead of emptying (404: a gateway without the route). */
   workspaceResetStatus: number | null = null;
+  /** Auth is switched off just before the next DELETE /api/workspace/generated is handled. */
+  authOffAtWorkspaceReset = false;
+  /** The query of each DELETE /api/workspace/generated, in order. */
+  readonly workspaceResetQueries: string[] = [];
   /** What GET /api/models/preset answers: the dashboard's Local ⇄ Claude switch. */
   modelPreset: { active: string | null; activePrimary: string | null } = { active: null, activePrimary: null };
   private readonly server = http.createServer((req, res) => void this.handleHttp(req, res));
@@ -335,6 +339,10 @@ class FakeGateway {
 
   private async handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://fake");
+    if (req.method === "DELETE" && url.pathname === "/api/workspace/generated" && this.authOffAtWorkspaceReset) {
+      this.authOffAtWorkspaceReset = false;
+      this.authEnabled = false;
+    }
     this.httpPaths.push(`${req.method} ${url.pathname}`);
     this.sequence.push(`${req.method} ${url.pathname}`);
     const json = (status: number, body: unknown): void => {
@@ -392,7 +400,12 @@ class FakeGateway {
       return json(200, { schemaVersion: 1, goals: [], expertise: [], workingStyle: [], communication: [], openQuestions: [], revision: 2, updatedAt: "2026-10-08T00:00:00.000Z", updatedBy: "user" });
     }
     if (req.method === "DELETE" && url.pathname === "/api/workspace/generated") {
+      this.workspaceResetQueries.push(url.search);
       if (this.workspaceResetStatus === 404) return json(404, { error: "not found" });
+      // As the route: scope=account refuses the shared root (gateway/workspace-routes.ts).
+      if (url.searchParams.get("scope") === "account" && this.rootOf(user) === "shared") {
+        return json(409, { error: "Your workspace root is the deployment's shared root, not an account's own: nothing was removed" });
+      }
       if (this.workspaceResetStatus !== null) return json(this.workspaceResetStatus, { error: "1 entry of generated/ could not be removed (EBUSY)", removed: 0, failed: 1 });
       const files = this.generated.get(this.rootOf(user));
       const removed = files?.size ?? 0;
@@ -544,6 +557,8 @@ beforeEach(() => {
   gateway.userModels.clear();
   gateway.generated.clear();
   gateway.workspaceResetStatus = null;
+  gateway.authOffAtWorkspaceReset = false;
+  gateway.workspaceResetQueries.length = 0;
   gateway.modelPreset = { active: null, activePrimary: null };
   gateway.setScripts([
     { match: /^hello/i, run: helloScript },
@@ -1270,6 +1285,56 @@ describe("e2e harness against a fake gateway", () => {
     gateway.authEnabled = true;
     expect(gateway.httpPaths.filter((path) => path === "DELETE /api/workspace/generated").length).toBe(emptied);
     expect(gateway.generatedFiles("shared")).toEqual(["operator-report.pdf"]);
+  });
+
+  it("waits for a stopped turn first and asks whether auth is on right before it deletes: auth switched off during the wait empties nothing shared", async () => {
+    // Asked before a wait of up to the cancel grace, the answer could be stale by the time the
+    // deletes went out, and a token from before still verifies with auth off.
+    let finishLingering: (() => void) | undefined;
+    gateway.setScripts([
+      { match: /^linger/, run: async (turn) => {
+        await turn.cancelled;
+        await new Promise<void>((resolveFinish) => { finishLingering = resolveFinish; });
+        turn.finish("ok", "Done after all.");
+      } },
+      { match: /^hello/i, run: helloScript },
+    ]);
+    const lingering: E2EScenario = { id: "fake-linger-auth", title: "A turn that outlives its cancel", group: "guards", steps: [{ kind: "turn", message: "linger after the cancel", timeoutMs: 200 }] };
+    await runScenario(loaded(lingering), deps(), { ...FAST, cancelGraceMs: 300 });
+    // The operator's own: what a reset with auth off would reach.
+    gateway.userModels.set("shared", { goals: ["the operator's goal"] });
+    gateway.writeGenerated("shared", "operator-report.pdf");
+    const deletesBefore = gateway.workspaceResetQueries.length;
+    const scenario: E2EScenario = { id: "fake-auth-off-during-wait", title: "Auth switched off during the wait", group: "core", steps: [{ ...helloTurn }] };
+    const running = runScenario(loaded(scenario), deps(), { ...FAST, cancelGraceMs: 5_000 });
+    // While the resets wait for the stopped turn: auth goes off, then the turn ends.
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+    gateway.authEnabled = false;
+    finishLingering?.();
+    const result = await running;
+    gateway.authEnabled = true;
+    expect(result.attempts[0]!.notes).toEqual([
+      "memory reset skipped: the gateway runs with auth off, so every account's memory is the shared single-operator store",
+      "workspace reset skipped: the gateway runs with auth off, so every account's generated/ is the shared root's, the operator's own files",
+    ]);
+    expect(gateway.userModels.get("shared")).toEqual({ goals: ["the operator's goal"] });
+    expect(gateway.generatedFiles("shared")).toEqual(["operator-report.pdf"]);
+    expect(gateway.workspaceResetQueries.length).toBe(deletesBefore);
+  });
+
+  it("asks the route for the account's own root: auth switched off just before the delete lands empties nothing shared", async () => {
+    gateway.writeGenerated("eval", "stale.md");
+    gateway.writeGenerated("shared", "operator-report.pdf");
+    gateway.authOffAtWorkspaceReset = true;
+    const scenario: E2EScenario = { id: "fake-auth-off-at-delete", title: "Auth switched off at the delete", group: "core", steps: [{ ...helloTurn }] };
+    const result = await runScenario(loaded(scenario), deps(), FAST);
+    gateway.authEnabled = true;
+    expect(gateway.workspaceResetQueries).toEqual(["?scope=account"]);
+    expect(result.attempts[0]!.notes).toEqual([
+      "workspace reset: eval's generated/ not emptied (HTTP 409: Your workspace root is the deployment's shared root, not an account's own: nothing was removed)",
+    ]);
+    expect(gateway.generatedFiles("shared")).toEqual(["operator-report.pdf"]);
+    expect(gateway.generatedFiles("eval")).toEqual(["stale.md"]);
   });
 
   it("skips — never fails — a scenario whose required service is down", async () => {
