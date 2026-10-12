@@ -206,6 +206,7 @@ export type CoreAuditEventType =
   | "delegation_routing_filtered_research_incapable"
   | "delegation_bidding_filtered_research_incapable"
   | "delegation_routing_filtered_capability_incapable"
+  | "delegation_routing_filtered_no_user_file"
   | "delegation_bidding_filtered_capability_incapable"
   | "delegation_bidding_filtered_meta_factory"
   | "delegation_explicit_redirected_research_incapable"

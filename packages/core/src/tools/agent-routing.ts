@@ -1014,6 +1014,19 @@ export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean
 }
 
 /**
+ * Whether an agent's only source is a file the user hands over: confined to the workspace, and its
+ * taxonomy names no input but an upload. With no such file in play it has nothing to read, however
+ * much its description shares with the task ("extract the content" reads like any step that
+ * extracts anything). An agent the taxonomy does not classify, or one that can reach outside the
+ * workspace, is not this.
+ */
+export function agentCfgReadsOnlyUploads(cfg: CapabilityBearing): boolean {
+  if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
+  return inputs.length > 0 && inputs.every((input) => input === "file_upload");
+}
+
+/**
  * The member of a batch of delegations — a plan's delegate steps, parallel slices, task-graph
  * nodes — that may become the turn's evidence gather point when the turn needs outside facts: the
  * first one, in the order given, naming an agent that works only from handed text. -1 when any member
