@@ -1499,13 +1499,15 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // covers by keeping the router's own gatherer (see there); on a flagged turn these gates stop the
   // same ranking. When a gate leaves no candidate and a research fallback may take the step, the
   // fallback is queued and no candidate is returned.
-  // `turnTriggered` is the routed turn trigger, decided at the delegation's first routing round;
-  // `auditExtra` goes on every row a gate leaves, so a row from Step 1b names its shortened query.
+  // `turnTriggered` is the routed turn trigger, decided at the delegation's first routing round.
+  // `shortenedQuery` marks Step 1b's ranking: the web-address rule holds it tighter (see there), and
+  // every row a gate leaves for it names the query.
   const gateRoutedCandidates = (
     ranked: AgentRoutingCandidate[],
     turnTriggered: boolean,
-    auditExtra: Record<string, unknown> = {},
+    shortenedQuery?: string,
   ): AgentRoutingCandidate[] => {
+    const auditExtra = shortenedQuery === undefined ? {} : { shortenedQuery };
     // Drop candidates that cannot produce the deliverable the task asks
     // for. See agentCanFulfillArtifactTask for the regression context.
     let routingCandidates = ranked.filter((cand) =>
@@ -1559,20 +1561,35 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       const turnCfg = getConfig();
       const turnPromoted = readPromotedAgents(turnCfg.workspacePath);
       const unfitForTurn = turnTriggered ? agentCfgWorksOnlyFromHandedText : agentCfgOnlyReadsOpenBrowserTab;
-      let gatherable = routingCandidates.filter((cand) =>
-        !unfitForTurn(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
-      // A step that names a web address has to be read from the web, so only a candidate that can
-      // open the page (or delegate to one that can, agentCfgIsResearchCapable) keeps it. A routed
-      // step names no agent whose source it is about, and the ranking follows the topic: a "Die URL
-      // … abrufen und … zusammenzählen" step ranked [vision_browser_analyst, data_analyst,
-      // browser_agent] went to data_analyst, which reads files already collected and cannot open
-      // the page either. Reaching outside the workspace is not enough: a calendar or mailbox agent
-      // reaches the user's own channels, not the page, and the shortened ranking in
-      // core-build-site-company-facts offered calendar_agent beside evidence_analyst. When the router offered no such candidate, the
-      // research fallback below takes the step. Without a web address every candidate that passed
-      // the trigger keeps its rank.
+      const lookupCfg = (cand: AgentRoutingCandidate) => turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name];
+      let gatherable = routingCandidates.filter((cand) => !unfitForTurn(lookupCfg(cand)));
+      // What keeps the step when no candidate is left and no fallback this turn may dispatch can
+      // take it: the candidates that passed the trigger, or, when none did, all of them (never a
+      // dead end). The web-address rule below never hands the step back to an agent the trigger
+      // dropped.
+      const keptWithoutFallback = gatherable.length > 0 ? gatherable : routingCandidates;
       if (turnTriggered && WEB_ADDRESS_RE.test(request.task)) {
-        gatherable = gatherable.filter((cand) => agentCfgIsResearchCapable(turnCfg.subAgents[cand.name] ?? turnPromoted[cand.name]));
+        if (shortenedQuery === undefined) {
+          // A step that names a web address has to be read from outside, so a candidate whose source
+          // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
+          // outside, when the router offered one. A routed step names no agent whose source it is
+          // about, and the ranking follows the topic: a "Die URL … abrufen und … zusammenzählen" step
+          // ranked [vision_browser_analyst, data_analyst, browser_agent] went to data_analyst, which
+          // cannot open the page either. Without a web address such a candidate keeps its rank. A
+          // candidate with an outside source of its own keeps it too: the full ranking read the whole
+          // step, and a mailbox agent it puts first for "die Mail mit dem Link https://…" is the
+          // step's agent.
+          const reaching = gatherable.filter((cand) => agentCfgReachesOutsideWorkspace(lookupCfg(cand)));
+          if (reaching.length > 0) gatherable = reaching;
+        } else {
+          // Step 1b's ranking is held tighter: only a candidate that can open the page, or delegate
+          // to one that can (agentCfgIsResearchCapable), keeps a step that names a web address, and
+          // when the shortened route offered none, the research fallback takes the step. A shortened
+          // query keeps a handful of rare words, so its ranking says nothing about whether the step
+          // is about a source of the candidate's own: in core-build-site-company-facts it put
+          // calendar_agent, which reaches only the user's own channels, beside evidence_analyst.
+          gatherable = gatherable.filter((cand) => agentCfgIsResearchCapable(lookupCfg(cand)));
+        }
       }
       if (gatherable.length < routingCandidates.length) {
         const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
@@ -1580,20 +1597,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
             && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
         );
-        // With no other candidate and no fallback this turn may dispatch, nothing is dropped.
-        const dropped = gatherable.length > 0 || fallback
-          ? routingCandidates.filter((cand) => !gatherable.includes(cand)).map((cand) => cand.name)
-          : [];
+        const kept = gatherable.length > 0 || fallback ? gatherable : keptWithoutFallback;
         logAudit("delegation_routing_filtered_research_incapable", {
           taskTitle: title,
-          droppedAgents: dropped,
+          droppedAgents: routingCandidates.filter((cand) => !kept.includes(cand)).map((cand) => cand.name),
           redirectedTo: fallback ?? null,
           trigger: "turn_evidence",
           ...auditExtra,
         }, { sessionId: ctx.sessionId });
-        if (gatherable.length > 0) {
-          routingCandidates = gatherable;
-        } else if (fallback) {
+        if (gatherable.length > 0 || !fallback) {
+          routingCandidates = kept;
+        } else {
           routingCandidateMap.set(fallback, {
             confidence: "medium",
             matchedTerms: ["research", "turn-evidence", "redirected"],
@@ -1813,7 +1827,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           const shortlisted = gateRoutedCandidates(
             shortRanked,
             routedTurnTriggered === true && ctx.turnEvidence?.outsideEngaged === engagedBeforeRoute,
-            { shortenedQuery: shortened },
+            shortened,
           );
           const top = shortlisted[0];
           if (top && shouldPreferCatalogAgent(top.score, top.confidence, skillMatchThreshold)) {

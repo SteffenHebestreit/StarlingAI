@@ -979,6 +979,29 @@ describe("the research gate's turn trigger", () => {
       expect(rows("delegation_routing_shortened_recovered")).toEqual([]);
     }, 30_000);
 
+    it("leaves the step to an agent that passed the trigger when no research agent may take it", async () => {
+      // The web-address rule leaves no candidate and this turn may dispatch no fallback, so the step
+      // stays with the candidates the trigger kept: data_analyst, never the dropped evidence_analyst.
+      routeByQuery([NESTED_SITE_STEP], [], [{ name: "evidence_analyst", score: 0.7561 }, { name: "data_analyst", score: 0.7568 }]);
+      await delegate({ task: NESTED_SITE_STEP, deliverable: "answer" }, turnCtx("s-short-no-fallback", { allowedAgents: ["evidence_analyst", "data_analyst"] }));
+
+      expect(ran()).toEqual(["data_analyst"]);
+      expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+        expect.objectContaining({ droppedAgents: ["evidence_analyst"], redirectedTo: null, trigger: "turn_evidence", shortenedQuery: expect.any(String) }),
+      ]);
+    }, 30_000);
+
+    it("keeps a step naming a web address on the mailbox agent the full ranking puts first", async () => {
+      // German, so the task's words arm nothing; the turn trigger does. The full ranking read the
+      // whole step, and the mailbox agent reaches a source of its own outside the workspace.
+      const step = "Suche in meinem Postfach die Mail mit dem Link https://www.nordlicht-werkzeuge.test/rechnung und nenne den Betrag.";
+      routeByQuery([step], [{ name: "mail_agent", score: 0.86 }, { name: "researcher", score: 0.81 }], []);
+      await delegate({ task: step, deliverable: "answer" }, turnCtx("s-mail-url"));
+
+      expect(ran()).toEqual(["mail_agent"]);
+      expect(rows("delegation_routing_filtered_research_incapable")).toEqual([]);
+    }, 30_000);
+
     it("redirects one of two builder slices the shortened route recovers, not both", async () => {
       // The full route offers nothing, so both slices reach Step 1b, and each awaits its shortened
       // route before its gates decide.
