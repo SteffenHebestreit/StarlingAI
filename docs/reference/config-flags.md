@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 84 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
-| `budget` | packages/core/src/config/schema.ts:1696 | 98 |
+| `budget` | packages/core/src/config/schema.ts:1696 | 99 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:973 | 48 |
@@ -166,7 +166,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:739 | 128 |
-| `evidence` | packages/core/src/config/schema.ts:1723 | 109 |
+| `evidence` | packages/core/src/config/schema.ts:1723 | 110 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:296 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:276 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:559 | 3 |
@@ -234,7 +234,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1851 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1841 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 55 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 56 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1558 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:850 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:539 | 8 |

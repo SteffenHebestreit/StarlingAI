@@ -174,15 +174,17 @@ export function collectDeclaredElements(html: string): Map<string, DeclaredEleme
   return declared;
 }
 
-/** Element ids the document actually defines — the set getElementById may resolve. */
+/**
+ * Element ids the document actually defines — the set getElementById may resolve.
+ *
+ * Read with the same attribute tokenizer as collectDeclaredElements, not a bare /id="…"/ scan.
+ * That scan missed an unquoted id (`<span id=total>`, valid HTML), so a script that wrote to it
+ * met null here and a working page was reported broken ("Cannot set properties of null"): in the
+ * E2E run of 2026-10-12 that verdict sent a finished evidence ledger to a corrective build. It
+ * also read `data-id="5"` as an element id, since `\bid` matches after the hyphen.
+ */
 export function collectElementIds(html: string): Set<string> {
-  const ids = new Set<string>();
-  const re = /\bid\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    if (m[1]) ids.add(m[1]);
-  }
-  return ids;
+  return new Set(collectDeclaredElements(html).keys());
 }
 
 export interface RunReport {
