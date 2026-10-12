@@ -9,8 +9,10 @@
  * on runtime.ts, so the import is strictly one-directional (no cycle). The
  * interwoven async/formatter functions that need runtime internals
  * (getSharedFactsEvidenceForFinalSynthesis, compactSourceSensitiveEvidenceForDisplay,
- * formatSourceSensitiveEvidenceBackstop, …) stay in runtime.ts.
+ * formatSourceSensitiveEvidenceBackstop, …) stay in runtime.ts. The one import is the fixed-text
+ * language helper (reply-language.ts), for the note under a plan's results.
  */
+import { localizedFixedText } from "./reply-language.js";
 
 // A shared-fact value that is a raw tool dump, not user-facing evidence: PDF
 // bytes / internals, or a bare url_inspect HTTP-probe line (status + headers,
@@ -152,4 +154,175 @@ export function stripLeadingDelegateLabelEcho(text: string): string {
     t = t.slice(m[0].length).trimStart();
   }
   return t;
+}
+
+/**
+ * How the routing note delegate_to_agent appends to an answer it routed itself (no agent named)
+ * begins: "\n↳ Auto-routed to <agent> (<confidence> confidence…)". One definition for the tool that
+ * writes the note (formatDelegatedOutput) and for stripDelegateRelayFrame, which takes it off.
+ */
+export const AUTO_ROUTED_NOTE_LEAD = "\n↳ Auto-routed to ";
+
+/**
+ * A delegated result as the orchestrator reads it: "[<agent>]: <answer>", followed by the routing
+ * note when routing picked the agent. The label and the note tell the orchestrator who answered;
+ * they are not part of the answer (stripDelegateRelayFrame).
+ */
+export function formatDelegatedOutput(
+  agentName: string,
+  output: string,
+  routing?: { confidence: string; matchedTerms: readonly string[] },
+): string {
+  const note = routing
+    ? `${AUTO_ROUTED_NOTE_LEAD}${agentName} (${routing.confidence} confidence${routing.matchedTerms.length > 0 ? `, matched: ${routing.matchedTerms.join(", ")}` : ""})`
+    : "";
+  return `[${agentName}]: ${output}${note}`;
+}
+
+/**
+ * The specialist's answer inside a delegated result (formatDelegatedOutput): without the trailing
+ * routing note and the leading "[<agent>]:" label, an "ephemeral:<name>" label included. For a
+ * runtime path that ships a delegate_to_agent result to the user: with the label in front, the
+ * last-resort raw-dump guard (looksLikeRawToolEvidenceDump) replaced the whole answer (E2E
+ * guards-list-files-on-a-file: a 541-character listing shipped as a fact-free heading).
+ */
+export function stripDelegateRelayFrame(output: string): string {
+  let text = output ?? "";
+  const noteAt = text.lastIndexOf(AUTO_ROUTED_NOTE_LEAD);
+  if (noteAt >= 0 && !text.slice(noteAt + AUTO_ROUTED_NOTE_LEAD.length).trimEnd().includes("\n")) {
+    text = text.slice(0, noteAt);
+  }
+  return text.replace(/^\s*\[[^\]\n]+\]:\s*/, "").trim();
+}
+
+/**
+ * The plan report (tools/plan-executor.ts), which record_plan carries too once it has folded the plan
+ * round: a roll-call, the steps still owed, "COMPLETED:", then the step results under
+ * PLAN_RESULTS_HEADING, each "[<step id>] <description>\n<result>" (formatPlanStepResult), and after
+ * them only sections that open with one of the leads below. The executor writes these strings from
+ * here, so planReportResultsForDisplay reads what it writes.
+ */
+export const PLAN_RESULTS_HEADING = "RESULTS — write the final answer from these:";
+export const PLAN_FINAL_STEP_HEADING = "FINAL STEP — yours, in the reply (nothing dispatches it):";
+export const PLAN_MARKED_DONE_LEAD = "Marked done: ";
+export const PLAN_RETRIED_LEAD = "Retried: ";
+export const PLAN_IGNORED_IDS_LEAD = "Ignored — no such step id: ";
+export const PLAN_CLOSING_ALL_RAN = "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.";
+export const PLAN_CLOSING_OUTSTANDING = "Do NOT write the final answer while steps above are outstanding.";
+const PLAN_RESULTS_OMITTED_TAIL = " further result(s) omitted for length.)";
+
+/** The note under the results when the report's budget left some out. */
+export function planResultsOmittedNote(omitted: number): string {
+  return `(${omitted}${PLAN_RESULTS_OMITTED_TAIL}`;
+}
+
+/** One step's block in the report's results. */
+export function formatPlanStepResult(id: string, description: string, result: string): string {
+  return `[${id}] ${description}\n${result}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** A plan step that did not complete: an entry of execute_plan's outstandingSteps. */
+export interface PlanStepNotCompleted {
+  id: string;
+  /** "failed", "manual" (the orchestrator's own, not done) or "pending" (did not run). */
+  status: string;
+  description?: string;
+}
+
+/** What execute_plan's metadata says about its report (see planReportResultsForDisplay). */
+export interface PlanReportFacts {
+  /** The steps whose results the report carries, in its order (reportedResultIds). */
+  reportedResultIds?: readonly string[];
+  /** The steps that failed, are still the orchestrator's to do, or did not run (outstandingSteps). */
+  outstandingSteps?: readonly PlanStepNotCompleted[];
+}
+
+const NOT_COMPLETED_LABEL: Record<string, { de: string; en: string }> = {
+  failed: { de: "fehlgeschlagen", en: "failed" },
+  manual: { de: "nicht erledigt", en: "not done" },
+  pending: { de: "nicht ausgeführt", en: "did not run" },
+};
+
+/**
+ * The line under a plan's results that says what they leave out: the steps that did not complete,
+ * and the results the report's budget omitted. Without it a plan that half ran reads as finished.
+ * Null when nothing is left out. Fixed text, in the language the person wrote in.
+ */
+function planIncompletenessNote(notCompleted: readonly PlanStepNotCompleted[], someOutstanding: boolean, omitted: number): string | null {
+  const lines: string[] = [];
+  if (notCompleted.length > 0) {
+    const items = (language: "de" | "en") => notCompleted
+      .map((step) => {
+        const name = (step.description ?? "").replace(/\s+/g, " ").trim() || step.id;
+        const label = NOT_COMPLETED_LABEL[step.status]?.[language] ?? step.status;
+        return `${name} (${label})`;
+      })
+      .join("; ");
+    lines.push(localizedFixedText({
+      de: `In diesem Lauf nicht abgeschlossen: ${items("de")}.`,
+      en: `Not completed in this run: ${items("en")}.`,
+    }));
+  } else if (someOutstanding) {
+    lines.push(localizedFixedText({
+      de: "Nicht jeder Schritt des Plans wurde in diesem Lauf abgeschlossen.",
+      en: "Not every step of the plan was completed in this run.",
+    }));
+  }
+  if (omitted > 0) {
+    lines.push(localizedFixedText({
+      de: `Weitere Schrittergebnisse wurden aus Platzgründen weggelassen (${omitted}).`,
+      en: `Further step results were left out for length (${omitted}).`,
+    }));
+  }
+  return lines.length > 0 ? lines.join(" ") : null;
+}
+
+/**
+ * The step results of a plan report, for a reply the user reads: without the report's roll-call and
+ * its instructions to the orchestrator, and without the relay frame of a delegated step's result. A
+ * coverage backstop (hallucinated_truncation_bypass) shipped a folded record_plan report as the
+ * reply, "Plan recorded … do NOT call execute_plan again" and the "[browser_agent]:" labels included
+ * (E2E new-plan-round-fold-site-facts).
+ *
+ * What the results leave out is said under them: the steps that failed or did not run, and results
+ * the report omitted for length (planIncompletenessNote); the report's own sections that said so are
+ * instructions to the orchestrator and do not ship. With the steps named (`facts.reportedResultIds`)
+ * each "[<id>] <description>" header becomes the description as a heading when there are several
+ * results, and goes when there is one; without them the headers stay. Null when the report carries
+ * no result.
+ */
+export function planReportResultsForDisplay(report: string, facts: PlanReportFacts = {}): string | null {
+  const text = (report ?? "").replace(/\r\n/g, "\n");
+  const at = text.indexOf(PLAN_RESULTS_HEADING);
+  if (at < 0) return null;
+  let results = text.slice(at + PLAN_RESULTS_HEADING.length);
+  const ends = [PLAN_FINAL_STEP_HEADING, PLAN_MARKED_DONE_LEAD, PLAN_RETRIED_LEAD, PLAN_IGNORED_IDS_LEAD, PLAN_CLOSING_ALL_RAN, PLAN_CLOSING_OUTSTANDING]
+    .map((lead) => results.indexOf(`\n\n${lead}`))
+    .filter((index) => index >= 0);
+  const omitted = new RegExp(`\\n\\n\\((\\d+)${escapeRegExp(PLAN_RESULTS_OMITTED_TAIL)}`).exec(results);
+  if (omitted) ends.push(omitted.index);
+  if (ends.length > 0) results = results.slice(0, Math.min(...ends));
+  let blocks = `\n\n${results.trim()}`;
+  // A delegated step's result opens with its relay label, on the line under the step's header.
+  blocks = blocks.replace(/(\n\n\[[^\]\n]+\] [^\n]*\n)[ \t]*\[[^\]\n]+\]:[ \t]*/g, "$1");
+  const stepIds = facts.reportedResultIds ?? [];
+  for (const id of stepIds) {
+    blocks = blocks.replace(new RegExp(`\\n\\n\\[${escapeRegExp(id)}\\] ([^\\n]*)\\n`), (_match, description: string) => {
+      const heading = description.trim();
+      return stepIds.length > 1 && heading ? `\n\n**${heading}**\n` : "\n\n";
+    });
+  }
+  blocks = blocks.replace(new RegExp(`${escapeRegExp(AUTO_ROUTED_NOTE_LEAD)}[^\\n]*`, "g"), "");
+  const shown = blocks.trim();
+  if (!shown) return null;
+  const note = planIncompletenessNote(
+    facts.outstandingSteps ?? [],
+    text.includes(`\n\n${PLAN_CLOSING_OUTSTANDING}`),
+    omitted ? Number(omitted[1]) : 0,
+  );
+  return note ? `${shown}\n\n${note}` : shown;
 }

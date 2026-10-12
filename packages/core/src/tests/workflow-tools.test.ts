@@ -162,6 +162,79 @@ describe("workflow catalog tools", () => {
     }
   });
 
+  // A scene is one step. Its result named no executed step, so the turn read a finished scene as one
+  // that had not run, and the ask_user cue, a text sniff, met its whole answer: a "clarify" past the
+  // 1,600 characters the frame used to show turned the reply into a question to the user.
+  describe("run_workflow reports a scene's one step as executed when it ran", () => {
+    const sceneConfig = {
+      agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
+      scenes: {
+        protocol_comparison_paper: {
+          description: "Compare protocols with one paper draft and one QA pass.",
+          task: "Compare {{topic}} as a source-grounded paper.",
+          allowedAgents: ["mission_coordinator", "paper_author", "quality_supervisor"],
+        },
+      },
+      subAgents: {
+        mission_coordinator: { description: "Coordinates multi-step work.", tools: ["parallel_delegate", "run_task_graph"], maxIterations: 6 },
+        paper_author: { description: "Drafts papers.", tools: ["write_file"], maxIterations: 4 },
+        quality_supervisor: { description: "Runs one quality gate.", tools: ["read_file"], maxIterations: 4 },
+      },
+    };
+    const ANSWER = [
+      "MCP vs A2A: comparison of transport, discovery and trust.",
+      ...Array.from({ length: 20 }, (_, n) => `- Finding ${n + 1}: both protocols document this aspect; the sources agree on the wording.`),
+      "",
+      "To clarify the scope: the comparison covers transport and discovery only.",
+    ].join("\n");
+
+    async function runScene(blocked: boolean) {
+      const { tempDir, configPath } = writeTempConfig(sceneConfig);
+      process.env["SAI_CONFIG_PATH"] = configPath;
+      vi.resetModules();
+      vi.doMock("../agent/runtime.js", () => ({
+        collectTurnArtifactAttachments: () => [],
+        runTurn: vi.fn(async () => ({
+          response: ANSWER,
+          toolCallsExecuted: 1,
+          guardrailEvents: [],
+          usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          blocked,
+        })),
+      }));
+      try {
+        const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/workflow-catalog.js")]);
+        const result = await getTool("run_workflow")!.execute(
+          { name: "protocol_comparison_paper", workflowType: "scene", params: { topic: "MCP vs A2A" } },
+          { sessionId: "workflow-scene", workspacePath: "/workspace" },
+        );
+        // The frame and the disposition as the turn loop builds them from the result.
+        const { buildModelVisibleToolResult } = await import("../agent/tool-result-format.js");
+        const { classifyPostOrchestrationDisposition } = await vi.importActual<typeof import("../agent/runtime.js")>("../agent/runtime.js");
+        const content = buildModelVisibleToolResult("run_workflow", result.success ? result.output : `Error: ${result.error}`, result.metadata);
+        return { result, content, disposition: classifyPostOrchestrationDisposition([{ role: "tool", tool_call_id: "call_scene", content, metadata: result.metadata }]) };
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+
+    it("synthesizes a finished scene whose answer says \"clarify\" past the old head", async () => {
+      expect(ANSWER.indexOf("clarify")).toBeGreaterThan(1_600);
+      const { result, content, disposition } = await runScene(false);
+      expect(result.metadata?.["executedSteps"]).toBe(1);
+      expect(content).toContain("Executed steps: 1/1.");
+      expect(content).toContain("To clarify the scope");
+      expect(disposition).toBe("synthesize");
+    });
+
+    it("counts no executed step for a blocked scene, which stays a failure", async () => {
+      const { result, content, disposition } = await runScene(true);
+      expect(result.metadata?.["executedSteps"]).toBe(0);
+      expect(content).toContain("blocked. Executed steps: 0/1.");
+      expect(disposition).toBe("failure");
+    });
+  });
+
   it("run_workflow resolves a unique partial workflow name", async () => {
     const { tempDir, configPath } = writeTempConfig({
       agents: {

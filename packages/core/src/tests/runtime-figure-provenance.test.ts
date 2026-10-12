@@ -395,7 +395,11 @@ describe("a turn whose delegated run masked figures no tool returned", () => {
       expect(failed[0]).toContain("The delegated run of coder also stated figures that no tool returned");
       expect(failed[0]).toContain("name the files it wrote (generated/primes.js) as written but not run successfully");
       expect(turn.qualityScorecard?.wardenFailureCount).toBe(1);
-      expect(auditTypes()).toContain("source_sensitive_failed_delegation_evidence_backstop");
+      // The failed-research backstop arms. No step returned a result, so it has no evidence to stand
+      // on and withholds the specifics: the plan's report is not evidence. Taken for evidence, its
+      // "FAILED — retry with execute_plan(…)" and "Do NOT write the final answer …" were the reply.
+      expect(auditTypes()).toContain("source_sensitive_final_answer_without_evidence_blocked");
+      expect(turn.response).not.toContain("execute_plan");
     });
 
     it("control: a plan whose coder printed synthesizes as before", async () => {

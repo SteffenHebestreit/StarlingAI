@@ -442,7 +442,8 @@ export const OrchestrationSchema = z.object({
    *  tool_choice:"required" makes it worse, so the only controlling variable is TASK SIZE IN
    *  ONE COMPLETION. When true, the runner classifies such runs structurally (agent holds BOTH
    *  write_file and edit_file AND the task exceeds STAGED_BUILD_TASK_CHAR_THRESHOLD, its fenced
-   *  and quoted input excluded unless the agent holds a builder tool: stagedBuildTaskChars —
+   *  and quoted input and an execute_plan step's turn context excluded unless the agent holds a
+   *  builder tool: stagedBuildTaskChars —
    *  capability + size only, never topic words), emits a staged_artifact_build_detected audit
    *  record, and reports the files a cut-off build actually left on disk in its partial output
    *  instead of discarding them. Purely additive: no prompt text, no routing, no tool-list

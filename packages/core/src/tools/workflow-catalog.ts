@@ -928,12 +928,15 @@ function addSessionExecutions(into: FanOutExecutionRecords, session: AgentSessio
 
 /**
  * The finish reasons with which a turn stops its own orchestration (agent/runtime.ts): the warden
- * after delegations failed back to back, every tool call of several iterations refused, or the
- * iteration cap. Its answer is then a forced synthesis of whatever the turn had.
+ * after delegations failed back to back, every tool call of several iterations refused, a loop brake
+ * (one tool in every iteration, or the same set of tools; runtime.ts LOOP_BRAKE_FINISH_REASONS), or
+ * the iteration cap. Its answer is then a forced synthesis of whatever the turn had.
  */
 const ORCHESTRATION_GIVE_UP_FINISH_REASONS: ReadonlySet<string> = new Set([
   "delegation_failures_terminal",
   "all_tool_calls_blocked",
+  "tool_streak_across_iterations",
+  "iteration_tool_set_repeat",
   "max_tool_iterations",
 ]);
 
@@ -1832,6 +1835,10 @@ registerTool({
           blocked: result.blocked,
           toolCallsExecuted: result.toolCallsExecuted,
           stepCount: 1,
+          // A scene is one step, and the turn reads whether it ran from here as it does a job's
+          // (agent/runtime.ts classifyPostOrchestrationDisposition). Without it a scene that finished
+          // read as never having run, and its answer met the text sniffs a finished run skips.
+          executedSteps: result.blocked ? 0 : 1,
           bootstrapAgent: result.bootstrapAgent,
           // Propagate scene-built artifacts (deck/images/paper) so the parent turn
           // surfaces them as clickable downloads and the auto-build doesn't re-fire.

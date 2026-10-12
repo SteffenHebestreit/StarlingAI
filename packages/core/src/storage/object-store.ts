@@ -198,6 +198,54 @@ export async function ensureUploadBucket(): Promise<void> {
 }
 
 /**
+ * Whether the caller's own store holds any upload under `relativeDir` (a folder such as
+ * `uploads/<session>`): one listing call of at most one key on S3, where an upload is on no disk,
+ * and a bounded walk of the folder on the local backend. Null when it cannot be told: a folder the
+ * caller may not name, a link out of its namespace, a store that does not answer.
+ */
+export async function uploadFolderHoldsFile(relativeDir: string): Promise<boolean | null> {
+  let location: { key: string; file: string };
+  try {
+    location = await callerUploadKey(relativeDir);
+  } catch {
+    return null;
+  }
+  if (usingS3()) {
+    try {
+      const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+      const s3 = await s3Client();
+      const listed = await s3.send(new ListObjectsV2Command({ Bucket: getConfig().storage.s3.bucket, Prefix: `${location.key}/`, MaxKeys: 1 }));
+      return (listed.KeyCount ?? listed.Contents?.length ?? 0) > 0;
+    } catch {
+      return null;
+    }
+  }
+  if (!await realDirWithin(location.key, location.file)) return null;
+  const { readdir } = await import("node:fs/promises");
+  // Breadth-first, a few levels and a few hundred entries: the question is whether there is one.
+  let budget = 500;
+  let level = [location.file];
+  for (let depth = 0; depth < 4 && level.length > 0; depth += 1) {
+    const next: string[] = [];
+    for (const dir of level) {
+      let entries: import("node:fs").Dirent[];
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;   // missing or unreadable: holds nothing this can see
+      }
+      for (const entry of entries) {
+        if (entry.isFile()) return true;
+        if (entry.isDirectory()) next.push(resolve(dir, entry.name));
+        if (--budget <= 0) return false;
+      }
+    }
+    level = next;
+  }
+  return false;
+}
+
+/**
  * Store an upload at `relativePath` in the caller's own root, and return the store key it went
  * to (record that, not the path, wherever the file is looked up later on someone's behalf).
  * Throws UploadPathRefusedError for a path the caller may not store at.

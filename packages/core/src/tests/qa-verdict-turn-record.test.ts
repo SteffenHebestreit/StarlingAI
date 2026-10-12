@@ -79,6 +79,9 @@ describe("formatQaTurnRecord", () => {
     expect(lines).toContain(USER_WORDS);
     expect(block).toContain("attributes a file to an engine, tier or model other than the one recorded above FAILS");
     expect(block).toContain("ignores a constraint the user stated in these words");
+    // A value the user chose is one: a reply that reports a result the user's choice did not
+    // produce (another shipping option than the one asked for) without saying so fails.
+    expect(block).toContain("a value they chose");
     expect(block).not.toContain("data:image");
   });
 
@@ -185,6 +188,25 @@ describe("the QA delivery verdict at runtime", () => {
     expect(beforeAnswer).toContain(PROVENANCE_LINE);
     expect(beforeAnswer).toContain(USER_WORDS);
     expect(beforeAnswer).toContain("other than the one recorded above FAILS");
+  });
+
+  it("tells the reviewer that an answer's note of a refusal or a deviation is required, not unrequested content", async () => {
+    const { QA_DISCLOSURE_VERDICT_RULE, QA_DISCLOSURE_RULE } = await import("../agent/qa-delivery-loop.js");
+    const prompts = await runImageTurn({ artifacts: [] });
+    const afterAnswer = prompts[0]!.split("\nANSWER:\n")[1]!;
+    expect(afterAnswer).toContain(QA_DISCLOSURE_VERDICT_RULE);
+    // After the scope row it qualifies: a disclosure is not the "unrequested" work that row fails.
+    expect(afterAnswer.indexOf(QA_DISCLOSURE_VERDICT_RULE)).toBeGreaterThan(afterAnswer.indexOf("Also FAIL when the answer reveals work OUTSIDE"));
+    // It shields the note only: what the note reports is still judged (review 2026-10-12).
+    expect(QA_DISCLOSURE_VERDICT_RULE).toContain("still judged against the criteria");
+    // The rewrites' wording ("keep it in any rewrite") is no instruction for a reviewer told not to rewrite.
+    expect(prompts[0]).not.toContain(QA_DISCLOSURE_RULE);
+  });
+
+  it("does not tell the reviewer the rewrites' rule: an answer whose agent changed the user's value still fails", async () => {
+    const { QA_ACTION_HONESTY_RULE } = await import("../agent/qa-delivery-loop.js");
+    const prompts = await runImageTurn({ artifacts: [] });
+    expect(prompts[0]).not.toContain(QA_ACTION_HONESTY_RULE);
   });
 
   it("leaves the verdict prompt as it was when there is no file and no user's words", async () => {

@@ -247,8 +247,9 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     const result = await run();
     expect(result.output.indexOf("FAILED")).toBeGreaterThan(0);
     expect(result.output.indexOf("FAILED")).toBeLessThan(result.output.indexOf("RESULTS"));
-    // ...and the ids are in the metadata, for record_plan's folded receipt to name.
-    expect(result.metadata?.["outstandingSteps"]).toEqual([{ id: "s2", status: "failed" }]);
+    // ...and the ids are in the metadata, for record_plan's folded receipt to name, with the step's
+    // description, for the note under the results where they are shown to the user.
+    expect(result.metadata?.["outstandingSteps"]).toEqual([{ id: "s2", status: "failed", description: "look it up" }]);
   });
 
   it("keeps a step's result across calls, so a resumed plan has not lost it", async () => {
@@ -553,6 +554,36 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     // The window the swarm actually hashes.
     expect(tasks[0]?.slice(0, 240)).not.toBe(tasks[1]?.slice(0, 240));
     expect(tasks[0]?.startsWith("STEP s1")).toBe(true);
+  });
+
+  it("carries the plan's stop conditions to the step, after the criteria, and says nothing when there are none", async () => {
+    // E2E core-ix-browser-order-form-express-refused: criteria only a confirmation page could meet,
+    // and the plan's own "an error on submit: report it" never reached the browser step — which
+    // picked another shipping option itself, submitted again and reported the reference.
+    const stop = "the page shows an error after submit — report it";
+    await persistTurnPlan(SESSION, { ...basePlan([{ id: "s1", description: "submit the form", kind: "delegate" }]), stopConditions: [stop] });
+    await run();
+    const withStop = String(calls[0]?.args["task"] ?? "");
+    expect(withStop).toContain(`STOP CONDITIONS for the turn — stop and report when one holds: ${stop}`);
+    expect(withStop.indexOf("STOP CONDITIONS")).toBeGreaterThan(withStop.indexOf("ACCEPTANCE CRITERIA"));
+
+    calls.length = 0;
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "submit the form", kind: "delegate" }]));
+    await run();
+    const without = String(calls[0]?.args["task"] ?? "");
+    expect(without).not.toContain("STOP CONDITIONS");
+    // Appended, not inserted: the text before them is unchanged. The reuse signature (the task
+    // whitespace-collapsed and cut at 240 characters, "..." when longer) is therefore unchanged only
+    // when that text is already longer than 240 characters; this one is shorter, so it is not.
+    expect(withStop.startsWith(without)).toBe(true);
+  });
+
+  it("carries the stop conditions into a reuse step's workflow context too", async () => {
+    const stop = "the page shows an error after submit — report it";
+    await persistTurnPlan(SESSION, { ...basePlan([{ id: "s1", description: "submit the form", kind: "reuse", workflow: "order_pack" }]), stopConditions: [stop] });
+    await run();
+    expect(calls[0]?.name).toBe("run_workflow");
+    expect(String(calls[0]?.args["context"] ?? "")).toContain(`stop and report when one holds: ${stop}`);
   });
 
   it("hands a delegate step's declared deliverable to delegate_to_agent, and none when it declares none", async () => {

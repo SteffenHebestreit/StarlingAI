@@ -147,7 +147,7 @@
           "workspace"
         ],
         "oneLiner": "Renders already-verified NUMBERS as HTML charts/tables; does not compute (data_analyst does); input_modality=structured_data records the numbers input. media only (no data L2 -- it renders, not ana...",
-        "sourceHash": "6e655bb9eb39bf8a",
+        "sourceHash": "bc913caf7a3a05ee",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }

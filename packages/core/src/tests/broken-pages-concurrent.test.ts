@@ -17,6 +17,7 @@ vi.mock("../tools/page-check.js", async (importOriginal) => ({
     flight.max = Math.max(flight.max, flight.now);
     await new Promise((resolve) => setTimeout(resolve, 30));
     flight.now -= 1;
+    if (rel.includes("slow")) return { ok: false, detail: `${rel}: the page did not finish within 15s and was stopped`, timedOut: true };
     return rel.includes("bad") ? { ok: false, detail: `${rel}: broken` } : { ok: true, detail: "" };
   },
 }));
@@ -35,5 +36,28 @@ describe("findBrokenBuiltPages", () => {
     expect(flight.max).toBe(3);
     // Sorted: the walk follows readdir order, which the filesystem decides.
     expect([...broken].sort()).toEqual(["generated/a-bad/index.html: broken", "generated/c-bad/index.html: broken"]);
+  });
+
+  it("names each broken page's file beside its verdict, for a caller that reports which file it repaired", async () => {
+    const { findBrokenBuiltPageFiles } = await import("../agent/sub-agent.js");
+    const broken = await findBrokenBuiltPageFiles(dir);
+    expect([...broken].sort((a, b) => a.file.localeCompare(b.file))).toEqual([
+      { file: "generated/a-bad/index.html", detail: "generated/a-bad/index.html: broken" },
+      { file: "generated/c-bad/index.html", detail: "generated/c-bad/index.html: broken" },
+    ]);
+  });
+
+  it("says which verdict a timeout produced", async () => {
+    const slowDir = mkdtempSync(join(tmpdir(), "sai-slow-pages-"));
+    try {
+      mkdirSync(join(slowDir, "generated", "d-slow"), { recursive: true });
+      writeFileSync(join(slowDir, "generated", "d-slow", "index.html"), "<script>1</script>", "utf8");
+      const { findBrokenBuiltPageFiles } = await import("../agent/sub-agent.js");
+      expect(await findBrokenBuiltPageFiles(slowDir)).toEqual([
+        { file: "generated/d-slow/index.html", detail: "generated/d-slow/index.html: the page did not finish within 15s and was stopped", timedOut: true },
+      ]);
+    } finally {
+      rmSync(slowDir, { recursive: true, force: true });
+    }
   });
 });

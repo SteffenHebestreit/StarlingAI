@@ -16,7 +16,7 @@
  */
 import { effectiveMaxDelegatedResultChars, effectiveOrchestration } from "../runtime/effort-context.js";
 import { looksLikeProviderErrorEcho } from "./container-failure.js";
-import { collapseWhitespace, stripPresentationFormatting, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
+import { budgetCutLine, collapseWhitespace, stripPresentationFormatting, looksLikeOrchestrationOnlyEvidence } from "./runtime-utils.js";
 import {
   looksLikeRawWorkspaceToolDump,
   formatRawWorkspaceToolDumpFailure,
@@ -42,7 +42,7 @@ import {
 import { UNOBSERVED_FIGURE_MARKER } from "./figure-provenance.js";
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult } from "./turn-tool-contribution.js";
+import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult, isWorkflowRunResult } from "./turn-tool-contribution.js";
 import { getConfig } from "../config/loader.js";
 
 export function truncateForContext(value: string, maxChars: number): string {
@@ -78,6 +78,12 @@ export interface ToolResultFrameContext {
    * result is allowed the whole budget.
    */
   readonly retrievalShown?: { chars: number };
+  /**
+   * The turn's tally of the workflow-run frames it has shown the model, in characters (agent/runtime.ts
+   * keeps one per turn). A run's frame is held to what the tally leaves of the turn's budget
+   * (workflowRunResultAllowance) and adds what it shows. Without a tally it is allowed the whole budget.
+   */
+  readonly workflowShown?: { chars: number };
 }
 
 /** retrieval.documentRag.maxContextChars's schema default, for a config that does not carry it. */
@@ -124,6 +130,32 @@ export function knowledgeBaseWorkerReportMaxChars(): number {
   return effectiveMaxDelegatedResultChars();
 }
 
+/** The most the workflow-run frames of one turn show, whatever an effort tier allows a delegated result. */
+const WORKFLOW_RUN_RESULT_CEILING = 40_000;
+
+/**
+ * What the workflow-run frames (isWorkflowRunResult) of one turn may show the model, in characters,
+ * headers and instructions included: a total for the turn, which is also what the history snippet of
+ * the turn that made a call allows one. A run's answer is the evidence the turn answers from, so it
+ * gets the budget of a delegated result relayed verbatim, the effort-scaled maxDelegatedResultChars,
+ * as a knowledge-base worker's report does, up to 40,000 characters: the max tier's 120,000 went into
+ * every later prompt of the turn.
+ */
+export function workflowRunResultMaxChars(): number {
+  return Math.min(effectiveMaxDelegatedResultChars(), WORKFLOW_RUN_RESULT_CEILING);
+}
+
+/**
+ * What one workflow run's frame may show, after the turn's earlier run frames have shown
+ * `charsShown`: what they left of the turn's budget, and no less than a quarter of it, as for
+ * retrieval results (retrievalEvidenceAllowance). A retry, a duplicate or a second run of the turn
+ * would otherwise carry a second whole budget into every prompt after it.
+ */
+export function workflowRunResultAllowance(charsShown: number): number {
+  const budget = workflowRunResultMaxChars();
+  return Math.max(Math.floor(budget / 4), budget - Math.max(0, charsShown));
+}
+
 /**
  * A result held to `maxChars`, newlines and table rows kept. A cut keeps the head: a retrieval tool
  * lists its passages most relevant first, and a knowledge-base worker's report opens with the tool's
@@ -131,17 +163,28 @@ export function knowledgeBaseWorkerReportMaxChars(): number {
  * note the turn loop appended stays after that line, when the text still ends with exactly that
  * note: a cut from the end would otherwise take the loop warning with it. Anything else at the end of
  * the text is the tool's and is cut with the rest.
+ *
+ * With `keepEnd` the cut is from the middle instead: the end keeps two thirds of the room, starting
+ * on a line of its own, the head the rest, and the line between them says how much is missing there.
+ * A workflow run's answer ends with its last step, the one that writes the deliverable, which a cut
+ * from the end took first.
  */
-function holdToBudget(resultText: string, maxChars: number, runtimeNote = ""): string {
+function holdToBudget(resultText: string, maxChars: number, runtimeNote = "", opts: { keepEnd?: boolean } = {}): string {
   const text = resultText.trim();
   if (text.length <= maxChars) return text;
   const note = runtimeNote.trimEnd();
   const notice = note && text.endsWith(note) ? note : "";
   const body = text.slice(0, text.length - notice.length);
-  const cutLine = (left: number): string =>
-    `\n\n[Cut to fit the context budget: the remaining ${left} characters of this result are not shown.]`;
-  const head = body.slice(0, Math.max(0, maxChars - notice.length - cutLine(body.length).length)).trimEnd();
-  return `${head}${cutLine(body.length - head.length)}${notice}`;
+  if (opts.keepEnd) {
+    const room = Math.max(0, maxChars - notice.length - budgetCutLine(body.length, "middle").length);
+    const from = body.length - Math.floor((room * 2) / 3);
+    const lineStart = body.indexOf("\n", from) + 1;
+    const end = body.slice(lineStart > 0 && lineStart < body.length ? lineStart : from).trimStart();
+    const head = body.slice(0, Math.max(0, room - end.length)).trimEnd();
+    return `${head}${budgetCutLine(body.length - head.length - end.length, "middle")}${end}${notice}`;
+  }
+  const head = body.slice(0, Math.max(0, maxChars - notice.length - budgetCutLine(body.length).length)).trimEnd();
+  return `${head}${budgetCutLine(body.length - head.length)}${notice}`;
 }
 
 export function stripAgentPrefix(value: string): string {
@@ -640,7 +683,6 @@ function frameToolResult(
     const blocked = metadata?.["blocked"] === true;
     const stepCount = Number(metadata?.["stepCount"] ?? 1);
     const executedSteps = Number(metadata?.["executedSteps"] ?? stepCount);
-    const evidence = truncatePlainText(stripPresentationFormatting(resultText), 1600);
     // Artifact-bearing completion: the deliverables are FILES attached to the
     // turn, not chat text. Without this pivot the model relays the document
     // body verbatim and ships its truncated head as the final answer
@@ -652,16 +694,31 @@ function frameToolResult(
         .filter(Boolean)
       : [];
     const completedInstruction = workflowArtifactPaths.length > 0
-      ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message — do NOT paste their contents into your answer. Write a SHORT final summary ${IN_REPLY_LANGUAGE}: state what was completed, list EVERY artifact path below with a one-line description, and note anything the evidence marks as incomplete. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
+      ? `IMPORTANT: The workflow's deliverables were SAVED AS FILES and are attached to this message. Write the final answer ${IN_REPLY_LANGUAGE}: answer any question the request asked, with the specific facts from the evidence below; list each attached file below with a one-line description; when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into your answer. Do NOT start fresh ad hoc delegation or rerun research for the same request.\n`
         + `Artifact files (already attached):\n${workflowArtifactPaths.map((path) => `- ${path}`).join("\n")}`
       : "IMPORTANT: Treat this as executed workflow output, not a plan. Relay the concrete evidence below and do not claim extra steps were run. Do NOT start fresh ad hoc delegation, create_ephemeral_agent, or rerun research for the same request in this turn unless the workflow evidence itself identifies one smallest corrective follow-up.";
-    return [
+    const head = [
       `Workflow ${workflowName} [${workflowType}] ${blocked ? "blocked" : "completed"}. Executed steps: ${executedSteps}/${stepCount}.`,
       blocked
         ? "IMPORTANT: This workflow did not complete. Treat the evidence below as a failure report, not as completed research. Do NOT jump straight to drafting-only agents like paper_author or summarizer unless earlier evidence was already collected successfully."
         : completedInstruction,
-      `Observed evidence:\n${evidence || "No usable workflow result returned."}`,
+      "Observed evidence:\n",
     ].join("\n");
+    // The run's answer is the evidence, not a summary of it: kept as the steps wrote it, newlines
+    // and table rows intact, up to what the turn's allowance leaves after the header. A cut is from
+    // the middle, so the last step's section at the end stays, with a line saying how much is
+    // missing there. The tool's own "Workflow … completed." line would only repeat the header. A call
+    // that ran no workflow keeps the 1,600 characters it had.
+    const answer = stripPresentationFormatting(stripWorkflowPreamble(resultText));
+    if (!isWorkflowRunResult(toolName, metadata)) {
+      return `${head}${truncatePlainText(answer, 1600) || "No usable workflow result returned."}`;
+    }
+    const shown = frameContext?.workflowShown;
+    const allowance = workflowRunResultAllowance(shown?.chars ?? 0);
+    const held = holdToBudget(answer, Math.max(0, allowance - head.length), frameContext?.runtimeNote, { keepEnd: true });
+    const framed = `${head}${held || "No usable workflow result returned."}`;
+    if (shown) shown.chars += framed.length;
+    return framed;
   }
 
   if (toolName === "create_ephemeral_agent") {

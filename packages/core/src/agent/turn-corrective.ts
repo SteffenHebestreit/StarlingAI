@@ -26,6 +26,7 @@ import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js"
 import { stripLeadingReasoningPreamble, looksLikeTruncatedCodeDeliverable } from "./deliverable-relay.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
+import { stripDelegateRelayFrame } from "./runtime-evidence-dump.js";
 import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
 
 /**
@@ -92,11 +93,32 @@ export interface CorrectiveContext {
   logWarn: (obj: Record<string, unknown>, msg: string) => void;
 }
 
+/**
+ * The shortest reply that counts as an answer. A build confirmation under it is replaced by the
+ * fixed text at the end of runCorrectiveBuild, and the completion gate keeps a turn's own answer
+ * from this length up when the build only repaired a file (turn-finalize-guards.ts).
+ */
+export const MIN_SUBSTANTIVE_REPLY_CHARS = 80;
+
+/** How the caller of runCorrectiveBuild will use what it returns. */
+export interface CorrectiveBuildOptions {
+  /**
+   * false when the caller keeps its own answer and only needs to know what was built: no
+   * confirmation is written (a full synthesis call, 30–90 s on the local model, whose text the
+   * completion gate would discard), and the build returns the built files' paths, comma-separated.
+   */
+  confirm?: boolean;
+}
+
 // One bounded corrective build for the completion QA gate: when the user asked to BUILD an
 // artifact and none was produced, delegate to the right builder, record the assistant+tool
 // pair so the artifact surfaces as a download, and synthesize a confirmation. Returns the
 // confirmation message if a real artifact was produced, else null (caller keeps its draft).
-export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveContext): Promise<string | null> => {
+export const runCorrectiveBuild = async (
+  buildContext: string,
+  ctx: CorrectiveContext,
+  options: CorrectiveBuildOptions = {},
+): Promise<string | null> => {
   const { signal, session, userMessage, deliverableIntent, toolContext } = ctx;
   if (ctx.getQaCorrectiveBuildUsed() || signal.aborted) return null;
   const builderAgent = deliverableIntent.builder;
@@ -261,6 +283,7 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
   const paths = builtArtifacts
     .map((a) => (typeof a["relativePath"] === "string" && a["relativePath"] ? a["relativePath"] : (typeof a["filename"] === "string" ? a["filename"] : "")))
     .filter((p): p is string => Boolean(p));
+  if (options.confirm === false) return paths.join(", ");
   // Ground the confirmation in the ARTIFACT FACTS so it cannot advertise features the
   // build never produced (audit c2f76a00: the actual artifact was a 4KB single static
   // page, but the confirmation promised an exam simulator, flashcards, and progress
@@ -295,9 +318,9 @@ export const runCorrectiveBuild = async (buildContext: string, ctx: CorrectiveCo
   logAudit("guardrail_flagged", {
     type: "final_qa_corrective_build_synthesized",
     artifacts: paths.length,
-    synthesized: Boolean(candidate && candidate.trim().length >= 80),
+    synthesized: Boolean(candidate && candidate.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS),
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-  return candidate && candidate.trim().length >= 80
+  return candidate && candidate.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS
     ? candidate
     : `Die angeforderte Datei wurde erstellt: ${paths.join(", ")}.\n\n(The requested file was built: ${paths.join(", ")}.)`;
 };
@@ -379,9 +402,12 @@ export const runCorrectiveReroute = async (
     if (!rerouteResult.success) return null;
     const rerouteOutput = rerouteResult.output;
     if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(rerouteOutput)) return null;
-    const evidenceMatch = EVIDENCE_SECTION_RE.exec(rerouteOutput);
+    // The answer, not the frame delegate_to_agent puts around it for the orchestrator: shipped with
+    // its "[agent]:" label, the runtime's raw-dump guard replaced the specialist's answer.
+    const answer = stripDelegateRelayFrame(rerouteOutput);
+    const evidenceMatch = EVIDENCE_SECTION_RE.exec(answer);
     const body = stripLeadingReasoningPreamble(
-      (evidenceMatch ? rerouteOutput.slice(evidenceMatch.index + evidenceMatch[0].length) : rerouteOutput).trim(),
+      (evidenceMatch ? answer.slice(evidenceMatch.index + evidenceMatch[0].length) : answer).trim(),
     );
     if (!body || looksLikeDegenerateRepetition(body) || looksLikeTruncatedCodeDeliverable(body)) return null;
     return body;

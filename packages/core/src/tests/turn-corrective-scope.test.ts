@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CorrectiveContext } from "../agent/turn-corrective.js";
 import type { ToolContext } from "../tools/registry.js";
+import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 
 // A scene or job step's turn may delegate only to the step's allowedAgents. The final-QA corrective
 // build picked content_writer from the request's wording and delegated to it all the same, and the
@@ -21,7 +22,9 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
         delegations.push(args);
         delegationContexts.push(context);
       }
-      return { success: true, output: "The brief, as text.", metadata: {} };
+      // As delegate_to_agent returns it: the agent's label in front, and the routing note when no
+      // agent was named.
+      return { success: true, output: formatDelegatedOutput("content_writer", "The brief, as text.", { confidence: "high", matchedTerms: [] }), metadata: {} };
     }),
   };
 });
@@ -106,6 +109,18 @@ describe("the corrective reroute", () => {
     expect(delegations).toEqual([{ task: REQUEST }]);
     expect(auditRows).toContainEqual(expect.objectContaining({ type: "loop_brake_reroute_delegated", brake: "tool_streak_across_iterations" }));
     expect(auditRows).not.toContainEqual(expect.objectContaining({ type: "fabricated_zero_work_reroute_delegated" }));
+  });
+
+  // The answer the guards ship is the specialist's, without the frame delegate_to_agent puts around
+  // it for the orchestrator. With the "[content_writer]:" label in front, the runtime's raw-dump
+  // guard took a 541-character listing for a tool dump and shipped a fact-free heading in its place
+  // (E2E guards-list-files-on-a-file).
+  it("returns the specialist's answer without delegate_to_agent's label and routing note", async () => {
+    const frame = "[content_writer]: The brief, as text.\n↳ Auto-routed to content_writer (high confidence)";
+    expect(formatDelegatedOutput("content_writer", "The brief, as text.", { confidence: "high", matchedTerms: [] })).toBe(frame);
+
+    expect(await runCorrectiveReroute(correctiveContext(undefined).ctx, "loop_brake", { brake: "all_tool_calls_blocked" })).toBe("The brief, as text.");
+    expect(await runCorrectiveReroute(correctiveContext(undefined).ctx)).toBe("The brief, as text.");
   });
 
   // allowDelegationAfterOperatorStop clears the operator's Stop latch (tools/sub-agent.ts), and the

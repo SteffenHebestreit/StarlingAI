@@ -216,10 +216,12 @@ export function formatRecoveryEvidenceForFinalUser(
 }
 
 /**
- * Honest user-facing message for the "research succeeded but the artifact step failed"
- * end-state. Surfaces the curated, sourced findings (so the gathered work isn't lost)
- * under a bilingual could-not-finish preamble — never the raw dump. Used by the
- * last-resort terminal guard.
+ * Honest user-facing message for an answer the terminal guards would not ship: the last-resort guard
+ * withheld a raw tool dump, or the inline-artifact guard a fabricated document. Surfaces the curated,
+ * sourced findings (so the gathered work isn't lost) under a could-not-finish preamble — never the
+ * raw dump. With no curated findings it claims none: it used to announce "Here are the researched,
+ * sourced facts" above nothing (E2E guards-list-files-on-a-file). No model writes it, so it is in
+ * the language the person wrote in (localizedFixedText); it used to be German and English at once.
  */
 export function buildResearchGatheredFallback(curatedEvidence: string | null, isArtifactRequest = true): string {
   // The preamble must match what the user actually asked for. An artifact-creation turn
@@ -227,21 +229,30 @@ export function buildResearchGatheredFallback(curatedEvidence: string | null, is
   // advice request never asked for a file, so apologizing about an unbuilt "HTML file" is
   // wrong and confusing (audit 49372c7a: a hardware-BOM Q&A is not an artifact build).
   // There the curated, sourced facts ARE the deliverable — present them as the answer.
-  const head = isArtifactRequest
-    ? [
-        "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
-        + "Die Inhalte wurden jedoch recherchiert und mit Quellen belegt — bestätige bitte, dann lasse ich die Datei vom zuständigen Spezialisten erstellen.",
-        "I couldn't finish the requested artifact (e.g. the HTML file) this turn, but the content was researched and sourced — confirm and I'll have the content specialist build the file.",
-      ].join("\n\n")
-    : [
-        "Hier sind die recherchierten, mit Quellen belegten Fakten zu deiner Anfrage.",
-        "Here are the researched, sourced facts for your request.",
-      ].join("\n\n");
   const curated = curatedEvidence?.trim();
-  if (curated) {
-    return `${head}\n\n## Recherchierte Fakten & Quellen / Researched facts & sources\n\n${formatSharedFactsRecoveryForUserDisplay(curated)}`;
+  if (!curated) {
+    return localizedFixedText(isArtifactRequest
+      ? {
+          de: "Ich konnte das angeforderte Artefakt in diesem Lauf nicht fertigstellen, und der Lauf hat nur rohe Werkzeugausgaben geliefert, keine Antwort, die ich dir zeigen kann — frag noch einmal, dann lasse ich es vom passenden Spezialisten erstellen.",
+          en: "I couldn't finish the requested artifact this turn, and the run returned only raw tool output, not an answer I can show you — ask again and I'll have the right specialist build it.",
+        }
+      : {
+          de: "Dieser Lauf hat nur rohe Werkzeugausgaben geliefert, keine Antwort, die ich dir zeigen kann — frag noch einmal, dann gebe ich die Anfrage an den passenden Spezialisten weiter.",
+          en: "This run returned only raw tool output, not an answer I can show you — ask again and I'll pass it to the right specialist.",
+        });
   }
-  return head;
+  const head = localizedFixedText(isArtifactRequest
+    ? {
+        de: "Ich konnte das angeforderte Artefakt (z. B. die HTML-Datei) in diesem Lauf nicht fertigstellen. "
+          + "Die Inhalte wurden jedoch recherchiert und mit Quellen belegt — bestätige bitte, dann lasse ich die Datei vom zuständigen Spezialisten erstellen.",
+        en: "I couldn't finish the requested artifact (e.g. the HTML file) this turn, but the content was researched and sourced — confirm and I'll have the content specialist build the file.",
+      }
+    : {
+        de: "Hier sind die recherchierten, mit Quellen belegten Fakten zu deiner Anfrage.",
+        en: "Here are the researched, sourced facts for your request.",
+      });
+  const heading = localizedFixedText({ de: "## Recherchierte Fakten & Quellen", en: "## Researched facts & sources" });
+  return `${head}\n\n${heading}\n\n${formatSharedFactsRecoveryForUserDisplay(curated)}`;
 }
 
 function compactSourceSensitiveEvidenceForDisplay(evidence: string): string {

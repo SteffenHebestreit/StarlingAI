@@ -84,6 +84,14 @@ export interface RunnerOptions {
    * what was left and why.
    */
   resetDurableMemory?: boolean;
+  /**
+   * Empty the generated/ of every identity a turn of the attempt runs as before each attempt, under
+   * the memory reset's conditions (one attempt at a time, provably the eval account's own; see
+   * resetWorkspace). Files a turn wrote stayed for every later run, and turns read them as
+   * evidence: a reply answered from a two-day-old briefing, another cited a chart an earlier run had
+   * made (2026-10-10). It runs before the attempt's first step, so what the steps seed stays.
+   */
+  resetWorkspace?: boolean;
   /** Aborts the run (Ctrl+C): running turns are cancelled, scenarios not started are skipped. */
   signal?: AbortSignal;
 }
@@ -101,6 +109,7 @@ export const RUNNER_DEFAULTS: Required<Omit<RunnerOptions, "signal">> = {
   mailWaitMs: 30_000,
   mailPollMs: 1_000,
   resetDurableMemory: true,
+  resetWorkspace: true,
 };
 
 export interface DuringRecord {
@@ -545,19 +554,20 @@ async function listMemory(identity: string, scope: MemoryEntryScope, deps: Runne
 }
 
 /**
- * Why the identity's memory may not be deleted at all, or null. The memory routes resolve the
- * caller's stores from the request context, and with auth off there is no user in it: every
- * request reaches the shared single-operator stores, while the token the harness got at login still
- * verifies (auth reloads without a restart, so this is asked before every reset). And a credentials
- * file may map the identity to any account, whose memory is not the eval account's to empty.
+ * Why the identity's memory, or its files, may not be deleted at all, or null. The routes resolve
+ * the caller's stores and workspace root from the request context, and with auth off there is no
+ * user in it: every request reaches the shared single-operator ones, while the token the harness got
+ * at login still verifies (auth reloads without a restart, so this is asked before every reset). And
+ * a credentials file may map the identity to any account, whose state is not the eval account's to
+ * empty. `sharedWithAuthOff` says what is shared with auth off.
  */
-async function resetRefusal(identity: string, deps: RunnerDeps, signal?: AbortSignal): Promise<string | null> {
+async function resetRefusal(identity: string, deps: RunnerDeps, sharedWithAuthOff: string, signal?: AbortSignal): Promise<string | null> {
   const account = E2E_ACCOUNTS.find((candidate) => candidate.identity === identity);
   if (!account) return `${identity} is not an eval identity (pnpm e2e:setup creates ${E2E_ACCOUNTS.map((candidate) => candidate.identity).join(" and ")})`;
   const mode = await deps.client.http(null, "GET", "/api/auth/mode", signal ? { signal } : {});
   if (!mode.ok) return `GET /api/auth/mode answered HTTP ${mode.status}`;
   if (!isRecord(mode.json) || mode.json["authEnabled"] !== true) {
-    return "the gateway runs with auth off, so every account's memory is the shared single-operator store";
+    return `the gateway runs with auth off, so ${sharedWithAuthOff}`;
   }
   const me = await deps.client.http(identity, "GET", "/api/auth/me", signal ? { signal } : {});
   if (!me.ok) return `GET /api/auth/me as ${identity} answered HTTP ${me.status}`;
@@ -566,6 +576,12 @@ async function resetRefusal(identity: string, deps: RunnerDeps, signal?: AbortSi
     return `${identity} logs in as ${username ? `account "${username}"` : "an account without a name"}, not as its eval account "${account.username}"`;
   }
   return null;
+}
+
+/** Why a reset of the identity is skipped: its turns that were stopped and have not been seen to end. */
+function stillRunningReason(identity: string, running: readonly string[]): string {
+  const one = running.length === 1;
+  return `${one ? "turn" : "turns"} ${running.join(", ")} of ${identity} ${one ? "was" : "were"} stopped earlier and ${one ? "has" : "have"} not been seen to end`;
 }
 
 /**
@@ -615,12 +631,15 @@ export async function resetDurableMemory(identity: string, deps: RunnerDeps, sig
   // A 401 or 403 is the account's answer, not the entry's: the remaining deletes are not tried.
   let forbidden: string | null = null;
   try {
-    const refusal = await resetRefusal(identity, deps, signal);
-    const running = refusal ? [] : await turnsStillRunning(identity, deps, turnWaitMs, signal);
-    if (refusal) {
+    // The wait first, the refusal right before the deletes: asked before a wait of up to turnWaitMs,
+    // it could miss auth being switched off in the meantime, and the deletes would reach the shared
+    // single-operator stores with a token that still verifies.
+    const running = await turnsStillRunning(identity, deps, turnWaitMs, signal);
+    const refusal = running.length > 0 ? null : await resetRefusal(identity, deps, "every account's memory is the shared single-operator store", signal);
+    if (running.length > 0) {
+      notes.push(`memory reset skipped: ${stillRunningReason(identity, running)}`);
+    } else if (refusal) {
       notes.push(`memory reset skipped: ${refusal}`);
-    } else if (running.length > 0) {
-      notes.push(`memory reset skipped: ${running.length === 1 ? "turn" : "turns"} ${running.join(", ")} of ${identity} ${running.length === 1 ? "was" : "were"} stopped earlier and ${running.length === 1 ? "has" : "have"} not been seen to end`);
     } else {
       for (const scope of ["user", "workspace"] as const) {
         for (let pass = 1; ; pass += 1) {
@@ -683,6 +702,67 @@ export async function resetDurableMemory(identity: string, deps: RunnerDeps, sig
   return { removed, userModelEmptied, notes };
 }
 
+/** What the workspace reset before an attempt did, and why it left anything. */
+export interface WorkspaceResetResult {
+  /** Entries removed from the identity's generated/: files, links and directories. */
+  removed: number;
+  /** One line per reason the reset was skipped or left something; they become attempt notes. */
+  notes: string[];
+}
+
+/**
+ * Empty the identity's generated/ before an attempt (DELETE /api/workspace/generated, which
+ * empties the caller's own), under the memory reset's gates: no turn stopped on the account that
+ * may still run and write into the next attempt (waited for up to turnWaitMs), then, right before
+ * the delete, auth on and the identity logged in as its own eval account (resetRefusal: with auth
+ * off the route empties the shared root's generated/, the operator's own files). The delete asks
+ * for `scope=account` as well, so the route itself refuses the shared root should auth be switched
+ * off in between.
+ *
+ * Only generated/, the zone a turn writes to. The rest of the account's root stays: uploads/ (no
+ * scenario reads a file there that an earlier attempt left) and the git repository the
+ * git_developer scenario keeps at the root, which its seed step resets with git.
+ *
+ * A reset that fails is a note, and the attempt runs, as with the memory reset: a file left from
+ * earlier is a confound the report names, not a verdict, and a scenario that needs a file absent
+ * deletes it and checks that in its own steps. Failing the attempt instead would end every attempt
+ * against a gateway built before the route (HTTP 404) as a harness error, and every scenario with
+ * a viewer turn: the route is operator-only like every mutating route, so eval-viewer's generated/
+ * is refused (HTTP 403).
+ */
+export async function resetWorkspace(identity: string, deps: RunnerDeps, signal?: AbortSignal, turnWaitMs = 0): Promise<WorkspaceResetResult> {
+  const notes: string[] = [];
+  let removed = 0;
+  try {
+    // The wait first, the refusal right before the delete, as for the memory reset.
+    const running = await turnsStillRunning(identity, deps, turnWaitMs, signal);
+    const refusal = running.length > 0 ? null : await resetRefusal(identity, deps, "every account's generated/ is the shared root's, the operator's own files", signal);
+    if (running.length > 0) {
+      notes.push(`workspace reset skipped: ${stillRunningReason(identity, running)}`);
+    } else if (refusal) {
+      notes.push(`workspace reset skipped: ${refusal}`);
+    } else {
+      // scope=account: the route refuses (409) when the caller's root is the shared one, so auth
+      // switched off after the refusal above was asked still empties nothing of the operator's.
+      const emptied = await deps.client.http(identity, "DELETE", "/api/workspace/generated?scope=account", signal ? { signal } : {});
+      const body = isRecord(emptied.json) ? emptied.json : {};
+      if (emptied.ok) {
+        removed = typeof body["removed"] === "number" ? body["removed"] : 0;
+      } else {
+        const why = emptied.status === 404
+          ? "the gateway has no DELETE /api/workspace/generated yet"
+          : typeof body["error"] === "string" ? redactSecrets(body["error"]).slice(0, 300) : "";
+        notes.push(`workspace reset: ${identity}'s generated/ not emptied (HTTP ${emptied.status}${why ? `: ${why}` : ""})`);
+      }
+    }
+  } catch (err) {
+    if (!signal?.aborted) notes.push(`workspace reset stopped: ${describeError(err)}`);
+  }
+  if (removed > 0) deps.log?.(`     reset: removed ${entries(removed)} from the generated/ of ${identity}`);
+  for (const note of notes) deps.log?.(`     ${note}`);
+  return { removed, notes };
+}
+
 export async function runAttempt(
   scenario: E2EScenario,
   index: number,
@@ -713,12 +793,18 @@ export async function runAttempt(
   if (opts.signal?.aborted) onRunAbort();
   else opts.signal?.addEventListener("abort", onRunAbort, { once: true });
   const resetNotes: string[] = [];
-  if (opts.resetDurableMemory && opts.concurrency === 1 && !controller.signal.aborted) {
-    // Every identity a turn of the attempt runs as: what any of them stored before would steer it.
+  // Before the first step, so what the steps seed stays.
+  if ((opts.resetDurableMemory || opts.resetWorkspace) && opts.concurrency === 1 && !controller.signal.aborted) {
+    // Every identity a turn of the attempt runs as: what any of them stored or wrote before would steer it.
     const identities = new Set([ctx.identity, ...scenario.steps.flatMap((step) => (step.kind === "turn" && step.as ? [step.as] : []))]);
     for (const identity of identities) {
-      if (controller.signal.aborted) break;
-      resetNotes.push(...(await resetDurableMemory(identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+      if (opts.resetDurableMemory && !controller.signal.aborted) {
+        resetNotes.push(...(await resetDurableMemory(identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+      }
+      if (opts.resetWorkspace && !controller.signal.aborted) {
+        // A turn the memory reset saw end is forgotten, so this waits only for one still running.
+        resetNotes.push(...(await resetWorkspace(identity, deps, controller.signal, opts.cancelGraceMs)).notes);
+      }
     }
   }
   const steps: StepResult[] = [];

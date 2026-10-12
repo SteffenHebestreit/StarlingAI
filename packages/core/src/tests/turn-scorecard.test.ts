@@ -69,6 +69,28 @@ describe("turn quality scorecard", () => {
     expect(scorecard.partialOrFailureReason).toBe("rate_limited");
   });
 
+  // The last-resort terminal guard withheld the answer as a raw tool dump and shipped its fallback:
+  // the E2E turn guards-list-files-on-a-file was recorded "completed" with a bare heading as reply.
+  it("a turn whose answer the raw-dump guard withheld is partial, not completed", () => {
+    const quality = createTurnQualitySignals();
+    expect(quality.answerWithheld).toBeNull();
+    quality.answerWithheld = "raw_tool_output";
+
+    expect(buildTurnQualityScorecard({ ...base, quality })).toMatchObject({
+      outcomeStatus: "partial",
+      partialOrFailureReason: "answer_withheld_raw_tool_output",
+    });
+    // The inline-artifact fabrication guard withholds an answer the same way.
+    expect(buildTurnQualityScorecard({ ...base, quality: { ...quality, answerWithheld: "fabricated_inline_artifact" } })).toMatchObject({
+      outcomeStatus: "partial",
+      partialOrFailureReason: "answer_withheld_fabricated_inline_artifact",
+    });
+    expect(buildTurnQualityScorecard({ ...base, quality: createTurnQualitySignals() })).toMatchObject({
+      outcomeStatus: "completed",
+      partialOrFailureReason: null,
+    });
+  });
+
   it("a turn whose delegation masked figures no tool returned is partial, not completed (E2E 2026-10-07)", () => {
     expect(buildTurnQualityScorecard({ ...base, delegatedFiguresUnobserved: true })).toMatchObject({
       version: 2,

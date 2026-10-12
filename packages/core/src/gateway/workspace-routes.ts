@@ -6,7 +6,7 @@
  */
 import type { Hono } from "hono";
 import { readFile, writeFile, stat, lstat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
 import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
 import type { Identity } from "../runtime/accounts.js";
@@ -20,7 +20,9 @@ import {
   type WorkspaceContainmentOptions,
   type WorkspaceRealPath,
 } from "../tools/workspace-path.js";
+import { removeContainedWorkspaceDir, removeContainedWorkspaceFile, WorkspaceContainmentError } from "../tools/workspace-containment.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
+import { AccountNotThreadedError } from "../runtime/user-scope.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { logAudit } from "../audit/logger.js";
@@ -72,6 +74,14 @@ async function bareTokenCaller(token: string | undefined | null): Promise<{ iden
   const payload = await verifyToken(token);
   if (!payload) return null;
   return { identity: typeof payload.sub === "string" ? { userId: payload.sub } : undefined };
+}
+
+/** What emptying a generated/ removed, and what stayed. */
+interface GeneratedTally {
+  removed: number;
+  failed: number;
+  /** The first failure's error code, or its message. */
+  firstError: string;
 }
 
 export function registerWorkspaceRoutes(app: Hono): void {
@@ -175,7 +185,13 @@ export function registerWorkspaceRoutes(app: Hono): void {
     // "generated/index.html" reads THEIR generated/, and a path aimed at another account
     // escapes this root and is refused by the workspace-boundary check like any other escape.
     // The resolver also holds the path to its zone through any link a sandbox left in that root.
-    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath), options);
+    // A name the listing or an artifact record gave is taken as it is on disk: one a turn left
+    // under a repeated root is that file, not the one of the same name in generated/.
+    return resolvePathWithinWorkspace(
+      requestedPath,
+      userWorkspaceRoot(getConfig().workspacePath),
+      { ...options, asNamedOnDisk: true },
+    );
   }
 
   /** Whether a path these routes built themselves under a resolved root stays in its zone of the
@@ -469,6 +485,130 @@ export function registerWorkspaceRoutes(app: Hono): void {
       return c.json({ error: mapped.message }, mapped.status);
     }
   });
+
+  // ── Empty the caller's generated/ ────────────────────────────────────────
+  // DELETE /api/workspace/generated[?scope=account]
+  // Removes everything under generated/ in the caller's own workspace root, and keeps the directory:
+  // 200 { removed } with the entries removed (files, links and directories; 0 without a generated/),
+  // 500 { error, removed, failed } when an entry stayed, 400 when generated/ is not a directory of
+  // that root, 403 when the caller has no root of its own, 409 when `scope=account` was asked for
+  // and the caller's root is the deployment's shared one. The E2E harness calls it before each
+  // attempt: the eval account's turns had left files there since its first run, and later turns read
+  // them as evidence (a reply answered from a two-day-old briefing, another cited a chart an earlier
+  // run had made; 2026-10-10).
+  app.delete("/api/workspace/generated", async (c) => {
+    // OPERATOR, AS FOR ONE FILE ABOVE, and checked here for the same reason. A viewer may not delete
+    // one file of its own, so not all of them either; the harness empties eval's, an operator's.
+    const caller = await authenticatedUser(c.req.header("Authorization"));
+    if (!caller) return c.json({ error: "Unauthorized" }, 401);
+    if (!userHasRole(caller, "operator")) {
+      logAudit("rbac_denied", {
+        username: caller.username,
+        role: caller.role,
+        method: "DELETE",
+        path: c.req.path,
+      }, { userId: caller.username, severity: "warn" });
+      return c.json({ error: "Operator role required for this action" }, 403);
+    }
+
+    // `scope=account`: the caller expects its own account's root, and nothing is removed when the
+    // root is the deployment's shared one (auth off, or no account to partition by). The E2E harness
+    // always sends it. It checks that auth is on before it calls, but auth can be switched off in
+    // between without a restart, and its token still verifies: the shared root's generated/ is the
+    // operator's own work.
+    const scope = c.req.query("scope");
+    if (scope !== undefined && scope !== "account") return c.json({ error: "scope must be \"account\" when given" }, 400);
+
+    const sharedRoot = getConfig().workspacePath;
+    try {
+      // Inside the try: an identity that carries no account id or principal kind has no root of its
+      // own (AccountNotThreadedError), and is answered as such below rather than with a bare 500.
+      const root = userWorkspaceRoot(sharedRoot);
+      const zone = resolve(root, GENERATED_SUBDIR);
+      const isSharedRoot = resolve(root) === resolve(sharedRoot);
+      if (scope === "account" && isSharedRoot) {
+        return c.json({ error: "Your workspace root is the deployment's shared root, not an account's own: nothing was removed" }, 409);
+      }
+      if (getConfig().auth?.enabled === true) {
+        // ONLY AN ACCOUNT'S OWN ROOT under multi-user auth. A caller nobody partitions by resolves
+        // to the shared root, whose generated/ holds every unattended run's work; and an account's
+        // root that is itself a link leads into a root that is not the caller's.
+        if (isSharedRoot) return c.json({ error: "No workspace root of your own to empty" }, 403);
+        if ((await lstat(root).catch(() => null))?.isSymbolicLink()) return c.json({ error: "Path must stay within the workspace" }, 400);
+      }
+      const zoneStat = await lstat(zone).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      });
+      if (!zoneStat) return c.json({ removed: 0 });
+      // generated/ itself has to be a directory where it really is: a link in its place (a sandbox
+      // can make one in its own root) is neither followed nor removed.
+      if (!zoneStat.isDirectory() || staysInCallerZone(zone) === null) {
+        return c.json({ error: `${GENERATED_SUBDIR}/ is not a directory of your workspace root` }, 400);
+      }
+      const tally: GeneratedTally = { removed: 0, failed: 0, firstError: "" };
+      await emptyGeneratedDirectory(zone, root, tally);
+      if (tally.failed > 0) {
+        const entries = `${tally.failed} ${tally.failed === 1 ? "entry" : "entries"}`;
+        return c.json({ error: `${entries} of ${GENERATED_SUBDIR}/ could not be removed (${tally.firstError})`, removed: tally.removed, failed: tally.failed }, 500);
+      }
+      return c.json({ removed: tally.removed });
+    } catch (error) {
+      if (error instanceof AccountNotThreadedError) return c.json({ error: `No workspace root of your own to empty: ${error.message}` }, 403);
+      const mapped = mapWorkspaceRouteError(error);
+      return c.json({ error: mapped.message }, mapped.status);
+    }
+  });
+
+  /**
+   * Removes everything in `dir`, a directory under the caller's generated/, depth first, counting
+   * into `tally`; true when nothing in it stayed. NO LINK IS FOLLOWED: lstat tells a link (a junction
+   * too) from a directory, so a link is removed as the name it is and its target stays. A file or a
+   * link goes through removeContainedWorkspaceFile, which removes the name in the directory it really
+   * is in, held to generated/ (on Linux in the open directory itself: a directory on the way swapped
+   * for a link to agents/ meanwhile gets a refusal, not a deleted shard). A directory is listed only
+   * while it really is under generated/, and removed with removeContainedWorkspaceDir, held there the
+   * same way: removed by name after a check, an empty directory wherever a swapped link led was gone
+   * (another account's generated/, a config zone's subdirectory). An entry that cannot be removed is
+   * counted and the others are still removed; one already gone is not counted.
+   */
+  async function emptyGeneratedDirectory(dir: string, root: string, tally: GeneratedTally): Promise<boolean> {
+    const failed = (error: unknown): false => {
+      tally.failed += 1;
+      if (!tally.firstError) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        tally.firstError = typeof code === "string" ? code : error instanceof Error ? error.message : String(error);
+      }
+      return false;
+    };
+    if (staysInCallerZone(dir) === null) return failed(new WorkspaceContainmentError());
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" || failed(error);
+    }
+    let complete = true;
+    for (const name of names) {
+      const path = join(dir, name);
+      try {
+        if ((await lstat(path)).isDirectory()) {
+          // What stayed in it is counted there; the directory itself then stays too.
+          if (!await emptyGeneratedDirectory(path, root, tally)) {
+            complete = false;
+            continue;
+          }
+          removeContainedWorkspaceDir(path, root);
+        } else {
+          removeContainedWorkspaceFile(path, root);
+        }
+        tally.removed += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") complete = failed(error);
+      }
+    }
+    return complete;
+  }
 
   app.get("/api/workspace/archive", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));

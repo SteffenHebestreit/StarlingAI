@@ -151,8 +151,9 @@ describe("the declared deliverable reaches the sub-agent run", () => {
 
   it("execute_plan: three parallel lookup steps declared \"answer\" each reach browser_agent with it, all at once", async () => {
     // Session 62b04e8b's plan: three short lookups in one parallelGroup. buildStepTask adds the turn's
-    // objective and criteria to every step, which carries each task past the staged-build threshold,
-    // so only the declaration keeps browser_agent off the skeleton directive.
+    // objective and criteria to every step, which carries each task past the staged-build threshold.
+    // That context no longer counts toward the size (plan-step-turn-context.test.ts), and the
+    // declaration still reaches each run, for a step that is past it on its own words.
     const STEPS = 3;
     let started = 0;
     let releaseAll: () => void = () => undefined;
@@ -195,9 +196,9 @@ describe("the declared deliverable reaches the sub-agent run", () => {
     for (const args of received()) {
       expect(args.agentName).toBe("browser_agent");
       expect(args.deliverable).toBe("answer");
-      // Without the declaration, size and tools alone stage this run.
+      // Past the threshold as the run receives it, and not staged on the step's own text.
       expect(args.task.length).toBeGreaterThan(STAGED_BUILD_TASK_CHAR_THRESHOLD);
-      expect(isStagedArtifactBuildRun(BROWSER_AGENT_TOOLS, args.task)).toBe(true);
+      expect(isStagedArtifactBuildRun(BROWSER_AGENT_TOOLS, args.task)).toBe(false);
     }
     expect(startedAtResolve).toEqual([STEPS, STEPS, STEPS]);
   }, 30_000);

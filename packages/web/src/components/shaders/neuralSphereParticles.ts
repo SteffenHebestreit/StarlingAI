@@ -1,7 +1,9 @@
 // Neural core sphere. Shimmer/pulse motion uses CPU-accumulated phase
 // uniforms so abrupt speed changes (e.g. entering criticalError) slow the
 // motion smoothly instead of snapping every particle to a new phase.
-export const vertexShader = `
+import { POINT_SCALE_VERTEX, POINT_SCALE_FRAGMENT } from "./pointScale";
+
+export const vertexShader = `${POINT_SCALE_VERTEX}
   attribute float shimmerData;
 
   uniform float uShimmerPhase;
@@ -50,11 +52,11 @@ export const vertexShader = `
     gl_Position = projectionMatrix * mvPosition;
 
     float size = 0.08;
-    gl_PointSize = size * (300.0 / -mvPosition.z);
+    gl_PointSize = scaledPointSize(size * (300.0 / -mvPosition.z));
   }
 `;
 
-export const fragmentShader = `
+export const fragmentShader = `${POINT_SCALE_FRAGMENT}
   varying vec4 vColor;
 
   void main() {
@@ -68,7 +70,7 @@ export const fragmentShader = `
     float glowStrength = 2.2;
 
     vec3 finalColor = brightColor * glowFactor * glowStrength;
-    float alpha = vColor.a * smoothstep(0.5, 0.1, dist);
+    float alpha = vColor.a * smoothstep(0.5, 0.1, dist) * vPointFade;
 
     gl_FragColor = vec4(finalColor, alpha);
   }

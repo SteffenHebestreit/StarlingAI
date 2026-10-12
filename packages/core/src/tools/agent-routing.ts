@@ -339,9 +339,15 @@ const ROUTING_QUERY_FILLER = new Set<string>([
  * Deliberately narrow: a colon inside the opening clause only, with substantial text after it.
  * A user-typed query rarely opens that way, and one that does ("error: cannot find module")
  * loses only its label.
+ *
+ * A label's colon is followed by whitespace or the end. The first colon of all was taken before,
+ * so a task naming a web address lost everything up to its scheme: "Rufe die Website
+ * http://www.example.test/ auf …" routed on "//www.example.test/ auf …", where five unrelated
+ * agents scored within 0.007 of each other (E2E 2026-10-12). A time (12:30) or a drive (C:\)
+ * is no label either.
  */
 export function stripDelegationFraming(query: string): string {
-  const colon = query.indexOf(":");
+  const colon = query.search(/:(?=\s|$)/);
   if (colon < 0) return query;
   const head = query.slice(0, colon);
   if (head.split(/\s+/).filter(Boolean).length > 8) return query;   // not an opening clause
@@ -751,6 +757,18 @@ export function isWebReachingToolName(toolName: string): boolean {
     || toolName.startsWith("browser_");
 }
 
+/** An absolute web address in a task: a page the step has to open from outside the workspace. */
+const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
+/**
+ * Whether a task names an absolute web address (WEB_ADDRESS_RE). Read by the delegation's routing
+ * gates (tools/sub-agent.ts) and by the runner's verdict on a run that answered with nothing
+ * (agent/sub-agent.ts emptyAnswerWithoutWork): a page named in the task is one to be read.
+ */
+export function taskNamesWebAddress(task: string): boolean {
+  return WEB_ADDRESS_RE.test(task);
+}
+
 /**
  * Browser tools that only look at the page the shared browser tab already shows, in both the
  * gateway's own names and the bridged Playwright server's. None of them opens a URL, so they
@@ -1005,6 +1023,19 @@ export function agentCfgWorksOnlyFromHandedText(cfg: CapabilityBearing): boolean
   if (agentCfgOnlyReadsOpenBrowserTab(cfg)) return true;
   const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
   return inputs.length > 0 && inputs.every((input) => input === "text" || input === "none");
+}
+
+/**
+ * Whether an agent's only source is a file the user hands over: confined to the workspace, and its
+ * taxonomy names no input but an upload. With no such file in play it has nothing to read, however
+ * much its description shares with the task ("extract the content" reads like any step that
+ * extracts anything). An agent the taxonomy does not classify, or one that can reach outside the
+ * workspace, is not this.
+ */
+export function agentCfgReadsOnlyUploads(cfg: CapabilityBearing): boolean {
+  if (agentCfgReachesOutsideWorkspace(cfg)) return false;
+  const inputs = resolveRoutingTaxonomy(cfg)?.inputModality ?? [];
+  return inputs.length > 0 && inputs.every((input) => input === "file_upload");
 }
 
 /**

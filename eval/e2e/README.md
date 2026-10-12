@@ -64,13 +64,15 @@ later turn of the account through the durable-facts capsule, so one scenario's f
 user- and workspace-scope memory entry, and its user model (`recall_context` serves it too), before the
 attempt starts. A scenario therefore cannot rely on what an earlier one stored; one that needs a record
 stores it itself (the viewer-isolation scenario: a turn as `eval`, then one `as: "eval-viewer"`).
-Concurrent attempts share the account, so then nothing is reset. `--keep-memory` keeps it.
+Concurrent attempts share the account, so then nothing is reset. `--keep-memory` keeps it, and the
+account's `generated/` files with it (below).
 
 A delete cannot be undone, so the reset deletes only what is provably the eval account's own, and the
 attempt's notes in the report say what it left and why:
 
-- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset) — with auth off every
-  account's memory is the shared single-operator store, and a token from before the switch still works;
+- the gateway runs with auth on (`GET /api/auth/mode`, asked before every reset, after any wait for a
+  stopped turn) — with auth off every account's memory is the shared single-operator store, and a token
+  from before the switch still works;
 - the identity logs in as its own eval account (`GET /api/auth/me`: `eval` → `eval`, `eval-viewer` →
   `eval-viewer`) — a credentials file may map it to any account;
 - no other eval account lists the same entries — a gateway older than the per-user workspace routes
@@ -96,11 +98,36 @@ waits for them the same way. A turn whose session is gone (`sai wipe`) counts as
 ended once the gateway has restarted since it was sent (`gateway.status` uptime). The run names the lock
 it took such turns from; deleting that file forgets them.
 
-**Workspace files are not reset.** A file a turn writes stays in the account's workspace root for every
-later run. A scenario that needs a file to be absent deletes it in an http step before its first turn:
-`DELETE /api/workspace/file?path=<path>` with `expect: { status: [204, 404] }` (204 removed, 404 not
-there; operator only, one file under `generated/` in the caller's own root, never a directory; any
-other path is refused with 400). See
+**`generated/` is emptied before each attempt too.** A file a turn writes lands in `generated/` of the
+account's own workspace root, and later turns read what is there as evidence: one reply answered from a
+two-day-old briefing, another cited a chart an earlier run had made (2026-10-10). Under the memory reset's
+conditions (one attempt at a time, auth on, the identity logged in as its own eval account, no stopped turn
+of it that may still run), every identity a turn of the attempt runs as has its `generated/` emptied
+before the attempt's first step: `DELETE /api/workspace/generated?scope=account`, which removes every
+file, link and directory in the caller's own `generated/` (a link itself, never what it leads to) and
+keeps the directory. Both resets wait for a stopped turn first and ask whether auth is on right before
+they delete; `scope=account` makes the route itself refuse (`HTTP 409`, noted) should auth be switched
+off in between, when the caller's root would be the shared one and its `generated/` the operator's files.
+A scenario therefore cannot rely on a file an earlier attempt or scenario wrote; one that needs a file
+writes it in its own steps, which run after the reset (guards-list-files-on-a-file, the `inprocess`
+scenarios). `--keep-workspace` keeps the files; `--keep-memory` keeps them too.
+
+Only `generated/` is emptied, the zone a turn writes to. The rest of the account's root stays: `uploads/`
+(chat attachments are stored per session, in the object store or under the shared root, not there, and no
+scenario reads a file there that an earlier attempt left) and the git repository the git_developer scenario
+keeps at the root (`.git`, `.gitignore`), which its seed step resets with git. The gateway keeps the
+account's own state (its memory among it) outside the root, where this reset never reaches; the memory
+reset above empties the memory.
+
+The route is operator-only, like every mutating route, so `eval-viewer`'s `generated/` is not emptied
+(`HTTP 403`, noted); no scenario has a viewer turn that writes a file. A reset that fails is noted, and the
+attempt runs: the files left are a confound the report names, not a verdict, and a gateway built before the
+route answers `HTTP 404` (noted as such) for every attempt.
+
+A scenario that needs a file to be absent still deletes it in an http step before its first turn, so that
+it holds with `--keep-workspace` too: `DELETE /api/workspace/file?path=<path>` with
+`expect: { status: [204, 404] }` (204 removed, 404 not there; operator only, one file under `generated/`
+in the caller's own root, never a directory; any other path is refused with 400). See
 guards-no-claimed-update-of-missing-file.
 
 **One run at a time.** Two `pnpm e2e:evaluate` runs share the gateway's eval accounts, and one's reset or

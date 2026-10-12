@@ -14,6 +14,9 @@
  * Gated by orchestration.qaDeliveryLoop (default off; pass^k before default-on)
  * because every round costs extra LLM calls on a slow local model.
  */
+import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { effectiveMaxDelegatedResultChars } from "../runtime/effort-context.js";
+import { scanOutput } from "../guardrails/output.js";
 
 export type QaVerdictStatus = "pass" | "fail" | "unverified";
 
@@ -183,6 +186,9 @@ export interface QaDeliveryResult {
   evidence?: string;
   /** True if at least one round used the coordinator escalation path. */
   escalated: boolean;
+  /** What each failing verdict named, in round order; absent when no verdict failed. Recorded so a
+   *  turn whose reply is a repair can be read back: the verdict's text was logged nowhere. */
+  flaws?: string[];
   /** The last check produced no verdict — an empty or unparseable reply, or a thrown check.
    *  The answer ships (fail-open) with status `unverified` and `passed` false. */
   noVerdict?: boolean;
@@ -216,6 +222,10 @@ export async function runQaDeliveryLoop(
   // NEXT failed round then escalates to the coordinator (when provided): re-wording
   // demonstrably didn't fix it, so the gap needs real re-work.
   let cheapImproveExhausted = false;
+  // Every failing verdict's flaws, on every result from here on: a reply that is a repair cannot
+  // be explained without what the repair was asked to fix.
+  const failedVerdictFlaws: string[] = [];
+  const named = (): { flaws?: string[] } => (failedVerdictFlaws.length > 0 ? { flaws: [...failedVerdictFlaws] } : {});
   for (let round = 0; round < maxRounds; round += 1) {
     let verdict: QaVerdict;
     try {
@@ -224,7 +234,7 @@ export async function runQaDeliveryLoop(
       // Check failed → fail open, ship the current answer. There is no verdict, so it did not
       // pass: the status is truthfully unverified, and whether that surfaces as a caveat is the
       // strict policy's call.
-      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true };
+      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true, ...named() };
     }
     if (verdict.pass) {
       // An empty or unparseable reply keeps pass:true so delivery fails open, but nobody judged
@@ -246,9 +256,11 @@ export async function runQaDeliveryLoop(
         escalated,
         unverified,
         ...(noVerdict ? { noVerdict: true } : {}),
+        ...named(),
       };
     }
 
+    if (verdict.flaws?.trim()) failedVerdictFlaws.push(verdict.flaws.trim());
     const useEscalate = cheapImproveExhausted && !!deps.escalate;
     let improved: string | null;
     try {
@@ -262,7 +274,7 @@ export async function runQaDeliveryLoop(
     else cheapImproveExhausted = true;
     // Repair failed or produced nothing usable → stop; ship the best so far.
     if (!improved || !improved.trim()) {
-      return { answer: current, rounds: round + 1, passed: false, status: "fail", escalated, unverified: false };
+      return { answer: current, rounds: round + 1, passed: false, status: "fail", escalated, unverified: false, ...named() };
     }
     current = improved;
   }
@@ -272,5 +284,144 @@ export async function runQaDeliveryLoop(
   // would only refine an audit-only boolean at the cost of one whole slow-model call
   // per turn. Report passed=false (we never got a confirming PASS within budget).
   const finalPass = false;
-  return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false };
+  return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false, ...named() };
+}
+
+/** How much of one verdict's flaws an audit row keeps. */
+const AUDIT_FLAWS_MAX_CHARS = 300;
+
+/**
+ * The failing verdicts' flaws as an audit row keeps them: each clipped, the cut marked; nothing when
+ * no verdict failed. In E2E core-ix-browser-order-form-express-refused both rounds failed and the
+ * reply was a repair, and what the verdicts had asked to fix could not be read back from anywhere.
+ *
+ * These are the reviewer's sentences about the answer, and they can quote it. Each is redacted
+ * BEFORE it is clipped: logAudit scans what it writes, but a token cut at the boundary is shorter
+ * than the pattern that would have caught it whole, and its head passed the scan. The redaction is
+ * the one logAudit applies to a string (scanOutput, as sanitizeAuditData calls it), called here
+ * rather than through the audit module, which most runtime tests replace with a bare logAudit mock.
+ * The cut then falls on a word boundary, so even a token no pattern knows is kept whole or dropped.
+ */
+export function qaFlawsForAudit(flaws: readonly string[] | undefined): { qaFlaws?: string[] } {
+  if (!flaws || flaws.length === 0) return {};
+  return { qaFlaws: flaws.map((text) => clipAtWord(redactLikeAudit(text), AUDIT_FLAWS_MAX_CHARS)) };
+}
+
+/** What logAudit's sanitizer makes of a string; unchanged when the scanner cannot run (as there). */
+function redactLikeAudit(text: string): string {
+  try {
+    return scanOutput(text).redacted ?? text;
+  } catch {
+    return text;
+  }
+}
+
+/** The text up to `maxChars`, cut at the last whitespace before it when there is one, the cut marked. */
+function clipAtWord(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const head = text.slice(0, maxChars);
+  const lastBreak = head.search(/\s\S*$/);
+  return `${lastBreak > 0 ? head.slice(0, lastBreak) : head}…`;
+}
+
+/**
+ * How much of its own answer a repair call is handed: the budget a delegated result relayed verbatim
+ * gets (performance.maxDelegatedResultChars, effort-scaled; tool-result-format.ts). The answer is the
+ * model's own output, written in a turn whose prompts were sized to carry a result that large.
+ */
+export function answerRepairMaxChars(): number {
+  return effectiveMaxDelegatedResultChars();
+}
+
+/**
+ * Whether a repair call can be handed the whole answer. One asked for the complete answer that saw
+ * only its head returns the head, and nothing downstream catches that: the improve step's shrink
+ * guard rejects only a stub, and the verification accepts half the length. So a cheap rewrite does
+ * not run on an answer that does not fit; the answer ships as it is.
+ */
+export function answerFitsRepair(current: string, maxChars = answerRepairMaxChars()): boolean {
+  return current.length <= maxChars;
+}
+
+/**
+ * What every QA call is told about an answer's own disclosures. The reviewer FAILed an answer for
+ * its note that the page had refused the user's choice and a different one was submitted, reading
+ * it as unrequested content against a "word for word" criterion, and the repair then dropped the
+ * note: an honest answer left the loop claiming the request went through as asked (E2E 2026-10-12).
+ * The repair, the verification and the consistency repair carry this one; the verdicts carry
+ * QA_DISCLOSURE_VERDICT_RULE.
+ */
+export const QA_DISCLOSURE_RULE = "A note that something was refused, failed, not done, or done differently than asked is required: "
+  + "keep it in any rewrite.";
+
+/**
+ * The verdicts' half of the same rule. It shields the NOTE, not what the note reports: a reviewer
+ * told only "do not fail an answer for it" could pass an answer saying 999 was submitted where the
+ * user asked for 1200, or a refusal of work that could have been done (review 2026-10-12). The
+ * prose verdict and the tool judge carry it.
+ */
+export const QA_DISCLOSURE_VERDICT_RULE = "A note that something was refused, failed, not done, or done differently than asked is required, "
+  + "never unrequested content: never FAIL an answer for including the note; what the note reports is still judged against the criteria.";
+
+/**
+ * What a rewrite is told about a flaw in what was DONE. The reviewer rightly failed an answer
+ * whose agent had resubmitted a form with 999 after the page refused the user's 1200; told to
+ * "fix" that, the repair could not undo the submission, so it rewrote the answer to say the
+ * quantity had NOT been changed, against the tool results (E2E 2026-10-12). Only the rewrites
+ * carry it: the reviewer's verdict is right to fail such an answer.
+ */
+export const QA_ACTION_HONESTY_RULE = "A flaw in what was done (a value submitted, an action taken) cannot be fixed by rewriting: "
+  + "say what the tool results show was actually done and that it does not meet the request; never state that it did not happen.";
+
+const REPAIR_ANSWER_LABEL = "Current answer to improve:";
+/** The verification is told to return the answer unchanged when it holds, so it is not labelled as one to improve. */
+const VERIFY_ANSWER_LABEL = "Your answer:";
+
+/**
+ * The answer a "fix your previous answer" call is about, for its instruction: whole up to
+ * `maxChars`, and past that the head with the cut marked, so a reader never takes it for all of it.
+ *
+ * Those calls run through forceSynthesis, which reads the session's history, and the draft is not in
+ * it yet: it is added only once the turn ships. So a rewrite saw the flaws and not the answer they
+ * were found in, and wrote a new answer from the history. In E2E
+ * core-ix-browser-order-form-express-refused every shipped reply was such a rewrite, and one turned
+ * the specialist's disclosure (it had changed the shipping option) into "no automatic change was
+ * made". The coordinator escalation was the only repair that passed the answer; every repair now
+ * passes it the same way.
+ */
+export function currentAnswerBlock(current: string, label = REPAIR_ANSWER_LABEL, maxChars = answerRepairMaxChars()): string {
+  if (current.length <= maxChars) return `\n\n${label}\n${current}`;
+  return `\n\n${label}\n${current.slice(0, maxChars)}\n[… ${current.length - maxChars} more characters not shown]`;
+}
+
+/**
+ * The QA delivery loop's cheap repair: fix the verdict's flaws in the answer it judged. Null when the
+ * answer does not fit a repair call (answerFitsRepair): that rewrite is skipped.
+ */
+export function buildQaImproveInstruction(current: string, flaws: string, maxChars = answerRepairMaxChars()): string | null {
+  if (!answerFitsRepair(current, maxChars)) return null;
+  return "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
+    + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
+    + flaws
+    + currentAnswerBlock(current, REPAIR_ANSWER_LABEL, maxChars)
+    + `\n\n${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE}`
+    + "\n\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
+}
+
+/**
+ * riskGatedQA's one-shot verification: check the answer against the criteria, repair only a gap.
+ * Null when the answer does not fit a repair call (answerFitsRepair): the verification is skipped.
+ */
+export function buildCriteriaVerifyInstruction(
+  current: string,
+  criteria: readonly string[],
+  maxChars = answerRepairMaxChars(),
+): string | null {
+  if (!answerFitsRepair(current, maxChars)) return null;
+  return "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
+    + criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+    + currentAnswerBlock(current, VERIFY_ANSWER_LABEL, maxChars)
+    + `\n\n${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE}`
+    + "\n\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
+    + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
 }

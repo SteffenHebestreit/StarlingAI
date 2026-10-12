@@ -34,6 +34,15 @@ import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherP
 import { isWebReachingToolName } from "./agent-routing.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+// The labels of the turn context a step's task carries after its own line, shared with the readers
+// that measure what the step itself asks (taskOwnWordChars, delegationAsksForFile).
+import {
+  PLAN_STEP_CRITERIA_LABEL,
+  PLAN_STEP_OBJECTIVE_LABEL,
+  PLAN_STEP_SECTION_SEPARATOR,
+  PLAN_STEP_STOP_CONDITIONS_LABEL,
+  PLAN_STEP_UPSTREAM_RESULTS_LABEL,
+} from "../agent/plan-step-task.js";
 // This tool's output is mostly untrusted delegated content, re-emitted as the orchestrator's own.
 // A step whose result merely quoted an HTML-ish role tag replaced the ENTIRE report with "Tool
 // output blocked by guardrails", while the metadata still said N done and 0 failed, so the turn
@@ -41,6 +50,19 @@ import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 // call re-emits the same text and is blocked again. Hence every carried or reported result is
 // defanged rather than left for checkToolOutput to block.
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
+// The report's results section and the leads of what follows it, shared with the reader that shows
+// the results to the user (agent/runtime-evidence-dump.ts planReportResultsForDisplay).
+import {
+  PLAN_CLOSING_ALL_RAN,
+  PLAN_CLOSING_OUTSTANDING,
+  PLAN_FINAL_STEP_HEADING,
+  PLAN_IGNORED_IDS_LEAD,
+  PLAN_MARKED_DONE_LEAD,
+  PLAN_RESULTS_HEADING,
+  PLAN_RETRIED_LEAD,
+  formatPlanStepResult,
+  planResultsOmittedNote,
+} from "../agent/runtime-evidence-dump.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -70,8 +92,14 @@ function fail(error: string): ToolResult {
  * entirely invented answer, because the specialist could not see the conversation. So a
  * dispatched step carries the objective it serves and the results of the steps it declared a
  * dependency on — which is exactly what `dependsOn` was already asserting is needed.
+ *
+ * What follows the step's own line is the TURN's, not the step's: the objective, criteria and stop
+ * conditions are the same on every step, and the upstream results are material. Each section opens
+ * with a label from agent/plan-step-task.ts, so the decisions about what the step itself asks — its
+ * size for a staged build (taskOwnWordChars), its verbs for a file (delegationAsksForFile) — can read
+ * the step's own text. A new section belongs there too, with a label of its own. Exported for tests.
  */
-function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>): string {
+export function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>): string {
   // THE STEP LEADS. delegate_to_agent dedups by a signature over the first 240 characters of the
   // task (buildTaskSignature in tools/sub-agent.ts), so opening every step with the same objective
   // banner made all of a plan's delegate steps signature-identical: the second step was SERVED THE
@@ -81,14 +109,14 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   // legitimately share a description.
   const parts = [
     `STEP ${step.id} — ${step.description}`,
-    `OBJECTIVE (the whole turn): ${plan.objective}`,
+    `${PLAN_STEP_OBJECTIVE_LABEL} ${plan.objective}`,
   ];
   const upstream = (step.dependsOn ?? [])
     .map((id) => ({ id, text: results.get(id) }))
     .filter((entry): entry is { id: string; text: string } => Boolean(entry.text));
   if (upstream.length > 0) {
     parts.push(
-      "RESULTS THIS STEP DEPENDS ON — use them; do not re-derive or re-ask for them:\n"
+      `${PLAN_STEP_UPSTREAM_RESULTS_LABEL}\n`
       + upstream.map((entry) => {
         const slice = entry.text.slice(0, CARRIED_RESULT_CHARS);
         // Unmarked truncation is worse than a short excerpt: the step is told to use this and not
@@ -98,9 +126,21 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
     );
   }
   if (plan.acceptanceCriteria.length > 0) {
-    parts.push(`ACCEPTANCE CRITERIA for the turn: ${plan.acceptanceCriteria.join("; ")}`);
+    parts.push(`${PLAN_STEP_CRITERIA_LABEL} ${plan.acceptanceCriteria.join("; ")}`);
   }
-  return parts.join("\n\n");
+  // The criteria say what success looks like, and only that. A plan whose criteria could be met by
+  // a confirmation page alone sent a browser step to get one: the page refused the shipping the user
+  // chose, the step chose another itself and submitted again, and reported the reference. The plan's
+  // own stop conditions ("an error on submit: report it") were recorded and never reached the step.
+  // Last, so the text before them is unchanged. delegate_to_agent's reuse signature
+  // (buildTaskSignature in tools/sub-agent.ts) reads the task whitespace-collapsed and cut at 240
+  // characters, with "..." when longer, so it is the same with or without them only when the text
+  // before them is already longer than that. A shorter task's signature does change, for every step
+  // of the plan alike, and each still opens with its own step id.
+  if (plan.stopConditions.length > 0) {
+    parts.push(`${PLAN_STEP_STOP_CONDITIONS_LABEL} ${plan.stopConditions.join("; ")}`);
+  }
+  return parts.join(PLAN_STEP_SECTION_SEPARATOR);
 }
 
 interface StepRun {
@@ -625,6 +665,7 @@ registerTool({
     // results" is what produces an invented answer: the orchestrator was handed the roll-call and
     // told to write up work it could not see.
     const reported: string[] = [];
+    const reportedIds: string[] = [];
     let budget = REPORTED_RESULT_TOTAL_CHARS;
     let omitted = 0;
     for (const outcome of done) {
@@ -633,7 +674,12 @@ registerTool({
       if (budget <= 0) { omitted += 1; continue; }
       const slice = text.slice(0, Math.min(REPORTED_RESULT_CHARS, budget));
       budget -= slice.length;
-      reported.push(`[${outcome.id}] ${byId.get(outcome.id)?.description ?? ""}\n${defangFramingMarkers(slice)}${slice.length < text.length ? "\n…(clipped)" : ""}`);
+      reported.push(formatPlanStepResult(
+        outcome.id,
+        byId.get(outcome.id)?.description ?? "",
+        `${defangFramingMarkers(slice)}${slice.length < text.length ? "\n…(clipped)" : ""}`,
+      ));
+      reportedIds.push(outcome.id);
     }
 
     const sections = [`Plan: ${done.length}/${plan.steps.length} step(s) completed.`];
@@ -644,14 +690,14 @@ registerTool({
     const resultSections: string[] = [];
     if (done.length > 0) resultSections.push(`COMPLETED:\n${describe(done)}`);
     if (reported.length > 0) {
-      resultSections.push(`RESULTS — write the final answer from these:\n\n${reported.join("\n\n")}`
-        + (omitted > 0 ? `\n\n(${omitted} further result(s) omitted for length.)` : ""));
+      resultSections.push(`${PLAN_RESULTS_HEADING}\n\n${reported.join("\n\n")}`
+        + (omitted > 0 ? `\n\n${planResultsOmittedNote(omitted)}` : ""));
     }
     if (reasoningLeaves.length > 0) {
       // Counted as done because nothing dispatches it — but said plainly, so a step that names
       // real work the model forgot to give a tool ("write the file", "send the mail") is not
       // quietly reported as finished.
-      resultSections.push(`FINAL STEP — yours, in the reply (nothing dispatches it):\n`
+      resultSections.push(`${PLAN_FINAL_STEP_HEADING}\n`
         + reasoningLeaves.map((id) => `  - ${id} — ${byId.get(id)?.description ?? ""}`).join("\n")
         + `\nIt did not run. If it needs a tool after all (writing a file, sending mail), call that tool now, before answering.`);
     }
@@ -690,15 +736,13 @@ registerTool({
     sections.push(...resultSections);
     if (marked.length > 0 || retried.length > 0 || unknownIds.length > 0) {
       sections.push([
-        marked.length > 0 ? `Marked done: ${marked.join(", ")}.` : "",
-        retried.length > 0 ? `Retried: ${retried.join(", ")}.` : "",
-        unknownIds.length > 0 ? `Ignored — no such step id: ${unknownIds.join(", ")}.` : "",
+        marked.length > 0 ? `${PLAN_MARKED_DONE_LEAD}${marked.join(", ")}.` : "",
+        retried.length > 0 ? `${PLAN_RETRIED_LEAD}${retried.join(", ")}.` : "",
+        unknownIds.length > 0 ? `${PLAN_IGNORED_IDS_LEAD}${unknownIds.join(", ")}.` : "",
       ].filter(Boolean).join(" "));
     }
     sections.push(
-      outstanding > 0
-        ? "Do NOT write the final answer while steps above are outstanding."
-        : "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.",
+      outstanding > 0 ? PLAN_CLOSING_OUTSTANDING : PLAN_CLOSING_ALL_RAN,
     );
 
     // REPORTED, NOT THROWN. The turn replaces a failed tool's output with "Error: <error>", so
@@ -722,6 +766,9 @@ registerTool({
         manual: manual.length,
         pending: pending.length,
         executed: ran,
+        // The steps whose results the report carries, in its order: read where the results are shown
+        // to the user without the report around them (planReportResultsForDisplay).
+        ...(reportedIds.length > 0 ? { reportedResultIds: reportedIds } : {}),
         // EVERY CALL THIS RUN MADE, for the turn to account for as its own — the delegation tally,
         // the workflow-completed flag, the per-turn budget, and whatever else that tail grows.
         // Reported rather than re-derived here: the turn owns those rules, and re-deriving them was
@@ -731,9 +778,17 @@ registerTool({
         // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
         // Which steps are still owed, by id — record_plan's folded receipt names them in its first
-        // line, where no history cap can cut them off.
+        // line, where no history cap can cut them off. With their descriptions: where the results
+        // are shown to the user, the steps that did not complete are named under them
+        // (planReportResultsForDisplay).
         ...(outstanding > 0
-          ? { outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({ id: o.id, status: o.status })) }
+          ? {
+            outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({
+              id: o.id,
+              status: o.status,
+              ...(byId.get(o.id)?.description ? { description: byId.get(o.id)!.description } : {}),
+            })),
+          }
           : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),

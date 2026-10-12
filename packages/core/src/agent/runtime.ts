@@ -27,7 +27,7 @@ import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js"
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, QA_DISCLOSURE_VERDICT_RULE, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import type { TurnUserWords } from "./delegation-user-words.js";
 import {
@@ -91,6 +91,7 @@ import { join } from "node:path";
 import {
   runCorrectiveBuild as runCorrectiveBuildImpl,
   runCorrectiveReroute as runCorrectiveRerouteImpl,
+  type CorrectiveBuildOptions,
   type CorrectiveContext,
 } from "./turn-corrective.js";
 // Tool-output post-processing sub-phase of the main loop's per-tool-call body
@@ -689,10 +690,20 @@ export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksL
  *    message ("I've gathered partial results...") is technically truthful
  *    but throws away the partial results.
  */
+/**
+ * The finish reasons of the two loop brakes that end the tool loop before its iteration cap: one tool
+ * in every iteration (the streak brake) and the same set of tools iteration after iteration. Both
+ * turns were reported as max_tool_iterations; each set below that holds that reason holds these too,
+ * and so do workflow-catalog.ts's give-up set and the dashboard's mirror of these names
+ * (packages/web/src/composables/finishReasons.ts).
+ */
+const LOOP_BRAKE_FINISH_REASONS: readonly string[] = ["tool_streak_across_iterations", "iteration_tool_set_repeat"];
+
 const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "synthesis_required_tool_call_rejected",
   "all_tool_calls_blocked",
   "max_tool_iterations",
+  ...LOOP_BRAKE_FINISH_REASONS,
   // Warden hard-stop after two consecutive delegation failures: same contract — the
   // runtime is giving up on orchestration, so surface the evidence already gathered
   // (e.g. shared findings) instead of a generic synthesis (audit 0602f246).
@@ -726,14 +737,18 @@ function shouldBypassTerminalSynthesisWithEvidence(
  * user actually wants is the evidence — not whatever 50-100 char fragment
  * the synthesis produced.
  */
-function looksLikeUnderpoweredSynthesis(synthesized: string | null): boolean {
+function looksLikeUnderpoweredSynthesis(
+  synthesized: string | null,
+  /** The turn's deliverables are attached files: a reply that lists them is short by design. */
+  opts: { filesAttached?: boolean } = {},
+): boolean {
   if (synthesized === null) return true;
   const trimmed = synthesized.trim();
   if (trimmed.length === 0) return true;
   // 300 chars is roughly two paragraphs of substantive text — anything
   // shorter for a turn that did real tool work is almost certainly an
   // apology, an empty acknowledgement, or a refusal.
-  if (trimmed.length < 300) return true;
+  if (trimmed.length < 300 && !opts.filesAttached) return true;
   if (looksLikeGenericNoUsableReply(trimmed)) return true;
   // Refusal / apology shapes that don't carry information.
   if (/^(?:i\s+(?:am\s+)?(?:sorry|unable|can(?:not|'?t)|wasn'?t\s+able)|sorry,\s+i)\b/i.test(trimmed)
@@ -752,6 +767,11 @@ async function enforceDelegateCoverage(
 ): Promise<string> {
   if (toolIterations === 0) return finalResponse;
   if (!finalResponse || finalResponse.length < 50) return finalResponse;
+  // A turn whose deliverables are attached files is told to answer what was asked and list the
+  // files, not to paste them (agent/citation-honesty.ts buildSynthesisRequiredDirective). Held to
+  // the length of the evidence, a correct reply naming the four error codes asked for and the job's
+  // three files was rewritten "for every item", and the job's whole answer shipped in its place.
+  if (collectTurnArtifactAttachments(session).length > 0) return finalResponse;
 
   // Coverage is about THIS turn's delegated evidence only — never a prior
   // turn's deliverable (which would otherwise win the richness score).
@@ -929,6 +949,8 @@ async function enforceDelegateCoverage(
 
 const CONTINUATION_CUE_RE = /\b(next (logical )?(step|action)|n[äa]chste (logische )?(schritt|aktion)|before summarizing|continue orchestration|continue with|drill down|inspect the contents|fetch the contents|final required action|determine the actual data file format|extract the raw numerical values)\b/i;
 const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval required|needs approval|ask the user|missing .* from the user|which one|which option|clarify|need the user to|authorization reference|approved target scope)\b/i;
+/** How much of a workflow run's answer the cues above read: the head its frame showed until it carried the whole answer. */
+const WORKFLOW_CUE_SCAN_CHARS = 1_600;
 
 type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "failure" | "none";
 
@@ -1035,6 +1057,39 @@ export function classifyPostOrchestrationDisposition(
       continue;
     }
 
+    // run_workflow results carry the runtime's own structured verdict — trust
+    // it over text heuristics. The completed-workflow instruction preamble
+    // contains phrases like "marked incomplete" that the failure-keyword
+    // sniff below misreads as failure evidence (audit 802d4791: a fully
+    // successful sourced_presentation run was branded "[DELEGATION FAILED]",
+    // the model re-ran the entire 10-minute job, and the warden then
+    // force-stopped two SUCCESSFUL runs as "consecutive failures").
+    // BEFORE the ask_user cue, as the plan report is: the frame carries the run's whole answer, so a
+    // step that wrote "please confirm with the vendor" or "which one applies" turned the reply to a
+    // job that had finished into a question to the user. A step that needs the user blocks in the
+    // ask_user tool itself, which works inside a workflow step.
+    // The cues that still read a run's answer read its head only, the 1,600 characters the frame
+    // showed before it carried the whole answer: a "Next step: …" late in a finished job's report
+    // turned the reply into more orchestration, past the directive that names its files.
+    if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
+      const answerHead = observedEvidence.slice(0, WORKFLOW_CUE_SCAN_CHARS);
+      if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
+        // A run blocked on the user, a confirmation or a credential it needs, asks the user rather
+        // than counting as a failed delegation, as it did while the cue came first.
+        return USER_INTERACTION_CUE_RE.test(answerHead) ? "ask_user" : "failure";
+      }
+      const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
+      const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
+      const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
+      const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
+      if (fullyExecuted || artifactCount > 0) {
+        if (CONTINUATION_CUE_RE.test(answerHead)) {
+          sawContinuationCue = true;
+        }
+        continue;
+      }
+    }
+
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
     }
@@ -1055,29 +1110,6 @@ export function classifyPostOrchestrationDisposition(
     // through to the normal success handling below.
     if (taskGraphFailureDisposition && taskGraphResultIsFailure(metadata)) {
       return "failure";
-    }
-
-    // run_workflow results carry the runtime's own structured verdict — trust
-    // it over text heuristics. The completed-workflow instruction preamble
-    // contains phrases like "marks as incomplete" that the failure-keyword
-    // sniff below misreads as failure evidence (audit 802d4791: a fully
-    // successful sourced_presentation run was branded "[DELEGATION FAILED]",
-    // the model re-ran the entire 10-minute job, and the warden then
-    // force-stopped two SUCCESSFUL runs as "consecutive failures").
-    if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
-      if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
-        return "failure";
-      }
-      const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
-      const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
-      const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
-      const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
-      if (fullyExecuted || artifactCount > 0) {
-        if (CONTINUATION_CUE_RE.test(observedEvidence)) {
-          sawContinuationCue = true;
-        }
-        continue;
-      }
     }
 
     if (
@@ -2330,6 +2362,8 @@ async function _runTurn(
   // The retrieval evidence this turn's frames have shown the model, in characters: the turn's
   // retrieval results share one budget (tool-result-format.ts retrievalEvidenceAllowance).
   const _turnRetrievalShown = { chars: 0 };
+  // ...and the workflow-run frames, which share one budget too (workflowRunResultAllowance).
+  const _turnWorkflowShown = { chars: 0 };
   const IDENTICAL_OUTPUT_LOOP_THRESHOLD = 3;
   // Iteration-level loop detection — tracks tool-name sets across iterations.
   const _iterationToolSets: string[] = [];
@@ -2436,7 +2470,7 @@ async function _runTurn(
   // artifact and none was produced, delegate to the right builder, record the assistant+tool
   // pair so the artifact surfaces as a download, and synthesize a confirmation. Returns the
   // confirmation message if a real artifact was produced, else null (caller keeps its draft).
-  const runCorrectiveBuild = (buildContext: string): Promise<string | null> => runCorrectiveBuildImpl(buildContext, correctiveCtx);
+  const runCorrectiveBuild = (buildContext: string, options?: CorrectiveBuildOptions): Promise<string | null> => runCorrectiveBuildImpl(buildContext, correctiveCtx, options);
 
   // One bounded corrective RE-ROUTE for the zero-work fabrication guard on NON-artifact
   // requests: the model fabricated a tool-minted deliverable for a question that never
@@ -2626,6 +2660,9 @@ async function _runTurn(
     "You have reached the tool-call limit for this turn. Using ONLY the information gathered in the tool results above, write a complete, useful response to the original request. Do NOT call any more tools. If data is incomplete, acknowledge it and provide the best answer possible with what you have.";
   let terminalSynthesisInstruction = limitTerminalSynthesisInstruction;
   let terminalFinishReason = "max_tool_iterations";
+  // The terminal instruction in force is the one for a turn whose deliverables are attached files
+  // (set where a tool call after [SYNTHESIS REQUIRED] is turned away). Read by the evidence backstop.
+  let terminalInstructionNamesAttachedFiles = false;
   // Which loop brake ended the loop, when one did: the one-tool streak or every call blocked. Read by
   // the loop-brake reroute after the loop.
   let loopBrakeExit: "tool_streak_across_iterations" | "all_tool_calls_blocked" | undefined;
@@ -3923,12 +3960,14 @@ async function _runTurn(
         // DONE — telling the model "research incomplete, write a partial answer"
         // made it relay the deliverable's truncated head as the final message
         // (audit 2445da2e: a completed 4/4-step workflow ended as 1600 chars of
-        // the paper's TOC ending in "…"). Pivot to a completion summary.
+        // the paper's TOC ending in "…"). Pivot to the answer from the evidence, with the files
+        // listed and not pasted (agent/citation-honesty.ts buildSynthesisRequiredDirective).
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
+        terminalInstructionNamesAttachedFiles = rejectedTurnArtifacts.length > 0;
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
-          ? `THE WORK IS COMPLETE — WRITE THE FINAL SUMMARY NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the documents' contents into the chat. Write a SHORT final answer ${IN_REPLY_LANGUAGE} that: (1) states what was completed, (2) lists every attached artifact path with a one-line description (`
+          ? `THE WORK IS COMPLETE — WRITE THE FINAL ANSWER NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools. Write the final answer ${IN_REPLY_LANGUAGE}: answer any question the request asked, with the specific facts from the evidence above; list each attached file with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
-            + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
+            + "); when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into the chat. Nothing more."
           : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
@@ -4102,7 +4141,7 @@ async function _runTurn(
             "COMPLIANCE CORRECTION: This request asks for a durable downloadable or viewable artifact.",
             "Do NOT paste the full artifact source into chat.",
             "You MUST call an orchestration tool now so a specialist can write/export the artifact file.",
-            "For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'.",
+            "For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'; for a chart or table of numbers already in hand, agentName='chart_designer'.",
             "Ask the specialist to save the file as an artifact and publish the artifact path/download details. The final chat answer should be only a concise summary and artifact reference.",
             "A tool-free artifact dump is invalid for this turn.",
           ].join(" ");
@@ -4819,7 +4858,7 @@ async function _runTurn(
 
         toolResultMessages.push({
           role: "tool",
-          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown }),
+          content: buildModelVisibleToolResult(tc.name, cachedResultText, cachedToolCall.metadata, { runtimeNote: cachedNote, retrievalShown: _turnRetrievalShown, workflowShown: _turnWorkflowShown }),
           tool_call_id: tc.id,
           metadata: cachedToolCall.metadata,
         });
@@ -5189,6 +5228,7 @@ async function _runTurn(
         session,
         runtimeNote,
         retrievalShown: _turnRetrievalShown,
+        workflowShown: _turnWorkflowShown,
         onIntervention: opts.onIntervention,
         onToolResult: opts.onToolResult,
         guardrailEvents,
@@ -5486,8 +5526,8 @@ async function _runTurn(
           };
         }
         // Artifact-aware variant: when the orchestration produced attached files,
-        // the final answer is a completion SUMMARY (paths + what was built), never
-        // a relay of the documents' contents (audit 2445da2e).
+        // the final answer answers what the request asked and lists the files,
+        // never a relay of the documents' contents (audit 2445da2e).
         const synthesisArtifacts = collectTurnArtifactAttachments(session);
         // Honesty floor (audit 0dc158ad): on a turn whose research came back partial/
         // cancelled/below the substance floor, the normal "copy the exact names and
@@ -5655,6 +5695,7 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "warn" });
       if (workflowStepStartBackstop("iteration_tool_set_repeat")) continue;
       log.warn({ iterationCount, toolSet: iterToolSet }, "Same tool-call set repeated across iterations — forcing synthesis");
+      terminalFinishReason = "iteration_tool_set_repeat";
       break; // falls through to forceSynthesis below
     }
 
@@ -5690,6 +5731,8 @@ async function _runTurn(
       if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
       if (streakLoop) {
         loopBrakeExit = "tool_streak_across_iterations";
+        // The turn ended at the brake, not at the iteration cap (LOOP_BRAKE_FINISH_REASONS).
+        terminalFinishReason = "tool_streak_across_iterations";
         break; // falls through to forceSynthesis below
       }
     }
@@ -5747,7 +5790,11 @@ async function _runTurn(
     terminalSharedFactsEvidence,
     { preferHigherScore: false },
   );
-  const bypassTerminalSynthesis = shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
+  // Not on a turn whose deliverables are attached files: the instruction written for it asks for the
+  // answer and the file list, and the bypass shipped the job's whole answer, its files' text among
+  // it, as the reply instead (audit 2445da2e).
+  const bypassTerminalSynthesis = !(terminalFinishReason === "synthesis_required_tool_call_rejected" && terminalInstructionNamesAttachedFiles)
+    && shouldBypassTerminalSynthesisWithEvidence(terminalFinishReason, terminalEvidenceBackstop);
   let synthesized = loopBrakeRerouteAnswer ?? (bypassTerminalSynthesis
     ? null
     : await forceSynthesis(
@@ -5768,6 +5815,7 @@ async function _runTurn(
     "all_tool_calls_blocked",
     "synthesis_required_tool_call_rejected",
     "max_tool_iterations",
+    ...LOOP_BRAKE_FINISH_REASONS,
     "delegation_failures_terminal",
   ]);
   // The loop-brake reroute's answer is the specialist's, written this turn for this request, and it
@@ -5776,6 +5824,8 @@ async function _runTurn(
   // exist in the workspace; nothing was changed"), and a request asked again is answered again. A
   // review reproduction shipped neither: the orchestrator's narration beside its looping calls ("the
   // heading was updated", 259 characters) replaced the answer, and a fresh synthesis replaced that.
+  // It arrives without delegate_to_agent's "[agent]:" label and routing note (runCorrectiveReroute):
+  // with the label in front, the raw-dump guard below took the answer for a tool dump.
   const rerouteAnswered = loopBrakeRerouteAnswer !== null;
   if (
     !rerouteAnswered
@@ -5811,7 +5861,7 @@ async function _runTurn(
     ? (looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
         ? buildRecoveryEvidenceUserMessage(terminalEvidenceBackstop.evidence)
         : terminalEvidenceBackstop.evidence)
-    : terminalFinishReason === "max_tool_iterations"
+    : terminalFinishReason === "max_tool_iterations" || LOOP_BRAKE_FINISH_REASONS.includes(terminalFinishReason)
       ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
       : resolveEmptyAssistantResponseFallback("", "", session);
   // Second-chance evidence backstop.  Even when the synthesis call ran,
@@ -5854,11 +5904,16 @@ async function _runTurn(
       suppressedTextLength: lastSuppressedAssistantText?.length ?? 0,
     }, { sessionId: session.id, severity: "warn" });
   }
+  // A short reply on a turn whose deliverables are attached files is what it was asked for, the
+  // files listed: replaced by the evidence it shipped the files' text instead.
+  const synthesisUnderpowered = looksLikeUnderpoweredSynthesis(synthesized, {
+    filesAttached: collectTurnArtifactAttachments(session).length > 0,
+  });
   const useEvidenceOverSynthesis = !bypassTerminalSynthesis
     && !rerouteAnswered
     && terminalEvidenceBackstop
     && !evidenceLooksRaw
-    && looksLikeUnderpoweredSynthesis(synthesized);
+    && synthesisUnderpowered;
   // Last-resort: the runtime suppresses the model's text when it's
   // emitted alongside tool calls (correct in the common case — that text
   // is usually narration like "I'll call X next").  But after several
@@ -5873,7 +5928,7 @@ async function _runTurn(
     && lastSuppressedAssistantText !== null
     && !suppressedTextLooksRaw
     && lastSuppressedAssistantText.length >= 200
-    && looksLikeUnderpoweredSynthesis(synthesized);
+    && synthesisUnderpowered;
   if (useEvidenceOverSynthesis && terminalEvidenceBackstop) {
     logAudit("sub_agent_synthesis_forced", {
       reason: "underpowered_synthesis_replaced_with_evidence",
@@ -5982,6 +6037,8 @@ async function _runTurn(
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
+    // The turn's answer did not reach the user, whatever the fallback says: its scorecard is partial.
+    turnQualitySignals.answerWithheld = "raw_tool_output";
   }
   // Fabricated-inline-artifact guard: a turn that RESEARCHED (≥1 curated shared fact) but
   // produced NO real artifact (the build was stopped/blocked/never ran) sometimes has the
@@ -6014,6 +6071,8 @@ async function _runTurn(
         curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
       }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       presentableFinalMsg = buildResearchGatheredFallback(curatedForHonest);
+      // As at the raw-dump guard above: the answer did not ship, so the turn did not complete.
+      turnQualitySignals.answerWithheld = "fabricated_inline_artifact";
     }
   }
   // Converge on the SAME terminal treatment as the normal in-loop exit
@@ -6282,7 +6341,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6431,6 +6490,7 @@ async function runQaDeliveryGate(
       // still catch — silent scope expansion and debug debris surfaced in the
       // answer itself. Verdict vocabulary stays strictly PASS/FAIL.
       "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",
+      QA_DISCLOSURE_VERDICT_RULE,
       "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
     ].join("\n");
     const messages: LLMMessage[] = [
@@ -6447,12 +6507,16 @@ async function runQaDeliveryGate(
     }
   };
 
+  // Set when the answer was too long to hand a rewrite whole (answerFitsRepair), so the audit row
+  // says why the repair did not run.
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
-    const instruction = "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
-      + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
-      + flaws
-      + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
+    const instruction = buildQaImproveInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
       forceSynthesis(session, provider, signal, instruction)));
@@ -6509,6 +6573,8 @@ async function runQaDeliveryGate(
     escalated: result.escalated,
     unverified: result.unverified,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 
@@ -6526,7 +6592,7 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
@@ -6543,10 +6609,16 @@ async function runDeliverableConsistencyGate(
     }
   };
 
+  let repairSkipped: "answer_exceeds_repair_budget" | undefined;
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
+    const instruction = buildDeliverableConsistencyRepairInstruction(current, flaws);
+    if (!instruction) {
+      repairSkipped = "answer_exceeds_repair_budget";
+      return null;
+    }
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
-      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws))));
+      forceSynthesis(session, provider, signal, instruction)));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
@@ -6569,6 +6641,8 @@ async function runDeliverableConsistencyGate(
     // a reader counting "pass" saw none (review of the thinking-off verdicts, D1).
     status: result.passed && !result.noVerdict ? "pass" : result.status,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
+    ...(repairSkipped ? { repairSkipped } : {}),
   };
 }
 

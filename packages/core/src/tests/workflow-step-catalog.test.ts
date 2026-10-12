@@ -436,6 +436,34 @@ describe("a scene or job step whose turn gave up", () => {
     expect(flagged).toEqual([expect.objectContaining({ finishReason: "all_tool_calls_blocked" })]);
   });
 
+  // The E2E step turn of verified_research_brief: search_tools again and again. The streak brake's
+  // first stop gives the step its start directive once more (workflowStepStartBackstop); the
+  // repeated-tool-set brake ends it next. Both reported max_tool_iterations until each had a finish
+  // reason of its own; the step is still one that gave up.
+  it("job: ended by a loop brake with no specialist's result, is reported blocked", async () => {
+    const { registry, logAudit } = await loadModules();
+    registry.registerTool({
+      name: "search_tools",
+      description: "search the tool catalog",
+      parameters: { type: "object", properties: { query: { type: "string" } } },
+      execute: async () => ({ success: true, output: "Tools matching: run_workflow." }),
+    });
+    let call = 0;
+    streamMock.mockImplementation(() => {
+      call += 1;
+      if (call <= 8) return toolCallStream(`t${call}`, "search_tools", { query: `run the brief, attempt ${call}` });
+      return textStream("The brief could not be completed.");
+    });
+
+    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-streak", workspacePath: "/workspace" });
+
+    expect(result.metadata?.["blocked"]).toBe(true);
+    const flagged = logAudit.mock.calls.map((c) => c[1] as Record<string, unknown>).filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");
+    expect(flagged).toEqual([expect.objectContaining({ finishReason: "iteration_tool_set_repeat" })]);
+    const brakes = logAudit.mock.calls.filter((c) => c[0] === "tool_loop_detected").map((c) => (c[1] as { reason?: string }).reason);
+    expect(brakes).toEqual(["tool_streak_across_iterations", "iteration_tool_set_repeat"]);
+  });
+
   it("control: at the iteration cap after its specialist returned, completes", async () => {
     const { result, flagged } = await runWithDelegations({ name: "brief_packet", workflowType: "job" }, [deliveredDelegation], { maxIterationsOverride: 1 });
 

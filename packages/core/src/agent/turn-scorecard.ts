@@ -15,7 +15,16 @@ export interface TurnQualitySignals {
   artifactProbeCount: number;
   /** Verdict of the plan-independent artifact verification gate. */
   artifactVerificationStatus: ArtifactVerificationStatus;
+  /**
+   * Why the turn's answer was withheld, when a terminal guard shipped its honest fallback in the
+   * answer's place (agent/runtime.ts): the last-resort guard took it for a raw tool dump
+   * (raw_tool_evidence_dump_suppressed), or the inline-artifact guard for a document written inline
+   * instead of built (inline_artifact_fabrication_suppressed). Null when the answer shipped.
+   */
+  answerWithheld: AnswerWithheldReason | null;
 }
+
+export type AnswerWithheldReason = "raw_tool_output" | "fabricated_inline_artifact";
 
 export interface TurnQualityScorecard {
   version: 2;
@@ -67,6 +76,7 @@ export function createTurnQualitySignals(): TurnQualitySignals {
     artifactProbeStatus: "not_requested",
     artifactProbeCount: 0,
     artifactVerificationStatus: "not_requested",
+    answerWithheld: null,
   };
 }
 
@@ -81,6 +91,9 @@ function outcomeFor(input: BuildTurnQualityScorecardInput, quality: TurnQualityS
   if (input.blocked) return { status: "blocked", reason: input.finishReason };
   if (input.failed) return { status: "failed", reason: input.finishReason };
   if (input.finishReason === "cancelled") return { status: "cancelled", reason: "cancelled" };
+  // What shipped is the fallback, not an answer: the E2E turn whose listing was withheld as a "dump"
+  // and replaced by a bare heading was recorded "completed".
+  if (quality.answerWithheld) return { status: "partial", reason: `answer_withheld_${quality.answerWithheld}` };
   if (quality.qaStatus === "fail") return { status: "partial", reason: "qa_failed" };
   if (quality.qaStatus === "unverified") return { status: "partial", reason: "qa_unverified" };
   // A turn that shipped a file which failed its integrity check is NOT "completed",

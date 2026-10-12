@@ -147,6 +147,19 @@ describe("the corrective build's confirmation", () => {
     expect(session.getHistory().some((message) => message.content === BUILD_REPORT)).toBe(true);
   });
 
+  it("is not written when the caller keeps its own answer: no model call, the built paths come back", async () => {
+    // Review of d2d064bc: the completion gate keeps a turn's answer after a repair and discarded
+    // this confirmation, a whole synthesis call on the slow model.
+    const session = turnSoFar();
+
+    const built = await modules.corrective.runCorrectiveBuild("", correctiveContext(session), { confirm: false });
+
+    expect(built).toBe("generated/e2e-guards/inventur");
+    expect(sentMessages).toHaveLength(0);
+    // The build itself is recorded as before, so the file still surfaces as an attachment.
+    expect(session.getHistory().some((message) => message.content === BUILD_REPORT)).toBe(true);
+  });
+
   it("control: a forced synthesis given no history reads the session's, as before", async () => {
     const session = turnSoFar();
 

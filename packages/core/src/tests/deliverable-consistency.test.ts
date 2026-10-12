@@ -7,7 +7,7 @@ import {
   DELIVERABLE_CONSISTENCY_CRITERION,
   DELIVERABLE_CONSISTENCY_MIN_CHARS,
 } from "../agent/deliverable-consistency.js";
-import { parseQaVerdict, runQaDeliveryLoop } from "../agent/qa-delivery-loop.js";
+import { parseQaVerdict, runQaDeliveryLoop, QA_DISCLOSURE_RULE, QA_ACTION_HONESTY_RULE } from "../agent/qa-delivery-loop.js";
 
 /**
  * Deliverable self-consistency gate (audit 17f53ed0): a plan-less price quote recommended
@@ -82,6 +82,8 @@ describe("buildDeliverableConsistencyCheckMessages", () => {
     expect(sys).toMatch(/tiers, options, phases, line items, or scenarios are NOT contradictions/);
     expect(sys).toMatch(/SUM correctly/);
     expect(sys).toMatch(/8\.000–12\.000 € is ONE range/);
+    // An openly reported deviation from the user's facts is not a contradiction (review 2026-10-12).
+    expect(sys).toMatch(/openly reports that something the user stated was refused, failed, or done differently does NOT contradict/);
     // The verdict vocabulary round-trips through the existing parser.
     expect(parseQaVerdict("PASS").pass).toBe(true);
     expect(parseQaVerdict("FAIL: recommends 10k for ~10 weeks at a stated 90-120€/h rate (≈37€/h)").pass).toBe(false);
@@ -95,7 +97,7 @@ describe("buildDeliverableConsistencyCheckMessages", () => {
 
 describe("buildDeliverableConsistencyRepairInstruction", () => {
   it("fixes ONLY the named contradictions and recomputes dependent totals", () => {
-    const instr = buildDeliverableConsistencyRepairInstruction("10k for 10 weeks contradicts the stated 90€/h rate");
+    const instr = buildDeliverableConsistencyRepairInstruction("Angebot: 10.000 €", "10k for 10 weeks contradicts the stated 90€/h rate");
     expect(instr).toContain("10k for 10 weeks contradicts the stated 90€/h rate");
     expect(instr).toMatch(/Fix ONLY these/);
     expect(instr).toMatch(/Recompute any dependent totals/i);
@@ -103,6 +105,26 @@ describe("buildDeliverableConsistencyRepairInstruction", () => {
     // Red-team fix B: a false-fire must not collapse legitimate structure/caveats.
     expect(instr).toMatch(/Do NOT collapse tiers, options, phases, or line-item breakdowns/);
     expect(instr).toMatch(/do NOT remove caveats/);
+    // Nor a note of a refusal or a deviation (E2E 2026-10-12: a repair dropped one).
+    expect(instr).toContain(QA_DISCLOSURE_RULE);
+    // And a flaw in what was done is stated, never rewritten away.
+    expect(instr).toContain(QA_ACTION_HONESTY_RULE);
+  });
+
+  it("carries the answer it repairs, disclosure included: the draft is not in the history the repair reads", () => {
+    const disclosure = "Annahme: 40 Stunden pro Woche; bei Teilzeit verlängert sich die Laufzeit entsprechend.";
+    const answer = `Empfehlung: 36.000 € für 10 Wochen bei 90 €/h.\n\n${disclosure}`;
+    const instr = buildDeliverableConsistencyRepairInstruction(answer, "the weekly hours are not stated") ?? "";
+    expect(instr).toContain(`Current answer to improve:\n${answer}`);
+    expect(instr).toContain(disclosure);
+    // What to do comes after the answer, so the instruction is the last thing the call reads.
+    expect(instr.indexOf("Fix ONLY these")).toBeGreaterThan(instr.indexOf(disclosure));
+  });
+
+  it("is skipped for an answer that does not fit, rather than handed its head and asked for all of it", () => {
+    const answer = `${"a".repeat(50)}TAIL`;
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 50)).toBeNull();
+    expect(buildDeliverableConsistencyRepairInstruction(answer, "f", 54)).toContain(answer);
   });
 });
 

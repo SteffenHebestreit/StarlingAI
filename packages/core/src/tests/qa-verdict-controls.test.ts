@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type Msg = { role: string; content: string };
-type CallRecord = { kind: string; options: unknown; attribution: Record<string, unknown> };
+type CallRecord = { kind: string; options: unknown; attribution: Record<string, unknown>; last: string };
 
 const streamMock = vi.hoisted(() => vi.fn());
 const completeMock = vi.hoisted(() => vi.fn());
@@ -66,6 +66,8 @@ const CRITERION = "Recommends one offer and says why";
 const ANSWER = ("Das zweite Angebot ist die beste Wahl: Es kostet 12.000 € bei zehn Wochen Laufzeit und bietet den "
   + "größten Leistungsumfang. Das erste ist günstiger, deckt aber keine Wartung ab; das dritte kostet mehr bei "
   + "gleicher Laufzeit. ").repeat(4);
+/** A delegated-result budget ANSWER does not fit in, for the tests where a repair must not run. */
+const OVER_BUDGET = Math.floor(ANSWER.trim().length / 2);
 
 function kindOf(messages: Msg[]): string {
   const system = messages[0]?.content ?? "";
@@ -83,7 +85,7 @@ function spyProvider(replies: Record<string, string[]>): CallRecord[] {
   const seen: Record<string, number> = {};
   completeMock.mockImplementation(async (messages: Msg[], _tools: unknown, _signal: unknown, options: unknown) => {
     const kind = kindOf(messages);
-    calls.push({ kind, options, attribution: { ...currentCallAttribution().data } });
+    calls.push({ kind, options, attribution: { ...currentCallAttribution().data }, last: messages[messages.length - 1]?.content ?? "" });
     const n = seen[kind] ?? 0;
     seen[kind] = n + 1;
     const list = replies[kind] ?? [];
@@ -177,6 +179,53 @@ describe("the QA delivery loop's verdict", () => {
     expect(verdicts[0]!.options).toBeUndefined();
   });
 
+  it("hands the improve rewrite the answer the verdict judged", async () => {
+    // The draft is not in the history forceSynthesis reads until the turn ships: the rewrite got the
+    // flaws and not the answer, and wrote a new one (E2E core-ix-browser-order-form-express-refused).
+    getConfig().orchestration.qaDeliveryLoop = true;
+    const calls = spyProvider({ qa_verdict: ["FAIL: the answer does not say why", "PASS — evidence: it recommends offer 2 for its scope"] });
+    await runDeliverableTurn({ plan: true });
+
+    const improve = calls.filter((c) => c.kind === "qa_improve");
+    expect(improve).toHaveLength(1);
+    expect(improve[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
+  });
+
+  it("does not rewrite an answer too long to hand over whole: it ships as it is, and the row says why", async () => {
+    // A rewrite asked for the COMPLETE answer that saw only its head returns the head, and the
+    // improve step's shrink guard rejects only a stub.
+    getConfig().orchestration.qaDeliveryLoop = true;
+    getConfig().agents.performance.maxDelegatedResultChars = OVER_BUDGET;
+    const calls = spyProvider({ qa_verdict: ["FAIL: the answer does not say why"] });
+    await runDeliverableTurn({ plan: true });
+
+    expect(calls.filter((c) => c.kind === "qa_improve")).toHaveLength(0);
+    const rows = auditRows("flow_verification_passed").filter((row) => row["reason"] === "qa_delivery_loop");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ improved: false, passed: false, repairSkipped: "answer_exceeds_repair_budget" });
+  });
+
+  it("logs what each failing verdict named, clipped, on flow_verification_passed", async () => {
+    // Both rounds failed and the reply was a repair, and nothing recorded what the verdicts had
+    // asked to fix (E2E core-ix-browser-order-form-express-refused).
+    getConfig().orchestration.qaDeliveryLoop = true;
+    const long = "the answer reports a reference the user's choice did not produce. ".repeat(8).trim();
+    spyProvider({ qa_verdict: [`FAIL: ${long}`, "FAIL: the answer does not say why"] });
+    await runDeliverableTurn({ plan: true });
+
+    const rows = auditRows("flow_verification_passed").filter((row) => row["reason"] === "qa_delivery_loop");
+    expect(rows).toHaveLength(1);
+    const [first, second] = rows[0]!["qaFlaws"] as string[];
+    // Clipped to at most 300 characters on a word boundary, the cut marked.
+    expect(first!.endsWith("…")).toBe(true);
+    const kept = first!.slice(0, -1);
+    expect(kept.length).toBeLessThanOrEqual(300);
+    expect(kept.length).toBeGreaterThan(200);
+    expect(long.startsWith(kept)).toBe(true);
+    expect(long[kept.length]).toMatch(/\s/);
+    expect(second).toBe("the answer does not say why");
+  });
+
   it("records an empty verdict as no verdict — passed:false, status unverified — and asks for no rewrite", async () => {
     getConfig().orchestration.qaDeliveryLoop = true;
     const calls = spyProvider({ qa_verdict: [""] });
@@ -208,6 +257,28 @@ describe("the deliverable-consistency verdict", () => {
     const [perf] = auditRows("turn_performance");
     expect(perf!["qaLlmCalls"]).toBe(2);
     expect((perf!["phaseTimingsMs"] as Record<string, number>)["deliverableConsistencyQa"]).toBeGreaterThanOrEqual(0);
+  });
+
+  it("does not repair an answer too long to hand over whole: it ships as it is, and the row says why", async () => {
+    getConfig().orchestration.deliverableConsistencyQa = true;
+    getConfig().agents.performance.maxDelegatedResultChars = OVER_BUDGET;
+    const calls = spyProvider({ consistency_verdict: ["FAIL: the recommendation contradicts the stated budget"] });
+    await runDeliverableTurn({ plan: false });
+
+    expect(calls.filter((c) => c.kind === "synthesis" && c.attribution["agentName"] === "consistency_repair")).toHaveLength(0);
+    expect(auditRows("deliverable_consistency_failed")).toEqual([
+      expect.objectContaining({ repaired: false, repairSkipped: "answer_exceeds_repair_budget" }),
+    ]);
+  });
+
+  it("hands the repair the answer the verdict judged", async () => {
+    getConfig().orchestration.deliverableConsistencyQa = true;
+    const calls = spyProvider({ consistency_verdict: ["FAIL: the recommendation contradicts the stated budget"] });
+    await runDeliverableTurn({ plan: false });
+
+    const repairs = calls.filter((c) => c.kind === "synthesis" && c.attribution["agentName"] === "consistency_repair");
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
   });
 
   it("keeps the provider's own controls when orchestration.qaVerdictReasoning is on", async () => {
@@ -243,7 +314,7 @@ describe("the deliverable-consistency verdict", () => {
     expect(auditRows("deliverable_consistency_passed")).toHaveLength(0);
     const rows = auditRows("deliverable_consistency_failed");
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ passed: false, status: "fail", repaired: false });
+    expect(rows[0]).toMatchObject({ passed: false, status: "fail", repaired: false, qaFlaws: ["the recommendation contradicts the stated budget"] });
   });
 
   it("records an empty verdict as deliverable_consistency_unverified, never as passed", async () => {
@@ -302,5 +373,34 @@ describe("the one-shot risk-gated verify (QA loop off)", () => {
 
     expect(auditRows("flow_verification_passed")).toHaveLength(0);
     expect(auditRows("flow_high_stakes_unverified")).toEqual([expect.objectContaining({ reason: "verify_returned_nothing" })]);
+  });
+
+  it("hands the verification the answer it is asked to return unchanged", async () => {
+    getConfig().orchestration.qaDeliveryLoop = false;
+    getConfig().orchestration.riskGatedQA = true;
+    const calls = spyProvider({});
+    await runDeliverableTurn({ plan: true, riskTier: "high" });
+
+    const verify = calls.filter((c) => c.kind === "synthesis" && c.last.includes("Before finalizing, verify your answer"));
+    expect(verify).toHaveLength(1);
+    // Labelled neutrally: it is asked to return the answer unchanged when the criteria hold.
+    expect(verify[0]!.last).toContain(`Your answer:\n${ANSWER.trim()}`);
+    expect(verify[0]!.last).not.toContain("Current answer to improve");
+    expect(auditRows("flow_verification_passed")).toEqual([expect.objectContaining({ repaired: false })]);
+  });
+
+  it("does not verify an answer too long to hand over whole: it ships as it is", async () => {
+    // A verification that saw only the head would return the head as "the SAME answer", and half
+    // the length passes its guard. The bound is the turn's delegated-result budget.
+    getConfig().orchestration.qaDeliveryLoop = false;
+    getConfig().orchestration.riskGatedQA = true;
+    getConfig().agents.performance.maxDelegatedResultChars = OVER_BUDGET;
+    const calls = spyProvider({});
+    await runDeliverableTurn({ plan: true, riskTier: "high" });
+
+    expect(calls.filter((c) => c.kind === "synthesis" && c.last.includes("Before finalizing, verify your answer"))).toHaveLength(0);
+    expect(auditRows("flow_verification_passed")).toHaveLength(0);
+    expect(auditRows("flow_verification_repaired")).toHaveLength(0);
+    expect(auditRows("flow_high_stakes_unverified")).toEqual([expect.objectContaining({ reason: "answer_exceeds_repair_budget" })]);
   });
 });

@@ -29,18 +29,33 @@ const MID_TURN_MAX_ENTRIES = 3;
 // Deliberately NOT "Original user request:". runtime-utils.ts reads that phrase as a delegation
 // task echoed back into an answer, and this block is a different thing.
 const LABEL = "[USER'S OWN WORDS — this turn, verbatim, untranslated]";
+/**
+ * A value the user chose is a constraint a refusal does not hand to the worker. In E2E
+ * core-ix-browser-order-form-express-refused the page refused the express shipping the user chose;
+ * the browser agent picked standard itself, submitted again and reported the reference it got. In
+ * both blocks, because a task that already quotes the user's words gets only the second.
+ *
+ * A fallback the user named for that case ("Express, sonst Standard") is the user's choice too, and
+ * filling a missed field or re-entering the same value in the format asked for substitutes nothing
+ * (the browser_agent prompt's own exception), so neither is blocked.
+ */
+export const REFUSED_CHOICE_RULE =
+  "If something refuses a value the user chose, use the alternative the user named for that case if they named one; "
+  + "otherwise report the refusal and leave the choice to the user — never substitute one of your own (filling a missed "
+  + "field or re-entering the same value in the required format is fine).";
 // The language sentence is here because this block is the only place a specialist sees what the
 // user actually wrote. Its task is the orchestrator's paraphrase and is often English, and a
 // specialist that mirrored its task delivered an English page to a German speaker.
 const GUIDANCE =
   "The task above is the orchestrator's summary. Your assignment is still the task; use these words to honour any "
   + "explicit instruction or constraint the user stated that applies to your part (e.g. a model, quality tier, format, "
-  + "language, something to avoid). Where the summary and the user's words disagree on such a constraint, follow the "
-  + `user's words. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION} Do not repeat this block.`;
-/** When the task already quotes the user's words, only the language instruction is still missing. */
+  + "language, a value they chose, something to avoid). Where the summary and the user's words disagree on such a "
+  + `constraint, follow the user's words. ${REFUSED_CHOICE_RULE} ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION} `
+  + "Do not repeat this block.";
+/** When the task already quotes the user's words, only the refused-choice rule and the language instruction are still missing. */
 const LANGUAGE_ONLY_LABEL = "[REPLY LANGUAGE]";
 const LANGUAGE_ONLY_GUIDANCE =
-  `The user's own words are quoted in the task or context above. ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION}`;
+  `The user's own words are quoted in the task or context above. ${REFUSED_CHOICE_RULE} ${SPECIALIST_REPLY_LANGUAGE_INSTRUCTION}`;
 
 function clipMiddle(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -119,7 +134,7 @@ export function userWordsLines(
  * A part the task or context already quotes is dropped, so a task that embeds the request itself
  * (the source-sensitive frames do) does not carry it twice. `alreadyCarried` is what the
  * specialist will see anyway: its task and its context. When everything is already carried, the
- * reply-language instruction still is not, so that alone is added.
+ * refused-choice rule and the reply-language instruction still are not, so they alone are added.
  */
 export function renderUserWordsBlock(words: TurnUserWords | undefined, alreadyCarried: string): string {
   if (!words) return "";

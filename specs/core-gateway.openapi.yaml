@@ -439,6 +439,31 @@ paths:
         '401': { description: Missing or invalid bearer token }
         '403': { description: Role below operator }
         '404': { description: Not there }
+  /api/workspace/generated:
+    delete:
+      tags: [Workspace]
+      summary: Empty generated/ in the caller's own workspace root
+      description: |
+        Removes every file, link and directory under `generated/`, the zone a turn writes to,
+        and keeps the directory. Under multi-user auth that is the caller's own root
+        (`users/<account>/generated/`), with one operator the shared root's. Nothing outside
+        `generated/` is touched (uploads, config shards, ledgers, the state directory, a
+        repository at the root). A link is removed itself, never followed: its target stays.
+        Requires an operator bearer token (a token with no role claim counts as operator).
+        The E2E harness calls it before each attempt, always with `scope=account`.
+      parameters:
+        - { name: scope, in: query, required: false, schema: { type: string, enum: [account] }, description: '`account`: the caller expects its own account''s root; when its root is the deployment''s shared one (auth off, or no account to partition by), nothing is removed and the answer is 409.' }
+      responses:
+        '200':
+          description: Emptied (also when there was no `generated/`)
+          content: { application/json: { schema: { type: object, properties: { removed: { type: integer, description: 'Entries removed: files, links and directories' } } } } }
+        '400': { description: '`generated/` is not a directory of the caller''s root (a link in its place), that root is a link, or `scope` is not `account`' }
+        '401': { description: Missing or invalid bearer token }
+        '403': { description: 'Role below operator, or no workspace root of the caller''s own under multi-user auth (an identity without an account id or principal kind among them)' }
+        '409': { description: '`scope=account` was asked for and the caller''s root is the deployment''s shared root: nothing removed' }
+        '500':
+          description: Some entries stayed
+          content: { application/json: { schema: { type: object, properties: { error: { type: string }, removed: { type: integer }, failed: { type: integer } } } } }
   /api/workspace/archive:
     get:
       tags: [Workspace]

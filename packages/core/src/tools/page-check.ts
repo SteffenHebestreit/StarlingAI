@@ -323,8 +323,12 @@ let pageCheckUnavailableReported = false;
  * Both look complete to a marker count, so the orchestrator had nothing to resume and simply
  * stopped. A build is not done because the placeholders are gone; it is done when the thing
  * it built works.
+ *
+ * `timedOut` marks a failing verdict a timeout produced (a script over the vm's 3 s, or the kill
+ * timer): it can be the machine's load at that moment, so it is not held, and a caller deciding
+ * whether a repair worked reads it as no verdict.
  */
-export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Promise<{ ok: boolean; detail: string }> {
+export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Promise<{ ok: boolean; detail: string; timedOut?: true }> {
   let html: string;
   let stat: { mtimeMs: number; size: number };
   try {
@@ -389,7 +393,7 @@ export async function checkBuiltPage(absHtmlPath: string, relLabel: string): Pro
     holdPageVerdict(verdictKey, problems.length === 0 ? { ok: true } : { ok: false, problem: problems[0]! });
   }
   if (problems.length === 0) return { ok: true, detail: "" };
-  return { ok: false, detail: `${relLabel}: ${problems[0]}` };
+  return { ok: false, detail: `${relLabel}: ${problems[0]}`, ...(report.timedOut ? { timedOut: true as const } : {}) };
 }
 
 /** Held page verdicts (checkBuiltPage), oldest first; bounded so a long-lived gateway cannot grow it. */

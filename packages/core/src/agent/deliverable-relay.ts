@@ -20,6 +20,7 @@ import {
   looksLikeRawToolEvidenceDump,
   looksLikeRawSharedFactsDump,
   looksLikeRawWorkspaceToolDump,
+  stripDelegateRelayFrame,
 } from "./runtime-evidence-dump.js";
 import { UNFINISHED_STUB_MARKER } from "./sub-agent-prompt-guidance.js";
 
@@ -91,7 +92,9 @@ export function extractSingleRelayableDeliverable(
   if (!/Present the full content below VERBATIM/i.test(content)) return null;
   const m = EVIDENCE_SECTION_RE.exec(content);
   if (!m) return null;
-  const evidence = stripLeadingReasoningPreamble(content.slice(m.index + m[0].length).trim());
+  // A routed specialist's answer ends with its routing note ("↳ Auto-routed to …"), which tells the
+  // orchestrator who answered and is not part of the deliverable.
+  const evidence = stripLeadingReasoningPreamble(stripDelegateRelayFrame(content.slice(m.index + m[0].length)));
   if (evidence.length < 800) return null;
   // A degenerate, repetition-looped deliverable must NOT be relayed verbatim. Return
   // null so the normal synthesis pass runs and cleans it into a usable answer — the

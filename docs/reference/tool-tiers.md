@@ -106,7 +106,7 @@ Always allowed; no side effects.
 | `search_knowledge_base` | — | — | Scoped graph-RAG search over one crawled knowledge base, excerpts cite source page URLs |
 | `search_sessions` | — | — | Full-text search over past conversations with optional LLM summarization |
 | `search_skills` | — | — | Search the Skill Library for reusable procedures learned from past work |
-| `search_tools` | — | — | Semantic search over registered tools — returns relevant tool names and descriptions for a task |
+| `search_tools` | — | — | Semantic search over registered tools — returns relevant tool names and descriptions for a task, marking each the caller cannot call (loadable, or the agents that hold it) |
 | `search_workflows` | — | — | Search reusable scenes and jobs in the workflow catalog |
 | `searchsploit_query` | — | — | Search Exploit-DB / SearchSploit for known CVEs and exploit PoCs (offline, no network traffic to target) |
 | `session_status` | — | — | Get current session metadata |

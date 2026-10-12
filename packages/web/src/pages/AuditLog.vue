@@ -313,6 +313,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useAuditStore, type AuditEvent } from "@/stores/audit";
 import { useProductStore } from "@/stores/product";
+import { ITERATION_STOP_FINISH_REASONS } from "@/composables/finishReasons";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -446,7 +447,7 @@ const performanceSummary = computed(() => {
     .map((event) => Number(event.data.toolCallsRequested ?? 0))
     .filter((value) => Number.isFinite(value) && value >= 0);
   const blockedTurns = recentPerformanceEvents.value.filter((event) => Boolean(event.data.blocked)).length;
-  const maxIterationStops = recentPerformanceEvents.value.filter((event) => String(event.data.finishReason ?? "") === "max_tool_iterations").length;
+  const maxIterationStops = recentPerformanceEvents.value.filter((event) => ITERATION_STOP_FINISH_REASONS.has(String(event.data.finishReason ?? ""))).length;
   const slowTurns = turnDurations.filter((value) => value >= PERFORMANCE_THRESHOLDS.slowTurnMs).length;
   const slowFirstResponses = firstResponses.filter((value) => value >= PERFORMANCE_THRESHOLDS.slowFirstResponseMs).length;
   const promptHeavyTurns = promptChars.filter((value) => value >= PERFORMANCE_THRESHOLDS.highPromptChars).length;
@@ -870,7 +871,7 @@ function performanceFlags(data: Record<string, unknown>): string[] {
   if (Number(data.promptChars ?? 0) >= PERFORMANCE_THRESHOLDS.highPromptChars) flags.push("high prompt");
   if (Number(data.toolCallsRequested ?? 0) >= PERFORMANCE_THRESHOLDS.toolHeavyCalls) flags.push("tool-heavy");
   if (Boolean(data.blocked)) flags.push("blocked");
-  if (String(data.finishReason ?? "") === "max_tool_iterations") flags.push("max iterations");
+  if (ITERATION_STOP_FINISH_REASONS.has(String(data.finishReason ?? ""))) flags.push("max iterations");
   return flags;
 }
 

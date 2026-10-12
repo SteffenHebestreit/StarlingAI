@@ -2,7 +2,8 @@
  * End-to-end evaluation CLI.
  *
  *   pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n]
- *                     [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory] [--list]
+ *                     [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory]
+ *                     [--keep-workspace] [--list]
  *   pnpm e2e:validate [--scenarios dir]
  *   pnpm e2e:setup [--remove]
  *
@@ -58,7 +59,7 @@ import { captureProvenance, describeProvenance, readGatewayModel, type E2EProven
 import { resolveSetupPaths, runE2ESetup, SetupRefusedError } from "./setup.js";
 
 const VALUE_FLAGS = new Set(["group", "tag", "id", "repeat", "concurrency", "baseline", "out", "scenarios"]);
-const BOOLEAN_FLAGS = new Set(["remove", "list", "help", "keep-memory"]);
+const BOOLEAN_FLAGS = new Set(["remove", "list", "help", "keep-memory", "keep-workspace"]);
 
 interface ParsedArgs {
   command: string;
@@ -160,9 +161,11 @@ function nonNegativeIntFromEnv(io: CliIo, name: string, fallback: number): numbe
 }
 
 const HELP = `Usage:
-  pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n] [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory] [--list]
+  pnpm e2e:evaluate [--group g] [--tag t] [--id x] [--repeat k] [--concurrency n] [--baseline report.json] [--out dir] [--scenarios dir] [--keep-memory] [--keep-workspace] [--list]
   pnpm e2e:validate [--scenarios dir]
   pnpm e2e:setup [--remove]
+Before each attempt (one at a time) the eval accounts' durable memory, user model and generated/
+files are emptied: --keep-memory keeps all three, --keep-workspace keeps the generated/ files.
 See eval/e2e/README.md.`;
 
 function validate(args: ParsedArgs, io: CliIo, repoRoot: string): number {
@@ -431,7 +434,7 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
     // restarted since) passes from run to run until someone deletes it.
     adoptUnconfirmedTurns(client, lock.inherited);
     const named = lock.inherited.map((turn) => `${turn.requestId} of ${turn.identity}`).join(", ");
-    io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}) in ${lockPath}: the memory reset of their account waits for them.`);
+    io.out(`An earlier run left ${lock.inherited.length} turn(s) it had not seen end (${named}) in ${lockPath}: the memory and workspace resets of their account wait for them.`);
   }
   // The lock lists the turns as they are sent and seen to end, so a run that is killed leaves them.
   let persistWarned = false;
@@ -490,6 +493,8 @@ async function evaluate(args: ParsedArgs, io: CliIo, repoRoot: string): Promise<
       concurrency,
       eventGraceMs,
       resetDurableMemory: !args.booleans.has("keep-memory"),
+      // --keep-memory keeps what the accounts had, their files with it: a memory naming a file that is gone misleads too.
+      resetWorkspace: !args.booleans.has("keep-memory") && !args.booleans.has("keep-workspace"),
       signal: interrupt.signal,
       ...io.runner,
     });

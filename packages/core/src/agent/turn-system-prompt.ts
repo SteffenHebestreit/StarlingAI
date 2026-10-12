@@ -278,7 +278,8 @@ export async function assembleTurnSystemMessages(
         + "More tools exist and can be added to THIS turn on demand. If you need a capability that is not in your current "
         + "tool list (reading or writing files, running code or shell commands, fetching a URL, generating a document or "
         + "image, and so on), call search_tools with a short description of what you need, then call load_tool with the "
-        + "exact name it returns — the tool becomes callable on your next step. Never tell the user a task is impossible, "
+        + "exact name of a tool it marks loadable — the tool becomes callable on your next step; a tool it marks as held by "
+        + "other agents is theirs: delegate the task to one of them. Never tell the user a task is impossible, "
         + "and never ask them to do it manually, because a tool was missing from the list: look for it and load it first."
       : "";
     const dynamicGuidance = iterationCount === 0 ? initialDynamicGuidance : null;

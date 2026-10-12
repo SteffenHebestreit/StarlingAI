@@ -5,7 +5,9 @@
 // cloud, and orbits read as one connected organism, not stacked layers.
 // Motion is driven by uOrbitTime, a CPU-accumulated phase, so speed changes
 // (state transitions, freezes) never cause angle jumps.
-export const orbitalVertexShader = `
+import { POINT_SCALE_VERTEX, POINT_SCALE_FRAGMENT } from "./pointScale";
+
+export const orbitalVertexShader = `${POINT_SCALE_VERTEX}
   attribute float aRing;    // ring index 0..2
   attribute float aAngle;   // base angle on the ring
   attribute float aRadial;  // radial offset from the orbit radius
@@ -127,11 +129,11 @@ export const orbitalVertexShader = `
     vKind = aKind;
     vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
     gl_Position  = projectionMatrix * mvPosition;
-    gl_PointSize = aSize * (5.0 / -mvPosition.z);
+    gl_PointSize = scaledPointSize(aSize * (5.0 / -mvPosition.z));
   }
 `;
 
-export const orbitalFragmentShader = `
+export const orbitalFragmentShader = `${POINT_SCALE_FRAGMENT}
   varying vec3  vColor;
   varying float vAlpha;
   varying float vKind;
@@ -142,17 +144,17 @@ export const orbitalFragmentShader = `
     if (vKind > 2.5 && vKind < 3.5) {
       // crisp square tick — the geometric "machined" accent on each orbit
       float box = max(abs(q.x), abs(q.y));
-      gl_FragColor = vec4(vColor, vAlpha * (1.0 - smoothstep(0.3, 0.5, box)));
+      gl_FragColor = vec4(vColor, vAlpha * (1.0 - smoothstep(0.3, 0.5, box)) * vPointFade);
     } else if (vKind > 0.5 && vKind < 1.5) {
       // planet: wide soft halo around a hot core
       float halo = pow(max(0.0, 1.0 - d * 2.0), 0.9);
       vec3  col  = vColor * (0.5 + 1.6 * halo);
-      float a    = vAlpha * (smoothstep(0.5, 0.02, d) * 0.9 + 0.25 * halo);
+      float a    = vAlpha * (smoothstep(0.5, 0.02, d) * 0.9 + 0.25 * halo) * vPointFade;
       gl_FragColor = vec4(col, a);
     } else {
       float glow = pow(max(0.0, 1.0 - d * 2.0), 1.4);
       vec3  col  = vColor * (0.6 + 1.8 * glow);
-      float a    = vAlpha * smoothstep(0.5, 0.05, d);
+      float a    = vAlpha * smoothstep(0.5, 0.05, d) * vPointFade;
       gl_FragColor = vec4(col, a);
     }
   }

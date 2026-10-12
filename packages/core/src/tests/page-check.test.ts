@@ -133,6 +133,123 @@ for(let x=0;x<960;x+=120){ ctx.fillRect(x,10,100,80); }
 });
 
 /**
+ * AN ID IS AN ATTRIBUTE NAMED `id`, HOWEVER IT IS QUOTED.
+ *
+ * E2E 2026-10-12 (core-ix-workflow-scene-research-brief): a working evidence ledger declared
+ * `<span id=total>`, valid unquoted HTML. The id scan only knew quoted values, so the check's
+ * getElementById("total") returned null, the page was reported broken with "Cannot set
+ * properties of null", and the finished page went to a corrective build.
+ */
+describe("verify_page — reads every id the markup declares, and only those", () => {
+  const UNQUOTED = `<!DOCTYPE html><html><body>
+<table><tr><td data-id="row-7">Kiel</td></tr></table>
+<p>Summe: <span id=total>0</span> · <b id='count'>0</b></p>
+<script>
+"use strict";
+document.getElementById("total").textContent = "146";
+document.getElementById("count").textContent = "18";
+</script>
+</body></html>`;
+
+  it("collects unquoted and single-quoted ids, and not a data-id", () => {
+    const ids = collectElementIds(UNQUOTED);
+    expect(ids.has("total")).toBe(true);
+    expect(ids.has("count")).toBe(true);
+    expect(ids.has("row-7")).toBe(false);
+    expect([...ids].sort()).toEqual(["count", "total"]);
+  });
+
+  it("passes a page whose script writes to an element with an unquoted id", async () => {
+    const root = mkdtempSync(join(tmpdir(), "sai-pagecheck-unquoted-"));
+    mkdirSync(join(root, "generated"), { recursive: true });
+    const page = join(root, "generated", "evidence_ledger.html");
+    writeFileSync(page, UNQUOTED);
+    expect(await checkBuiltPage(page, "generated/evidence_ledger.html")).toEqual({ ok: true, detail: "" });
+  }, 40_000);
+
+  it("still fails a script asking for an id only a data-id carries", () => {
+    const html = '<html><body><div data-id="total"></div><script>document.getElementById("total").textContent = "1";</script></body></html>';
+    const { scripts } = collectScripts(html, "/w/index.html");
+    const r = runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+    expect(r.errors.join(" ")).toMatch(/TypeError/);
+  });
+
+  it("reads a tag a browser reads: an `=` inside an unquoted value, an attribute glued to a quoted one", () => {
+    expect(collectElementIds('<a href=page.html?x=1 id="y">weiter</a>').has("y")).toBe(true);
+    expect(collectElementIds('<div class="a"id="b"></div>').has("b")).toBe(true);
+    expect(collectElementIds("<span class='a'id=c></span>").has("c")).toBe(true);
+    // An unquoted value keeps its `=`, so it is not read as a further attribute.
+    expect(collectDeclaredElements('<meta id=m content=width=device-width>').get("m")).toEqual({ tag: "meta" });
+  });
+});
+
+/**
+ * AN ID THE PAGE GIVES AN ELEMENT AT RUN TIME IS AN ID THE PAGE DEFINES.
+ *
+ * Review of 18a2b780: the old scan read ids out of the script text by accident (`s.id='toast'`
+ * matched /\bid\s*=\s*["']/), and reading only the markup reported this working page broken with a
+ * TypeError on null. The stub now does what a browser does: an element with an id is found once it
+ * is in the document.
+ */
+describe("verify_page — ids the page assigns while it runs", () => {
+  const run = (html: string) => {
+    const { scripts } = collectScripts(html, "/w/index.html");
+    return runScripts(scripts, collectElementIds(html), collectDeclaredElements(html));
+  };
+  const TOAST = `<!DOCTYPE html><html><body><script>
+const s = document.createElement('div');
+s.id = 'toast';
+document.body.appendChild(s);
+document.getElementById('toast').textContent = 'hi';
+</script></body></html>`;
+
+  it("passes the review's probe page: createElement, .id, appendChild, then getElementById", async () => {
+    expect(run(TOAST).errors).toEqual([]);
+    const root = mkdtempSync(join(tmpdir(), "sai-pagecheck-runtime-id-"));
+    const page = join(root, "toast.html");
+    writeFileSync(page, TOAST);
+    expect(await checkBuiltPage(page, "toast.html")).toEqual({ ok: true, detail: "" });
+  }, 40_000);
+
+  it("finds an id set through setAttribute, on an element appended inside a parent that is appended later", () => {
+    const r = run(`<html><body><script>
+const panel = document.createElement('section');
+const total = document.createElement('span');
+total.setAttribute('id', 'total');
+panel.append(total);
+document.body.append(panel);
+document.getElementById('total').textContent = String(document.getElementById('total').getAttribute('id'));
+document.head.appendChild(document.createElement('style'));
+</script></body></html>`);
+    expect(r.errors).toEqual([]);
+  });
+
+  it("finds an id in markup the page writes into innerHTML, its value computed at run time", () => {
+    const r = run(`<html><body><ul id="list"></ul><script>
+const n = 3;
+document.getElementById('list').innerHTML = '<li id="item-' + n + '">Kiel</li>';
+document.getElementById('item-3').textContent = 'Lübeck';
+</script></body></html>`);
+    expect(r.errors).toEqual([]);
+  });
+
+  it("still fails an element that is never put in the document, or was taken out of it, as a browser does", () => {
+    expect(run(`<html><body><script>
+const s = document.createElement('div');
+s.id = 'toast';
+document.getElementById('toast').textContent = 'hi';
+</script></body></html>`).errors.join(" ")).toMatch(/TypeError/);
+    expect(run(`<html><body><script>
+const s = document.createElement('div');
+s.id = 'toast';
+document.body.appendChild(s);
+document.body.removeChild(s);
+document.getElementById('toast').textContent = 'hi';
+</script></body></html>`).errors.join(" ")).toMatch(/TypeError/);
+  });
+});
+
+/**
  * WHAT THIS PROBE MUST NOT DO TO THE PROCESS IT RUNS IN.
  *
  * checkBuiltPage is called with no tool call at all — artifact-probes runs it on every
@@ -177,6 +294,22 @@ requestAnimationFrame(loop);
     const verdict = await checkBuiltPage(page, "generated/game/index.html");
     expect(JSON.stringify(verdict)).not.toContain("sk-live-not-a-real-key");
   });
+
+  it("marks a failing verdict a timeout produced, and only that one", async () => {
+    // A timeout can be the machine's load at that moment; a caller deciding whether a repair
+    // worked reads such a verdict as none (turn-finalize-guards.ts).
+    const root = ws();
+    const hang = join(root, "hang.html");
+    writeFileSync(hang, "<html><body><script>function loop(){ while(true){} } requestAnimationFrame(loop);</script></body></html>");
+    const hung = await checkBuiltPage(hang, "hang.html");
+    expect(hung.ok).toBe(false);
+    expect(hung.timedOut).toBe(true);
+    const broken = join(root, "broken.html");
+    writeFileSync(broken, "<html><body><script>const a = 1; const a = 2;</script></body></html>");
+    const failed = await checkBuiltPage(broken, "broken.html");
+    expect(failed.ok).toBe(false);
+    expect(failed.timedOut).toBeUndefined();
+  }, 40_000);
 
   it("treats a missing sibling script as soft, but a page with nothing to run as broken", async () => {
     const root = ws();

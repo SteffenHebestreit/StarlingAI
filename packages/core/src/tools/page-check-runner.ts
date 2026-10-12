@@ -144,11 +144,16 @@ export interface DeclaredElement {
  * Attributes are read with a real attribute tokenizer, not a bare /width=/ scan: the latter
  * matches inside `<meta content="width=device-width">` and any other quoted value that
  * happens to contain the word.
+ *
+ * It reads what a browser reads, not only what the spec calls valid: an unquoted value that holds
+ * an `=` (`<a href=page.html?x=1 id="y">`), and an attribute written straight after a quoted value
+ * with no space (`class="a"id="b"`). Both are parse errors a browser recovers from, and a tag
+ * the tokenizer could not read lost its id, so a script that used it failed the check.
  */
 export function collectDeclaredElements(html: string): Map<string, DeclaredElement> {
   const declared = new Map<string, DeclaredElement>();
-  const tagRe = /<([a-zA-Z][\w-]*)((?:\s+[^\s"'=<>`/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*\/?>/g;
-  const attrRe = /([^\s"'=<>`/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  const tagRe = /<([a-zA-Z][\w-]*)((?:(?:\s+|(?<=["']))[^\s"'=<>`/]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>`]+))?)*)\s*\/?>/g;
+  const attrRe = /([^\s"'=<>`/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+)))?/g;
   let tag: RegExpExecArray | null;
   while ((tag = tagRe.exec(html)) !== null) {
     const attrs = new Map<string, string>();
@@ -174,15 +179,17 @@ export function collectDeclaredElements(html: string): Map<string, DeclaredEleme
   return declared;
 }
 
-/** Element ids the document actually defines — the set getElementById may resolve. */
+/**
+ * Element ids the document actually defines — the set getElementById may resolve.
+ *
+ * Read with the same attribute tokenizer as collectDeclaredElements, not a bare /id="…"/ scan.
+ * That scan missed an unquoted id (`<span id=total>`, valid HTML), so a script that wrote to it
+ * met null here and a working page was reported broken ("Cannot set properties of null"): in the
+ * E2E run of 2026-10-12 that verdict sent a finished evidence ledger to a corrective build. It
+ * also read `data-id="5"` as an element id, since `\bid` matches after the hyphen.
+ */
 export function collectElementIds(html: string): Set<string> {
-  const ids = new Set<string>();
-  const re = /\bid\s*=\s*["']([^"']+)["']/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    if (m[1]) ids.add(m[1]);
-  }
-  return ids;
+  return new Set(collectDeclaredElements(html).keys());
 }
 
 export interface RunReport {
@@ -316,6 +323,13 @@ function compilesOnlyAsModule(code: string): boolean {
  * Minimal DOM. getElementById returns null for an id the HTML does NOT define, which is the
  * whole point: that mismatch is invisible to review and fatal at runtime, and it is exactly
  * what shipped in run 2dc5832c (`getElementById("board")` against `id="board-canvas"`).
+ *
+ * AN ID THE PAGE GIVES AN ELEMENT AT RUN TIME IS DEFINED TOO. A page that creates a toast
+ * (`createElement("div")`, `.id = "toast"`, `body.appendChild(…)`) and then looks it up works in
+ * a browser, and the markup holds no such id. The id scan this check used before read `.id='…'`
+ * out of the script text by accident; the stub now does what the browser does: an element with an
+ * id (set as a property, through setAttribute, or by markup assigned to innerHTML) is found once
+ * it is in the document, which is when it, or an ancestor, is appended to an element that is.
  */
 function buildDomContext(
   ids: Set<string>,
@@ -323,6 +337,54 @@ function buildDomContext(
   declared: Map<string, DeclaredElement> = new Map(),
 ): Record<string, unknown> {
   const noop = (): void => {};
+  // Where each element sits: its id, whether it is in the document, and what was appended to it.
+  // Only the run-time side: an id the markup declares is answered from `ids` below.
+  type StubElement = Record<string, unknown>;
+  interface NodeState { id?: string; attached: boolean; children: StubElement[]; fromHtml: StubElement[] }
+  const nodeStates = new WeakMap<StubElement, NodeState>();
+  const runtimeById = new Map<string, StubElement>();
+  const stateOf = (el: StubElement): NodeState => {
+    let state = nodeStates.get(el);
+    if (!state) {
+      state = { attached: false, children: [], fromHtml: [] };
+      nodeStates.set(el, state);
+    }
+    return state;
+  };
+  const attach = (el: StubElement): void => {
+    const state = stateOf(el);
+    if (state.attached) return;
+    state.attached = true;
+    // First in wins, as getElementById answers with the first element of a duplicate id.
+    if (state.id && !runtimeById.has(state.id)) runtimeById.set(state.id, el);
+    for (const child of state.children) attach(child);
+  };
+  const detach = (el: StubElement): void => {
+    const state = stateOf(el);
+    if (!state.attached) return;
+    state.attached = false;
+    if (state.id && runtimeById.get(state.id) === el) runtimeById.delete(state.id);
+    for (const child of state.children) detach(child);
+  };
+  const setId = (el: StubElement, value: string): void => {
+    const state = stateOf(el);
+    if (state.id && runtimeById.get(state.id) === el) runtimeById.delete(state.id);
+    state.id = value;
+    if (state.attached && value && !runtimeById.has(value)) runtimeById.set(value, el);
+  };
+  const adopt = (parent: StubElement, child: unknown): void => {
+    // Text and strings (`append("text")`) are not elements and carry no id.
+    if (!child || typeof child !== "object" || !nodeStates.has(child as StubElement)) return;
+    const parentState = stateOf(parent);
+    parentState.children.push(child as StubElement);
+    if (parentState.attached) attach(child as StubElement);
+  };
+  const release = (parent: StubElement, child: unknown): void => {
+    if (!child || typeof child !== "object") return;
+    const parentState = stateOf(parent);
+    parentState.children = parentState.children.filter((entry) => entry !== child);
+    detach(child as StubElement);
+  };
   const makeCtx2d = (): Record<string, unknown> => new Proxy({}, {
     get: (_t, prop) => {
       if (prop === "canvas") return makeElement("canvas");
@@ -354,11 +416,16 @@ function buildDomContext(
       clientWidth: 300,
       clientHeight: 600,
       textContent: "",
-      innerHTML: "",
-      appendChild: noop,
-      removeChild: noop,
-      setAttribute: noop,
-      getAttribute: () => null,
+      appendChild: (child: unknown) => { adopt(el, child); return child; },
+      append: (...nodes: unknown[]) => { for (const node of nodes) adopt(el, node); },
+      prepend: (...nodes: unknown[]) => { for (const node of nodes) adopt(el, node); },
+      insertBefore: (child: unknown) => { adopt(el, child); return child; },
+      removeChild: (child: unknown) => { release(el, child); return child; },
+      remove: () => detach(el),
+      setAttribute: (name: unknown, value: unknown) => {
+        if (String(name).toLowerCase() === "id") setId(el, String(value));
+      },
+      getAttribute: (name: unknown) => (String(name).toLowerCase() === "id" ? stateOf(el).id ?? null : null),
       addEventListener: noop,
       removeEventListener: noop,
       focus: noop,
@@ -380,24 +447,56 @@ function buildDomContext(
       querySelector: () => null,
       querySelectorAll: () => [],
     };
+    stateOf(el);
+    Object.defineProperty(el, "id", {
+      enumerable: true,
+      get: () => stateOf(el).id ?? "",
+      set: (value: unknown) => setId(el, String(value)),
+    });
+    // Markup assigned to innerHTML becomes the element's content, ids included.
+    let html = "";
+    Object.defineProperty(el, "innerHTML", {
+      enumerable: true,
+      get: () => html,
+      set: (value: unknown) => {
+        html = String(value);
+        const state = stateOf(el);
+        for (const previous of state.fromHtml) release(el, previous);
+        state.fromHtml = [];
+        for (const [childId, childDecl] of collectDeclaredElements(html)) {
+          const child = makeElement(childDecl.tag, undefined, childDecl);
+          setId(child, childId);
+          state.fromHtml.push(child);
+          adopt(el, child);
+        }
+      },
+    });
     return el;
   };
 
   const elementCache = new Map<string, Record<string, unknown>>();
   const elementFor = (id: string): Record<string, unknown> | null => {
-    if (!ids.has(id)) return null;
+    if (!ids.has(id)) return runtimeById.get(id) ?? null;
     let el = elementCache.get(id);
     if (!el) {
       const decl = declared.get(id);
       // The real tag when the document declares one. The id-name guess behind it is the last
       // resort for an id that reaches getElementById without ever appearing in the markup.
       el = makeElement(decl?.tag ?? (/canvas/i.test(id) ? "canvas" : "div"), id, decl);
-      el["id"] = id;
+      // In the document from the start, without taking the run-time slot of its id: the markup
+      // answers for it.
+      const state = stateOf(el);
+      state.id = id;
+      state.attached = true;
       elementCache.set(id, el);
     }
     return el;
   };
 
+  const inDocument = (el: StubElement): StubElement => {
+    attach(el);
+    return el;
+  };
   const documentObj: Record<string, unknown> = {
     getElementById: (id: unknown) => elementFor(String(id)),
     querySelector: (sel: unknown) => {
@@ -408,8 +507,9 @@ function buildDomContext(
     createElement: (tag: unknown) => makeElement(String(tag)),
     addEventListener: noop,
     removeEventListener: noop,
-    body: makeElement("body"),
-    documentElement: makeElement("html"),
+    body: inDocument(makeElement("body")),
+    head: inDocument(makeElement("head")),
+    documentElement: inDocument(makeElement("html")),
     readyState: "complete",
   };
 

@@ -19,6 +19,7 @@
  */
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { answerFitsRepair, answerRepairMaxChars, currentAnswerBlock, QA_DISCLOSURE_RULE, QA_ACTION_HONESTY_RULE } from "./qa-delivery-loop.js";
 
 /** Don't spend a slow-model check on a one-liner; only audit a real synthesized deliverable. */
 export const DELIVERABLE_CONSISTENCY_MIN_CHARS = 600;
@@ -82,6 +83,10 @@ export function buildDeliverableConsistencyCheckMessages(answer: string, userSta
     "If the deliverable does arithmetic (rate × time = total, sums, percentages, discounts), check it actually adds up. " +
     "Do NOT invent facts and do NOT impose external benchmarks the deliverable never claimed. " +
     "Different figures for clearly-labeled different tiers, options, phases, line items, or scenarios are NOT contradictions — only two mutually-exclusive claims about the SAME thing are. " +
+    // An answer reporting that the page refused the user's 1200 and 999 went in states the gap;
+    // read as a contradiction of the user's figure, its repair is told to be "consistent with the
+    // user's stated facts" and can only lose the report (review 2026-10-12).
+    "A deliverable that openly reports that something the user stated was refused, failed, or done differently does NOT contradict the user by saying so. " +
     "When a total is broken into line items or phases, verify they SUM correctly rather than treating them as conflicting. " +
     "Read European number formatting correctly (1.000,00 € = one thousand euros; a range like 8.000–12.000 € is ONE range, not two conflicting figures).";
   const user = [
@@ -101,14 +106,26 @@ export function buildDeliverableConsistencyCheckMessages(answer: string, userSta
   ];
 }
 
-/** Repair instruction handed to forceSynthesis when the check found contradictions. */
-export function buildDeliverableConsistencyRepairInstruction(flaws: string): string {
+/**
+ * Repair instruction handed to forceSynthesis when the check found contradictions. It carries the
+ * answer the check judged (currentAnswerBlock): the draft is not in the history forceSynthesis
+ * reads, so without it the repair rewrote an answer it had never seen. Null when the answer does not
+ * fit a repair call (answerFitsRepair): the repair is skipped and the answer ships as it is.
+ */
+export function buildDeliverableConsistencyRepairInstruction(
+  current: string,
+  flaws: string,
+  maxChars = answerRepairMaxChars(),
+): string | null {
+  if (!answerFitsRepair(current, maxChars)) return null;
   return (
     "CONSISTENCY REVIEW found concrete contradictions in your previous answer — values, arithmetic, or claims that conflict with each other or with what the user explicitly stated:\n" +
     flaws +
-    `\nFix ONLY these contradictions so every figure, calculation, and claim is mutually consistent (and consistent with the user's stated facts), ${IN_REPLY_LANGUAGE}. ` +
+    currentAnswerBlock(current, undefined, maxChars) +
+    `\n\nFix ONLY these contradictions so every figure, calculation, and claim is mutually consistent (and consistent with the user's stated facts), ${IN_REPLY_LANGUAGE}. ` +
     "Recompute any dependent totals. Keep everything else that was already correct. " +
     "Do NOT collapse tiers, options, phases, or line-item breakdowns into a single figure, and do NOT remove caveats, assumptions, or conditional estimates — preserve every legitimate distinction; only reconcile the values that actually conflict. " +
+    `${QA_DISCLOSURE_RULE} ${QA_ACTION_HONESTY_RULE} ` +
     "Do NOT invent new facts; if resolving a conflict needs a value you do not have, state the assumption explicitly rather than guessing. " +
     "Return the COMPLETE corrected answer (not a diff, not a note)."
   );
