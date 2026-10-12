@@ -92,6 +92,15 @@ describe("a rerank server is read at its /health", () => {
     expect(loading.byRole("reranker")).toMatchObject({ ok: false, error: "HTTP 503" });
   });
 
+  it("is read by its model list when it has no /health, as an OpenAI-style rerank server", async () => {
+    const { byRole, requests } = await checkEndpoints({ baseUrl: "http://models.test/v1", model: "qwen" }, modelServer(true));
+    expect(requests.some((request) => request.url === "http://models.test/v1/health")).toBe(true);
+    expect(byRole("reranker")).toMatchObject({ ok: true, matchedModel: "qwen" });
+
+    const unlisted = await checkEndpoints({ baseUrl: "http://models.test/v1", model: "BAAI/bge-reranker-v2-m3" }, modelServer(true));
+    expect(unlisted.byRole("reranker")?.ok).toBe(false);
+  });
+
   it("is still read by its model list in \"llm\" mode, where it is an OpenAI-compatible chat model", async () => {
     const { byRole, requests } = await checkEndpoints(
       { mode: "llm", baseUrl: "http://models.test/v1", model: "lmstudio/qwen" },
