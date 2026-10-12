@@ -175,7 +175,13 @@ export function registerWorkspaceRoutes(app: Hono): void {
     // "generated/index.html" reads THEIR generated/, and a path aimed at another account
     // escapes this root and is refused by the workspace-boundary check like any other escape.
     // The resolver also holds the path to its zone through any link a sandbox left in that root.
-    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath), options);
+    // A name the listing or an artifact record gave is taken as it is on disk: one a turn left
+    // under a repeated root is that file, not the one of the same name in generated/.
+    return resolvePathWithinWorkspace(
+      requestedPath,
+      userWorkspaceRoot(getConfig().workspacePath),
+      { ...options, asNamedOnDisk: true },
+    );
   }
 
   /** Whether a path these routes built themselves under a resolved root stays in its zone of the

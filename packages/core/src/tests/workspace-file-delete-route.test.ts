@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { Hono } from "hono";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import * as configLoader from "../config/loader.js";
 import { registerWorkspaceRoutes } from "../gateway/workspace-routes.js";
 import { createToken } from "../gateway/auth.js";
@@ -62,6 +62,29 @@ describe("DELETE /api/workspace/file", () => {
     expect(res.status).toBe(204);
     expect(existsSync(join(zone("alice"), "e2e", "page.html"))).toBe(false);
     expect(existsSync(join(zone("bob"), "e2e", "page.html"))).toBe(true);
+  });
+
+  it("removes a file a turn left under a repeated root by its name on disk, not the one of the same name in generated/", async () => {
+    // Before the resolvers dropped a repeated root, write_file put `users/<segment>/page.html` at
+    // generated/users/<segment>/page.html, and that is the name the listing gives it.
+    const segment = basename(root("alice"));
+    mkdirSync(join(zone("alice"), "users", segment), { recursive: true });
+    writeFileSync(join(zone("alice"), "users", segment, "page.html"), "<h1>old</h1>", "utf8");
+    writeFileSync(join(zone("alice"), "page.html"), "<h1>new</h1>", "utf8");
+    const res = await remove("alice", `generated/users/${segment}/page.html`);
+    expect(res.status).toBe(204);
+    expect(existsSync(join(zone("alice"), "users", segment, "page.html"))).toBe(false);
+    expect(existsSync(join(zone("alice"), "page.html"))).toBe(true);
+  });
+
+  it("answers 404 for such a name that is not there, and leaves the file of the plain name alone", async () => {
+    // The file tools drop a repeated root from a name that is not on disk; a route deletes only
+    // the name it was given.
+    const segment = basename(root("alice"));
+    writeFileSync(join(zone("alice"), "page.html"), "<h1>new</h1>", "utf8");
+    const res = await remove("alice", `generated/users/${segment}/page.html`);
+    expect(res.status).toBe(404);
+    expect(existsSync(join(zone("alice"), "page.html"))).toBe(true);
   });
 
   it("answers 404 for a file that is not there", async () => {

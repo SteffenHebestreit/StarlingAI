@@ -74,6 +74,30 @@ describe("run_script path resolution", () => {
     expect(runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath("fib.py", ws))).toBe("generated/fib.py");
   });
 
+  // The file tools read a path that repeats the root as the root itself where nothing is there as
+  // named; a shell does not, so `users/<segment>/run.py` written by one is a directory of that name
+  // in the root, and a stale generated/run.py ran in its place (review 2026-10-12).
+  it("runs the script a shell left under a repeated root, not a stale one where the plain name goes", () => {
+    const segment = "acct-0123456789abcdef";
+    const account = (files: string[]) => {
+      const root = join(workspace([]), "users", segment);
+      for (const file of files) {
+        mkdirSync(join(root, file, ".."), { recursive: true });
+        writeFileSync(join(root, file), "print(1)\n", "utf8");
+      }
+      return root;
+    };
+    const scoped = (path: string, root: string) =>
+      runWithRequestContext({ workspaceScope: "generated" }, () => resolveScriptPath(path, root));
+    const named = `users/${segment}/run.py`;
+
+    const both = account(["generated/run.py", named]);
+    expect(scoped(named, both)).toBe(named);
+    expect(resolveScriptPath(named, both)).toBe(named);
+    // Where nothing is there as named, the plain name's place still finds what write_file put there.
+    expect(scoped(named, account(["generated/run.py"]))).toBe("generated/run.py");
+  });
+
   // The tests above pin the helper; this one pins that run_script hands the sandbox what it found.
   // A command that names the script as given ran /workspace/primes.js, which is the E2E failure.
   it("runs the script in the sandbox where it was found", async () => {

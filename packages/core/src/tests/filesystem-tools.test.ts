@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { runWithRequestContext } from "../runtime/request-context.js";
 
 describe("filesystem tools", () => {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-filesystem-tools-"));
@@ -150,7 +151,8 @@ describe("filesystem tools", () => {
     expect(result.success).toBe(true);
     expect(result.metadata).toMatchObject({
       artifactKind: "workspace_file",
-      path: "reports/recorder.md",
+      // The path it acted on, as outputPath: not the one it was given.
+      path: "generated/reports/recorder.md",
       // Rooted one layer deeper so generated output never mixes with the
       // config zone (agents/, jobs/, scenes/).
       outputPath: "generated/reports/recorder.md",
@@ -533,5 +535,118 @@ describe("read_file and edit_file on a generated file of several megabytes", () 
     expect(r.success).toBe(true);
     const back = await getTool("read_file")!.execute({ path: "generated/deck/index.html", offset: 3, limit: 1 }, ctx);
     expect(String(back.output)).toContain("slideNumber: true");
+  });
+});
+
+/**
+ * A NAME THAT IS ON DISK IS THAT FILE (review 2026-10-12).
+ *
+ * The resolvers take a path that repeats the root (`users/<segment>/x.html`) as the root itself. Turns
+ * before that rule left files under such a name, and list_files shows them there: dropping the repeat
+ * from that name too made read_file, edit_file and delete_file act on generated/x.html instead, and the
+ * delete then reported the name it was given.
+ */
+describe("file tools on a name under a repeated root", () => {
+  const SEGMENT = "eval-19e81d52fcab8153";
+  const LEGACY = `generated/users/${SEGMENT}`;
+  let account = "";
+  const ctx = () => ({ sessionId: "s-repeated-root", workspacePath: account });
+  const scoped = <T,>(fn: () => Promise<T>): Promise<T> => runWithRequestContext({ workspaceScope: "generated" }, fn);
+  const tool = async (name: string) => (await import("../tools/registry.js")).getTool(name)!;
+  const text = (rel: string) => readFileSync(join(account, rel), "utf8");
+
+  beforeAll(async () => { await import("../tools/filesystem.js"); });
+  beforeEach(() => {
+    account = join(mkdtempSync(join(tmpdir(), "starlingai-fs-repeated-root-")), "users", SEGMENT);
+    mkdirSync(join(account, LEGACY), { recursive: true });
+    writeFileSync(join(account, LEGACY, "old.html"), "stale", "utf8");
+    writeFileSync(join(account, "generated", "old.html"), "current", "utf8");
+    writeFileSync(join(account, "generated", "only-current.txt"), "x", "utf8");
+  });
+  afterEach(() => { rmSync(join(account, "..", ".."), { recursive: true, force: true }); });
+
+  it("read_file reads the file it names", async () => {
+    const r = await scoped(async () => (await tool("read_file")).execute({ path: `${LEGACY}/old.html` }, ctx()));
+    expect(String(r.output)).toContain("stale");
+    expect(String(r.output)).not.toContain("current");
+  });
+
+  it("edit_file and write_file change the file they name, and leave the other alone", async () => {
+    const edit = await scoped(async () => (await tool("edit_file")).execute(
+      { path: `${LEGACY}/old.html`, old_string: "stale", new_string: "edited" }, ctx()));
+    expect(edit.success).toBe(true);
+    expect(text(`${LEGACY}/old.html`)).toBe("edited");
+    const write = await scoped(async () => (await tool("write_file")).execute(
+      { path: `users/${SEGMENT}/old.html`, content: "rewritten" }, ctx()));
+    expect(write.success).toBe(true);
+    expect(text(`${LEGACY}/old.html`)).toBe("rewritten");
+    expect(text("generated/old.html")).toBe("current");
+  });
+
+  it("delete_file deletes the file it names, and says which", async () => {
+    const r = await scoped(async () => (await tool("delete_file")).execute({ path: `${LEGACY}/old.html` }, ctx()));
+    expect(r.success).toBe(true);
+    expect(existsSync(join(account, LEGACY, "old.html"))).toBe(false);
+    expect(text("generated/old.html")).toBe("current");
+    expect(r.output).toBe(`File deleted: ${LEGACY}/old.html`);
+  });
+
+  it("list_files lists the directory it names", async () => {
+    const r = await scoped(async () => (await tool("list_files")).execute({ path: LEGACY }, ctx()));
+    expect(String(r.output)).toContain("old.html");
+    expect(String(r.output)).not.toContain("only-current");
+  });
+
+  it("a name that is not there yet still lands where the plain name goes", async () => {
+    const r = await scoped(async () => (await tool("write_file")).execute({ path: `users/${SEGMENT}/new.html`, content: "new" }, ctx()));
+    expect(r.output).toBe("File written: generated/new.html (3 chars)");
+    expect(text("generated/new.html")).toBe("new");
+  });
+
+  it("delete_file, edit_file, create_dir and write_file report the path they acted on, not the one they were given", async () => {
+    const edit = await scoped(async () => (await tool("edit_file")).execute({ path: "old.html", old_string: "current", new_string: "edited" }, ctx()));
+    expect(edit.output).toBe("File edited: generated/old.html (1 replacement).");
+    expect(edit.metadata?.["path"]).toBe("generated/old.html");
+    const dir = await scoped(async () => (await tool("create_dir")).execute({ path: "assets" }, ctx()));
+    expect(dir.output).toBe("Directory created: generated/assets");
+    expect(dir.metadata?.["path"]).toBe("generated/assets");
+    const write = await scoped(async () => (await tool("write_file")).execute({ path: "notes.md", content: "n" }, ctx()));
+    expect(write.metadata?.["path"]).toBe("generated/notes.md");
+    const removed = await scoped(async () => (await tool("delete_file")).execute({ path: "old.html" }, ctx()));
+    expect(removed.output).toBe("File deleted: generated/old.html");
+    expect(removed.metadata?.["path"]).toBe("generated/old.html");
+  });
+});
+
+describe("file tools at a shared root named workspace", () => {
+  // Auth off: the root is the shared one, whose own name is a plain word that can name a file or a
+  // directory in it as well (review 2026-10-12).
+  let root = "";
+  const ctx = () => ({ sessionId: "s-shared-root", workspacePath: root });
+  const write = async (path: string, content: string) =>
+    (await import("../tools/registry.js")).getTool("write_file")!.execute({ path, content }, ctx());
+
+  beforeAll(async () => { await import("../tools/filesystem.js"); });
+  beforeEach(() => {
+    root = join(mkdtempSync(join(tmpdir(), "starlingai-fs-shared-root-")), "workspace");
+    mkdirSync(root, { recursive: true });
+  });
+  afterEach(() => { rmSync(join(root, ".."), { recursive: true, force: true }); });
+
+  it("keeps workspace/index.html and index.html two files", async () => {
+    expect((await write("workspace/index.html", "nested")).success).toBe(true);
+    expect((await write("index.html", "top")).success).toBe(true);
+    expect((await write("generated/workspace/app.js", "nested js")).success).toBe(true);
+    expect((await write("generated/app.js", "top js")).success).toBe(true);
+    expect(readFileSync(join(root, "generated", "workspace", "index.html"), "utf8")).toBe("nested");
+    expect(readFileSync(join(root, "generated", "index.html"), "utf8")).toBe("top");
+    expect(readFileSync(join(root, "generated", "workspace", "app.js"), "utf8")).toBe("nested js");
+    expect(readFileSync(join(root, "generated", "app.js"), "utf8")).toBe("top js");
+  });
+
+  it("writes a Bazel WORKSPACE file as a file", async () => {
+    const r = await write("WORKSPACE", "workspace(name = \"demo\")\n");
+    expect(r.success).toBe(true);
+    expect(readFileSync(join(root, "generated", "WORKSPACE"), "utf8")).toBe("workspace(name = \"demo\")\n");
   });
 });

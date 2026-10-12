@@ -1,8 +1,9 @@
+import { lstatSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { currentWorkspaceScope } from "../runtime/request-context.js";
 import { segmentFor } from "../runtime/user-scope.js";
-import type { Identity } from "../runtime/accounts.js";
+import { ACCOUNT_ID_RE, type Identity } from "../runtime/accounts.js";
 import { GENERATED_SUBDIR, UPLOADS_SUBDIR, USERS_SUBDIR } from "./workspace-zones.js";
 import { containedWorkspaceRealPath, type WorkspaceContainmentOptions } from "./workspace-containment.js";
 
@@ -152,33 +153,181 @@ function stripVirtualWorkspacePrefix(inputPath: string): string {
   return inputPath.trim();
 }
 
+/**
+ * An absolute path that lies inside the root, taken as it is, or null. On the gateway that IS the
+ * place it names, and toSandboxPath maps it to the same place in a sandbox. Checked before the
+ * /workspace prefix is read as a sandbox's view of the root, because in a container the root itself
+ * is under /workspace (/workspace/workspace/users/<segment>): the very path every sub-agent is told
+ * and writes back was otherwise taken relative to the root, a directory of the same names inside it.
+ */
+function absolutePathInRoot(inputPath: string, workspacePath: string): string | null {
+  const trimmed = inputPath.trim();
+  if (!isAbsolute(trimmed)) return null;
+  const rel = relative(workspacePath, resolve(trimmed));
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) ? null : trimmed;
+}
+
+/**
+ * A RELATIVE PATH THAT REPEATS THE ROOT IT IS RELATIVE TO, taken relative to the root.
+ *
+ * Every sub-agent is told "Current workspace: <root>", the gateway's absolute path
+ * (/workspace/workspace/users/<segment> in the compose deployment), and a model writing a relative
+ * path often starts it with the tail of that root: `workspace/users/<segment>/report.html`, or
+ * `users/<segment>/report.html`. As named, that is a directory of the same names INSIDE the root,
+ * and the write zone put generated/ in front of it: the file landed at
+ * generated/workspace/users/<segment>/report.html, a read of `report.html` found nothing, and the
+ * agent wrote the whole file again (E2E, several runs; one turn wrote 9.5 KB twice, ~54 s each).
+ *
+ * So the leading segments that are a SUFFIX of the root's own path are dropped, as often as they
+ * repeat, and so are those right after a leading generated/: that is the doubled form the zone
+ * itself produced, and the path an earlier turn reported. A suffix ends at the root's LAST segment,
+ * which is what keeps this to the root: `users/alice/x` under the shared root names its real users/
+ * zone, and `workspace/x` under an account's root only shares an earlier segment; both stay as
+ * named.
+ *
+ * ONE SEGMENT IS ENOUGH ONLY FOR AN ACCOUNT'S ROOT. Its last segment is an account id
+ * (`<slug>-<16 hex>`, ACCOUNT_ID_RE), a name nothing else in the root has. Any other root ends in a
+ * plain name, `workspace` for the shared root, and that alone is an ordinary directory or file
+ * there: `workspace/index.html` next to `index.html`, a Bazel `WORKSPACE`. Such a root needs two
+ * segments of its own path, `workspace/workspace/` or `StarlingAI/workspace/`, before any is dropped.
+ *
+ * IN ANY CASE. A name the root has in another case is the root on Windows, on macOS and through a
+ * Docker Desktop bind, where the gateway itself runs on Linux, so the platform cannot tell; on a
+ * case-sensitive filesystem it is a directory nobody makes inside the root on purpose.
+ *
+ * What remains is the end of the path as named, normalized and without `..`, so it reaches nothing
+ * the path did not. A path with nothing to drop comes back unchanged. Absolute paths do not come
+ * here: one inside the root is taken as it is (absolutePathInRoot). And the resolvers drop nothing
+ * from a name that is on disk as named (resolvedAsOnDisk).
+ */
+export function withoutRepeatedWorkspaceRoot(relativePath: string, workspacePath: string): string {
+  const root = rootSegments(workspacePath);
+  const normalized = posix.normalize(relativePath.replace(/\\/g, "/"));
+  if (root.segments.length === 0 || normalized === ".." || normalized.startsWith("../")) return relativePath;
+  const named = normalized.split("/").filter((segment) => segment !== "" && segment !== ".");
+  let rest = withoutRootSuffixes(named, root);
+  // However they nest: generated/users/<segment>/generated/x is generated/x too.
+  while (rest[0] === GENERATED_SUBDIR) {
+    const inZone = withoutRootSuffixes(rest.slice(1), root);
+    if (inZone.length === rest.length - 1) break;
+    rest = inZone[0] === GENERATED_SUBDIR ? inZone : [GENERATED_SUBDIR, ...inZone];
+  }
+  if (rest.length === named.length) return relativePath;
+  return rest.length === 0 ? "." : rest.join("/");
+}
+
+/** A root's own segments, lowercased and without a drive, and how many of them a match needs. */
+interface RootSegments {
+  segments: string[];
+  shortest: number;
+}
+
+/** Split at either separator, so a Windows root splits the same on every platform. */
+function rootSegments(workspacePath: string): RootSegments {
+  const segments = workspacePath.split(/[\\/]+/).filter((segment) => segment !== "");
+  if (/^[a-zA-Z]:$/.test(segments[0] ?? "")) segments.shift();
+  const shortest = ACCOUNT_ID_RE.test(segments.at(-1) ?? "") ? 1 : 2;
+  return { segments: segments.map((segment) => segment.toLowerCase()), shortest };
+}
+
+/** `segments` without the leading ones that are a suffix of the root's, as often as one leads. */
+function withoutRootSuffixes(segments: string[], root: RootSegments): string[] {
+  let rest = segments;
+  for (let length = rootSuffixLength(rest, root); length > 0; length = rootSuffixLength(rest, root)) {
+    rest = rest.slice(length);
+  }
+  return rest;
+}
+
+/** How many of the leading `segments` are the root's last as many, longest first; 0 for none. */
+function rootSuffixLength(segments: string[], root: RootSegments): number {
+  for (let length = Math.min(segments.length, root.segments.length); length >= root.shortest; length--) {
+    const suffix = root.segments.slice(root.segments.length - length);
+    if (suffix.every((segment, i) => segments[i]?.toLowerCase() === segment)) return length;
+  }
+  return 0;
+}
+
+/**
+ * A NAME THAT IS ON DISK IS THAT FILE. A path is resolved as named, and with a repeated root
+ * dropped only where nothing is there as named: the zone re-root applied, a link not followed.
+ *
+ * Dropping it regardless made a file tool act on another file than the one named. Files that turns
+ * before the rule left under a repeated root are still there (generated/users/<segment>/old.html),
+ * list_files shows them under that name, and read_file, edit_file and delete_file on it reached
+ * generated/old.html instead: an approved delete removed a file nobody named and kept the stale one
+ * (review 2026-10-12). A name that is not there yet is what the rule is for, so a new file still
+ * lands where the plain name goes, and a later read of either name finds it there.
+ */
+function resolvedAsOnDisk(
+  resolveAs: (asNamedOnDisk: boolean) => { resolved: string; relativePath: string },
+  asNamedOnDisk: boolean | undefined,
+): { resolved: string; relativePath: string } {
+  const named = resolveAs(true);
+  if (asNamedOnDisk) return named;
+  const dropped = resolveAs(false);
+  return dropped.resolved === named.resolved || isOnDisk(named.resolved) ? named : dropped;
+}
+
+/** lstat: a link at the name is there, wherever it leads; the resolvers' containment check judges that. */
+function isOnDisk(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What the resolvers below take besides the path: how a link on the way is held
+ * (WorkspaceContainmentOptions), and whether the path is a name as it is on disk.
+ */
+export interface WorkspacePathOptions extends WorkspaceContainmentOptions {
+  /**
+   * A name the gateway listed or recorded itself and is handed back, taken as it is, with no
+   * repeated root dropped (withoutRepeatedWorkspaceRoot) even where nothing is there yet. The
+   * workspace routes serve and delete by the names their listing and the artifact records carry.
+   */
+  asNamedOnDisk?: boolean;
+}
+
 function assertContained(resolvedPath: string, workspacePath: string, options: WorkspaceContainmentOptions | undefined): void {
   if (!containedWorkspaceRealPath(resolvedPath, workspacePath, options)) throw new Error("Path escapes workspace boundary");
 }
 
 /**
- * A workspace path exactly as named: the boundary check of resolvePathWithinWorkspace without its
- * zone re-root. For the one caller that needs what a sandbox sees: a container is handed the whole
+ * A workspace path as named: the boundary check of resolvePathWithinWorkspace without its zone
+ * re-root. For the one caller that needs what a sandbox sees: a container is handed the whole
  * working root at /workspace, whatever the agent's zone, so a script a scope-confined agent's shell
- * left at the root is there and nowhere under generated/.
+ * left at the root is there and nowhere under generated/. A repeated root is dropped here as well,
+ * unless `asNamedOnDisk`: the sandbox has the root at /workspace, not inside itself.
  *
  * Each resolver here also holds the path to its zone through any link (containedWorkspaceRealPath).
  */
 export function resolveLiteralWorkspacePath(
   inputPath: string,
   workspacePath: string,
-  options?: WorkspaceContainmentOptions,
+  options?: WorkspacePathOptions,
 ): { resolved: string; relativePath: string } {
-  const literal = lexicalLiteralWorkspacePath(inputPath, workspacePath);
+  const literal = resolvedAsOnDisk(
+    (asNamed) => lexicalLiteralWorkspacePath(inputPath, workspacePath, asNamed),
+    options?.asNamedOnDisk,
+  );
   assertContained(literal.resolved, workspacePath, options);
   return literal;
 }
 
-function lexicalLiteralWorkspacePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
-  const candidatePath = stripVirtualWorkspacePrefix(inputPath);
+function lexicalLiteralWorkspacePath(
+  inputPath: string,
+  workspacePath: string,
+  asNamedOnDisk = false,
+): { resolved: string; relativePath: string } {
+  const candidatePath = absolutePathInRoot(inputPath, workspacePath) ?? stripVirtualWorkspacePrefix(inputPath);
+  const named = candidatePath.replace(/^\//, "");
   const resolvedPath = isAbsolute(candidatePath)
     ? resolve(candidatePath)
-    : resolve(workspacePath, candidatePath.replace(/^\//, ""));
+    : resolve(workspacePath, asNamedOnDisk ? named : withoutRepeatedWorkspaceRoot(named, resolve(workspacePath)));
   const rel = relative(workspacePath, resolvedPath);
   if (rel.startsWith("..") || rel === "..") {
     throw new Error("Path escapes workspace boundary");
@@ -189,15 +338,22 @@ function lexicalLiteralWorkspacePath(inputPath: string, workspacePath: string): 
 export function resolvePathWithinWorkspace(
   inputPath: string,
   workspacePath: string,
-  options?: WorkspaceContainmentOptions,
+  options?: WorkspacePathOptions,
 ): { resolved: string; relativePath: string } {
-  const within = lexicalPathWithinWorkspace(inputPath, workspacePath);
+  const within = resolvedAsOnDisk(
+    (asNamed) => lexicalPathWithinWorkspace(inputPath, workspacePath, asNamed),
+    options?.asNamedOnDisk,
+  );
   assertContained(within.resolved, workspacePath, options);
   return within;
 }
 
-function lexicalPathWithinWorkspace(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
-  const literal = lexicalLiteralWorkspacePath(inputPath, workspacePath);
+function lexicalPathWithinWorkspace(
+  inputPath: string,
+  workspacePath: string,
+  asNamedOnDisk = false,
+): { resolved: string; relativePath: string } {
+  const literal = lexicalLiteralWorkspacePath(inputPath, workspacePath, asNamedOnDisk);
   const relativePath = literal.relativePath;
 
   // Zone enforcement for scope-confined executions (set per-agent via
@@ -225,7 +381,11 @@ function lexicalPathWithinWorkspace(inputPath: string, workspacePath: string): {
  * agent can write `index.html` (→ generated/index.html) and later edit either
  * `index.html` or `generated/index.html` and hit the same file. The returned
  * relativePath stays rooted at the workspace (e.g. "generated/index.html") so
- * artifact previews and the file-serving endpoint resolve correctly.
+ * artifact previews and the file-serving endpoint resolve correctly. So is a
+ * path that repeats the root, `users/<segment>/index.html`, and the
+ * `generated/users/<segment>/index.html` this rooting made of it before,
+ * unless a file is there under that name (withoutRepeatedWorkspaceRoot,
+ * resolvedAsOnDisk).
  *
  * Core agents running with workspaceScope:"full" write WITHOUT the generated/
  * rooting — they maintain the workspace itself (config shards, docs), so their
@@ -235,15 +395,22 @@ function lexicalPathWithinWorkspace(inputPath: string, workspacePath: string): {
 export function resolveWorkspaceWritePath(
   inputPath: string,
   workspacePath: string,
-  options?: WorkspaceContainmentOptions,
+  options?: WorkspacePathOptions,
 ): { resolved: string; relativePath: string } {
-  const target = lexicalWorkspaceWritePath(inputPath, workspacePath);
+  const target = resolvedAsOnDisk(
+    (asNamed) => lexicalWorkspaceWritePath(inputPath, workspacePath, asNamed),
+    options?.asNamedOnDisk,
+  );
   assertContained(target.resolved, workspacePath, options);
   return target;
 }
 
-function lexicalWorkspaceWritePath(inputPath: string, workspacePath: string): { resolved: string; relativePath: string } {
-  const within = lexicalPathWithinWorkspace(inputPath, workspacePath);
+function lexicalWorkspaceWritePath(
+  inputPath: string,
+  workspacePath: string,
+  asNamedOnDisk = false,
+): { resolved: string; relativePath: string } {
+  const within = lexicalPathWithinWorkspace(inputPath, workspacePath, asNamedOnDisk);
   if (currentWorkspaceScope() === "full") {
     return within;
   }
