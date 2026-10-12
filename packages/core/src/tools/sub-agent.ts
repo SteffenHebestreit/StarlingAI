@@ -51,6 +51,7 @@ import {
   agentCfgDrivesSharedBrowser,
   evidenceGatherPoint,
   lookupAgentCapabilities,
+  taskNamesWebAddress,
   filterCandidatesByExecutionCapability,
   explicitAgentsCoverTaskExecution,
   countRoutingQueryContentTokens,
@@ -363,9 +364,6 @@ export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): To
 export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyArray<string | undefined>): number {
   return ctx.turnEvidence?.required === true ? evidenceGatherPoint(agentNames, lookupAgentCapabilities) : -1;
 }
-
-/** An absolute web address in a task: a page the step has to open from outside the workspace. */
-const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
 
 /**
  * How far a routed agent that opens pages itself has to lead the next candidate for Step 1 of
@@ -1618,7 +1616,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // dead end). The web-address rule below never hands the step back to an agent the trigger
       // dropped.
       const keptWithoutFallback = gatherable.length > 0 ? gatherable : routingCandidates;
-      if (turnTriggered && WEB_ADDRESS_RE.test(request.task)) {
+      if (turnTriggered && taskNamesWebAddress(request.task)) {
         if (shortenedQuery === undefined) {
           // A step that names a web address has to be read from outside, so a candidate whose source
           // is the workspace (a codebase, an upload, a data table) is passed over for one that reaches
@@ -1845,7 +1843,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           const gathererLeads = !runnerUp || topCandidate.score - runnerUp.score >= ROUTED_GATHERER_LEAD_MARGIN;
           const researchTaskHasCapableCandidate =
             (textRequiresResearch && agentIsResearchCapable(topCandidate.name))
-            || ((routedTurnTriggered || WEB_ADDRESS_RE.test(request.task))
+            || ((routedTurnTriggered || taskNamesWebAddress(request.task))
               && agentGathersDirectly(topCandidate.name)
               && !delegationAsksForFile(request.task, request.deliverable)
               && gathererLeads);

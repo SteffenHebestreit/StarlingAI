@@ -757,6 +757,18 @@ export function isWebReachingToolName(toolName: string): boolean {
     || toolName.startsWith("browser_");
 }
 
+/** An absolute web address in a task: a page the step has to open from outside the workspace. */
+const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
+
+/**
+ * Whether a task names an absolute web address (WEB_ADDRESS_RE). Read by the delegation's routing
+ * gates (tools/sub-agent.ts) and by the runner's verdict on a run that answered with nothing
+ * (agent/sub-agent.ts emptyAnswerWithoutWork): a page named in the task is one to be read.
+ */
+export function taskNamesWebAddress(task: string): boolean {
+  return WEB_ADDRESS_RE.test(task);
+}
+
 /**
  * Browser tools that only look at the page the shared browser tab already shows, in both the
  * gateway's own names and the bridged Playwright server's. None of them opens a URL, so they
