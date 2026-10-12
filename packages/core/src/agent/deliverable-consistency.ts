@@ -19,6 +19,7 @@
  */
 import type { LLMMessage } from "../providers/lmstudio.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { currentAnswerBlock } from "./qa-delivery-loop.js";
 
 /** Don't spend a slow-model check on a one-liner; only audit a real synthesized deliverable. */
 export const DELIVERABLE_CONSISTENCY_MIN_CHARS = 600;
@@ -101,12 +102,17 @@ export function buildDeliverableConsistencyCheckMessages(answer: string, userSta
   ];
 }
 
-/** Repair instruction handed to forceSynthesis when the check found contradictions. */
-export function buildDeliverableConsistencyRepairInstruction(flaws: string): string {
+/**
+ * Repair instruction handed to forceSynthesis when the check found contradictions. It carries the
+ * answer the check judged (currentAnswerBlock): the draft is not in the history forceSynthesis
+ * reads, so without it the repair rewrote an answer it had never seen.
+ */
+export function buildDeliverableConsistencyRepairInstruction(current: string, flaws: string): string {
   return (
     "CONSISTENCY REVIEW found concrete contradictions in your previous answer — values, arithmetic, or claims that conflict with each other or with what the user explicitly stated:\n" +
     flaws +
-    `\nFix ONLY these contradictions so every figure, calculation, and claim is mutually consistent (and consistent with the user's stated facts), ${IN_REPLY_LANGUAGE}. ` +
+    currentAnswerBlock(current) +
+    `\n\nFix ONLY these contradictions so every figure, calculation, and claim is mutually consistent (and consistent with the user's stated facts), ${IN_REPLY_LANGUAGE}. ` +
     "Recompute any dependent totals. Keep everything else that was already correct. " +
     "Do NOT collapse tiers, options, phases, or line-item breakdowns into a single figure, and do NOT remove caveats, assumptions, or conditional estimates — preserve every legitimate distinction; only reconcile the values that actually conflict. " +
     "Do NOT invent new facts; if resolving a conflict needs a value you do not have, state the assumption explicitly rather than guessing. " +

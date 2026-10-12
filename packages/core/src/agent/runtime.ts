@@ -27,7 +27,7 @@ import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js"
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import type { TurnUserWords } from "./delegation-user-words.js";
 import {
@@ -6449,13 +6449,9 @@ async function runQaDeliveryGate(
 
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
-    const instruction = "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
-      + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
-      + flaws
-      + "\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
     // forceSynthesis labels the call "synthesis"; the agent name says which rewrite it was.
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "qa_improve" }, () =>
-      forceSynthesis(session, provider, signal, instruction)));
+      forceSynthesis(session, provider, signal, buildQaImproveInstruction(current, flaws))));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the improver collapsed the answer to a stub).
@@ -6546,7 +6542,7 @@ async function runDeliverableConsistencyGate(
   const improve = async (current: string, flaws: string): Promise<string | null> => {
     if (signal.aborted) return null;
     const improved = await timedQaModelCall(() => runWithCallAttribution({ agentName: "consistency_repair" }, () =>
-      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(flaws))));
+      forceSynthesis(session, provider, signal, buildDeliverableConsistencyRepairInstruction(current, flaws))));
     if (!improved) return null;
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).

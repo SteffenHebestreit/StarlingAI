@@ -64,6 +64,7 @@ import {
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
+import { buildCriteriaVerifyInstruction, currentAnswerBlock } from "./qa-delivery-loop.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -510,10 +511,9 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     if (risk === "high" && !evidenceAnchoringRepairRan && !qaLoopWillVerify) {
       if (qaPlan && qaPlan.acceptanceCriteria.length > 0 && finalResponse.trim().length > 200 && !signal.aborted) {
         acceptanceCriteriaQaRan = true;
-        const verifyInstruction = "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
-          + qaPlan.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
-          + "\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
-          + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
+        // The answer rides in the instruction: it is not in the history forceSynthesis reads, so
+        // "return the SAME answer" asked for one the call had never seen.
+        const verifyInstruction = buildCriteriaVerifyInstruction(finalResponse, qaPlan.acceptanceCriteria);
         const verified = await ctx.forceSynthesis(session, provider, signal, verifyInstruction);
         const candidate = verified ? sanitizeUserFacingAssistantResponse(verified, 0) : null;
         // Guard against catastrophic truncation — a legitimate repair may
@@ -567,7 +567,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
               + `${IN_REPLY_LANGUAGE}. Ground every claim in tool results; do not fabricate to satisfy a criterion — if `
               + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
-              + "\n\nCurrent answer to improve:\n" + current.slice(0, 6_000);
+              + currentAnswerBlock(current);
             try {
               const res = await executeTool("delegate_to_agent", {
                 agentName: "mission_coordinator",

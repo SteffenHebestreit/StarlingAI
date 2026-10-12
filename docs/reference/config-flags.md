@@ -58,7 +58,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1304 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 83 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 84 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
 | `budget` | packages/core/src/config/schema.ts:1696 | 96 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
@@ -473,7 +473,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:985 | 20 |
 | `tags` | packages/core/src/config/schema.ts:632 | 76 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1364 | 154 |
+| `task` | packages/core/src/config/schema.ts:1364 | 155 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1865 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:498 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:717 | 1 |

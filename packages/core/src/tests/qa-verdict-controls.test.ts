@@ -15,7 +15,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type Msg = { role: string; content: string };
-type CallRecord = { kind: string; options: unknown; attribution: Record<string, unknown> };
+type CallRecord = { kind: string; options: unknown; attribution: Record<string, unknown>; last: string };
 
 const streamMock = vi.hoisted(() => vi.fn());
 const completeMock = vi.hoisted(() => vi.fn());
@@ -83,7 +83,7 @@ function spyProvider(replies: Record<string, string[]>): CallRecord[] {
   const seen: Record<string, number> = {};
   completeMock.mockImplementation(async (messages: Msg[], _tools: unknown, _signal: unknown, options: unknown) => {
     const kind = kindOf(messages);
-    calls.push({ kind, options, attribution: { ...currentCallAttribution().data } });
+    calls.push({ kind, options, attribution: { ...currentCallAttribution().data }, last: messages[messages.length - 1]?.content ?? "" });
     const n = seen[kind] ?? 0;
     seen[kind] = n + 1;
     const list = replies[kind] ?? [];
@@ -177,6 +177,18 @@ describe("the QA delivery loop's verdict", () => {
     expect(verdicts[0]!.options).toBeUndefined();
   });
 
+  it("hands the improve rewrite the answer the verdict judged", async () => {
+    // The draft is not in the history forceSynthesis reads until the turn ships: the rewrite got the
+    // flaws and not the answer, and wrote a new one (E2E core-ix-browser-order-form-express-refused).
+    getConfig().orchestration.qaDeliveryLoop = true;
+    const calls = spyProvider({ qa_verdict: ["FAIL: the answer does not say why", "PASS — evidence: it recommends offer 2 for its scope"] });
+    await runDeliverableTurn({ plan: true });
+
+    const improve = calls.filter((c) => c.kind === "qa_improve");
+    expect(improve).toHaveLength(1);
+    expect(improve[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
+  });
+
   it("records an empty verdict as no verdict — passed:false, status unverified — and asks for no rewrite", async () => {
     getConfig().orchestration.qaDeliveryLoop = true;
     const calls = spyProvider({ qa_verdict: [""] });
@@ -208,6 +220,16 @@ describe("the deliverable-consistency verdict", () => {
     const [perf] = auditRows("turn_performance");
     expect(perf!["qaLlmCalls"]).toBe(2);
     expect((perf!["phaseTimingsMs"] as Record<string, number>)["deliverableConsistencyQa"]).toBeGreaterThanOrEqual(0);
+  });
+
+  it("hands the repair the answer the verdict judged", async () => {
+    getConfig().orchestration.deliverableConsistencyQa = true;
+    const calls = spyProvider({ consistency_verdict: ["FAIL: the recommendation contradicts the stated budget"] });
+    await runDeliverableTurn({ plan: false });
+
+    const repairs = calls.filter((c) => c.kind === "synthesis" && c.attribution["agentName"] === "consistency_repair");
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
   });
 
   it("keeps the provider's own controls when orchestration.qaVerdictReasoning is on", async () => {
@@ -302,5 +324,17 @@ describe("the one-shot risk-gated verify (QA loop off)", () => {
 
     expect(auditRows("flow_verification_passed")).toHaveLength(0);
     expect(auditRows("flow_high_stakes_unverified")).toEqual([expect.objectContaining({ reason: "verify_returned_nothing" })]);
+  });
+
+  it("hands the verification the answer it is asked to return unchanged", async () => {
+    getConfig().orchestration.qaDeliveryLoop = false;
+    getConfig().orchestration.riskGatedQA = true;
+    const calls = spyProvider({});
+    await runDeliverableTurn({ plan: true, riskTier: "high" });
+
+    const verify = calls.filter((c) => c.kind === "synthesis" && c.last.includes("Before finalizing, verify your answer"));
+    expect(verify).toHaveLength(1);
+    expect(verify[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
+    expect(auditRows("flow_verification_passed")).toEqual([expect.objectContaining({ repaired: false })]);
   });
 });

@@ -14,6 +14,7 @@
  * Gated by orchestration.qaDeliveryLoop (default off; pass^k before default-on)
  * because every round costs extra LLM calls on a slow local model.
  */
+import { IN_REPLY_LANGUAGE } from "./reply-language.js";
 
 export type QaVerdictStatus = "pass" | "fail" | "unverified";
 
@@ -273,4 +274,40 @@ export async function runQaDeliveryLoop(
   // per turn. Report passed=false (we never got a confirming PASS within budget).
   const finalPass = false;
   return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false };
+}
+
+/** How much of the answer a repair call is handed: the coordinator escalation's bound. */
+const CURRENT_ANSWER_MAX_CHARS = 6_000;
+
+/**
+ * The answer a "fix your previous answer" call is about, for its instruction.
+ *
+ * Those calls run through forceSynthesis, which reads the session's history, and the draft is not in
+ * it yet: it is added only once the turn ships. So a rewrite saw the flaws and not the answer they
+ * were found in, and wrote a new answer from the history. In E2E
+ * core-ix-browser-order-form-express-refused every shipped reply was such a rewrite, and one turned
+ * the specialist's disclosure (it had changed the shipping option) into "no automatic change was
+ * made". The coordinator escalation was the only repair that passed the answer; every repair now
+ * passes it the same way.
+ */
+export function currentAnswerBlock(current: string): string {
+  return "\n\nCurrent answer to improve:\n" + current.slice(0, CURRENT_ANSWER_MAX_CHARS);
+}
+
+/** The QA delivery loop's cheap repair: fix the verdict's flaws in the answer it judged. */
+export function buildQaImproveInstruction(current: string, flaws: string): string {
+  return "QA REVIEW found that your previous answer does not yet meet the task's acceptance criteria. "
+    + `Fix ONLY these flaws while keeping everything that was already correct, ${IN_REPLY_LANGUAGE}:\n`
+    + flaws
+    + currentAnswerBlock(current)
+    + "\n\nReturn the COMPLETE corrected answer (not a diff, not a note). Ground every claim in this conversation's tool results and shared findings; do not invent facts to satisfy a criterion — if something genuinely cannot be verified, mark it unverified rather than fabricating it.";
+}
+
+/** riskGatedQA's one-shot verification: check the answer against the criteria, repair only a gap. */
+export function buildCriteriaVerifyInstruction(current: string, criteria: readonly string[]): string {
+  return "Before finalizing, verify your answer meets ALL of these acceptance criteria for the user's task:\n"
+    + criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+    + currentAnswerBlock(current)
+    + "\n\nIf every criterion is met and every claim is grounded in this conversation's tool results and shared findings, return the SAME answer. "
+    + "If a criterion is unmet or a claim is unsupported, return a corrected answer that fixes the gap or transparently marks what could not be verified. Do not add unsupported claims.";
 }

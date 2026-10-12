@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence} from "../agent/qa-delivery-loop.js";
+import {
+  runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence,
+  buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock,
+} from "../agent/qa-delivery-loop.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
 
@@ -362,3 +365,42 @@ describe("qaRequiresEvidence — strict implies the evidence request", () => {
   });
 });
 
+/**
+ * The repairs see the answer they repair.
+ *
+ * E2E core-ix-browser-order-form-express-refused: both QA rounds failed, and every shipped reply was
+ * the improve step's rewrite. That rewrite ran through forceSynthesis, which reads the session's
+ * history, and the draft is not in it until the turn ships: it got the flaws and not the answer, and
+ * one rewrite turned the browser agent's disclosure (it had changed the shipping) into "no
+ * automatic change was made". Only the coordinator escalation passed the answer; these pin that
+ * every repair instruction does, in the escalation's form.
+ */
+describe("repair instructions carry the answer they repair", () => {
+  const DISCLOSURE = "Hinweis: Die Seite hat Express für Speditionsware abgelehnt; der Browser-Agent hat daraufhin auf "
+    + "Standardversand umgestellt und erneut abgeschickt.";
+  const ANSWER = `Die Bestellung wurde abgeschickt, Referenz NW-B-2106-2-S.\n\n${DISCLOSURE}`;
+
+  it("the QA improve step gets the flaws and the answer, disclosure included", () => {
+    const instruction = buildQaImproveInstruction(ANSWER, "the reply does not say the user's express choice was refused");
+    expect(instruction).toContain("QA REVIEW found");
+    expect(instruction).toContain("the reply does not say the user's express choice was refused");
+    expect(instruction).toContain(`Current answer to improve:\n${ANSWER}`);
+    expect(instruction).toContain(DISCLOSURE);
+    // What to return comes after the answer, so the instruction is the last thing the call reads.
+    expect(instruction.indexOf("Return the COMPLETE corrected answer")).toBeGreaterThan(instruction.indexOf(DISCLOSURE));
+  });
+
+  it("riskGatedQA's one-shot verification gets the criteria and the answer it is to return unchanged", () => {
+    const instruction = buildCriteriaVerifyInstruction(ANSWER, ["reports what the page showed after submit"]);
+    expect(instruction).toContain("1. reports what the page showed after submit");
+    expect(instruction).toContain(`Current answer to improve:\n${ANSWER}`);
+    expect(instruction).toContain(DISCLOSURE);
+    expect(instruction.indexOf("return the SAME answer")).toBeGreaterThan(instruction.indexOf(DISCLOSURE));
+  });
+
+  it("passes the answer in the coordinator escalation's form and bound", () => {
+    expect(currentAnswerBlock(ANSWER)).toBe(`\n\nCurrent answer to improve:\n${ANSWER}`);
+    const long = "a".repeat(6_000) + "TAIL-BEYOND-THE-BOUND";
+    expect(currentAnswerBlock(long)).toBe(`\n\nCurrent answer to improve:\n${"a".repeat(6_000)}`);
+  });
+});
