@@ -69,7 +69,7 @@ Every public schema field, where it is declared, and how many production files r
 | `captureMessageAs` | packages/core/src/config/schema.ts:1425 | 2 |
 | `captureRemainderAs` | packages/core/src/config/schema.ts:1426 | 3 |
 | `cdpUrl` | packages/core/src/config/schemas/render.ts:21 | 1 |
-| `channels` | packages/core/src/config/schema.ts:1416 | 39 |
+| `channels` | packages/core/src/config/schema.ts:1416 | 40 |
 | `childReserveActiveTimeMs` | packages/core/src/config/schema.ts:1707 | 1 |
 | `childReserveTokens` | packages/core/src/config/schema.ts:1705 | 1 |
 | `childReserveToolCalls` | packages/core/src/config/schema.ts:1706 | 1 |

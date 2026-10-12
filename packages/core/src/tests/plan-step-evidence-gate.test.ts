@@ -871,6 +871,90 @@ describe("the research gate's turn trigger", () => {
 
     expect(ran().sort()).toEqual(["researcher", "web_coder"]);
   }, 30_000);
+
+  // ── A routed step scored under the threshold, and Step 1b's shortened ranking ────────────────
+
+  /**
+   * E2E core-build-site-company-facts: web_task_coordinator delegated the site step naming no
+   * agent. The router ranked researcher first at 0.7213, under the deployment's 0.75, and the
+   * shortened-query retry ranked five agents within 0.007 of each other and ran evidence_analyst,
+   * which cannot open a page, without any of the gates the full ranking passes.
+   */
+  describe("with the deployment's skillMatchThreshold", () => {
+    /** As workspace/agents gives them: evidence_analyst's tools and taxonomy, calendar_agent's. */
+    const DEPLOYED = {
+      evidence_analyst: {
+        tools: ["read_shared_facts", "read_file", "list_files", "extract_file_content", "analyze_image", "json_query", "regex_test", "datetime_arithmetic", "url_inspect", "hash_compute", "share_finding", "write_file", "edit_file"],
+        routingGenerated: label("GATHER", "workspace", "text"),
+      },
+      calendar_agent: {
+        tools: ["mail_list_accounts", "calendar_list_calendars", "calendar_list_events", "calendar_create_event", "calendar_update_event", "calendar_delete_event", "contacts_list_address_books", "contacts_search", "contacts_create", "contacts_update", "contacts_delete", "extract_calendar", "generate_ics", "read_file", "list_files", "datetime_arithmetic", "read_shared_facts", "share_finding"],
+        routingGenerated: label("ACT", "user_channel", "live_system"),
+      },
+    };
+
+    beforeEach(async () => {
+      const subAgents = Object.fromEntries(Object.entries({ ...AGENTS, ...DEPLOYED }).map(([name, cfg]) => [name, {
+        description: `${name} test agent`, systemPrompt: "Test.", maxIterations: 4, ...cfg,
+      }]));
+      writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+        workspacePath: tempDir, subAgents, agents: { ephemeralGeneration: { skillMatchThreshold: 0.75 } },
+      }), "utf8");
+      (await import("../config/loader.js")).resetConfigForTests();
+    });
+
+    /** The nested step, verbatim in its opening: German, so the task's words arm nothing. */
+    const NESTED_SITE_STEP = "Rufe die Website http://www.nordlicht-werkzeuge.test/ auf und suche nach dem Gründungsjahr und der Mitarbeiterzahl der Nordlicht Werkzeuge GmbH.";
+    /** Stands in for the embedding router: `full` for a delegation's own task, `other` for any other query (the shortened one). */
+    const routeByQuery = (tasks: readonly string[], full: ReadonlyArray<{ name: string; score: number }>, other: ReadonlyArray<{ name: string; score: number }>) =>
+      vi.doMock("../tools/agent-routing.js", async (importOriginal) => {
+        const actual = await importOriginal<typeof import("../tools/agent-routing.js")>();
+        return {
+          ...actual,
+          resolveAgentRouting: async (query: string, opts?: { minConfidence?: "high" | "medium" | "low"; excludeAgents?: string[] }) => ({
+            query, minConfidence: opts?.minConfidence ?? "medium", mode: "hybrid" as const,
+            results: (tasks.includes(query) ? full : other).filter((entry) => !(opts?.excludeAgents ?? []).includes(entry.name)).map((entry) => ({
+              name: entry.name, description: `${entry.name} test agent`, model: "mock", confidence: "high" as const,
+              score: entry.score, matchedTerms: [], capabilities: [], tags: [],
+            })),
+            weakCandidates: [], gated: false, trippedAgents: [], allLowConfidence: false, nearMisses: [],
+          }),
+        };
+      });
+    const delegate = async (args: Record<string, unknown>, ctx: ToolContext) => {
+      const { getTool } = await import("../tools/registry.js");
+      await import("../tools/sub-agent.js");
+      return getTool("delegate_to_agent")!.execute(args, ctx);
+    };
+
+    it("holds the shortened ranking to the turn trigger: a step naming a web address goes to the research fallback", async () => {
+      routeByQuery([NESTED_SITE_STEP], [], [{ name: "evidence_analyst", score: 0.7561 }, { name: "calendar_agent", score: 0.7507 }]);
+      await delegate({ task: NESTED_SITE_STEP, deliverable: "answer" }, turnCtx("s-short-flagged"));
+
+      // evidence_analyst works only from what it is handed; calendar_agent reaches the user's own
+      // channels, not the page.
+      expect(ran()).toEqual(["researcher"]);
+      expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+        expect.objectContaining({ droppedAgents: ["evidence_analyst", "calendar_agent"], redirectedTo: "researcher", trigger: "turn_evidence", shortenedQuery: expect.any(String) }),
+      ]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([]);
+    }, 30_000);
+
+    it("redirects one of two builder slices the shortened route recovers, not both", async () => {
+      // The full route offers nothing, so both slices reach Step 1b, and each awaits its shortened
+      // route before its gates decide.
+      const second = "Construire une deuxième page avec ces informations.";
+      routeByQuery([FRENCH_BUILD, second], [], [{ name: "web_coder", score: 0.8 }]);
+      const { getTool } = await import("../tools/registry.js");
+      await import("../tools/sub-agent.js");
+      await getTool("parallel_delegate")!.execute({ tasks: [{ task: FRENCH_BUILD }, { task: second }] }, turnCtx("s-short-pair"));
+
+      expect(ran().sort()).toEqual(["researcher", "web_coder"]);
+      expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+        expect.objectContaining({ droppedAgents: ["web_coder"], redirectedTo: "researcher", trigger: "turn_evidence" }),
+      ]);
+    }, 30_000);
+  });
 });
 
 describe("capability predicates behind the turn trigger", () => {
