@@ -168,15 +168,15 @@
       ]
     },
     "chart_designer": {
-      "description": "Plots already-verified NUMBERS as HTML charts and tables: line, bar, area, scatter, and combo charts plus formatted HTML data tables, preserving exact labels, units, date ranges, and source names. Takes a clean dataset and renders it — it does NOT compute or clean the figures (data_analyst does that; chart_designer hands messy data back to it) and does NOT draw process/architecture structure (diagram_designer does that with Mermaid). Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'scatter plot of price vs. quality', 'Tabelle der KPIs als HTML', 'time-series chart from the verified metrics', 'Kombi-Diagramm aus Umsatz und Marge'.",
-      "capabilities": ["html chart rendering", "numeric data visualization", "time-series charting", "html data tables", "line/bar/area charts", "scatter and combo charts"],
-      "tags": ["chart", "html", "plot", "data-visualization", "table", "bar-chart", "line-chart", "scatter", "timeseries"],
+      "description": "Plots already-verified NUMBERS as HTML charts and tables: bar, line, pie, and doughnut charts of one or more series, each with a formatted HTML data table, preserving exact labels, units, date ranges, and source names. Takes a clean dataset and renders it — it does NOT compute or clean the figures (data_analyst does that; chart_designer hands messy data back to it) and does NOT draw process/architecture structure (diagram_designer does that with Mermaid). Example queries: 'plot monthly revenue as a line chart', 'Balkendiagramm der Umsätze pro Region', 'pie chart of the market shares', 'Tabelle der KPIs als HTML', 'time-series chart from the verified metrics', 'Umsatz und Marge als Balken nebeneinander'.",
+      "capabilities": ["html chart rendering", "numeric data visualization", "time-series charting", "html data tables", "bar/line charts", "pie and doughnut charts"],
+      "tags": ["chart", "html", "plot", "data-visualization", "table", "bar-chart", "line-chart", "pie-chart", "timeseries"],
       "model": {
         "enableThinking": true
       },
       "maxIterations": 10,
       "container": { "disabled": true },
-      "systemPrompt": "You turn verified numbers into visual artifacts. Read shared facts first and only chart values that were explicitly established by the user, prior specialists, or provided files. Prefer generate_chart_html for line, bar, area, scatter, and combo charts. Use generate_document when a supporting HTML or Markdown note is useful beside the chart. Preserve exact labels, units, date ranges, source names, and caveats. If the evidence is still messy or not tabulated cleanly, hand off to data_analyst instead of guessing values. Publish the artifact path, chart type, and the exact dataset used via share_finding.",
+      "systemPrompt": "You turn verified numbers into visual artifacts. Read shared facts first and only chart values that were explicitly established by the user, prior specialists, or provided files. Prefer generate_chart_html: it draws bar, line, pie, and doughnut charts and no other type, so for another kind draw the closest of these and say so. Use generate_document when a supporting HTML or Markdown note is useful beside the chart. Preserve exact labels, units, date ranges, source names, and caveats. If the evidence is still messy or not tabulated cleanly, hand off to data_analyst instead of guessing values. Publish the artifact path, chart type, and the exact dataset used via share_finding.",
       "tools": [
         "read_shared_facts",
         "research_notes_read",
