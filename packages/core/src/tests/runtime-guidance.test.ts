@@ -624,6 +624,58 @@ describe("runtime turn guidance", () => {
     expect(disposition).toBe("failure");
   });
 
+  // E2E core-ix-workflow-job-sourced-report: the frame now carries the run's whole answer, and the
+  // ask_user cue is a text sniff over the whole frame. A step that wrote "please confirm" into its
+  // report turned the reply to a finished job into a question to the user.
+  describe("a workflow run's answer that happens to say \"please confirm\"", () => {
+    const jobOutput = (status: "completed" | "blocked") => [
+      `Workflow source_grounded_paper_packet [job] ${status}.`,
+      "",
+      "## Quellenbericht",
+      "",
+      ...Array.from({ length: 18 }, (_, n) => `- Wartung ${n + 1}: laut Dokumentation zu beachten; Hinweise zu Inbetriebnahme, Pflege und Zubehör.`),
+      "",
+      "| Code | Bedeutung |",
+      "| --- | --- |",
+      "| E45 | Kommunikation mit dem Akku gestört |",
+      "",
+      "Hinweis: Garantiefälle bitte vor dem Versand mit dem Händler klären — please confirm the serial number with the dealer.",
+    ].join("\n");
+    const jobMetadata = (blocked: boolean) => ({
+      workflowName: "source_grounded_paper_packet",
+      workflowType: "job",
+      blocked,
+      stepCount: 1,
+      executedSteps: 1,
+      artifacts: blocked ? [] : [{ outputPath: "generated/bericht.md" }, { outputPath: "generated/folien.html" }],
+    });
+    const framed = (status: "completed" | "blocked") => {
+      const metadata = jobMetadata(status === "blocked");
+      const output = jobOutput(status);
+      return [{
+        role: "tool" as const,
+        tool_call_id: "call_workflow_cue",
+        // As the turn loop frames it (agent/turn-tool-execution.ts); a blocked run arrives as the error.
+        content: buildModelVisibleToolResult("run_workflow", status === "blocked" ? `Error: ${output}` : output, metadata),
+        metadata,
+      }];
+    };
+
+    it("synthesizes a completed job instead of asking the user", () => {
+      const [message] = framed("completed");
+      // The cue lies past the head the old 1,600-character cut kept, so only the whole answer has it.
+      expect(jobOutput("completed").indexOf("please confirm")).toBeGreaterThan(1_600);
+      expect(message!.content).toContain("please confirm the serial number");
+      expect(classifyPostOrchestrationDisposition([message!])).toBe("synthesize");
+    });
+
+    it("still classifies a blocked job as failure", () => {
+      const [message] = framed("blocked");
+      expect(message!.content).toContain("please confirm the serial number");
+      expect(classifyPostOrchestrationDisposition([message!])).toBe("failure");
+    });
+  });
+
   it("still classifies a partially executed workflow with failing evidence as failure", () => {
     const disposition = classifyPostOrchestrationDisposition([
       {

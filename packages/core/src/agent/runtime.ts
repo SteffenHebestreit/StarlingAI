@@ -1035,6 +1035,33 @@ export function classifyPostOrchestrationDisposition(
       continue;
     }
 
+    // run_workflow results carry the runtime's own structured verdict — trust
+    // it over text heuristics. The completed-workflow instruction preamble
+    // contains phrases like "marks as incomplete" that the failure-keyword
+    // sniff below misreads as failure evidence (audit 802d4791: a fully
+    // successful sourced_presentation run was branded "[DELEGATION FAILED]",
+    // the model re-ran the entire 10-minute job, and the warden then
+    // force-stopped two SUCCESSFUL runs as "consecutive failures").
+    // BEFORE the ask_user cue, as the plan report is: the frame carries the run's whole answer, so a
+    // step that wrote "please confirm with the vendor" or "which one applies" turned the reply to a
+    // job that had finished into a question to the user. A step that needs the user blocks in the
+    // ask_user tool itself, which works inside a workflow step.
+    if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
+      if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
+        return "failure";
+      }
+      const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
+      const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
+      const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
+      const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
+      if (fullyExecuted || artifactCount > 0) {
+        if (CONTINUATION_CUE_RE.test(observedEvidence)) {
+          sawContinuationCue = true;
+        }
+        continue;
+      }
+    }
+
     if (USER_INTERACTION_CUE_RE.test(text)) {
       return "ask_user";
     }
@@ -1055,29 +1082,6 @@ export function classifyPostOrchestrationDisposition(
     // through to the normal success handling below.
     if (taskGraphFailureDisposition && taskGraphResultIsFailure(metadata)) {
       return "failure";
-    }
-
-    // run_workflow results carry the runtime's own structured verdict — trust
-    // it over text heuristics. The completed-workflow instruction preamble
-    // contains phrases like "marks as incomplete" that the failure-keyword
-    // sniff below misreads as failure evidence (audit 802d4791: a fully
-    // successful sourced_presentation run was branded "[DELEGATION FAILED]",
-    // the model re-ran the entire 10-minute job, and the warden then
-    // force-stopped two SUCCESSFUL runs as "consecutive failures").
-    if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
-      if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
-        return "failure";
-      }
-      const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
-      const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
-      const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
-      const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
-      if (fullyExecuted || artifactCount > 0) {
-        if (CONTINUATION_CUE_RE.test(observedEvidence)) {
-          sawContinuationCue = true;
-        }
-        continue;
-      }
     }
 
     if (
