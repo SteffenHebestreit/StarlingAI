@@ -48,7 +48,7 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
   },
   search_tools: {
     tier: ToolTier.ZERO_READ_ONLY,
-    description: "Semantic search over registered tools — returns relevant tool names and descriptions for a task",
+    description: "Semantic search over registered tools — returns relevant tool names and descriptions for a task, marking each the caller cannot call (loadable, or the agents that hold it)",
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
