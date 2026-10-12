@@ -6282,7 +6282,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[] }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6505,6 +6505,7 @@ async function runQaDeliveryGate(
     escalated: result.escalated,
     unverified: result.unverified,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
   };
 }
 
@@ -6522,7 +6523,7 @@ async function runDeliverableConsistencyGate(
   answer: string,
   userStatements: string,
   maxRounds: number,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; noVerdict?: boolean; flaws?: string[] }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   const check = async (current: string): Promise<QaVerdict> => {
@@ -6565,6 +6566,7 @@ async function runDeliverableConsistencyGate(
     // a reader counting "pass" saw none (review of the thinking-off verdicts, D1).
     status: result.passed && !result.noVerdict ? "pass" : result.status,
     ...(result.noVerdict ? { noVerdict: true } : {}),
+    ...(result.flaws ? { flaws: result.flaws } : {}),
   };
 }
 

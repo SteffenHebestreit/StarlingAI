@@ -64,7 +64,7 @@ import {
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import { IN_REPLY_LANGUAGE } from "./reply-language.js";
-import { buildCriteriaVerifyInstruction, currentAnswerBlock } from "./qa-delivery-loop.js";
+import { buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit } from "./qa-delivery-loop.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -92,6 +92,8 @@ interface QaDeliveryGateResult {
   unverified: boolean;
   /** The reviewer returned no verdict (empty/unparseable reply or a thrown check). */
   noVerdict?: boolean;
+  /** What each failing verdict named, in round order. */
+  flaws?: string[];
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -102,6 +104,8 @@ interface DeliverableConsistencyGateResult {
   passed: boolean;
   status: "pass" | "fail" | "unverified";
   noVerdict?: boolean;
+  /** What each failing verdict named, in round order. */
+  flaws?: string[];
 }
 
 /**
@@ -641,6 +645,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         improved: gate.changed,
         escalated: gate.escalated,
         acceptanceCriteria: criteria.length,
+        ...qaFlawsForAudit(gate.flaws),
       }, { sessionId: session.id, severity: gate.changed || gate.unverified ? "warn" : "info" });
     }
   }
@@ -703,7 +708,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         ? "deliverable_consistency_repaired"
         : gate.noVerdict ? "deliverable_consistency_unverified"
           : gate.passed ? "deliverable_consistency_passed" : "deliverable_consistency_failed",
-      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}) },
+      { rounds: gate.rounds, passed: gate.passed, status: gate.status, repaired: gate.changed, ...(gate.noVerdict ? { noVerdict: true } : {}), ...qaFlawsForAudit(gate.flaws) },
       { sessionId: session.id, severity: gate.changed ? "warn" : "info" });
   }
 

@@ -189,6 +189,19 @@ describe("the QA delivery loop's verdict", () => {
     expect(improve[0]!.last).toContain(`Current answer to improve:\n${ANSWER.trim()}`);
   });
 
+  it("logs what each failing verdict named, clipped, on flow_verification_passed", async () => {
+    // Both rounds failed and the reply was a repair, and nothing recorded what the verdicts had
+    // asked to fix (E2E core-ix-browser-order-form-express-refused).
+    getConfig().orchestration.qaDeliveryLoop = true;
+    const long = `the answer reports a reference the user's choice did not produce ${"x".repeat(400)}`;
+    spyProvider({ qa_verdict: [`FAIL: ${long}`, "FAIL: the answer does not say why"] });
+    await runDeliverableTurn({ plan: true });
+
+    const rows = auditRows("flow_verification_passed").filter((row) => row["reason"] === "qa_delivery_loop");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["qaFlaws"]).toEqual([`${long.slice(0, 300)}…`, "the answer does not say why"]);
+  });
+
   it("records an empty verdict as no verdict — passed:false, status unverified — and asks for no rewrite", async () => {
     getConfig().orchestration.qaDeliveryLoop = true;
     const calls = spyProvider({ qa_verdict: [""] });
@@ -265,7 +278,7 @@ describe("the deliverable-consistency verdict", () => {
     expect(auditRows("deliverable_consistency_passed")).toHaveLength(0);
     const rows = auditRows("deliverable_consistency_failed");
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ passed: false, status: "fail", repaired: false });
+    expect(rows[0]).toMatchObject({ passed: false, status: "fail", repaired: false, qaFlaws: ["the recommendation contradicts the stated budget"] });
   });
 
   it("records an empty verdict as deliverable_consistency_unverified, never as passed", async () => {

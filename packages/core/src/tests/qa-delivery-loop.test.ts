@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence,
-  buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock,
+  buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit,
 } from "../agent/qa-delivery-loop.js";
 
 const CRITERIA = ["names a winner", "cites sources"];
@@ -402,5 +402,46 @@ describe("repair instructions carry the answer they repair", () => {
     expect(currentAnswerBlock(ANSWER)).toBe(`\n\nCurrent answer to improve:\n${ANSWER}`);
     const long = "a".repeat(6_000) + "TAIL-BEYOND-THE-BOUND";
     expect(currentAnswerBlock(long)).toBe(`\n\nCurrent answer to improve:\n${"a".repeat(6_000)}`);
+  });
+});
+
+/**
+ * What the verdicts asked to fix is recorded. In E2E core-ix-browser-order-form-express-refused
+ * both rounds failed and the reply was a repair, and the verdicts' text was logged nowhere.
+ */
+describe("the failing verdicts' flaws", () => {
+  it("come back with the result, each round's in order — whatever the loop ends on", async () => {
+    let n = 0;
+    const exhausted = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: `round ${++n} flaw` }),
+      maxRounds: 2,
+    }));
+    expect(exhausted.flaws).toEqual(["round 1 flaw", "round 2 flaw"]);
+
+    n = 0;
+    const passedLater = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => (++n === 1 ? { pass: false, flaws: "missing sources" } : { pass: true, evidence: "cites rfc 9110" }),
+      maxRounds: 3,
+    }));
+    expect(passedLater.passed).toBe(true);
+    expect(passedLater.flaws).toEqual(["missing sources"]);
+
+    const repairFailed = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "no winner named" }),
+      improve: async () => null,
+    }));
+    expect(repairFailed.flaws).toEqual(["no winner named"]);
+  });
+
+  it("are absent when no verdict failed", async () => {
+    const r = await runQaDeliveryLoop("good", CRITERIA, deps({ check: async () => ({ pass: true }) }));
+    expect(r).not.toHaveProperty("flaws");
+  });
+
+  it("go into the audit row clipped to 300 characters, the cut marked, and not at all when there are none", () => {
+    const long = "f".repeat(500);
+    expect(qaFlawsForAudit([long, "short"])).toEqual({ qaFlaws: [`${"f".repeat(300)}…`, "short"] });
+    expect(qaFlawsForAudit(undefined)).toEqual({});
+    expect(qaFlawsForAudit([])).toEqual({});
   });
 });

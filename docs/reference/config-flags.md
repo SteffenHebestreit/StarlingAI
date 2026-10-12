@@ -416,7 +416,7 @@ Every public schema field, where it is declared, and how many production files r
 | `scopes` | packages/core/src/config/schema.ts:455 | 24 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
-| `secret` | packages/core/src/config/schema.ts:1048 | 55 |
+| `secret` | packages/core/src/config/schema.ts:1048 | 56 |
 | `secretAccessKey` | packages/core/src/config/schema.ts:525 | 4 |
 | `seed` | packages/core/src/config/schema.ts:177 | 24 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 1 |

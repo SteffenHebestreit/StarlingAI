@@ -184,6 +184,9 @@ export interface QaDeliveryResult {
   evidence?: string;
   /** True if at least one round used the coordinator escalation path. */
   escalated: boolean;
+  /** What each failing verdict named, in round order; absent when no verdict failed. Recorded so a
+   *  turn whose reply is a repair can be read back: the verdict's text was logged nowhere. */
+  flaws?: string[];
   /** The last check produced no verdict — an empty or unparseable reply, or a thrown check.
    *  The answer ships (fail-open) with status `unverified` and `passed` false. */
   noVerdict?: boolean;
@@ -217,6 +220,10 @@ export async function runQaDeliveryLoop(
   // NEXT failed round then escalates to the coordinator (when provided): re-wording
   // demonstrably didn't fix it, so the gap needs real re-work.
   let cheapImproveExhausted = false;
+  // Every failing verdict's flaws, on every result from here on: a reply that is a repair cannot
+  // be explained without what the repair was asked to fix.
+  const failedVerdictFlaws: string[] = [];
+  const named = (): { flaws?: string[] } => (failedVerdictFlaws.length > 0 ? { flaws: [...failedVerdictFlaws] } : {});
   for (let round = 0; round < maxRounds; round += 1) {
     let verdict: QaVerdict;
     try {
@@ -225,7 +232,7 @@ export async function runQaDeliveryLoop(
       // Check failed → fail open, ship the current answer. There is no verdict, so it did not
       // pass: the status is truthfully unverified, and whether that surfaces as a caveat is the
       // strict policy's call.
-      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true };
+      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true, ...named() };
     }
     if (verdict.pass) {
       // An empty or unparseable reply keeps pass:true so delivery fails open, but nobody judged
@@ -247,9 +254,11 @@ export async function runQaDeliveryLoop(
         escalated,
         unverified,
         ...(noVerdict ? { noVerdict: true } : {}),
+        ...named(),
       };
     }
 
+    if (verdict.flaws?.trim()) failedVerdictFlaws.push(verdict.flaws.trim());
     const useEscalate = cheapImproveExhausted && !!deps.escalate;
     let improved: string | null;
     try {
@@ -263,7 +272,7 @@ export async function runQaDeliveryLoop(
     else cheapImproveExhausted = true;
     // Repair failed or produced nothing usable → stop; ship the best so far.
     if (!improved || !improved.trim()) {
-      return { answer: current, rounds: round + 1, passed: false, status: "fail", escalated, unverified: false };
+      return { answer: current, rounds: round + 1, passed: false, status: "fail", escalated, unverified: false, ...named() };
     }
     current = improved;
   }
@@ -273,7 +282,22 @@ export async function runQaDeliveryLoop(
   // would only refine an audit-only boolean at the cost of one whole slow-model call
   // per turn. Report passed=false (we never got a confirming PASS within budget).
   const finalPass = false;
-  return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false };
+  return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false, ...named() };
+}
+
+/** How much of one verdict's flaws an audit row keeps. */
+const AUDIT_FLAWS_MAX_CHARS = 300;
+
+/**
+ * The failing verdicts' flaws as an audit row keeps them: each clipped, the cut marked; nothing when
+ * no verdict failed. In E2E core-ix-browser-order-form-express-refused both rounds failed and the
+ * reply was a repair, and what the verdicts had asked to fix could not be read back from anywhere.
+ * These are the reviewer's sentences about the answer; logAudit's secret scan runs over them as
+ * over every string it writes.
+ */
+export function qaFlawsForAudit(flaws: readonly string[] | undefined): { qaFlaws?: string[] } {
+  if (!flaws || flaws.length === 0) return {};
+  return { qaFlaws: flaws.map((text) => (text.length > AUDIT_FLAWS_MAX_CHARS ? `${text.slice(0, AUDIT_FLAWS_MAX_CHARS)}…` : text)) };
 }
 
 /** How much of the answer a repair call is handed: the coordinator escalation's bound. */
