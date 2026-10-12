@@ -142,7 +142,7 @@ Every public schema field, where it is declared, and how many production files r
 | `disabled` | packages/core/src/config/schema.ts:874 | 116 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2057 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:2059 | 3 |
-| `discovery` | packages/core/src/config/schema.ts:665 | 42 |
+| `discovery` | packages/core/src/config/schema.ts:665 | 43 |
 | `discoveryPrefetch` | packages/core/src/config/schemas/orchestration.ts:623 | 6 |
 | `displayName` | packages/core/src/config/schema.ts:396 | 17 |
 | `distillSharedFacts` | packages/core/src/config/schemas/orchestration.ts:702 | 1 |
