@@ -157,8 +157,8 @@ Derived from the served pages (re-derive after editing `site/`):
   blinks blue three times; firmware 3.2.1 released 12.03.2026; gearbox grease check every 150 operating hours;
   warranty 36 months if registered within 30 days, else 24.
 - **Order form**: confirmation reference `NW-B-<article digits>-<quantity>-<S|E>` (e.g. 3 × NW-2104, standard
-  shipping → `NW-B-2104-3-S`). Express for NW-2104/NW-2106 is refused with an error message; missing fields are
-  listed in an error message.
+  shipping → `NW-B-2104-3-S`). Express for NW-2104/NW-2106 is refused with an error message; missing fields and
+  a quantity outside 1–999 are listed in an error message (the form is `novalidate`, so the script reports them).
 - **Delivery status** (after 4 s): NW-A-2041 versandt, parcel NWP-7731-0042, expected 09.10.2026; NW-A-2042 in
   Bearbeitung; NW-A-2043 zugestellt am 02.10.2026.
 - **Slow page**: customer portal maintenance every first Tuesday of the month, 02:00–04:00; last outage
