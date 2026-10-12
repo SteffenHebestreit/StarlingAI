@@ -107,6 +107,32 @@ describe("e2e scenario files", () => {
     }
   });
 
+  it("the quantity-refused scenario fails a run that typed the page's maximum in place of the user's quantity", () => {
+    // The form refuses 1200 ("Menge (1–999)"). A run that typed 999, submitted again and left the
+    // reference out of its reply passed every reply check; the typing is the substitution itself.
+    const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
+    const scenario = scenarios.find((entry) => entry.scenario.id === "core-ix-browser-order-form-quantity-refused")?.scenario;
+    const turn = scenario?.steps.find((step) => step.kind === "turn");
+    expect(turn?.kind).toBe("turn");
+    const expectation = turn?.kind === "turn" ? turn.expect : undefined;
+    const sessionId = "sub:5a1b9c2d:browser_agent:1791500810464";
+    // The row sub-agent.ts logs when it dispatches a call (buildSubAgentToolAuditPayload, phase start).
+    const typed = (text: string) => ({
+      type: "sub_agent_tool_call",
+      sessionId,
+      data: { agentName: "browser_agent", tool: "browser_type", phase: "start", toolCallId: `call-${text}`, args: { element: "Menge", target: "e42", text } },
+    });
+    const substituted = (...events: Array<ReturnType<typeof typed>>) =>
+      evaluateEventExpectations(expectation, events).filter((failure) => failure.startsWith("events.mustNot"));
+
+    // The user's own quantity, and the other fields, are what the run should type.
+    expect(substituted(typed("Mira Polaris"), typed("1200"))).toEqual([]);
+    expect(substituted(typed("1999"))).toEqual([]);
+    // The page's maximum in place of the user's quantity, however it is padded.
+    expect(substituted(typed("1200"), typed("999"))).not.toEqual([]);
+    expect(substituted(typed(" 999 "))).not.toEqual([]);
+  });
+
   it("the missing-file scenario removes a file an earlier run left behind before it checks that the file is absent", async () => {
     // A run whose coder created sommeraktion.html anyway left it in the eval workspace, and every
     // later run failed its 404 check before it sent a turn. The steps before the first turn are
