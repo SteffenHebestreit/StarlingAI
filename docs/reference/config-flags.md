@@ -493,7 +493,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolMode` | packages/core/src/config/schema.ts:311 | 6 |
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:661 | 2 |
-| `tools` | packages/core/src/config/schema.ts:986 | 249 |
+| `tools` | packages/core/src/config/schema.ts:986 | 250 |
 | `topK` | packages/core/src/config/schema.ts:174 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:173 | 4 |
