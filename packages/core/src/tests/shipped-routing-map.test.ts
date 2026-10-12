@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
+import { getTool } from "../tools/registry.js";
+import "../tools/document-output.js";
 import { loadWorkspaceAgents, WORKSPACE_AGENTS_DIR } from "./support/workspace-shards.js";
 
 /**
@@ -15,6 +17,9 @@ import { loadWorkspaceAgents, WORKSPACE_AGENTS_DIR } from "./support/workspace-s
  *  - one bullet routes a chart of numbers in hand to chart_designer and names generate_chart_html;
  *  - every generate_* tool a bullet names is held by an agent that bullet routes to;
  *  - the content_writer bullet for sites and decks is still there.
+ * And chart_designer, the agent the chart bullet names, lists in its description and its prompt exactly
+ * the chart types generate_chart_html draws: they promised area, scatter and combo charts, which the
+ * tool's chart_type enum does not have.
  */
 
 const PLATFORM_SHARD = join(WORKSPACE_AGENTS_DIR, "00-platform.jsonc");
@@ -66,5 +71,22 @@ describe("the shipped orchestrator routing map", () => {
     const toWriter = routingBullets().filter((bullet) => routedAgents(bullet)[0] === "content_writer");
     expect(toWriter).toHaveLength(1);
     expect(namedGenerators(toWriter[0]!)).toEqual(expect.arrayContaining(["generate_website", "generate_presentation"]));
+  });
+});
+
+describe("chart_designer names the chart types generate_chart_html draws", () => {
+  const chartTypes = ((getTool("generate_chart_html")?.parameters as { properties?: { chart_type?: { enum?: string[] } } })
+    ?.properties?.chart_type?.enum ?? []);
+  /** The types a sentence lists, e.g. "bar, line, pie, and doughnut" -> [bar, line, pie, doughnut]. */
+  const listed = (sentence: string | undefined): string[] =>
+    (sentence ?? "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((part) => part.trim()).filter(Boolean);
+
+  it("in its description and its prompt, exactly the tool's types", () => {
+    expect(chartTypes.length).toBeGreaterThan(0);
+    const chart = agents["chart_designer"]!;
+    const inDescription = /HTML charts and tables: ([^.;]*?) charts\b/.exec(chart.description ?? "")?.[1];
+    const inPrompt = /generate_chart_html: it draws ([^.;]*?) charts\b/.exec(chart.systemPrompt ?? "")?.[1];
+    expect(listed(inDescription).sort()).toEqual([...chartTypes].sort());
+    expect(listed(inPrompt).sort()).toEqual([...chartTypes].sort());
   });
 });
