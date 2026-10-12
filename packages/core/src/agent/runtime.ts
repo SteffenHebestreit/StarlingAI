@@ -929,6 +929,8 @@ async function enforceDelegateCoverage(
 
 const CONTINUATION_CUE_RE = /\b(next (logical )?(step|action)|n[äa]chste (logische )?(schritt|aktion)|before summarizing|continue orchestration|continue with|drill down|inspect the contents|fetch the contents|final required action|determine the actual data file format|extract the raw numerical values)\b/i;
 const USER_INTERACTION_CUE_RE = /\b(please confirm|confirm .* before|approval required|needs approval|ask the user|missing .* from the user|which one|which option|clarify|need the user to|authorization reference|approved target scope)\b/i;
+/** How much of a workflow run's answer the cues above read: the head its frame showed until it carried the whole answer. */
+const WORKFLOW_CUE_SCAN_CHARS = 1_600;
 
 type PostOrchestrationDisposition = "continue" | "synthesize" | "ask_user" | "failure" | "none";
 
@@ -1046,16 +1048,22 @@ export function classifyPostOrchestrationDisposition(
     // step that wrote "please confirm with the vendor" or "which one applies" turned the reply to a
     // job that had finished into a question to the user. A step that needs the user blocks in the
     // ask_user tool itself, which works inside a workflow step.
+    // The cues that still read a run's answer read its head only, the 1,600 characters the frame
+    // showed before it carried the whole answer: a "Next step: …" late in a finished job's report
+    // turned the reply into more orchestration, past the directive that names its files.
     if (/^Workflow\s+\S+\s+\[[^\]]+\]\s+(?:blocked|completed)\./i.test(text)) {
+      const answerHead = observedEvidence.slice(0, WORKFLOW_CUE_SCAN_CHARS);
       if (metadata["blocked"] === true || /^Workflow\s+\S+\s+\[[^\]]+\]\s+blocked\./i.test(text)) {
-        return "failure";
+        // A run blocked on the user, a confirmation or a credential it needs, asks the user rather
+        // than counting as a failed delegation, as it did while the cue came first.
+        return USER_INTERACTION_CUE_RE.test(answerHead) ? "ask_user" : "failure";
       }
       const stepCount = typeof metadata["stepCount"] === "number" ? metadata["stepCount"] : undefined;
       const executedSteps = typeof metadata["executedSteps"] === "number" ? metadata["executedSteps"] : undefined;
       const artifactCount = Array.isArray(metadata["artifacts"]) ? (metadata["artifacts"] as unknown[]).length : 0;
       const fullyExecuted = stepCount !== undefined && stepCount > 0 && executedSteps !== undefined && executedSteps >= stepCount;
       if (fullyExecuted || artifactCount > 0) {
-        if (CONTINUATION_CUE_RE.test(observedEvidence)) {
+        if (CONTINUATION_CUE_RE.test(answerHead)) {
           sawContinuationCue = true;
         }
         continue;

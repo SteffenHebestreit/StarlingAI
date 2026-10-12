@@ -676,6 +676,50 @@ describe("runtime turn guidance", () => {
     });
   });
 
+  // The text cues that still read a workflow run's answer read the head the frame showed before it
+  // carried the whole answer, 1,600 characters, so the whole answer adds no cue they did not see.
+  describe("the text cues read the head of a workflow run's answer", () => {
+    const filler = Array.from({ length: 18 }, (_, n) => `- Wartung ${n + 1}: laut Dokumentation zu beachten; Hinweise zu Inbetriebnahme, Pflege und Zubehör.`);
+    const output = (status: "completed" | "blocked", parts: { head?: string[]; tail?: string[] }) => [
+      `Workflow source_grounded_paper_packet [job] ${status}.`,
+      "",
+      "## Quellenbericht",
+      "",
+      ...(parts.head ?? []),
+      ...filler,
+      "",
+      ...(parts.tail ?? []),
+    ].join("\n");
+    const classify = (status: "completed" | "blocked", parts: { head?: string[]; tail?: string[] }) => {
+      const blocked = status === "blocked";
+      const metadata = {
+        workflowName: "source_grounded_paper_packet",
+        workflowType: "job",
+        blocked,
+        stepCount: 1,
+        executedSteps: 1,
+        artifacts: blocked ? [] : [{ outputPath: "generated/bericht.md" }],
+      };
+      const text = output(status, parts);
+      const content = buildModelVisibleToolResult("run_workflow", blocked ? `Error: ${text}` : text, metadata);
+      return classifyPostOrchestrationDisposition([{ role: "tool", tool_call_id: "call_workflow_head", content, metadata }]);
+    };
+    const NEXT_STEP = "Next step: fetch the contents of the dealer portal for the 2027 price list.";
+
+    it("does not continue a finished job for a next step its report names late", () => {
+      expect(output("completed", { tail: [NEXT_STEP] }).indexOf("Next step")).toBeGreaterThan(1_600);
+      expect(classify("completed", { tail: [NEXT_STEP] })).toBe("synthesize");
+    });
+
+    it("still continues one whose report opens with it", () => {
+      expect(classify("completed", { head: [NEXT_STEP] })).toBe("continue");
+    });
+
+    it("asks the user when a blocked job's report opens with a confirmation it needs", () => {
+      expect(classify("blocked", { head: ["Blocker: please confirm the dealer portal credentials before the price list can be read."] })).toBe("ask_user");
+    });
+  });
+
   it("still classifies a partially executed workflow with failing evidence as failure", () => {
     const disposition = classifyPostOrchestrationDisposition([
       {
