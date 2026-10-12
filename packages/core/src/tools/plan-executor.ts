@@ -100,6 +100,14 @@ function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   if (plan.acceptanceCriteria.length > 0) {
     parts.push(`ACCEPTANCE CRITERIA for the turn: ${plan.acceptanceCriteria.join("; ")}`);
   }
+  // The criteria say what success looks like, and only that. A plan whose criteria could be met by
+  // a confirmation page alone sent a browser step to get one: the page refused the shipping the user
+  // chose, the step chose another itself and submitted again, and reported the reference. The plan's
+  // own stop conditions ("an error on submit: report it") were recorded and never reached the step.
+  // Last, so the head the reuse signature reads is the same with or without them.
+  if (plan.stopConditions.length > 0) {
+    parts.push(`STOP CONDITIONS for the turn — stop and report when one holds: ${plan.stopConditions.join("; ")}`);
+  }
   return parts.join("\n\n");
 }
 
