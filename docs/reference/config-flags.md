@@ -135,7 +135,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverable` | packages/core/src/config/schema.ts:951 | 63 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:403 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
-| `description` | packages/core/src/config/schema.ts:630 | 186 |
+| `description` | packages/core/src/config/schema.ts:630 | 187 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:434 | 2 |
 | `digest` | packages/core/src/config/schema.ts:2039 | 59 |
 | `dir` | packages/core/src/config/schema.ts:2028 | 61 |
@@ -229,7 +229,7 @@ Every public schema field, where it is declared, and how many production files r
 | `label` | packages/core/src/config/schema.ts:289 | 152 |
 | `labeledAt` | packages/core/src/config/schema.ts:968 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:967 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 98 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:236 | 99 |
 | `layaFirstMs` | packages/core/src/config/schemas/decisions.ts:52 | 3 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1851 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
@@ -504,7 +504,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:325 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:506 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:353 | 23 |
-| `type` | packages/core/src/config/schema.ts:1029 | 488 |
+| `type` | packages/core/src/config/schema.ts:1029 | 489 |
 | `unbackedActionClaims` | packages/core/src/config/schemas/orchestration.ts:917 | 1 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 3 |

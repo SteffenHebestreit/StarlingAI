@@ -751,9 +751,17 @@ registerTool({
         // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
         // Which steps are still owed, by id — record_plan's folded receipt names them in its first
-        // line, where no history cap can cut them off.
+        // line, where no history cap can cut them off. With their descriptions: where the results
+        // are shown to the user, the steps that did not complete are named under them
+        // (planReportResultsForDisplay).
         ...(outstanding > 0
-          ? { outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({ id: o.id, status: o.status })) }
+          ? {
+            outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({
+              id: o.id,
+              status: o.status,
+              ...(byId.get(o.id)?.description ? { description: byId.get(o.id)!.description } : {}),
+            })),
+          }
           : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),

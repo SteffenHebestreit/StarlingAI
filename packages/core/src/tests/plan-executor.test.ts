@@ -247,8 +247,9 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     const result = await run();
     expect(result.output.indexOf("FAILED")).toBeGreaterThan(0);
     expect(result.output.indexOf("FAILED")).toBeLessThan(result.output.indexOf("RESULTS"));
-    // ...and the ids are in the metadata, for record_plan's folded receipt to name.
-    expect(result.metadata?.["outstandingSteps"]).toEqual([{ id: "s2", status: "failed" }]);
+    // ...and the ids are in the metadata, for record_plan's folded receipt to name, with the step's
+    // description, for the note under the results where they are shown to the user.
+    expect(result.metadata?.["outstandingSteps"]).toEqual([{ id: "s2", status: "failed", description: "look it up" }]);
   });
 
   it("keeps a step's result across calls, so a resumed plan has not lost it", async () => {
