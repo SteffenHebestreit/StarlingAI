@@ -881,8 +881,15 @@ describe("the research gate's turn trigger", () => {
    * which cannot open a page, without any of the gates the full ranking passes.
    */
   describe("with the deployment's skillMatchThreshold", () => {
-    /** As workspace/agents gives them: evidence_analyst's tools and taxonomy, calendar_agent's. */
+    /**
+     * As workspace/agents gives them: evidence_analyst's tools and taxonomy, calendar_agent's, and
+     * researcher's tools, which include write_file, so a step asking for a file does not filter it out.
+     */
     const DEPLOYED = {
+      researcher: {
+        tools: ["web_search", "web_fetch", "web_table", "url_inspect", "list_knowledge_bases", "search_knowledge_base", "read_shared_facts", "share_finding", "read_file", "write_file", "edit_file", "research_note", "research_notes_read", "research_notes_summary", "research_notes_clear", "graph_upsert_entity", "graph_relate", "graph_query", "graph_find_paths"],
+        routingGenerated: label("GATHER", "external_network", "url"),
+      },
       evidence_analyst: {
         tools: ["read_shared_facts", "read_file", "list_files", "extract_file_content", "analyze_image", "json_query", "regex_test", "datetime_arithmetic", "url_inspect", "hash_compute", "share_finding", "write_file", "edit_file"],
         routingGenerated: label("GATHER", "workspace", "text"),
@@ -948,6 +955,14 @@ describe("the research gate's turn trigger", () => {
       expect(rows("delegation_routing_shortened_recovered")).toEqual([]);
     }, 30_000);
 
+    it("keeps it behind a runner-up too, when it leads by the margin", async () => {
+      routeByQuery([NESTED_SITE_STEP], [{ name: "researcher", score: 0.7213 }, { name: "data_analyst", score: 0.66 }], SHORTENED_RANKING);
+      await delegate({ task: NESTED_SITE_STEP, deliverable: "answer" }, specialistCtx("s-nested-site-lead"));
+
+      expect(ran()).toEqual(["researcher"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([]);
+    }, 30_000);
+
     it("still recovers through the shortened query for the same ranking when the step names no web address", async () => {
       const step = "Rufe die Website der Nordlicht Werkzeuge GmbH auf und suche nach dem Gründungsjahr und der Mitarbeiterzahl.";
       routeByQuery([step], [{ name: "researcher", score: 0.7213 }], SHORTENED_RANKING);
@@ -964,6 +979,27 @@ describe("the research gate's turn trigger", () => {
 
       expect(ran()).toEqual(["web_coder"]);
       expect(rows("delegation_routing_shortened_recovered")).toEqual([expect.objectContaining({ agent: "web_coder" })]);
+    }, 30_000);
+
+    it("does not keep the gatherer for a step that asks for a file, even alone at the top", async () => {
+      // Undeclared, so the verb test decides; researcher holds write_file and passes the routing filter.
+      const step = "Erstelle eine Präsentation über die Nordlicht Werkzeuge GmbH anhand von http://www.nordlicht-werkzeuge.test/.";
+      routeByQuery([step], [{ name: "researcher", score: 0.7213 }], [{ name: "content_writer", score: 0.7561 }]);
+      await delegate({ task: step }, specialistCtx("s-nested-deck"));
+
+      expect(ran()).toEqual(["content_writer"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([expect.objectContaining({ agent: "content_writer" })]);
+    }, 30_000);
+
+    it("does not keep the gatherer when it leads the next candidate by less than the margin", async () => {
+      // Declared "answer" — the event goes into the calendar, not into a workspace file — so the
+      // deliverable does not exempt it; the ranking does.
+      const step = "Add the event announced at https://www.nordlicht-werkzeuge.test/termine.html to my calendar.";
+      routeByQuery([step], [{ name: "researcher", score: 0.7213 }, { name: "calendar_agent", score: 0.7195 }], [{ name: "calendar_agent", score: 0.7561 }]);
+      await delegate({ task: step, deliverable: "answer" }, specialistCtx("s-nested-calendar"));
+
+      expect(ran()).toEqual(["calendar_agent"]);
+      expect(rows("delegation_routing_shortened_recovered")).toEqual([expect.objectContaining({ agent: "calendar_agent" })]);
     }, 30_000);
 
     it("holds the shortened ranking to the turn trigger: a step naming a web address goes to the research fallback", async () => {

@@ -364,6 +364,17 @@ export function batchEvidenceGatherPoint(ctx: ToolContext, agentNames: ReadonlyA
 /** An absolute web address in a task: a page the step has to open from outside the workspace. */
 const WEB_ADDRESS_RE = /\bhttps?:\/\/\S/i;
 
+/**
+ * How far a routed agent that opens pages itself has to lead the next candidate for Step 1 of
+ * executeDelegationWithFallback to keep it under skillMatchThreshold; a lone candidate leads by
+ * definition, as routing-fusion counts a lone candidate decisive. It is the routing canary's margin
+ * over the admission floor (agent/routing-canary.ts), on the same agent-score scale: there a score
+ * that clears the floor by less is one description edit away from falling through it, here a lead
+ * of less is one edit away from another order. Scores that close are noise: the shortened ranking
+ * in core-build-site-company-facts held five agents within 0.007.
+ */
+const ROUTED_GATHERER_LEAD_MARGIN = 0.05;
+
 /** Whether the session a delegation belongs to holds shared facts yet. A read that fails counts as none, which keeps the research gate armed. */
 async function sessionHoldsSharedFacts(ctx: ToolContext): Promise<boolean> {
   try {
@@ -1781,9 +1792,23 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           // evidence_analyst. A top pick that does not open pages itself (a builder, a coordinator) is
           // not kept on this ground, so "build a page linking to https://…" still goes where the
           // threshold sends it.
+          // Two limits keep it to the step that has to read the page. A step that asks for a file or a
+          // workspace change (delegationAsksForFile: the declared deliverable, else the verb test the
+          // routing filter reads) produces something, and the address it names is a source or a
+          // target: "make a deck about https://…" with researcher first goes where the threshold
+          // sends it. And the gatherer has to lead the ranking by ROUTED_GATHERER_LEAD_MARGIN over
+          // the next candidate the gates left, or stand alone in it: a top pick a hair ahead of an
+          // agent that owns the step's subject ("add the event at https://… to my calendar",
+          // researcher a hair ahead of calendar_agent) is the router being unsure, not the step
+          // being a read.
+          const runnerUp = routingCandidates[1];
+          const gathererLeads = !runnerUp || topCandidate.score - runnerUp.score >= ROUTED_GATHERER_LEAD_MARGIN;
           const researchTaskHasCapableCandidate =
             (textRequiresResearch && agentIsResearchCapable(topCandidate.name))
-            || ((routedTurnTriggered || WEB_ADDRESS_RE.test(request.task)) && agentGathersDirectly(topCandidate.name));
+            || ((routedTurnTriggered || WEB_ADDRESS_RE.test(request.task))
+              && agentGathersDirectly(topCandidate.name)
+              && !delegationAsksForFile(request.task, request.deliverable)
+              && gathererLeads);
           const shouldQueueRoutedCandidate = explicitAgentRequested
             || attemptedAgents.length > 0
             || researchTaskHasCapableCandidate
