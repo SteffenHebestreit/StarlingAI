@@ -60,7 +60,7 @@ Every public schema field, where it is declared, and how many production files r
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
 | `browser` | packages/core/src/config/schemas/decisions.ts:85 | 84 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
-| `budget` | packages/core/src/config/schema.ts:1696 | 97 |
+| `budget` | packages/core/src/config/schema.ts:1696 | 98 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
 | `candidateTopK` | packages/core/src/config/schemas/retrieval.ts:105 | 2 |
 | `capabilities` | packages/core/src/config/schema.ts:973 | 48 |
