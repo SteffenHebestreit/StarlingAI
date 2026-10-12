@@ -191,10 +191,10 @@ describe("the turn that ran a job whose files are attached", () => {
     expect(prompt).toContain(E45_ROW);
     expect(prompt).not.toContain("snippet summarized for prior-turn history");
     expect(prompt).toContain("Write the final answer in the reply language");
-    expect(prompt).toContain("give what the request asked for from the evidence below, list EVERY artifact path below with a one-line description");
+    expect(prompt).toContain("answer any question the request asked, with the specific facts from the evidence below; list each attached file below with a one-line description; when the files themselves are what was asked for, keep the reply to that list");
     expect(prompt).toContain("[SYNTHESIS REQUIRED]");
-    expect(prompt).toContain("give what the request asked for from the evidence above, list each attached file with a one-line description");
-    expect(prompt).not.toMatch(/SHORT final|state what was completed/);
+    expect(prompt).toContain("answer any question the request asked, with the specific facts from the evidence above; list each attached file with a one-line description; when the files themselves are what was asked for, keep the reply to that list");
+    expect(prompt).not.toMatch(/SHORT final|state what was completed|give what the request asked for/);
     // The reply names every code, and the coverage check did not hold it to the job's answer.
     for (const code of ALL_CODES) expect(turn.response).toContain(code);
     expect(turn.response).not.toContain(PASTED);
@@ -211,9 +211,9 @@ describe("the turn that ran a job whose files are attached", () => {
     expect(terminal, "no forced answer after the rejected call").toBeDefined();
     const instruction = String(terminal![terminal!.length - 1]!.content);
     expect(instruction).toContain("WRITE THE FINAL ANSWER NOW");
-    expect(instruction).toContain("do NOT paste the files' contents");
-    expect(instruction).toContain("(1) gives what the request asked for from the evidence above, (2) lists every attached file with a one-line description");
-    expect(instruction).not.toMatch(/SHORT|states what was completed/);
+    expect(instruction).toContain("answer any question the request asked, with the specific facts from the evidence above; list each attached file with a one-line description (");
+    expect(instruction).toContain("); when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into the chat. Nothing more.");
+    expect(instruction).not.toMatch(/SHORT|states what was completed|gives what the request asked for/);
     // ...from the job's whole answer, which the collapsed history it reads carries.
     expect(promptText(terminal!)).toContain(E45_ROW);
     // Its reply is under 300 characters, which on this turn is the file list it was asked for, not

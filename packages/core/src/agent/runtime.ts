@@ -1048,7 +1048,7 @@ export function classifyPostOrchestrationDisposition(
 
     // run_workflow results carry the runtime's own structured verdict — trust
     // it over text heuristics. The completed-workflow instruction preamble
-    // contains phrases like "marks as incomplete" that the failure-keyword
+    // contains phrases like "marked incomplete" that the failure-keyword
     // sniff below misreads as failure evidence (audit 802d4791: a fully
     // successful sourced_presentation run was branded "[DELEGATION FAILED]",
     // the model re-ran the entire 10-minute job, and the warden then
@@ -3952,9 +3952,9 @@ async function _runTurn(
         const rejectedTurnArtifacts = collectTurnArtifactAttachments(session);
         terminalInstructionNamesAttachedFiles = rejectedTurnArtifacts.length > 0;
         terminalSynthesisInstruction = rejectedTurnArtifacts.length > 0
-          ? `THE WORK IS COMPLETE — WRITE THE FINAL ANSWER NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools and do NOT paste the files' contents into the chat. Write the final answer ${IN_REPLY_LANGUAGE} that: (1) gives what the request asked for from the evidence above, (2) lists every attached file with a one-line description (`
+          ? `THE WORK IS COMPLETE — WRITE THE FINAL ANSWER NOW. The deliverables were already built and are ATTACHED to this message as files. Do NOT call any more tools. Write the final answer ${IN_REPLY_LANGUAGE}: answer any question the request asked, with the specific facts from the evidence above; list each attached file with a one-line description (`
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
-            + "), and (3) notes anything the evidence explicitly marks as incomplete. Nothing more."
+            + "); when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into the chat. Nothing more."
           : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
         opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
@@ -5512,7 +5512,7 @@ async function _runTurn(
           };
         }
         // Artifact-aware variant: when the orchestration produced attached files,
-        // the final answer gives what the request asked for and lists the files,
+        // the final answer answers what the request asked and lists the files,
         // never a relay of the documents' contents (audit 2445da2e).
         const synthesisArtifacts = collectTurnArtifactAttachments(session);
         // Honesty floor (audit 0dc158ad): on a turn whose research came back partial/

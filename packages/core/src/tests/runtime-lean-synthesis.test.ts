@@ -57,17 +57,20 @@ describe("buildSynthesisRequiredDirective", () => {
     expect(d.toLowerCase()).toContain("copy the exact names");
   });
 
-  it("artifact path: the answer the request asked for, with the attached files listed and not pasted", () => {
+  it("artifact path: answers the request's questions, lists the attached files, and pastes neither", () => {
     const d = buildSynthesisRequiredDirective({ artifactPaths: ["app/index.html", "report.pdf"] });
     expect(d).toContain("attached to this message as files");
     expect(d).toContain("app/index.html");
     expect(d).toContain("report.pdf");
-    // A SHORT summary of what was completed asked for no part of the answer: the reply to a job
-    // whose report held the error codes asked for did not give them (E2E core-ix-workflow-job-sourced-report).
+    // A SHORT summary of what was completed asked for no part of the answer: nothing asked the reply
+    // for the error codes a job's report held (E2E core-ix-workflow-job-sourced-report). A request
+    // for a deck or a site is answered by the files, so then the list is the reply.
     expect(d).toContain("Write the final answer");
-    expect(d).toContain("give what the request asked for from the evidence above, list each attached file with a one-line description");
-    expect(d).toContain("Do NOT paste the files' contents");
-    expect(d).not.toMatch(/SHORT|state what was completed/);
+    expect(d).toContain("answer any question the request asked, with the specific facts from the evidence above; "
+      + "list each attached file with a one-line description; "
+      + "when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete.");
+    expect(d).toContain("Do NOT paste the files' contents into the chat and do NOT delegate again.");
+    expect(d).not.toMatch(/SHORT|state what was completed|give what the request asked for/);
     // Must NOT carry the "copy exact names/numbers" framing — there is no evidence block to copy.
     expect(d.toLowerCase()).not.toContain("copy the exact names");
   });
