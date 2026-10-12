@@ -22,6 +22,14 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
+import { COMPANIONS_FILE, companionCompose, readCompanionStacks } from "./companion-stacks.mjs";
+
+// The environment `sai` was started with, before loadDotEnv adds this stack's .env to it. A companion
+// stack's compose reads its own .env, and a variable of ours of the same name would override it.
+const HOST_ENV = { ...process.env };
+// The gateway's network, which a companion's joined service goes onto (docker-compose.yml: the
+// project's `<slug>-internal` network).
+const GATEWAY_NETWORK = `${PRODUCT.slug}_${PRODUCT.slug}-internal`;
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";
@@ -158,12 +166,14 @@ async function cmdStart() {
       "computer-desktop":{ type: "boolean", default: false },
       rag:               { type: "boolean", default: false },
       laya:              { type: "boolean", default: false },
+      companions:        { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
     strict: false,
   });
 
   const wantBuild   = values.build || values["no-cache"] || values.fresh;
+  const companionsFlag = values.companions || values.all;
   const noCache     = values["no-cache"] || values.fresh;
   const wipeVolumes = values.fresh;
   const pentest     = values.pentest || values.all;
@@ -249,6 +259,9 @@ async function cmdStart() {
   // memory/skills/audit and uploaded files live on the host bind mount and survive
   // it, so sweep those too — otherwise --fresh silently leaves stale .starlingai data.
   if (wipeVolumes) {
+    // A companion's container on the gateway's network keeps `down` from removing it; its own data
+    // is not this stack's to wipe, so it goes down without its volumes.
+    await stopCompanionStacks();
     hdr("Wiping existing volumes...");
     try { execSync(dc("down", "-v").join(" "), { stdio: "inherit" }); } catch { /* ok */ }
     ok("Volumes wiped");
@@ -284,6 +297,25 @@ async function cmdStart() {
       await run(dc("build"));
       await run(["docker", "compose", ...composeFiles, "--profile", "build-only", "build"]);
       ok("Images built");
+    }
+  }
+
+  // Companion stacks go first: their joined services need the gateway's network, which the
+  // containers' creation makes, and the gateway connects its MCP servers once, at boot, so a
+  // companion it reaches that way has to be up by then. One that fails leaves the stack starting.
+  const companions = companionsFlag ? loadCompanionStacks() : [];
+  if (companions.length > 0) {
+    hdr("Starting companion stacks...");
+    await run(dc("up", "--no-start"));
+    for (const stack of companions) {
+      const exitCode = process.exitCode;
+      try {
+        await runCompanion(stack, ["up", "-d", "--wait", ...(wantBuild ? ["--build"] : [])]);
+        ok(`${stack.name} up${stack.join ? ` — the gateway reaches its ${stack.join.service} as ${stack.join.alias}` : ""}`);
+      } catch (err) {
+        process.exitCode = exitCode;
+        warn(`${stack.name} did not start (${err instanceof Error ? err.message : String(err)}); the stack starts without it`);
+      }
     }
   }
 
@@ -421,6 +453,9 @@ async function cmdStop() {
   hdr(`Stopping ${PRODUCT.name}...`);
   ensureDockerDaemon();
   ensureInternalSecrets(); // compose `down` interpolates the same `${VAR:?}` tokens
+  // First the companion stacks: one on the gateway's network keeps `down` from removing it. Their
+  // data is their own, so --volumes leaves it.
+  await stopCompanionStacks();
   const downArgs = values.volumes ? ["down", "-v"] : ["down"];
   await run(["docker", "compose", ...composeFiles, ...allProfiles, ...downArgs]);
 
@@ -771,8 +806,12 @@ ${BOLD}Commands:${RESET}
                                        SAI_ENABLE_LAYA=1 in .env
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
-    --all                              Include all remaining optional services
-  stop  [--volumes]                  Stop services (--volumes wipes DB volumes incl. engram RAG, flat-file memory, uploaded files)
+    --companions                       Also start the companion stacks declared in
+                                       docker/companions.local.jsonc (own compose projects,
+                                       reachable from the gateway under their alias)
+    --all                              Include all remaining optional services and
+                                       the companion stacks
+  stop  [--volumes]                  Stop services and companion stacks (--volumes wipes DB volumes incl. engram RAG, flat-file memory, uploaded files; companions keep their data)
   wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
                                      incl. pgvector, QuestDB, MemGraph, audit log)
                                      while containers keep running; config kept
@@ -934,12 +973,46 @@ async function waitForHealth() {
   }
 }
 
+/** The companion stacks of docker/companions.local.jsonc (scripts/companion-stacks.mjs) whose compose file exists. */
+function loadCompanionStacks() {
+  const { stacks, error } = readCompanionStacks();
+  if (error) {
+    warn(`${error} — no companion stack is started or stopped`);
+    return [];
+  }
+  return stacks.filter((stack) => {
+    if (existsSync(stack.compose)) return true;
+    warn(`${COMPANIONS_FILE}: ${stack.name}'s compose file ${stack.compose} does not exist — skipped`);
+    return false;
+  });
+}
+
+/** `docker compose` on one companion stack, in the environment `sai` was started with (HOST_ENV). */
+function runCompanion(stack, args) {
+  return run([...companionCompose(stack, GATEWAY_NETWORK), ...args], undefined, HOST_ENV);
+}
+
+/** Takes the declared companion stacks down, without their volumes; one that fails is reported, not fatal. */
+async function stopCompanionStacks() {
+  for (const stack of loadCompanionStacks()) {
+    const exitCode = process.exitCode;
+    try {
+      await runCompanion(stack, ["down"]);
+      ok(`${stack.name} stopped (its data kept)`);
+    } catch (err) {
+      process.exitCode = exitCode;
+      warn(`${stack.name} did not stop: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 /**
  * Run a command. Accepts either:
  *   run("cmd", ["arg1", "arg2"])
  *   run(["cmd", "arg1", "arg2"])
+ * `env` replaces the environment the command runs in (default: this process's).
  */
-function run(cmdOrParts, args) {
+function run(cmdOrParts, args, env) {
   let parts;
   if (Array.isArray(cmdOrParts)) {
     parts = cmdOrParts;
@@ -952,7 +1025,7 @@ function run(cmdOrParts, args) {
   // and ensure arguments are passed correctly on all platforms
   const shellCmd = parts.join(" ");
   return new Promise((resolve, reject) => {
-    const child = spawn(shellCmd, [], { stdio: "inherit", shell: true });
+    const child = spawn(shellCmd, [], { stdio: "inherit", shell: true, ...(env ? { env } : {}) });
     child.on("close", (code) => {
       if (code !== 0) {
         process.exitCode = code ?? 1;
