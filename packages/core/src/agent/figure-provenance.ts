@@ -87,6 +87,20 @@ export function addReceivedFigureKeys(into: Set<string>, text: string | null | u
 }
 
 /**
+ * The keys of the figures `rewrite` states that none of `sources` holds as an input. A rewrite made
+ * without tools (the QA repair) cannot have read a figure anywhere else, so one it introduces is one
+ * it worked out itself: in E2E (2026-10-12) a reviewer added up eight prices to 227,30 (they sum to
+ * 227,40), and the repair put that in place of the total the browser run had computed.
+ */
+export function figuresNotIn(rewrite: string, sources: ReadonlyArray<string | null | undefined>): string[] {
+  const received = new Set<string>();
+  for (const source of sources) addReceivedFigureKeys(received, source);
+  const stated = new Set<string>();
+  addFigureKeys(stated, rewrite);
+  return [...stated].filter((key) => !received.has(key));
+}
+
+/**
  * Action identifiers (v1), structural and language-independent — no verb or keyword lists, per the
  * no-keyword rule. Two shapes: a hex token of 7 to 40 characters that holds at least one digit AND
  * at least one a–f letter (a git commit or tag id), and an http(s) URL. The digit-and-letter rule

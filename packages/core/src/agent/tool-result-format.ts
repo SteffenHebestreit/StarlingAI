@@ -615,6 +615,10 @@ function frameToolResult(
       `Delegated result from ${agentName} — TASK COMPLETED.`,
       attemptedAgents.length > 1 ? `Attempts: ${attemptedAgents.join(", ")}.` : "",
       routingReason?.["confidence"] ? `Routing confidence: ${String(routingReason["confidence"])}.` : "",
+      // Said here, outside the evidence, so no relay of the evidence repeats it to the user.
+      metadata?.["reusedFromSessionMemory"] === true
+        ? "This turn had already gathered these findings, so no new run was started for this delegation."
+        : "",
       importantNote,
       `Observed evidence:\n${successEvidence || "No usable delegated result returned."}`,
     ].filter(Boolean);

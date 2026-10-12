@@ -79,3 +79,23 @@ describe("delegation verdicts — only an explicit one beats the prose sniff", (
     expect(isExplicitDelegationSuccess(undefined)).toBe(false);
   });
 });
+
+describe("a delegation served from findings the turn already gathered", () => {
+  it("says so in the frame, outside the evidence a relay repeats", () => {
+    // E2E 2026-10-12: the reuse note was the first line of the result, and a verbatim relay of a
+    // plan's results put it into the reply.
+    const facts = "- Die Firma hat 146 Mitarbeiterinnen und Mitarbeiter.\n- Ab Werk ist Drehmomentstufe 7 eingestellt.";
+    const framed = buildModelVisibleToolResult("delegate_to_agent", facts, {
+      agentName: "researcher",
+      delegationSucceeded: true,
+      reused: true,
+      reusedFromSessionMemory: true,
+    });
+    const [frame, evidence] = framed.split("Observed evidence:");
+    expect(frame).toMatch(/already gathered these findings/);
+    expect(evidence).toContain("Drehmomentstufe 7");
+    expect(evidence).not.toMatch(/already gathered/);
+    // An ordinary run's frame does not say it.
+    expect(buildModelVisibleToolResult("delegate_to_agent", facts, HEURISTIC)).not.toMatch(/already gathered these findings/);
+  });
+});

@@ -318,9 +318,11 @@ describe("swarm orchestration tools", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("Reused relevant session/task memory");
-    expect(result.output).toContain("a2a_protocol_sources");
+    expect(result.output).toContain("https://a2a-protocol.org/latest/specification/");
     expect(result.metadata?.["reusedFromSessionMemory"]).toBe(true);
+    // The result is evidence, relayable as it stands: no runtime narration, fact keys or match scores
+    // (E2E 2026-10-12: a verbatim relay carried "Reused relevant session/task memory" into the reply).
+    expect(result.output).not.toMatch(/Reused relevant|already gathered|a2a_protocol_sources|\d+%\)/);
     expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
     expect(Object.values(swarmState.tasks)).toHaveLength(1);
     expect(Object.values(swarmState.tasks)[0]?.status).toBe("completed");
@@ -387,9 +389,9 @@ describe("swarm orchestration tools", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("Reused relevant session/task memory");
-    expect(result.output).toContain("a2a_protocol_v1_official_spec");
-    expect(result.output).toContain("a2a_github_repository");
+    expect(result.output).toContain("A2A Protocol v1.0 official specification");
+    expect(result.output).toContain("Official GitHub repository for the A2A protocol");
+    expect(result.output).not.toMatch(/Reused relevant|a2a_protocol_v1_official_spec|a2a_github_repository/);
     expect(result.metadata?.["reusedFromSessionMemory"]).toBe(true);
     expect(runSubAgentWithStatsMock).not.toHaveBeenCalled();
   }, 30_000);

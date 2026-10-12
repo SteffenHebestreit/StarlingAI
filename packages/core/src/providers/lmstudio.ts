@@ -355,6 +355,8 @@ export function isReasoningBurn(progress: Readonly<StreamProgress>): boolean {
 interface LMStudioProviderOptions {
   timeoutMs?: number;
   maxRetries?: number;
+  /** First wait before a stream's connection-drop retry (streamRetryDelayMs); tests pass 0. */
+  streamRetryBaseDelayMs?: number;
 }
 
 export interface OpenAICompatibleProviderRuntimeSnapshot {
@@ -560,14 +562,44 @@ export function computeOutputTokenBudget(input: {
  */
 export function isRetryableStreamError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  const code = String(
-    (err as { code?: unknown })?.code
-    ?? (err as { cause?: { code?: unknown } })?.cause?.code
-    ?? "",
-  );
   if (/exceeded hard timeout|stream stalled|aborted/.test(msg)) return false;
-  return /premature close|econnreset|socket hang up|terminated|epipe|econnrefused|fetch failed|network error/.test(msg)
-    || ["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET", "EPIPE", "ECONNREFUSED", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(code);
+  // The SDK reports a refused or reset connection as "Connection error." (APIConnectionError), with
+  // the socket's code two causes down (its fetch error, then undici's): read as far as the chain goes.
+  // Its timeout is "Request timed out." and does not match.
+  const codes: string[] = [];
+  let link: unknown = err;
+  for (let depth = 0; depth < 4 && link && typeof link === "object"; depth++) {
+    const code = (link as { code?: unknown }).code;
+    if (typeof code === "string") codes.push(code);
+    link = (link as { cause?: unknown }).cause;
+  }
+  return /premature close|econnreset|socket hang up|terminated|epipe|econnrefused|fetch failed|network error|connection error/.test(msg)
+    || codes.some((code) => ["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET", "EPIPE", "ECONNREFUSED", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(code));
+}
+
+/**
+ * The wait before a stream's connection-drop retry: the base, doubled per retry, at most 4 s. An
+ * immediate retry spent every attempt inside the same few seconds a model server was restarting —
+ * both calls of an E2E turn hit "Connection error." within 7 s and failed over to a model on the
+ * same server — so the attempts now span about that window (1 + 2 + 4 s at the default base).
+ */
+export function streamRetryDelayMs(retry: number, baseMs: number): number {
+  if (baseMs <= 0) return 0;
+  return Math.min(4_000, baseMs * 2 ** Math.max(0, retry - 1));
+}
+
+/** Resolves after `ms`, or as soon as `signal` aborts. */
+function waitUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 }
 
 export interface LLMMessage {
@@ -1566,6 +1598,7 @@ export class LMStudioProvider {
   private healthy = false;
   private lastHealthCheck = 0;
   private configuredMaxRetries: number;
+  private streamRetryBaseDelayMs: number;
   private requestTimeoutMs: number;
   /** Per-agent total-stream backstop, resolved from the ModelConfig (see resolveStreamTotalCapMs). */
   private readonly maxStreamTotalMs: number;
@@ -1586,6 +1619,7 @@ export class LMStudioProvider {
     this.baseUrl = baseUrl;
     this.modelConfig = modelConfig;
     this.configuredMaxRetries = Math.max(0, options.maxRetries ?? 1);
+    this.streamRetryBaseDelayMs = Math.max(0, options.streamRetryBaseDelayMs ?? 1_000);
     this.requestTimeoutMs = computeOpenAICompatibleRequestTimeoutMs(modelConfig, options.timeoutMs);
     // Same derivation shape as requestTimeoutMs above: read off the ModelConfig, not
     // off the endpoint options, because the backstop is a property of the AGENT's run,
@@ -2570,10 +2604,13 @@ export class LMStudioProvider {
         }
         const effortRejected = this.noteReasoningEffortRejection(this.parseModelId(this.modelConfig.primary), err, options?.controls);
         if (yielded === 0 && attempt < maxAttempts && !signal?.aborted && (effortRejected || isRetryableStreamError(err))) {
+          const delayMs = effortRejected ? 0 : streamRetryDelayMs(attempt, this.streamRetryBaseDelayMs);
           log.warn(
-            { err: String(err), model: this.parseModelId(this.modelConfig.primary), attempt, maxAttempts },
+            { err: String(err), model: this.parseModelId(this.modelConfig.primary), attempt, maxAttempts, delayMs },
             "transient stream drop before first chunk — retrying",
           );
+          if (delayMs > 0) await waitUnlessAborted(delayMs, signal);
+          if (signal?.aborted) throw err;
           continue;
         }
         throw err;

@@ -31,6 +31,7 @@ export async function initMcpServers(): Promise<void> {
 }
 
 export async function syncMcpServers(): Promise<void> {
+  cancelFailedServerRetry();
   markRuntimeComponentAttempt("mcp");
   try {
     const config = getConfig();
@@ -78,6 +79,7 @@ export async function syncMcpServers(): Promise<void> {
     log.info({ ok, failed }, "MCP servers initialized");
     if (failed > 0) {
       markRuntimeComponentSuccess("mcp", { connected: ok, failed, servers: [..._connections.keys()] }, { healthy: false, error: `${failed} MCP server(s) failed to connect` });
+      scheduleFailedServerRetry();
     } else {
       markRuntimeComponentSuccess("mcp", { connected: ok, failed, servers: [..._connections.keys()] });
     }
@@ -111,6 +113,7 @@ export async function syncMcpServers(): Promise<void> {
 }
 
 export async function shutdownMcpServers(): Promise<void> {
+  cancelFailedServerRetry();
   // A server that a reconnect is still connecting is not in _connections, so it is torn down
   // by name as well: that moves its epoch, and the reconnect closes what it opened instead of
   // bridging it after the shutdown.
@@ -255,7 +258,7 @@ const MCP_RECONNECT_THROTTLE_MS = 10_000;
  * comes back first and a sync that tore the server down is still connecting, the sync's bridge
  * replaces and closes it when the sync's own connection comes back.
  */
-async function reconnectServer(name: string): Promise<McpClientConnection | null> {
+async function reconnectServer(name: string, why = "after a failed tool call"): Promise<McpClientConnection | null> {
   await teardownServer(name);
   const epoch = _serverEpoch.get(name);
   const cfg = getConfig().mcp?.servers?.[name];
@@ -277,8 +280,74 @@ async function reconnectServer(name: string): Promise<McpClientConnection | null
     return null;
   }
   await _bridgeServer(name, conn);
-  log.info({ server: name, tools: conn.tools.length }, "MCP server reconnected after a failed tool call");
+  log.info({ server: name, tools: conn.tools.length }, `MCP server reconnected ${why}`);
   return conn;
+}
+
+/**
+ * A server that failed to connect is tried again, alone, after 30 s, then twice as long each time up to
+ * 5 min, until it connects or a sync or a shutdown takes over. The gateway used to connect its servers
+ * at boot and on an mcp config reload only, so a server whose host came up after the gateway — a
+ * companion stack started next to a running gateway (2026-10-12) — stayed failed, its tools missing,
+ * until the gateway was recreated. Each attempt is reconnectServer's, so a sync that changes the
+ * server meanwhile wins, and the servers already connected are not touched.
+ */
+const MCP_RETRY_BASE_MS = 30_000;
+const MCP_RETRY_MAX_MS = 300_000;
+let _retryTimer: ReturnType<typeof setTimeout> | undefined;
+let _retryRound = 0;
+
+function cancelFailedServerRetry(): void {
+  if (_retryTimer) clearTimeout(_retryTimer);
+  _retryTimer = undefined;
+  _retryRound = 0;
+}
+
+function scheduleFailedServerRetry(): void {
+  if (_retryTimer) clearTimeout(_retryTimer);
+  const delay = Math.min(MCP_RETRY_MAX_MS, MCP_RETRY_BASE_MS * 2 ** _retryRound);
+  _retryRound += 1;
+  _retryTimer = setTimeout(() => {
+    _retryTimer = undefined;
+    void retryFailedServers().catch((err) => log.warn({ err }, "MCP retry of failed servers failed"));
+  }, delay);
+  _retryTimer.unref?.();
+}
+
+/** The configured autoStart servers that have no connection. */
+function unconnectedServers(): string[] {
+  return Object.entries(getConfig().mcp?.servers ?? {})
+    .filter(([name, cfg]) => cfg.autoStart && !_connections.has(name))
+    .map(([name]) => name);
+}
+
+async function retryFailedServers(): Promise<void> {
+  const missing = unconnectedServers();
+  if (missing.length === 0) {
+    _retryRound = 0;
+    return;
+  }
+  const toolNames: string[] = [];
+  for (const name of missing) {
+    const conn = await reconnectServer(name, "on retry after it failed to connect");
+    if (conn) toolNames.push(...(_serverToolNames.get(name) ?? []));
+  }
+  const failed = unconnectedServers().length;
+  const state = { connected: _connections.size, failed, servers: [..._connections.keys()] };
+  if (failed > 0) {
+    markRuntimeComponentSuccess("mcp", state, { healthy: false, error: `${failed} MCP server(s) failed to connect` });
+    scheduleFailedServerRetry();
+  } else {
+    markRuntimeComponentSuccess("mcp", state);
+    _retryRound = 0;
+  }
+  if (toolNames.length > 0) {
+    void warmToolEmbeddings(toolNames).then((warm) => {
+      if (warm.warmed > 0) {
+        logAudit("tool_embeddings_warmed", { warmed: warm.warmed, skipped: warm.skipped, durationMs: warm.durationMs, source: "mcp_retry" });
+      }
+    }).catch(() => undefined);
+  }
 }
 
 /**

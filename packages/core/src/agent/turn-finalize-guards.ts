@@ -172,6 +172,8 @@ export interface TerminalGuardContext {
   readonly workflowRunCompletedThisTurn: boolean;
   readonly releasedWithoutResearchEvidence: boolean;
   readonly autoResearchAnswer: string | null;
+  /** The up-front judge found the QUESTION source-sensitive (orchestration.upfrontSourceSensitiveClassifier). */
+  readonly upfrontSourceSensitive?: boolean;
 
   // --- output guardrail scan result (precomputed on rawResponse, read back for redaction) ---
   readonly outputScan: ReturnType<typeof scanOutput>;
@@ -367,6 +369,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
     !ctx.skipDraftRecovery
     && getConfig().orchestration?.failedResearchHonestyBackstop === true
     && currentTurnHasExecutableOrchestration
+    // The person handed over the material (pasted code, configuration, output) and the up-front judge
+    // did not find the question source-sensitive: the answer is grounded in the message, and a partial
+    // delegation is not a research run that failed. A static review of pasted code was replaced by
+    // "Research did not complete" after the analyst's greps of the workspace found nothing (E2E 2026-10-12).
+    && !(initialDynamicGuidance?.inlineAnalyticalContent && !ctx.upfrontSourceSensitive)
     && (
       ctx.forcedSynthesisFired
       || ctx.consecutiveDelegationFailures > 0
