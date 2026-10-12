@@ -295,6 +295,22 @@ requestAnimationFrame(loop);
     expect(JSON.stringify(verdict)).not.toContain("sk-live-not-a-real-key");
   });
 
+  it("marks a failing verdict a timeout produced, and only that one", async () => {
+    // A timeout can be the machine's load at that moment; a caller deciding whether a repair
+    // worked reads such a verdict as none (turn-finalize-guards.ts).
+    const root = ws();
+    const hang = join(root, "hang.html");
+    writeFileSync(hang, "<html><body><script>function loop(){ while(true){} } requestAnimationFrame(loop);</script></body></html>");
+    const hung = await checkBuiltPage(hang, "hang.html");
+    expect(hung.ok).toBe(false);
+    expect(hung.timedOut).toBe(true);
+    const broken = join(root, "broken.html");
+    writeFileSync(broken, "<html><body><script>const a = 1; const a = 2;</script></body></html>");
+    const failed = await checkBuiltPage(broken, "broken.html");
+    expect(failed.ok).toBe(false);
+    expect(failed.timedOut).toBeUndefined();
+  }, 40_000);
+
   it("treats a missing sibling script as soft, but a page with nothing to run as broken", async () => {
     const root = ws();
     mkdirSync(join(root, "site"), { recursive: true });

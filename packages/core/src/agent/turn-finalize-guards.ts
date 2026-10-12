@@ -17,7 +17,8 @@
 // straight from their sibling modules (never through runtime.js), so the audit events,
 // severities, conditions, and ordering are byte-identical to the inline original.
 
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { logAudit } from "../audit/logger.js";
 import { findUnfilledStubFiles, findBrokenBuiltPageFiles, type ArtifactScanScope } from "./sub-agent.js";
@@ -287,6 +288,15 @@ export function repairedArtifactsNote(repaired: readonly string[], unrepaired: r
   }
   if (de.length === 0) return null;
   return localizedFixedText({ de: `Hinweis: ${de.join(" ")}`, en: `Note: ${en.join(" ")}` });
+}
+
+/** A file's content hash, or null when it cannot be read: what tells a file a build changed from one it did not. */
+function artifactFingerprint(absPath: string): string | null {
+  try {
+    return createHash("sha1").update(readFileSync(absPath)).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Promise<string> {
@@ -830,6 +840,11 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       // Decided before the build, which then writes no confirmation: one synthesis call on the
       // slow model, whose text this path would discard.
       const keepsAnswer = !describedInsteadOfBuilding && finalResponse.trim().length >= MIN_SUBSTANTIVE_REPLY_CHARS;
+      // What each file held before the build, so a repair is claimed only for a file it changed.
+      const workspacePath = session.getWorkspacePath();
+      const before = keepsAnswer
+        ? new Map(faultyArtifacts.map((file) => [file, artifactFingerprint(resolvePath(workspacePath, file))]))
+        : new Map<string, string | null>();
       const built = keepsAnswer
         ? await ctx.runCorrectiveBuild(factsCtx, { confirm: false })
         : await ctx.runCorrectiveBuild(factsCtx);
@@ -841,25 +856,35 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         }
       } else if (ctx.getQaCorrectiveBuildUsed()) {
         // The build ran (the latch is set as it delegates). Both scans again, held to the files
-        // it was asked to repair and without the marker shortcut: a file with neither markers nor
-        // a failing page that is still there is repaired, whatever the build reported about
-        // itself. A scan that fails says nothing either way, so the answer then gains no line.
-        const workspacePath = session.getWorkspacePath();
+        // it was asked to repair and without the marker shortcut, and each file is judged on what
+        // they say, never on what the build reported about itself:
+        //   - repaired: the build changed it, and it now has neither markers nor a failing page;
+        //   - still faulty: markers, or a page that fails on its own account;
+        //   - nothing either way: a page whose check timed out (the machine's load at that moment
+        //     as much as the page), or a file the build did not touch and that now passes, which
+        //     says the first verdict was wrong, not that anything was repaired.
+        // A scan that fails says nothing either way, so the answer then gains no line.
         const asked = new Set(faultyArtifacts.map((file) => resolvePath(workspacePath, file)));
         const recheckScope: ArtifactScanScope = { ...artifactScope, acceptPath: (abs) => asked.has(resolvePath(abs)) };
-        let stillFaulty: Set<string> | null;
+        let recheck: { faulty: Set<string>; undecided: Set<string> } | null;
         try {
-          stillFaulty = new Set([
-            ...findUnfilledStubFiles(workspacePath, recheckScope).files,
-            ...(await findBrokenBuiltPageFiles(workspacePath, recheckScope)).map((page) => page.file),
-          ]);
+          const pages = await findBrokenBuiltPageFiles(workspacePath, recheckScope);
+          recheck = {
+            faulty: new Set([
+              ...findUnfilledStubFiles(workspacePath, recheckScope).files,
+              ...pages.filter((page) => !page.timedOut).map((page) => page.file),
+            ]),
+            undecided: new Set(pages.filter((page) => page.timedOut).map((page) => page.file)),
+          };
         } catch {
-          stillFaulty = null;
+          recheck = null;
         }
-        if (stillFaulty) {
-          const faulty = stillFaulty;
-          const repaired = faultyArtifacts.filter((file) => !faulty.has(file) && existsSync(resolvePath(workspacePath, file)));
-          const unrepaired = faultyArtifacts.filter((file) => !repaired.includes(file));
+        if (recheck) {
+          const { faulty, undecided } = recheck;
+          const repaired = faultyArtifacts.filter((file) => !faulty.has(file) && !undecided.has(file)
+            && existsSync(resolvePath(workspacePath, file))
+            && artifactFingerprint(resolvePath(workspacePath, file)) !== before.get(file));
+          const unrepaired = faultyArtifacts.filter((file) => faulty.has(file));
           const note = repairedArtifactsNote(repaired, unrepaired);
           if (note) finalResponse = `${finalResponse.trimEnd()}\n\n${note}`;
           if (repaired.length > 0) guardrailEvents.push({ type: "guardrail_flagged", details: "final_qa_corrective_build_repaired_artifact" });
@@ -867,6 +892,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
             type: "final_qa_corrective_build_repair_checked",
             repaired,
             unrepaired,
+            undecided: faultyArtifacts.filter((file) => !repaired.includes(file) && !unrepaired.includes(file)),
             buildReturned: Boolean(built),
           }, { sessionId: session.id, channel: session.channel, severity: unrepaired.length > 0 ? "warn" : "info" });
         }

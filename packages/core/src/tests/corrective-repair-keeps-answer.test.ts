@@ -21,6 +21,23 @@ vi.mock("../audit/logger.js", () => ({
   logAudit: (type: string, data: Record<string, unknown>) => { audit.push({ type, data }); },
   subscribeToAudit: () => () => {},
 }));
+/**
+ * The page check, real unless a test plans a verdict for one of its calls (by position): a timeout
+ * is the machine's load as much as the page, and only a planned one makes it happen on cue.
+ */
+type PageVerdict = { ok: boolean; detail: string; timedOut?: true };
+const pageChecks = vi.hoisted(() => ({ calls: 0, plan: [] as Array<((rel: string) => PageVerdict) | undefined> }));
+vi.mock("../tools/page-check.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/page-check.js")>();
+  return {
+    ...actual,
+    checkBuiltPage: async (abs: string, rel: string) => {
+      const planned = pageChecks.plan[pageChecks.calls++];
+      return planned ? planned(rel) : actual.checkBuiltPage(abs, rel);
+    },
+  };
+});
+const timedOut = (rel: string): PageVerdict => ({ ok: false, detail: `${rel}: the page did not finish within 15s and was stopped`, timedOut: true });
 
 const { applyTerminalResponseGuards, repairedArtifactsNote } = await import("../agent/turn-finalize-guards.js");
 const { classifyDeliverableIntent } = await import("../agent/deliverable-intent.js");
@@ -62,6 +79,8 @@ describe("the completion gate's corrective build, on a turn that answered and le
     workspace = mkdtempSync(join(tmpdir(), "sai-repair-keeps-answer-"));
     mkdirSync(join(workspace, "generated"), { recursive: true });
     audit.length = 0;
+    pageChecks.calls = 0;
+    pageChecks.plan = [];
     _resetPageVerdictsForTests();
     // Its own probe would run on the attachments the mocks report; this file is about the gate.
     getConfig().orchestration.verifyArtifacts = false;
@@ -184,6 +203,47 @@ describe("the completion gate's corrective build, on a turn that answered and le
     expect(added.split("\n")).toHaveLength(1);
     expect(added).toContain(LEDGER);
     expect(added).not.toMatch(/nachträglich repariert|repaired since/);
+    expect(ctx.guardrailEvents).toEqual([]);
+  }, 60_000);
+
+  it("claims no repair for a file the build did not change, when the first verdict was a timeout", async () => {
+    // Review of d2d064bc: a timed-out check fails a page and is not held; the re-check then passes
+    // the same bytes, and the line said "repaired" for a file nothing had touched.
+    writeFileSync(join(workspace, LEDGER), REPAIRED_LEDGER, "utf8");
+    pageChecks.plan = [timedOut];
+    let buildRan = false;
+    const ctx = turnCtx({
+      request: BRIEF_REQUEST,
+      answer: BRIEF,
+      attachments: sceneFiles,
+      buildRan: () => buildRan,
+      build: async () => { buildRan = true; return LEDGER; },
+    });
+
+    expect(await applyTerminalResponseGuards(ctx as never)).toBe(BRIEF);
+    expect(buildRan).toBe(true);
+    expect(audit.filter((row) => row.data["type"] === "final_qa_corrective_build_repair_checked").map((row) => row.data))
+      .toEqual([expect.objectContaining({ repaired: [], unrepaired: [], undecided: [LEDGER] })]);
+  }, 60_000);
+
+  it("claims nothing either way when the re-check of a changed page times out", async () => {
+    writeFileSync(join(workspace, LEDGER), BROKEN_LEDGER, "utf8");
+    // The first check is real (the page is broken); the one after the build times out.
+    pageChecks.plan = [undefined, timedOut];
+    let buildRan = false;
+    const ctx = turnCtx({
+      request: BRIEF_REQUEST,
+      answer: BRIEF,
+      attachments: sceneFiles,
+      buildRan: () => buildRan,
+      build: async () => {
+        buildRan = true;
+        writeFileSync(join(workspace, LEDGER), REPAIRED_LEDGER, "utf8");
+        return LEDGER;
+      },
+    });
+
+    expect(await applyTerminalResponseGuards(ctx as never)).toBe(BRIEF);
     expect(ctx.guardrailEvents).toEqual([]);
   }, 60_000);
 

@@ -11,7 +11,7 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:464 | 18 |
 | `accessKeyId` | packages/core/src/config/schema.ts:524 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 156 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 157 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1739 | 1 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1770 | 2 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:406 | 1 |
 | `description` | packages/core/src/config/schema.ts:630 | 187 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:434 | 2 |
-| `digest` | packages/core/src/config/schema.ts:2039 | 59 |
+| `digest` | packages/core/src/config/schema.ts:2039 | 60 |
 | `dir` | packages/core/src/config/schema.ts:2028 | 61 |
 | `disabled` | packages/core/src/config/schema.ts:874 | 116 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2057 | 3 |
