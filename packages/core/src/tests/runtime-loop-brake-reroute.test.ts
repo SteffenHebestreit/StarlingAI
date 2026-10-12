@@ -320,6 +320,25 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     expect(instructions.some((text) => text.includes("NOTHING was created or changed"))).toBe(false);
   });
 
+  // When the last-resort guard does withhold an answer as a raw tool dump, the fallback claims no
+  // facts it does not show, and the turn is not scored completed.
+  it("withholds a raw-dump synthesis honestly, and scores the turn partial", async () => {
+    const { session, runTurn } = await load({ delegationSucceeds: false });
+    streamMock.mockImplementation(() => toolCallStream(`m${streamMock.mock.calls.length}`, "memory_store", { key: "k", content: "" }));
+    const dump = "Web Search Results for: sommeraktion 2026\n\n1. Sommeraktion – Startseite – https://example.test/\nMENU Home Angebote Kontakt Jump to content "
+      + "Create account Log in move to sidebar\n2. Preise und Rabatte – https://example.test/preise\nContent from: https://example.test/preise Rabatte bis 30 % auf alle Werkzeuge.";
+    completeMock.mockResolvedValueOnce({ content: dump, tool_calls: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, finishReason: "stop" });
+
+    const result = await runTurn({ session, userMessage: REQUEST });
+
+    expect(dump.length).toBeGreaterThanOrEqual(200);
+    expect(auditRows("raw_tool_evidence_dump_suppressed")).toHaveLength(1);
+    expect(result.response).not.toContain("Web Search Results");
+    expect(result.response).not.toMatch(/sourced facts|mit Quellen belegten/);
+    const scorecards = auditMock.mock.calls.filter(([event]) => event === "turn_scorecard").map(([, data]) => data as Record<string, unknown>);
+    expect(scorecards).toEqual([expect.objectContaining({ outcomeStatus: "partial", partialOrFailureReason: "answer_withheld_raw_tool_output" })]);
+  });
+
   it("control: a turn that delegated is left as it was", async () => {
     const { session, runTurn } = await load({ delegationSucceeds: false });
     scriptLoopingModel(() => toolCallStream("d1", "delegate_to_agent", { agentName: "content_writer", task: "Change the heading." }));

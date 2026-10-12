@@ -138,7 +138,7 @@ Every public schema field, where it is declared, and how many production files r
 | `description` | packages/core/src/config/schema.ts:630 | 185 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:434 | 2 |
 | `digest` | packages/core/src/config/schema.ts:2039 | 59 |
-| `dir` | packages/core/src/config/schema.ts:2028 | 60 |
+| `dir` | packages/core/src/config/schema.ts:2028 | 61 |
 | `disabled` | packages/core/src/config/schema.ts:874 | 116 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2057 | 3 |
 | `disabledTools` | packages/core/src/config/schema.ts:2059 | 3 |
@@ -177,7 +177,7 @@ Every public schema field, where it is declared, and how many production files r
 | `expression` | packages/core/src/config/schema.ts:1409 | 21 |
 | `extensions` | packages/core/src/config/schema.ts:2067 | 21 |
 | `failedResearchHonestyBackstop` | packages/core/src/config/schemas/orchestration.ts:138 | 1 |
-| `fallback` | packages/core/src/config/schema.ts:117 | 110 |
+| `fallback` | packages/core/src/config/schema.ts:117 | 111 |
 | `finalResponseQaGate` | packages/core/src/config/schemas/effort.ts:49 | 3 |
 | `firstTokenSloMs` | packages/core/src/config/schema.ts:1823 | 1 |
 | `fixedSizeModels` | packages/core/src/config/schemas/multimodal.ts:139 | 2 |

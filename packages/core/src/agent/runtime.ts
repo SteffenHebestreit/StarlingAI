@@ -5984,6 +5984,8 @@ async function _runTurn(
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
+    // The turn's answer did not reach the user, whatever the fallback says: its scorecard is partial.
+    turnQualitySignals.answerWithheld = true;
   }
   // Fabricated-inline-artifact guard: a turn that RESEARCHED (≥1 curated shared fact) but
   // produced NO real artifact (the build was stopped/blocked/never ran) sometimes has the
