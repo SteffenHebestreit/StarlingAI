@@ -27,7 +27,7 @@ import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js"
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, QA_DISCLOSURE_RULE, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import type { TurnUserWords } from "./delegation-user-words.js";
 import {
@@ -6489,6 +6489,7 @@ async function runQaDeliveryGate(
       // still catch — silent scope expansion and debug debris surfaced in the
       // answer itself. Verdict vocabulary stays strictly PASS/FAIL.
       "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",
+      QA_DISCLOSURE_RULE,
       "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
     ].join("\n");
     const messages: LLMMessage[] = [

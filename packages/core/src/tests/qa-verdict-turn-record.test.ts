@@ -190,6 +190,15 @@ describe("the QA delivery verdict at runtime", () => {
     expect(beforeAnswer).toContain("other than the one recorded above FAILS");
   });
 
+  it("tells the reviewer that an answer's note of a refusal or a deviation is required, not unrequested content", async () => {
+    const { QA_DISCLOSURE_RULE } = await import("../agent/qa-delivery-loop.js");
+    const prompts = await runImageTurn({ artifacts: [] });
+    const afterAnswer = prompts[0]!.split("\nANSWER:\n")[1]!;
+    expect(afterAnswer).toContain(QA_DISCLOSURE_RULE);
+    // After the scope row it qualifies: a disclosure is not the "unrequested" work that row fails.
+    expect(afterAnswer.indexOf(QA_DISCLOSURE_RULE)).toBeGreaterThan(afterAnswer.indexOf("Also FAIL when the answer reveals work OUTSIDE"));
+  });
+
   it("leaves the verdict prompt as it was when there is no file and no user's words", async () => {
     const prompts = await runImageTurn({ artifacts: [] });
     expect(prompts).toHaveLength(1);

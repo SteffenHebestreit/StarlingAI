@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   runQaDeliveryLoop, parseQaVerdict, verdictHasEvidence, type QaDeliveryDeps, qaRequiresEvidence,
   buildQaImproveInstruction, buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit,
-  answerFitsRepair, answerRepairMaxChars,
+  answerFitsRepair, answerRepairMaxChars, QA_DISCLOSURE_RULE,
 } from "../agent/qa-delivery-loop.js";
 import { BUILTIN_EFFORT_PROFILES, runWithEffortContext } from "../runtime/effort-context.js";
 
@@ -399,6 +399,15 @@ describe("repair instructions carry the answer they repair", () => {
     expect(instruction).not.toContain("Current answer to improve");
     expect(instruction).toContain(DISCLOSURE);
     expect(instruction.indexOf("return the SAME answer")).toBeGreaterThan(instruction.indexOf(DISCLOSURE));
+  });
+
+  it("both repairs are told to keep a note of a refusal or a deviation (E2E 2026-10-12: a repair dropped it)", () => {
+    for (const instruction of [
+      buildQaImproveInstruction(ANSWER, "it adds an unrequested note to the verbatim page text") ?? "",
+      buildCriteriaVerifyInstruction(ANSWER, ["documents the page's output word for word"]) ?? "",
+    ]) {
+      expect(instruction).toContain(QA_DISCLOSURE_RULE);
+    }
   });
 
   it("passes the answer in the coordinator escalation's form, and marks a cut", () => {
