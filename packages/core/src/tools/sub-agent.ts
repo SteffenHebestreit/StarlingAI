@@ -9,9 +9,8 @@ import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, toolCal
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
 import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
-import { extractTaskNamedPaths, runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
-import { workspaceFileExists } from "../agent/artifact-path-repair.js";
-import { parentSessionOf, rootSessionOf } from "../agent/session-ids.js";
+import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
+import { delegationHasUserFile } from "../agent/delegation-file-input.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
 import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 import { isBlankBrowserPage } from "./browser-page-report.js";
@@ -1250,8 +1249,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   // round and kept for the rest (see Step 1 below).
   let routedTurnTriggered: boolean | undefined;
   // Whether the delegation has a file of the user's to read (delegationHasUserFile), asked once and
-  // only when a ranking offers an agent that reads nothing else.
+  // only when a ranking offers an agent that reads nothing else. Asked right after the routing call
+  // that offered one, before the turn trigger is read, so the gates below stay synchronous: an await
+  // between a decision and its claim lets a sibling slice decide on the same state.
   let hasUserFile: boolean | undefined;
+  const settleUserFile = async (ranked: readonly AgentRoutingCandidate[]): Promise<void> => {
+    if (hasUserFile !== undefined || !ranked.some((cand) => agentCfgReadsOnlyUploads(lookupAgentCapabilities(cand.name)))) return;
+    // A probe that fails cannot say there is no file.
+    hasUserFile = await delegationHasUserFile({
+      sessionId: ctx.sessionId,
+      workspacePath: ctx.workspacePath,
+      texts: [request.task, request.context],
+    }).catch(() => true);
+  };
   // A coordinator must not delegate to another coordinator — that is pure
   // re-decomposition recursion (audit 687a224b: a depth-1 mission_coordinator
   // spawned a depth-2 mission_coordinator and burned ~24 min before the turn cap).
@@ -1545,13 +1555,13 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     // data", routed as "web browsing and website content extraction"; the rerank put the upload
     // reader ahead of researcher, and it listed an empty folder for half a minute before the step
     // went to researcher. A workflow step carries no turn trigger, so the web-address rule below
-    // never saw it. With no file attached in the conversation and none the task names, such an
-    // agent is dropped (agentCfgReadsOnlyUploads, read from the taxonomy's input facet), as long as
-    // another candidate is left.
+    // never saw it. When the delegation has no file of the user's to read (delegationHasUserFile,
+    // settled after the routing call), such an agent is dropped (agentCfgReadsOnlyUploads, read from
+    // the taxonomy's input facet), as long as another candidate is left.
     if (routingCandidates.length > 1) {
       const uploadReaders = routingCandidates.filter((cand) => agentCfgReadsOnlyUploads(lookupAgentCapabilities(cand.name)));
       if (uploadReaders.length > 0 && uploadReaders.length < routingCandidates.length
-        && !(hasUserFile ??= delegationHasUserFile(ctx, [request.task, request.context]))) {
+        && hasUserFile === false) {
         logAudit("delegation_routing_filtered_no_user_file", {
           taskTitle: title,
           droppedAgents: uploadReaders.map((cand) => cand.name),
@@ -1759,6 +1769,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
         const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting());
+        await settleUserFile(allRoutingCandidates);
         // THE TURN TRIGGER, for a routed pick. The research gate reads the task's words, which match
         // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
         // asking in German to fetch a page named an agent the catalog does not have (web_crawler),
@@ -1878,6 +1889,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         if (shortened) {
           const engagedBeforeRoute = ctx.turnEvidence?.outsideEngaged;
           const shortRanked = await routeAgentCandidates(shortened, ctx, excludedFromRouting());
+          await settleUserFile(shortRanked);
           const shortlisted = gateRoutedCandidates(
             shortRanked,
             routedTurnTriggered === true && ctx.turnEvidence?.outsideEngaged === engagedBeforeRoute,
@@ -4176,33 +4188,6 @@ registerTool({
     };
   },
 });
-
-/**
- * Whether a delegation has a file of the user's to read: one attached to a user message in the
- * conversation it runs in (its own session and every one above it, through sub-agent and workflow
- * runs, as far as this process holds them), or one its task or context names that is in the
- * workspace. True when the chain's root is not held here: a conversation this process cannot see
- * is not one without files.
- */
-function delegationHasUserFile(ctx: ToolContext, texts: ReadonlyArray<string | undefined>): boolean {
-  // DECIDED BY THE ROOT. A conversation's attachments are on its chat's messages, and the first
-  // session of the chain this process held used to stand for it: the scene worker holds a workflow
-  // run but not the chat it came from, and an archived chat is not held either, so their files went
-  // unseen and the upload reader was dropped. A root this process does not hold cannot be asked.
-  if (!getSession(rootSessionOf(ctx.sessionId, ["sub:", "workflow:"]))) return true;
-  let id: string | null = ctx.sessionId;
-  for (let depth = 0; id && depth < 16; depth += 1) {
-    const attached = getSession(id)?.getHistory().some((message) => {
-      const attachments = message.role === "user" ? message.metadata?.["attachments"] : undefined;
-      return Array.isArray(attachments) && attachments.length > 0;
-    });
-    if (attached) return true;
-    const parent = parentSessionOf(id, ["sub:", "workflow:"]);
-    id = parent === id ? null : parent;
-  }
-  const exists = workspaceFileExists(ctx.workspacePath);
-  return texts.some((text) => (text ? extractTaskNamedPaths(text).some(exists) : false));
-}
 
 /**
  * The files the user handed over in this session: the attachments on its user messages. An
