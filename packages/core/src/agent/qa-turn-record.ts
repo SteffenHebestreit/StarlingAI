@@ -18,7 +18,7 @@ import { currentTurnStartIndex, type TurnBoundaryMessage } from "./turn-boundary
 const USER_WORDS_HEADER = "The user's own words this turn, verbatim:";
 const ATTRIBUTION_RULE = "An answer that attributes a file to an engine, tier or model other than the one recorded above FAILS.";
 const CONSTRAINT_RULE = "An answer that ignores a constraint the user stated in these words (a model, tier, format, "
-  + "language, something to avoid) without saying so FAILS.";
+  + "language, a value they chose, something to avoid) without saying so FAILS.";
 
 /**
  * The block the verdict prompt carries after the criteria, or "" when the turn produced no file and

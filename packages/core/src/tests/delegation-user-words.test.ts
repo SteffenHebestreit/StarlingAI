@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderUserWordsBlock, typedUserWords, userWordsBlockForRun, type TurnUserWords } from "../agent/delegation-user-words.js";
+import { REFUSED_CHOICE_RULE, renderUserWordsBlock, typedUserWords, userWordsBlockForRun, type TurnUserWords } from "../agent/delegation-user-words.js";
 import { SPECIALIST_REPLY_LANGUAGE_INSTRUCTION } from "../agent/reply-language.js";
 
 /**
@@ -36,8 +36,10 @@ describe("renderUserWordsBlock", () => {
     expect(block).toContain("HEAD-MARKER");
     expect(block).toContain("TAIL-MARKER and never the fast one");
     expect(block).toMatch(/…\(\d+ chars omitted\)…/);
-    // Bounded: the 5,000 characters did not all come along.
-    expect(block.length).toBeLessThan(2_000);
+    // Bounded: the 5,000 characters did not all come along. Measured past the fixed guidance, so
+    // a sentence added to the guidance does not read as the paste growing.
+    const fixed = renderUserWordsBlock(words("x"), TASK).length - 1;
+    expect(block.length - fixed).toBeLessThan(1_300);
   });
 
   it("does not repeat words the task already quotes, whatever the case or spacing — only the language line", () => {
@@ -84,6 +86,20 @@ describe("renderUserWordsBlock", () => {
     const block = renderUserWordsBlock(words(GERMAN, ["nimm das qwen model"]), `${TASK}\n${GERMAN}`);
     expect(block).toContain("(added mid-turn) nimm das qwen model");
     expect(block).not.toContain(GERMAN);
+  });
+
+  it("names a value the user chose as a constraint, and says a refusal of it is reported, not resolved", () => {
+    // E2E core-ix-browser-order-form-express-refused: the page refused the express shipping the
+    // user chose, and the browser agent picked standard itself, submitted again and reported the
+    // reference. The rule rides in both blocks: a task that quotes the words gets only the second.
+    const full = renderUserWordsBlock(words(GERMAN), TASK);
+    expect(full).toContain(LABEL);
+    expect(full).toContain("a value they chose");
+    expect(full).toContain(REFUSED_CHOICE_RULE);
+    const languageOnly = renderUserWordsBlock(words(GERMAN), `${TASK}\n${GERMAN}`);
+    expect(languageOnly).toContain("[REPLY LANGUAGE]");
+    expect(languageOnly).toContain(REFUSED_CHOICE_RULE);
+    expect(REFUSED_CHOICE_RULE).toContain("never substitute one of your own");
   });
 
   it("defangs role tags the user typed, so a quoted block cannot trip the tool-output guardrail", () => {
