@@ -36,6 +36,7 @@ import {
   readDelegationDeliverable,
 } from "./delegation-artifact-classification.js";
 import { holdsArtifactBuilderTool } from "../agent/sub-agent-prompt-guidance.js";
+import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 
 const log = childLogger("tool:sub-agent");
 
@@ -608,7 +609,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
 
   return {
     success,
-    output: success ? `[${ephemeralName}]: ${result}` : result,
+    output: success ? formatDelegatedOutput(ephemeralName, result) : result,
     error: success ? undefined : `Architect-designed agent '${agentName}' could not complete the task.`,
     metadata: {
       agentName: ephemeralName,
@@ -930,7 +931,7 @@ registerTool({
     const note = rejected.length > 0 ? ` [Note: tools ${rejected.join(", ")} were rejected as not grantable]` : "";
     return {
       success: true,
-      output: `[ephemeral:${agentName}]: ${result}${note}`,
+      output: `${formatDelegatedOutput(ephemeralName, result)}${note}`,
       metadata: { agentName: ephemeralName, grantedTools: tools, rejectedTools: rejected, ...runRecordMetadata(runResult) },
     };
   },

@@ -41,6 +41,19 @@ import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
 // call re-emits the same text and is blocked again. Hence every carried or reported result is
 // defanged rather than left for checkToolOutput to block.
 import { defangFramingMarkers } from "../guardrails/framing-markers.js";
+// The report's results section and the leads of what follows it, shared with the reader that shows
+// the results to the user (agent/runtime-evidence-dump.ts planReportResultsForDisplay).
+import {
+  PLAN_CLOSING_ALL_RAN,
+  PLAN_CLOSING_OUTSTANDING,
+  PLAN_FINAL_STEP_HEADING,
+  PLAN_IGNORED_IDS_LEAD,
+  PLAN_MARKED_DONE_LEAD,
+  PLAN_RESULTS_HEADING,
+  PLAN_RETRIED_LEAD,
+  formatPlanStepResult,
+  planResultsOmittedNote,
+} from "../agent/runtime-evidence-dump.js";
 
 const log = childLogger("tool:execute_plan");
 
@@ -625,6 +638,7 @@ registerTool({
     // results" is what produces an invented answer: the orchestrator was handed the roll-call and
     // told to write up work it could not see.
     const reported: string[] = [];
+    const reportedIds: string[] = [];
     let budget = REPORTED_RESULT_TOTAL_CHARS;
     let omitted = 0;
     for (const outcome of done) {
@@ -633,7 +647,12 @@ registerTool({
       if (budget <= 0) { omitted += 1; continue; }
       const slice = text.slice(0, Math.min(REPORTED_RESULT_CHARS, budget));
       budget -= slice.length;
-      reported.push(`[${outcome.id}] ${byId.get(outcome.id)?.description ?? ""}\n${defangFramingMarkers(slice)}${slice.length < text.length ? "\n…(clipped)" : ""}`);
+      reported.push(formatPlanStepResult(
+        outcome.id,
+        byId.get(outcome.id)?.description ?? "",
+        `${defangFramingMarkers(slice)}${slice.length < text.length ? "\n…(clipped)" : ""}`,
+      ));
+      reportedIds.push(outcome.id);
     }
 
     const sections = [`Plan: ${done.length}/${plan.steps.length} step(s) completed.`];
@@ -644,14 +663,14 @@ registerTool({
     const resultSections: string[] = [];
     if (done.length > 0) resultSections.push(`COMPLETED:\n${describe(done)}`);
     if (reported.length > 0) {
-      resultSections.push(`RESULTS — write the final answer from these:\n\n${reported.join("\n\n")}`
-        + (omitted > 0 ? `\n\n(${omitted} further result(s) omitted for length.)` : ""));
+      resultSections.push(`${PLAN_RESULTS_HEADING}\n\n${reported.join("\n\n")}`
+        + (omitted > 0 ? `\n\n${planResultsOmittedNote(omitted)}` : ""));
     }
     if (reasoningLeaves.length > 0) {
       // Counted as done because nothing dispatches it — but said plainly, so a step that names
       // real work the model forgot to give a tool ("write the file", "send the mail") is not
       // quietly reported as finished.
-      resultSections.push(`FINAL STEP — yours, in the reply (nothing dispatches it):\n`
+      resultSections.push(`${PLAN_FINAL_STEP_HEADING}\n`
         + reasoningLeaves.map((id) => `  - ${id} — ${byId.get(id)?.description ?? ""}`).join("\n")
         + `\nIt did not run. If it needs a tool after all (writing a file, sending mail), call that tool now, before answering.`);
     }
@@ -690,15 +709,13 @@ registerTool({
     sections.push(...resultSections);
     if (marked.length > 0 || retried.length > 0 || unknownIds.length > 0) {
       sections.push([
-        marked.length > 0 ? `Marked done: ${marked.join(", ")}.` : "",
-        retried.length > 0 ? `Retried: ${retried.join(", ")}.` : "",
-        unknownIds.length > 0 ? `Ignored — no such step id: ${unknownIds.join(", ")}.` : "",
+        marked.length > 0 ? `${PLAN_MARKED_DONE_LEAD}${marked.join(", ")}.` : "",
+        retried.length > 0 ? `${PLAN_RETRIED_LEAD}${retried.join(", ")}.` : "",
+        unknownIds.length > 0 ? `${PLAN_IGNORED_IDS_LEAD}${unknownIds.join(", ")}.` : "",
       ].filter(Boolean).join(" "));
     }
     sections.push(
-      outstanding > 0
-        ? "Do NOT write the final answer while steps above are outstanding."
-        : "Every step has run. Synthesize the final answer from the results above, against the acceptance criteria.",
+      outstanding > 0 ? PLAN_CLOSING_OUTSTANDING : PLAN_CLOSING_ALL_RAN,
     );
 
     // REPORTED, NOT THROWN. The turn replaces a failed tool's output with "Error: <error>", so
@@ -722,6 +739,9 @@ registerTool({
         manual: manual.length,
         pending: pending.length,
         executed: ran,
+        // The steps whose results the report carries, in its order: read where the results are shown
+        // to the user without the report around them (planReportResultsForDisplay).
+        ...(reportedIds.length > 0 ? { reportedResultIds: reportedIds } : {}),
         // EVERY CALL THIS RUN MADE, for the turn to account for as its own — the delegation tally,
         // the workflow-completed flag, the per-turn budget, and whatever else that tail grows.
         // Reported rather than re-derived here: the turn owns those rules, and re-deriving them was
@@ -731,9 +751,17 @@ registerTool({
         // Reported for the audit line and the report, not consumed by the turn.
         delegated: dispatchedOk.filter((id) => byId.get(id)?.kind !== "direct").length,
         // Which steps are still owed, by id — record_plan's folded receipt names them in its first
-        // line, where no history cap can cut them off.
+        // line, where no history cap can cut them off. With their descriptions: where the results
+        // are shown to the user, the steps that did not complete are named under them
+        // (planReportResultsForDisplay).
         ...(outstanding > 0
-          ? { outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({ id: o.id, status: o.status })) }
+          ? {
+            outstandingSteps: [...failed, ...manual, ...pending].map((o) => ({
+              id: o.id,
+              status: o.status,
+              ...(byId.get(o.id)?.description ? { description: byId.get(o.id)!.description } : {}),
+            })),
+          }
           : {}),
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(specialistToolFailures.length > 0 ? { specialistToolFailures } : {}),

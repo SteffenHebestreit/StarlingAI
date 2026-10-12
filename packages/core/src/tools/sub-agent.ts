@@ -11,6 +11,7 @@ import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecuti
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
+import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 import { isBlankBrowserPage } from "./browser-page-report.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
@@ -2072,7 +2073,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         publishSwarmState(ctx);
         return {
           success: true,
-          output: `[${winner.agentName}]: ${winner.output}`,
+          output: formatDelegatedOutput(winner.agentName, winner.output),
           metadata: {
             taskId,
             attemptedAgents,
@@ -2863,12 +2864,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       });
       await releaseLease();
 
-      const routingNote = routingInfo
-        ? `\n↳ Auto-routed to ${candidate} (${routingInfo.confidence} confidence${routingInfo.matchedTerms.length > 0 ? `, matched: ${routingInfo.matchedTerms.join(", ")}` : ""})`
-        : "";
       return {
         success: true,
-        output: `[${candidate}]: ${output}${routingNote}`,
+        output: formatDelegatedOutput(candidate, output, routingInfo),
         metadata: {
           agentName: candidate,
           taskId,
@@ -2994,12 +2992,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
     publishSwarmState(ctx);
 
-    const routingNote = bestPartialResult.routingInfo
-      ? `\n↳ Auto-routed to ${bestPartialResult.agentName} (${bestPartialResult.routingInfo.confidence} confidence${bestPartialResult.routingInfo.matchedTerms.length > 0 ? `, matched: ${bestPartialResult.routingInfo.matchedTerms.join(", ")}` : ""})`
-      : "";
     return {
       success: true,
-      output: `[${bestPartialResult.agentName}]: ${bestPartialResult.output}${routingNote}`,
+      output: formatDelegatedOutput(bestPartialResult.agentName, bestPartialResult.output, bestPartialResult.routingInfo),
       metadata: {
         agentName: bestPartialResult.agentName,
         taskId,
@@ -4189,7 +4184,7 @@ function sessionFilesInPlay(sessionId: string): FileInPlay[] {
 
 registerTool({
   name: "search_tools",
-  description: "Search available tools by semantic similarity to a task description. Returns the top-matching tool names and descriptions. Use this to discover which tools are available for a sub-task instead of relying on the static tool list in the system prompt.",
+  description: "Search available tools by semantic similarity to a task description. Returns the top-matching tool names and descriptions. Use this to discover which tools are available for a sub-task instead of relying on the static tool list in the system prompt. A tool you cannot call directly is marked: load it with load_tool, or delegate the task to an agent the mark names.",
   embeddingDescription: "find tools, discover capabilities, what tools can do X, which tool handles Y, tool catalog search, tool discovery",
   costHint: "low" as const,
   latencyHint: "low" as const,
@@ -4207,7 +4202,7 @@ registerTool({
     },
     required: ["query"],
   },
-  async execute(args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const query = String(args["query"] ?? "").trim();
     if (!query) {
       return { success: false, output: "", error: "query is required" };
@@ -4236,14 +4231,87 @@ registerTool({
     }
 
     const mode = ranked[0]?.mode ?? "empty";
-    const lines = ranked.map((r) => `- **${r.name}**: ${r.description}`);
+    // Every match is listed, whoever can call it: create_ephemeral_agent picks its grant from the
+    // whole catalog (ephemeral-agent-factory.ts). The mark says what THIS caller can do with it.
+    const reach = await toolReachMarks(ranked.map((r) => r.name), query, ctx);
+    const lines = ranked.map((r) => `- **${r.name}**${reach.marks.get(r.name) ?? ""}: ${r.description}`);
     return {
       success: true,
       output: `Tools matching "${query}" (${ranked.length} result${ranked.length === 1 ? "" : "s"}, ${mode} mode):\n\n${lines.join("\n")}`,
-      metadata: { query, resultCount: ranked.length, mode, topResult: ranked[0]?.name ?? null },
+      metadata: {
+        query,
+        resultCount: ranked.length,
+        mode,
+        topResult: ranked[0]?.name ?? null,
+        ...(reach.loadable.length > 0 ? { loadableResults: reach.loadable } : {}),
+        ...(reach.outOfReach.length > 0 ? { outOfReachResults: reach.outOfReach } : {}),
+      },
     };
   },
 });
+
+/**
+ * What the caller can do with each tool search_tools found, as a mark after its name: none for a
+ * tool it holds, "load it with load_tool first" for one its turn can load (ToolContext.loadableTools),
+ * and otherwise the agents that hold it. The search ranks the whole registry, and in
+ * orchestration_only the orchestrator holds no file tool: handed list_files as a bare name it called
+ * list_files, the tool grammar turned each call into list_capability_gaps({}), and the loop brake
+ * ended the turn (E2E guards-list-files-on-a-file). A caller with no allowedTools is not scoped and
+ * holds every tool, as before. A caller that cannot delegate is told only that the tool is not its own.
+ */
+async function toolReachMarks(
+  toolNames: readonly string[],
+  query: string,
+  ctx: ToolContext,
+): Promise<{ marks: Map<string, string>; loadable: string[]; outOfReach: string[] }> {
+  const marks = new Map<string, string>();
+  if (!ctx.allowedTools) return { marks, loadable: [], outOfReach: [] };
+  const held = new Set(ctx.allowedTools);
+  const loadableSet = new Set(ctx.loadableTools ?? []);
+  const notHeld = toolNames.filter((name) => !held.has(name));
+  const loadable = notHeld.filter((name) => loadableSet.has(name));
+  const outOfReach = notHeld.filter((name) => !loadableSet.has(name));
+  for (const name of loadable) marks.set(name, " (load it with load_tool first)");
+  const holders = outOfReach.length > 0 && held.has("delegate_to_agent")
+    ? await rankedToolHolders(outOfReach, query, ctx)
+    : new Map<string, string[]>();
+  for (const name of outOfReach) {
+    const names = holders.get(name) ?? [];
+    marks.set(name, names.length > 0
+      ? ` (not in your tools; held by ${names.join(", ")} — delegate the task to one of them)`
+      : " (not in your tools)");
+  }
+  return { marks, loadable, outOfReach };
+}
+
+/**
+ * Per tool, up to three configured agents whose tools include it: within the caller's allowedAgents,
+ * never the caller, and in the order search_agents' engine (resolveAgentRouting) ranks them for the
+ * query, the ones it did not rank after them in config order. Agents routing will not offer (an
+ * open circuit breaker, no usable tool) are left out. One routing pass serves every tool.
+ */
+async function rankedToolHolders(toolNames: readonly string[], query: string, ctx: ToolContext): Promise<Map<string, string[]>> {
+  const caller = ctx.currentAgentName?.trim();
+  const agents = Object.entries(getConfig().subAgents)
+    .filter(([name]) => name !== caller && (!ctx.allowedAgents || ctx.allowedAgents.includes(name)));
+  const holdersOf = new Map(toolNames.map((tool) => [
+    tool,
+    agents.filter(([, cfg]) => (cfg.tools ?? []).includes(tool)).map(([name]) => name),
+  ] as const));
+  const allHolders = [...new Set([...holdersOf.values()].flat())];
+  if (allHolders.length === 0) return new Map();
+  let order = allHolders;
+  try {
+    const resolution = await resolveAgentRouting(query, { allowedAgents: allHolders, minConfidence: "low", allowKeywordFallback: false });
+    const notOffered = new Set([...resolution.trippedAgents, ...(resolution.toollessAgents ?? [])]);
+    const ranked = [...resolution.results, ...resolution.weakCandidates].map((candidate) => candidate.name);
+    order = [...new Set([...ranked, ...allHolders])].filter((name) => allHolders.includes(name) && !notOffered.has(name));
+  } catch (err) {
+    // The holders are named all the same, in config order: the mark is for the model, not a routing verdict.
+    log.debug({ err }, "search_tools could not rank the agents holding a tool");
+  }
+  return new Map([...holdersOf].map(([tool, names]) => [tool, order.filter((name) => names.includes(name)).slice(0, 3)]));
+}
 
 // ─── load_tool ───────────────────────────────────────────────────────────────
 // Companion to search_tools for the lean tool catalog (B37): when
@@ -4259,7 +4327,7 @@ registerTool({
 
 registerTool({
   name: "load_tool",
-  description: "Load an available-but-not-yet-offered tool into the current turn so you can call it on your next step. Use after search_tools tells you a tool exists that is not in your current tool list. Pass the exact tool name.",
+  description: "Load an available-but-not-yet-offered tool into the current turn so you can call it on your next step. Use after search_tools marks a tool loadable. Pass the exact tool name.",
   embeddingDescription: "load a tool, enable a tool, activate tool, add tool to this turn, make tool available",
   costHint: "low" as const,
   latencyHint: "low" as const,

@@ -353,6 +353,7 @@ import { stepsFor } from "@/composables/turnSteps";
 import { localExpiresAt, placementKey } from "@/composables/userInputs";
 import { escapeHtml, memoizedRenderMarkdown, renderMarkdown, renderStreamingMarkdown } from "@/composables/markdown";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { finishReasonNeedsAttention as needsAttention } from "@/composables/finishReasons";
 import "highlight.js/styles/github-dark.css";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
 
@@ -1214,11 +1215,7 @@ const usageTooltip = computed(() => {
 
 // Highlight finish reasons that meant the turn didn't end on its own (the
 // user usually wants to know about these).
-const finishReasonNeedsAttention = computed(() => {
-  const reason = props.message.perf?.finishReason;
-  if (!reason) return false;
-  return ["max_iterations", "timeout", "budget_exceeded", "blocked", "interrupted", "error"].includes(reason);
-});
+const finishReasonNeedsAttention = computed(() => needsAttention(props.message.perf?.finishReason));
 
 onBeforeUnmount(() => {
   closeArtifactPreview();

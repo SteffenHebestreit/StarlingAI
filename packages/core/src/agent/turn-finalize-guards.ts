@@ -54,7 +54,7 @@ import {
 } from "./runtime-utils.js";
 import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js";
 import { isExecutionChatterOnly } from "./sanitize-response.js";
-import { looksLikeRawSharedFactsDump } from "./runtime-evidence-dump.js";
+import { looksLikeRawSharedFactsDump, stripDelegateRelayFrame } from "./runtime-evidence-dump.js";
 import {
   looksLikeTransparentIncompleteReport,
   looksLikeUnsourcedSpecificClaims,
@@ -587,7 +587,8 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
                 tool_call_id: callId, metadata: res.metadata,
               });
               if (!res.success) return null;
-              const candidate = sanitizeUserFacingAssistantResponse(res.output, 0);
+              // The coordinator's answer, not delegate_to_agent's frame around it ("[mission_coordinator]:").
+              const candidate = sanitizeUserFacingAssistantResponse(stripDelegateRelayFrame(res.output), 0);
               // Reject a catastrophic shrink (a short "I built X" summary must not replace a long answer).
               if (candidate.trim().length < Math.min(200, Math.floor(current.trim().length * 0.5))) return null;
               return candidate;

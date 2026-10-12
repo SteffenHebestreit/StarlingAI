@@ -689,10 +689,20 @@ export { looksLikeDegenerateRepetition, collapseRepeatedMarkdownSections, looksL
  *    message ("I've gathered partial results...") is technically truthful
  *    but throws away the partial results.
  */
+/**
+ * The finish reasons of the two loop brakes that end the tool loop before its iteration cap: one tool
+ * in every iteration (the streak brake) and the same set of tools iteration after iteration. Both
+ * turns were reported as max_tool_iterations; each set below that holds that reason holds these too,
+ * and so do workflow-catalog.ts's give-up set and the dashboard's mirror of these names
+ * (packages/web/src/composables/finishReasons.ts).
+ */
+const LOOP_BRAKE_FINISH_REASONS: readonly string[] = ["tool_streak_across_iterations", "iteration_tool_set_repeat"];
+
 const EVIDENCE_BACKSTOP_GIVE_UP_REASONS = new Set([
   "synthesis_required_tool_call_rejected",
   "all_tool_calls_blocked",
   "max_tool_iterations",
+  ...LOOP_BRAKE_FINISH_REASONS,
   // Warden hard-stop after two consecutive delegation failures: same contract — the
   // runtime is giving up on orchestration, so surface the evidence already gathered
   // (e.g. shared findings) instead of a generic synthesis (audit 0602f246).
@@ -5655,6 +5665,7 @@ async function _runTurn(
       }, { sessionId: session.id, severity: "warn" });
       if (workflowStepStartBackstop("iteration_tool_set_repeat")) continue;
       log.warn({ iterationCount, toolSet: iterToolSet }, "Same tool-call set repeated across iterations — forcing synthesis");
+      terminalFinishReason = "iteration_tool_set_repeat";
       break; // falls through to forceSynthesis below
     }
 
@@ -5690,6 +5701,8 @@ async function _runTurn(
       if (streakLoop && workflowStepStartBackstop("tool_streak_across_iterations")) continue;
       if (streakLoop) {
         loopBrakeExit = "tool_streak_across_iterations";
+        // The turn ended at the brake, not at the iteration cap (LOOP_BRAKE_FINISH_REASONS).
+        terminalFinishReason = "tool_streak_across_iterations";
         break; // falls through to forceSynthesis below
       }
     }
@@ -5768,6 +5781,7 @@ async function _runTurn(
     "all_tool_calls_blocked",
     "synthesis_required_tool_call_rejected",
     "max_tool_iterations",
+    ...LOOP_BRAKE_FINISH_REASONS,
     "delegation_failures_terminal",
   ]);
   // The loop-brake reroute's answer is the specialist's, written this turn for this request, and it
@@ -5776,6 +5790,8 @@ async function _runTurn(
   // exist in the workspace; nothing was changed"), and a request asked again is answered again. A
   // review reproduction shipped neither: the orchestrator's narration beside its looping calls ("the
   // heading was updated", 259 characters) replaced the answer, and a fresh synthesis replaced that.
+  // It arrives without delegate_to_agent's "[agent]:" label and routing note (runCorrectiveReroute):
+  // with the label in front, the raw-dump guard below took the answer for a tool dump.
   const rerouteAnswered = loopBrakeRerouteAnswer !== null;
   if (
     !rerouteAnswered
@@ -5811,7 +5827,7 @@ async function _runTurn(
     ? (looksLikeRawSharedFactsDump(terminalEvidenceBackstop.evidence)
         ? buildRecoveryEvidenceUserMessage(terminalEvidenceBackstop.evidence)
         : terminalEvidenceBackstop.evidence)
-    : terminalFinishReason === "max_tool_iterations"
+    : terminalFinishReason === "max_tool_iterations" || LOOP_BRAKE_FINISH_REASONS.includes(terminalFinishReason)
       ? "I've gathered partial results but reached the tool-call limit. Please review the tool outputs above for details."
       : resolveEmptyAssistantResponseFallback("", "", session);
   // Second-chance evidence backstop.  Even when the synthesis call ran,
@@ -5982,6 +5998,8 @@ async function _runTurn(
       curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
     presentableFinalMsg = buildResearchGatheredFallback(curated, deliverableIntent.wantsArtifact);
+    // The turn's answer did not reach the user, whatever the fallback says: its scorecard is partial.
+    turnQualitySignals.answerWithheld = "raw_tool_output";
   }
   // Fabricated-inline-artifact guard: a turn that RESEARCHED (≥1 curated shared fact) but
   // produced NO real artifact (the build was stopped/blocked/never ran) sometimes has the
@@ -6014,6 +6032,8 @@ async function _runTurn(
         curatedFacts: terminalSharedFactsEvidence?.itemCount ?? 0,
       }, { sessionId: session.id, channel: session.channel, severity: "warn" });
       presentableFinalMsg = buildResearchGatheredFallback(curatedForHonest);
+      // As at the raw-dump guard above: the answer did not ship, so the turn did not complete.
+      turnQualitySignals.answerWithheld = "fabricated_inline_artifact";
     }
   }
   // Converge on the SAME terminal treatment as the normal in-loop exit
