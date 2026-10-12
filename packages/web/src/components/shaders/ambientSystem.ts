@@ -3,7 +3,9 @@
 //       Environment keeps living even when the entity itself is frozen.
 //   1 — shooting star: a straight streak driven by CPU uniforms; inactive
 //       when uShootProgress < 0.
-export const ambientVertexShader = `
+import { POINT_SCALE_VERTEX, POINT_SCALE_FRAGMENT } from "./pointScale";
+
+export const ambientVertexShader = `${POINT_SCALE_VERTEX}
   attribute float aKind;
   attribute float aA;    // shoot: 0..1 trail position
   attribute float aSeed;
@@ -41,17 +43,17 @@ export const ambientVertexShader = `
 
     vec4 mv = modelViewMatrix * vec4(p, 1.0);
     gl_Position  = projectionMatrix * mv;
-    gl_PointSize = aSize * (5.0 / -mv.z);
+    gl_PointSize = scaledPointSize(aSize * (5.0 / -mv.z));
   }
 `;
 
-export const ambientFragmentShader = `
+export const ambientFragmentShader = `${POINT_SCALE_FRAGMENT}
   varying vec3  vColor;
   varying float vAlpha;
 
   void main() {
     float d    = distance(gl_PointCoord, vec2(0.5));
     float glow = pow(max(0.0, 1.0 - d * 2.0), 1.5);
-    gl_FragColor = vec4(vColor * (0.7 + 1.6 * glow), vAlpha * smoothstep(0.5, 0.08, d));
+    gl_FragColor = vec4(vColor * (0.7 + 1.6 * glow), vAlpha * smoothstep(0.5, 0.08, d) * vPointFade);
   }
 `;

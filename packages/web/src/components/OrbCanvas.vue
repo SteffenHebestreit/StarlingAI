@@ -108,6 +108,17 @@ const MOTION_SCALE = REDUCED_MOTION ? 0.35 : 1;
 // Scale factor applied to the whole orb group
 const ORB_SCALE               = 0.42;
 
+// Framing. The camera's 60° field of view is vertical, so the orb is sized by the canvas height;
+// below MIN_FRAMED_ASPECT (a canvas far narrower than it is tall) the orbits would run off the
+// sides, and the fov widens there to keep the horizontal view that aspect has. Point sprites follow
+// the orb's size on screen (shaders/pointScale): their authored sizes are the look at a 1350-pixel
+// frame in the drawing buffer — a full-window desktop canvas — and a smaller orb scales them down
+// in proportion instead of keeping their pixel size while everything around them shrinks.
+const BASE_FOV_DEG            = 60;
+const MIN_FRAMED_ASPECT       = 0.4;
+const REFERENCE_FRAME_PX      = 1350;
+const pointScaleUniform       = { value: 1 };
+
 // ─── Visual state ─────────────────────────────────────────────────────────────
 interface VisualState {
   portalSpeedFactor: number; pulseSpeedFactor: number; pulseRateFactor: number;
@@ -633,6 +644,20 @@ function stopAnimation() {
   clock?.stop();
 }
 
+/** Size the drawing buffer, frame the orb in it, and scale the points to the orb's size on screen. */
+function frameCanvas(w: number, h: number) {
+  renderer.setSize(w, h, false);
+  const aspect = w / h;
+  const baseHalfTan = Math.tan(THREE.MathUtils.degToRad(BASE_FOV_DEG) / 2);
+  const halfTan = baseHalfTan * Math.max(1, MIN_FRAMED_ASPECT / aspect);
+  camera.aspect = aspect;
+  camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(halfTan));
+  camera.updateProjectionMatrix();
+  const buffer = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const framePx = buffer.y * baseHalfTan / halfTan;
+  pointScaleUniform.value = Math.min(1, framePx / REFERENCE_FRAME_PX);
+}
+
 function handleVisibilityChange() {
   if (document.hidden) stopAnimation();
   else startAnimation();
@@ -663,11 +688,11 @@ onMounted(() => {
     return; // skip all 3D setup + the animation loop; onUnmounted's renderer?.dispose() stays safe
   }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-  renderer.setSize(w, h, false);
 
   scene  = new THREE.Scene();
-  camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100);
+  camera = new THREE.PerspectiveCamera(BASE_FOV_DEG, w / h, 0.1, 100);
   camera.position.set(0, 0, 5.0);
+  frameCanvas(w, h);
 
   clock = new THREE.Clock();
 
@@ -684,6 +709,7 @@ onMounted(() => {
     uPulseOrigins:     { value: Array.from({ length: MAX_ACTIVE_PULSES }, () => new THREE.Vector3()) },
     uPulseTravelRadii: { value: new Array<number>(MAX_ACTIVE_PULSES).fill(0) },
     uActivePulseCount: { value: 0 },
+    uPointScale:       pointScaleUniform,
   };
 
   sphereUniforms = {
@@ -692,6 +718,7 @@ onMounted(() => {
     uNeuralSpherePulseAmount: { value: currentVisuals.neuralSpherePulseAmount },
     uNeuralSphereColor:       { value: currentVisuals.neuralSphereColor.clone() },
     uNeuralSphereOpacity:     { value: currentVisuals.neuralSphereOpacity },
+    uPointScale:              pointScaleUniform,
   };
 
   orbitalUniforms = {
@@ -700,6 +727,7 @@ onMounted(() => {
     uRingColorB:  { value: currentVisuals.portalColorFar.clone() },
     uPlanetColor: { value: currentVisuals.pulseColor.clone() },
     uOpacity:     { value: currentVisuals.particleOpacity },
+    uPointScale:  pointScaleUniform,
   };
 
   ambientUniforms = {
@@ -711,6 +739,7 @@ onMounted(() => {
     uShootStart:    { value: new THREE.Vector3() },
     uShootDir:      { value: new THREE.Vector3() },
     uShootProgress: { value: -1 },
+    uPointScale:    pointScaleUniform,
   };
 
   coreUniforms = {
@@ -760,11 +789,7 @@ onMounted(() => {
 
   resizeObserver = new ResizeObserver(() => {
     const cw = canvas.clientWidth, ch = canvas.clientHeight;
-    if (cw && ch) {
-      renderer.setSize(cw, ch, false);
-      camera.aspect = cw / ch;
-      camera.updateProjectionMatrix();
-    }
+    if (cw && ch) frameCanvas(cw, ch);
   });
   resizeObserver.observe(canvas);
   document.addEventListener("visibilitychange", handleVisibilityChange);
