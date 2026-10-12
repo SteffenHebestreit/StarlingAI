@@ -51,6 +51,18 @@ describe("evidence backstop — chooser prefers curated over a long junk dump", 
     const chosen = chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence);
     expect(chosen?.evidence).toContain("NOT PDM");
   });
+
+  it("returns the curated shared facts over a browser run's page results, longer as they are", () => {
+    // E2E 2026-10-12: the run had shared its total as a finding; its page results won on length.
+    const pages = [1, 2, 3].map((page) =>
+      `### Ran Playwright code \`\`\`js await page.getByRole('link', { name: 'Seite ${page}' }).click(); \`\`\` `
+      + `### Page - Page URL: http://shop.example.test/produkte/seite-${page}.html ### Snapshot yaml `
+      + "- generic [active] [ref=e1]: - banner [ref=e2]: - navigation [ref=e4]: - link \"Start\" [ref=e5]");
+    const delegateEvidence = { evidence: pages.join("\n\n"), itemCount: 3 };
+    const sharedFactsEvidence = { evidence: "- articles_under_50_total: 227,40 € — 8 Artikel kosten weniger als 50 €", itemCount: 1 };
+    expect(chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence, { preferHigherScore: false })?.evidence).toContain("227,40");
+    expect(chooseBetterRecoveryEvidence(delegateEvidence, sharedFactsEvidence)?.evidence).toContain("227,40");
+  });
 });
 
 /**

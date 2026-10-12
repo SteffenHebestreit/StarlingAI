@@ -714,29 +714,25 @@ function isResearchLikeDelegation(
   return sourceHeavyTask && (researchAgentName || researchTools || researchCapabilities);
 }
 
+/**
+ * The result of a delegation served from what this turn already gathered. It is EVIDENCE, as a run's
+ * answer is — the facts' values and the earlier partial results — without the runtime's narration, the
+ * facts' keys and provenance tags, or the match scores. It used to open with "Reused relevant
+ * session/task memory for '…'" over a "## Shared facts already gathered" list, and a coverage
+ * correction that told the orchestrator to relay a plan's results verbatim put both into the reply
+ * (E2E 2026-10-12). The delegate frame says the result was reused (reusedFromSessionMemory).
+ */
 function formatReusableSessionEvidenceOutput(
-  title: string,
   factMatches: Array<{ key: string; value: string; score: number }>,
   partialMatches: Array<{ taskId: string; agentName: string; content: string; score: number }>,
 ): string {
-  const factSection = factMatches.length > 0
-    ? "## Shared facts already gathered\n" + factMatches
-      .slice(0, 4)
-      .map((match) => `- **${match.key}** (${Math.round(match.score * 100)}%): ${summarizeText(match.value, 280)}`)
-      .join("\n")
-    : "";
-  const partialSection = partialMatches.length > 0
-    ? "## Relevant prior partial results\n" + partialMatches
-      .slice(0, 3)
-      .map((match) => `### ${match.agentName} (${match.taskId}, ${Math.round(match.score * 100)}%)\n${summarizeText(match.content, 520)}`)
-      .join("\n\n")
-    : "";
-
-  return [
-    `Reused relevant session/task memory for '${title}' instead of launching another duplicate research pass.`,
-    factSection,
-    partialSection,
-  ].filter(Boolean).join("\n\n");
+  const facts = factMatches
+    .slice(0, 4)
+    .map((match) => `- ${summarizeText(match.value.replace(/^\s*\[[^\]\n]+\]\s*/, ""), 280)}`);
+  const partials = partialMatches
+    .slice(0, 3)
+    .map((match) => summarizeText(match.content, 520));
+  return [facts.join("\n"), ...partials].filter(Boolean).join("\n\n");
 }
 
 // Minimum merged (semantic|keyword) similarity for a cached fact/partial to be
@@ -847,11 +843,7 @@ async function findReusableSessionEvidence(
   }
 
   return {
-    output: formatReusableSessionEvidenceOutput(
-      request.taskTitle ?? summarizeText(request.task, 80),
-      relevantFacts,
-      relevantPartials,
-    ),
+    output: formatReusableSessionEvidenceOutput(relevantFacts, relevantPartials),
     factCount: relevantFacts.length,
     partialCount: relevantPartials.length,
   };

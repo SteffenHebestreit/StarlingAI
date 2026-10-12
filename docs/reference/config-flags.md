@@ -58,7 +58,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1304 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 85 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 87 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
 | `budget` | packages/core/src/config/schema.ts:1696 | 101 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
@@ -297,7 +297,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1529 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
 | `mode` | packages/core/src/config/schema.ts:536 | 155 |
-| `model` | packages/core/src/config/schema.ts:1299 | 288 |
+| `model` | packages/core/src/config/schema.ts:1299 | 289 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1767 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1782 | 4 |
@@ -345,7 +345,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:2026 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:56 | 60 |
+| `points` | packages/core/src/config/schemas/decisions.ts:56 | 61 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:343 | 42 |
 | `primary` | packages/core/src/config/schema.ts:116 | 70 |
@@ -507,7 +507,7 @@ Every public schema field, where it is declared, and how many production files r
 | `type` | packages/core/src/config/schema.ts:1029 | 490 |
 | `unbackedActionClaims` | packages/core/src/config/schemas/orchestration.ts:918 | 1 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
-| `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 3 |
+| `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 4 |
 | `url` | packages/core/src/config/schema.ts:628 | 158 |
 | `urlFetchEnforcement` | packages/core/src/config/schemas/orchestration.ts:130 | 1 |
 | `urlNotFetchedShortAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:283 | 1 |

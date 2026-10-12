@@ -21,6 +21,7 @@ import { currentTurnFactKeys, readAllFacts } from "../swarm/memory.js";
 import {
   isJunkEvidenceValue,
   looksLikeRawSharedFactsDump,
+  looksLikeRawToolEvidenceDump,
   looksLikeRawWorkspaceToolDump,
   trimSharedFactDisplayTail,
 } from "./runtime-evidence-dump.js";
@@ -372,7 +373,9 @@ export function chooseBetterRecoveryEvidence(
   // A delegate "evidence" blob that is mostly raw tool junk (PDF bytes, HTTP
   // probes) must not win on length over concise curated findings — that is what
   // shipped %PDF garbage instead of the verified specs the swarm had gathered.
-  if (sharedFactsEvidence && evidenceIsMostlyJunk(delegateEvidence.evidence)) {
+  // Nor may a raw tool dump: an interrupted browser run's page results stood in for
+  // the total the same run had shared as a finding (E2E 2026-10-12).
+  if (sharedFactsEvidence && (evidenceIsMostlyJunk(delegateEvidence.evidence) || looksLikeRawToolEvidenceDump(delegateEvidence.evidence))) {
     return sharedFactsEvidence;
   }
   if (!sharedFactsEvidence) return delegateEvidence;
