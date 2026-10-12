@@ -4102,7 +4102,7 @@ async function _runTurn(
             "COMPLIANCE CORRECTION: This request asks for a durable downloadable or viewable artifact.",
             "Do NOT paste the full artifact source into chat.",
             "You MUST call an orchestration tool now so a specialist can write/export the artifact file.",
-            "For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'.",
+            "For HTML pages, how-to blogs, documentation pages, or static websites, prefer delegate_to_agent with agentName='content_writer'; for a chart or table of numbers already in hand, agentName='chart_designer'.",
             "Ask the specialist to save the file as an artifact and publish the artifact path/download details. The final chat answer should be only a concise summary and artifact reference.",
             "A tool-free artifact dump is invalid for this turn.",
           ].join(" ");
