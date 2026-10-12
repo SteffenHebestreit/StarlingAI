@@ -126,6 +126,15 @@ describe("the QA delivery loop's escalation to mission_coordinator", () => {
     expect(finalMsg).toContain("Design A is the one that meets the target");
     expect(finalMsg).not.toContain("[mission_coordinator]");
     expect(finalMsg).not.toContain("Auto-routed");
+
+    // The re-plan neither denies a flaw in what was done nor does it again (review 2026-10-12).
+    const { executeTool } = await import("../tools/registry.js");
+    const { QA_ACTION_HONESTY_RULE } = await import("../agent/qa-delivery-loop.js");
+    const replan = vi.mocked(executeTool).mock.calls.find(([name]) => name === "delegate_to_agent");
+    const task = String((replan?.[1] as Record<string, unknown> | undefined)?.["task"] ?? "");
+    expect(task).toContain("QA RE-PLAN");
+    expect(task).toContain(QA_ACTION_HONESTY_RULE);
+    expect(task).toContain("Do not repeat an action that already took effect");
   });
 });
 

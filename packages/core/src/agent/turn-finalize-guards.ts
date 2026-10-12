@@ -67,7 +67,7 @@ import {
 import { applyCitationHonestyGuard } from "./turn-terminal-guards.js";
 import { findRecentDelegateEvidence } from "./interrupted-delegation-evidence.js";
 import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
-import { buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit } from "./qa-delivery-loop.js";
+import { buildCriteriaVerifyInstruction, currentAnswerBlock, qaFlawsForAudit, QA_ACTION_HONESTY_RULE } from "./qa-delivery-loop.js";
 import {
   hasRecentSourceSensitivePartialDelegation,
 } from "./source-sensitive-enforcement.js";
@@ -610,7 +610,12 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
               + "which means the gap needs real work, not re-wording. Make a focused plan to fix EXACTLY these flaws "
               + "and execute it (re-research or re-build as needed), then return the COMPLETE corrected deliverable "
               + `${IN_REPLY_LANGUAGE}. Ground every claim in tool results; do not fabricate to satisfy a criterion — if `
-              + "something genuinely cannot be verified, say so.\n\nUnmet criteria / flaws:\n" + flaws
+              + "something genuinely cannot be verified, say so. "
+              // A flaw in what was done (a form submitted with a value the user did not choose)
+              // escalates reliably now that an honest answer reporting it still fails; the
+              // re-plan must neither deny it nor do it again (review 2026-10-12).
+              + `${QA_ACTION_HONESTY_RULE} Do not repeat an action that already took effect (a submission, a sent message, a booking).`
+              + "\n\nUnmet criteria / flaws:\n" + flaws
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
               + currentAnswerBlock(current);
             try {

@@ -44,6 +44,13 @@ describe("qa-tool-judge — task builder (pure)", () => {
     expect(task).toContain("1. app loads without errors");
     expect(task).toContain("Never PASS on the answer's own claims");
   });
+
+  it("carries the verdicts' disclosure rule after its scope check (review 2026-10-12)", async () => {
+    const { QA_DISCLOSURE_VERDICT_RULE } = await import("../agent/qa-delivery-loop.js");
+    const task = buildQaToolJudgeTask("answer", CRITERIA, [{ kind: "file", location: "app/index.html" }]);
+    expect(task).toContain(QA_DISCLOSURE_VERDICT_RULE);
+    expect(task.indexOf(QA_DISCLOSURE_VERDICT_RULE)).toBeGreaterThan(task.indexOf("Fraud checks while inspecting"));
+  });
 });
 
 describe("qa-tool-judge — check wrapper (DI runner, no module mocks)", () => {
