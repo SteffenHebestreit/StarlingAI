@@ -153,3 +153,42 @@ export function stripLeadingDelegateLabelEcho(text: string): string {
   }
   return t;
 }
+
+/**
+ * How the routing note delegate_to_agent appends to an answer it routed itself (no agent named)
+ * begins: "\n↳ Auto-routed to <agent> (<confidence> confidence…)". One definition for the tool that
+ * writes the note (formatDelegatedOutput) and for stripDelegateRelayFrame, which takes it off.
+ */
+export const AUTO_ROUTED_NOTE_LEAD = "\n↳ Auto-routed to ";
+
+/**
+ * A delegated result as the orchestrator reads it: "[<agent>]: <answer>", followed by the routing
+ * note when routing picked the agent. The label and the note tell the orchestrator who answered;
+ * they are not part of the answer (stripDelegateRelayFrame).
+ */
+export function formatDelegatedOutput(
+  agentName: string,
+  output: string,
+  routing?: { confidence: string; matchedTerms: readonly string[] },
+): string {
+  const note = routing
+    ? `${AUTO_ROUTED_NOTE_LEAD}${agentName} (${routing.confidence} confidence${routing.matchedTerms.length > 0 ? `, matched: ${routing.matchedTerms.join(", ")}` : ""})`
+    : "";
+  return `[${agentName}]: ${output}${note}`;
+}
+
+/**
+ * The specialist's answer inside a delegated result (formatDelegatedOutput): without the trailing
+ * routing note and the leading "[<agent>]:" label, an "ephemeral:<name>" label included. For a
+ * runtime path that ships a delegate_to_agent result to the user: with the label in front, the
+ * last-resort raw-dump guard (looksLikeRawToolEvidenceDump) replaced the whole answer (E2E
+ * guards-list-files-on-a-file: a 541-character listing shipped as a fact-free heading).
+ */
+export function stripDelegateRelayFrame(output: string): string {
+  let text = output ?? "";
+  const noteAt = text.lastIndexOf(AUTO_ROUTED_NOTE_LEAD);
+  if (noteAt >= 0 && !text.slice(noteAt + AUTO_ROUTED_NOTE_LEAD.length).trimEnd().includes("\n")) {
+    text = text.slice(0, noteAt);
+  }
+  return text.replace(/^\s*\[[^\]\n]+\]:\s*/, "").trim();
+}

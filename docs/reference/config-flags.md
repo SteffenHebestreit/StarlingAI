@@ -226,7 +226,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:237 | 29 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1134 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1132 | 1 |
-| `label` | packages/core/src/config/schema.ts:289 | 151 |
+| `label` | packages/core/src/config/schema.ts:289 | 152 |
 | `labeledAt` | packages/core/src/config/schema.ts:968 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:967 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:236 | 98 |
@@ -306,7 +306,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1302 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:586 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:748 | 13 |
-| `name` | packages/core/src/config/schema.ts:2038 | 406 |
+| `name` | packages/core/src/config/schema.ts:2038 | 407 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:175 | 7 |
 | `network` | packages/core/src/config/schema.ts:749 | 60 |
 | `node` | packages/core/src/config/schema.ts:1107 | 259 |
@@ -329,7 +329,7 @@ Every public schema field, where it is declared, and how many production files r
 | `password` | packages/core/src/config/schema.ts:849 | 49 |
 | `passwordHash` | packages/core/src/config/schema.ts:394 | 5 |
 | `passwordSelector` | packages/core/src/config/schema.ts:853 | 5 |
-| `path` | packages/core/src/config/schemas/decisions.ts:111 | 319 |
+| `path` | packages/core/src/config/schemas/decisions.ts:111 | 320 |
 | `pattern` | packages/core/src/config/schema.ts:1419 | 62 |
 | `patterns` | packages/core/src/config/schema.ts:1356 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 30 |
@@ -406,7 +406,7 @@ Every public schema field, where it is declared, and how many production files r
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
 | `role` | packages/core/src/config/schema.ts:983 | 139 |
 | `rolesClaim` | packages/core/src/config/schema.ts:459 | 1 |
-| `routing` | packages/core/src/config/schema.ts:276 | 109 |
+| `routing` | packages/core/src/config/schema.ts:276 | 110 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:861 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:818 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:769 | 1 |

@@ -7,6 +7,7 @@ import {
   looksLikeInlinedArtifactFabrication,
   looksLikeInlinedAppDocument,
 } from "../agent/runtime.js";
+import { AUTO_ROUTED_NOTE_LEAD, formatDelegatedOutput, stripDelegateRelayFrame } from "../agent/runtime-evidence-dump.js";
 
 /**
  * Last-resort terminal guard (audit 003f5aeb). When the "create a verified reveal.js
@@ -275,5 +276,25 @@ describe("raw-dump evidence backstop (audit bcb417e4) — combined detector", ()
     // against a refactor that passes terminalEvidenceBackstop.evidence unconditionally.
     expect(evidenceLooksRaw("")).toBe(false);
     expect(evidenceLooksRaw("   \n  ")).toBe(false);
+  });
+});
+
+// delegate_to_agent frames a specialist's answer for the orchestrator (formatDelegatedOutput). A path
+// that ships such a result to the user takes the frame off (stripDelegateRelayFrame); left on, the
+// label alone makes the answer a "dump" to looksLikeRawToolEvidenceDump above.
+describe("the delegate relay frame", () => {
+  const answer = "The folder holds three files:\n- inventur (34 bytes)\n- preise.csv (812 bytes)\n- entwurf.md (1.2 KB)";
+
+  it("strips what formatDelegatedOutput adds, routed or named, and an ephemeral agent's label", () => {
+    expect(stripDelegateRelayFrame(formatDelegatedOutput("content_writer", answer, { confidence: "high", matchedTerms: [] }))).toBe(answer);
+    expect(stripDelegateRelayFrame(formatDelegatedOutput("code_analyst", answer, { confidence: "medium", matchedTerms: ["files", "folder"] }))).toBe(answer);
+    expect(stripDelegateRelayFrame(formatDelegatedOutput("content_writer", answer))).toBe(answer);
+    expect(stripDelegateRelayFrame(formatDelegatedOutput("ephemeral:folder_lister", answer))).toBe(answer);
+  });
+
+  it("leaves an unframed answer, and a routing note quoted inside one, as they are", () => {
+    expect(stripDelegateRelayFrame(answer)).toBe(answer);
+    const quoted = `Delegated results end with a line like${AUTO_ROUTED_NOTE_LEAD}researcher (high confidence)\nand that line is relay framing.`;
+    expect(stripDelegateRelayFrame(quoted)).toBe(quoted);
   });
 });

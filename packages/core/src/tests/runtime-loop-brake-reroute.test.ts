@@ -129,6 +129,7 @@ async function load(options: {
   await import("../tools/sub-agent.js");
   const { registerTool } = await import("../tools/registry.js");
   const { writeSharedFact } = await import("../swarm/memory.js");
+  const { formatDelegatedOutput } = await import("../agent/runtime-evidence-dump.js");
   const { longRunningGenerationManager } = await import("../agent/long-running-generation.js");
   resetSessionsForTests();
   registerTool({
@@ -140,7 +141,12 @@ async function load(options: {
       if (options.sharedFinding) await writeSharedFact(ctx.sessionId, "content_writer_finding", options.sharedFinding);
       return options.delegationSucceeds === false
         ? { success: false, output: "", error: "The specialist could not run." }
-        : { success: true, output: options.specialistAnswer ?? SPECIALIST_ANSWER, metadata: { delegationOutcome: "success", agentName: "content_writer" } };
+        // Framed as delegate_to_agent frames an answer it routed itself: label and routing note.
+        : {
+          success: true,
+          output: formatDelegatedOutput("content_writer", options.specialistAnswer ?? SPECIALIST_ANSWER, { confidence: "high", matchedTerms: [] }),
+          metadata: { delegationOutcome: "success", agentName: "content_writer" },
+        };
     },
   });
   registerTool({
@@ -216,6 +222,8 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     expect(delegations).toHaveLength(1);
     expect(delegations[0]).toEqual({ task: REQUEST });
     expect(result.response).toContain(SPECIALIST_ANSWER);
+    expect(result.response).not.toContain("[content_writer]");
+    expect(result.response).not.toContain("Auto-routed");
     expect(auditRows("loop_brake_reroute_delegated")).toEqual([
       expect.objectContaining({ brake: "tool_streak_across_iterations" }),
     ]);
@@ -264,6 +272,28 @@ describe("a zero-delegation orchestration turn stopped by a loop brake", () => {
     expect(delegations).toEqual([{ task: request }]);
     expect(result.response).toContain(listing);
     expect(auditRows("blocked_turn_regurgitated_prior_answer")).toEqual([]);
+  });
+
+  // The E2E turn (guards-list-files-on-a-file): the specialist listed the folder in 541 characters,
+  // and the reply was the heading "Here are the researched, sourced facts" and nothing else. The
+  // answer had shipped in delegate_to_agent's frame, "[content_writer]: …", which the last-resort
+  // raw-dump guard reads as a relayed tool dump from 200 characters on.
+  it("ships a long specialist answer without the relay frame, and the raw-dump guard leaves it alone", async () => {
+    const request = "Liste den Inhalt des Ordners generated/e2e-guards auf.";
+    const listing = "Der Ordner generated/e2e-guards enthält vier Einträge: inventur (34 Bytes, eine Textdatei mit „Inventur Westmark: Regal 4, Fach 9“), "
+      + "sommeraktion-entwurf.md (1,2 KB, der Entwurf der Sommeraktion), preise.csv (812 Bytes, 14 Zeilen mit Artikelnummern und Preisen) "
+      + "und den Unterordner archiv/ mit zwei älteren Fassungen der Preisliste.";
+    const { session, runTurn } = await load({ specialistAnswer: listing });
+    streamMock.mockImplementation(() => toolCallStream(`m${streamMock.mock.calls.length}`, "memory_store", { key: "generated/e2e-guards", content: "" }));
+
+    const result = await runTurn({ session, userMessage: request });
+
+    expect(listing.length).toBeGreaterThanOrEqual(200);
+    expect(delegations).toEqual([{ task: request }]);
+    expect(result.response).toContain(listing);
+    expect(result.response).not.toContain("[content_writer]");
+    expect(result.response).not.toContain("Auto-routed");
+    expect(auditRows("raw_tool_evidence_dump_suppressed")).toEqual([]);
   });
 
   it("re-dispatches it once when every call was blocked", async () => {

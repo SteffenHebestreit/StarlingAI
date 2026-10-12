@@ -26,6 +26,7 @@ import { sanitizeUserFacingAssistantResponse } from "./response-finalization.js"
 import { stripLeadingReasoningPreamble, looksLikeTruncatedCodeDeliverable } from "./deliverable-relay.js";
 import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
+import { stripDelegateRelayFrame } from "./runtime-evidence-dump.js";
 import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
 
 /**
@@ -379,9 +380,12 @@ export const runCorrectiveReroute = async (
     if (!rerouteResult.success) return null;
     const rerouteOutput = rerouteResult.output;
     if (/TASK FAILED|PARTIAL PROGRESS|TASK COMPLETED \(PARTIAL/i.test(rerouteOutput)) return null;
-    const evidenceMatch = EVIDENCE_SECTION_RE.exec(rerouteOutput);
+    // The answer, not the frame delegate_to_agent puts around it for the orchestrator: shipped with
+    // its "[agent]:" label, the runtime's raw-dump guard replaced the specialist's answer.
+    const answer = stripDelegateRelayFrame(rerouteOutput);
+    const evidenceMatch = EVIDENCE_SECTION_RE.exec(answer);
     const body = stripLeadingReasoningPreamble(
-      (evidenceMatch ? rerouteOutput.slice(evidenceMatch.index + evidenceMatch[0].length) : rerouteOutput).trim(),
+      (evidenceMatch ? answer.slice(evidenceMatch.index + evidenceMatch[0].length) : answer).trim(),
     );
     if (!body || looksLikeDegenerateRepetition(body) || looksLikeTruncatedCodeDeliverable(body)) return null;
     return body;

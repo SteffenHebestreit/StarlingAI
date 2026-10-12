@@ -5776,6 +5776,8 @@ async function _runTurn(
   // exist in the workspace; nothing was changed"), and a request asked again is answered again. A
   // review reproduction shipped neither: the orchestrator's narration beside its looping calls ("the
   // heading was updated", 259 characters) replaced the answer, and a fresh synthesis replaced that.
+  // It arrives without delegate_to_agent's "[agent]:" label and routing note (runCorrectiveReroute):
+  // with the label in front, the raw-dump guard below took the answer for a tool dump.
   const rerouteAnswered = loopBrakeRerouteAnswer !== null;
   if (
     !rerouteAnswered

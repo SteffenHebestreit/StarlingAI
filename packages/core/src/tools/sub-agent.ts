@@ -11,6 +11,7 @@ import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecuti
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
 import { collectArtifactRecords } from "../agent/artifact-metadata.js";
+import { formatDelegatedOutput } from "../agent/runtime-evidence-dump.js";
 import { isBlankBrowserPage } from "./browser-page-report.js";
 // Leaf module shared with agent/sub-agent.ts so the soft deadline and the hard deadline
 // are derived from ONE precedence rule; deriving them separately is how they drifted.
@@ -1976,7 +1977,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         publishSwarmState(ctx);
         return {
           success: true,
-          output: `[${winner.agentName}]: ${winner.output}`,
+          output: formatDelegatedOutput(winner.agentName, winner.output),
           metadata: {
             taskId,
             attemptedAgents,
@@ -2767,12 +2768,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       });
       await releaseLease();
 
-      const routingNote = routingInfo
-        ? `\n↳ Auto-routed to ${candidate} (${routingInfo.confidence} confidence${routingInfo.matchedTerms.length > 0 ? `, matched: ${routingInfo.matchedTerms.join(", ")}` : ""})`
-        : "";
       return {
         success: true,
-        output: `[${candidate}]: ${output}${routingNote}`,
+        output: formatDelegatedOutput(candidate, output, routingInfo),
         metadata: {
           agentName: candidate,
           taskId,
@@ -2898,12 +2896,9 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
     publishSwarmState(ctx);
 
-    const routingNote = bestPartialResult.routingInfo
-      ? `\n↳ Auto-routed to ${bestPartialResult.agentName} (${bestPartialResult.routingInfo.confidence} confidence${bestPartialResult.routingInfo.matchedTerms.length > 0 ? `, matched: ${bestPartialResult.routingInfo.matchedTerms.join(", ")}` : ""})`
-      : "";
     return {
       success: true,
-      output: `[${bestPartialResult.agentName}]: ${bestPartialResult.output}${routingNote}`,
+      output: formatDelegatedOutput(bestPartialResult.agentName, bestPartialResult.output, bestPartialResult.routingInfo),
       metadata: {
         agentName: bestPartialResult.agentName,
         taskId,
