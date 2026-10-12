@@ -38,7 +38,7 @@ import {
 import { scanOutput } from "../guardrails/output.js";
 import { checkRateLimit } from "../guardrails/rate-limiter.js";
 import { logAudit } from "../audit/logger.js";
-import { addFigureKeys } from "./figure-provenance.js";
+import { addFigureKeys, figuresNotIn } from "./figure-provenance.js";
 import { getConfig } from "../config/loader.js";
 import {
   runWithEffortContext,
@@ -758,7 +758,8 @@ function looksLikeUnderpoweredSynthesis(
   return false;
 }
 
-async function enforceDelegateCoverage(
+/** Exported for tests. */
+export async function enforceDelegateCoverage(
   finalResponse: string,
   toolIterations: number,
   session: AgentSession,
@@ -777,6 +778,12 @@ async function enforceDelegateCoverage(
   // turn's deliverable (which would otherwise win the richness score).
   const evidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   if (!evidence) return finalResponse;
+  // Coverage holds an answer to ONE deliverable. A plan's report carries each step's result, and
+  // steps overlap: two browser steps both summed the same catalogue (E2E 2026-10-12), and a step served
+  // from earlier findings repeated them. Their items and length counted twice against a correct merged
+  // answer, the correction asked for every one of them, and when it still came out short the raw report
+  // shipped, step headings and duplicates included, as the reply.
+  if ((evidence.planStepResults ?? 0) >= 2) return finalResponse;
 
   const initialCoverage = measureEvidenceCoverage(finalResponse, evidence);
   const finalItems = initialCoverage.textItems;
@@ -6325,6 +6332,28 @@ function qaVerdictCallOptions(): { controls: typeof QA_VERDICT_CONTROLS } | unde
 }
 
 /**
+ * Whether a repair rewrite states a figure that nothing in the conversation held — not the answer it
+ * repaired, not a message or tool result of the session, not the system prompt (figuresNotIn). The
+ * repair runs without tools, so such a figure is its own arithmetic, and the rewrite is refused: the
+ * answer it was asked to repair ships instead. The reviewer's verdict is no source: its 227,30 was
+ * the arithmetic that replaced a computed 227,40 (E2E 2026-10-12).
+ */
+function repairInventsFigures(session: AgentSession, current: string, candidate: string, repair: string): boolean {
+  const invented = figuresNotIn(candidate, [
+    current,
+    session.getSystemPrompt(),
+    ...session.getHistory().map((message) => (typeof message.content === "string" ? message.content : "")),
+  ]);
+  if (invented.length === 0) return false;
+  logAudit("guardrail_flagged", { type: "repair_rewrite_invented_figures", repair, figures: invented.length }, {
+    sessionId: session.id,
+    channel: session.channel,
+    severity: "warn",
+  });
+  return true;
+}
+
+/**
  * Final QA delivery gate (staged orchestration — docs/staged-orchestration.md).
  * After the existing correctness gates have refined `answer`, verify it against the
  * turn plan's acceptance criteria and loop ONE improvement pass per unmet round until
@@ -6527,6 +6556,7 @@ async function runQaDeliveryGate(
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the improver collapsed the answer to a stub).
     if (candidate.trim().length < Math.min(200, Math.floor(current.trim().length * 0.5))) return null;
+    if (repairInventsFigures(session, current, candidate, "qa_improve")) return null;
     return candidate;
   };
 
@@ -6626,6 +6656,7 @@ async function runDeliverableConsistencyGate(
     const candidate = sanitizeUserFacingAssistantResponse(improved, 0);
     // Reject a catastrophic shrink (the fixer collapsed the answer to a stub).
     if (candidate.trim().length < Math.min(200, Math.floor(current.trim().length * 0.5))) return null;
+    if (repairInventsFigures(session, current, candidate, "consistency_repair")) return null;
     return candidate;
   };
 

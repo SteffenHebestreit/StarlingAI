@@ -212,7 +212,7 @@ function planReportFacts(meta: Record<string, unknown>): PlanReportFacts {
 function findRecentDelegateEvidence(
   history: readonly { role: string; content?: string | null; metadata?: Record<string, unknown> }[],
   options: { scopeToCurrentTurn?: boolean } = {},
-): { evidence: string; itemCount: number; computedAggregateKeys?: string[] } | null {
+): { evidence: string; itemCount: number; computedAggregateKeys?: string[]; planStepResults?: number } | null {
   // When scoped to the current turn, drop everything up to and including the
   // last user message. Without this, the scan reaches back across turns and a
   // PRIOR turn's richer deliverable wins on `length + items*200`, becoming the
@@ -223,7 +223,7 @@ function findRecentDelegateEvidence(
     ? history.slice(lastUserMessageIndex(history) + 1)
     : history;
   const recent = [...scoped].reverse().slice(0, 24);
-  let bestCandidate: { evidence: string; itemCount: number; score: number; computedAggregateKeys?: string[] } | null = null;
+  let bestCandidate: { evidence: string; itemCount: number; score: number; computedAggregateKeys?: string[]; planStepResults?: number } | null = null;
 
   for (const message of recent) {
     if (message.role !== "tool") continue;
@@ -289,7 +289,15 @@ function findRecentDelegateEvidence(
       const keys = Array.isArray(meta["computedAggregateKeys"])
         ? (meta["computedAggregateKeys"] as unknown[]).filter((key): key is string => typeof key === "string")
         : [];
-      bestCandidate = { evidence, itemCount, score, ...(keys.length > 0 ? { computedAggregateKeys: keys } : {}) };
+      // How many steps' results a plan's report carries: the answer to it is a synthesis across them.
+      const planStepResults = isPlanResult ? (planReportFacts(meta).reportedResultIds ?? []).length : 0;
+      bestCandidate = {
+        evidence,
+        itemCount,
+        score,
+        ...(keys.length > 0 ? { computedAggregateKeys: keys } : {}),
+        ...(planStepResults > 0 ? { planStepResults } : {}),
+      };
     }
   }
 
@@ -298,6 +306,7 @@ function findRecentDelegateEvidence(
       evidence: bestCandidate.evidence,
       itemCount: bestCandidate.itemCount,
       ...(bestCandidate.computedAggregateKeys ? { computedAggregateKeys: bestCandidate.computedAggregateKeys } : {}),
+      ...(bestCandidate.planStepResults ? { planStepResults: bestCandidate.planStepResults } : {}),
     }
     : null;
 }
