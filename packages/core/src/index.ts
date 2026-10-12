@@ -21,6 +21,7 @@ import { markRuntimeComponentAttempt, markRuntimeComponentFailure, markRuntimeCo
 import { loadAccountRegistry } from "./runtime/account-registry.js";
 import { loadAccountTombstones } from "./runtime/account-tombstones.js";
 import { accountMigrationMaintenance, reportAccountMigrationBacklog } from "./runtime/account-migration.js";
+import { relocateAccountWorkspaceState } from "./runtime/workspace-state-relocation.js";
 import { userStateBaseDir } from "./runtime/user-scope.js";
 import { reportBareAclEntries } from "./guardrails/acl-entries-check.js";
 import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
@@ -92,6 +93,12 @@ export async function main() {
   // Load and validate config
   const config = loadConfig();
   log.info({ model: config.agents.defaults.model.primary }, "Config loaded");
+
+  // Each account's workspace state moves out of the account's own root, which its sandboxes can
+  // write, before anything can run a sandbox; it is never moved on access, when a sandbox could have
+  // created the old directory first (runtime/workspace-state-relocation.ts). Once: a no-op after the
+  // first pass that completes for every account, and a pass that did not is tried again at the next boot.
+  await relocateAccountWorkspaceState(config.workspacePath);
 
   // A maintenance boot for the account migration loads the stores it rewrites and serves the
   // migration only (runtime/account-migration.ts); nothing that writes those stores starts.

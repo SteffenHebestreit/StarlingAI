@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource } from "./workspace-mount.js";
+import { resolveDockerWorkspaceBind, resolveDockerWorkspaceMountSource, sandboxBindSpec, sandboxIsolationArgs, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:git");
@@ -39,6 +39,18 @@ async function runGitInSandbox(
   // git agent cannot reach the deployment repo or another account's workspace. When the mount
   // source is a named volume there is no host path to subdivide, so the narrow fails CLOSED
   // (requireNarrow → null) rather than silently falling back to the whole tree.
+  //
+  // The full-scope repo bind is read-only but for the config zones and generated/, and the gateway's
+  // state in it (the repo root's and the shared root's state directories, users/) stays READABLE
+  // there under a case alias on Docker Desktop, where the tmpfs masks hold one spelling only. The
+  // shell gets no such bind for that reason (workspace-mount.ts fullScopeZoneMounts). This one is
+  // acceptable because nothing but git runs in it: no shell, arguments this module fixes, and every
+  // value the model supplies is an option's value, a pathspec after `--`, or refused where git would
+  // read it as an option (refuseOptionLike). git prints file content only from its object database
+  // and index, never an untracked or ignored file; the one way it does, a no-index diff (`--no-index`,
+  // or two refs that name paths outside the repository), git_diff closes off. Nor does git run a
+  // command a repository's own config or hooks name: the write tools refuse `.git` by name, and
+  // safe.bareRepository below keeps git from taking a directory merely shaped like one.
   let bind: string;
   let mountScope: "caller" | "repo";
   if (ctx.workspaceScope === "full") {
@@ -68,7 +80,35 @@ async function runGitInSandbox(
     "--pids-limit=64",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
-    "-v", bind,
+    "-v", sandboxBindSpec(bind, { workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
+    // As the owner of the directory bound at /workspace, which git also requires before it reads
+    // a repository at all, with the gateway's state in the bind masked. The full-scope repo bind is
+    // read-only but for the config zones and generated/ (sandboxIsolationArgs).
+    ...sandboxIsolationArgs({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope, bind: mountScope }),
+    // Where the sandbox does not run as that owner (no --user on a Windows-native gateway, or an
+    // owner the stat could not read), git refuses a repository as of "dubious ownership".
+    // safe.directory lifts that for this run only, through the environment, which is the command
+    // scope: git honours safe.directory only from protected configuration. `*`, not /workspace:
+    // git matches the value against the repository's own directory, so /workspace left a repository
+    // in a subdirectory (generated/<clone>) refused. The ownership check protects nothing here: the
+    // sandbox sees only the bind this tool hands the caller (its own root, or the full-scope repo
+    // bind), where every file is the bind owner's, or shows as root's on Docker Desktop, and no
+    // other user's repository is there to be kept from.
+    // safe.bareRepository=explicit: git takes no directory it discovers for a bare repository. The
+    // write tools refuse `.git` by name (filesystem.ts), but they can still make a directory shaped
+    // like one (HEAD, objects/, refs/, and a config with core.worktree and core.fsmonitor), and
+    // git_status with that as its path ran the config's command (probed against starlingai/sandbox,
+    // git 2.43). No git tool works on a bare repository.
+    "-e", "GIT_CONFIG_COUNT=2",
+    "-e", "GIT_CONFIG_KEY_0=safe.directory",
+    "-e", "GIT_CONFIG_VALUE_0=*",
+    "-e", "GIT_CONFIG_KEY_1=safe.bareRepository",
+    "-e", "GIT_CONFIG_VALUE_1=explicit",
+    // The full-scope repo bind is the deployment's own repository, and git uses that one by name,
+    // never one it discovers below the working directory. A full-scope shell writes the zones, and a
+    // `.git` it left in one (core.fsmonitor, hooks) ran in this sandbox, which has the whole
+    // repository bound (review 2026-10-12). A clone makes a new repository and keeps discovery.
+    ...(mountScope === "repo" && args[0] !== "clone" ? ["-e", "GIT_DIR=/workspace/.git", "-e", "GIT_WORK_TREE=/workspace"] : []),
     "-w", workdir,
     SANDBOX_IMAGE,
     "git", ...args,
@@ -91,7 +131,34 @@ async function runGitInSandbox(
   }
 }
 
-// ── git_status (Tier 0 — read-only) ─────────────────────────────────────
+/**
+ * A path the model supplied, where the sandbox sees it. A sandbox narrowed to the caller has the
+ * caller's root at /workspace, so the gateway path every sub-agent is told maps there, as it does for
+ * shell_exec; a relative path stays relative. The full-scope repo bind needs nothing: its gateway
+ * path under /workspace already is the sandbox path.
+ */
+function sandboxPathFor(path: string, ctx: ToolContext): string {
+  return ctx.workspaceScope === "full" ? path : toSandboxPath(path, ctx.workspacePath);
+}
+
+/**
+ * The refusal for a value the model supplied that git would parse as an option where the tool puts
+ * it: a ref, a tag or branch name, a remote, a clone destination. No ref, branch, tag or remote name
+ * can start with "-" (git check-ref-format), so nothing real is refused. Taken as an option, such a
+ * value changed what git does: `--no-index` turned git_diff into a diff of any two files, the
+ * gateway's state under a case alias included (workspace-mount.ts), `--output=<file>` wrote one, and
+ * `--receive-pack=<command>` on a push to a local path ran a command through a shell.
+ */
+function refuseOptionLike(fields: Record<string, string | undefined>): ToolResult | null {
+  for (const [field, value] of Object.entries(fields)) {
+    if (value !== undefined && value.trimStart().startsWith("-")) {
+      return { success: false, output: "", error: `Invalid ${field} "${value}": it would be read as a git option. Nothing was run.` };
+    }
+  }
+  return null;
+}
+
+// ── git_status (Tier 0 — read-only)─────────────────────────────────────
 
 registerTool({
   name: "git_status",
@@ -108,7 +175,8 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const subdir = String(args["path"] ?? "");
-    const workdir = subdir ? `/workspace/${subdir.replace(/\\/g, "/")}` : "/workspace";
+    const mapped = sandboxPathFor(subdir, ctx);
+    const workdir = mapped !== subdir ? mapped : subdir ? `/workspace/${subdir.replace(/\\/g, "/")}` : "/workspace";
     log.info({ workdir, sessionId: ctx.sessionId }, "git_status");
     return runGitInSandbox(["status", "--porcelain=v2", "--branch"], ctx, { workdir });
   },
@@ -141,7 +209,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const count = Math.min(Math.max(Number(args["count"] ?? 20), 1), 100);
-    const filePath = args["path"] ? String(args["path"]) : undefined;
+    const filePath = args["path"] ? sandboxPathFor(String(args["path"]), ctx) : undefined;
     const oneline = Boolean(args["oneline"]);
 
     const gitArgs = ["log", `--max-count=${count}`];
@@ -189,14 +257,25 @@ registerTool({
     },
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const ref1 = args["ref1"] ? String(args["ref1"]) : undefined;
+    const ref2 = ref1 && args["ref2"] ? String(args["ref2"]) : undefined;
+    const refused = refuseOptionLike({ ref1, ref2 });
+    if (refused) return refused;
     const gitArgs = ["diff"];
     if (args["staged"]) gitArgs.push("--cached");
     if (args["stat"]) gitArgs.push("--stat");
-    if (args["ref1"]) {
-      gitArgs.push(String(args["ref1"]));
-      if (args["ref2"]) gitArgs.push(String(args["ref2"]));
-    }
-    if (args["path"]) gitArgs.push("--", String(args["path"]));
+    // Each ref peeled to the commit it names. Where the working directory is no repository (an
+    // auth-off session's shared-root bind, a full-scope repo bind without .git), git took two
+    // arguments for paths and diffed them with no index whatever followed (diff_no_index drops the
+    // `--`), which printed any file the sandbox can read. `<ref>^{commit}` resolves for every ref,
+    // range and commit a caller means, and names no file git or the gateway keeps, so outside a
+    // repository it is an error, not a diff of two files.
+    if (ref1) gitArgs.push(`${ref1}^{commit}`);
+    if (ref2) gitArgs.push(`${ref2}^{commit}`);
+    // `--` closes the refs, always: inside a repository two arguments with none after them, where one
+    // names a path outside it (`/dev/null` and a file), are a no-index diff to git too.
+    gitArgs.push("--");
+    if (args["path"]) gitArgs.push(sandboxPathFor(String(args["path"]), ctx));
 
     log.info({ sessionId: ctx.sessionId }, "git_diff");
     return runGitInSandbox(gitArgs, ctx);
@@ -230,7 +309,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const message = String(args["message"] ?? "");
-    const files = (Array.isArray(args["files"]) ? args["files"] : ["."]).map(String);
+    const files = (Array.isArray(args["files"]) ? args["files"] : ["."]).map((file) => sandboxPathFor(String(file), ctx));
     const author = args["author"] ? String(args["author"]) : undefined;
 
     if (!message.trim()) {
@@ -279,7 +358,7 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const url = String(args["url"] ?? "");
-    const destination = args["destination"] ? String(args["destination"]) : undefined;
+    const destination = args["destination"] ? sandboxPathFor(String(args["destination"]), ctx) : undefined;
     const branch = args["branch"] ? String(args["branch"]) : undefined;
     const depth = args["depth"] ? Number(args["depth"]) : undefined;
 
@@ -288,10 +367,13 @@ registerTool({
       return { success: false, output: "", error: "Only https:// repository URLs are allowed" };
     }
 
+    const refused = refuseOptionLike({ destination });
+    if (refused) return refused;
+
     const gitArgs = ["clone"];
     if (branch) gitArgs.push("--branch", branch);
     if (depth && depth > 0) gitArgs.push("--depth", String(Math.floor(depth)));
-    gitArgs.push(url);
+    gitArgs.push("--", url);
     if (destination) gitArgs.push(destination);
 
     log.info({ url, destination, branch, depth, sessionId: ctx.sessionId }, "git_clone");
@@ -326,11 +408,13 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const ref = String(args["ref"] ?? "");
     const createBranch = Boolean(args["createBranch"]);
-    const files = Array.isArray(args["files"]) ? args["files"].map(String) : undefined;
+    const files = Array.isArray(args["files"]) ? args["files"].map((file) => sandboxPathFor(String(file), ctx)) : undefined;
 
     if (!ref.trim()) {
       return { success: false, output: "", error: "ref is required" };
     }
+    const refused = refuseOptionLike({ ref });
+    if (refused) return refused;
 
     const gitArgs = ["checkout"];
     if (createBranch) gitArgs.push("-b");
@@ -383,6 +467,8 @@ registerTool({
     if (!name || !/^[a-zA-Z0-9._/-]+$/.test(name)) {
       return { success: false, output: "", error: "Invalid tag name." };
     }
+    const refused = refuseOptionLike({ name, ref: ref || undefined });
+    if (refused) return refused;
 
     const gitArgs = ["tag"];
     if (force) gitArgs.push("-f");
@@ -443,6 +529,8 @@ registerTool({
     if (!/^[a-zA-Z0-9_.-]+$/.test(remote)) {
       return { success: false, output: "", error: "Invalid remote name." };
     }
+    const refused = refuseOptionLike({ remote, branch: branch || undefined });
+    if (refused) return refused;
 
     const gitArgs = ["push"];
     if (force) gitArgs.push("--force");

@@ -10,7 +10,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
-import { resolveDockerWorkspaceBind } from "./workspace-mount.js";
+import { callerSandboxMounts, sandboxMappedRoot, toSandboxCommand, toSandboxPath } from "./workspace-mount.js";
 import { assertSafeDockerRunArgs } from "./docker-safety.js";
 
 const log = childLogger("tool:run-test-suite");
@@ -76,9 +76,11 @@ registerTool({
   },
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const suite = String(args["suite"] ?? "custom");
-    const customCommand = args["command"] != null ? String(args["command"]).trim() : "";
-    const filter = args["filter"] != null ? String(args["filter"]).trim() : "";
-    const rawWorkdir = String(args["workdir"] ?? "/workspace").trim().replace(/\\/g, "/");
+    // The gateway-side workspace path, wherever the model wrote it, is /workspace in the sandbox.
+    const mappedRoot = sandboxMappedRoot(ctx.workspacePath);
+    const customCommand = args["command"] != null ? toSandboxCommand(String(args["command"]).trim(), mappedRoot) : "";
+    const filter = args["filter"] != null ? toSandboxPath(String(args["filter"]).trim(), mappedRoot) : "";
+    const rawWorkdir = toSandboxPath(String(args["workdir"] ?? "/workspace").trim(), mappedRoot).replace(/\\/g, "/");
     const timeoutMs = Math.min(
       Math.max(Number(args["timeoutMs"] ?? DEFAULT_TIMEOUT_MS), 5_000),
       MAX_TIMEOUT_MS,
@@ -117,7 +119,10 @@ registerTool({
 
     // The WORKSPACE at /workspace — see resolveDockerWorkspaceBind. Binding the deployment
     // mount source there made /workspace the repo in the compose layout.
-    const workspaceBind = resolveDockerWorkspaceBind(ctx.workspacePath, { at: "/workspace" });
+    // Only the zones a full-scope agent maintains, and nothing for an account's root behind a named
+    // volume (callerSandboxMounts).
+    const mounts = callerSandboxMounts({ workspacePath: ctx.workspacePath, workspaceScope: ctx.workspaceScope });
+    if ("error" in mounts) return { success: false, output: "", error: mounts.error };
 
     const dockerArgs = [
       "run", "--rm",
@@ -127,7 +132,7 @@ registerTool({
       "--pids-limit=128",
       "--cap-drop=ALL",
       "--security-opt=no-new-privileges",
-      "-v", workspaceBind,
+      ...mounts.args,
       "-w", workdir,
       SANDBOX_IMAGE,
       "sh", "-lc", fullCommand,

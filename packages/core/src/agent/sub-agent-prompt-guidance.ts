@@ -200,20 +200,45 @@ export function holdsArtifactBuilderTool(toolNames: readonly string[] | undefine
 
 /**
  * One-shot assemblers: each turns compact authored content (slides, Markdown, a slide or block
- * list) into the finished deck, Office file or PDF in one call. For a run that holds one, that call
- * is the build, so a FRESH staged build gets no skeleton directive (sub-agent.ts). In E2E
+ * list, a series list, Mermaid source, an image prompt) into the finished deck, Office file, PDF,
+ * chart page, diagram or picture in one call. For a run that holds one, that call is the build, so
+ * a FRESH staged build gets no skeleton directive (sub-agent.ts). In E2E
  * core-build-artifact-revealjs-deck (2026-10-09) the orchestrator's deck tasks grew to 817-1,349
  * chars, past the threshold. content_writer was told "SKELETON (first tool call): one write_file",
  * hand-wrote index.html with UNFINISHED_STUB markers, and never called generate_presentation. Its
  * deck runs used generate_presentation in 2 of 2 unstaged runs and 1 of 4 staged ones.
  *
- * Two emitters are left out. web_coder holds generate_website beside the tools it hand-builds pages
- * with, and its large builds are what the directive exists for (dfe964f3). generate_document saves
- * exactly the text it is passed, so it is the document form of write_file, and six specialists
- * besides content_writer hold it.
+ * chart_designer did the same in core-build-artifact-html-chart (session 59579f24, 2026-10-10): a
+ * 750-char brief put the directive ahead of its own "Prefer generate_chart_html", and it wrote a
+ * 708-char skeleton, filled it with edit_file and never called the tool. Since the inline-SVG
+ * rewrite (f689bed5) its chart attempts called generate_chart_html and passed in 7 of 7 unstaged
+ * runs and 0 of 2 staged ones.
+ * - generate_chart_html: labels and series in, the standalone inline-SVG page out. The tool draws
+ *   the scales, axes and marks, so the input stays a few numbers however detailed the brief.
+ * - generate_mermaid_diagram: the Mermaid source is the finished diagram the chat previews, and it
+ *   stays a compact notation however long the brief that describes it. diagram_designer holds
+ *   write_file and edit_file beside it, as chart_designer does.
+ * - generate_image: a prompt in, the finished picture out, and no text skeleton can build it. A
+ *   long brief to image_creator is the picture's prompt, and its own prompt makes this the first call.
+ *
+ * The rest of ARTIFACT_BUILDER_TOOLS stays out: holding one does not make a long brief a brief for
+ * that tool's single artifact.
+ * - generate_website: web_coder holds it beside the tools it hand-builds pages with, and its large
+ *   builds are what the directive exists for (dfe964f3).
+ * - generate_document, generate_svg: they save exactly the text or markup they are passed, so they
+ *   are write_file in another form. Six specialists besides content_writer hold generate_document.
+ * - generate_pdf: report_writer_agent, its one holder not already exempt, uses it for alternate
+ *   formats of the Markdown report it writes.
+ * - generate_qr_code, transform_image: one encodes a string and the other applies a list of
+ *   operations to an existing picture, so a brief past the threshold is about something larger.
+ * - spreadsheet_write, pdf_fill: export and form-fill steps of runs whose task is a query or a
+ *   document intake (sql_specialist, document_intake).
+ * - bundle_artifact_zip, verify_page, verify_app, serve_app: they package, check or serve files
+ *   built by hand, so holding them marks a hand-builder.
  */
 export const ONE_SHOT_ASSEMBLER_TOOLS: ReadonlySet<string> = new Set([
   "generate_presentation", "generate_docx", "generate_pptx", "render_pdf",
+  "generate_chart_html", "generate_mermaid_diagram", "generate_image",
 ]);
 
 export function holdsOneShotAssembler(toolNames: readonly string[] | undefined): boolean {

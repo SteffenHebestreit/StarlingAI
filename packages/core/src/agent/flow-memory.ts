@@ -1,17 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { childLogger } from "../logger.js";
 import { isProtectedConfigPath } from "./config-assistant-proposals.js";
 import { canReadRecord, recordReader } from "../runtime/user-scope.js";
-import { deploymentWorkspaceRoot } from "../tools/workspace-path.js";
+import { deploymentWorkspaceRoot, workspaceStateDir } from "../tools/workspace-path.js";
 import { readAllRecords, rewriteJsonLines } from "../memory/bounded-ndjson-store.js";
-
-import { PRODUCT } from "../product/index.js";
 
 const log = childLogger("agent:flow-memory");
 
-const FLOW_MEMORY_FILE = `${PRODUCT.stateDirName}/flow_memory.ndjson`;
+/** The file in the root's state directory, which for an account's root is kept outside that root
+ *  (workspaceStateDir): the account's sandboxes can write anything inside it. */
+function flowMemoryFile(workspacePath: string): string {
+  return resolve(workspaceStateDir(workspacePath), "flow_memory.ndjson");
+}
 const MAX_ACTIONS = 8;
 const MAX_TAGS = 10;
 
@@ -67,9 +69,9 @@ export function appendFlowMemoryEntry(
   };
 
   try {
-    const dir = resolve(workspacePath, PRODUCT.stateDirName);
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(resolve(workspacePath, FLOW_MEMORY_FILE), `${JSON.stringify(normalized)}\n`, "utf-8");
+    const file = flowMemoryFile(workspacePath);
+    mkdirSync(dirname(file), { recursive: true });
+    appendFileSync(file, `${JSON.stringify(normalized)}\n`, "utf-8");
   } catch (err) {
     log.warn({ err }, "Failed to persist flow memory entry");
   }
@@ -78,7 +80,7 @@ export function appendFlowMemoryEntry(
 }
 
 export function readFlowMemoryEntries(workspacePath: string, limit = 100): FlowMemoryEntry[] {
-  const file = resolve(workspacePath, FLOW_MEMORY_FILE);
+  const file = flowMemoryFile(workspacePath);
   if (!existsSync(file)) return [];
 
   try {
@@ -108,7 +110,7 @@ export function readFlowMemoryEntries(workspacePath: string, limit = 100): FlowM
  * Throws when the file cannot be read or written.
  */
 export function rewriteFlowMemoryAccounts(workspacePath: string, rewrite: (account: string) => string | null | undefined): number {
-  return rewriteJsonLines(resolve(workspacePath, FLOW_MEMORY_FILE), (record) => {
+  return rewriteJsonLines(flowMemoryFile(workspacePath), (record) => {
     const account = (record as FlowMemoryEntry | null)?.account;
     if (typeof account !== "string") return undefined;
     const next = rewrite(account);
@@ -119,7 +121,7 @@ export function rewriteFlowMemoryAccounts(workspacePath: string, rewrite: (accou
 /** How many entries each account has stamped on it (the account migration's inventory). */
 export function flowMemoryAccountCounts(workspacePath: string): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const entry of readAllRecords<FlowMemoryEntry>(resolve(workspacePath, FLOW_MEMORY_FILE))) {
+  for (const entry of readAllRecords<FlowMemoryEntry>(flowMemoryFile(workspacePath))) {
     if (typeof entry?.account === "string") counts.set(entry.account, (counts.get(entry.account) ?? 0) + 1);
   }
   return counts;

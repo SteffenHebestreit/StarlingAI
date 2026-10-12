@@ -20,13 +20,18 @@
  * a misleading empty pass.
  */
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import JSON5 from "json5";
 import { ConfigSchema } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
 import { DEFAULT_RUNTIME_DIRECTORY_NAME } from "./loader.js";
 import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-path.js";
+import { sweepEntryKind } from "../tools/workspace-zones.js";
+import { isWorkspaceContainmentError, withContainedWorkspaceFile } from "../tools/workspace-containment.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("config:validate-workspace");
 
 export interface WorkspaceValidationResult {
   ok: boolean;
@@ -101,13 +106,19 @@ export function resolveShardDirs(workspacePath: string): { repoRoot: string; dir
 }
 
 /** Sorted .json/.jsonc shard paths under a directory (recursive), like config-layout. `zones` are
- *  the tree's top-level non-config directories (NON_CONFIG_BASE_ZONES for config/). */
-function collectShardPaths(directory: string, zones: ReadonlySet<string>): string[] {
+ *  the tree's top-level non-config directories (NON_CONFIG_BASE_ZONES for config/). A link is never
+ *  followed, as the loader follows none (sweepEntryKind): each one skipped is added to `links`. */
+function collectShardPaths(directory: string, zones: ReadonlySet<string>, links: string[]): string[] {
   const paths: string[] = [];
   const visit = (current: string, depth: number) => {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
       const next = resolve(current, entry.name);
-      if (entry.isDirectory()) {
+      const kind = sweepEntryKind(next);
+      if (kind === "link") {
+        if (!isNonConfigShardDirectory(entry.name, depth, zones)) links.push(next);
+        continue;
+      }
+      if (kind === "directory") {
         // Mirror the loader: working zones (generated/, uploads/, tools/, users/; config/mail/ in
         // the config tree) and hidden state dirs hold data, never config shards.
         if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
@@ -120,7 +131,7 @@ function collectShardPaths(directory: string, zones: ReadonlySet<string>): strin
         continue;
       }
       const ext = extname(entry.name).toLowerCase();
-      if (ext !== ".json" && ext !== ".jsonc") continue;
+      if (kind !== "file" || (ext !== ".json" && ext !== ".jsonc")) continue;
       paths.push(next);
     }
   };
@@ -144,19 +155,36 @@ function deepMerge(base: Record<string, unknown>, overlay: Record<string, unknow
 /**
  * Read + merge shards from the given directories, collecting per-file parse
  * errors instead of throwing. Paths in error messages are relative to repoRoot
- * (so they read like "workspace/scenes/10-scenes.jsonc").
+ * (so they read like "workspace/scenes/10-scenes.jsonc"). A link in the tree is
+ * skipped with a warning, and each shard is read held to its zone, as the loader
+ * reads it (config/loader.ts readSweptShardText).
  */
-function mergeShards(repoRoot: string, dirs: string[], parseErrors: string[]): Record<string, unknown> {
+function mergeShards(repoRoot: string, dirs: string[], parseErrors: string[], warnings: string[]): Record<string, unknown> {
   let merged: Record<string, unknown> = {};
+  const shown = (path: string) => {
+    const rel = relative(repoRoot, path).replace(/\\/g, "/");
+    return rel.startsWith("..") ? path.replace(/\\/g, "/") : rel;
+  };
   for (const dir of dirs) {
     const zones = dir === join(repoRoot, "config") ? NON_CONFIG_BASE_ZONES : NON_CONFIG_WORKSPACE_ZONES;
-    for (const shardPath of collectShardPaths(dir, zones)) {
+    const links: string[] = [];
+    const shardPaths = collectShardPaths(dir, zones, links);
+    for (const link of links) {
+      log.warn({ path: link }, "Skipped a link in the config tree: a shard is read only from a regular file, and no link is followed");
+      warnings.push(`${shown(link)}: a link, skipped — the loader reads shards only from regular files and follows no link`);
+    }
+    for (const shardPath of shardPaths) {
       let parsed: unknown;
       try {
-        parsed = JSON5.parse(readFileSync(shardPath, "utf8"));
+        const text = withContainedWorkspaceFile(shardPath, dir, { mode: "read" }, (file) => file.read().toString("utf8"));
+        parsed = JSON5.parse(text);
       } catch (err) {
-        const rel = relative(repoRoot, shardPath).replace(/\\/g, "/");
-        parseErrors.push(`${rel.startsWith("..") ? shardPath.replace(/\\/g, "/") : rel}: ${err instanceof Error ? err.message : String(err)}`);
+        if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") continue;
+        if (isWorkspaceContainmentError(err)) {
+          warnings.push(`${shown(shardPath)}: no longer a regular file in its place in the tree, skipped`);
+          continue;
+        }
+        parseErrors.push(`${shown(shardPath)}: ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
       if (isPlainObject(parsed)) merged = deepMerge(merged, parsed);
@@ -210,7 +238,7 @@ export function validateWorkspaceConfig(workspacePath: string, knownToolNames: S
   const referenceErrors: string[] = [];
   const warnings: string[] = [];
 
-  const merged = dirs.length > 0 ? mergeShards(repoRoot, dirs, parseErrors) : {};
+  const merged = dirs.length > 0 ? mergeShards(repoRoot, dirs, parseErrors, warnings) : {};
 
   // The loader deletes `configRemovals` paths after folding the shards, so this
   // validator must too — otherwise it validates a roster the runtime never sees

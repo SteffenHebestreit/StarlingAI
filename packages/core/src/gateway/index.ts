@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { resolve, basename, extname } from "node:path";
+import { basename, extname } from "node:path";
 import { z } from "zod";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -101,11 +101,13 @@ import {
   parseUpstreamJsonResponse,
   callMultimodalToolViaMcp,
   checkEndpointHealth,
+  checkOpenAiTtsHealth,
   multimodalServiceConfigured,
   unwrapConversionResult,
   disabledServiceStatus,
   disabledServiceResponse,
 } from "./upstream-http.js";
+import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { handleMcpHttpRequest, getMcpHttpSessionCount } from "../mcp/server-http.js";
 import { getMcpExposeSummary } from "../mcp/server.js";
 import { browserSessionManager } from "../agent/browser-session.js";
@@ -512,12 +514,19 @@ export function createGateway() {
     );
   }
 
-  async function readWorkspaceBinaryFile(path: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
-    const workspaceRoot = resolve(getConfig().workspacePath);
-    const targetPath = resolve(workspaceRoot, path);
-    if (!targetPath.startsWith(workspaceRoot)) {
-      throw new Error("Audio example path escapes the workspace");
+  /**
+   * An audio sample under `root`. A path the REQUEST names is read from the caller's own root
+   * (userWorkspaceRoot), with the workspace boundary and the denylist read_file enforces: it was
+   * joined to the SHARED root behind a bare prefix check, so an account's "users/<other>/x.wav",
+   * or a secret file, went to the TTS service as the voice to clone.
+   */
+  async function readWorkspaceBinaryFile(path: string, root: string): Promise<{ filename: string; contentType: string; bytes: Uint8Array }> {
+    const { guardPath } = await import("../tools/filesystem.js");
+    const guarded = guardPath(path, root);
+    if (!guarded.safe) {
+      throw new Error("Audio example path escapes the workspace or names protected workspace data");
     }
+    const targetPath = guarded.resolved;
     const fileStat = await stat(targetPath);
     if (!fileStat.isFile()) {
       throw new Error(`Audio example is not a file: ${path}`);
@@ -572,63 +581,6 @@ export function createGateway() {
 
   function normalizeTtsLanguage(language: string, api: "qwen-compatible" | "openai-compatible"): string {
     return api === "qwen-compatible" ? normalizeQwenLanguage(language) : language.trim();
-  }
-
-  async function fetchTtsVoiceCatalog(config: {
-    api: "qwen-compatible" | "openai-compatible";
-    baseUrl: string;
-    apiKey?: string;
-    timeoutMs: number;
-  }): Promise<Record<string, unknown>> {
-    if (!multimodalServiceConfigured(config.baseUrl)) {
-      throw new Error("TTS is disabled: no endpoint configured.");
-    }
-
-    if (config.api === "openai-compatible") {
-      const [voicesResponse, modelsResponse] = await Promise.all([
-        fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-        fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      ]);
-
-      if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
-
-      const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
-      let voices: unknown[] = [];
-
-      if (voicesResponse.ok) {
-        const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
-        voices = Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [];
-      } else if (voicesResponse.status !== 404 && voicesResponse.status !== 405) {
-        throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
-      }
-
-      return {
-        voices,
-        speakers: [],
-        models: modelsBody["models"] ?? {},
-        currentModel: modelsBody["current_model"] ?? undefined,
-      };
-    }
-
-    const [voicesResponse, speakersResponse, modelsResponse] = await Promise.all([
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/speakers"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-      fetchWithTimeout(upstreamUrl(config.baseUrl, "/models"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),
-    ]);
-
-    if (!voicesResponse.ok) throw new Error(await extractUpstreamError(voicesResponse, "Failed to load saved voices"));
-    if (!speakersResponse.ok) throw new Error(await extractUpstreamError(speakersResponse, "Failed to load speakers"));
-    if (!modelsResponse.ok) throw new Error(await extractUpstreamError(modelsResponse, "Failed to load TTS models"));
-
-    const voicesBody = await parseUpstreamJsonResponse(voicesResponse, "Voice list returned a non-JSON response");
-    const speakersBody = await parseUpstreamJsonResponse(speakersResponse, "Speaker list returned a non-JSON response");
-    const modelsBody = await parseUpstreamJsonResponse(modelsResponse, "Model list returned a non-JSON response");
-    return {
-      voices: Array.isArray(voicesBody["voices"]) ? voicesBody["voices"] : [],
-      speakers: Array.isArray(speakersBody["speakers"]) ? speakersBody["speakers"] : [],
-      models: modelsBody["models"] ?? {},
-      currentModel: modelsBody["current_model"] ?? undefined,
-    };
   }
 
   // TTL-cached TTS capability snapshot (avoid hitting /models on every TTS request)
@@ -1599,11 +1551,10 @@ export function createGateway() {
       !multimodalServiceConfigured(multimodalConfig.tts.baseUrl)
         ? Promise.resolve(disabledServiceStatus("Disabled: no TTS endpoint configured."))
         : multimodalConfig.tts.api === "openai-compatible"
-          ? checkEndpointHealth({
+          ? checkOpenAiTtsHealth({
               baseUrl: multimodalConfig.tts.baseUrl,
               apiKey: multimodalConfig.tts.apiKey,
               timeoutMs: multimodalConfig.tts.timeoutMs,
-              path: "/models",
             })
           : checkEndpointHealth({
               baseUrl: multimodalConfig.tts.baseUrl,
@@ -2302,7 +2253,10 @@ export function createGateway() {
           : typeof body["voice"] === "string" && body["voice"].trim()
             ? body["voice"].trim()
             : multimodalConfig.tts.defaultVoiceId,
-        audioExample: audioExamplePath ? await readWorkspaceBinaryFile(audioExamplePath) : undefined,
+        // The configured sample belongs to the deployment and stays at the shared root.
+        audioExample: audioExamplePath
+          ? await readWorkspaceBinaryFile(audioExamplePath, explicitAudioExamplePath ? userWorkspaceRoot(getConfig().workspacePath) : getConfig().workspacePath)
+          : undefined,
         referenceText: explicitReferenceText ?? multimodalConfig.tts.voiceSampleText,
         saveVoiceAs: explicitSaveVoiceAs,
         allowVoiceCloneFallback: !explicitAudioExamplePath && !explicitReferenceText && !explicitSaveVoiceAs,

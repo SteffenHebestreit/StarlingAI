@@ -17,6 +17,7 @@ import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./obs
 import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { loadConfig } from "./config/loader.js";
 import { stopAllCronJobs } from "./runtime/scheduler.js";
+import { relocateAccountWorkspaceState } from "./runtime/workspace-state-relocation.js";
 
 import "./tools/filesystem.js";
 import "./tools/shell.js";
@@ -61,6 +62,10 @@ const log = childLogger("scene-worker:main");
 export async function main() {
   const config = loadConfig();
   log.info({ model: config.agents.defaults.model.primary }, "Standalone scene worker starting");
+
+  // A standalone worker runs sandboxes too, and may start before the gateway: the same one-time move
+  // of each account's workspace state out of its root, before any of them (src/index.ts).
+  await relocateAccountWorkspaceState(config.workspacePath);
 
   startEventLoopMonitor();
   startProviderActivityMonitor();

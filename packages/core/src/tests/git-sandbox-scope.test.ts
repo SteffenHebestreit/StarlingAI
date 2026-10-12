@@ -21,6 +21,16 @@ vi.mock("node:child_process", () => {
   return { execFile };
 });
 
+// The sandbox creates the caller's root and its state directory on the gateway side before a
+// run. These are compose-layout paths, which on this machine are not the gateway's (on Windows
+// "/workspace" is the root of the current drive), so nothing is created for them here.
+vi.mock("node:fs", async (importOriginal) => {
+  const real = await importOriginal<typeof import("node:fs")>();
+  const mkdirSync = ((path: Parameters<typeof real.mkdirSync>[0], options?: Parameters<typeof real.mkdirSync>[1]) =>
+    /^\/workspace(\/|$)/.test(String(path).replace(/\\/g, "/")) ? undefined : real.mkdirSync(path, options)) as typeof real.mkdirSync;
+  return { ...real, mkdirSync, default: { ...real, mkdirSync } };
+});
+
 // A per-user workspace path in the compose layout, and a host-path mount source for it.
 const CALLER_WS = "/workspace/workspace/users/acct-1";
 const HOST_SOURCE = "/opt/deploy/repo";
@@ -82,7 +92,7 @@ describe("git sandbox scope narrowing (slice 0)", () => {
     expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}/workspace/users/acct-1:/workspace`);
   });
 
-  it("keeps the whole-repo mount for a full-scope agent (swarm_maintainer's git)", async () => {
+  it("keeps the whole-repo mount, read-only, for a full-scope agent (swarm_maintainer's git)", async () => {
     process.env["SAI_WORKSPACE_MOUNT_SOURCE"] = HOST_SOURCE;
     execFileAsyncMock.mockResolvedValue({ stdout: "## main", stderr: "" });
     const { getTool } = await import("../tools/registry.js");
@@ -95,7 +105,7 @@ describe("git sandbox scope narrowing (slice 0)", () => {
 
     expect(result.success).toBe(true);
     expect(result.metadata?.["mountScope"]).toBe("repo");
-    expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}:/workspace`);
+    expect(bindArg(execFileAsyncMock.mock.calls[0])).toBe(`${HOST_SOURCE}:/workspace:ro`);
   });
 
   it("refuses WITHOUT spawning when a named-volume source cannot be narrowed", async () => {

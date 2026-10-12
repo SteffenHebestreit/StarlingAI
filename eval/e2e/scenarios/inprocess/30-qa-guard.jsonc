@@ -1,0 +1,128 @@
+// IN-PROCESS: qa_guard runs a seeded node:test suite in the sandbox and reports the real result,
+// without touching the code under test.
+//
+// qa_guard has run in the gateway process since 2026-10-09 (container.disabled). Step 1 seeds a
+// tiny suite through shell_agent's write_file (generated/e2e-qa/); in a fresh session qa_guard is
+// asked to run it. The suite has one passing and one failing test, so a reply can only be right by
+// running it:
+//   zeilenpreis(8.9, 10) === 89                    passes,
+//   zeilenpreis(8.9, 30) === 245.64                fails: 8.9 * 30 * (1 - 0.08) is
+//                                                  245.64000000000001 in IEEE 754 doubles (node -e).
+// The business value 245,64 € is the site's volume-discount example (eval/e2e/ENVIRONMENT.md
+// "Prices & shipping": 30 × NW-3102 = 267,00 € − 8 % = 245,64 €); the code never rounds to cents.
+// Only a run prints the actual value 245.64000000000001, so the reply naming it is the verdict. The
+// exit code is not: node --test exits 1, but `| tail`, `|| true` or `; echo $?` turn the same red
+// run into exit 0.
+//
+// Audit row asserted: sub_agent_tool_call phase "done" with args and result (agent/sub-agent.ts
+// buildSubAgentToolAuditPayload). shell_exec and run_test_suite both report how much the run
+// printed as metadata.programOutputChars, whatever its exit code (tools/shell.ts,
+// tools/run-test-suite.ts), so either tool counts, provided its command ran node's test runner and
+// printed something.
+// Both need per-call approval (guardrails/tool-tiers.ts), hence --auto.
+// A verification run does not change what it verifies: no write or edit of the seeded files, and the
+// GETs after the turn find both unchanged (the failing assertion not weakened, the code not "fixed").
+// The files sit under generated/, so the attempt deletes them first (204 removed, 404 not there).
+{
+  id: "inprocess-qa-guard-runs-seeded-tests",
+  title: "In-process qa_guard: a seeded node:test suite is run and its failure reported as printed",
+  group: "inprocess",
+  tags: ["inprocess", "qa_guard", "shell_agent", "sandbox", "tests"],
+  description: "Step 1 seeds generated/e2e-qa/staffel.mjs and staffel.test.mjs through shell_agent. In a fresh session qa_guard (in-process since 2026-10-09) runs the suite with node --test in the sandbox. Protects: the in-process test execution path (a node --test run with output), a report grounded in that output (the actual value 245.64000000000001 of the failing assertion), and a verification run that leaves the code and the test as they were.",
+  requires: ["model", "sandbox"],
+  timeoutMs: 1500000,
+  steps: [
+    {
+      kind: "http",
+      id: "remove-leftover-code",
+      method: "DELETE",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.mjs",
+      expect: { status: [204, 404] },
+    },
+    {
+      kind: "http",
+      id: "remove-leftover-test",
+      method: "DELETE",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.test.mjs",
+      expect: { status: [204, 404] },
+    },
+    {
+      kind: "turn",
+      id: "seed-suite",
+      agent: "shell_agent",
+      message: "Lege mit write_file genau diese zwei Dateien an und übernimm den Inhalt unverändert. Führe nichts aus.\n\nDatei generated/e2e-qa/staffel.mjs:\n```js\n// Mengenrabatt je Artikelzeile: ab 25 Stück 8 %.\nexport function zeilenpreis(stueckpreis, menge) {\n  const rabatt = menge >= 25 ? 0.08 : 0;\n  return stueckpreis * menge * (1 - rabatt);\n}\n```\n\nDatei generated/e2e-qa/staffel.test.mjs:\n```js\nimport { test } from \"node:test\";\nimport assert from \"node:assert/strict\";\nimport { zeilenpreis } from \"./staffel.mjs\";\n\ntest(\"10 Stück ohne Rabatt\", () => {\n  assert.equal(zeilenpreis(8.9, 10), 89);\n});\n\ntest(\"30 Stück mit 8 % Rabatt\", () => {\n  assert.equal(zeilenpreis(8.9, 30), 245.64);\n});\n```\n--auto",
+      timeoutMs: 600000,
+      expect: {
+        agents: { mustRun: ["shell_agent"] },
+      },
+    },
+    {
+      kind: "http",
+      id: "seeded-code",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.mjs",
+      expect: { status: 200, bodyIncludes: ["return stueckpreis * menge * (1 - rabatt);"] },
+    },
+    {
+      kind: "http",
+      id: "seeded-test",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.test.mjs",
+      expect: { status: 200, bodyIncludes: ["assert.equal(zeilenpreis(8.9, 30), 245.64);"] },
+    },
+    // The QA run must read the workspace, not the conversation that wrote it.
+    { kind: "newSession" },
+    {
+      kind: "turn",
+      id: "run-suite",
+      agent: "qa_guard",
+      message: "Führe die Node-Tests in generated/e2e-qa/staffel.test.mjs mit node --test aus und berichte, welche Tests bestehen und welche fehlschlagen. Nenne für jeden fehlgeschlagenen Test den erwarteten und den tatsächlichen Wert aus der Testausgabe. Ändere keine Dateien. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          // The failing assertion's actual value, as node printed it.
+          matches: ["245[.,]64000000000001"],
+        },
+        agents: { mustRun: ["qa_guard"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "qa_guard",
+                "data.tool": { in: ["shell_exec", "run_test_suite"] },
+                "data.phase": "done",
+                "data.args.command": { regex: "--test" },
+                "data.metadata.programOutputChars": { gte: 1 },
+              },
+            },
+          ],
+          mustNot: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.tool": { in: ["write_file", "edit_file"] },
+                "data.phase": "start",
+                "data.args.path": { regex: "e2e-qa/staffel" },
+              },
+            },
+          ],
+        },
+      },
+    },
+    {
+      kind: "http",
+      id: "code-unchanged",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.mjs",
+      expect: { status: 200, bodyIncludes: ["return stueckpreis * menge * (1 - rabatt);"] },
+    },
+    {
+      kind: "http",
+      id: "test-unchanged",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-qa/staffel.test.mjs",
+      expect: { status: 200, bodyIncludes: ["assert.equal(zeilenpreis(8.9, 30), 245.64);"] },
+    },
+  ],
+}

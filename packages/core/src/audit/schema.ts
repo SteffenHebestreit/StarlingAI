@@ -118,6 +118,7 @@ export type CoreAuditEventType =
   | "turn_guidance_applied"
   | "turn_slo_breach"
   | "computer_action"
+  | "page_check_unavailable"
   | "computer_screenshot_analyzed"
   | "computer_credential_prompt_detected"
   | "computer_session_started"
@@ -210,6 +211,12 @@ export type CoreAuditEventType =
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_research_candidate_selected"
   | "delegation_render_research_redirect_skipped"
+  // On a flagged turn, a step whose first agent only reads the open browser tab runs the other
+  // agents it names first; the tab readers wait behind them until a browser has been driven.
+  | "delegation_tab_reader_demoted"
+  | "delegation_tab_reader_held"
+  // An agent that only reads the open browser tab saw nothing but the browser's empty page: failed.
+  | "delegation_tab_reader_saw_blank_tab"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
   | "delegation_depth_ceiling_enforced"

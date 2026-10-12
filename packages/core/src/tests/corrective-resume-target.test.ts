@@ -103,6 +103,8 @@ describe("runCorrectiveBuild — the runtime's build declares the file it wants"
       getStashedBuilderTaskSpec: () => null,
       getQaCorrectiveBuildUsed: () => false,
       setQaCorrectiveBuildUsed: () => {},
+      getCorrectiveRerouteUsed: () => false,
+      setCorrectiveRerouteUsed: () => {},
       incrementDelegationCount: () => {},
       forceSynthesis: async () => null,
       selectCorrectiveResumeTarget: () => null,

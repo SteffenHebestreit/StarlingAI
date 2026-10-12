@@ -88,7 +88,7 @@ registerTool({
 
     let bytes: Buffer;
     try {
-      const { resolved } = resolvePathWithinWorkspace(path, ctx.workspacePath);
+      const { resolved, relativePath } = resolvePathWithinWorkspace(path, ctx.workspacePath);
       // Same secret-exfil guard read_file enforces: ingest_document must not pull
       // .env / .starlingai / .git / credential files into the searchable document
       // library (where search_documents would return their contents). Checked on the
@@ -104,8 +104,11 @@ registerTool({
         // Under `storage.backend: "s3"` (the compose default) uploads live only in the
         // object store, never on the workspace disk — read them back through it. The
         // sensitive-path guard above has already run on the lexical + real path.
+        // Keyed by the path that guard approved, not the raw argument, and read from the
+        // caller's own namespace: the store used to join the raw path to the shared root, so
+        // "users/<other>/generated/x.pdf" ingested another account's file.
         const { getUpload } = await import("../storage/object-store.js");
-        const stored = await getUpload(path.replace(/\\/g, "/").replace(/^\/+/, ""));
+        const stored = await getUpload(relativePath);
         if (!stored) throw diskErr;
         bytes = Buffer.from(stored);
       }

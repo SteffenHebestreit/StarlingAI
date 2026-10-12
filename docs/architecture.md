@@ -139,7 +139,7 @@ Each self-authored artifact type has a validation path before it should be trust
 
 #### Procedural memory: the self-authoring Skill Library
 
-The clearest realization of bounded self-improvement is the **Skill Library** (`packages/core/src/skills/`). A *skill* is a named, versioned **procedure** — how to accomplish a recurring task — stored as a portable `SKILL.md` (YAML frontmatter + Markdown body) under `.starlingai/skills/<slug>/`. Skills are pure guidance: no code, no credentials, no privilege. They cannot grant tools or alter tiers — the guardrail stack still governs every tool a skill suggests — which is exactly why they are a safe autonomous surface.
+The clearest realization of bounded self-improvement is the **Skill Library** (`packages/core/src/skills/`). A *skill* is a named, versioned **procedure** — how to accomplish a recurring task — stored as a portable `SKILL.md` (YAML frontmatter + Markdown body) under `skills/<slug>/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, and `<shared>/.starlingai/users/<seg>/` for an account's own root, which keeps no gateway state inside the directory its sandboxes are handed (`tools/workspace-state.ts`). Skills are pure guidance: no code, no credentials, no privilege. They cannot grant tools or alter tiers — the guardrail stack still governs every tool a skill suggests — which is exactly why they are a safe autonomous surface.
 
 The loop is: author skills from experience, then improve them during use.
 

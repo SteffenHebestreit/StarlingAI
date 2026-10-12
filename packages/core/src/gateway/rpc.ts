@@ -19,7 +19,7 @@ import {
 } from "../agent/session.js";
 import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
 import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
-import { ownsRecord, principalIdentity, recordHasOwner } from "../runtime/user-scope.js";
+import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { callerMayUseSession } from "./session-route-access.js";
@@ -693,6 +693,10 @@ export class RpcConnection implements AccountConnection {
 
       case "session.create": {
         let workspacePath: string | undefined = undefined;
+        // Attribute the session to the authenticated connection user (so the document-RAG user
+        // scope + RBAC match the identity uploads use). The server-derived identity wins over any
+        // client-supplied userId, and travels whole: the account id with the name.
+        const sessionIdentity = this.connIdentity() ?? (params["userId"] ? { userId: String(params["userId"]) } : undefined);
         // In local/dev contexts, we allow setting a workspace path.
         // In a real deployed environment, this should be overridden or constrained by the gateway.
         if (params["workspacePath"]) {
@@ -700,8 +704,13 @@ export class RpcConnection implements AccountConnection {
           // SECURITY: Only allow relative paths inside a safe workspace root, never absolute host paths like "/".
           // EVL-401: when gateway.sessionWorkspaceRoot is configured, the relative path resolves
           // under that root (containment enforced) so eval fixtures on a container mount are
-          // reachable; unset keeps the legacy raw-relative behavior.
-          const resolution = resolveSessionWorkspaceOverride(requestedPath, getConfig().gateway?.sessionWorkspaceRoot);
+          // reachable; unset keeps the legacy raw-relative behavior. Either way it may not name
+          // another account's root: the session roots itself under the override at its own
+          // account's segment, which is the identity checked here.
+          const resolution = resolveSessionWorkspaceOverride(requestedPath, getConfig().gateway?.sessionWorkspaceRoot, {
+            ownSegment: segmentFor(sessionIdentity),
+            deploymentRoot: getConfig().workspacePath,
+          });
           if (!resolution.ok) {
              log.warn({ requestedPath, reason: resolution.reason, connId: this.connId }, "Rejected workspacePath override");
              throw new Error(`Invalid workspacePath: ${resolution.reason}`);
@@ -711,11 +720,7 @@ export class RpcConnection implements AccountConnection {
 
         const session = createSession({
           channel: String(params["channel"] ?? "webchat"),
-          // Attribute the session to the authenticated connection user (so the
-          // document-RAG user scope + RBAC match the identity uploads use). The
-          // server-derived identity wins over any client-supplied userId, and travels whole:
-          // the account id with the name.
-          ...(this.connIdentity() ?? (params["userId"] ? { userId: String(params["userId"]) } : {})),
+          ...(sessionIdentity ?? {}),
           ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
         });

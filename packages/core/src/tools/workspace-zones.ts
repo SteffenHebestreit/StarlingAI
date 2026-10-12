@@ -8,6 +8,7 @@
  * concurrent dynamic imports do) waited on each other for good. tools/workspace-path.ts re-exports
  * every one of them.
  */
+import { lstatSync, statSync } from "node:fs";
 import { relative, sep } from "node:path";
 
 /**
@@ -70,6 +71,53 @@ export function isNonConfigShardDirectory(
   zones: ReadonlySet<string> = NON_CONFIG_WORKSPACE_ZONES,
 ): boolean {
   return name.startsWith(".") || (depth === 0 && zones.has(name));
+}
+
+/**
+ * What a sweep of the workspace or config tree finds at `path`, by lstat: "link" for a symlink or,
+ * on Windows, a junction, which a sweep never follows, whatever it leads to; null where nothing is
+ * there any more.
+ *
+ * A LINK IN THE ZONES IS THE SANDBOX'S, NOT THE OPERATOR'S. The full-scope maintenance sandbox writes
+ * agents/, jobs/, scenes/, tools/ and generated/, and can leave `agents/x.jsonc` linked to any file
+ * the gateway can read, or a directory linked anywhere: the gateway would read through it what the
+ * sandbox itself cannot, the state directory included, and merge it into the live configuration
+ * (review 2026-10-12). Node's Dirent already reported such an entry as neither file nor directory,
+ * but a sweep that took anything not a directory as a file (validate-workspace), or listed names
+ * and read them by path (the dynamic tools, config-layout), followed it; each caller warns, naming
+ * the link it skips.
+ */
+export function sweepEntryKind(path: string): "file" | "directory" | "link" | "other" | null {
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch {
+    return null;
+  }
+  if (stats.isSymbolicLink()) return "link";
+  if (stats.isDirectory()) return "directory";
+  return stats.isFile() ? "file" : "other";
+}
+
+/**
+ * Whether a link a sweep found at the TOP of a config tree (depth 0, a name the sweep reads: not
+ * hidden, not a working zone) stands for config: a directory, a shard by its name (`isShard`), or a
+ * link that leads nowhere, which could have been either. Mirrors topLevelLinkHoldsConfig in
+ * scripts/config-shards.mjs, where the build stops on one.
+ *
+ * Skipped like a link further down, with a warning, it dropped everything behind it from the
+ * configuration: config/gateway/ linked to a directory kept elsewhere took the gateway's settings
+ * out. No sandbox writes that depth, so such a link is the operator's layout; the loader says so as
+ * an error. A config or workspace directory that is itself a link is the swept directory, which is
+ * read through.
+ */
+export function topLevelLinkHoldsConfig(path: string, isShard: boolean): boolean {
+  if (isShard) return true;
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return true;
+  }
 }
 
 /**

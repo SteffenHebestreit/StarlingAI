@@ -12,11 +12,15 @@
  *   - a SCRUBBED environment, so an escape finds no API keys, no JWT secret, no DB URL;
  *   - a working directory in the OS temp dir, so a relative write cannot land in the workspace;
  *   - a hard kill on the parent's timer, so a loop no vm timeout catches cannot outlive it;
- *   - no shared memory with the gateway, so nothing here can read a session, a token or a turn.
+ *   - no shared memory with the gateway, so nothing here can read a session, a token or a turn;
+ *   - Node's permission model, so an escape reads only this directory and the TypeScript
+ *     package, writes nothing, and starts no process, worker or addon (page-check.ts,
+ *     confinedWorkerFlags).
  *
- * What this does NOT claim: the child runs as the same OS user and can still touch the
- * filesystem. Full containment is the sandbox runner's job (shell_exec / run_script); this is
- * the bounded, dependency-free check that can run on every build without one.
+ * What this does NOT claim: the child runs as the same OS user, so it could signal the gateway,
+ * and on Node 22 the permission model does not cover the network. Full containment is the
+ * sandbox runner's job (shell_exec / run_script); this is the bounded, dependency-free check
+ * that can run on every build without one.
  *
  * Protocol: one JSON request on stdin, one JSON response on stdout. Anything this process
  * writes to stderr is diagnostic only — the parent reads stdout.

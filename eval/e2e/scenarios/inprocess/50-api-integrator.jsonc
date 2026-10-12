@@ -1,0 +1,59 @@
+// IN-PROCESS: api_integrator calls the fixture site's JSON endpoint with http_request and reports
+// status, content type and body facts as the endpoint answered them.
+//
+// api_integrator has run in the gateway process since 2026-10-09 (container.disabled). In the
+// agent-worker it sat on Docker's default bridge network, where it could neither resolve
+// www.nordlicht-werkzeuge.test nor pass its own SSRF guard (eval/e2e/ENVIRONMENT.md "Website"). In
+// process, http_request goes through the shared guard, which lets the site's name through once
+// `pnpm e2e:env up` has compiled it into guardrails.allowedPrivateHosts.
+//
+// Ground truth: eval/e2e/site/daten/lieferstatus.json, served by nginx (eval/e2e/env/nginx.conf:
+// charset utf-8 for application/json) as "Content-Type: application/json; charset=utf-8". The field
+// `auftraege` holds 3 orders; NW-A-2041 has parcel number NWP-7731-0042.
+//
+// Audit row asserted: sub_agent_tool_call phase "done" with args and result (agent/sub-agent.ts
+// buildSubAgentToolAuditPayload). http_request's output starts "HTTP <status> <text>\nContent-Type:
+// <type>" (tools/http-request.ts), success is response.ok, and resultPreview keeps that start
+// (whitespace collapsed). Status and content type are only in http_request's answer (web_fetch shows
+// neither), so the call must be http_request. It needs per-call approval
+// (guardrails/tool-tiers.ts), hence --auto.
+{
+  id: "inprocess-api-integrator-json-endpoint",
+  title: "In-process api_integrator: a GET on the fixture JSON endpoint, reported as answered",
+  group: "inprocess",
+  tags: ["inprocess", "api_integrator", "site", "http"],
+  description: "api_integrator (in-process since 2026-10-09) sends GET http://www.nordlicht-werkzeuge.test/daten/lieferstatus.json with http_request. Protects: the in-process HTTP path to the fixture site (the agent could not reach it from the agent-worker), a call that got 200 with application/json (the tool's own answer), and a reply whose status, content type, order count (3) and parcel number (NWP-7731-0042) come from that answer.",
+  requires: ["model", "e2e-site"],
+  timeoutMs: 900000,
+  steps: [
+    {
+      kind: "turn",
+      id: "call-endpoint",
+      agent: "api_integrator",
+      message: "Teste den JSON-Endpunkt http://www.nordlicht-werkzeuge.test/daten/lieferstatus.json mit einem GET-Request: Nenne den HTTP-Statuscode und den Content-Type der Antwort, wie viele Einträge das Feld `auftraege` enthält und welche Paketnummer der Auftrag NW-A-2041 hat. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: {
+          includes: ["NWP-7731-0042", "application/json"],
+          matches: ["\\b200\\b", "\\b(?:3|drei)\\b"],
+        },
+        agents: { mustRun: ["api_integrator"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "api_integrator",
+                "data.tool": "http_request",
+                "data.phase": "done",
+                "data.success": true,
+                "data.args.url": { regex: "^http://www\\.nordlicht-werkzeuge\\.test/daten/lieferstatus\\.json$" },
+                "data.resultPreview": { regex: "^HTTP 200 OK Content-Type: application/json\\b" },
+              },
+            },
+          ],
+        },
+      },
+    },
+  ],
+}

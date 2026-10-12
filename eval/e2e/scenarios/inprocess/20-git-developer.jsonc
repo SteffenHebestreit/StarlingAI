@@ -1,0 +1,132 @@
+// IN-PROCESS: git_developer creates a branch and commits to it, through its own git tools, in the
+// eval account's own workspace and nowhere else.
+//
+// git_developer has run in the gateway process since 2026-10-09 (container.disabled), and its git
+// sandbox was narrowed to the caller's own root then (tools/git.ts runGitInSandbox: a non-full agent
+// gets resolveDockerWorkspaceBind(..., { at: "/workspace", requireNarrow: true }) and the result
+// carries metadata.mountScope "caller"; only the full-scope maintenance agent mounts the repo).
+//
+// Where the repository has to be: every git tool except git_status runs with -w /workspace and takes
+// no directory, so the repository is the eval account's workspace ROOT. There is no git_init tool,
+// so step 1 seeds it through shell_agent's shell_exec. The seed command:
+//   - resets the repository with git commands only. The sandbox refuses a shell command that names
+//     the VCS directory (tools/shell.ts findSensitiveWorkspaceReference, filesystem.ts
+//     SENSITIVE_READ_PATTERNS), so it cannot be deleted. Instead HEAD is pointed at main, every
+//     branch ref is deleted and the index is emptied: each attempt starts with no commit and no
+//     branch, whatever an earlier run left;
+//   - sets a local user.name/user.email (the sandbox has no global identity, and git refuses to
+//     commit without one);
+//   - writes a .gitignore that admits only itself and generated/e2e-git/, so a commit of "." (the
+//     git_commit default) never stages the account's state directory or other runs' files;
+//   - stages .gitignore and generated/e2e-git/hinweis.txt and prints `git status --short`.
+//
+// NOT YET RUN AGAINST A LIVE SANDBOX. The seed and the git tools run git as the image's non-root
+// `sandbox` user (docker/sandbox/Dockerfile); neither tools/shell.ts nor tools/git.ts passes --user
+// or safe.directory. If the bind shows /workspace as another user's (a Docker Desktop bind of a
+// Windows path can show it as root's), git refuses the repository: "detected dubious ownership in
+// repository at '/workspace'". The seed's shell_exec then exits 128 and its row fails; git's message
+// is in the tool's output and the agent's reply, not in the row's preview (the docker command line
+// fills its 280 characters). That failure is the product's, not the scenario's, since the git tools
+// would refuse the same way.
+//
+// Ground truth: git commit prints "[<branch> (root-commit) <hash>] <subject>" for the first commit
+// of a history. On feature/hinweis with "(root-commit)" it proves the commit landed on the new
+// branch, and that the reset worked (a rerun without it would print no "(root-commit)"). The subject
+// must have the Conventional Commits shape the request asks for.
+//
+// Audit rows asserted: sub_agent_tool_call phase "done" with args and result (agent/sub-agent.ts
+// buildSubAgentToolAuditPayload; resultPreview is the output with whitespace collapsed, 280
+// characters; metadata.mountScope is kept by summarizeToolAuditMetadata). git_checkout and git_commit
+// need per-call approval (guardrails/tool-tiers.ts), hence --auto. There is no remote in E2E, so
+// neither git_push nor github_pr_create may run.
+{
+  id: "inprocess-git-developer-branch-commit",
+  title: "In-process git_developer: a new branch and a conventional commit in the caller's own workspace",
+  group: "inprocess",
+  tags: ["inprocess", "git_developer", "shell_agent", "git", "sandbox"],
+  description: "Step 1 resets and seeds a repository at the eval account's workspace root through shell_agent (no commit, two staged files). In a fresh session git_developer (in-process since 2026-10-09) creates feature/hinweis with git_checkout and commits with git_commit. Protects: the in-process git tools run against the caller's own root (metadata.mountScope caller), the commit is the root commit on feature/hinweis with a Conventional Commits subject (the tool's own output), and nothing is pushed.",
+  requires: ["model", "sandbox"],
+  timeoutMs: 1500000,
+  steps: [
+    {
+      kind: "http",
+      id: "remove-leftover",
+      method: "DELETE",
+      path: "/api/workspace/file?path=generated/e2e-git/hinweis.txt",
+      expect: { status: [204, 404] },
+    },
+    {
+      kind: "turn",
+      id: "seed-repository",
+      agent: "shell_agent",
+      message: "Führe im Workspace genau diesen einen Befehl mit shell_exec aus und gib die Ausgabe wieder (er setzt das Test-Repository zurück und merkt zwei Dateien vor): `git init -q && git symbolic-ref HEAD refs/heads/main && git for-each-ref --format='%(refname)' refs/heads | xargs -r -n1 git update-ref -d && git read-tree --empty && git config user.name 'Eval E2E' && git config user.email eval@e2e.test && mkdir -p generated/e2e-git && printf '/*\\n!/.gitignore\\n!/generated/\\n/generated/*\\n!/generated/e2e-git/\\n' > .gitignore && printf 'Erste Zeile\\n' > generated/e2e-git/hinweis.txt && git add .gitignore generated/e2e-git/hinweis.txt && git status --short` --auto",
+      timeoutMs: 600000,
+      expect: {
+        agents: { mustRun: ["shell_agent"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "shell_agent",
+                "data.tool": "shell_exec",
+                "data.phase": "done",
+                "data.success": true,
+                // `git status --short`: "A  generated/e2e-git/hinweis.txt", staged and new.
+                "data.resultPreview": { regex: "\\bA generated/e2e-git/hinweis\\.txt\\b" },
+              },
+            },
+          ],
+        },
+      },
+    },
+    {
+      kind: "http",
+      id: "seeded-file",
+      method: "GET",
+      path: "/api/workspace/file?path=generated/e2e-git/hinweis.txt",
+      expect: { status: 200, bodyIncludes: ["Erste Zeile"] },
+    },
+    // The commit turn must find the state in the workspace, not in the conversation.
+    { kind: "newSession" },
+    {
+      kind: "turn",
+      id: "branch-and-commit",
+      agent: "git_developer",
+      message: "Im Workspace liegt ein Git-Repository mit vorgemerkten (gestagten) Änderungen und noch ohne Commit. Lege den neuen Branch `feature/hinweis` an und committe die vorgemerkten Änderungen dort mit einer Nachricht im Conventional-Commits-Format. Nicht pushen. --auto",
+      timeoutMs: 600000,
+      expect: {
+        reply: { includes: ["feature/hinweis"] },
+        agents: { mustRun: ["git_developer"] },
+        tools: { mustNotCall: ["git_push", "github_pr_create"] },
+        events: {
+          must: [
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "git_developer",
+                "data.tool": "git_checkout",
+                "data.phase": "done",
+                "data.success": true,
+                "data.args.ref": "feature/hinweis",
+                "data.metadata.mountScope": "caller",
+              },
+            },
+            {
+              type: "sub_agent_tool_call",
+              where: {
+                "data.agentName": "git_developer",
+                "data.tool": "git_commit",
+                "data.phase": "done",
+                "data.success": true,
+                "data.metadata.mountScope": "caller",
+                // "[feature/hinweis (root-commit) 1a2b3c4] docs: ..." — type(scope)!: subject.
+                "data.resultPreview": { regex: "\\[feature/hinweis \\(root-commit\\) [0-9a-f]{7,}\\] [a-z]+(\\([^)]*\\))?!?: \\S" },
+              },
+            },
+          ],
+        },
+      },
+    },
+  ],
+}

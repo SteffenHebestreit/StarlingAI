@@ -15,6 +15,7 @@ import {
   buildStagedArtifactBuildGuidance,
   buildStagedBuildFirstStepInstruction,
   ONE_SHOT_ASSEMBLER_TOOLS,
+  holdsOneShotAssembler,
 } from "../agent/sub-agent-prompt-guidance.js";
 
 /**
@@ -172,6 +173,41 @@ const DECK_TASK = [
   "5) Ablauf einer Wartung vom Auftrag bis zur Freigabe. 6) Kennzahlen: MTBF, MTTR, Termintreue. 7) Einführung in drei Phasen.",
   "8) Risiken und Gegenmaßnahmen. 9) Nächste Schritte mit Terminen. 10) Abschlussfolie mit Kontakt.",
   "Halte jede Folie kurz, höchstens fünf Stichpunkte, und lege die Sprechernotizen in die Notizen der Folien.",
+].join("\n");
+
+/**
+ * A chart delegation shaped on E2E core-build-artifact-html-chart (session 59579f24, 750 chars):
+ * the orchestrator restates the data, the labels and "no CDN", and the brief crosses the threshold.
+ */
+const CHART_TASK = [
+  "Erstelle ein Balkendiagramm als eigenständige HTML-Datei aus den Besucherzahlen eines fiktiven Hofladens in der Woche ab dem 05.10.2026.",
+  "Daten (Tag: Besucher): Montag 132, Dienstag 118, Mittwoch 147, Donnerstag 159, Freitag 214, Samstag 287.",
+  "Übernimm die Werte exakt, ohne zu runden oder zu ergänzen. Die x-Achse zeigt die Wochentage in dieser Reihenfolge, die y-Achse die Anzahl der Besucher ab null.",
+  "Titel: \"Besucherzahlen Hofladen, Woche ab 05.10.2026\". Darunter ein kurzer Satz: Der Samstag war mit 287 Besuchern der stärkste Tag, der Dienstag mit 118 der schwächste.",
+  "Reines HTML mit eingebettetem CSS und JavaScript, keine externen Abhängigkeiten (kein CDN), damit die Datei auch offline geöffnet werden kann.",
+  "Beschrifte jeden Balken mit seinem Wert und hebe den Höchstwert farblich hervor.",
+  "Speichere die Datei unter einem sprechenden Namen.",
+  "Nenne am Ende den Dateipfad, den Diagrammtyp und die verwendeten Daten.",
+].join("\n");
+
+/** A diagram brief past the threshold: the nodes, branches and groups of one Mermaid flowchart. */
+const DIAGRAM_TASK = [
+  "Erstelle ein Mermaid-Flussdiagramm (flowchart TD) der Bestellabwicklung eines Onlineshops mit dem Titel \"Bestellabwicklung\".",
+  "Schritte in dieser Reihenfolge: Bestellung eingegangen, Zahlung prüfen, Lagerbestand prüfen, Ware kommissionieren, Versandetikett erstellen, Paket übergeben, Kunde benachrichtigen.",
+  "Verzweigungen: Ist die Zahlung abgelehnt, geht die Bestellung an \"Zahlung erneut anfordern\" und nach zwei Versuchen an \"Bestellung stornieren\".",
+  "Fehlt Ware im Lager, geht sie an \"Nachbestellung auslösen\" und danach zurück zu \"Lagerbestand prüfen\".",
+  "Fasse Zahlung und Lager in einem Subgraph \"Prüfungen\" zusammen und Kommissionierung bis Übergabe in einem Subgraph \"Versand\".",
+  "Beschrifte jede Kante einer Entscheidung mit ja oder nein und verwende kurze, eindeutige Knotennamen.",
+].join("\n");
+
+/** An image brief past the threshold: register, subject, light and composition of one picture. */
+const IMAGE_TASK = [
+  "Erstelle ein Titelbild für einen Blogartikel über den Herbstmarkt eines Hofladens.",
+  "Stil: Fotografie, 35-mm-Objektiv, Blende 2,8, natürliche, unbearbeitete Farben, leichtes Filmkorn.",
+  "Motiv: ein Holztisch vor einer Scheune, darauf Kürbisse in Orange und Grün, Körbe mit Äpfeln, ein Glas Honig und ein handgeschriebenes Kreideschild ohne lesbaren Text.",
+  "Licht: tiefstehende Nachmittagssonne von links, lange weiche Schatten, ein wenig Dunst über der Wiese im Hintergrund.",
+  "Komposition: Querformat, der Tisch im unteren Drittel, links freier Himmel für eine spätere Überschrift.",
+  "Keine Personen, keine Logos, keine Schrift im Bild. Speichere das Bild unter einem sprechenden Namen und gib den Pfad zurück.",
 ].join("\n");
 
 /**
@@ -811,6 +847,96 @@ describe("staged artifact build — directive injection", () => {
     );
     expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
     expect(firstUserTurn).toContain("THIS TURN:");
+  });
+
+  it("gives chart_designer's FRESH chart build no skeleton directive", async () => {
+    // E2E core-build-artifact-html-chart (session 59579f24): a 750-char brief put the directive
+    // ahead of chart_designer's "Prefer generate_chart_html". It wrote a skeleton, filled it with
+    // edit_file and never called the tool. Its shipped tool set, a chart brief of about 900 chars.
+    expect(CHART_TASK.trim().length).toBeGreaterThan(850);
+    expect(CHART_TASK.trim().length).toBeLessThan(1000);
+    const chartDesignerTools = loadWorkspaceAgents<{ tools?: string[] }>()["chart_designer"]?.tools ?? [];
+    expect(chartDesignerTools).toEqual(expect.arrayContaining(["write_file", "edit_file", "generate_chart_html"]));
+    expect(isStagedArtifactBuildRun(chartDesignerTools, CHART_TASK)).toBe(true);
+
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      CHART_TASK,
+      chartDesignerTools,
+    );
+
+    expect(prompt).toContain("You build files.");
+    expect(prompt).not.toContain("STAGED BUILD");
+    expect(firstUserTurn).toContain(CHART_TASK.slice(0, 60));
+    expect(firstUserTurn).not.toContain("THIS TURN:");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ mode: "fresh", directiveInjected: false }),
+      expect.anything(),
+    );
+  });
+
+  it("keeps the directive for web_coder on the same chart brief", async () => {
+    const webCoderTools = loadWorkspaceAgents<{ tools?: string[] }>()["web_coder"]?.tools ?? [];
+    expect(webCoderTools.some((tool) => ONE_SHOT_ASSEMBLER_TOOLS.has(tool))).toBe(false);
+    const prompt = await runAndCaptureSystemPrompt(
+      { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+      CHART_TASK,
+      webCoderTools,
+    );
+    expect(prompt).toContain("STAGED BUILD — THIS TASK IS TOO LARGE FOR ONE PASS.");
+    expect(firstUserTurn).toContain("THIS TURN:");
+    expect(logAuditMock).toHaveBeenCalledWith(
+      "sub_agent_staged_build_detected",
+      expect.objectContaining({ mode: "fresh", directiveInjected: true }),
+      expect.anything(),
+    );
+  });
+
+  it("gives diagram_designer's and image_creator's FRESH builds no skeleton directive", async () => {
+    // Both hold write_file and edit_file beside the one call that finishes their artifact, as
+    // chart_designer does, so a brief past the threshold would be told to hand-write a skeleton.
+    const cases = [
+      { agentName: "diagram_designer", task: DIAGRAM_TASK, assembler: "generate_mermaid_diagram" },
+      { agentName: "image_creator", task: IMAGE_TASK, assembler: "generate_image" },
+    ];
+    for (const { agentName, task, assembler } of cases) {
+      logAuditMock.mockReset();
+      const tools = loadWorkspaceAgents<{ tools?: string[] }>()[agentName]?.tools ?? [];
+      expect(tools, agentName).toEqual(expect.arrayContaining(["write_file", "edit_file", assembler]));
+      expect(isStagedArtifactBuildRun(tools, task), agentName).toBe(true);
+
+      const prompt = await runAndCaptureSystemPrompt(
+        { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true },
+        task,
+        tools,
+      );
+
+      expect(prompt, agentName).toContain("You build files.");
+      expect(prompt, agentName).not.toContain("STAGED BUILD");
+      expect(firstUserTurn, agentName).not.toContain("THIS TURN:");
+      expect(logAuditMock, agentName).toHaveBeenCalledWith(
+        "sub_agent_staged_build_detected",
+        expect.objectContaining({ mode: "fresh", directiveInjected: false }),
+        expect.anything(),
+      );
+    }
+  });
+
+  it("exempts exactly the shipped builders whose long brief is a brief for one assembler call", () => {
+    // Every shipped agent that a long brief stages, split by whether it holds a one-shot
+    // assembler. The hand-builders (web_coder, backend_coder) and the runs that hold a builder
+    // tool only to export or fill (report_writer_agent, document_intake, sql_specialist) keep it.
+    const agents = loadWorkspaceAgents<{ tools?: string[] }>();
+    const staged = Object.entries(agents)
+      .filter(([, cfg]) => isStagedArtifactBuildRun(cfg.tools, PROBE_LARGE_TASK))
+      .map(([name, cfg]) => ({ name, exempt: holdsOneShotAssembler(cfg.tools) }));
+    expect(staged.filter((agent) => agent.exempt).map((agent) => agent.name).sort()).toEqual([
+      "chart_designer", "content_writer", "diagram_designer", "image_creator", "meeting_briefing_agent", "paper_author",
+    ]);
+    for (const name of ["web_coder", "backend_coder", "report_writer_agent", "document_intake", "sql_specialist"]) {
+      expect(staged.find((agent) => agent.name === name), name).toEqual({ name, exempt: false });
+    }
   });
 
   it("does not stage a run declared deliverable \"answer\", and stages the same run undeclared or declared \"file\"", async () => {

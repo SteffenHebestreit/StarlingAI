@@ -7,7 +7,7 @@ import { PRODUCT } from "./product.mjs";
 import { NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "./config-zones.mjs";
 // Shard walk, order (code point, not locale) and merge live in one place so the routing
 // taxonomy check (routing-taxonomy-check.mjs) merges exactly what this build does.
-import { collectShardPaths, deepMerge } from "./config-shards.mjs";
+import { collectShardPaths, deepMerge, LinkedConfigEntryError, sweepEntryKind, warnSkippedLink } from "./config-shards.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultSourceFile = join(repoRoot, PRODUCT.configFileName);
@@ -60,6 +60,7 @@ function deriveShardPlacement(subdir, wrapper) {
   const placement = {};
   for (const name of readdirSync(dir)) {
     if (!/\.(jsonc?|json5)$/.test(name)) continue;
+    if (!isShardFile(join(dir, name))) continue;
     try {
       const obj = JSON5.parse(readFileSync(join(dir, name), "utf8"));
       const keys = Object.keys(obj?.[wrapper] ?? {});
@@ -76,10 +77,19 @@ function deriveWrapperFile(subdir, wrapper, fallback) {
   if (existsSync(dir) && isDir(dir)) {
     for (const name of readdirSync(dir)) {
       if (!/\.(jsonc?|json5)$/.test(name)) continue;
+      if (!isShardFile(join(dir, name))) continue;
       try { if (JSON5.parse(readFileSync(join(dir, name), "utf8"))?.[wrapper]) return name; } catch { /* skip */ }
     }
   }
   return fallback;
+}
+
+// A shard by name in workspace/<subdir>/ is read only where it is a regular file: a link there is
+// warned about and skipped, as every sweep skips one (config-shards.mjs sweepEntryKind).
+function isShardFile(path) {
+  const kind = sweepEntryKind(path);
+  if (kind === "link") warnSkippedLink(path);
+  return kind === "file";
 }
 
 // Shard a flat {name: def} map into category files under `subdir`, with a `wrapper` top-level
@@ -115,6 +125,26 @@ if (command === "split") {
 // ---------------------------------------------------------------------------
 
 function buildTwoZone() {
+  let merged;
+  try {
+    merged = mergeShards();
+  } catch (err) {
+    if (!(err instanceof LinkedConfigEntryError)) throw err;
+    // Not built: a starlingai.json without everything behind the link is not the configuration.
+    console.error(`[config-layout] ERROR: ${err.message}`);
+    console.error(`[config-layout] Not built; ${relative(repoRoot, defaultTargetFile)} is unchanged.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (merged === null) return;
+
+  mkdirSync(dirname(defaultTargetFile), { recursive: true });
+  writeFileSync(defaultTargetFile, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+  console.log(`[config-layout] Built ${relative(repoRoot, defaultTargetFile)}`);
+}
+
+/** Every shard of the layout merged, or null where there is no layout (said, with exit code 1). */
+function mergeShards() {
   let merged = {};
 
   if (existsSync(defaultConfigDir) && isDir(defaultConfigDir)) {
@@ -139,12 +169,9 @@ function buildTwoZone() {
   } else {
     console.error("[config-layout] No config/ directory found. Run 'config split' first or create config/ + workspace/ manually.");
     process.exitCode = 1;
-    return;
+    return null;
   }
-
-  mkdirSync(dirname(defaultTargetFile), { recursive: true });
-  writeFileSync(defaultTargetFile, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-  console.log(`[config-layout] Built ${relative(repoRoot, defaultTargetFile)}`);
+  return merged;
 }
 
 // ---------------------------------------------------------------------------

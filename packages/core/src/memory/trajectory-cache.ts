@@ -5,8 +5,8 @@
  * instead of re-running all delegation from scratch.
  *
  * Security:
- * - File stored under `.starlingai/trajectory_cache.ndjson` inside the workspace only.
- *   Never written to a user-global location.
+ * - File stored as `trajectory_cache.ndjson` in the workspace's state directory only
+ *   (workspaceStateDir). Never written to a user-global location.
  * - Entries containing credential-shaped tokens are stripped before persistence.
  * - TTL enforced on read: stale entries are never returned.
  */
@@ -15,13 +15,15 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { dirname, resolve } from "node:path";
 import { isEmbeddingAvailable, computeQueryEmbedding, cosineSimilarity } from "../providers/embeddings.js";
 import { appendJsonLine, readLastRecords } from "./bounded-ndjson-store.js";
-
-import { PRODUCT } from "../product/index.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const CACHE_FILE = `${PRODUCT.stateDirName}/trajectory_cache.ndjson`;
-const INVALIDATION_FILE = `${PRODUCT.stateDirName}/trajectory_cache_invalidations.json`;
+// Both in the root's state directory, which for an account's root is kept outside that root
+// (workspaceStateDir): the account's sandboxes can write anything inside it, and a cached
+// trajectory is fed back into a later turn as evidence.
+const CACHE_FILE = "trajectory_cache.ndjson";
+const INVALIDATION_FILE = "trajectory_cache_invalidations.json";
 const INVALIDATION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MAX_CACHE_LINES = 5_000;
 const SIMILARITY_THRESHOLD = 0.82;
@@ -82,7 +84,7 @@ export async function writeTrajectory(
       finalAnswer: entry.finalAnswer,
     };
 
-    const filePath = resolve(workspacePath, CACHE_FILE);
+    const filePath = resolve(workspaceStateDir(workspacePath), CACHE_FILE);
     appendJsonLine(filePath, record, { maxLines: MAX_CACHE_LINES });
   } catch {
     // Best-effort — trajectory cache write is never critical
@@ -118,7 +120,7 @@ function getInvalidationMap(workspacePath: string): Map<string, number> {
   }
   if (_loadedWorkspaces.has(workspacePath)) return map;
   _loadedWorkspaces.add(workspacePath);
-  const file = resolve(workspacePath, INVALIDATION_FILE);
+  const file = resolve(workspaceStateDir(workspacePath), INVALIDATION_FILE);
   if (!existsSync(file)) return map;
   try {
     const raw = readFileSync(file, "utf-8");
@@ -137,7 +139,7 @@ function getInvalidationMap(workspacePath: string): Map<string, number> {
 
 function persistInvalidations(workspacePath: string, map: Map<string, number>): void {
   try {
-    const file = resolve(workspacePath, INVALIDATION_FILE);
+    const file = resolve(workspaceStateDir(workspacePath), INVALIDATION_FILE);
     mkdirSync(dirname(file), { recursive: true });
     const obj: Record<string, number> = {};
     for (const [key, expiresAt] of map) obj[key] = expiresAt;
@@ -273,7 +275,7 @@ export async function lookupTrajectory(
   if (!isEmbeddingAvailable()) return null;
   if (freshnessSensitive) return null; // Never use cached data for fresh-sensitive queries
 
-  const filePath = resolve(workspacePath, CACHE_FILE);
+  const filePath = resolve(workspaceStateDir(workspacePath), CACHE_FILE);
   if (!existsSync(filePath)) return null;
 
   let queryEmbedding: Float32Array | null;

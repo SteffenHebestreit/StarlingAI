@@ -9,13 +9,18 @@ import type { ToolContext } from "../tools/registry.js";
 
 const delegations: Array<Record<string, unknown>> = [];
 const auditRows: Array<Record<string, unknown>> = [];
+/** The tool context each delegate_to_agent call ran with. */
+const delegationContexts: ToolContext[] = [];
 
 vi.mock("../tools/registry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/registry.js")>();
   return {
     ...actual,
-    executeTool: vi.fn(async (name: string, args: Record<string, unknown>) => {
-      if (name === "delegate_to_agent") delegations.push(args);
+    executeTool: vi.fn(async (name: string, args: Record<string, unknown>, context: ToolContext) => {
+      if (name === "delegate_to_agent") {
+        delegations.push(args);
+        delegationContexts.push(context);
+      }
       return { success: true, output: "The brief, as text.", metadata: {} };
     }),
   };
@@ -25,13 +30,14 @@ vi.mock("../audit/logger.js", () => ({
   logAudit: vi.fn((_event: string, details: Record<string, unknown>) => { auditRows.push(details); }),
 }));
 
-const { runCorrectiveBuild } = await import("../agent/turn-corrective.js");
+const { runCorrectiveBuild, runCorrectiveReroute } = await import("../agent/turn-corrective.js");
 const { classifyDeliverableIntent } = await import("../agent/deliverable-intent.js");
 
 const REQUEST = "Write a sourced report on the company as a document.";
 
 function correctiveContext(allowedAgents: string[] | undefined) {
   let latch = false;
+  let rerouteLatch = false;
   const ctx: CorrectiveContext = {
     signal: new AbortController().signal,
     session: { id: "corrective-scope", channel: "scene", addMessage: () => undefined } as unknown as CorrectiveContext["session"],
@@ -43,6 +49,8 @@ function correctiveContext(allowedAgents: string[] | undefined) {
     getStashedBuilderTaskSpec: () => null,
     getQaCorrectiveBuildUsed: () => latch,
     setQaCorrectiveBuildUsed: (value) => { latch = value; },
+    getCorrectiveRerouteUsed: () => rerouteLatch,
+    setCorrectiveRerouteUsed: (value) => { rerouteLatch = value; },
     incrementDelegationCount: () => undefined,
     forceSynthesis: async () => null,
     selectCorrectiveResumeTarget: () => null,
@@ -55,6 +63,7 @@ function correctiveContext(allowedAgents: string[] | undefined) {
 
 afterEach(() => {
   delegations.length = 0;
+  delegationContexts.length = 0;
   auditRows.length = 0;
 });
 
@@ -81,5 +90,30 @@ describe("the final-QA corrective build in a turn scoped to allowedAgents", () =
       expect(delegations.map((args) => args["agentName"])).toEqual(["content_writer"]);
       expect(latch()).toBe(true);
     }
+  });
+});
+
+// The loop-brake reroute (agent/runtime.ts) and the zero-work fabrication guard
+// (turn-finalize-guards.ts) both re-dispatch the request through runCorrectiveReroute. They share
+// one latch: the request goes out a second time in no turn.
+describe("the corrective reroute", () => {
+  it("re-dispatches the request once a turn, whichever guard asks", async () => {
+    const { ctx } = correctiveContext(undefined);
+
+    expect(await runCorrectiveReroute(ctx, "loop_brake", { brake: "tool_streak_across_iterations" })).toBe("The brief, as text.");
+    expect(await runCorrectiveReroute(ctx)).toBeNull();
+
+    expect(delegations).toEqual([{ task: REQUEST }]);
+    expect(auditRows).toContainEqual(expect.objectContaining({ type: "loop_brake_reroute_delegated", brake: "tool_streak_across_iterations" }));
+    expect(auditRows).not.toContainEqual(expect.objectContaining({ type: "fabricated_zero_work_reroute_delegated" }));
+  });
+
+  // allowDelegationAfterOperatorStop clears the operator's Stop latch (tools/sub-agent.ts), and the
+  // loop-brake reroute's semantic routing can pick a coordinator that delegates on.
+  it("lifts an operator Stop for the zero-work guard only, as before, and not at a loop brake", async () => {
+    await runCorrectiveReroute(correctiveContext(undefined).ctx, "loop_brake", { brake: "all_tool_calls_blocked" });
+    await runCorrectiveReroute(correctiveContext(undefined).ctx);
+
+    expect(delegationContexts.map((context) => context.allowDelegationAfterOperatorStop === true)).toEqual([false, true]);
   });
 });

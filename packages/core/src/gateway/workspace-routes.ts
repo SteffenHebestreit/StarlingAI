@@ -5,13 +5,21 @@
  * boundary. Extracted verbatim from gateway/index.ts (god-file seam).
  */
 import type { Hono } from "hono";
-import { readFile, writeFile, stat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
+import { readFile, writeFile, stat, lstat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
 import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
 import type { Identity } from "../runtime/accounts.js";
 import { getConfig } from "../config/loader.js";
-import { resolvePathWithinWorkspace, userWorkspaceRoot, GENERATED_SUBDIR, UPLOADS_SUBDIR } from "../tools/workspace-path.js";
+import {
+  containedWorkspaceRealPath,
+  resolvePathWithinWorkspace,
+  userWorkspaceRoot,
+  GENERATED_SUBDIR,
+  UPLOADS_SUBDIR,
+  type WorkspaceContainmentOptions,
+  type WorkspaceRealPath,
+} from "../tools/workspace-path.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
@@ -160,13 +168,26 @@ export function registerWorkspaceRoutes(app: Hono): void {
     return contentTypes[extension] ?? "application/octet-stream";
   }
 
-  function resolveWorkspaceTarget(requestedPath: string): { resolved: string; relativePath: string } {
+  function resolveWorkspaceTarget(requestedPath: string, options?: WorkspaceContainmentOptions): { resolved: string; relativePath: string } {
     // THE CALLER'S OWN ROOT. These routes hand workspace files back over HTTP, so resolving
     // them against the shared root would serve one account the other's work no matter how the
     // filesystem is partitioned. Rooting at the ambient caller means a request for
     // "generated/index.html" reads THEIR generated/, and a path aimed at another account
     // escapes this root and is refused by the workspace-boundary check like any other escape.
-    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath));
+    // The resolver also holds the path to its zone through any link a sandbox left in that root.
+    return resolvePathWithinWorkspace(requestedPath, userWorkspaceRoot(getConfig().workspacePath), options);
+  }
+
+  /** Whether a path these routes built themselves under a resolved root stays in its zone of the
+   *  caller's own root through any link (containedWorkspaceRealPath). */
+  function staysInCallerRoot(resolved: string): boolean {
+    return staysInCallerZone(resolved) !== null;
+  }
+
+  /** Where a path in the caller's own root really is, checked to be in its zone; null when a link
+   *  takes it out (containedWorkspaceRealPath). */
+  function staysInCallerZone(resolved: string): WorkspaceRealPath | null {
+    return containedWorkspaceRealPath(resolved, userWorkspaceRoot(getConfig().workspacePath));
   }
 
   function mapWorkspaceRouteError(error: unknown): { status: 400 | 404 | 500; message: string } {
@@ -183,7 +204,11 @@ export function registerWorkspaceRoutes(app: Hono): void {
   }
 
   async function addWorkspacePathToZip(zipFile: ZipFile, absolutePath: string, archivePath: string): Promise<void> {
-    const fileStat = await stat(absolutePath);
+    // lstat: a link inside the archived directory is left out, not followed. One a sandbox made
+    // would put whatever it leads to into the archive (a file of the gateway's, another account's
+    // directory, or the directory itself again), and the size estimate below never counted it.
+    const fileStat = await lstat(absolutePath);
+    if (fileStat.isSymbolicLink()) return;
     const normalizedArchivePath = archivePath.replace(/\\/g, "/");
 
     if (fileStat.isFile()) {
@@ -292,8 +317,8 @@ export function registerWorkspaceRoutes(app: Hono): void {
     }
     const targetPath = resolve(targetDir, safeName);
 
-    // Prevent path traversal
-    if (!targetPath.startsWith(resolve(workspaceRoot))) {
+    // Prevent path traversal, and a write through a link a sandbox left at the name.
+    if (!targetPath.startsWith(resolve(workspaceRoot)) || !staysInCallerRoot(targetPath)) {
       return c.json({ error: "Invalid upload path" }, 400);
     }
 
@@ -405,7 +430,9 @@ export function registerWorkspaceRoutes(app: Hono): void {
     }
 
     try {
-      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
+      // A link at the path itself is what is removed (unlink does not follow it), so only the
+      // directories on the way to it are held to the zone here; the check below does the rest.
+      const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath, { final: "link" });
       // ONLY THE ZONE A TURN WRITES TO. The caller's root, which the GET serves, holds more than a
       // turn's output: the config shards (agents/, jobs/, scenes/) when auth is off and it is the
       // shared root, and the deployment ledgers and the memory store under the state dir. A
@@ -454,14 +481,23 @@ export function registerWorkspaceRoutes(app: Hono): void {
 
     try {
       const { resolved, relativePath } = resolveWorkspaceTarget(requestedPath);
-      const fileStat = await stat(resolved);
+      // The archive leaves out every link INSIDE the directory (addWorkspacePathToZip), so the walk
+      // starts at where the requested path really is: a requested path that is itself a link inside
+      // its zone (generated/latest -> generated/v2) came back as an empty archive. That real path is
+      // the one the containment check returns, taken again here: the resolver held the path to its
+      // zone when it resolved it, and a link a sandbox swapped in after that sent a realpath of its
+      // own, which nothing checked, and the walk with it, anywhere the gateway can read.
+      const contained = staysInCallerZone(resolved);
+      if (contained === null) return c.json({ error: "Path must stay within the workspace" }, 400);
+      const walkRoot = contained.real;
+      const fileStat = await stat(walkRoot);
       if (!fileStat.isFile() && !fileStat.isDirectory()) {
         return c.json({ error: "Requested workspace path must be a file or directory" }, 400);
       }
 
       // Pre-flight size/entry check for directories
       if (fileStat.isDirectory()) {
-        const { totalBytes, entryCount } = await estimateDirectorySize(resolved);
+        const { totalBytes, entryCount } = await estimateDirectorySize(walkRoot);
         if (entryCount > WORKSPACE_ARCHIVE_MAX_ENTRIES) {
           return c.json({ error: `Directory has too many entries (${entryCount}). Maximum is ${WORKSPACE_ARCHIVE_MAX_ENTRIES}.` }, 413);
         }
@@ -473,7 +509,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
       }
 
       const archiveBaseName = basename(resolved) || "workspace";
-      const archiveBytes = await buildWorkspaceArchiveBuffer(resolved, archiveBaseName);
+      const archiveBytes = await buildWorkspaceArchiveBuffer(walkRoot, archiveBaseName);
       const archiveName = `${archiveBaseName}.zip`;
       const responseBytes = new Uint8Array(archiveBytes);
 
@@ -530,6 +566,9 @@ export function registerWorkspaceRoutes(app: Hono): void {
       const candidate = resolve(rootResolved, file.replace(/^\/+/, ""));
       if (!candidate.startsWith(rootResolved + sep) && candidate !== rootResolved) {
         return c.text("File path escapes root directory", 400);
+      }
+      if (!runWithRequestContext({ identity: previewIdentity }, () => staysInCallerRoot(candidate))) {
+        return c.text("Path escapes workspace boundary", 400);
       }
       fileResolved = candidate;
     } catch {
@@ -603,6 +642,9 @@ export function registerWorkspaceRoutes(app: Hono): void {
       const candidate = resolve(rootTarget.resolved, file.replace(/^\/+/, ""));
       if (!candidate.startsWith(rootTarget.resolved + sep) && candidate !== rootTarget.resolved) {
         return c.text("File path escapes root directory", 400);
+      }
+      if (!runWithRequestContext({ identity: siteIdentity }, () => staysInCallerRoot(candidate))) {
+        return c.text("Path escapes workspace boundary", 400);
       }
       fileResolved = candidate;
     } catch {

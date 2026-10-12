@@ -9,7 +9,8 @@
  *   tsx src/cli/memory-vault.ts export [--vault <path>] [--workspace <path>] [--no-sessions]
  *   tsx src/cli/memory-vault.ts import [--vault <path>] [--workspace <path>]
  *
- * The durable memory store is plain files under <workspace>/.starlingai/memory,
+ * The durable memory store is plain files under the workspace's state directory
+ * (workspaceStateDir: <workspace>/.starlingai/memory for the shared root),
  * so no running gateway is required. Recent-session summaries are only available
  * when a live session store exists, so they are skipped in this standalone CLI.
  */

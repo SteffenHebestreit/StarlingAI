@@ -108,11 +108,12 @@ networks; it resolves to a private container address, which the SSRF guard (`pac
   tools (RSS) keep their own guard and still refuse the site.
 
 Reach: tools run in the gateway process for the orchestrator and the in-process sub-agents — `researcher`,
-`source_verifier`, `browser_agent`, `vision_browser_analyst` (all `container.disabled`); the browser itself
-(Chrome in `browser-vnc`) resolves the name on the same networks. A sub-agent that runs **containerized**
-(`agent-worker` on Docker's default bridge network, e.g. `api_integrator` while `agents.defaultContainerized`
-is on) can neither resolve the name nor pass its own guard, so site scenarios should route to the agents
-above.
+`source_verifier`, `browser_agent`, `vision_browser_analyst`, and since 2026-10-09 also the specialists that
+used to run in the `agent-worker`, among them `api_integrator` and `ops_triage` (all `container.disabled`;
+the in-process scenarios in `scenarios/inprocess/` point those two at the site). The browser itself (Chrome
+in `browser-vnc`) resolves the name on the same networks. A sub-agent that runs **containerized**
+(`agent-worker` on Docker's default bridge network, while `agents.defaultContainerized` is on) can neither
+resolve the name nor pass its own guard, so site scenarios should route to in-process agents.
 
 ### Pages
 

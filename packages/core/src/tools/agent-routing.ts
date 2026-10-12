@@ -761,6 +761,11 @@ const BROWSER_TAB_VIEW_TOOL_NAMES = new Set<string>([
   "mcp__playwright__browser_snapshot", "mcp__playwright__browser_screenshot", "mcp__playwright__browser_take_screenshot",
 ]);
 
+/** Whether a tool only looks at the page the shared browser tab already shows (BROWSER_TAB_VIEW_TOOL_NAMES). */
+export function isBrowserTabViewToolName(toolName: string): boolean {
+  return BROWSER_TAB_VIEW_TOOL_NAMES.has(toolName);
+}
+
 /**
  * True for a tool that can GATHER fresh external evidence (search + fetch page
  * content + drive a browser). This is the narrower cousin of isWebReachingToolName:

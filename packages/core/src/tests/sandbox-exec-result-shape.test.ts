@@ -16,6 +16,7 @@ vi.mock("node:child_process", () => {
 vi.mock("../tools/workspace-mount.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../tools/workspace-mount.js")>()),
   resolveDockerWorkspaceBind: vi.fn(() => "/srv/workspace:/workspace"),
+  callerSandboxMounts: vi.fn(() => ({ args: ["-v", "/srv/workspace:/workspace"] })),
 }));
 
 /**

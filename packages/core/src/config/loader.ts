@@ -4,7 +4,8 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import JSON5 from "json5";
 import { ConfigSchema, type Config, type SubAgentConfig } from "./schema.js";
 import { validateComputerUseConfig } from "./computer-use-schema.js";
-import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES } from "../tools/workspace-zones.js";
+import { compareShardPaths, isNonConfigShardDirectory, NON_CONFIG_BASE_ZONES, NON_CONFIG_WORKSPACE_ZONES, sweepEntryKind, topLevelLinkHoldsConfig } from "../tools/workspace-zones.js";
+import { isWorkspaceContainmentError, withContainedWorkspaceFile } from "../tools/workspace-containment.js";
 import { logger } from "../logger.js";
 
 import { PRODUCT } from "../product/index.js";
@@ -296,8 +297,8 @@ function applyConfigRemovals(raw: Record<string, unknown>): Record<string, unkno
   return raw;
 }
 
-function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<string, unknown> {
-  if (!existsSync(path)) {
+function readRawConfigFile(path: string, kind: "base" | "mutable", text?: string): Record<string, unknown> {
+  if (text === undefined && !existsSync(path)) {
     if (kind === "base") {
       logger.info({ path }, "No config file found — using defaults");
     }
@@ -305,7 +306,7 @@ function readRawConfigFile(path: string, kind: "base" | "mutable"): Record<strin
   }
 
   try {
-    const raw = JSON5.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+    const raw = JSON5.parse(text ?? readFileSync(path, "utf-8")) as Record<string, unknown>;
     logger.info({ path, kind }, "Loaded config file");
     return raw;
   } catch (err) {
@@ -332,7 +333,9 @@ function readRawConfigDirectory(directoryPath: string, mutablePath: string, zone
   const shardPaths = collectConfigShardPaths(directoryPath, mutablePath, CONFIG_SOURCE.compiledPath, zones);
 
   for (const shardPath of shardPaths) {
-    const shardRaw = readRawConfigFile(shardPath, "base");
+    const text = readSweptShardText(shardPath, directoryPath);
+    if (text === null) continue;
+    const shardRaw = readRawConfigFile(shardPath, "base", text);
     Object.assign(merged, mergeConfigObjects(merged, shardRaw));
   }
 
@@ -343,12 +346,48 @@ function readRawConfigDirectory(directoryPath: string, mutablePath: string, zone
   return merged;
 }
 
+/**
+ * A swept shard's text, or null where it is no longer a regular file in its place in the tree.
+ *
+ * The sweep found it a regular file with no link on the way (collectConfigShardPaths), and the
+ * full-scope sandbox can still swap it, or a directory above it, for a link before it is read. So it
+ * is read held to its zone (tools/workspace-containment.ts): on Linux, where the open file really is
+ * is read back from its descriptor and must lie in the zone it was found in; elsewhere the same
+ * check is made right before the open. One removed since the sweep is skipped, as before.
+ */
+function readSweptShardText(shardPath: string, directoryPath: string): string | null {
+  try {
+    return withContainedWorkspaceFile(shardPath, directoryPath, { mode: "read" }, (file) => file.read().toString("utf-8"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+    if (!isWorkspaceContainmentError(err)) throw err;
+    logger.warn({ path: shardPath }, "Skipped a config shard that is no longer a regular file in its place in the tree");
+    return null;
+  }
+}
+
 function collectConfigShardPaths(directoryPath: string, mutablePath: string, compiledPath: string, zones: ReadonlySet<string>): string[] {
   const shardPaths: string[] = [];
   const visit = (currentPath: string, depth: number) => {
     for (const entry of readdirSync(currentPath, { withFileTypes: true })) {
       const nextPath = resolve(currentPath, entry.name);
-      if (entry.isDirectory()) {
+      // By lstat, never through a link (sweepEntryKind): the full-scope sandbox writes the zones.
+      const kind = sweepEntryKind(nextPath);
+      if (kind === "link") {
+        if (isNonConfigShardDirectory(entry.name, depth, zones)) continue;
+        if (depth === 0 && topLevelLinkHoldsConfig(nextPath, isSupportedConfigFile(entry.name))) {
+          // The operator's layout, not a sandbox's: everything behind it is missing from the config.
+          logger.error(
+            { path: nextPath },
+            "A link at the top of the config tree is not read, so everything behind it is left out of the configuration. Replace "
+              + "the link with what it points to, or make the whole config or workspace directory the link instead, which is read through",
+          );
+        } else {
+          logger.warn({ path: nextPath }, "Skipped a link in the config tree: a shard is read only from a regular file, and no link is followed");
+        }
+        continue;
+      }
+      if (kind === "directory") {
         // Working zones (generated/, uploads/, tools/, users/) hold agent output, user
         // uploads, and dynamic-tool bundles — NOT config, and neither do hidden state
         // dirs. Sweeping them would let an agent-written data.json (or a malicious
@@ -357,7 +396,7 @@ function collectConfigShardPaths(directoryPath: string, mutablePath: string, com
         visit(nextPath, depth + 1);
         continue;
       }
-      if (!entry.isFile() || !isSupportedConfigFile(entry.name)) continue;
+      if (kind !== "file" || !isSupportedConfigFile(entry.name)) continue;
       if (nextPath === mutablePath || nextPath === compiledPath) continue;
       shardPaths.push(nextPath);
     }
@@ -894,8 +933,10 @@ function getWatchedDirectoryPaths(configSource: ConfigSource): string[] {
     watchedDirectories.add(path);
     if (!existsSync(path) || !isExistingDirectory(path)) return;
     for (const entry of readdirSync(path, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      addDirectoryTree(resolve(path, entry.name));
+      // No link is followed here either; the sweep warns about each (collectConfigShardPaths).
+      const next = resolve(path, entry.name);
+      if (sweepEntryKind(next) !== "directory") continue;
+      addDirectoryTree(next);
     }
   };
 

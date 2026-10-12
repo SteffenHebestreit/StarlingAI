@@ -11,11 +11,14 @@
  * pure guidance. They cannot grant tools, alter tiers, or bypass approval — the
  * guardrail stack still governs every tool a skill suggests.
  *
- * Layout (workspace-scoped, mirroring flow_memory / trajectory_cache):
- *   .starlingai/skills/<slug>/SKILL.md          ← portable Markdown + frontmatter
- *   .starlingai/skills/<slug>/skill.meta.json   ← outcome stats + embedding
- *   .starlingai/skills/<slug>/skill.history.json ← bounded mutation history for rollback
- *   .starlingai/skills/<slug>/{references,templates,scripts,assets}/... ← support files
+ * Layout (workspace-scoped, mirroring flow_memory / trajectory_cache), in the workspace's state
+ * directory (workspaceStateDir), shown here as `<state>`: `<shared>/.starlingai` for the shared root,
+ * and `<shared>/.starlingai/users/<seg>` for an account's own root, which keeps no gateway state
+ * inside the directory its sandboxes are handed:
+ *   <state>/skills/<slug>/SKILL.md          ← portable Markdown + frontmatter
+ *   <state>/skills/<slug>/skill.meta.json   ← outcome stats + embedding
+ *   <state>/skills/<slug>/skill.history.json ← bounded mutation history for rollback
+ *   <state>/skills/<slug>/{references,templates,scripts,assets}/... ← support files
  *
  * Security:
  * - Credential-shaped content is rejected before persistence (same RE family as
@@ -36,12 +39,12 @@ import {
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { childLogger } from "../logger.js";
-
-import { PRODUCT } from "../product/index.js";
+import { workspaceStateDir } from "../tools/workspace-state.js";
 
 const log = childLogger("skills:store");
 
-const SKILLS_SUBDIR = `${PRODUCT.stateDirName}/skills`;
+/** Under the workspace's state directory (workspaceStateDir). */
+const SKILLS_SUBDIR = "skills";
 const SUPPORT_FILE_DIRS = new Set(["references", "templates", "scripts", "assets"]);
 const HISTORY_FILE = "skill.history.json";
 const MAX_HISTORY_ENTRIES = 50;
@@ -178,8 +181,13 @@ export function slugifySkillName(name: string): string {
   return base || "skill";
 }
 
+/**
+ * The library of the root's state directory, which for an account's root is kept outside that root
+ * (workspaceStateDir): the account's sandboxes can write anything inside it, and a skill's body is
+ * guidance that goes into an agent's prompt.
+ */
 export function skillsDir(workspacePath: string): string {
-  return resolve(workspacePath, SKILLS_SUBDIR);
+  return resolve(workspaceStateDir(workspacePath), SKILLS_SUBDIR);
 }
 
 export function listSkills(

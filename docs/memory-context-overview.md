@@ -33,7 +33,7 @@ The spine of all of it is **scope**:
 
 | Store | Scope | Storage | How it's managed | Lever |
 |---|---|---|---|---|
-| **Durable workspace memory** | workspace | one JSON file/key at `<ws>/.starlingai/memory/` (+ optional graph node) | `memory_store`; auto-consolidated from sessions; supersession + near-dup compaction + kind-decay | `memory.*`; `memory_store/search/promote/compact`; **Memory page** |
+| **Durable workspace memory** | workspace | one JSON file/key under `memory/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, `<shared>/.starlingai/users/<seg>/` for an account's own root, outside the directory its sandboxes are handed (+ optional graph node) | `memory_store`; auto-consolidated from sessions; supersession + near-dup compaction + kind-decay | `memory.*`; `memory_store/search/promote/compact`; **Memory page** |
 | **Durable user memory** | user | JSON files at `$SAI_USER_MEMORY_PATH` (docker `/data`) else `~/.starlingai/user-memory` | same pipeline; higher scope weight (0.34 vs 0.30) | `SAI_USER_MEMORY_PATH`; `memory_store scope:'user'` |
 | **Session shared-facts** | session | Redis hash `starlingai:mem:{sessionId}:facts` (4h TTL); in-proc Map fallback | sub-agents `share_finding`/`share_evidence`; `read_shared_facts`; near-dup rejected (0.85); consolidated up on archive | code constants (`FACT_VALUE_MAX=2000`); `memory.autoConsolidateSessions` |
 | **Partial results** | session | Redis list `starlingai:mem:{sid}:results` (4h, ltrim 50) | completed-output snippets for reuse | constants `RESULTS_MAX=50`, `RESULT_CONTENT_MAX=1200` |
@@ -44,7 +44,7 @@ The spine of all of it is **scope**:
 | **Agent memory** (outcomes + flow-memory lessons) | deployment (one ledger for every account) | append logs under the shared root's `.starlingai/` (`agent_outcomes.ndjson`, `flow_memory.ndjson`); under multi-user auth each entry records the account it was written for (its user-scope segment) | each run's outcome, `record_lesson` (filed under the calling run's own task) + config-assistant flow entries → surfaced as `scope:'agent'` records; under multi-user auth a reader sees only the caller's own entries ([§6](#6-multi-user-isolation--the-honest-account)) | a sub-agent's own lessons in its run guidance; `memory_search` / `recall_context` / `memory_promote` on demand |
 | **Dialectic user model** | user | `user-model.json` in state dir | assistant calls `user_model_update`; caps `MAX_ITEMS=10`, 280 chars/item | `user_model_update` tool; **Memory page** |
 | **Personality store** | user/global | `main-assistant-personality.json` | `assistant_personality_update` tool or UI; whole profile replaced | **Memory page → Personality**; `PUT /api/personality` |
-| **Skills store** | workspace | `.starlingai/skills/<slug>/` | procedural memory — see the tuning doc | `skillLibrary.*`; **Skills page** |
+| **Skills store** | workspace | `skills/<slug>/` in the workspace's state directory: `<shared>/.starlingai/`, or `<shared>/.starlingai/users/<seg>/` for an account's own root | procedural memory — see the tuning doc | `skillLibrary.*`; **Skills page** |
 | **Credential store** | workspace | encrypted (AES-256-GCM) | secrets referenced via `secret:` / `$ENV`; per-resource `allowedUsers` | guarded by `canAccessResource` (unbound = **shared to all** — [§6](#6-multi-user-isolation--the-honest-account)) |
 
 ---
