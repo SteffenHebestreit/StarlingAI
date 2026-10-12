@@ -26,6 +26,14 @@ import JSON5 from "json5";
 
 export const COMPANIONS_FILE = "docker/companions.local.jsonc";
 
+/**
+ * A Windows path's drive letter in upper case. Compose's build on Docker Desktop failed before building
+ * anything ("failed to execute bake: exit status 1") when the working directory and the compose file
+ * both named the drive in lower case ("e:/ProcessMem/docker-compose.yml", the companion's directory as
+ * the working directory); with either in upper case it built. Windows paths ignore case; this does not.
+ */
+export const upperCaseDrive = (path) => path.replace(/^([a-z]):(?=[\\/])/, (_, drive) => `${drive.toUpperCase()}:`);
+
 /** A compose project name: what `docker compose -p` accepts. */
 const PROJECT_NAME = /^[a-z0-9][a-z0-9_-]*$/;
 /** A compose service name, and a DNS alias on a Docker network. */
@@ -62,7 +70,7 @@ export function readCompanionStacks(path = COMPANIONS_FILE, { exists = existsSyn
       }
       joinSpec = { service, alias };
     }
-    stacks.push({ name: entry.name, compose: entry.compose.trim(), ...(joinSpec ? { join: joinSpec } : {}) });
+    stacks.push({ name: entry.name, compose: upperCaseDrive(entry.compose.trim()), ...(joinSpec ? { join: joinSpec } : {}) });
   }
   return { stacks };
 }
@@ -96,10 +104,11 @@ const quoted = (value) => (/[\s"]/.test(value) ? JSON.stringify(value) : value);
 /**
  * The `docker compose` invocation for one stack, with its override written to the temp dir when it
  * joins the gateway's network. Its project directory is its compose file's, so its own .env applies.
+ * `override: false` leaves the override out, for a build: the network does not concern it.
  */
-export function companionCompose(stack, network, { write = writeFileSync, dir = tmpdir() } = {}) {
+export function companionCompose(stack, network, { write = writeFileSync, dir = tmpdir(), override = true } = {}) {
   const parts = ["docker", "compose", "-p", stack.name, "-f", quoted(stack.compose)];
-  if (stack.join) {
+  if (stack.join && override) {
     const overridePath = join(dir, `sai-companion-${stack.name}.override.yml`);
     write(overridePath, companionOverrideYaml(stack.join, network));
     parts.push("-f", quoted(overridePath));
