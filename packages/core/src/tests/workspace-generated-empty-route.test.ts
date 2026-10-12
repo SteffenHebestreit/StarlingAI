@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import * as configLoader from "../config/loader.js";
 import { registerWorkspaceRoutes } from "../gateway/workspace-routes.js";
 import { createToken } from "../gateway/auth.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
 import { safeUserSegment } from "../runtime/user-scope.js";
 
 /**
@@ -56,7 +57,7 @@ describe("DELETE /api/workspace/generated", () => {
   process.env["SAI_JWT_SECRET"] = "workspace-generated-empty-route-test-secret-key";
   const config = {
     // No `users` entries: authenticatedUser then takes the role from the token's own claims.
-    auth: { enabled: true, provider: "builtin", users: [] },
+    auth: { enabled: true, provider: "builtin", users: [] as Array<Record<string, unknown>> },
     workspacePath: ws,
     gateway: { jwtSecret: "workspace-generated-empty-route-test-secret-key" },
   };
@@ -65,9 +66,9 @@ describe("DELETE /api/workspace/generated", () => {
   const app = new Hono();
   registerWorkspaceRoutes(app);
 
-  const empty = async (user: string, role?: string) => {
+  const empty = async (user: string, role?: string, query = "", on: Hono = app) => {
     const token = await createToken(user, role ? { role } : undefined);
-    return app.request("/api/workspace/generated", { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+    return on.request(`/api/workspace/generated${query}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
   };
 
   /** What a turn leaves in generated/: files, a nested tree. */
@@ -77,6 +78,7 @@ describe("DELETE /api/workspace/generated", () => {
 
   beforeEach(() => {
     config.auth.enabled = true;
+    config.auth.users = [];
     for (const dir of ["users", "generated", "agents", ".starlingai"]) {
       rmSync(join(ws, dir), { recursive: true, force: true });
     }
@@ -163,6 +165,43 @@ describe("DELETE /api/workspace/generated", () => {
     expect(readdirSync(zone("alice"))).toEqual([]);
     expect((await empty("bob", "admin")).status).toBe(200);
     expect(readdirSync(zone("bob"))).toEqual([]);
+  });
+
+  it("with scope=account, empties the caller's own generated/ and refuses the shared root with 409", async () => {
+    // The E2E harness asks whether auth is on before it calls, and sends scope=account: auth switched
+    // off in between (no restart needed, and the token still verifies) must not empty the shared
+    // root's generated/, the operator's own files.
+    const own = await empty("alice", undefined, "?scope=account");
+    expect(own.status).toBe(200);
+    expect(readdirSync(zone("alice"))).toEqual([]);
+
+    config.auth.enabled = false;
+    put(join(ws, "generated", "operator-report.pdf"));
+    const shared = await empty("alice", undefined, "?scope=account");
+    expect(shared.status).toBe(409);
+    expect(await shared.json()).toEqual({ error: "Your workspace root is the deployment's shared root, not an account's own: nothing was removed" });
+    expect(readdirSync(join(ws, "generated"))).toEqual(["operator-report.pdf"]);
+
+    const unknown = await empty("alice", undefined, "?scope=everything");
+    expect(unknown.status).toBe(400);
+    expect(readdirSync(join(ws, "generated"))).toEqual(["operator-report.pdf"]);
+  });
+
+  it("answers an identity that carries no account id or principal kind with 403, not a bare 500", async () => {
+    // A name that is an account's, in a request context that did not thread the account's id:
+    // no root is derived from it (AccountNotThreadedError).
+    config.auth.users = [{ username: "carol", id: "carol-0123456789abcdef", role: "operator" }];
+    const legacy = new Hono();
+    legacy.use("/api/*", (_c, next) => runWithRequestContext({ identity: { userId: "carol" } }, () => next()));
+    registerWorkspaceRoutes(legacy);
+    // A bootstrap token gets past the route's own sign-in check; the context names carol.
+    const token = await createToken("operator-bootstrap", { bst: true });
+    const res = await legacy.request("/api/workspace/generated", { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toMatch(/^No workspace root of your own to empty: The identity 'carol' carries no account id/);
+    for (const user of ["alice", "bob"]) {
+      for (const file of turnOutput) expect(existsSync(join(zone(user), file)), file).toBe(true);
+    }
   });
 
   it("with auth off, empties the shared root's generated/ as the single operator, and nothing beside it", async () => {

@@ -22,6 +22,7 @@ import {
 } from "../tools/workspace-path.js";
 import { removeContainedWorkspaceDir, removeContainedWorkspaceFile, WorkspaceContainmentError } from "../tools/workspace-containment.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
+import { AccountNotThreadedError } from "../runtime/user-scope.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { logAudit } from "../audit/logger.js";
@@ -480,13 +481,15 @@ export function registerWorkspaceRoutes(app: Hono): void {
   });
 
   // ── Empty the caller's generated/ ────────────────────────────────────────
-  // DELETE /api/workspace/generated
+  // DELETE /api/workspace/generated[?scope=account]
   // Removes everything under generated/ in the caller's own workspace root, and keeps the directory:
   // 200 { removed } with the entries removed (files, links and directories; 0 without a generated/),
   // 500 { error, removed, failed } when an entry stayed, 400 when generated/ is not a directory of
-  // that root. The E2E harness calls it before each attempt: the eval account's turns had left files
-  // there since its first run, and later turns read them as evidence (a reply answered from a
-  // two-day-old briefing, another cited a chart an earlier run had made; 2026-10-10).
+  // that root, 403 when the caller has no root of its own, 409 when `scope=account` was asked for
+  // and the caller's root is the deployment's shared one. The E2E harness calls it before each
+  // attempt: the eval account's turns had left files there since its first run, and later turns read
+  // them as evidence (a reply answered from a two-day-old briefing, another cited a chart an earlier
+  // run had made; 2026-10-10).
   app.delete("/api/workspace/generated", async (c) => {
     // OPERATOR, AS FOR ONE FILE ABOVE, and checked here for the same reason. A viewer may not delete
     // one file of its own, so not all of them either; the harness empties eval's, an operator's.
@@ -502,15 +505,29 @@ export function registerWorkspaceRoutes(app: Hono): void {
       return c.json({ error: "Operator role required for this action" }, 403);
     }
 
+    // `scope=account`: the caller expects its own account's root, and nothing is removed when the
+    // root is the deployment's shared one (auth off, or no account to partition by). The E2E harness
+    // always sends it. It checks that auth is on before it calls, but auth can be switched off in
+    // between without a restart, and its token still verifies: the shared root's generated/ is the
+    // operator's own work.
+    const scope = c.req.query("scope");
+    if (scope !== undefined && scope !== "account") return c.json({ error: "scope must be \"account\" when given" }, 400);
+
     const sharedRoot = getConfig().workspacePath;
-    const root = userWorkspaceRoot(sharedRoot);
-    const zone = resolve(root, GENERATED_SUBDIR);
     try {
+      // Inside the try: an identity that carries no account id or principal kind has no root of its
+      // own (AccountNotThreadedError), and is answered as such below rather than with a bare 500.
+      const root = userWorkspaceRoot(sharedRoot);
+      const zone = resolve(root, GENERATED_SUBDIR);
+      const isSharedRoot = resolve(root) === resolve(sharedRoot);
+      if (scope === "account" && isSharedRoot) {
+        return c.json({ error: "Your workspace root is the deployment's shared root, not an account's own: nothing was removed" }, 409);
+      }
       if (getConfig().auth?.enabled === true) {
         // ONLY AN ACCOUNT'S OWN ROOT under multi-user auth. A caller nobody partitions by resolves
         // to the shared root, whose generated/ holds every unattended run's work; and an account's
         // root that is itself a link leads into a root that is not the caller's.
-        if (resolve(root) === resolve(sharedRoot)) return c.json({ error: "No workspace root of your own to empty" }, 403);
+        if (isSharedRoot) return c.json({ error: "No workspace root of your own to empty" }, 403);
         if ((await lstat(root).catch(() => null))?.isSymbolicLink()) return c.json({ error: "Path must stay within the workspace" }, 400);
       }
       const zoneStat = await lstat(zone).catch((error: unknown) => {
@@ -531,6 +548,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
       }
       return c.json({ removed: tally.removed });
     } catch (error) {
+      if (error instanceof AccountNotThreadedError) return c.json({ error: `No workspace root of your own to empty: ${error.message}` }, 403);
       const mapped = mapWorkspaceRouteError(error);
       return c.json({ error: mapped.message }, mapped.status);
     }
