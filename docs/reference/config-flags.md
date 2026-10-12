@@ -58,7 +58,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1304 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 87 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 88 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
 | `budget` | packages/core/src/config/schema.ts:1696 | 101 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
@@ -196,7 +196,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1551 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:613 | 1 |
-| `host` | packages/core/src/config/schema.ts:772 | 125 |
+| `host` | packages/core/src/config/schema.ts:772 | 126 |
 | `http` | packages/core/src/config/schema.ts:817 | 96 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
 | `id` | packages/core/src/config/schema.ts:405 | 326 |
