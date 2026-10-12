@@ -104,6 +104,11 @@ async function runGitInSandbox(
     "-e", "GIT_CONFIG_VALUE_0=*",
     "-e", "GIT_CONFIG_KEY_1=safe.bareRepository",
     "-e", "GIT_CONFIG_VALUE_1=explicit",
+    // The full-scope repo bind is the deployment's own repository, and git uses that one by name,
+    // never one it discovers below the working directory. A full-scope shell writes the zones, and a
+    // `.git` it left in one (core.fsmonitor, hooks) ran in this sandbox, which has the whole
+    // repository bound (review 2026-10-12). A clone makes a new repository and keeps discovery.
+    ...(mountScope === "repo" && args[0] !== "clone" ? ["-e", "GIT_DIR=/workspace/.git", "-e", "GIT_WORK_TREE=/workspace"] : []),
     "-w", workdir,
     SANDBOX_IMAGE,
     "git", ...args,

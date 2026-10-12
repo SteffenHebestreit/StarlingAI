@@ -391,7 +391,13 @@ describe("a full-scope sandbox runs as its bind's owner, root included", () => {
       "GIT_CONFIG_COUNT=2", "GIT_CONFIG_KEY_0=safe.directory", "GIT_CONFIG_VALUE_0=*",
       // A directory the write tools made in the shape of a bare repository is not one to git.
       "GIT_CONFIG_KEY_1=safe.bareRepository", "GIT_CONFIG_VALUE_1=explicit",
+      // The deployment's own repository by name: never a `.git` a full-scope shell left in a zone.
+      "GIT_DIR=/workspace/.git", "GIT_WORK_TREE=/workspace",
     ]);
+    // An account's git sandbox keeps discovery: its repositories are wherever it made them.
+    fakeOwners.set(CALLER_WS, 2222);
+    await getTool("git_status")!.execute({}, { sessionId: "s-account", workspacePath: CALLER_WS, workspaceScope: "generated" });
+    expect(dockerArgs().some((arg) => arg.startsWith("GIT_DIR="))).toBe(false);
     // Before the image: docker's own flags, not git's.
     expect(dockerArgs().indexOf("GIT_CONFIG_COUNT=1")).toBeLessThan(dockerArgs().indexOf("starlingai/sandbox:latest"));
   });

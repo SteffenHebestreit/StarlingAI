@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -243,6 +243,30 @@ describe("git tools: what the model supplies is never a git option", () => {
       const result = await realGit(dir, { ref1: "one.txt", ref2: "two.txt" });
       expect(result.status).not.toBe(0);
       expect(result.stdout).not.toContain("file-content");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Why the full-scope repo bind pins GIT_DIR and GIT_WORK_TREE (git.ts): a `.git` planted in a
+  // subdirectory runs its own core.fsmonitor when git discovers it, and does not once git is told
+  // which repository it works on.
+  it.skipIf(!hostGit)("a planted repository's fsmonitor runs under discovery and not with the repository pinned", () => {
+    const dir = mkdtempSync(join(tmpdir(), "sai-git-pinned-"));
+    const git = (cwd: string, args: string[], env: Record<string, string> = {}) =>
+      realChildProcess.spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir(), ...env } });
+    try {
+      git(dir, ["init", "-q"]);
+      const planted = join(dir, "generated", "planted");
+      git(dir, ["init", "-q", planted]);
+      const marker = join(dir, "fsmonitor-ran");
+      git(planted, ["config", "core.fsmonitor", `node -e "require('fs').writeFileSync(process.argv[1], 'x')" "${marker.replace(/\\/g, "/")}"`]);
+
+      git(planted, ["status", "--porcelain"], { GIT_DIR: join(dir, ".git"), GIT_WORK_TREE: dir });
+      expect(existsSync(marker)).toBe(false);
+
+      git(planted, ["status", "--porcelain"]);
+      expect(existsSync(marker)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
