@@ -5,7 +5,7 @@
  * boundary. Extracted verbatim from gateway/index.ts (god-file seam).
  */
 import type { Hono } from "hono";
-import { readFile, writeFile, stat, lstat, readdir, mkdir, realpath, rmdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, stat, lstat, readdir, mkdir, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ZipFile } from "yazl";
 import { verifyToken, extractBearerToken, authenticatedUser, authenticatedUserFromToken, callerIdentity, userHasRole } from "./auth.js";
@@ -20,7 +20,7 @@ import {
   type WorkspaceContainmentOptions,
   type WorkspaceRealPath,
 } from "../tools/workspace-path.js";
-import { removeContainedWorkspaceFile, WorkspaceContainmentError } from "../tools/workspace-containment.js";
+import { removeContainedWorkspaceDir, removeContainedWorkspaceFile, WorkspaceContainmentError } from "../tools/workspace-containment.js";
 import { runWithRequestContext, currentUserId } from "../runtime/request-context.js";
 import { getServedApp, injectBaseHref } from "../tools/serve-app.js";
 import { buildContentDisposition } from "./content-disposition.js";
@@ -542,9 +542,11 @@ export function registerWorkspaceRoutes(app: Hono): void {
    * too) from a directory, so a link is removed as the name it is and its target stays. A file or a
    * link goes through removeContainedWorkspaceFile, which removes the name in the directory it really
    * is in, held to generated/ (on Linux in the open directory itself: a directory on the way swapped
-   * for a link to agents/ meanwhile gets a refusal, not a deleted shard). A directory is listed and
-   * removed only while it really is under generated/. An entry that cannot be removed is counted and
-   * the others are still removed; one already gone is not counted.
+   * for a link to agents/ meanwhile gets a refusal, not a deleted shard). A directory is listed only
+   * while it really is under generated/, and removed with removeContainedWorkspaceDir, held there the
+   * same way: removed by name after a check, an empty directory wherever a swapped link led was gone
+   * (another account's generated/, a config zone's subdirectory). An entry that cannot be removed is
+   * counted and the others are still removed; one already gone is not counted.
    */
   async function emptyGeneratedDirectory(dir: string, root: string, tally: GeneratedTally): Promise<boolean> {
     const failed = (error: unknown): false => {
@@ -572,8 +574,7 @@ export function registerWorkspaceRoutes(app: Hono): void {
             complete = false;
             continue;
           }
-          if (staysInCallerZone(path) === null) throw new WorkspaceContainmentError();
-          await rmdir(path);
+          removeContainedWorkspaceDir(path, root);
         } else {
           removeContainedWorkspaceFile(path, root);
         }

@@ -17,6 +17,7 @@ import {
   readlinkSync,
   readSync,
   realpathSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeSync,
@@ -298,6 +299,40 @@ export function removeContainedWorkspaceFile(
   recheckElsewhere(target, workspacePath, "link", options);
   if (lstatSync(target).isDirectory()) throw codedError("EISDIR", target);
   unlinkSync(target);
+}
+
+/**
+ * Removes an empty workspace directory, held to its zone as removeContainedWorkspaceFile holds a
+ * file: on Linux it is removed in the open directory it was found in, so a directory on the way that
+ * a sandbox swaps for a link after any check by path does not take the removal out of the zone (an
+ * empty directory of another account's, of a config zone or of the state directory). ELSEWHERE the
+ * check is made again right before the removal, which narrows the window a swap has to hit but does
+ * not close it (withContainedWorkspaceFile). A link at the name is not removed (ENOTDIR): a walk
+ * removes links with removeContainedWorkspaceFile. Throws ENOENT where nothing is there, ENOTEMPTY
+ * where the directory is not empty; the workspace root itself is refused.
+ */
+export function removeContainedWorkspaceDir(
+  resolvedPath: string,
+  workspacePath: string,
+  options: Pick<ContainedFileOptions, "refuse"> = {},
+): void {
+  const target = resolve(resolvedPath);
+  if (target === resolve(workspacePath)) throw new WorkspaceContainmentError();
+  const zone = zoneOf(target, workspacePath);
+  if (descriptorPaths()) {
+    const dirFd = openDirectoryOnLinux(dirname(target), basename(target), refusedIn(zone, options), false);
+    try {
+      const entry = fdEntry(dirFd, basename(target));
+      if (!lstatSync(entry).isDirectory()) throw codedError("ENOTDIR", target);
+      rmdirSync(entry);
+    } finally {
+      closeSync(dirFd);
+    }
+    return;
+  }
+  recheckElsewhere(target, workspacePath, "link", options);
+  if (!lstatSync(target).isDirectory()) throw codedError("ENOTDIR", target);
+  rmdirSync(target);
 }
 
 interface Zone {
