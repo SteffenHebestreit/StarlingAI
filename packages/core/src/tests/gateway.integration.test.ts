@@ -2492,6 +2492,11 @@ describe("gateway HTTP bridge", () => {
         (await new Response(raw, { headers: { "content-type": type } }).formData()).forEach((value, key) => { if (typeof value === "string") body[key] = value; });
       }
       seen.push({ path: req.url ?? "", body });
+      if (req.method === "POST" && req.url === "/api/providers/qwen3/saved-voices") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", voice_id: String(body["name"]).toLowerCase(), name: body["name"] }));
+        return;
+      }
       if (req.method === "POST") {
         res.writeHead(200, { "Content-Type": "audio/wav" });
         res.end(Buffer.from("RIFF"));
@@ -2549,6 +2554,31 @@ describe("gateway HTTP bridge", () => {
       expect(warm.status).toBe(200);
       expect(await warm.json()).toMatchObject({ ok: true });
       expect(seen.at(-1)).toEqual({ path: "/api/providers/qwen3/saved-voices/luna/tts", body: { text: "Hallo.", lang: "de" } });
+
+      // The voice library (2026-10-15): a voice the chat speaks a language with is not deleted from
+      // under it; another one is, and a voice cloned here is saved on the service.
+      const remove = (ref: string) => fetch(`${baseUrl}/api/multimodal/voices/${encodeURIComponent(ref)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const before = seen.length;
+      const inUse = await remove("saved:luna");
+      expect(inUse.status).toBe(409);
+      expect(await inUse.json()).toMatchObject({ error: expect.stringContaining("de") });
+      expect(seen.length).toBe(before);
+      expect((await remove("saved:old")).status).toBe(200);
+      expect(seen.at(-1)?.path).toBe("/api/providers/qwen3/saved-voices/old");
+
+      const form = new FormData();
+      form.append("name", "Steffen");
+      form.append("file", new Blob(["RIFF"], { type: "audio/wav" }), "sample.wav");
+      form.append("language", "de");
+      form.append("mode", "icl");
+      form.append("referenceText", "Hallo zusammen");
+      const cloned = await fetch(`${baseUrl}/api/multimodal/voices/clone`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      expect(cloned.status).toBe(200);
+      expect(await cloned.json()).toMatchObject({ voice: "saved:steffen", name: "Steffen" });
+      expect(seen.at(-1)).toEqual({ path: "/api/providers/qwen3/saved-voices", body: { name: "Steffen", lang: "de", mode: "icl", ref_text: "Hallo zusammen" } });
     } finally {
       await gateway.stop();
       auth.resetAuthStateForTests();

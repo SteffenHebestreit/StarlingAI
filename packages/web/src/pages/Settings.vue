@@ -425,6 +425,13 @@
                 </div>
               </div>
 
+              <!-- A TTS-STT gateway's voices: per language, cloning, design, training. Shown once the
+                   gateway mode is saved — its routes act on the saved configuration. -->
+              <VoiceStudio v-if="multimodalForm.ttsApi === 'tts-stt-gateway' && multimodalStore.config.tts.api === 'tts-stt-gateway'" />
+              <div v-else-if="multimodalForm.ttsApi === 'tts-stt-gateway'" class="text-xs text-gray-500">
+                Save this mode to manage the speech service's voices here.
+              </div>
+
               <div v-if="multimodalForm.ttsApi === 'qwen-compatible'" class="rounded-xl border border-purple-500/10 bg-gray-950/40 p-3 space-y-3">
                 <div>
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Save Voice To Qwen-Compatible Library</div>
@@ -2142,6 +2149,7 @@ import { useConfigAssistantStore, type ConfigAssistantFeedbackOutcome, type Conf
 import ToggleSwitch from "@/components/ToggleSwitch.vue";
 import ChannelIcon from "@/components/ChannelIcon.vue";
 import AppearanceSettings from "@/components/AppearanceSettings.vue";
+import VoiceStudio from "@/components/settings/VoiceStudio.vue";
 import { appVersion } from "@/appVersion";
 import { useProductStore } from "@/stores/product";
 
