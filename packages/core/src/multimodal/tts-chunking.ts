@@ -255,6 +255,25 @@ export function mergeWavAudioChunks(chunks: Uint8Array[]): Uint8Array {
   return merged;
 }
 
+/** A response's body, read within `timeoutMs` when one is given. */
+export async function readBodyWithin(response: Response, timeoutMs?: number): Promise<ArrayBuffer> {
+  if (!timeoutMs || timeoutMs <= 0) return response.arrayBuffer();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.arrayBuffer(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void response.body?.cancel().catch(() => undefined);
+          reject(new Error(`Speech synthesis timed out after ${Math.round(timeoutMs / 1000)} s while the audio was being read`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function sendChunkedTtsRequests<TInput extends { text: string }>(
   input: TInput,
   options: {
@@ -262,6 +281,9 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
     requestChunk: (nextInput: TInput) => Promise<Response>;
     /** Max chunks synthesized concurrently (default 2; 1 = the old sequential path). */
     maxConcurrency?: number;
+    /** Time allowed to read one chunk's audio once its headers arrived (the request's own timeout
+     *  ends with the headers, so a service that stalls mid-body held the request forever). */
+    bodyTimeoutMs?: number;
   },
 ): Promise<Response> {
   const chunks = splitTextForTts(input.text, options.maxChunkChars);
@@ -290,13 +312,14 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
       const response = await options.requestChunk({ ...input, text: chunks[i]! } as TInput);
       if (!response.ok) { recordFailure(i, response); return; }
       const ct = response.headers.get("content-type") ?? "audio/wav";
-      if (!ct.toLowerCase().includes("audio/wav")) {
+      // audio/x-wav and audio/wave are WAV too; only "audio/wav" was accepted, a 502 for long text.
+      if (!/audio\/(?:x-)?wav/i.test(ct)) {
         recordFailure(i, new Response(JSON.stringify({
           error: `Chunked TTS merge requires WAV audio, but the backend returned '${ct}'.`,
         }), { status: 502, headers: { "Content-Type": "application/json" } }));
         return;
       }
-      results[i] = new Uint8Array(await response.arrayBuffer());
+      results[i] = new Uint8Array(await readBodyWithin(response, options.bodyTimeoutMs));
     }
   };
 

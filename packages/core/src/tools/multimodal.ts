@@ -2150,6 +2150,7 @@ async function sendTtsRequest(input: {
 
   return sendChunkedTtsRequests(input, {
     requestChunk: sendSingleTtsRequest,
+    bodyTimeoutMs: input.timeoutMs,
   });
 }
 

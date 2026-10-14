@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { splitIntoSentences, splitTextForTts } from "../multimodal/tts-chunking.js";
+import { readBodyWithin, sendChunkedTtsRequests, splitIntoSentences, splitTextForTts } from "../multimodal/tts-chunking.js";
+
+/** A minimal 16-bit mono PCM WAV with `samples` zero samples. */
+function wav(samples: number): Uint8Array {
+  const data = samples * 2;
+  const buffer = new ArrayBuffer(44 + data);
+  const view = new DataView(buffer);
+  const ascii = (offset: number, text: string) => { for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i)); };
+  ascii(0, "RIFF"); view.setUint32(4, 36 + data, true); ascii(8, "WAVE");
+  ascii(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, "data"); view.setUint32(40, data, true);
+  return new Uint8Array(buffer);
+}
+
+describe("sendChunkedTtsRequests", () => {
+  it("merges WAV chunks the service labels audio/x-wav", async () => {
+    const response = await sendChunkedTtsRequests({ text: "Erster Satz hier. ".repeat(40) }, {
+      maxChunkChars: 100,
+      requestChunk: async () => new Response(wav(10).slice(0), { headers: { "content-type": "audio/x-wav" } }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("audio/wav");
+  });
+
+  it("gives up on a chunk whose audio stops arriving", async () => {
+    const stalled = new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([82, 73])); } }), {
+      headers: { "content-type": "audio/wav" },
+    });
+    await expect(readBodyWithin(stalled, 50)).rejects.toThrow(/timed out/);
+  });
+});
 
 /**
  * EVERY CHARACTER OF THE TEXT REACHES THE SPEECH SERVER (2026-10-14).

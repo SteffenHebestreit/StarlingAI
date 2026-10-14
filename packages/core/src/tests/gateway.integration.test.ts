@@ -2400,7 +2400,7 @@ describe("gateway HTTP bridge", () => {
         for await (const chunk of req) chunks.push(chunk as Buffer);
         const form = await new Response(Buffer.concat(chunks), { headers: { "content-type": String(req.headers["content-type"]) } }).formData();
         const fields: Record<string, string> = {};
-        for (const [key, value] of form.entries()) if (typeof value === "string") fields[key] = value;
+        form.forEach((value, key) => { if (typeof value === "string") fields[key] = value; });
         seen.push(fields);
         if (refuseVerbose && fields["response_format"] === "verbose_json") {
           res.writeHead(400, { "Content-Type": "application/json" });

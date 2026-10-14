@@ -63,7 +63,7 @@ import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, imageRequestBoundsError, requestImageGeneration } from "../multimodal/image-generation.js";
-import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
+import { readBodyWithin, sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { checkInput } from "../guardrails/input.js";
@@ -699,6 +699,7 @@ export function createGateway() {
 
     return sendChunkedTtsRequests(input, {
       requestChunk: sendSingleTtsRequest,
+      bodyTimeoutMs: input.timeoutMs,
     });
   }
 
@@ -2289,7 +2290,7 @@ export function createGateway() {
         });
       }
 
-      const audio = await upstream.arrayBuffer();
+      const audio = await readBodyWithin(upstream, multimodalConfig.tts.timeoutMs);
       return new Response(audio, {
         status: 200,
         headers: {
