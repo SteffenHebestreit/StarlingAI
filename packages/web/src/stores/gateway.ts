@@ -305,6 +305,27 @@ export interface SpeechToTextResult {
   duration?: number;
 }
 
+/** A voice of a TTS-STT gateway, as /api/multimodal/voices lists it (multimodal/tts-stt-gateway.ts). */
+export interface HubVoiceInfo {
+  /** The reference to configure or send: "piper:de_DE-thorsten-medium", "saved:luna". */
+  id: string;
+  name: string;
+  engine: string;
+  kind: "builtin" | "custom" | "saved";
+  language?: string;
+}
+
+/** A training job on a TTS-STT gateway (experimental piper training). */
+export interface VoiceTrainingJob {
+  id: string;
+  status: string;
+  progress?: number;
+  modelName?: string;
+  message?: string;
+  currentEpoch?: number;
+  totalEpochs?: number;
+}
+
 export interface SavedTtsVoice {
   voice_id: string;
   name: string;
@@ -4273,6 +4294,64 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string };
   }
 
+  /** A TTS-STT gateway's voices: each engine's own and the saved (cloned) ones. */
+  async function listHubVoices(): Promise<{ voices: HubVoiceInfo[]; engines: string[] }> {
+    const response = await authorizedFetch("/api/multimodal/voices");
+    const body = await response.json() as { voices?: unknown; engines?: unknown };
+    const voices = Array.isArray(body.voices) ? body.voices.filter((voice): voice is HubVoiceInfo =>
+      Boolean(voice) && typeof (voice as HubVoiceInfo).id === "string" && typeof (voice as HubVoiceInfo).engine === "string") : [];
+    return { voices, engines: Array.isArray(body.engines) ? body.engines.map(String) : [] };
+  }
+
+  /** Clones a voice from a recording on a TTS-STT gateway; returns its reference ("saved:<id>"). */
+  async function cloneHubVoice(input: {
+    name: string;
+    audio: Blob;
+    filename: string;
+    language?: string;
+    referenceText?: string;
+    mode?: "xvector" | "icl";
+    replace?: boolean;
+  }): Promise<{ voice: string; name: string; referenceText?: string }> {
+    const form = new FormData();
+    form.append("name", input.name);
+    form.append("file", input.audio, input.filename);
+    if (input.language) form.append("language", input.language);
+    if (input.referenceText) form.append("referenceText", input.referenceText);
+    if (input.mode) form.append("mode", input.mode);
+    if (input.replace) form.append("replace", "true");
+    const response = await authorizedFetch("/api/multimodal/voices/clone", { method: "POST", body: form });
+    return await response.json() as { voice: string; name: string; referenceText?: string };
+  }
+
+  /** A voice designed from a description, speaking `text` (audio; nothing is saved). */
+  async function designHubVoice(input: { description: string; text: string; language?: string }): Promise<Blob> {
+    const response = await authorizedFetch("/api/multimodal/voices/design", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return await response.blob();
+  }
+
+  async function listTrainingJobs(): Promise<{ enabled: boolean; jobs: VoiceTrainingJob[] }> {
+    const response = await authorizedFetch("/api/multimodal/voices/training");
+    return await response.json() as { enabled: boolean; jobs: VoiceTrainingJob[] };
+  }
+
+  async function startVoiceTraining(input: { name: string; language: string; files: File[] }): Promise<{ jobId: string }> {
+    const form = new FormData();
+    form.append("name", input.name);
+    form.append("language", input.language);
+    for (const file of input.files) form.append("file", file, file.name);
+    const response = await authorizedFetch("/api/multimodal/voices/training", { method: "POST", body: form });
+    return await response.json() as { jobId: string };
+  }
+
+  async function cancelVoiceTraining(jobId: string): Promise<void> {
+    await authorizedFetch(`/api/multimodal/voices/training/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+  }
+
   async function removeTtsVoice(voiceId: string): Promise<void> {
     const response = await authorizedFetch(`/api/multimodal/voices/${encodeURIComponent(voiceId)}`, {
       method: "DELETE",
@@ -4589,6 +4668,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     transcribeAudio,
     listVoices,
     saveTtsVoice,
+    listHubVoices,
+    cloneHubVoice,
+    designHubVoice,
+    listTrainingJobs,
+    startVoiceTraining,
+    cancelVoiceTraining,
     removeTtsVoice,
     synthesizeSpeech,
     warmSpeech,

@@ -34,6 +34,8 @@ export interface VoiceCaptureOptions {
   endSilenceMs: number;
   /** Recording straight away, this long with no speech ends the recording. */
   noSpeechTimeoutMs?: number;
+  /** The recording's sample rate: 16 kHz for a transcriber (the default), more for a voice to clone. */
+  wavRate?: number;
 }
 
 /** Less speech than this is a cough or a click, not something said. */
@@ -155,7 +157,7 @@ export class UtteranceRecorder {
     if (wasRecording) this.currentMode = "paused";
     const usable = speechMs >= MIN_SPEECH_MS && frames.length > 0;
     this.events.onUtterance(usable
-      ? { audio: new Blob([encodeWav(frames, this.sampleRate)], { type: "audio/wav" }), speechMs }
+      ? { audio: new Blob([encodeWav(frames, this.sampleRate, this.options.wavRate)], { type: "audio/wav" }), speechMs }
       : null);
   }
 
