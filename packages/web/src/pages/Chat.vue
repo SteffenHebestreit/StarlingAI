@@ -553,74 +553,38 @@
         />
       </div>
 
-      <div v-if="audioPreviewUrl" class="reply-audio-panel">
-        <audio
-          ref="audioPlayerEl"
-          :src="audioPreviewUrl"
-          class="hidden"
-          preload="metadata"
-          @loadedmetadata="syncAudioPreviewState"
-          @timeupdate="syncAudioPreviewState"
-          @play="syncAudioPreviewState"
-          @pause="syncAudioPreviewState"
-          @ended="handleAudioPreviewEnded"
-        />
-
-        <div class="reply-audio-panel__header">
-          <div class="reply-audio-panel__headline">
-            <div class="reply-audio-panel__eyebrow">Reply Audio</div>
-            <div class="reply-audio-panel__meta">{{ audioPlaying ? 'Playing response' : 'Ready to play' }}</div>
+      <!-- The voice: what is being said or heard, Stop, and the spoken answer's text. -->
+      <div v-if="showVoiceBar" class="voice-bar" role="status" aria-live="polite">
+        <div class="voice-bar__row">
+          <span
+            class="voice-bar__indicator"
+            :class="voiceBarBusy ? 'voice-bar__indicator--speaking' : voiceBarListening ? 'voice-bar__indicator--listening' : ''"
+            aria-hidden="true"
+          ><span /><span /><span /></span>
+          <div class="voice-bar__text">
+            <div class="voice-bar__eyebrow">{{ voiceConversationMode ? 'Voice conversation' : 'Voice' }}</div>
+            <div class="voice-bar__label" :class="voiceNotice ? 'voice-bar__label--notice' : ''">{{ voiceNotice || voiceBarLabel }}</div>
+          </div>
+          <div v-if="voiceBarListening" class="voice-bar__meter" aria-hidden="true">
+            <span :style="{ width: `${Math.round(micLevel * 100)}%` }" />
+          </div>
+          <div class="voice-bar__actions">
+            <button v-if="voiceBarBusy" type="button" class="voice-bar__button voice-bar__button--stop" @click="voice.stopSpeaking()">Stop</button>
+            <button v-if="recordingState === 'recording'" type="button" class="voice-bar__button" @click="toggleRecording()">Done</button>
+            <button v-if="lastReply?.summarized" type="button" class="voice-bar__button" @click="voice.readFullReply()">Read full answer</button>
+            <button v-if="lastReply && !voiceBarBusy" type="button" class="voice-bar__button" @click="voice.replay()">Replay</button>
+            <button v-if="lastReply" type="button" class="voice-bar__button" @click="replyTextOpen = !replyTextOpen">{{ replyTextOpen ? 'Hide text' : 'Show text' }}</button>
+            <button v-if="voiceConversationMode" type="button" class="voice-bar__button" @click="voice.toggleConversation()">End conversation</button>
+            <button
+              v-if="!voiceBarBusy && !voiceConversationMode && recordingState === 'idle'"
+              type="button"
+              class="voice-bar__close"
+              aria-label="Close the voice bar"
+              @click="dismissVoiceBar()"
+            >✕</button>
           </div>
         </div>
-
-        <div class="reply-audio-panel__transport">
-          <button
-            type="button"
-            class="reply-audio-panel__play"
-            :disabled="audioDuration <= 0"
-            @click="toggleAudioPreviewPlayback"
-          >
-            {{ audioPlaying ? 'Pause' : 'Play' }}
-          </button>
-
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="0.1"
-            :value="audioProgressPercent"
-            class="reply-audio-panel__range"
-            aria-label="Reply audio timeline"
-            @input="seekAudioPreview"
-          />
-
-          <div class="reply-audio-panel__time">{{ formatMediaTime(audioCurrentTime) }} / {{ formatMediaTime(audioDuration) }}</div>
-
-          <div class="reply-audio-panel__actions">
-            <button
-              v-if="lastSpokenSummary"
-              type="button"
-              class="reply-audio-panel__summary-toggle"
-              @click="audioSummaryExpanded = !audioSummaryExpanded"
-            >
-              {{ audioSummaryExpanded ? 'Hide text' : 'Show text' }}
-            </button>
-
-            <button
-              type="button"
-              class="reply-audio-panel__restart"
-              :disabled="audioDuration <= 0"
-              @click="restartAudioPreview"
-            >
-              Restart
-            </button>
-          </div>
-        </div>
-
-        <p v-if="lastSpokenSummary && audioSummaryExpanded" class="reply-audio-panel__summary">
-          <span class="reply-audio-panel__summary-label">Spoken summary</span>
-          <span>{{ lastSpokenSummary }}</span>
-        </p>
+        <p v-if="lastReply && replyTextOpen" class="voice-bar__body">{{ lastReply.spokenText }}</p>
       </div>
 
       <div class="chat-composer" :class="compactComposer ? 'chat-composer--compact' : ''">
@@ -709,7 +673,7 @@
                     <button
                       v-if="showRecording"
                       @click="toggleRecording()"
-                      :disabled="multimodalBusy && recordingState !== 'recording'"
+                      :disabled="(multimodalBusy && recordingState !== 'recording') || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
                       :title="recordingState === 'recording' ? 'Stop microphone recording' : 'Record voice from the microphone'"
@@ -728,7 +692,7 @@
                       :disabled="recordingState === 'processing' || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="wakeListening ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? 'Wake mode is folded into voice conversation mode' : (wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection')"
+                      :title="voiceConversationMode ? 'A voice conversation listens without a wake word' : (wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection')"
                       :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -740,11 +704,12 @@
                       </svg>
                     </button>
                     <button
-                      v-if="showWakeMode && showSpeechPlayback"
-                      @click="toggleVoiceConversation()"
-                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
+                      v-if="showVoiceConversation"
+                      @click="voice.toggleConversation()"
+                      :disabled="recordingState !== 'idle' || wakeListening"
+                      class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="voiceConversationMode ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? `Voice conversation mode: ${voiceConversationStatusLabel}` : 'Start hands-free voice conversation mode (continuous listen + auto-speak + interrupt)'"
+                      :title="voiceConversationMode ? `Voice conversation: ${voiceConversationStatusLabel} — click to end` : 'Start a hands-free voice conversation: talk, pause, and it is sent; the answer is spoken, and talking over it interrupts'"
                       :aria-label="voiceConversationMode ? 'Stop voice conversation' : 'Start voice conversation'"
                       :aria-pressed="voiceConversationMode"
                     >
@@ -757,10 +722,10 @@
                     </button>
                     <button
                       v-if="showSpeechPlayback"
-                      @click="speakLatestAssistant()"
-                      :disabled="multimodalBusy || !latestAssistantText"
+                      @click="voice.speakLatest()"
+                      :disabled="!latestAssistantText"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Speak a summary of the latest assistant reply"
+                      title="Read the latest answer aloud (a long one as a summary)"
                       aria-label="Speak reply"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -773,11 +738,11 @@
                     </button>
                     <button
                       v-if="showSpeechPlayback"
-                      @click="toggleSpeakReply()"
+                      @click="voice.toggleSpeak()"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
                       :class="speakReplyEnabled ? 'multimodal-action-active' : ''"
-                      :title="speakReplyEnabled ? 'Auto-speak reply summary is ON — click to disable' : 'Auto-speak reply summary is OFF — click to enable'"
-                      :aria-label="speakReplyEnabled ? 'Disable auto-speak' : 'Enable auto-speak'"
+                      :title="speakReplyEnabled ? 'Speech is ON: tones and updates while a turn runs, the answer read aloud — click to turn off' : 'Speech is OFF — click for tones and updates while a turn runs, and the answer read aloud'"
+                      :aria-label="speakReplyEnabled ? 'Turn speech off' : 'Turn speech on'"
                       :aria-pressed="speakReplyEnabled"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -786,6 +751,25 @@
                         <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
                       </svg>
                     </button>
+                  </div>
+                  <div v-if="showSpeechPlayback || showAudioUpload" class="chat-dropdown__voice-settings">
+                    <label v-if="showAudioUpload" class="chat-dropdown__voice-setting">
+                      <span>Spoken language</span>
+                      <select v-model="sttLanguage" class="chat-dropdown__select" title="The language your recordings are transcribed in">
+                        <option value="auto">Detect</option>
+                        <option value="de">Deutsch</option>
+                        <option value="en">English</option>
+                        <option value="pl">Polski</option>
+                      </select>
+                    </label>
+                    <label v-if="showSpeechPlayback" class="chat-dropdown__voice-setting">
+                      <span>While a turn runs</span>
+                      <select v-model="speechUpdates" class="chat-dropdown__select" title="What you hear while the assistant works, with speech on">
+                        <option value="voice">Spoken updates + tones</option>
+                        <option value="tones">Tones only</option>
+                        <option value="off">Silent until the answer</option>
+                      </select>
+                    </label>
                   </div>
                 </div>
 
@@ -1095,8 +1079,8 @@ import { useMultimodalStore } from "@/stores/multimodal";
 import { useComputerStore } from "@/stores/computer";
 import { useShellStore } from "@/stores/shell";
 import type { GatewaySessionTranscriptMessage, InterventionAction, EffortTier } from "@/stores/gateway";
-import { readSpeakReplySummaryStorage, writeSpeakReplySummaryStorage } from "@/stores/multimodal";
 import { marked } from "marked";
+import { useVoice, type RecordingOutcome } from "@/speech/useVoice";
 import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import UserInputCard from "@/components/input/UserInputCard.vue";
@@ -1170,14 +1154,9 @@ const composerTextareaEl = ref<HTMLTextAreaElement | null>(null);
 const messagesEl = ref<HTMLElement | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
 const audioInputEl = ref<HTMLInputElement | null>(null);
-const audioPlayerEl = ref<HTMLAudioElement | null>(null);
-const audioPreviewUrl = ref<string | null>(null);
-const audioCurrentTime = ref(0);
-const audioDuration = ref(0);
-const audioPlaying = ref(false);
-const audioSummaryExpanded = ref(false);
+/** The spoken answer's text, opened under the voice bar. */
+const replyTextOpen = ref(false);
 const multimodalBusy = ref(false);
-const recordingState = ref<"idle" | "recording" | "processing">("idle");
 const wakeListening = ref(false);
 const wakeStatus = ref("Voice idle");
 const wakeFeedbackState = ref<"idle" | "listening" | "recording" | "processing" | "success" | "error">("idle");
@@ -1186,16 +1165,7 @@ const wakeKeywords = useStorage<string[]>("gc_wake_keywords", ["Hey Guarded", "O
 const wakeStopPhrases = useStorage<string[]>("gc_wake_stop_phrases", ["stop recording", "end recording", "stop listening", "luna stop"]);
 const wakeLanguage = useStorage<string>("gc_wake_language", "en-US");
 const wakeSilenceTimeoutMs = useStorage<number>("gc_wake_silence_ms", 4000);
-const speakReplyEnabled = useStorage<boolean>("sai_speak_reply", false);
-// Voice conversation mode: bundles wake listening + auto-speak + interrupt-on-
-// speech into a single hands-free toggle. When on, any non-trivial speech
-// triggers a recording turn (no wake keyword required), the assistant's reply
-// is spoken automatically, and speech during TTS playback interrupts and
-// captures the user's next turn.
-const voiceConversationMode = useStorage<boolean>("sai_voice_conversation", false);
-const lastSpokenSummary = ref<string | null>(null);
 const exportingTranscript = ref(false);
-const pendingSpokenAckLanguage = ref<string | null>(null);
 /** Per-message thinking toggle for models that support enable_thinking: undefined = auto, true = on, false = off */
 const thinkingMode = ref<boolean | undefined>(undefined);
 /** Images queued for the current composer message — analyzed and sent together on submit. */
@@ -1256,11 +1226,6 @@ function formatApprovalCountdown(value: number): string {
   if (minutes <= 0) return `${seconds}s`;
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
-
-const audioProgressPercent = computed(() => {
-  if (audioDuration.value <= 0) return 0;
-  return Math.min(100, Math.max(0, (audioCurrentTime.value / audioDuration.value) * 100));
-});
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
 function removeImage(idx: number) {
@@ -1355,58 +1320,9 @@ declare global {
   }
 }
 
-type SpeechLane = "ack" | "progress" | "reply";
-
-const SPEECH_LANE_PRIORITY: Record<SpeechLane, number> = {
-  ack: 1,
-  progress: 2,
-  reply: 3,
-};
-
 let wakeRecognition: BrowserSpeechRecognition | null = null;
 let wakeRestartTimer: number | null = null;
-let mediaRecorder: MediaRecorder | null = null;
-let mediaStream: MediaStream | null = null;
-let audioContext: AudioContext | null = null;
-let analyser: AnalyserNode | null = null;
-let audioIntervalId: number | null = null;
-let lastAudioActivityAt = 0;
-let observedSpeech = false;
 let wakeFeedbackTimer: number | null = null;
-let sendAckAudio: HTMLAudioElement | null = null;
-let sendAckAudioUrl: string | null = null;
-let progressAudio: HTMLAudioElement | null = null;
-let progressAudioUrl: string | null = null;
-let lastSpokenProgressText = "";
-let lastSpokenProgressAt = 0;
-const recordedChunks: Blob[] = [];
-const lastSpokenAckIndex = new Map<string, number>();
-const speechAudioCache = new Map<string, Blob>();
-const speechSummaryCache = new Map<string, string>();
-const MAX_SPEECH_AUDIO_CACHE_ENTRIES = 24;
-const MAX_SPEECH_SUMMARY_CACHE_ENTRIES = 16;
-let activeSpeechLane: SpeechLane | null = null;
-let activeSpeechToken = 0;
-let activeBrowserSpeechLane: SpeechLane | null = null;
-const lastAutoSpokenAssistantId = ref<string | null>(null);
-
-const SPOKEN_ACKNOWLEDGEMENTS: Record<string, string[]> = {
-  "de-DE": [
-    "Einen Moment, ich kümmere mich darum.",
-    "Alles klar, ich bin dran.",
-    "Verstanden, ich lege direkt los.",
-  ],
-  "pl-PL": [
-    "Chwileczkę, już się tym zajmuję.",
-    "Jasne, biorę się za to.",
-    "Dobrze, już działam.",
-  ],
-  "en-US": [
-    "One moment, I'm on it.",
-    "Alright, working on it now.",
-    "Got it, I'll take care of that.",
-  ],
-};
 
 interface FlagChip {
   label: string;
@@ -1700,11 +1616,14 @@ const orbAiState = computed(() => {
   if (gateway.pendingApproval || gateway.pendingInputRequest || gateway.pendingIntervention || gateway.hasOpenUserInput) {
     return "waiting";
   }
+  // The answer read aloud is the assistant talking, as much as tokens arriving.
+  if (speechActivity.value?.priority === "reply") return "speaking";
   // Tokens visibly arriving outranks still-unresolved tool calls.
   if (gateway.isStreaming) return "output";
   if (gateway.isLoading || analysing.value || hasRunningToolCalls.value || hasRunningSwarmTasks.value) {
     return "activity";
   }
+  if (voicePhase.value === "listening" || voicePhase.value === "hearing" || recordingState.value === "recording") return "listening";
   return "default";
 });
 
@@ -1903,10 +1822,7 @@ async function selectPanelArtifact(att: ChatAttachment): Promise<void> {
 
 watch(() => gateway.currentSessionId, () => {
   shellStore.reset();
-  lastAutoSpokenAssistantId.value = null;
-  stopSendAcknowledgementPlayback();
-  stopProgressPlayback();
-  stopReplySpeechPlayback({ resetPreview: true });
+  replyTextOpen.value = false;
   selectedPanelArtifact.value = null;
   panelArtifactPreview.value = null;
   panelArtifactError.value = null;
@@ -1937,22 +1853,15 @@ const latestAssistantMessage = computed(() => {
   return null;
 });
 const latestAssistantText = computed(() => latestAssistantMessage.value?.content ?? "");
-const currentProgressStatus = computed(() => {
-  if (!gateway.isLoading) return "";
-  for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
-    const message = gateway.messages[index];
-    if (message?.id === "streaming") {
-      return message.statusText?.trim() ?? "";
-    }
-  }
-  return "";
-});
 const multimodalStatus = computed(() => multimodalStore.status);
 const filesAvailable = computed(() => Boolean(multimodalStatus.value?.files.ok));
 const sttAvailable = computed(() => Boolean(multimodalStatus.value?.stt.ok));
 const ttsAvailable = computed(() => Boolean(multimodalStatus.value?.tts.ok));
 const wakeConfigured = computed(() => Boolean(multimodalStore.config.wakeWord.enabled));
-const browserRecordingAvailable = computed(() => typeof MediaRecorder !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia));
+// The microphone is read through an AudioContext (speech/voiceCapture.ts), not a MediaRecorder.
+const browserRecordingAvailable = computed(() => typeof window !== "undefined"
+  && Boolean(navigator.mediaDevices?.getUserMedia)
+  && Boolean(window.AudioContext ?? (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext));
 const browserSpeechRecognitionAvailable = computed(() => typeof window !== "undefined" && Boolean(window.SpeechRecognition ?? window.webkitSpeechRecognition));
 const browserSpeechPlaybackAvailable = computed(() => typeof window !== "undefined" && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined");
 const showFileInput = computed(() => filesAvailable.value || typeof FileReader !== "undefined");
@@ -1960,6 +1869,32 @@ const showAudioUpload = computed(() => sttAvailable.value);
 const showRecording = computed(() => sttAvailable.value && browserRecordingAvailable.value);
 const showWakeMode = computed(() => sttAvailable.value && wakeConfigured.value && browserSpeechRecognitionAvailable.value);
 const showSpeechPlayback = computed(() => ttsAvailable.value || browserSpeechPlaybackAvailable.value);
+/** A hands-free conversation needs a microphone, a transcriber and a voice — not the browser's wake-word recogniser. */
+const showVoiceConversation = computed(() => showRecording.value && showSpeechPlayback.value);
+
+const voice = useVoice({
+  ttsAvailable,
+  recordSilenceMs: wakeSilenceTimeoutMs,
+  appendToComposer,
+  submit: async (text) => {
+    appendToComposer(text);
+    await sendMessage();
+  },
+});
+const {
+  speakEnabled: speakReplyEnabled,
+  speechUpdates,
+  sttLanguage,
+  conversation: voiceConversationMode,
+  phase: voicePhase,
+  activity: speechActivity,
+  preparingReply,
+  lastReply,
+  micLevel,
+  recording: recordingState,
+  notice: voiceNotice,
+} = voice;
+
 const showMultimodalStatus = computed(() =>
   showFileInput.value ||
   showAudioUpload.value ||
@@ -2031,441 +1966,6 @@ function appendToComposer(text: string) {
     : text.trim();
 }
 
-function normalizeSpeechLocale(language: string | undefined): string {
-  const normalized = (language ?? "").trim().toLowerCase().replace(/_/g, "-");
-  if (!normalized) return "en-US";
-  if (normalized.startsWith("de")) return "de-DE";
-  if (normalized.startsWith("pl")) return "pl-PL";
-  if (normalized.startsWith("en")) return "en-US";
-  return "en-US";
-}
-
-const GERMAN_SPEECH_MARKERS = [
-  " und ", " der ", " die ", " das ", " nicht ", " ich ", " bitte ", " kann ", " wie ", " ist ", " für ", " mit ", "ü", "ö", "ä", "ß",
-];
-const ENGLISH_SPEECH_MARKERS = [
-  " and ", " the ", " this ", " that ", " you ", " your ", " can ", " how ", " today ", "please", " with ",
-];
-const POLISH_SPEECH_MARKERS = [
-  " i ", " nie ", " jest ", " oraz ", " może ", " jak ", " dla ", " się ", " że ", "cz", "sz", "ł", "ą", "ę",
-];
-
-function detectSpeechLocaleFromText(text: string, fallbackLanguage?: string): string {
-  const normalized = ` ${text.trim().toLowerCase()} `;
-  if (!normalized.trim()) {
-    return normalizeSpeechLocale(fallbackLanguage ?? multimodalStore.config.tts.defaultLanguage);
-  }
-
-  const germanScore = GERMAN_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
-  const englishScore = ENGLISH_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
-  const polishScore = POLISH_SPEECH_MARKERS.reduce((score, marker) => score + (normalized.includes(marker) ? 1 : 0), 0);
-
-  if (germanScore > englishScore && germanScore > polishScore) return "de-DE";
-  if (polishScore > germanScore && polishScore > englishScore) return "pl-PL";
-  if (englishScore > germanScore && englishScore > polishScore) return "en-US";
-  return normalizeSpeechLocale(fallbackLanguage ?? multimodalStore.config.tts.defaultLanguage);
-}
-
-function buildTtsLanguage(language: string | undefined): string {
-  const locale = normalizeSpeechLocale(language);
-  if (locale === "de-DE") return "de";
-  if (locale === "pl-PL") return "pl";
-  return "en";
-}
-
-function buildSpokenAcknowledgement(language: string | undefined): { text: string; lang: string } {
-  const locale = normalizeSpeechLocale(language);
-  const variants = SPOKEN_ACKNOWLEDGEMENTS[locale] ?? SPOKEN_ACKNOWLEDGEMENTS["en-US"];
-  const previousIndex = lastSpokenAckIndex.get(locale) ?? -1;
-  let nextIndex = Math.floor(Math.random() * variants.length);
-  if (variants.length > 1 && nextIndex === previousIndex) {
-    nextIndex = (nextIndex + 1) % variants.length;
-  }
-  lastSpokenAckIndex.set(locale, nextIndex);
-  return { text: variants[nextIndex]!, lang: locale };
-}
-
-function rememberSpeechAudio(key: string, blob: Blob): void {
-  if (speechAudioCache.has(key)) {
-    speechAudioCache.delete(key);
-  }
-  speechAudioCache.set(key, blob);
-  while (speechAudioCache.size > MAX_SPEECH_AUDIO_CACHE_ENTRIES) {
-    const oldestKey = speechAudioCache.keys().next().value;
-    if (!oldestKey) break;
-    speechAudioCache.delete(oldestKey);
-  }
-}
-
-function rememberSpeechSummary(key: string, summary: string): void {
-  if (speechSummaryCache.has(key)) {
-    speechSummaryCache.delete(key);
-  }
-  speechSummaryCache.set(key, summary);
-  while (speechSummaryCache.size > MAX_SPEECH_SUMMARY_CACHE_ENTRIES) {
-    const oldestKey = speechSummaryCache.keys().next().value;
-    if (!oldestKey) break;
-    speechSummaryCache.delete(oldestKey);
-  }
-}
-
-function buildSpeechAudioCacheKey(input: {
-  text: string;
-  language?: string;
-  voiceId?: string;
-  speaker?: string;
-  quality?: string;
-  speed?: number;
-}): string {
-  return JSON.stringify({
-    text: input.text,
-    language: input.language ?? "",
-    voiceId: input.voiceId ?? "",
-    speaker: input.speaker ?? "",
-    quality: input.quality ?? "",
-    speed: input.speed ?? 1,
-  });
-}
-
-function buildPreferredSpeechRequest(input: {
-  text: string;
-  language?: string;
-  speed?: number;
-}): {
-  text: string;
-  language: string;
-  voiceId?: string;
-  speaker?: string;
-  quality?: string;
-  speed?: number;
-} {
-  const voiceId = multimodalStore.config.tts.defaultVoiceId?.trim() || undefined;
-  const speaker = voiceId ? undefined : multimodalStore.config.tts.defaultSpeaker?.trim() || undefined;
-  const quality = multimodalStore.config.tts.defaultQuality?.trim() || undefined;
-  const playbackLocale = input.language?.trim()
-    ? normalizeSpeechLocale(input.language)
-    : detectSpeechLocaleFromText(input.text, multimodalStore.config.tts.defaultLanguage);
-  return {
-    text: input.text,
-    language: buildTtsLanguage(playbackLocale),
-    ...(voiceId ? { voiceId } : {}),
-    ...(speaker ? { speaker } : {}),
-    ...(quality ? { quality } : {}),
-    ...(input.speed !== undefined ? { speed: input.speed } : {}),
-  };
-}
-
-async function synthesizePreferredSpeech(input: {
-  text: string;
-  language?: string;
-  speed?: number;
-}): Promise<Blob> {
-  const request = buildPreferredSpeechRequest(input);
-  const cacheKey = buildSpeechAudioCacheKey(request);
-  const cached = speechAudioCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const audioBlob = await gateway.synthesizeSpeech(request);
-  rememberSpeechAudio(cacheKey, audioBlob);
-  return audioBlob;
-}
-
-async function summarizeSpeechText(text: string, maxSentences: number): Promise<string> {
-  const cacheKey = `${maxSentences}:${text}`;
-  const cached = speechSummaryCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const summary = await gateway.summarizeForSpeech({ text, maxSentences });
-  rememberSpeechSummary(cacheKey, summary);
-  return summary;
-}
-
-function cancelBrowserSpeechForLane(lane?: SpeechLane) {
-  if (typeof window === "undefined" || !browserSpeechPlaybackAvailable.value) return;
-  if (lane && activeBrowserSpeechLane !== lane) return;
-  window.speechSynthesis.cancel();
-  if (!lane || activeBrowserSpeechLane === lane) {
-    activeBrowserSpeechLane = null;
-  }
-}
-
-function releaseSpeechLane(lane: SpeechLane, token?: number) {
-  if (token !== undefined && token !== activeSpeechToken) return;
-  if (activeSpeechLane === lane) activeSpeechLane = null;
-  if (activeBrowserSpeechLane === lane) activeBrowserSpeechLane = null;
-}
-
-function stopReplySpeechPlayback(options: { cancelBrowser?: boolean; resetPreview?: boolean } = {}) {
-  const { cancelBrowser = true, resetPreview = false } = options;
-  audioPlayerEl.value?.pause();
-  audioPlaying.value = false;
-  if (resetPreview) {
-    revokeAudioPreview();
-  } else {
-    syncAudioPreviewState();
-  }
-  if (cancelBrowser) {
-    cancelBrowserSpeechForLane("reply");
-  }
-  releaseSpeechLane("reply");
-}
-
-function stopSendAcknowledgementPlayback(cancelBrowser = true) {
-  if (sendAckAudio) {
-    sendAckAudio.pause();
-    sendAckAudio = null;
-  }
-  if (sendAckAudioUrl) {
-    URL.revokeObjectURL(sendAckAudioUrl);
-    sendAckAudioUrl = null;
-  }
-  if (cancelBrowser) {
-    cancelBrowserSpeechForLane("ack");
-  }
-  releaseSpeechLane("ack");
-}
-
-function stopProgressPlayback(cancelBrowser = true) {
-  if (progressAudio) {
-    progressAudio.pause();
-    progressAudio = null;
-  }
-  if (progressAudioUrl) {
-    URL.revokeObjectURL(progressAudioUrl);
-    progressAudioUrl = null;
-  }
-  if (cancelBrowser) {
-    cancelBrowserSpeechForLane("progress");
-  }
-  releaseSpeechLane("progress");
-}
-
-function stopSpeechLane(lane: SpeechLane, options: { cancelBrowser?: boolean; resetReplyPreview?: boolean } = {}) {
-  const { cancelBrowser = true, resetReplyPreview = false } = options;
-  if (lane === "ack") {
-    stopSendAcknowledgementPlayback(cancelBrowser);
-    return;
-  }
-  if (lane === "progress") {
-    stopProgressPlayback(cancelBrowser);
-    return;
-  }
-  stopReplySpeechPlayback({ cancelBrowser, resetPreview: resetReplyPreview });
-}
-
-function claimSpeechLane(lane: SpeechLane): number | null {
-  const currentLane = activeSpeechLane;
-  if (currentLane && SPEECH_LANE_PRIORITY[currentLane] > SPEECH_LANE_PRIORITY[lane]) {
-    return null;
-  }
-
-  if (currentLane) {
-    stopSpeechLane(currentLane, { resetReplyPreview: currentLane === "reply" || lane === "reply" });
-  }
-
-  activeSpeechToken += 1;
-  activeSpeechLane = lane;
-  return activeSpeechToken;
-}
-
-function isSpeechLaneCurrent(lane: SpeechLane, token: number): boolean {
-  return activeSpeechLane === lane && activeSpeechToken === token;
-}
-
-function normalizeProgressSpeechText(raw: string): string | null {
-  const firstLine = raw.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
-  if (!firstLine) return null;
-  if (/^working on it/i.test(firstLine)) return null;
-  if (/^running\s+/i.test(firstLine)) return null;
-  if (/^completed\s+/i.test(firstLine)) return null;
-  if (/^swarm plan active:/i.test(firstLine)) {
-    if (!/\b(partial|failed|blocked)\b/i.test(firstLine)) return null;
-    return firstLine.replace(/^swarm plan active:/i, "Swarm update:").replace(/·/g, ",");
-  }
-  if (!/\b(approval|blocked|failed|error|stalled|recovering|reconnecting|timed out|timeout|needs attention|intervention|partial)\b/i.test(firstLine)) {
-    return null;
-  }
-  return firstLine.length > 140 ? `${firstLine.slice(0, 137).trimEnd()}...` : firstLine;
-}
-
-async function speakProgressUpdate(rawStatus: string): Promise<void> {
-  if (!speakReplyEnabled.value || !showSpeechPlayback.value) return;
-
-  const text = normalizeProgressSpeechText(rawStatus);
-  if (!text) return;
-  const spokenLocale = detectSpeechLocaleFromText(text, multimodalStore.config.tts.defaultLanguage);
-
-  const now = Date.now();
-  if (text === lastSpokenProgressText && now - lastSpokenProgressAt < 20_000) return;
-  if (now - lastSpokenProgressAt < 4_000) return;
-
-  const laneToken = claimSpeechLane("progress");
-  if (!laneToken) return;
-
-  lastSpokenProgressText = text;
-  lastSpokenProgressAt = now;
-
-  if (ttsAvailable.value) {
-    try {
-      const audioBlob = await synthesizePreferredSpeech({
-        text,
-        language: spokenLocale,
-        speed: 1.03,
-      });
-      if (!isSpeechLaneCurrent("progress", laneToken)) return;
-
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      progressAudio = audio;
-      progressAudioUrl = audioUrl;
-      audio.onended = () => {
-        if (progressAudio === audio) progressAudio = null;
-        if (progressAudioUrl === audioUrl) {
-          URL.revokeObjectURL(audioUrl);
-          progressAudioUrl = null;
-        }
-        releaseSpeechLane("progress", laneToken);
-      };
-      audio.onerror = () => {
-        if (progressAudio === audio) progressAudio = null;
-        if (progressAudioUrl === audioUrl) {
-          URL.revokeObjectURL(audioUrl);
-          progressAudioUrl = null;
-        }
-        releaseSpeechLane("progress", laneToken);
-      };
-      await audio.play();
-      return;
-    } catch {
-      if (isSpeechLaneCurrent("progress", laneToken)) {
-        stopProgressPlayback();
-      }
-      return;
-    }
-  }
-
-  if (browserSpeechPlaybackAvailable.value && typeof window !== "undefined") {
-    try {
-      if (!isSpeechLaneCurrent("progress", laneToken)) return;
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = spokenLocale;
-      const voice = selectBrowserSpeechVoice(utterance.lang);
-      if (voice) utterance.voice = voice;
-      utterance.rate = 1.03;
-      utterance.pitch = 1;
-      activeBrowserSpeechLane = "progress";
-      utterance.onend = () => releaseSpeechLane("progress", laneToken);
-      utterance.onerror = () => releaseSpeechLane("progress", laneToken);
-      window.speechSynthesis.speak(utterance);
-    } catch {
-      if (isSpeechLaneCurrent("progress", laneToken)) {
-        stopProgressPlayback();
-      }
-    }
-    return;
-  }
-
-  releaseSpeechLane("progress", laneToken);
-}
-
-function selectBrowserSpeechVoice(language: string | undefined): SpeechSynthesisVoice | null {
-  if (typeof window === "undefined" || !browserSpeechPlaybackAvailable.value) return null;
-
-  const desiredLocale = normalizeSpeechLocale(language).toLowerCase();
-  const desiredPrefix = desiredLocale.slice(0, 2);
-  const configuredNames = [
-    multimodalStore.config.tts.defaultVoiceId,
-    multimodalStore.config.tts.defaultSpeaker,
-  ]
-    .map((value) => value?.trim().toLowerCase())
-    .filter((value): value is string => Boolean(value));
-
-  const voices = window.speechSynthesis.getVoices();
-  if (voices.length === 0) return null;
-
-  const scored = voices.map((voice) => {
-    const voiceLang = (voice.lang || "").toLowerCase();
-    const voiceName = (voice.name || "").toLowerCase();
-    let score = 0;
-    if (voiceLang === desiredLocale) score += 6;
-    else if (voiceLang.startsWith(desiredPrefix)) score += 4;
-    if (configuredNames.some((name) => voiceName.includes(name))) score += 5;
-    if (voice.default) score += 1;
-    return { voice, score };
-  });
-
-  scored.sort((left, right) => right.score - left.score);
-  return scored[0]?.score > 0 ? scored[0].voice : null;
-}
-
-async function speakSendAcknowledgement(language: string | undefined): Promise<void> {
-  if (!showSpeechPlayback.value || speakReplyEnabled.value) return;
-
-  const { text, lang } = buildSpokenAcknowledgement(language);
-  const laneToken = claimSpeechLane("ack");
-  if (!laneToken) return;
-
-  if (ttsAvailable.value) {
-    try {
-      const audioBlob = await synthesizePreferredSpeech({ text, language: lang, speed: 1.02 });
-      if (!isSpeechLaneCurrent("ack", laneToken)) return;
-
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      sendAckAudio = audio;
-      sendAckAudioUrl = audioUrl;
-      audio.onended = () => {
-        if (sendAckAudio === audio) sendAckAudio = null;
-        if (sendAckAudioUrl === audioUrl) {
-          URL.revokeObjectURL(audioUrl);
-          sendAckAudioUrl = null;
-        }
-        releaseSpeechLane("ack", laneToken);
-      };
-      audio.onerror = () => {
-        if (sendAckAudio === audio) sendAckAudio = null;
-        if (sendAckAudioUrl === audioUrl) {
-          URL.revokeObjectURL(audioUrl);
-          sendAckAudioUrl = null;
-        }
-        releaseSpeechLane("ack", laneToken);
-      };
-      await audio.play();
-      return;
-    } catch {
-      if (isSpeechLaneCurrent("ack", laneToken)) {
-        stopSendAcknowledgementPlayback();
-      }
-      return;
-    }
-  }
-
-  try {
-    if (!browserSpeechPlaybackAvailable.value || typeof window === "undefined") {
-      releaseSpeechLane("ack", laneToken);
-      return;
-    }
-    if (!isSpeechLaneCurrent("ack", laneToken)) return;
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang;
-    const voice = selectBrowserSpeechVoice(lang);
-    if (voice) utterance.voice = voice;
-    utterance.rate = 1.02;
-    utterance.pitch = 1;
-    activeBrowserSpeechLane = "ack";
-    utterance.onend = () => releaseSpeechLane("ack", laneToken);
-    utterance.onerror = () => releaseSpeechLane("ack", laneToken);
-    window.speechSynthesis.speak(utterance);
-  } catch {
-    if (isSpeechLaneCurrent("ack", laneToken)) {
-      releaseSpeechLane("ack", laneToken);
-    }
-    // Best-effort acknowledgement only.
-  }
-}
-
 function isTextLikeFile(file: File): boolean {
   if (file.type.startsWith("text/")) return true;
   return /\.(txt|md|markdown|csv|json|log|yaml|yml|xml)$/i.test(file.name);
@@ -2494,81 +1994,6 @@ async function convertLocalTextFileToMarkdown(file: File): Promise<string> {
     return `\`\`\`csv\n${trimmed}\n\`\`\``;
   }
   return trimmed;
-}
-
-function revokeAudioPreview() {
-  audioCurrentTime.value = 0;
-  audioDuration.value = 0;
-  audioPlaying.value = false;
-  audioSummaryExpanded.value = false;
-  if (!audioPreviewUrl.value) return;
-  URL.revokeObjectURL(audioPreviewUrl.value);
-  audioPreviewUrl.value = null;
-}
-
-function syncAudioPreviewState() {
-  const player = audioPlayerEl.value;
-  if (!player) return;
-  audioCurrentTime.value = Number.isFinite(player.currentTime) ? player.currentTime : 0;
-  audioDuration.value = Number.isFinite(player.duration) ? player.duration : 0;
-  audioPlaying.value = !player.paused && !player.ended;
-}
-
-function handleAudioPreviewEnded() {
-  syncAudioPreviewState();
-  audioPlaying.value = false;
-  audioCurrentTime.value = audioDuration.value;
-  releaseSpeechLane("reply");
-}
-
-async function toggleAudioPreviewPlayback() {
-  const player = audioPlayerEl.value;
-  if (!player) return;
-  if (player.paused || player.ended) {
-    const laneToken = claimSpeechLane("reply");
-    if (!laneToken) return;
-    if (player.ended) player.currentTime = 0;
-    try {
-      await player.play();
-    } catch {
-      releaseSpeechLane("reply", laneToken);
-    }
-  } else {
-    player.pause();
-    releaseSpeechLane("reply");
-  }
-  syncAudioPreviewState();
-}
-
-async function restartAudioPreview() {
-  const player = audioPlayerEl.value;
-  if (!player) return;
-  const laneToken = claimSpeechLane("reply");
-  if (!laneToken) return;
-  player.currentTime = 0;
-  try {
-    await player.play();
-  } catch {
-    releaseSpeechLane("reply", laneToken);
-  }
-  syncAudioPreviewState();
-}
-
-function seekAudioPreview(event: Event) {
-  const player = audioPlayerEl.value;
-  if (!player || audioDuration.value <= 0) return;
-  const value = Number((event.target as HTMLInputElement).value);
-  if (!Number.isFinite(value)) return;
-  player.currentTime = (value / 100) * audioDuration.value;
-  syncAudioPreviewState();
-}
-
-function formatMediaTime(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0:00";
-  const totalSeconds = Math.max(0, Math.floor(value));
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function createSpeechRecognition(): BrowserSpeechRecognition | null {
@@ -2619,33 +2044,16 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
     const lowered = transcript.toLowerCase();
 
     if (wakeStopPhrases.value.some((phrase) => lowered.includes(phrase.toLowerCase()))) {
-      void stopRecording(true);
+      voice.finishRecording();
       wakeStatus.value = "Stop phrase detected";
       setWakeFeedback("processing", "Stop phrase detected. Finishing the recording and starting transcription.");
       return;
     }
 
-    // Voice-conversation mode: any non-trivial speech triggers a recording
-    // turn. If the assistant is currently speaking, the user's speech also
-    // interrupts the TTS playback so they can talk over it.
-    if (voiceConversationMode.value && transcript.length >= 2) {
-      const ttsActive = activeSpeechLane !== null || activeBrowserSpeechLane !== null;
-      if (ttsActive) {
-        cancelAllSpeechLanes();
-        setWakeFeedback("recording", "Interrupting and recording");
-      }
-      if (recordingState.value === "idle") {
-        wakeStatus.value = "Listening";
-        void startRecording(true);
-      }
-      return;
-    }
-
     const matchedKeyword = wakeKeywords.value.find((phrase) => lowered.includes(phrase.toLowerCase()));
-    if (matchedKeyword) {
+    if (matchedKeyword && recordingState.value === "idle") {
       wakeStatus.value = `Wake phrase detected: ${matchedKeyword}`;
-      setWakeFeedback("recording", `Wake phrase detected: ${matchedKeyword}`);
-      void startRecording(true);
+      void startWakeRecording();
       return;
     }
   }
@@ -2683,134 +2091,40 @@ async function toggleWakeListening() {
   recognition.start();
 }
 
-function cleanupRecordingResources() {
-  if (audioIntervalId !== null) {
-    window.clearInterval(audioIntervalId);
-    audioIntervalId = null;
-  }
-  analyser?.disconnect();
-  analyser = null;
-  audioContext?.close().catch(() => undefined);
-  audioContext = null;
-  mediaStream?.getTracks().forEach((track) => track.stop());
-  mediaStream = null;
-}
-
-async function startRecording(fromWakeWord = false) {
-  if (recordingState.value !== "idle") return;
-  if (!navigator.mediaDevices?.getUserMedia) {
-    wakeStatus.value = "Microphone capture unavailable";
-    setWakeFeedback("error", wakeStatus.value, 6000);
-    return;
-  }
-
-  if (fromWakeWord) stopWakeRecognition();
-
-  revokeAudioPreview();
-  multimodalBusy.value = true;
-  recordingState.value = "recording";
-  wakeStatus.value = fromWakeWord ? "Wake-triggered recording" : "Recording from microphone";
-  setWakeFeedback("recording", fromWakeWord ? "Wake word detected. Recording has started." : "Recording has started.");
-  recordedChunks.length = 0;
-  observedSpeech = false;
-  lastAudioActivityAt = Date.now();
-
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(mediaStream);
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) recordedChunks.push(event.data);
-    };
-    mediaRecorder.onstop = () => {
-      void finalizeRecording();
-    };
-
-    audioContext = new AudioContext();
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-    const source = audioContext.createMediaStreamSource(mediaStream);
-    source.connect(analyser);
-    const data = new Uint8Array(analyser.frequencyBinCount);
-
-    audioIntervalId = window.setInterval(() => {
-      if (!analyser || recordingState.value !== "recording") return;
-      analyser.getByteFrequencyData(data);
-      const avg = data.reduce((sum, value) => sum + value, 0) / data.length;
-      if (avg > 18) {
-        observedSpeech = true;
-        lastAudioActivityAt = Date.now();
-      }
-      if (observedSpeech && Date.now() - lastAudioActivityAt > wakeSilenceTimeoutMs.value) {
-        void stopRecording(true);
-      }
-    }, 150);
-
-    mediaRecorder.start(250);
-  } catch (error) {
-    cleanupRecordingResources();
-    recordingState.value = "idle";
-    multimodalBusy.value = false;
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
-    setWakeFeedback("error", wakeStatus.value, 7000);
-    if (wakeListening.value) {
-      wakeRecognition = createSpeechRecognition();
-      scheduleWakeRestart(500);
-    }
+function reportRecording(outcome: RecordingOutcome): void {
+  if (outcome.kind === "transcribed") {
+    wakeStatus.value = `Transcript ready${outcome.language ? ` (${outcome.language})` : ""}`;
+    setWakeFeedback("success", wakeStatus.value, 5000);
+  } else if (outcome.kind === "empty") {
+    wakeStatus.value = "No speech was heard";
+    setWakeFeedback("error", "No speech was heard. Speak a little longer and try again.", 7000);
+  } else {
+    wakeStatus.value = outcome.message;
+    setWakeFeedback("error", outcome.message, 7000);
   }
 }
 
-async function stopRecording(restartWake = false) {
-  if (recordingState.value !== "recording") return;
-  setWakeFeedback("processing", "Recording finished. Transcribing now...");
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-  }
-  if (!restartWake) wakeListening.value = false;
-}
-
-async function finalizeRecording() {
-  cleanupRecordingResources();
-  recordingState.value = "processing";
-  wakeStatus.value = "Transcribing recorded audio";
-  setWakeFeedback("processing", "Recording finished. Transcribing now...");
-
-  try {
-    const audioBlob = new Blob(recordedChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
-    if (audioBlob.size <= 0) {
-      wakeStatus.value = "No usable audio was captured";
-      setWakeFeedback("error", "No usable audio was captured. Speak a little longer and try again.", 7000);
-      return;
-    }
-    const result = await gateway.transcribeAudio(audioBlob, { language: wakeLanguage.value });
-    if (result.text.trim()) {
-      appendToComposer(result.text);
-      pendingSpokenAckLanguage.value = result.language || wakeLanguage.value;
-      wakeStatus.value = `Transcript ready${result.language ? ` (${result.language})` : ""}`;
-      setWakeFeedback("success", wakeStatus.value, 5000);
-    } else {
-      wakeStatus.value = "No transcription returned";
-      setWakeFeedback("error", "No transcription was returned. Try speaking a bit longer or reducing background noise.", 7000);
-    }
-  } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
-    setWakeFeedback("error", wakeStatus.value, 7000);
-  } finally {
-    mediaRecorder = null;
-    recordingState.value = "idle";
-    multimodalBusy.value = false;
-    if (wakeListening.value) {
-      wakeRecognition = createSpeechRecognition();
-      scheduleWakeRestart(300);
-    }
+/** A wake phrase was heard: record what follows it, then listen for the phrase again. */
+async function startWakeRecording(): Promise<void> {
+  stopWakeRecognition();
+  wakeStatus.value = "Wake-triggered recording";
+  setWakeFeedback("recording", "Wake word detected. Recording has started.");
+  reportRecording(await voice.startRecording());
+  if (wakeListening.value) {
+    wakeRecognition = createSpeechRecognition();
+    scheduleWakeRestart(300);
   }
 }
 
 async function toggleRecording() {
   if (recordingState.value === "recording") {
-    await stopRecording(false);
+    setWakeFeedback("processing", "Recording finished. Transcribing now...");
+    voice.finishRecording();
     return;
   }
-  await startRecording(false);
+  if (recordingState.value !== "idle") return;
+  wakeStatus.value = "Recording from microphone";
+  reportRecording(await voice.startRecording());
 }
 
 function onDocumentSelected(event: Event) {
@@ -2852,13 +2166,10 @@ async function transcribeDroppedAudio(file: File): Promise<void> {
   multimodalBusy.value = true;
   wakeStatus.value = `Transcribing ${file.name}`;
   try {
-    const result = await gateway.transcribeAudio(file, { language: wakeLanguage.value });
-    if (!result.text.trim()) throw new Error("Audio transcription returned no text");
-    appendToComposer(result.text);
-    pendingSpokenAckLanguage.value = result.language || wakeLanguage.value;
-    wakeStatus.value = `Audio added from ${file.name}`;
-  } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
+    const outcome = await voice.transcribeFile(file);
+    wakeStatus.value = outcome.kind === "transcribed"
+      ? `Audio added from ${file.name}`
+      : outcome.kind === "empty" ? "Audio transcription returned no text" : outcome.message;
   } finally {
     multimodalBusy.value = false;
   }
@@ -2928,180 +2239,38 @@ async function onChatDrop(event: DragEvent): Promise<void> {
   }
 }
 
-async function speakLatestAssistant(options: { forceFullText?: boolean; reason?: "manual" | "auto" } = {}) {
-  const latest = latestAssistantMessage.value;
-  const text = latest?.content.trim() ?? "";
-  if (!text) return;
-  if (options.reason === "auto" && latest && lastAutoSpokenAssistantId.value === latest.id) return;
+/** The voice-conversation toggle's tooltip: what the conversation is doing. */
+const voiceConversationStatusLabel = computed(() => (voiceConversationMode.value ? voicePhase.value : "off"));
 
-  const laneToken = claimSpeechLane("reply");
-  if (!laneToken) return;
+const voiceBarBusy = computed(() => Boolean(speechActivity.value || preparingReply.value));
+const voiceBarListening = computed(() =>
+  voicePhase.value === "listening" || voicePhase.value === "hearing" || recordingState.value === "recording");
+const showVoiceBar = computed(() => Boolean(
+  voiceBarBusy.value || voiceConversationMode.value || lastReply.value || recordingState.value !== "idle" || voiceNotice.value));
 
-  multimodalBusy.value = true;
-  lastSpokenSummary.value = null;
-  wakeStatus.value = "Summarising reply";
-  try {
-    // Summarise first unless caller explicitly wants the full text
-    let spoken = text;
-    if (!options.forceFullText && ttsAvailable.value) {
-      try {
-        const maxSentences = multimodalStore.config.tts.speakReplySummaryMaxSentences ?? 3;
-        spoken = await summarizeSpeechText(text, maxSentences);
-        if (!isSpeechLaneCurrent("reply", laneToken)) return;
-        lastSpokenSummary.value = spoken;
-        audioSummaryExpanded.value = false;
-      } catch {
-        // Summarisation failed — fall back to speaking the full text
-        spoken = text;
-      }
-    }
-
-    wakeStatus.value = "Generating speech";
-    const spokenLocale = detectSpeechLocaleFromText(spoken, multimodalStore.config.tts.defaultLanguage);
-    if (ttsAvailable.value) {
-      const audioBlob = await synthesizePreferredSpeech({
-        text: spoken,
-        language: spokenLocale,
-      });
-      if (!isSpeechLaneCurrent("reply", laneToken)) return;
-
-      revokeAudioPreview();
-      audioPreviewUrl.value = URL.createObjectURL(audioBlob);
-      await nextTick();
-      const player = audioPlayerEl.value;
-      if (player) {
-        try {
-          await player.play();
-          if (options.reason === "auto" && latest) {
-            lastAutoSpokenAssistantId.value = latest.id;
-          }
-        } catch {
-          releaseSpeechLane("reply", laneToken);
-        }
-      } else {
-        releaseSpeechLane("reply", laneToken);
-      }
-      wakeStatus.value = "Reply spoken";
-    } else if (browserSpeechPlaybackAvailable.value) {
-      if (!isSpeechLaneCurrent("reply", laneToken)) return;
-      cancelBrowserSpeechForLane();
-      const utterance = new SpeechSynthesisUtterance(spoken);
-      utterance.lang = spokenLocale;
-      const voice = selectBrowserSpeechVoice(utterance.lang);
-      if (voice) utterance.voice = voice;
-      await new Promise<void>((resolve, reject) => {
-        activeBrowserSpeechLane = "reply";
-        utterance.onend = () => {
-          releaseSpeechLane("reply", laneToken);
-          resolve();
-        };
-        utterance.onerror = () => {
-          releaseSpeechLane("reply", laneToken);
-          reject(new Error("Browser speech playback failed"));
-        };
-        window.speechSynthesis.speak(utterance);
-      });
-      lastSpokenSummary.value = spoken;
-      audioSummaryExpanded.value = false;
-      if (options.reason === "auto" && latest) {
-        lastAutoSpokenAssistantId.value = latest.id;
-      }
-      wakeStatus.value = "Reply spoken in browser";
-    } else {
-      releaseSpeechLane("reply", laneToken);
-      throw new Error("Speech playback is unavailable in this browser");
-    }
-  } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
-  } finally {
-    multimodalBusy.value = false;
-  }
-}
-
-function toggleSpeakReply() {
-  speakReplyEnabled.value = !speakReplyEnabled.value;
-  writeSpeakReplySummaryStorage(speakReplyEnabled.value);
-}
-
-/**
- * Stop every active speech lane (server-TTS preview audio + browser
- * synth) at once. Used when the user interrupts the assistant during
- * voice conversation mode.
- */
-function cancelAllSpeechLanes(): void {
-  stopSpeechLane("reply", { cancelBrowser: true, resetReplyPreview: true });
-  stopSpeechLane("ack", { cancelBrowser: true });
-  stopSpeechLane("progress", { cancelBrowser: true });
-}
-
-/** Human-readable status for the voice-conversation toggle's tooltip.
- *  Tooltips re-evaluate on hover, so a plain reactive computed over the
- *  refs we actually have is enough — the speaking phase is implied by
- *  gateway.isLoading transitioning from true → false. */
-const voiceConversationStatusLabel = computed(() => {
-  if (!voiceConversationMode.value) return "off";
-  if (recordingState.value === "recording") return "recording";
-  if (recordingState.value === "processing") return "transcribing";
-  if (gateway.isLoading) return "thinking";
-  if (wakeListening.value) return "listening";
-  return "ready";
-});
-
-/**
- * Toggle the bundled hands-free conversation mode. Composes the
- * existing wake-listener + speak-reply pieces so the user only has
- * one button to think about.
- */
-async function toggleVoiceConversation(): Promise<void> {
+/** What the voice bar says is happening. */
+const voiceBarLabel = computed(() => {
+  const speaking = speechActivity.value;
+  if (speaking?.priority === "reply") return speaking.label === "summary" ? "Speaking a summary of the answer" : "Speaking the answer";
+  if (speaking) return speaking.label ? `“${speaking.label}”` : "Speaking";
+  if (preparingReply.value) return "Preparing a spoken summary…";
   if (voiceConversationMode.value) {
-    voiceConversationMode.value = false;
-    if (wakeListening.value) await toggleWakeListening();
-    cancelAllSpeechLanes();
-    setWakeFeedback("idle", "");
-    wakeStatus.value = "Voice conversation off";
-    return;
+    if (voicePhase.value === "hearing") return "Hearing you…";
+    if (voicePhase.value === "transcribing") return "Transcribing…";
+    if (voicePhase.value === "thinking") return "Working on it…";
+    if (voicePhase.value === "listening") return "Listening — just talk";
   }
-
-  voiceConversationMode.value = true;
-  if (!speakReplyEnabled.value) {
-    speakReplyEnabled.value = true;
-    writeSpeakReplySummaryStorage(true);
-  }
-  if (!wakeListening.value) {
-    await toggleWakeListening();
-  }
-  setWakeFeedback("listening", "Voice conversation active — start talking");
-  wakeStatus.value = "Voice conversation: listening";
-}
-
-// In voice-conversation mode, re-arm the wake listener after a turn
-// completes (and any reply TTS finishes). Mirrors the auto-speak watcher
-// pattern so the user doesn't have to click anything between turns.
-watch(() => gateway.isLoading, (loading, prev) => {
-  if (!voiceConversationMode.value) return;
-  if (prev === true && loading === false) {
-    // Turn finished — wait briefly so the auto-speak watcher (separate
-    // file-scope watcher below) has a chance to fire first, then poll
-    // until the speech lane idles before re-arming the listener.
-    const armWhenIdle = (): void => {
-      if (!voiceConversationMode.value) return;
-      // activeSpeechLane / activeBrowserSpeechLane are plain `let` bindings
-      // (see top of script section) — read directly, no .value.
-      const ttsActive = activeSpeechLane !== null || activeBrowserSpeechLane !== null;
-      if (ttsActive) {
-        window.setTimeout(armWhenIdle, 400);
-        return;
-      }
-      if (recordingState.value !== "idle") return; // user already started talking
-      if (!wakeListening.value) {
-        void toggleWakeListening();
-      } else {
-        wakeStatus.value = "Voice conversation: listening";
-      }
-    };
-    window.setTimeout(armWhenIdle, 250);
-  }
+  if (recordingState.value === "recording") return "Recording — pause or press Done to finish";
+  if (recordingState.value === "processing") return "Transcribing…";
+  if (lastReply.value) return lastReply.value.summarized ? "Spoke a summary of the answer" : "Spoke the answer";
+  return "";
 });
+
+function dismissVoiceBar(): void {
+  voiceNotice.value = "";
+  replyTextOpen.value = false;
+  voice.dismissReply();
+}
 
 // ── Slash-command autocomplete ──────────────────────────────────────────────
 // Triggered when the textarea starts with '/' and the user is still typing the
@@ -3261,9 +2430,6 @@ async function sendMessage() {
     showSteeringNote("Still reading your attachments — send this once they're done.");
     return;
   }
-  const spokenAckLanguage = pendingSpokenAckLanguage.value;
-  pendingSpokenAckLanguage.value = null;
-
   const jobMatch = !hasImages && !hasDocs
     ? trimmedText.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s)
     : null;
@@ -3286,10 +2452,6 @@ async function sendMessage() {
   if (allNames.length > 0) displayParts.push(`📎 ${allNames.join(", ")}`);
   if (trimmedText) displayParts.push(trimmedText);
   const displayContent = displayParts.join("\n");
-
-  if (spokenAckLanguage) {
-    void speakSendAcknowledgement(spokenAckLanguage);
-  }
 
   if (pendingImages.length === 0 && pendingDocs.length === 0) {
     try {
@@ -3882,10 +3044,6 @@ watch(() => gateway.messages.length, scrollToBottom);
 watch(() => gateway.streamingText, scrollToBottom);
 // A new question card grows the stream without adding a message; keep it in view.
 watch(() => gateway.sessionUserInputs.length, (count, before) => { if (count > (before ?? 0)) scrollToBottom(); });
-watch(currentProgressStatus, (status) => {
-  if (!status || !gateway.isLoading) return;
-  void speakProgressUpdate(status);
-});
 watch(compactComposer, () => {
   nextTick(() => { adjustComposerHeight(); });
 }, { immediate: true });
@@ -3896,24 +3054,16 @@ watch(() => [gateway.pendingApproval?.approvalId, gateway.pendingInputRequest?.i
   approvalNowMs.value = Date.now();
 });
 
-// Auto-speak: fires when a turn finishes (isLoading flips false → true → false)
-// and the speak-reply toggle is on and the user is in voice-input mode.
+// A turn landing here keeps the view following its answer. (Reading it aloud: speech/useVoice.ts.)
 let _wasLoading = false;
 // The session the running turn belongs to. Switching sessions mid-turn also clears the flag —
-// the turn goes on there, unwatched — and that is no answer to read aloud.
+// the turn goes on there, unwatched.
 let _loadingSessionId: string | null = null;
 watch(() => gateway.isLoading, (loading) => {
   const landedHere = _wasLoading && !loading && gateway.currentSessionId === _loadingSessionId;
   if (loading) _loadingSessionId = gateway.currentSessionId;
   // The answer is laid out just after the flag flips; its growth still belongs to the turn.
   if (landedHere) turnFollowUntil = Date.now() + LANDING_FOLLOW_MS;
-  if (landedHere && speakReplyEnabled.value && showSpeechPlayback.value) {
-    void speakLatestAssistant({ reason: "auto" });
-  }
-  if (!loading) {
-    stopSendAcknowledgementPlayback();
-    stopProgressPlayback();
-  }
   _wasLoading = loading;
 });
 watch(() => gateway.connected, async (connected) => {
@@ -3940,15 +3090,8 @@ onUnmounted(() => {
     window.clearInterval(approvalClockId);
     approvalClockId = null;
   }
-  stopSendAcknowledgementPlayback();
-  stopProgressPlayback();
-  stopReplySpeechPlayback({ resetPreview: true });
   clearWakeFeedbackTimer();
   stopWakeRecognition();
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
-  }
-  cleanupRecordingResources();
 });
 </script>
 
@@ -4232,55 +3375,115 @@ onUnmounted(() => {
   100% { transform: translateX(210%); opacity: 0.72; }
 }
 
-.reply-audio-panel {
+.voice-bar {
   display: grid;
-  gap: 0.5rem;
+  gap: 0.45rem;
   margin-bottom: 0.65rem;
-  padding: 0.6rem 0.75rem;
+  padding: 0.55rem 0.75rem;
   border-radius: 1rem;
-  border: 1px solid rgba(125, 211, 252, 0.12);
+  border: 1px solid rgba(125, 211, 252, 0.14);
   background: linear-gradient(180deg, rgba(8, 18, 32, 0.86), rgba(7, 14, 26, 0.68));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-.reply-audio-panel__header {
+.voice-bar__row {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 0.45rem;
-}
-
-.reply-audio-panel__headline {
-  display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
+  gap: 0.65rem;
   min-width: 0;
   flex-wrap: wrap;
 }
 
-.reply-audio-panel__eyebrow {
-  font-size: 0.64rem;
+.voice-bar__indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 1.1rem;
+  flex-shrink: 0;
+}
+
+.voice-bar__indicator > span {
+  width: 3px;
+  height: 30%;
+  border-radius: 9999px;
+  background: rgb(100 116 139);
+  transition: background 0.2s ease;
+}
+
+.voice-bar__indicator--speaking > span {
+  background: rgb(52 211 153);
+  animation: voice-bar-wave 0.9s ease-in-out infinite;
+}
+
+.voice-bar__indicator--listening > span {
+  background: rgb(56 189 248);
+  animation: voice-bar-wave 1.6s ease-in-out infinite;
+}
+
+.voice-bar__indicator > span:nth-child(2) { animation-delay: 0.15s; }
+.voice-bar__indicator > span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes voice-bar-wave {
+  0%, 100% { height: 30%; }
+  50% { height: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-bar__indicator > span { animation: none !important; height: 60%; }
+}
+
+.voice-bar__text {
+  display: grid;
+  gap: 0.05rem;
+  min-width: 0;
+  flex: 1 1 10rem;
+}
+
+.voice-bar__eyebrow {
+  font-size: 0.62rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgb(125 211 252);
 }
 
-.reply-audio-panel__meta {
-  margin-top: 0;
-  font-size: 0.72rem;
-  color: rgb(148 163 184);
+.voice-bar__label {
+  font-size: 0.76rem;
+  color: rgb(203 213 225);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.reply-audio-panel__transport {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+.voice-bar__label--notice {
+  color: rgb(252 165 165);
+}
+
+.voice-bar__meter {
+  width: 4.5rem;
+  height: 0.22rem;
+  border-radius: 9999px;
+  background: rgba(56, 189, 248, 0.12);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.voice-bar__meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: rgb(56 189 248);
+  transition: width 0.08s linear;
+}
+
+.voice-bar__actions {
+  display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-left: auto;
 }
 
-.reply-audio-panel__play,
-.reply-audio-panel__restart,
-.reply-audio-panel__summary-toggle {
+.voice-bar__button {
   border-radius: 9999px;
   border: 1px solid rgba(125, 211, 252, 0.18);
   background: rgba(11, 26, 44, 0.7);
@@ -4291,95 +3494,64 @@ onUnmounted(() => {
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-.reply-audio-panel__play:hover:not(:disabled),
-.reply-audio-panel__restart:hover:not(:disabled),
-.reply-audio-panel__summary-toggle:hover:not(:disabled) {
+.voice-bar__button:hover {
   border-color: rgba(125, 211, 252, 0.38);
   background: rgba(16, 38, 63, 0.8);
   color: white;
 }
 
-.reply-audio-panel__play:disabled,
-.reply-audio-panel__restart:disabled,
-.reply-audio-panel__summary-toggle:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.voice-bar__button--stop {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(127, 29, 29, 0.45);
+  color: rgb(254 226 226);
 }
 
-.reply-audio-panel__actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
+.voice-bar__button--stop:hover {
+  border-color: rgba(248, 113, 113, 0.7);
+  background: rgba(153, 27, 27, 0.6);
 }
 
-.reply-audio-panel__range {
-  width: 100%;
-  appearance: none;
-  min-width: 0;
-  height: 0.22rem;
-  border-radius: 9999px;
-  background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(34, 211, 238, 0.55));
-  outline: none;
-}
-
-.reply-audio-panel__range::-webkit-slider-thumb {
-  appearance: none;
-  width: 0.72rem;
-  height: 0.72rem;
-  border-radius: 9999px;
-  border: 2px solid rgba(7, 14, 26, 0.95);
-  background: rgb(224 242 254);
-  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.18);
-}
-
-.reply-audio-panel__range::-moz-range-thumb {
-  width: 0.72rem;
-  height: 0.72rem;
-  border-radius: 9999px;
-  border: 2px solid rgba(7, 14, 26, 0.95);
-  background: rgb(224 242 254);
-  box-shadow: 0 0 0 2px rgba(125, 211, 252, 0.18);
-}
-
-.reply-audio-panel__time {
-  min-width: 4.2rem;
-  text-align: right;
-  font-size: 0.7rem;
-  color: rgb(148 163 184);
-  font-variant-numeric: tabular-nums;
-}
-
-.reply-audio-panel__summary {
-  display: grid;
-  gap: 0.12rem;
-  margin: 0;
-  padding-top: 0.2rem;
-  font-size: 0.7rem;
-  line-height: 1.4;
-  color: rgb(148 163 184);
-}
-
-.reply-audio-panel__summary-label {
-  font-size: 0.62rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+.voice-bar__close {
   color: rgb(100 116 139);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.35rem;
+  line-height: 1;
 }
 
-@media (max-width: 640px) {
-  .reply-audio-panel__transport {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
+.voice-bar__close:hover {
+  color: rgb(226 232 240);
+}
 
-  .reply-audio-panel__time {
-    grid-column: 1 / 2;
-    text-align: left;
-  }
+.voice-bar__body {
+  margin: 0;
+  padding-top: 0.15rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: rgb(148 163 184);
+  max-height: 10rem;
+  overflow-y: auto;
+}
 
-  .reply-audio-panel__actions {
-    grid-column: 2 / 3;
-    justify-self: end;
-  }
+.chat-dropdown__voice-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.5rem;
+}
+
+.chat-dropdown__voice-setting {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.68rem;
+  color: rgb(148 163 184);
+}
+
+.chat-dropdown__select {
+  border-radius: 0.7rem;
+  border: 1px solid rgba(125, 211, 252, 0.16);
+  background: rgba(11, 26, 44, 0.75);
+  color: rgb(224 242 254);
+  font-size: 0.74rem;
+  padding: 0.35rem 0.5rem;
 }
 
 .chat-workspace {

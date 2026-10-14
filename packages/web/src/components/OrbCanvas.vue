@@ -171,6 +171,29 @@ const STATE_DEFS: Record<string, {
     pulsesFromCenter: true, neuralSphereScale: 1.02, frozenAnimation: false,
     orbitSpeedFactor: 1.7, coreIntensity: 1.05,
   },
+  // The answer read aloud: the output state's pulses from the centre, in a calmer teal.
+  speaking: {
+    portalSpeedFactor: 0.6, pulseSpeedFactor: 0.95, pulseRateFactor: 1.1,
+    particleOpacity: BASE_PARTICLE_OPACITY + 0.06,
+    pulseColorOverride: new THREE.Color(0xccfff4).multiplyScalar(1.15),
+    portalColorNearOverride: new THREE.Color(0x22e5c8).multiplyScalar(1.15),
+    portalColorFarOverride: new THREE.Color(0x0b6f86).multiplyScalar(1.1),
+    neuralSphereColor: NS_OUTPUT_COLOR, neuralSphereOpacity: NS_OUTPUT_OPACITY,
+    neuralSpherePulseAmount: NS_OUTPUT_PULSE,
+    pulsesFromCenter: true, neuralSphereScale: 1.03, frozenAnimation: false,
+    orbitSpeedFactor: 1.2, coreIntensity: 1.0,
+  },
+  // The microphone is open for the user: cool blue, slow and steady — attentive, not working.
+  listening: {
+    portalSpeedFactor: 0.25, pulseSpeedFactor: 0.5, pulseRateFactor: 0.35,
+    particleOpacity: BASE_PARTICLE_OPACITY,
+    pulseColorOverride: new THREE.Color(0x9fdcff).multiplyScalar(1.1),
+    portalColorNearOverride: new THREE.Color(0x38bdf8).multiplyScalar(1.15),
+    portalColorFarOverride: new THREE.Color(0x1e3a8a).multiplyScalar(1.1),
+    neuralSphereColor: NS_BASE_COLOR, neuralSphereOpacity: NS_BASE_OPACITY, neuralSpherePulseAmount: NS_BASE_PULSE * 1.6,
+    pulsesFromCenter: false, neuralSphereScale: 1.01, frozenAnimation: false,
+    orbitSpeedFactor: 0.7, coreIntensity: 0.7,
+  },
   // Idle but needs the human: approval, input request, or intervention.
   // Magenta, slow orbits, strong core breathing — attention, not work.
   waiting: {

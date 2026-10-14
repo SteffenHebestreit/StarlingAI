@@ -21,7 +21,9 @@ export interface MultimodalSttConfig extends MultimodalServiceConfig {
 }
 
 export interface MultimodalTtsConfig extends MultimodalServiceConfig {
-  api: "qwen-compatible" | "openai-compatible";
+  api: "qwen-compatible" | "openai-compatible" | "tts-stt-gateway";
+  /** On "tts-stt-gateway": the voice for each language ("de": "saved:luna"), "*" for any other. */
+  voices?: Record<string, string>;
   model?: string;
   defaultLanguage: string;
   defaultSpeaker: string;

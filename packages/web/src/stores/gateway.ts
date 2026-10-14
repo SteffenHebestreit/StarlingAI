@@ -4064,9 +4064,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { filename: string; relativePath: string; contentType: string; size: number };
   }
 
-  async function transcribeAudio(file: Blob | File, options: { language?: string; prompt?: string; model?: string } = {}): Promise<SpeechToTextResult> {
+  async function transcribeAudio(
+    file: Blob | File,
+    options: { language?: string; prompt?: string; model?: string; signal?: AbortSignal } = {},
+  ): Promise<SpeechToTextResult> {
     const formData = new FormData();
-    const filename = file instanceof File ? file.name : "recording.webm";
+    // A recogniser can go by the name's extension: a WAV recording is not "recording.webm".
+    const filename = file instanceof File ? file.name : /wav/i.test(file.type) ? "recording.wav" : "recording.webm";
     formData.append("file", file, filename);
     if (options.language) formData.append("language", options.language);
     if (options.prompt) formData.append("prompt", options.prompt);
@@ -4075,6 +4079,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const response = await authorizedFetch("/api/multimodal/transcribe", {
       method: "POST",
       body: formData,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     return await response.json() as SpeechToTextResult;
   }
@@ -4254,13 +4259,28 @@ export const useGatewayStore = defineStore("gateway", () => {
     quality?: string;
     gender?: string;
     speed?: number;
-  }): Promise<Blob> {
+  }, options: { signal?: AbortSignal } = {}): Promise<Blob> {
     const response = await authorizedFetch("/api/multimodal/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     return await response.blob();
+  }
+
+  /**
+   * Keeps the voice for `language` loaded on the speech service, which unloads an idle one — and
+   * the first sentence after that waits for the load. Returns how long the synthesis took.
+   */
+  async function warmSpeech(language: string): Promise<number | undefined> {
+    const response = await authorizedFetch("/api/multimodal/tts/warm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language }),
+    });
+    const body = await response.json() as { ms?: unknown };
+    return typeof body.ms === "number" ? body.ms : undefined;
   }
 
   async function analyzeImageFile(file: File): Promise<string> {
@@ -4399,11 +4419,12 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function summarizeForSpeech(input: {
     text: string;
     maxSentences?: number;
-  }): Promise<string> {
+  }, options: { signal?: AbortSignal } = {}): Promise<string> {
     const response = await authorizedFetch("/api/multimodal/summarize-for-speech", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) {
       throw new Error(`Summarisation failed: ${response.status}`);
@@ -4518,6 +4539,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     saveTtsVoice,
     removeTtsVoice,
     synthesizeSpeech,
+    warmSpeech,
     summarizeForSpeech,
     analyzeImageFile,
     getOrchestrationConfig,
