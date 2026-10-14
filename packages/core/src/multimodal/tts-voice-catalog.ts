@@ -7,6 +7,7 @@
  * list at /v1/models (fetchOpenAiTtsModels), the tool's copy kept reading /models, which such a
  * server does not serve: the tool failed on a backend the dashboard listed (review 2026-10-11).
  */
+import { fetchHubVoiceCatalog } from "./tts-stt-gateway.js";
 import {
   extractUpstreamError,
   fetchOpenAiTtsModels,
@@ -17,13 +18,17 @@ import {
 } from "../gateway/upstream-http.js";
 
 export interface TtsCatalogConfig {
-  api: "qwen-compatible" | "openai-compatible";
+  api: "qwen-compatible" | "openai-compatible" | "tts-stt-gateway";
   baseUrl: string;
   apiKey?: string;
   timeoutMs: number;
 }
 
 export async function fetchTtsVoiceCatalog(config: TtsCatalogConfig): Promise<Record<string, unknown>> {
+  if (config.api === "tts-stt-gateway") {
+    const { voices, engines } = await fetchHubVoiceCatalog(config);
+    return { voices, engines, speakers: [], models: {} };
+  }
   if (config.api === "openai-compatible") {
     const [voicesResponse, modelsResponse] = await Promise.all([
       fetchWithTimeout(upstreamUrl(config.baseUrl, "/voices"), { headers: upstreamHeaders(config.apiKey) }, config.timeoutMs),

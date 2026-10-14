@@ -4,6 +4,7 @@ import JSON5 from "json5";
 import { getConfig } from "../config/loader.js";
 import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
+import { hubVoiceFor, requestHubSpeech } from "../multimodal/tts-stt-gateway.js";
 import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { getMcpConnections } from "../mcp/registry.js";
 import {
@@ -292,14 +293,29 @@ registerTool({
       const referenceText = explicitReferenceText ?? config.voiceSampleText;
       const savedVoiceId = stringArg(args["voiceId"]) ?? stringArg(args["voice"]) ?? config.defaultVoiceId;
       const speaker = stringArg(args["speaker"]) ?? (savedVoiceId ? undefined : config.defaultSpeaker);
-      const response = await sendTtsRequest({
-        api: config.api,
+      const ttsApi = config.api;
+      const language = String(args["language"] ?? config.defaultLanguage);
+      const response = ttsApi === "tts-stt-gateway"
+        ? await sendChunkedTtsRequests({ text }, {
+            requestChunk: (chunk) => requestHubSpeech({
+              baseUrl: config.baseUrl,
+              apiKey: config.apiKey,
+              timeoutMs: config.timeoutMs,
+              text: chunk.text,
+              language,
+              voice: hubVoiceFor(config.voices, language, stringArg(args["voiceId"]) ?? stringArg(args["voice"])),
+              ...(typeof args["speed"] === "number" ? { speed: args["speed"] } : {}),
+            }),
+            bodyTimeoutMs: config.timeoutMs,
+          })
+        : await sendTtsRequest({
+        api: ttsApi,
         baseUrl: config.baseUrl,
         apiKey: config.apiKey,
         timeoutMs: config.timeoutMs,
         text,
         model: stringArg(args["model"]) ?? config.model,
-        language: String(args["language"] ?? config.defaultLanguage),
+        language,
         quality: String(args["quality"] ?? config.defaultQuality),
         gender: stringArg(args["gender"]),
         speed: typeof args["speed"] === "number" ? args["speed"] : 1,
@@ -2150,6 +2166,7 @@ async function sendTtsRequest(input: {
 
   return sendChunkedTtsRequests(input, {
     requestChunk: sendSingleTtsRequest,
+    bodyTimeoutMs: input.timeoutMs,
   });
 }
 

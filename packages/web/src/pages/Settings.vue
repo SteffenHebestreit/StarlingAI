@@ -387,6 +387,7 @@
                   <select v-model="multimodalForm.ttsApi" class="input-box font-mono">
                     <option value="openai-compatible">openai-compatible</option>
                     <option value="qwen-compatible">qwen-compatible</option>
+                    <option value="tts-stt-gateway">tts-stt-gateway</option>
                   </select>
                 </div>
                 <div>
@@ -2233,7 +2234,7 @@ const multimodalForm = reactive({
   sttTimeoutMs: 60_000,
   sttModel: "whisper-1",
   ttsBaseUrl: "",
-  ttsApi: "openai-compatible" as "qwen-compatible" | "openai-compatible",
+  ttsApi: "openai-compatible" as "qwen-compatible" | "openai-compatible" | "tts-stt-gateway",
   ttsApiKey: "",
   ttsTimeoutMs: 60_000,
   ttsModel: "tts-1",
