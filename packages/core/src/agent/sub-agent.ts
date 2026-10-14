@@ -2712,6 +2712,11 @@ export interface SubAgentProgressEvent {
   /** Chain-of-thought text for kind="reasoning" — the model's thinking for
    * this iteration, surfaced to the UI (behind a debug toggle) and audits. */
   reasoning?: string;
+  /** For kind="thinking": what the specialist is doing — planning its next step, composing a
+   * long reply (`chars` of it so far), or reading a message the user sent mid-turn. The page
+   * words it in the user's language; `summary` stays the English line for the logs. */
+  activity?: "planning" | "composing" | "steering";
+  chars?: number;
 }
 
 export interface SubAgentExecutionStats {
@@ -5736,6 +5741,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         agentName: opts.agentName,
         kind: "thinking",
         iteration: iterations,
+        activity: "steering",
         summary: `${opts.agentName} picked up your message`,
       });
     };
@@ -6381,6 +6387,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           agentName: opts.agentName,
           kind: "thinking",
           iteration: iterations + 1,
+          activity: "planning",
           summary: `Planning the next delegated step in ${opts.agentName}.`,
         });
       }
@@ -6441,6 +6448,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
                 agentName: opts.agentName,
                 kind: "thinking",
                 iteration: iterations + 1,
+                activity: "composing",
+                chars: p.reasoningChars,
                 summary: `${opts.agentName} is composing (${p.reasoningChars.toLocaleString("en-US")} chars).`,
               });
             }
