@@ -33,6 +33,10 @@ export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
   baseUrl: OptionalEndpointUrlSchema.default(""),
   api: z.enum(["auto", "openai-compatible", "transcribe-only"]).default("auto"),
   model: z.string().min(1).default("whisper-1"),
+  /** The language spoken into the microphone when the client names none: "auto" lets the speech
+   *  service detect it; a code ("de", "en") pins it. The client used to send the wake-word locale
+   *  (en-US by default), so German speech was decoded as English. */
+  language: z.string().min(1).default("auto"),
 });
 
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({

@@ -409,21 +409,30 @@ export function createGateway() {
       return directResponse;
     }
 
-    const openAiForm = new FormData();
-    openAiForm.append("file", input.audioBlob, input.filename);
-    openAiForm.append("model", input.model);
-    if (normalizedLanguage) openAiForm.append("language", normalizedLanguage);
-    if (input.prompt) openAiForm.append("prompt", input.prompt);
-
-    const openAiResponse = await fetchWithTimeout(
-      upstreamUrl(input.baseUrl, "/v1/audio/transcriptions"),
-      {
-        method: "POST",
-        headers: upstreamHeaders(input.apiKey),
-        body: openAiForm,
-      },
-      input.timeoutMs,
-    );
+    // "auto" means: let the service detect the language. It is not sent: the OpenAI API refuses it.
+    // verbose_json returns the language the service detected, which picks the voice that answers;
+    // a service that does not know verbose_json is asked again for plain JSON.
+    const sendOpenAiTranscription = (verbose: boolean) => {
+      const openAiForm = new FormData();
+      openAiForm.append("file", input.audioBlob, input.filename);
+      openAiForm.append("model", input.model);
+      if (normalizedLanguage && normalizedLanguage !== "auto") openAiForm.append("language", normalizedLanguage);
+      if (input.prompt) openAiForm.append("prompt", input.prompt);
+      if (verbose) openAiForm.append("response_format", "verbose_json");
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/v1/audio/transcriptions"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(input.apiKey),
+          body: openAiForm,
+        },
+        input.timeoutMs,
+      );
+    };
+    let openAiResponse = await sendOpenAiTranscription(true);
+    if (openAiResponse.status === 400 || openAiResponse.status === 422) {
+      openAiResponse = await sendOpenAiTranscription(false);
+    }
 
     if (openAiResponse.status !== 404 && openAiResponse.status !== 405) {
       return openAiResponse;
@@ -2010,7 +2019,9 @@ export function createGateway() {
     const model = String(formData.get("model") ?? multimodalConfig.stt.model);
 
     const languageValue = formData.get("language");
-    const language = typeof languageValue === "string" && languageValue.trim() ? languageValue.trim() : undefined;
+    const language = typeof languageValue === "string" && languageValue.trim()
+      ? languageValue.trim()
+      : multimodalConfig.stt.language;
 
     const promptValue = formData.get("prompt");
     const prompt = typeof promptValue === "string" && promptValue.trim() ? promptValue.trim() : undefined;
@@ -2041,10 +2052,16 @@ export function createGateway() {
             return "";
           }).filter(Boolean).join(" ").trim()
         : "";
+      // The first of the text fields that IS text: a service that wraps its result in an object came
+      // back as "[object Object]".
+      const text = [body["text"], body["transcription"], body["result"]].find((value): value is string => typeof value === "string")
+        ?? segments;
+      const detected = [body["language"], body["detected_language"], body["lang"]].find((value): value is string => typeof value === "string" && value.trim() !== "");
+      const duration = typeof body["duration"] === "number" ? body["duration"] : undefined;
       return c.json({
-        text: String(body["text"] ?? body["transcription"] ?? body["result"] ?? segments ?? ""),
-        language: body["language"] ?? body["detected_language"] ?? body["lang"],
-        duration: body["duration"] ?? body["processing_time"],
+        text: text.trim(),
+        ...(detected ? { language: detected.trim() } : {}),
+        ...(duration !== undefined ? { duration } : {}),
       });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);

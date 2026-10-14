@@ -2384,6 +2384,94 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  // 2026-10-14: the client sent the wake-word locale (en-US by default) as the STT language, so German
+  // speech was decoded as English. The service now detects the language unless one is named.
+  it("lets the speech service detect the spoken language, asks for it back, and pins it only when named", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "sai-stt-language-"));
+    const port = 23500 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 24500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const seen: Array<Record<string, string>> = [];
+    let refuseVerbose = false;
+
+    upstreamServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "POST" && req.url === "/v1/audio/transcriptions") {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const form = await new Response(Buffer.concat(chunks), { headers: { "content-type": String(req.headers["content-type"]) } }).formData();
+        const fields: Record<string, string> = {};
+        for (const [key, value] of form.entries()) if (typeof value === "string") fields[key] = value;
+        seen.push(fields);
+        if (refuseVerbose && fields["response_format"] === "verbose_json") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "unsupported response_format" } }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(fields["response_format"] === "verbose_json"
+          ? { task: "transcribe", language: "de", duration: 2.4, text: "Einen Moment bitte." }
+          : { text: "Einen Moment bitte." }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => (error ? reject(error) : resolve()));
+    });
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "j".repeat(32) },
+      multimodal: { stt: { baseUrl: `http://127.0.0.1:${upstreamPort}`, api: "openai-compatible" } },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+    vi.resetModules();
+    const [{ createGateway }, auth] = await Promise.all([import("../gateway/index.js"), import("../gateway/auth.js")]);
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    const transcribe = async (language?: string) => {
+      const form = new FormData();
+      form.append("file", new File([new Uint8Array([1, 2, 3, 4])], "recording.webm", { type: "audio/webm" }));
+      if (language) form.append("language", language);
+      const response = await fetch(`${baseUrl}/api/multimodal/transcribe`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      return { status: response.status, body: await response.json() as { text: string; language?: string; duration?: number } };
+    };
+    let token = "";
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      token = await auth.createToken("admin", { role: "admin" });
+
+      // No language named: none is sent, and the detected one comes back.
+      expect(await transcribe()).toEqual({ status: 200, body: { text: "Einen Moment bitte.", language: "de", duration: 2.4 } });
+      expect(seen.at(-1)).not.toHaveProperty("language");
+      expect(seen.at(-1)?.["response_format"]).toBe("verbose_json");
+
+      // "auto" is not sent either: the OpenAI API refuses it.
+      await transcribe("auto");
+      expect(seen.at(-1)).not.toHaveProperty("language");
+
+      // A named locale pins the language, as its two-letter code.
+      await transcribe("de-DE");
+      expect(seen.at(-1)?.["language"]).toBe("de");
+
+      // A service that does not know verbose_json is asked again for plain JSON.
+      refuseVerbose = true;
+      const before = seen.length;
+      expect(await transcribe()).toEqual({ status: 200, body: { text: "Einen Moment bitte." } });
+      expect(seen.slice(before).map((fields) => fields["response_format"] ?? "json")).toEqual(["verbose_json", "json"]);
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("reads an OpenAI-compatible TTS server's model list at /v1/models for the status check and the voice catalog", async () => {
     // Such a server keeps its list beside /v1/audio/speech and serves nothing at /models: the status
     // check reported TTS offline (404) while every speech request succeeded (2026-10-11).
