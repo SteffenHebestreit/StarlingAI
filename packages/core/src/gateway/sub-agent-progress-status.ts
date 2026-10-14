@@ -34,3 +34,20 @@ export function subAgentProgressStatus(
   }
   return null;
 }
+
+export interface SubAgentHeartbeat {
+  activity: "planning" | "composing" | "steering";
+  chars?: number;
+}
+
+/**
+ * A specialist's sign of life, for its delegation's row: planning its next step, composing a long
+ * reply, reading a message the user sent mid-turn. Not a status line (above) — the row's detail,
+ * which otherwise stood still for the minutes a specialist composed without calling a tool. Sent
+ * as what it is, not as a sentence, so the page says it in the user's language. A `thinking` event
+ * that does not say what it is (a federated peer's) is not one.
+ */
+export function subAgentHeartbeat(event: Pick<SubAgentProgressEvent, "kind" | "activity" | "chars">): SubAgentHeartbeat | null {
+  if (event.kind !== "thinking" || !event.activity) return null;
+  return { activity: event.activity, ...(typeof event.chars === "number" && Number.isFinite(event.chars) ? { chars: event.chars } : {}) };
+}

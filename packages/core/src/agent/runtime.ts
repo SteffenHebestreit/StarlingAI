@@ -160,6 +160,8 @@ import {
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
+import { TURN_STATUS } from "./turn-status-text.js";
+import { executeVisibleTool } from "./visible-tool.js";
 
 // Turn-preparation phases + the blocked() early-exit builder (god-file seam): the
 // pre-loop setup phases of _runTurn and the shared blocked() TurnOutput builder live
@@ -2459,6 +2461,7 @@ async function _runTurn(
     deliverableIntent,
     toolContext,
     onStatus: opts.onStatus,
+    toolSteps: opts,
     getIterationCount: () => iterationCount,
     getProvider: () => provider,
     getStashedBuilderTaskSpec: () => stashedBuilderTaskSpec,
@@ -2814,7 +2817,7 @@ async function _runTurn(
         // Which messages were taken, and when, BEFORE the status: the client splits the running
         // answer at this point, and the status line then lands on the part that follows.
         opts.onSteeringConsumed?.({ messages: steering, iteration: iterationCount, at });
-        opts.onStatus?.({ phase: "steering", message: "Folding in your mid-turn message…", iteration: iterationCount });
+        opts.onStatus?.({ phase: "steering", message: localizedFixedText(TURN_STATUS.steering), iteration: iterationCount });
       }
     }
 
@@ -3075,8 +3078,8 @@ async function _runTurn(
           // as a narration line, and which would be buried if this routine line shared a phase.
           phase: suppressInitialInlineStreaming ? "routing" : "reviewing",
           message: suppressInitialInlineStreaming
-            ? "Selecting the required specialist path before drafting the answer."
-            : "Reviewing completed tool results and preparing the final response.",
+            ? localizedFixedText(TURN_STATUS.routing)
+            : localizedFixedText(TURN_STATUS.reviewing),
           iteration: iterationCount,
         });
       }
@@ -3652,7 +3655,7 @@ async function _runTurn(
           toolNames: llmResponse.tool_calls.map((toolCall) => toolCall.name),
           swarmMaintenanceSensitive: initialDynamicGuidance?.swarmMaintenanceSensitive ?? false,
         }, { sessionId: session.id, severity: "warn" });
-        opts.onStatus?.({ phase: "guardrail", message: "This is a StarlingAI maintenance request, so I am routing it to the swarm maintainer instead of workflow discovery.", iteration: iterationCount });
+        opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.maintenanceRoute), iteration: iterationCount });
         continue;
       }
 
@@ -3978,7 +3981,7 @@ async function _runTurn(
             + rejectedTurnArtifacts.map((artifact) => String(artifact["relativePath"] ?? artifact["filename"] ?? "artifact")).slice(0, 12).join(", ")
             + "); when the files themselves are what was asked for, keep the reply to that list; note anything marked incomplete. Do NOT paste the files' contents into the chat. Nothing more."
           : `RESEARCH INCOMPLETE — WRITE A PARTIAL ANSWER NOW. The delegated research ran out of time before covering all topics. Do NOT call any more tools. Do NOT write raw search snippets or tool-trace text. Instead write a proper user-facing answer ${IN_REPLY_LANGUAGE} that: (1) clearly states the research was incomplete and which topics still need verification, (2) presents every concrete verified fact that IS in the tool results and shared findings above as a structured answer (component names, specs, prices, sources — whatever was found), (3) explicitly marks sections as [unverified — research incomplete], worded in that same language, when no evidence was found for them, and (4) asks the user whether to retry the missing sections. Never dump raw 'Web Search Results for:' blocks. Convert all search snippet evidence into readable prose or a structured list.`;
-        opts.onStatus?.({ phase: "synthesizing", message: "Stopping repeated tool calls and writing the answer from gathered evidence.", iteration: iterationCount });
+        opts.onStatus?.({ phase: "synthesizing", message: localizedFixedText(TURN_STATUS.loopStop), iteration: iterationCount });
         log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after synthesis was required — forcing synthesis");
         break;
       }
@@ -3994,7 +3997,7 @@ async function _runTurn(
       terminalFinishReason = "user_response_required_tool_call_rejected";
       terminalSynthesisInstruction =
         "A previous delegated result requires a user response, clarification, authorization, or approval, but the model attempted another tool call. Reject that tool call. Ask the user the required question in one concise message using only the evidence already present above. Do NOT call tools, delegate, search, browse, or promise automatic continuation.";
-      opts.onStatus?.({ phase: "synthesizing", message: "Stopping extra tool calls and preparing the required user-facing question.", iteration: iterationCount });
+      opts.onStatus?.({ phase: "synthesizing", message: localizedFixedText(TURN_STATUS.questionStop), iteration: iterationCount });
       log.warn({ sessionId: session.id, toolCalls: llmResponse.tool_calls.map((toolCall) => toolCall.name) }, "Model attempted more tool calls after delegated results required a user response — forcing synthesis");
       break;
     }
@@ -4159,7 +4162,7 @@ async function _runTurn(
             type: "tool_free_artifact_answer_rejected",
             artifactSensitive: initialDynamicGuidance?.artifactSensitive ?? false,
           }, { sessionId: session.id, severity: "warn" });
-          opts.onStatus?.({ phase: "guardrail", message: "The draft skipped artifact creation, so I am retrying with the required specialist workflow.", iteration: iterationCount });
+          opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.artifactRetry), iteration: iterationCount });
           continue;
         }
 
@@ -4289,7 +4292,7 @@ async function _runTurn(
             freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
             sourceSensitive: initialDynamicGuidance?.sourceSensitive ?? false,
           }, { sessionId: session.id, severity: "warn" });
-          opts.onStatus?.({ phase: "guardrail", message: "The draft skipped required research orchestration, so I am retrying with a specialist agent.", iteration: iterationCount });
+          opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.researchRetry), iteration: iterationCount });
           continue;
         }
 
@@ -4309,9 +4312,9 @@ async function _runTurn(
             tool: autoRoute.toolName,
             agent: autoRoute.label,
           }, { sessionId: session.id, severity: "warn" });
-          opts.onStatus?.({ phase: "guardrail", message: "The draft ran no research — fetching sourced evidence via a research specialist now. / Der Entwurf hat keine Recherche ausgeführt — ich hole jetzt belegte Quellen über einen Spezialisten.", iteration: iterationCount });
+          opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.autoResearch), iteration: iterationCount });
           try {
-            await executeTool(autoRoute.toolName, autoRoute.args, toolContext);
+            await executeVisibleTool(opts, `autoresearch_${Date.now().toString(36)}`, autoRoute.toolName, autoRoute.args, toolContext);
             _turnDelegationCount += 1;
           } catch (err) {
             log.warn({ err, sessionId: session.id }, "Auto-research delegation on refusal failed");
@@ -4406,6 +4409,7 @@ async function _runTurn(
         provider,
         userMessage,
         toolContext,
+        toolSteps: opts,
         deliverableIntent,
         initialDynamicGuidance,
         rawResponse,
@@ -4890,7 +4894,7 @@ async function _runTurn(
               fallbackAgent: route.label,
               cachedResult: true,
             }, { sessionId: session.id, severity: "warn" });
-            opts.onStatus?.({ phase: "guardrail", message: "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.", iteration: iterationCount });
+            opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.discoveryFallback), iteration: iterationCount });
           }
         }
         continue;
@@ -5027,7 +5031,7 @@ async function _runTurn(
             fallbackTool: route.toolName,
             fallbackAgent: route.label,
           }, { sessionId: session.id, severity: "warn" });
-          opts.onStatus?.({ phase: "guardrail", message: "Agent discovery returned no usable match, so I am falling back to a required research specialist instead of searching again.", iteration: iterationCount });
+          opts.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.discoveryFallback), iteration: iterationCount });
         }
       }
 
@@ -5792,7 +5796,7 @@ async function _runTurn(
   }
 
   // Exceeded max iterations (or iteration-level loop) — force a synthesis response from the LLM
-  opts.onStatus?.({ phase: "synthesizing", message: "Writing the final response from the evidence gathered so far.", iteration: iterationCount });
+  opts.onStatus?.({ phase: "synthesizing", message: localizedFixedText(TURN_STATUS.finalSynthesis), iteration: iterationCount });
   const terminalDelegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
   const terminalSharedFactsEvidence = await getSharedFactsEvidenceForFinalSynthesis(session.id);
   const terminalEvidenceBackstop = chooseBetterRecoveryEvidence(

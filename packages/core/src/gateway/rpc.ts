@@ -4,7 +4,7 @@
  */
 import type WebSocket from "ws";
 import { randomUUID } from "node:crypto";
-import { subAgentProgressStatus } from "./sub-agent-progress-status.js";
+import { subAgentHeartbeat, subAgentProgressStatus } from "./sub-agent-progress-status.js";
 import {
   archiveSession,
   createSession,
@@ -870,6 +870,10 @@ export class RpcConnection implements AccountConnection {
         if (pending) {
           clearTimeout(pending.timeout);
           this.pendingApprovals.delete(approvalId);
+          this.sendEvent({
+            type: "agent.approval_resolved",
+            data: { requestId: pending.requestId, approvalId, outcome: approved ? "approved" : "denied" },
+          });
           // Use reject when the user explicitly denies so the error message
           // says "denied by user"; use resolve(true) for explicit approval.
           if (approved) {
@@ -1469,12 +1473,22 @@ export class RpcConnection implements AccountConnection {
 
             // A specialist's start and finish are status, not tool events: without them the pill
             // froze on the orchestrator's last phase for the minutes a specialist ran tool-less.
+            // `lifecycle` lets the page word the line itself; the message is the runtime's English.
             const lifecycle = subAgentProgressStatus(event);
             if (lifecycle) {
               this.sendEvent({
                 type: "status",
-                data: { requestId, status: lifecycle.phase, message: lifecycle.message, iteration: lifecycle.iteration, sourceAgent: event.agentName, delegated: true },
+                data: {
+                  requestId, status: lifecycle.phase, message: lifecycle.message, iteration: lifecycle.iteration,
+                  sourceAgent: event.agentName, delegated: true, lifecycle: event.kind,
+                },
               });
+              return;
+            }
+
+            const heartbeat = subAgentHeartbeat(event);
+            if (heartbeat) {
+              this.sendEvent({ type: "agent.heartbeat", data: { requestId, sourceAgent: event.agentName, delegated: true, ...heartbeat } });
               return;
             }
 
@@ -1523,6 +1537,8 @@ export class RpcConnection implements AccountConnection {
               // so the approval-timeout intervention can explain what happened.
               const timeout = setTimeout(() => {
                 this.pendingApprovals.delete(approvalId);
+                // The page's banner and its sticky notice asked on until the turn ended.
+                this.sendEvent({ type: "agent.approval_resolved", data: { requestId, approvalId, outcome: "timeout" } });
                 log.warn({ approvalId, toolName }, "Approval timed out — denying");
                 reject(new Error(`Tool '${toolName}' approval timed out (no response within ${formatApprovalTimeout(approvalTimeoutMs)})`));
               }, approvalTimeoutMs);

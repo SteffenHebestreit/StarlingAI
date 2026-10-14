@@ -169,6 +169,7 @@
               :streaming-reasoning="msg.id === 'streaming' ? gateway.streamingReasoning : undefined"
               :streaming-sub-agent-reasoning="msg.id === 'streaming' ? gateway.streamingSubAgentReasoning : undefined"
               :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
+              :fold-steps="msg.role === 'assistant' && msg.id !== 'streaming'"
               :allow-rewind="!gateway.isLoading"
               @rewind="handleRewind"
               @resend="handleResendSteer"

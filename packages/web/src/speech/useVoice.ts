@@ -267,7 +267,10 @@ export function useVoice(options: UseVoiceOptions) {
   function onTurnStart(): void {
     const voiceLanguage = pendingVoiceLanguage;
     pendingVoiceLanguage = null;
-    const language = voiceLanguage ?? detectLanguage(lastUserText()) ?? preferredLanguage();
+    // The language the chat shows this turn in (stores/gateway.ts notes it on the live bubble), so
+    // what is said and what is shown agree; a spoken request's own language wins.
+    const shown = gateway.messages.find((message) => message.id === "streaming")?.language;
+    const language = voiceLanguage ?? shown ?? detectLanguage(lastUserText()) ?? preferredLanguage();
     turn = {
       sessionId: gateway.currentSessionId,
       narrator: new TurnNarrator(Date.now()),

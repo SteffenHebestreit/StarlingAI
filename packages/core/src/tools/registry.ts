@@ -209,6 +209,8 @@ export interface ToolContext {
     metadata?: Record<string, unknown>;
     summary?: string;
     reasoning?: string;
+    activity?: "planning" | "composing" | "steering";
+    chars?: number;
   }) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;

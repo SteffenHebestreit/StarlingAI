@@ -25,7 +25,8 @@ import { findUnfilledStubFiles, findBrokenBuiltPageFiles, type ArtifactScanScope
 import { MIN_SUBSTANTIVE_REPLY_CHARS, type CorrectiveBuildOptions } from "./turn-corrective.js";
 import { getConfig } from "../config/loader.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
-import { executeTool, type ToolContext } from "../tools/registry.js";
+import { type ToolContext } from "../tools/registry.js";
+import { executeVisibleTool, type ToolStepSink } from "./visible-tool.js";
 import { scanOutput } from "../guardrails/output.js";
 import { requiresApproval } from "../guardrails/tool-tiers.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
@@ -130,6 +131,8 @@ export interface TerminalGuardContext {
   readonly provider: ChatProvider;
   readonly userMessage: string;
   readonly toolContext: ToolContext;
+  /** Where a call the guards make themselves is announced, so the page shows it as a step. */
+  readonly toolSteps?: ToolStepSink;
   readonly deliverableIntent: DeliverableIntent;
   readonly initialDynamicGuidance: DynamicTurnGuidance | null;
 
@@ -636,14 +639,14 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
               + "\n\nAcceptance criteria:\n" + crit.map((c, i) => `${i + 1}. ${c}`).join("\n")
               + currentAnswerBlock(current);
             try {
-              const res = await executeTool("delegate_to_agent", {
+              const callId = `qaescalate_${Date.now().toString(36)}`;
+              const res = await executeVisibleTool(ctx.toolSteps, callId, "delegate_to_agent", {
                 agentName: "mission_coordinator",
                 task,
               }, { ...toolContext, allowDelegationAfterOperatorStop: true });
               ctx.incrementDelegationCount();
               // Record the delegation so any artifact the coordinator built surfaces as
               // a download and history stays valid (mirrors the corrective-build path).
-              const callId = `qaescalate_${Date.now().toString(36)}`;
               session.addMessage({
                 role: "assistant", content: "",
                 tool_calls: [{ id: callId, type: "function", function: { name: "delegate_to_agent", arguments: JSON.stringify({ agentName: "mission_coordinator", task: "QA RE-PLAN (coordinator escalation)" }) } }],
