@@ -2472,6 +2472,91 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  // 2026-10-14: the user's cloned voice ("Luna") lives on a TTS-STT gateway, which speaks a saved voice
+  // only at its saved-voice route. The dashboard's TTS route picks the voice by the reply's language.
+  it("speaks each language with its configured voice on a TTS-STT gateway, and warms the voice on request", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "sai-tts-hub-"));
+    const port = 23500 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 24500 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    const seen: Array<{ path: string; body: Record<string, string> }> = [];
+
+    upstreamServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const raw = Buffer.concat(chunks);
+      const type = String(req.headers["content-type"] ?? "");
+      const body: Record<string, string> = {};
+      if (type.includes("application/json")) Object.assign(body, JSON.parse(raw.toString("utf8")));
+      if (type.includes("multipart/form-data")) {
+        (await new Response(raw, { headers: { "content-type": type } }).formData()).forEach((value, key) => { if (typeof value === "string") body[key] = value; });
+      }
+      seen.push({ path: req.url ?? "", body });
+      if (req.method === "POST") {
+        res.writeHead(200, { "Content-Type": "audio/wav" });
+        res.end(Buffer.from("RIFF"));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "healthy" }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => (error ? reject(error) : resolve()));
+    });
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "j".repeat(32) },
+      multimodal: {
+        tts: {
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          api: "tts-stt-gateway",
+          voices: { de: "saved:luna", "*": "piper:en_US-lessac-medium" },
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+    vi.resetModules();
+    const [{ createGateway }, auth] = await Promise.all([import("../gateway/index.js"), import("../gateway/auth.js")]);
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+      const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      expect((await post("/api/multimodal/tts", { text: "Einen Moment, bitte.", language: "de" })).status).toBe(200);
+      expect(seen.at(-1)).toEqual({ path: "/api/providers/qwen3/saved-voices/luna/tts", body: { text: "Einen Moment, bitte.", lang: "de" } });
+
+      expect((await post("/api/multimodal/tts", { text: "One moment, please.", language: "en" })).status).toBe(200);
+      expect(seen.at(-1)).toEqual({
+        path: "/api/tts",
+        body: { provider: "piper", text: "One moment, please.", language: "en", output_format: "wav", voice: "en_US-lessac-medium" },
+      });
+
+      // A voice the request names wins.
+      await post("/api/multimodal/tts", { text: "Hallo.", language: "de", voice: "magpie:Sofia" });
+      expect(seen.at(-1)?.body).toMatchObject({ provider: "magpie", voice: "Sofia", language: "de" });
+
+      const warm = await post("/api/multimodal/tts/warm", { language: "de-DE" });
+      expect(warm.status).toBe(200);
+      expect(await warm.json()).toMatchObject({ ok: true });
+      expect(seen.at(-1)).toEqual({ path: "/api/providers/qwen3/saved-voices/luna/tts", body: { text: "Hallo.", lang: "de" } });
+    } finally {
+      await gateway.stop();
+      auth.resetAuthStateForTests();
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("reads an OpenAI-compatible TTS server's model list at /v1/models for the status check and the voice catalog", async () => {
     // Such a server keeps its list beside /v1/audio/speech and serves nothing at /models: the status
     // check reported TTS offline (404) while every speech request succeeded (2026-10-11).
