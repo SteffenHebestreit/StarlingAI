@@ -76,26 +76,52 @@ export function readCompanionStacks(path = COMPANIONS_FILE, { exists = existsSyn
 }
 
 /**
- * The compose override that puts the stack's joined service on the gateway's network under its alias.
- * It names `default` too: a service with no networks of its own is on its project's default network,
- * and an override that lists only the gateway's network would take it off that one, away from the
- * rest of its own stack.
+ * The services of a stack that are meant to keep running, from its resolved compose config (`docker
+ * compose config --format json`): every one a plain `up` starts (none behind a profile) that declares
+ * no restart policy of its own and is not a one-shot another service waits to complete.
+ *
+ * Docker restarts after a reboot or an update only the containers with a restart policy. The stack's
+ * own have one; a companion's often do not, and it stayed down while the gateway came back without
+ * it (2026-10-15: every MCP call to ProcessMem failed for hours after Docker restarted).
  */
-export function companionOverrideYaml(joinSpec, network) {
-  return [
-    "services:",
-    `  ${joinSpec.service}:`,
-    "    networks:",
-    "      default: {}",
-    "      sai-gateway:",
-    "        aliases:",
-    `          - ${joinSpec.alias}`,
-    "networks:",
-    "  sai-gateway:",
-    "    external: true",
-    `    name: ${network}`,
-    "",
-  ].join("\n");
+export function servicesToKeepRunning(composeConfig) {
+  const services = composeConfig && typeof composeConfig === "object" && composeConfig.services && typeof composeConfig.services === "object"
+    ? composeConfig.services
+    : {};
+  const oneShots = new Set();
+  for (const service of Object.values(services)) {
+    const dependsOn = service?.depends_on;
+    if (!dependsOn || typeof dependsOn !== "object" || Array.isArray(dependsOn)) continue;
+    for (const [name, dependency] of Object.entries(dependsOn)) {
+      if (dependency?.condition === "service_completed_successfully") oneShots.add(name);
+    }
+  }
+  return Object.entries(services)
+    .filter(([name, service]) => !service?.restart && !(Array.isArray(service?.profiles) && service.profiles.length) && !oneShots.has(name))
+    .map(([name]) => name)
+    .sort();
+}
+
+/**
+ * The compose override for a companion stack: the services to keep running get `restart:
+ * unless-stopped` (servicesToKeepRunning), and the joined service goes on the gateway's network under
+ * its alias. It names `default` too: a service with no networks of its own is on its project's default
+ * network, and an override that lists only the gateway's network would take it off that one, away from
+ * the rest of its own stack.
+ */
+export function companionOverrideYaml(joinSpec, network, keepRunning = []) {
+  const names = [...new Set([...keepRunning, ...(joinSpec ? [joinSpec.service] : [])])].sort();
+  const lines = ["services:"];
+  for (const name of names) {
+    lines.push(`  ${name}:`);
+    if (keepRunning.includes(name)) lines.push("    restart: unless-stopped");
+    if (joinSpec?.service === name) {
+      lines.push("    networks:", "      default: {}", "      sai-gateway:", "        aliases:", `          - ${joinSpec.alias}`);
+    }
+  }
+  if (joinSpec) lines.push("networks:", "  sai-gateway:", "    external: true", `    name: ${network}`);
+  lines.push("");
+  return lines.join("\n");
 }
 
 /** A path quoted for the shell string `sai`'s runner joins its arguments into. */
@@ -103,14 +129,15 @@ const quoted = (value) => (/[\s"]/.test(value) ? JSON.stringify(value) : value);
 
 /**
  * The `docker compose` invocation for one stack, with its override written to the temp dir when it
- * joins the gateway's network. Its project directory is its compose file's, so its own .env applies.
- * `override: false` leaves the override out, for a build: the network does not concern it.
+ * joins the gateway's network or has services to keep running. Its project directory is its compose
+ * file's, so its own .env applies. `override: false` leaves the override out, for a build: neither the
+ * network nor a restart policy concerns it.
  */
-export function companionCompose(stack, network, { write = writeFileSync, dir = tmpdir(), override = true } = {}) {
+export function companionCompose(stack, network, { write = writeFileSync, dir = tmpdir(), override = true, keepRunning = [] } = {}) {
   const parts = ["docker", "compose", "-p", stack.name, "-f", quoted(stack.compose)];
-  if (stack.join && override) {
+  if (override && (stack.join || keepRunning.length)) {
     const overridePath = join(dir, `sai-companion-${stack.name}.override.yml`);
-    write(overridePath, companionOverrideYaml(stack.join, network));
+    write(overridePath, companionOverrideYaml(stack.join, network, keepRunning));
     parts.push("-f", quoted(overridePath));
   }
   return parts;

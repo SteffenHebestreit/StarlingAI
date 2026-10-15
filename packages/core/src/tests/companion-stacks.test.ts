@@ -4,14 +4,15 @@ import * as companionStacksModule from "../../../../scripts/companion-stacks.mjs
 
 interface CompanionStack { name: string; compose: string; join?: { service: string; alias: string } }
 type FileAccess = { exists: (path: string) => boolean; read: (path: string) => string };
-const { companionCompose, companionOverrideYaml, readCompanionStacks } = companionStacksModule as {
+const { companionCompose, companionOverrideYaml, readCompanionStacks, servicesToKeepRunning } = companionStacksModule as {
   readCompanionStacks: (path: string, access: FileAccess) => { stacks: CompanionStack[]; error?: string };
-  companionOverrideYaml: (join: { service: string; alias: string }, network: string) => string;
+  companionOverrideYaml: (join: { service: string; alias: string } | undefined, network: string, keepRunning?: string[]) => string;
   companionCompose: (
     stack: CompanionStack,
     network: string,
-    io: { dir: string; write: (path: string, text: string) => void; override?: boolean },
+    io: { dir: string; write: (path: string, text: string) => void; override?: boolean; keepRunning?: string[] },
   ) => string[];
+  servicesToKeepRunning: (config: unknown) => string[];
 };
 
 /**
@@ -104,5 +105,45 @@ describe("companionCompose", () => {
     );
     expect(parts).toEqual(["docker", "compose", "-p", "jobs", "-f", "\"C:/Program Files/jobs/compose.yml\""]);
     expect(written).toHaveLength(0);
+  });
+});
+
+// 2026-10-15: Docker restarted, the stack came back (its services have a restart policy) and the
+// companion did not (its own compose sets none) — the gateway retried ProcessMem for hours.
+describe("a companion comes back after Docker restarts", () => {
+  // ProcessMem's resolved config (docker compose config --format json), trimmed.
+  const processMem = {
+    services: {
+      postgres: {},
+      migrate: { restart: "no", depends_on: { postgres: { condition: "service_healthy" } } },
+      api: { depends_on: { migrate: { condition: "service_completed_successfully" }, postgres: { condition: "service_healthy" } } },
+      test: { profiles: ["test"], depends_on: { postgres: { condition: "service_healthy" } } },
+    },
+  };
+
+  it("keeps running what is meant to run: not a one-shot, nothing behind a profile, no policy of its own", () => {
+    expect(servicesToKeepRunning(processMem)).toEqual(["api", "postgres"]);
+    expect(servicesToKeepRunning({
+      services: { worker: { restart: "always" }, setup: {}, web: { depends_on: { setup: { condition: "service_completed_successfully" } } } },
+    })).toEqual(["web"]);
+    expect(servicesToKeepRunning(null)).toEqual([]);
+  });
+
+  it("gives them a restart policy in the override, beside the joined service's network", () => {
+    const yaml = companionOverrideYaml({ service: "api", alias: "processmem" }, "stack-app", ["api", "postgres"]);
+    expect(yaml).toContain("  api:\n    restart: unless-stopped\n    networks:\n      default: {}");
+    expect(yaml).toContain("  postgres:\n    restart: unless-stopped\n");
+    expect(companionOverrideYaml(undefined, "stack-app", ["worker"])).toBe("services:\n  worker:\n    restart: unless-stopped\n");
+  });
+
+  it("writes an override for a stack the gateway does not reach when it has services to keep running", () => {
+    const written: Array<{ path: string; text: string }> = [];
+    const parts = companionCompose(
+      { name: "jobs", compose: "d:/jobs/compose.yml" },
+      "stack-app",
+      { dir: "/tmp/x", write: (path: string, text: string) => { written.push({ path, text }); }, keepRunning: ["worker"] },
+    );
+    expect(parts.slice(6, 7)).toEqual(["-f"]);
+    expect(written[0]?.text).toContain("restart: unless-stopped");
   });
 });

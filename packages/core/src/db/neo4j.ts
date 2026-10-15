@@ -15,6 +15,10 @@ const log = childLogger("db:graph");
 
 let _driver: Driver | null = null;
 let _available = false;
+/** When a connectivity error last marked the graph unavailable (0: never). */
+let _unavailableSince = 0;
+/** How long the graph stays marked unavailable before the next query is let through to try again. */
+export const GRAPH_RETRY_AFTER_MS = 30_000;
 
 export function getGraphDriver(): Driver | null {
   if (_driver) return _driver;
@@ -54,6 +58,12 @@ export function isGraphDbAvailable(): boolean {
   // back true on any successful round-trip. This lets callers distinguish
   // "graph is empty" from "graph is down" once traffic has flowed.
   if (!_driver) getGraphDriver();
+  // Marked unavailable, it is tried again after a while: every caller asks this before querying, so
+  // no query ran that could find it back, and a MemGraph that was not up yet when the gateway booted
+  // (Docker restarting everything at once) read "offline" until the gateway restarted (2026-10-15).
+  if (!_available && _driver !== null && _unavailableSince > 0 && Date.now() - _unavailableSince >= GRAPH_RETRY_AFTER_MS) {
+    _available = true;
+  }
   return _available && _driver !== null;
 }
 
@@ -108,6 +118,7 @@ export async function runCypher(
   } catch (err) {
     if (isConnectivityError(err)) {
       _available = false; // stop reporting UP; callers can now tell down from empty
+      _unavailableSince = Date.now();
       log.warn({ err }, "MemGraph appears unreachable — marking graph DB unavailable");
     }
     log.error({ err, cypher: cypher.slice(0, 200) }, "Cypher query failed");
