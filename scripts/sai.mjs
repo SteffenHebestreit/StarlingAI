@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
-import { COMPANIONS_FILE, companionCompose, readCompanionStacks } from "./companion-stacks.mjs";
+import { COMPANIONS_FILE, companionCompose, readCompanionStacks, servicesToKeepRunning } from "./companion-stacks.mjs";
 
 // The environment `sai` was started with, before loadDotEnv adds this stack's .env to it. A companion
 // stack's compose reads its own .env, and a variable of ours of the same name would override it.
@@ -312,8 +312,10 @@ async function cmdStart() {
       try {
         // Built first, without the network override it does not need, then started without a build.
         if (wantBuild) await runCompanion(stack, ["build"], { override: false });
-        await runCompanion(stack, ["up", "-d", "--wait"]);
-        ok(`${stack.name} up${stack.join ? ` — the gateway reaches its ${stack.join.service} as ${stack.join.alias}` : ""}`);
+        // With a restart policy on what keeps running, it comes back with the stack after Docker restarts.
+        const keepRunning = companionServicesToKeepRunning(stack);
+        await runCompanion(stack, ["up", "-d", "--wait"], { keepRunning });
+        ok(`${stack.name} up${stack.join ? ` — the gateway reaches its ${stack.join.service} as ${stack.join.alias}` : ""}${keepRunning.length ? `; ${keepRunning.join(", ")} restart with Docker` : ""}`);
       } catch (err) {
         process.exitCode = exitCode;
         warn(`${stack.name} did not start (${err instanceof Error ? err.message : String(err)}); the stack starts without it`);
@@ -994,8 +996,25 @@ function loadCompanionStacks() {
  * in its compose file's directory: run from this checkout, on another drive than the stack's build
  * context, compose's build failed before building anything ("failed to execute bake").
  */
-function runCompanion(stack, args, { override = true } = {}) {
-  return run([...companionCompose(stack, GATEWAY_NETWORK, { override }), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
+function runCompanion(stack, args, { override = true, keepRunning = [] } = {}) {
+  return run([...companionCompose(stack, GATEWAY_NETWORK, { override, keepRunning }), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
+}
+
+/** The services of a companion stack to give a restart policy, read from its resolved compose config; none when it cannot be read. */
+function companionServicesToKeepRunning(stack) {
+  try {
+    const output = execFileSync("docker", ["compose", "-p", stack.name, "-f", stack.compose, "config", "--format", "json"], {
+      env: HOST_ENV,
+      cwd: dirname(resolve(stack.compose)),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return servicesToKeepRunning(JSON.parse(output));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message.split(/\r?\n/)[0] : String(err);
+    warn(`${stack.name}: its compose config could not be read (${reason}) — started without restart policies`);
+    return [];
+  }
 }
 
 /** Takes the declared companion stacks down, without their volumes; one that fails is reported, not fatal. */

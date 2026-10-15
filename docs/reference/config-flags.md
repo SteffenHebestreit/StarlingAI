@@ -19,7 +19,7 @@ Every public schema field, where it is declared, and how many production files r
 | `admin` | packages/core/src/config/schema.ts:436 | 54 |
 | `agents` | packages/core/src/config/schema.ts:1760 | 190 |
 | `alertmanager` | packages/core/src/config/schema.ts:1200 | 1 |
-| `all` | packages/core/src/config/schema.ts:1353 | 318 |
+| `all` | packages/core/src/config/schema.ts:1353 | 317 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1373 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1316 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -160,7 +160,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingModel` | packages/core/src/config/schema.ts:178 | 27 |
 | `enabled` | packages/core/src/config/schema.ts:329 | 148 |
 | `enableThinking` | packages/core/src/config/schema.ts:200 | 22 |
-| `endpoint` | packages/core/src/config/schema.ts:521 | 84 |
+| `endpoint` | packages/core/src/config/schema.ts:521 | 85 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1737 | 1 |
 | `enforce` | packages/core/src/config/schema.ts:596 | 24 |
 | `engramApiKey` | packages/core/src/config/schemas/retrieval.ts:94 | 2 |

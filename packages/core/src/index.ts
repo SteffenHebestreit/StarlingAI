@@ -24,7 +24,7 @@ import { accountMigrationMaintenance, reportAccountMigrationBacklog } from "./ru
 import { relocateAccountWorkspaceState } from "./runtime/workspace-state-relocation.js";
 import { userStateBaseDir } from "./runtime/user-scope.js";
 import { reportBareAclEntries } from "./guardrails/acl-entries-check.js";
-import { syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
+import { startModelEndpointRechecks, syncModelEndpointRuntimeStatus } from "./runtime/model-endpoints.js";
 import { syncApprovalRuntimeStatus } from "./approval/status.js";
 import { startWarden, stopWarden } from "./agent/warden.js";
 import { startEventLoopMonitor, stopEventLoopMonitor } from "./observability/event-loop-monitor.js";
@@ -148,7 +148,9 @@ export async function main() {
 
   // Check LLM provider health
   await initProviders();
-  await syncModelEndpointRuntimeStatus();
+  const bootEndpoints = await syncModelEndpointRuntimeStatus();
+  // One not up yet at boot is probed again until it answers, instead of reading unhealthy until a reload.
+  const stopModelEndpointRechecks = startModelEndpointRechecks({ initiallyHealthy: bootEndpoints.every((endpoint) => endpoint.ok) });
 
   // Initialize the unified pgvector semantic store (probes the embedding model
   // for its dimension, so it must run after providers). Re-attempts lazily on
@@ -414,6 +416,7 @@ export async function main() {
     shuttingDown = true;
     log.info({ signal }, "Shutting down...");
     clearInterval(healthInterval);
+    stopModelEndpointRechecks();
     stopCacheWarmer();
     stopEventLoopMonitor();
     stopProviderActivityMonitor();

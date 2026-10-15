@@ -355,3 +355,40 @@ export async function syncModelEndpointRuntimeStatus(): Promise<ModelEndpointHea
 export function getModelEndpointHealthSnapshot(): ModelEndpointHealth[] {
   return lastSnapshot;
 }
+
+/**
+ * Probes the model endpoints again on its own: every minute while one fails, so the dashboard clears
+ * once it answers, and every ten minutes while all answer, so one that goes away is noticed.
+ *
+ * They were probed at boot, on a config reload, and when the status route was read. An endpoint that
+ * was not up yet at boot — the gateway restarting with the rest of Docker, before a model server had
+ * loaded — kept the dashboard on "1 model endpoint(s) unhealthy" for hours after it answered
+ * (2026-10-15). Returns the function that stops the re-probing.
+ */
+export function startModelEndpointRechecks(options: {
+  initiallyHealthy: boolean;
+  probe?: () => Promise<ModelEndpointHealth[]>;
+  healthyEveryMs?: number;
+  unhealthyEveryMs?: number;
+}): () => void {
+  const probe = options.probe ?? syncModelEndpointRuntimeStatus;
+  const healthyEveryMs = options.healthyEveryMs ?? 10 * 60_000;
+  const unhealthyEveryMs = options.unhealthyEveryMs ?? 60_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  const schedule = (healthy: boolean) => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void probe()
+        .then((endpoints) => endpoints.every((endpoint) => endpoint.ok), () => false)
+        .then(schedule);
+    }, healthy ? healthyEveryMs : unhealthyEveryMs);
+    // A pending re-probe never keeps the process alive.
+    timer.unref?.();
+  };
+  schedule(options.initiallyHealthy);
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
+}
