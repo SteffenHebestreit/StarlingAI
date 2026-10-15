@@ -22,12 +22,25 @@ export function upstreamHeaders(apiKey?: string, init: Record<string, string> | 
   return headers;
 }
 
+/** A URL's path, for a message the user may read: the service's internal host stays out of it. */
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
 export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
+    // The timer's abort read "This operation was aborted", with the internal URL in front of it.
+    if (controller.signal.aborted) {
+      throw new Error(`Request to ${pathOf(url)} timed out after ${Math.round(timeoutMs / 1000)} s`);
+    }
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Request to ${url} failed: ${detail}`);
   } finally {
@@ -55,17 +68,41 @@ export function summarizeUpstreamText(value: string): string {
   return collapsed.length > 240 ? `${collapsed.slice(0, 237)}...` : collapsed;
 }
 
+/**
+ * The message an upstream error carries, in the shapes services send: a string; OpenAI's
+ * `{error: {message}}`; FastAPI's validation list `{detail: [{loc, msg}]}`. Only the bare string
+ * was read, so the speech service's real reason came back as "Transcription failed".
+ */
+export function upstreamErrorText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value)) {
+    const parts = value.map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (entry && typeof entry === "object") {
+        const item = entry as { msg?: unknown; message?: unknown; loc?: unknown };
+        const text = typeof item.msg === "string" ? item.msg : typeof item.message === "string" ? item.message : "";
+        const where = Array.isArray(item.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+        return text ? (where ? `${where}: ${text}` : text) : "";
+      }
+      return "";
+    }).filter(Boolean);
+    return parts.length > 0 ? parts.join("; ") : undefined;
+  }
+  if (value && typeof value === "object") {
+    const item = value as { message?: unknown; detail?: unknown };
+    return upstreamErrorText(item.message ?? item.detail);
+  }
+  return undefined;
+}
+
 export async function extractUpstreamError(response: Response, fallback: string): Promise<string> {
   const contentType = response.headers.get("content-type") ?? "";
 
   try {
     if (contentType.includes("application/json")) {
       const body = await response.json() as Record<string, unknown>;
-      const detail = body["detail"] ?? body["error"] ?? body["message"];
-      if (typeof detail === "string" && detail.trim()) {
-        return detail.trim();
-      }
-      return fallback;
+      const detail = upstreamErrorText(body["detail"] ?? body["error"] ?? body["message"]);
+      return detail ?? fallback;
     }
 
     const text = await response.text();

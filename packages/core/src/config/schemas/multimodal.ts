@@ -33,11 +33,20 @@ export const MultimodalSpeechToTextSchema = MultimodalServiceSchema.extend({
   baseUrl: OptionalEndpointUrlSchema.default(""),
   api: z.enum(["auto", "openai-compatible", "transcribe-only"]).default("auto"),
   model: z.string().min(1).default("whisper-1"),
+  /** The language spoken into the microphone when the client names none: "auto" lets the speech
+   *  service detect it; a code ("de", "en") pins it. The client used to send the wake-word locale
+   *  (en-US by default), so German speech was decoded as English. */
+  language: z.string().min(1).default("auto"),
 });
 
 export const MultimodalTextToSpeechSchema = MultimodalServiceSchema.extend({
   baseUrl: OptionalEndpointUrlSchema.default(""),
-  api: z.enum(["qwen-compatible", "openai-compatible"]).default("openai-compatible"),
+  /** "tts-stt-gateway": a speech service with several engines behind its own API
+   *  (multimodal/tts-stt-gateway.ts), whose voices are named "<engine>:<voice>" or "saved:<id>". */
+  api: z.enum(["qwen-compatible", "openai-compatible", "tts-stt-gateway"]).default("openai-compatible"),
+  /** On "tts-stt-gateway": the voice that speaks each language, keyed by two-letter code, with "*"
+   *  for any other — e.g. { "de": "saved:luna", "en": "piper:en_US-lessac-medium" }. */
+  voices: z.record(z.string(), z.string()).default({}),
   // Empty string is a meaningful value: on qwen-compatible it tells the
   // runtime to skip the /load_model preflight (use whatever the upstream
   // already has loaded); on openai-compatible the runtime falls back to

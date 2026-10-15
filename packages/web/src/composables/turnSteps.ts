@@ -10,6 +10,7 @@
  * Deliberately free of Vue and of the store, so the derivation can be exercised on its own.
  */
 
+import { agentLabel, toolLabel, turnText, type TurnLanguage } from "./turnText";
 import type { StepUserInput } from "./userInputs";
 
 export type StepStatus = "running" | "done" | "failed" | "stopped";
@@ -137,12 +138,12 @@ function ranThePlan(step: Pick<TurnStep, "name" | "metadata">): boolean {
 }
 
 /** "k/N done · f failed" for a plan run, or undefined when the report carries no counts. */
-function planRunOutcome(meta: Record<string, unknown>): string | undefined {
+function planRunOutcome(meta: Record<string, unknown>, lang: TurnLanguage): string | undefined {
   const done = num(meta["done"]);
   const total = num(meta["steps"]);
   const failed = num(meta["failed"]);
   if (done === undefined || total === undefined) return undefined;
-  return `${done}/${total} done${failed ? ` · ${failed} failed` : ""}`;
+  return turnText.planRun(lang, done, total, failed);
 }
 
 /**
@@ -157,35 +158,42 @@ export function isQuietStep(step: Pick<TurnStep, "kind" | "name" | "status">): b
   return step.kind === "tool" && QUIET_TOOLS.has(step.name) && step.status !== "failed";
 }
 
-/** The row's main text: what this step IS, in words rather than a function name where we can. */
-export function stepTitle(step: TurnStep): string {
+/** Tools whose row has a worded title of its own; any other tool is named by turnText toolLabel. */
+const WORDED_TITLES = new Set([
+  "delegate_to_agent", "swarm_delegate", "parallel_delegate", "run_task_graph", "run_workflow", "record_plan", "execute_plan",
+  "search_agents", "generate_image", "transform_image", "ask_user", "specialist_run",
+]);
+
+/** The row's main text: what this step IS, in words rather than a function name, in `lang`. */
+export function stepTitle(step: TurnStep, lang: TurnLanguage = "en"): string {
   if (step.kind === "note") return step.text ?? step.name;
   const args = step.args ?? {};
   switch (step.name) {
     case "delegate_to_agent":
     case "swarm_delegate": {
       const target = delegationTarget(step);
-      return target ? `Delegated to ${target}` : "Delegated to a specialist";
+      return target ? turnText.delegatedTo(lang, target) : turnText.delegatedToSpecialist(lang);
     }
-    case "parallel_delegate": return "Delegated in parallel";
-    case "run_task_graph": return "Ran a task graph";
+    case "parallel_delegate": return turnText.delegatedInParallel(lang);
+    case "run_task_graph": return turnText.ranTaskGraph(lang);
+    case "run_workflow": return turnText.ranWorkflow(lang);
     case "record_plan": {
       const steps = Array.isArray(args["steps"]) ? args["steps"].length : undefined;
       // Folded: the same call also ran the plan, so it reads like execute_plan's row.
-      if (ranThePlan(step)) return steps ? `Planned and ran ${steps} step${steps === 1 ? "" : "s"}` : "Ran the plan";
-      return steps ? `Planned ${steps} step${steps === 1 ? "" : "s"}` : "Planned the work";
+      if (ranThePlan(step)) return steps ? turnText.plannedAndRan(lang, steps) : turnText.ranThePlan(lang);
+      return steps ? turnText.planned(lang, steps) : turnText.plannedTheWork(lang);
     }
-    case "execute_plan": return "Ran the plan";
-    case "search_agents": return "Looked for the right specialist";
+    case "execute_plan": return turnText.ranThePlan(lang);
+    case "search_agents": return turnText.lookedForSpecialist(lang);
     case "generate_image":
       return str(args["baseImage"])
-        ? (str(args["mask"]) ? "Edited a region of the image" : "Edited the image")
-        : "Generated an image";
-    case "transform_image": return "Transformed the image";
-    case "ask_user": return "Asked you a question";
+        ? (str(args["mask"]) ? turnText.editedRegion(lang) : turnText.editedImage(lang))
+        : turnText.generatedImage(lang);
+    case "transform_image": return turnText.transformedImage(lang);
+    case "ask_user": return turnText.askedYou(lang);
     // A specialist a coordinator brought in, reconstructed from the swarm record on reload.
-    case "specialist_run": return step.agent ? `${step.agent} worked on it` : "A specialist worked on it";
-    default: return step.name;
+    case "specialist_run": return turnText.specialistWorked(lang, step.agent);
+    default: return toolLabel(step.name, lang);
   }
 }
 
@@ -194,7 +202,7 @@ export function stepTitle(step: TurnStep): string {
  * tool name. Only for tools without a worded title, which already say what they did.
  */
 export function stepSubject(step: TurnStep): string | undefined {
-  if (step.kind !== "tool" || stepTitle(step) !== step.name) return undefined;
+  if (step.kind !== "tool" || WORDED_TITLES.has(step.name)) return undefined;
   const args = step.args ?? {};
   const pick = str(args["query"]) ?? str(args["path"]) ?? str(args["url"]) ?? str(args["file"])
     ?? str(args["command"]) ?? str(args["prompt"])
@@ -203,12 +211,12 @@ export function stepSubject(step: TurnStep): string | undefined {
 }
 
 /** How the step came out, in one line. Undefined while it is still running. */
-export function stepOutcome(step: TurnStep): string | undefined {
+export function stepOutcome(step: TurnStep, lang: TurnLanguage = "en"): string | undefined {
   if (step.kind === "note" || step.status === "running") return undefined;
   // Not "did not finish": a step can also land here because its completion event never
   // arrived while the turn itself succeeded. Claiming failure would be a guess.
-  if (step.status === "stopped") return "no result reported";
-  if (isSkippedByUser(step)) return "Skipped by you";
+  if (step.status === "stopped") return turnText.noResult(lang);
+  if (isSkippedByUser(step)) return turnText.skippedByYou(lang);
 
   const meta = step.metadata ?? {};
   const result = step.result ?? "";
@@ -217,11 +225,11 @@ export function stepOutcome(step: TurnStep): string | undefined {
   // Said up front, because otherwise a cached result reads exactly like fresh work.
   if (meta["notExecuted"] === true) {
     const line = result.split("\n").map(l => l.trim()).find(Boolean);
-    return `${meta["cached"] === true ? "cached" : "not run"}${line ? ` · ${clip(line, 100)}` : ""}`;
+    return `${meta["cached"] === true ? turnText.cached(lang) : turnText.notRun(lang)}${line ? ` · ${clip(line, 100)}` : ""}`;
   }
 
   if (step.status === "failed") {
-    const firstLine = result.split("\n").map(line => line.trim()).find(Boolean) ?? "failed";
+    const firstLine = result.split("\n").map(line => line.trim()).find(Boolean) ?? turnText.failed(lang);
     return clip(firstLine.replace(/^(error:|⚠️|failed:)\s*/i, ""), 110);
   }
 
@@ -234,27 +242,27 @@ export function stepOutcome(step: TurnStep): string | undefined {
       // Said when the user set the render up themselves: otherwise the row reads as the agent's
       // choice, and the reader cannot tell the settings card was answered.
       const yours = record(meta["settings"])?.["source"] === "user" || step.userInput?.outcome === "configured";
-      return [path ? basename(path) : undefined, tier ? `${tier} tier` : undefined, yours ? "your settings" : undefined]
-        .filter(Boolean).join(" · ") || "done";
+      return [path ? basename(path) : undefined, tier ? turnText.tier(lang, tier) : undefined, yours ? turnText.yourSettings(lang) : undefined]
+        .filter(Boolean).join(" · ") || turnText.done(lang);
     }
     case "search_agents": {
       const top = str(meta["topResult"]);
       const score = num(meta["topResultScore"]);
-      return top ? `→ ${top}${score !== undefined ? ` (${Math.round(score * 100)}%)` : ""}` : "no match";
+      return top ? `→ ${agentLabel(top)}${score !== undefined ? ` (${Math.round(score * 100)}%)` : ""}` : turnText.noMatch(lang);
     }
     case "record_plan": {
       // Folded: what matters is how the run went, exactly as on execute_plan's row.
       if (ranThePlan(step)) {
-        const ran = planRunOutcome(meta);
+        const ran = planRunOutcome(meta, lang);
         if (ran) return ran;
       }
       const count = num(meta["stepCount"]);
       const risk = str(meta["riskTier"]);
-      return [count !== undefined ? `${count} step${count === 1 ? "" : "s"}` : undefined, risk ? `risk ${risk}` : undefined]
+      return [count !== undefined ? turnText.stepCount(lang, count) : undefined, risk ? turnText.risk(lang, risk) : undefined]
         .filter(Boolean).join(" · ") || undefined;
     }
     case "execute_plan": {
-      const ran = planRunOutcome(meta);
+      const ran = planRunOutcome(meta, lang);
       if (!ran) break;
       return ran;
     }
@@ -272,7 +280,7 @@ export function stepOutcome(step: TurnStep): string | undefined {
       if (artifacts.length) {
         const first = artifacts[0]!;
         const name = str(first["filename"]) ?? (str(first["outputPath"]) ? basename(str(first["outputPath"])!) : undefined);
-        return artifacts.length === 1 && name ? name : `${artifacts.length} files`;
+        return artifacts.length === 1 && name ? name : turnText.files(lang, artifacts.length);
       }
       break;
     }
@@ -294,19 +302,19 @@ export function stepOutcome(step: TurnStep): string | undefined {
  * Once the user has picked the engine on the settings card, THEIR engine decides — the agent's
  * arguments still name the one it proposed.
  */
-export function stepHint(step: TurnStep, now = Date.now()): string | undefined {
+export function stepHint(step: TurnStep, now = Date.now(), lang: TurnLanguage = "en"): string | undefined {
   if (step.status !== "running") return undefined;
   if (step.name === "generate_image") {
     const expected = step.userInput?.expectedSeconds;
     // The engine first finishing a render abandoned at its timeout — minutes that are not the
     // render's — counted down to when it should be free, as the card and the form count it.
     const wait = Math.max(0, ((step.userInput?.engineFreeAt ?? now) - now) / 1000);
-    const waiting = wait >= 1 ? `, once the engine finishes an earlier render (~${roughDuration(wait)})` : "";
-    if (expected && expected > 0) return `usually ~${roughDuration(expected)}${waiting}`;
+    const waiting = wait >= 1 ? turnText.afterEarlierRender(lang, roughDuration(wait)) : "";
+    if (expected && expected > 0) return `${turnText.usually(lang, roughDuration(expected))}${waiting}`;
     const slow = step.userInput?.tier
       ? step.userInput.tier === "quality"
       : str(step.args?.["baseImage"]) || step.args?.["tier"] === "quality";
-    return `${slow ? "quality tier — usually 2–3 min" : "usually ~10 s"}${waiting}`;
+    return `${slow ? turnText.qualityTierUsually(lang) : turnText.usually(lang, "10 s")}${waiting}`;
   }
   return undefined;
 }

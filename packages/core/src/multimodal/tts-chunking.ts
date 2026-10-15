@@ -74,14 +74,25 @@ function packSegments(segments: string[], maxChars: number): string[] {
   return chunks;
 }
 
+/**
+ * A paragraph's sentences: it is cut at the white space after a sentence's end mark, and nowhere
+ * else, so every character stays in a sentence. The sentences used to be MATCHED instead, and a mark
+ * not followed by white space ended no match: "Version 3.5 is out." came back as "5 is out.", and a
+ * German answer with "z.B." and a URL lost a third of its text before it was spoken. A cut after an
+ * abbreviation ("z.B. 4,50") only splits a sentence; the packing below joins it up again.
+ */
+export function splitIntoSentences(paragraph: string): string[] {
+  const sentences = paragraph.split(/(?<=[.!?…])\s+/).map(normalizeParagraph).filter(Boolean);
+  return sentences.length > 0 ? sentences : [paragraph];
+}
+
 function splitParagraphIntoSentences(paragraph: string): string[] {
-  const sentences = paragraph.match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)/g)?.map(normalizeParagraph).filter(Boolean);
-  if (sentences && sentences.length > 0) return sentences;
-  return [paragraph];
+  return splitIntoSentences(paragraph);
 }
 
 function splitLongSentence(sentence: string, maxChars: number): string[] {
-  const clauses = sentence.match(/[^,;:]+(?:[,;:]+(?=\s|$)|$)/g)?.map(normalizeParagraph).filter(Boolean);
+  // Cut, as above, at the white space after a clause mark, so "10:30" and "1,5" stay whole.
+  const clauses = sentence.split(/(?<=[,;:])\s+/).map(normalizeParagraph).filter(Boolean);
   if (clauses && clauses.length > 1 && clauses.every((clause) => clause.length <= maxChars)) {
     return packSegments(clauses, maxChars);
   }
@@ -244,6 +255,25 @@ export function mergeWavAudioChunks(chunks: Uint8Array[]): Uint8Array {
   return merged;
 }
 
+/** A response's body, read within `timeoutMs` when one is given. */
+export async function readBodyWithin(response: Response, timeoutMs?: number): Promise<ArrayBuffer> {
+  if (!timeoutMs || timeoutMs <= 0) return response.arrayBuffer();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      response.arrayBuffer(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void response.body?.cancel().catch(() => undefined);
+          reject(new Error(`Speech synthesis timed out after ${Math.round(timeoutMs / 1000)} s while the audio was being read`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function sendChunkedTtsRequests<TInput extends { text: string }>(
   input: TInput,
   options: {
@@ -251,6 +281,9 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
     requestChunk: (nextInput: TInput) => Promise<Response>;
     /** Max chunks synthesized concurrently (default 2; 1 = the old sequential path). */
     maxConcurrency?: number;
+    /** Time allowed to read one chunk's audio once its headers arrived (the request's own timeout
+     *  ends with the headers, so a service that stalls mid-body held the request forever). */
+    bodyTimeoutMs?: number;
   },
 ): Promise<Response> {
   const chunks = splitTextForTts(input.text, options.maxChunkChars);
@@ -279,13 +312,14 @@ export async function sendChunkedTtsRequests<TInput extends { text: string }>(
       const response = await options.requestChunk({ ...input, text: chunks[i]! } as TInput);
       if (!response.ok) { recordFailure(i, response); return; }
       const ct = response.headers.get("content-type") ?? "audio/wav";
-      if (!ct.toLowerCase().includes("audio/wav")) {
+      // audio/x-wav and audio/wave are WAV too; only "audio/wav" was accepted, a 502 for long text.
+      if (!/audio\/(?:x-)?wav/i.test(ct)) {
         recordFailure(i, new Response(JSON.stringify({
           error: `Chunked TTS merge requires WAV audio, but the backend returned '${ct}'.`,
         }), { status: 502, headers: { "Content-Type": "application/json" } }));
         return;
       }
-      results[i] = new Uint8Array(await response.arrayBuffer());
+      results[i] = new Uint8Array(await readBodyWithin(response, options.bodyTimeoutMs));
     }
   };
 

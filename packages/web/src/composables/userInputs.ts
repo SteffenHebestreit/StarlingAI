@@ -16,6 +16,7 @@
  */
 import { agentEstimateSeconds, engineWaitSeconds, readImageSettingsPayload } from "./imageSettings";
 import type { TurnStep } from "./turnSteps";
+import { turnText, type TurnLanguage } from "./turnText";
 
 export type UserInputOutcome = "configured" | "auto" | "cancelled";
 
@@ -501,11 +502,11 @@ export function closesAskUser(question: { requestId: string; toolCallId?: string
  * The row of a step that is waiting on the user. Its usual hint ("usually 2–3 min") would be
  * wrong here — nothing renders until the user answers or the deadline passes.
  */
-export function awaitingStepTitle(kind: string): string {
-  return kind === "image_settings" ? "Waiting for your image settings" : "Waiting for your answer";
+export function awaitingStepTitle(kind: string, lang: TurnLanguage = "en"): string {
+  return kind === "image_settings" ? turnText.waitingForImageSettings(lang) : turnText.waitingForAnswer(lang);
 }
 
-export function awaitingStepHint(expiresAt: string | undefined, now: number): string {
+export function awaitingStepHint(expiresAt: string | undefined, now: number, lang: TurnLanguage = "en"): string {
   const left = remainingMs(expiresAt, now);
-  return left === null ? "waiting for you" : `waiting for you · Auto in ${formatCountdown(left)}`;
+  return turnText.waitingForYou(lang, left === null ? undefined : formatCountdown(left));
 }

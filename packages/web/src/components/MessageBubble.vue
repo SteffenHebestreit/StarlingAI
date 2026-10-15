@@ -15,11 +15,13 @@
         : message.role === 'system'
           ? 'message-bubble--system'
           : 'message-bubble--ai',
-      message.blocked && 'message-bubble--error'
+      message.blocked && !message.stopped && 'message-bubble--error'
     ]">
 
+      <!-- A turn the user stopped: their choice, not an error. -->
+      <div v-if="message.stopped" class="guardrail-badge guardrail-badge--stopped">{{ turnText.stoppedBadge(bubbleLanguage) }}</div>
       <!-- Guardrail / blocked badge -->
-      <div v-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
+      <div v-else-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
         {{ blockLabel }}
       </div>
       <div v-if="visibleGuardrailEvents.length" class="guardrail-events">
@@ -87,8 +89,9 @@
         :steps="turnSteps"
         :is-streaming="isStreamingMessage"
         :live-text="isStreamingMessage ? message.statusText : undefined"
-        :start-collapsed="autoCollapse"
+        :start-collapsed="stepsStartCollapsed"
         :awaiting="awaitingSteps"
+        :language="bubbleLanguage"
         @select="(stepId) => emit('show-step', message.id, stepId)"
       >
         <!-- A question a step is waiting on sits under that step, so it moves with the step
@@ -349,7 +352,9 @@ import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
 import TurnStepStream from "@/components/TurnStepStream.vue";
 import UserInputCard from "@/components/input/UserInputCard.vue";
-import { stepsFor } from "@/composables/turnSteps";
+import { displayStatus, stepsFor } from "@/composables/turnSteps";
+import { turnLanguage, turnText, type TurnLanguage } from "@/composables/turnText";
+import { detectLanguage } from "@/speech/speechText";
 import { localExpiresAt, placementKey } from "@/composables/userInputs";
 import { escapeHtml, memoizedRenderMarkdown, renderMarkdown, renderStreamingMarkdown } from "@/composables/markdown";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
@@ -394,6 +399,8 @@ const props = defineProps<{
   /** Live per-sub-agent chain-of-thought for the in-flight turn. */
   streamingSubAgentReasoning?: Array<{ agent: string; text: string }>;
   autoCollapse?: boolean;
+  /** A finished answer: its steps fold under their header unless one failed (the answer is the point). */
+  foldSteps?: boolean;
   /** False while a turn runs: a Restart then would cut the history under it. */
   allowRewind?: boolean;
 }>();
@@ -417,6 +424,14 @@ const artifactPreviewLoading = ref<string | null>(null);
 const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
 const turnSteps = computed(() => stepsFor(props.message));
+/**
+ * The language the turn is told in: the one the store noted when the turn started, else the
+ * answer's own (a reloaded transcript), else English — the rest of the page is English.
+ */
+const bubbleLanguage = computed<TurnLanguage>(() =>
+  turnLanguage(props.message.language ?? detectLanguage(props.message.content ?? "")));
+const stepsStartCollapsed = computed(() => Boolean(props.autoCollapse)
+  || (Boolean(props.foldSteps) && !props.message.blocked && !turnSteps.value.some((step) => displayStatus(step) === "failed")));
 const isStreamingMessage = computed(() => props.message.id === "streaming");
 /** This bubble's steps that have an open question under them. */
 const awaitingSteps = computed(() => {
@@ -463,7 +478,9 @@ function splitContent(raw: string): { thinking: string; main: string } {
   return { thinking, main };
 }
 
-const parsed = computed(() => splitContent(
+const parsed = computed(() => props.message.stopped
+  ? { thinking: "", main: turnText.stoppedNote(bubbleLanguage.value) }
+  : splitContent(
   props.message.role === "assistant"
     ? sanitizeAssistantMessageContent(props.message.content ?? "", props.message.toolCalls)
     : (props.message.content ?? "")
@@ -1555,6 +1572,7 @@ onBeforeUnmount(() => {
 }
 .guardrail-badge--blocked { color: #f87171; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239,68,68,0.25); }
 .guardrail-badge--warn    { color: #fbbf24; background: rgba(251, 191, 36, 0.08); border: 1px solid rgba(251,191,36,0.2); }
+.guardrail-badge--stopped { color: rgb(203 213 225); background: rgba(148, 163, 184, 0.1); border: 1px solid rgba(148, 163, 184, 0.22); }
 .guardrail-events { margin-bottom: 0.5rem; display: flex; flex-direction: column; gap: 0.25rem; }
 
 /* ── Tool status ─────────────────────────────────────────────────────────────── */

@@ -26,6 +26,25 @@ describe("wave B/C wiring is in place", () => {
     expect(count(read("gateway/rpc.ts"), "subAgentProgressStatus(event)")).toBe(1);
   });
 
+  // Status UX wave (2026-10-15): a specialist's heartbeat reaches its row, a settled approval closes
+  // the page's banner, and a delegation the runtime makes itself gets a step like any other.
+  it("gateway: sub-agent heartbeats and settled approvals reach the page", () => {
+    const rpc = read("gateway/rpc.ts");
+    expect(count(rpc, "subAgentHeartbeat(event)")).toBe(1);
+    expect(count(rpc, 'type: "agent.heartbeat"')).toBe(1);
+    expect(count(rpc, 'type: "agent.approval_resolved"')).toBe(2);   // answered, timed out
+  });
+
+  it("runtime: delegations the runtime makes itself are announced as steps", () => {
+    for (const file of ["agent/runtime.ts", "agent/turn-corrective.ts", "agent/turn-finalize-guards.ts"]) {
+      expect(count(read(file), 'executeTool("delegate_to_agent"'), file).toBe(0);
+    }
+    expect(count(read("agent/turn-corrective.ts"), "executeVisibleTool(ctx.toolSteps,")).toBe(2);   // build, reroute
+    expect(count(read("agent/turn-finalize-guards.ts"), "executeVisibleTool(ctx.toolSteps,")).toBe(1);   // escalation
+    expect(count(read("agent/runtime.ts"), "executeVisibleTool(opts,")).toBe(1);   // auto-research
+    expect(count(read("agent/runtime.ts"), "toolSteps: opts,")).toBe(2);   // corrective + terminal-guard contexts
+  });
+
   it("nested workflow turns forward the user's input channel", () => {
     expect(count(read("tools/workflow-catalog.ts"), "inputCallback: ctx.inputCallback,")).toBe(2);
   });

@@ -50,10 +50,11 @@ export const useRuntimeStore = defineStore("runtime", () => {
     modelEndpointError.value = "";
     try {
       const headers = { Authorization: `Bearer ${gateway.token}` };
-      const [runtimeRes, endpointRes] = await Promise.all([
-        window.fetch(`${baseUrl()}/api/runtime/status`, { headers }),
-        window.fetch(`${baseUrl()}/api/model-endpoints/status`, { headers }),
-      ]);
+      // The endpoint status probes the endpoints and records the result in the runtime status, so
+      // that is read after it: read side by side, the runtime card showed the verdict from before
+      // the probe the list under it had just made.
+      const endpointRes = await window.fetch(`${baseUrl()}/api/model-endpoints/status`, { headers });
+      const runtimeRes = await window.fetch(`${baseUrl()}/api/runtime/status`, { headers });
 
       if (!runtimeRes.ok) throw new Error(`HTTP ${runtimeRes.status}`);
       snapshot.value = await runtimeRes.json() as RuntimeStatusSnapshot;

@@ -9,7 +9,11 @@ import {
   multimodalServiceConfigured,
   disabledServiceStatus,
   disabledServiceResponse,
+  extractUpstreamError,
+  fetchWithTimeout,
+  upstreamErrorText,
 } from "../gateway/upstream-http.js";
+import { createServer, type Server } from "node:http";
 
 // Pure upstream-HTTP + MCP-parse helpers extracted from the gateway god-file.
 describe("upstream-http helpers", () => {
@@ -65,5 +69,37 @@ describe("upstream-http helpers", () => {
     const res = disabledServiceResponse("off");
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "off", disabled: true });
+  });
+});
+
+// 2026-10-14: only a bare string was read, so the speech service's real reason came back as
+// "Transcription failed"; a timeout read "This operation was aborted" with the internal host.
+describe("upstream errors, as the speech service sends them", () => {
+  it("reads a string, OpenAI's {error: {message}} and FastAPI's validation list", () => {
+    expect(upstreamErrorText("  model not found ")).toBe("model not found");
+    expect(upstreamErrorText({ message: "Invalid voice", type: "invalid_request_error" })).toBe("Invalid voice");
+    expect(upstreamErrorText([{ loc: ["body", "text"], msg: "Field required", type: "missing" }])).toBe("text: Field required");
+    expect(upstreamErrorText({ detail: "upstream busy" })).toBe("upstream busy");
+    expect(upstreamErrorText(42)).toBeUndefined();
+  });
+
+  it("extracts them from a response, and falls back when there is none", async () => {
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 400, headers: { "content-type": "application/json" } });
+    expect(await extractUpstreamError(json({ error: { message: "unsupported response_format" } }), "Transcription failed")).toBe("unsupported response_format");
+    expect(await extractUpstreamError(json({ detail: [{ loc: ["body", "file"], msg: "Field required" }] }), "Transcription failed")).toBe("file: Field required");
+    expect(await extractUpstreamError(json({}), "Transcription failed")).toBe("Transcription failed");
+  });
+
+  it("says a request timed out, naming its path and not the service's host", async () => {
+    const server: Server = createServer(() => { /* never answers */ });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const port = (server.address() as { port: number }).port;
+    try {
+      await expect(fetchWithTimeout(`http://127.0.0.1:${port}/v1/audio/speech`, {}, 200))
+        .rejects.toThrow("Request to /v1/audio/speech timed out after 0 s");
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 });

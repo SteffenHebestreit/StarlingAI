@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { logAudit } from "../audit/logger.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { executeTool, type ToolContext } from "../tools/registry.js";
+import { executeVisibleTool, type ToolStepSink } from "./visible-tool.js";
 import type { ChatProvider, LLMMessage } from "../providers/lmstudio.js";
 import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
@@ -28,6 +29,7 @@ import { looksLikeDegenerateRepetition } from "./text-dedup.js";
 import { EVIDENCE_SECTION_RE } from "./interrupted-delegation-evidence.js";
 import { stripDelegateRelayFrame } from "./runtime-evidence-dump.js";
 import { IN_REPLY_LANGUAGE, localizedFixedText } from "./reply-language.js";
+import { TURN_STATUS } from "./turn-status-text.js";
 
 /**
  * Result of selectCorrectiveResumeTarget — structurally compatible with the runtime
@@ -53,6 +55,8 @@ export interface CorrectiveContext {
   readonly deliverableIntent: DeliverableIntent;
   readonly toolContext: ToolContext;
   readonly onStatus?: (status: { phase: string; message: string; iteration?: number }) => void;
+  /** Where the delegations made here are announced, so the page shows each as a step. */
+  readonly toolSteps?: ToolStepSink;
 
   // --- live reads of mutable / late-bound enclosing state ---
   getIterationCount: () => number;
@@ -142,7 +146,7 @@ export const runCorrectiveBuild = async (
     builderAgent,
     contextChars: buildContext.length,
   }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-  ctx.onStatus?.({ phase: "guardrail", message: "Der QA-Check verlangt das angeforderte Artefakt — ich lasse es jetzt vom passenden Spezialisten erstellen.", iteration: ctx.getIterationCount() });
+  ctx.onStatus?.({ phase: "guardrail", message: localizedFixedText(TURN_STATUS.qaArtifact), iteration: ctx.getIterationCount() });
   // Resume-over-regenerate: if an earlier attempt this turn left a partial deliverable
   // that looks cut off mid-document, finish THAT file in place instead of re-emitting the
   // whole thing — saves the tokens/latency of regeneration and avoids hitting the same
@@ -204,7 +208,8 @@ export const runCorrectiveBuild = async (
   // turn's history (see where it is written).
   const confirmationHistory: LLMMessage[] = [{ role: "user", content: userMessage }];
   try {
-    const buildResult = await executeTool("delegate_to_agent", {
+    const buildCallId = `qabuild_${Date.now().toString(36)}`;
+    const buildResult = await executeVisibleTool(ctx.toolSteps, buildCallId, "delegate_to_agent", {
       agentName: builderAgent,
       task: buildTask,
       // The runtime knows what it asked for: a build that writes no file has missed it.
@@ -219,7 +224,6 @@ export const runCorrectiveBuild = async (
     // executeTool here runs OUTSIDE the main tool loop; record a well-formed assistant+tool
     // pair so the built artifact surfaces as a clickable attachment (collectTurnArtifactAttachments
     // only reads tool-role history) and history stays valid (audit 65f46046).
-    const buildCallId = `qabuild_${Date.now().toString(36)}`;
     const buildCall: LLMMessage = {
       role: "assistant",
       content: "",
@@ -381,13 +385,13 @@ export const runCorrectiveReroute = async (
     // its safety argument (sub-agent.ts) is that the agent it unblocks holds no delegate tools;
     // semantic routing promises no such thing. The runtime does not arm the loop-brake reroute after
     // a Stop, and without the flag delegate_to_agent refuses one that lands first.
-    const rerouteResult = await executeTool("delegate_to_agent", {
+    const rerouteCallId = `qareroute_${Date.now().toString(36)}`;
+    const rerouteResult = await executeVisibleTool(ctx.toolSteps, rerouteCallId, "delegate_to_agent", {
       task: userMessage,
     }, reason === "fabricated_zero_work" ? { ...toolContext, allowDelegationAfterOperatorStop: true } : toolContext);
     ctx.incrementDelegationCount();
     // Record a well-formed assistant+tool pair (same as the corrective build) so the
     // delegated evidence is in history and any artifacts surface as attachments.
-    const rerouteCallId = `qareroute_${Date.now().toString(36)}`;
     session.addMessage({
       role: "assistant",
       content: "",

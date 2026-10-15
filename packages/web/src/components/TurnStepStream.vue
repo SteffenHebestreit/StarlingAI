@@ -82,6 +82,7 @@ import {
   type StepDisplayStatus,
   type TurnStep,
 } from "@/composables/turnSteps";
+import { agentLabel, turnText, type TurnLanguage } from "@/composables/turnText";
 import { awaitingStepHint, awaitingStepTitle } from "@/composables/userInputs";
 
 const props = defineProps<{
@@ -93,7 +94,11 @@ const props = defineProps<{
   startCollapsed?: boolean;
   /** Steps waiting on the user's answer: their row says so, and the `input` slot renders under them. */
   awaiting?: Record<string, { kind: string; expiresAt: string }>;
+  /** The language the turn is shown in: the user's (composables/turnText.ts). */
+  language?: TurnLanguage;
 }>();
+
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 const emit = defineEmits<{
   /** Open this step's detail in the side panel. */
@@ -128,7 +133,7 @@ const rows = computed(() => {
   return props.steps.filter(step => !isQuietStep(step)).map(step => {
     if (step.depth === 0 && step.kind === "tool") parentTarget = delegationTarget(step);
     const agentTag = step.depth === 1 && step.agent && step.agent !== parentTarget && step.name !== "specialist_run"
-      ? step.agent
+      ? agentLabel(step.agent)
       : undefined;
     return { ...describe(step), agentTag };
   });
@@ -138,13 +143,13 @@ const hasAwaiting = computed(() => Boolean(props.awaiting && props.steps.some(st
 
 function describe(step: TurnStep) {
   const waiting = step.status === "running" ? props.awaiting?.[step.id] : undefined;
-  const title = waiting ? awaitingStepTitle(waiting.kind) : stepTitle(step);
-  const outcome = stepOutcome(step);
+  const title = waiting ? awaitingStepTitle(waiting.kind, lang.value) : stepTitle(step, lang.value);
+  const outcome = stepOutcome(step, lang.value);
   // While running: the specialist's own progress line if it sent one, otherwise what to
   // expect. Finished: how it came out. While it waits on the user, neither — the countdown.
   const detail = waiting
-    ? awaitingStepHint(waiting.expiresAt, now.value)
-    : step.status === "running" ? (step.progress ?? stepHint(step, now.value)) : outcome;
+    ? awaitingStepHint(waiting.expiresAt, now.value, lang.value)
+    : step.status === "running" ? (step.progress ?? stepHint(step, now.value, lang.value)) : outcome;
   const duration = formatDuration(stepDurationMs(step, now.value));
   const waited = step.userInput?.waitedMs;
   return {
@@ -155,11 +160,11 @@ function describe(step: TurnStep) {
     detail,
     duration,
     tooltip: [
-      step.agent ? `inside ${step.agent}` : undefined,
+      step.agent ? turnText.insideAgent(lang.value, step.agent) : undefined,
       step.kind === "tool" ? step.name : undefined,
       // The row's time leaves the wait out; this is where it is still told.
-      waited ? `waited ${formatDuration(waited)} for your answer` : undefined,
-      "click for details",
+      waited ? turnText.waitedForAnswer(lang.value, formatDuration(waited)) : undefined,
+      turnText.clickForDetails(lang.value),
     ].filter(Boolean).join(" · "),
   };
 }
@@ -170,7 +175,8 @@ const headerText = computed(() => {
   const agents = [...new Set(props.steps
     .filter(step => step.depth === 0 && step.kind === "tool")
     .map(delegationTarget)
-    .filter((name): name is string => Boolean(name)))];
+    .filter((name): name is string => Boolean(name))
+    .map(agentLabel))];
   // A render the user skipped is their choice, not a failure of the turn.
   const failed = props.steps.filter(step => displayStatus(step) === "failed").length;
   const span = formatDuration(turnSpanMs(props.steps, now.value));
@@ -178,21 +184,19 @@ const headerText = computed(() => {
   // it still needs a header, or folding it made the whole record disappear.
   const notes = rows.value.length - toolCount.value;
   return [
-    toolCount.value
-      ? `${toolCount.value} step${toolCount.value === 1 ? "" : "s"}`
-      : `${notes} note${notes === 1 ? "" : "s"}`,
+    toolCount.value ? turnText.headerSteps(lang.value, toolCount.value) : turnText.headerNotes(lang.value, notes),
     agents.length ? agents.join(", ") : undefined,
-    failed ? `${failed} failed` : undefined,
+    failed ? turnText.headerFailed(lang.value, failed) : undefined,
     span || undefined,
   ].filter(Boolean).join(" · ");
 });
 
 function statusWord(status: StepDisplayStatus): string {
-  if (status === "running") return "running";
-  if (status === "failed") return "failed";
-  if (status === "stopped") return "no result";
-  if (status === "skipped") return "skipped by you";
-  return "done";
+  if (status === "running") return turnText.statusRunning(lang.value);
+  if (status === "failed") return turnText.statusFailed(lang.value);
+  if (status === "stopped") return turnText.statusNoResult(lang.value);
+  if (status === "skipped") return turnText.statusSkipped(lang.value);
+  return turnText.statusDone(lang.value);
 }
 
 function markFor(status: StepDisplayStatus): string {

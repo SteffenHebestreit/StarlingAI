@@ -1,11 +1,12 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
 import { useAuditStore } from "./audit";
 import { useComputerStore } from "./computer";
 import { useNotificationStore } from "./notifications";
 import { useShellStore } from "./shell";
 import { isDelegation, isFailedResult, isFanOut, stepsFromToolCalls, type TurnStep } from "../composables/turnSteps";
+import { agentLabel, languageOfTurn, turnLanguage, turnText, type TurnLanguage } from "../composables/turnText";
 import { mergeFinalAssistantContent, mergeSegmentAssistantContent, transcriptAssistantContent } from "../composables/assistantContent";
 import {
   appendUnread, landTurn, liveCallId, markUnread, newSteerMessage, progressSteps, readSteeringEntries, resteer, resumeTurnSegments,
@@ -101,6 +102,8 @@ export interface ChatMessage {
   pageOnly?: boolean;
   /** A page-only note on a turn the user stopped: the server records no stop, only what the turn did. */
   stopped?: boolean;
+  /** The language the turn is shown in, noted when it starts ("de" | "en"; composables/turnText.ts). */
+  language?: TurnLanguage;
 }
 
 export interface SwarmTaskAttempt {
@@ -300,6 +303,27 @@ export interface SpeechToTextResult {
   text: string;
   language?: string;
   duration?: number;
+}
+
+/** A voice of a TTS-STT gateway, as /api/multimodal/voices lists it (multimodal/tts-stt-gateway.ts). */
+export interface HubVoiceInfo {
+  /** The reference to configure or send: "piper:de_DE-thorsten-medium", "saved:luna". */
+  id: string;
+  name: string;
+  engine: string;
+  kind: "builtin" | "custom" | "saved";
+  language?: string;
+}
+
+/** A training job on a TTS-STT gateway (experimental piper training). */
+export interface VoiceTrainingJob {
+  id: string;
+  status: string;
+  progress?: number;
+  modelName?: string;
+  message?: string;
+  currentEpoch?: number;
+  totalEpochs?: number;
 }
 
 export interface SavedTtsVoice {
@@ -899,6 +923,18 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   const pendingApproval = ref<PendingApproval | null>(null);
+  // A banner closes in many places (answered, the turn ending, a Stop, a session switch); its sticky
+  // notice closed in none, and "Approval required" stayed in the corner long after the turn.
+  watch(pendingApproval, (next, previous) => {
+    if (previous && previous.approvalId !== next?.approvalId) notifications.dismiss(`approval:${previous.approvalId}`);
+  });
+  /** The notice the open intervention banner put up, closed with the banner. */
+  let interventionNoticeId: string | null = null;
+  watch(pendingIntervention, (next) => {
+    if (next || !interventionNoticeId) return;
+    notifications.dismiss(interventionNoticeId);
+    interventionNoticeId = null;
+  });
   const pendingInputRequest = ref<PendingInputRequest | null>(null);
   let inputRequestExpiryTimer: ReturnType<typeof setTimeout> | null = null;
   // Structured questions (the image settings card), keyed by inputId. Separate from the ask_user
@@ -1067,9 +1103,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     turnLikelyStalled.value = true;
     updateStreamingStatus(
-      delegated
-        ? "Work is still in progress, but the backend has stopped confirming that this run is active. Watching closely before recovery."
-        : "No progress signal has arrived recently, and the backend no longer confirms the run as active.",
+      delegated ? turnText.stalledDelegated(liveLanguage()) : turnText.stalled(liveLanguage()),
       { appendHistory: false },
     );
   }
@@ -1094,19 +1128,13 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (liveness.connectionHealthy && liveness.requestActive) {
       turnLikelyStalled.value = false;
-      updateStreamingStatus(
-        "The backend is still generating this response. Keeping the turn open while waiting for the next progress event.",
-        { appendHistory: false },
-      );
+      updateStreamingStatus(turnText.stillGenerating(liveLanguage()), { appendHistory: false });
       armPendingTurnWatchdog();
       return;
     }
 
     turnLikelyStalled.value = true;
-    updateStreamingStatus(
-      "No progress signal was received for this turn. Reconnecting to recover the active session.",
-      { appendHistory: true },
-    );
+    updateStreamingStatus(turnText.reconnecting(liveLanguage()), { appendHistory: true });
 
     beginPendingTurnRecovery();
     stopHeartbeat();
@@ -1328,7 +1356,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         // A turn picked up by reading the transcript lost no connection here (a reload, a second
         // tab): its status line stays as followServerTurn set it, and its steps move with each read.
         if (readsTranscriptOnly(recovery.requestId)) refreshPickedUpTurn(recovery.requestId, result);
-        else updateStreamingStatus("Reconnected — this turn is still running on the server. Its answer appears here when it finishes.", { appendHistory: false });
+        else updateStreamingStatus(turnText.reconnected(liveLanguage()), { appendHistory: false });
         scheduleTurnRecovery(TURN_RECOVERY_RUNNING_POLL_MS);
         return;
       }
@@ -1680,13 +1708,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     const completedCount = tasks.filter((task) => task.status === "completed").length;
     const partialCount = tasks.filter((task) => task.status === "partial").length;
     const failedCount = tasks.filter((task) => task.status === "failed" || task.status === "blocked").length;
-    const statusParts: string[] = [];
-    if (runningCount > 0) statusParts.push(`${runningCount} running`);
-    if (pendingCount > 0) statusParts.push(`${pendingCount} pending`);
-    if (completedCount > 0) statusParts.push(`${completedCount} done`);
-    if (partialCount > 0) statusParts.push(`${partialCount} partial`);
-    if (failedCount > 0) statusParts.push(`${failedCount} failed`);
-    return statusParts.length > 0 ? `Swarm plan active: ${statusParts.join(" · ")}` : null;
+    return turnText.plan(liveLanguage(), {
+      running: runningCount, pending: pendingCount, done: completedCount, partial: partialCount, failed: failedCount,
+    });
   }
 
   function currentTurnObjectiveFallback(): string {
@@ -1882,8 +1906,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     // at all and they were dropped, leaving the row silent while several specialists worked.
     const host = running.find(isFanOut) ?? single[0];
     if (!host) return;
-    host.progress = agent && !message.toLowerCase().includes(agent.toLowerCase())
-      ? `${agent}: ${message}`
+    const label = agent ? agentLabel(agent) : undefined;
+    host.progress = label && !message.toLowerCase().includes(label.toLowerCase())
+      ? `${label}: ${message}`
       : message;
   }
 
@@ -2128,7 +2153,7 @@ export const useGatewayStore = defineStore("gateway", () => {
           : {};
         if (toolName) {
           ensureStreamingToolCall(toolName, args, `audit:${event.id}`);
-          updateStreamingStatus(`Running ${toolName}...`, { appendHistory: true });
+          updateStreamingStatus(turnText.runningTool(liveLanguage(), toolName), { appendHistory: true });
         }
         return;
       }
@@ -2337,6 +2362,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       blocked: true,
       pageOnly: true,
       ...(stopped ? { stopped: true } : {}),
+      ...(streamingMessage?.language ? { language: streamingMessage.language } : {}),
       swarmState: preservedSwarmState ?? undefined,
       toolCalls: streamingMessage?.toolCalls,
       attachments: streamingMessage?.attachments,
@@ -2365,7 +2391,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearPendingTurnRecovery();
     }
 
-    flashError(5000);
+    // The user's Stop is not an error: no red flash for it.
+    if (!stopped) flashError(5000);
   }
 
   /**
@@ -2425,7 +2452,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     pickedUpTurn = { requestId, transcriptOnly: !options.live };
     turnSessions.set(requestId, sessionId);
     messages.value = resumeTurnSegments(messages.value, requestId, stepsFromToolCalls);
-    const status = options.live ? "Still working on it…" : "Still running on the server — its answer appears here when it finishes.";
+    const opener = [...messages.value].reverse().find((message) => message.role === "user" && !message.midTurn);
+    const language = turnLanguageFor(opener?.content);
+    const status = options.live ? turnText.stillWorking(language) : turnText.stillOnServer(language);
     messages.value.push({
       id: "streaming",
       role: "assistant",
@@ -2435,6 +2464,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       statusHistory: [status],
       steps: [],
       requestId,
+      language,
     });
     if (!options.live) readTranscriptUntilLanded(requestId, sessionId);
     armPendingTurnWatchdog();
@@ -2665,6 +2695,15 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function getStreamingMessage(): ChatMessage | undefined {
     return messages.value.find((entry) => entry.id === "streaming");
+  }
+
+  function turnLanguageFor(requestText: string | undefined): TurnLanguage {
+    return languageOfTurn(requestText, messages.value);
+  }
+
+  /** The running turn's language, for the lines the page writes itself. */
+  function liveLanguage(): TurnLanguage {
+    return turnLanguage(getStreamingMessage()?.language);
   }
 
   function updateStreamingStatus(content: string, options: { appendHistory?: boolean } = {}): void {
@@ -3141,6 +3180,28 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    // A specialist's sign of life: what it is doing, on its delegation's row.
+    if (type === "agent.heartbeat") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (isLiveTurnEvent(data)) {
+        notePendingTurnActivity();
+        const agent = typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined;
+        const activity = typeof data["activity"] === "string" ? data["activity"] : "planning";
+        const chars = typeof data["chars"] === "number" ? data["chars"] : undefined;
+        recordDelegationProgress(agent, turnText.heartbeat(liveLanguage(), activity, chars));
+      }
+      return;
+    }
+
+    // Answered, denied or timed out: the banner and its sticky notice asked on until the turn ended.
+    if (type === "agent.approval_resolved") {
+      const data = msg["data"] as Record<string, unknown> | undefined;
+      const approvalId = typeof data?.["approvalId"] === "string" ? data["approvalId"] : undefined;
+      if (approvalId && pendingApproval.value?.approvalId === approvalId) pendingApproval.value = null;
+      if (approvalId) notifications.dismiss(`approval:${approvalId}`);
+      return;
+    }
+
     if (type === "agent.tool_start") {
       const data = msg["data"] as Record<string, unknown>;
       if (isLiveTurnEvent(data)) {
@@ -3156,7 +3217,7 @@ export const useGatewayStore = defineStore("gateway", () => {
           );
           recordStepStart(data);
         }
-        updateStreamingStatus(`Running ${String(data["name"])}...`, { appendHistory: true });
+        updateStreamingStatus(turnText.runningTool(liveLanguage(), String(data["name"])), { appendHistory: true });
       }
       return;
     }
@@ -3246,8 +3307,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         notePendingTurnActivity();
         pendingIntervention.value = data["notice"] as InterventionNotice;
         const notice = data["notice"] as InterventionNotice;
+        interventionNoticeId = `intervention:${String(data["requestId"])}:${notice.reasonCode}`;
         notifications.pushLocalNotification({
-          id: `intervention:${String(data["requestId"])}:${notice.reasonCode}`,
+          id: interventionNoticeId,
           title: "Operator action suggested",
           message: notice.summary,
           level: notice.severity,
@@ -3296,12 +3358,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         if (streamingMessage) {
           const completedTools = streamingMessage.toolCalls?.filter((toolCall) => toolCall.result !== undefined).length ?? 0;
           const shouldCheckpoint = completedTools <= 2 || completedTools % 3 === 0;
-          updateStreamingStatus(
-            completedTools > 0
-              ? `Completed ${completedTools} tool call${completedTools === 1 ? "" : "s"}. Latest: ${String(data["name"])}.`
-              : `Completed ${String(data["name"])}.`,
-            { appendHistory: shouldCheckpoint },
-          );
+          // The finished call has its row with its outcome; the live line says what comes next.
+          updateStreamingStatus(turnText.nextStep(liveLanguage()), { appendHistory: shouldCheckpoint });
         }
       }
       return;
@@ -3367,11 +3425,17 @@ export const useGatewayStore = defineStore("gateway", () => {
       // recovered from a failure — and dropping them is why a long turn looks silent.
       if (["routing", "reviewing", "synthesizing", "guardrail", "delegating",
         "steering", "oversight", "recovered"].includes(status)) {
-        const message = String(data["message"] ?? "").trim();
+        // A specialist's start and finish come as what they are (lifecycle) and are worded here,
+        // in the turn's language; the runtime's message is its English log line.
+        const sourceAgent = typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined;
+        const lifecycle = data["delegated"] === true && sourceAgent ? data["lifecycle"] : undefined;
+        const message = lifecycle === "started" ? turnText.specialistStarted(liveLanguage(), sourceAgent!)
+          : lifecycle === "completed" ? turnText.specialistFinished(liveLanguage(), sourceAgent!)
+            : String(data["message"] ?? "").trim();
         if (message) {
           updateStreamingStatus(message, { appendHistory: true });
           if (data["delegated"] === true) {
-            recordDelegationProgress(typeof data["sourceAgent"] === "string" ? data["sourceAgent"] : undefined, message);
+            recordDelegationProgress(sourceAgent, message);
           } else if (NARRATION_PHASES.has(status)) {
             recordNarration(status, message);
           }
@@ -3392,6 +3456,9 @@ export const useGatewayStore = defineStore("gateway", () => {
         // Replace streaming placeholder with final message
         const idx = messages.value.findIndex(m => m.id === "streaming");
         const isBlocked = status === "blocked";
+        // The final status of a turn this page stopped: blocked ("Request cancelled") — the user's
+        // Stop, shown as such rather than as an error.
+        const stoppedHere = isBlocked && stoppedRequestId === data["requestId"];
         const streamingMessage = idx >= 0 ? messages.value[idx] : undefined;
         const swarmState = normalizeSwarmState(data["swarmState"]) ?? liveSwarmState.value ?? streamingMessage?.swarmState ?? syntheticSwarmState.value;
         const rawPerf = data["performance"] as Record<string, unknown> | undefined;
@@ -3423,6 +3490,8 @@ export const useGatewayStore = defineStore("gateway", () => {
             ? streamingSubAgentReasoning.value.map((entry) => ({ ...entry }))
             : undefined,
           requestId: String(data["requestId"]),
+          ...(stoppedHere ? { stopped: true } : {}),
+          ...(streamingMessage?.language ? { language: streamingMessage.language } : {}),
         };
         messages.value = landTurn(messages.value, String(data["requestId"]), finalMsg, Date.now());
         streamingText.value = "";
@@ -3432,10 +3501,12 @@ export const useGatewayStore = defineStore("gateway", () => {
         isStreaming.value = false;
         clearTurnStallState();
         clearPendingTurnRecovery();
-        if (isBlocked) flashError(3000);
+        if (isBlocked && !stoppedHere) flashError(3000);
         else clearErrorFlash();
         pendingApproval.value = null;
         pendingInputRequest.value = null;
+        // The turn is over, and so is what it suggested the operator do about it.
+        pendingIntervention.value = null;
         dropUserInputsOfTurn(String(data["requestId"]));
         appendSwarmRun(isBlocked ? "blocked" : "ok", swarmState);
         liveSwarmState.value = null;
@@ -3992,15 +4063,17 @@ export const useGatewayStore = defineStore("gateway", () => {
     turnLikelyStalled.value = false;
 
     // Add streaming placeholder
+    const language = turnLanguageFor(text);
     messages.value.push({
       id: "streaming",
       role: "assistant",
       content: "",
       timestamp: new Date(),
-      statusText: "Working on it...",
-      statusHistory: ["Working on it..."],
+      statusText: turnText.working(language),
+      statusHistory: [turnText.working(language)],
       steps: [],
       requestId,
+      language,
     });
     armPendingTurnWatchdog();
 
@@ -4064,9 +4137,13 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { filename: string; relativePath: string; contentType: string; size: number };
   }
 
-  async function transcribeAudio(file: Blob | File, options: { language?: string; prompt?: string; model?: string } = {}): Promise<SpeechToTextResult> {
+  async function transcribeAudio(
+    file: Blob | File,
+    options: { language?: string; prompt?: string; model?: string; signal?: AbortSignal } = {},
+  ): Promise<SpeechToTextResult> {
     const formData = new FormData();
-    const filename = file instanceof File ? file.name : "recording.webm";
+    // A recogniser can go by the name's extension: a WAV recording is not "recording.webm".
+    const filename = file instanceof File ? file.name : /wav/i.test(file.type) ? "recording.wav" : "recording.webm";
     formData.append("file", file, filename);
     if (options.language) formData.append("language", options.language);
     if (options.prompt) formData.append("prompt", options.prompt);
@@ -4075,6 +4152,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     const response = await authorizedFetch("/api/multimodal/transcribe", {
       method: "POST",
       body: formData,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     return await response.json() as SpeechToTextResult;
   }
@@ -4216,6 +4294,64 @@ export const useGatewayStore = defineStore("gateway", () => {
     return await response.json() as { voices: SavedTtsVoice[]; speakers: string[]; models: Record<string, unknown>; currentModel?: string };
   }
 
+  /** A TTS-STT gateway's voices: each engine's own and the saved (cloned) ones. */
+  async function listHubVoices(): Promise<{ voices: HubVoiceInfo[]; engines: string[] }> {
+    const response = await authorizedFetch("/api/multimodal/voices");
+    const body = await response.json() as { voices?: unknown; engines?: unknown };
+    const voices = Array.isArray(body.voices) ? body.voices.filter((voice): voice is HubVoiceInfo =>
+      Boolean(voice) && typeof (voice as HubVoiceInfo).id === "string" && typeof (voice as HubVoiceInfo).engine === "string") : [];
+    return { voices, engines: Array.isArray(body.engines) ? body.engines.map(String) : [] };
+  }
+
+  /** Clones a voice from a recording on a TTS-STT gateway; returns its reference ("saved:<id>"). */
+  async function cloneHubVoice(input: {
+    name: string;
+    audio: Blob;
+    filename: string;
+    language?: string;
+    referenceText?: string;
+    mode?: "xvector" | "icl";
+    replace?: boolean;
+  }): Promise<{ voice: string; name: string; referenceText?: string }> {
+    const form = new FormData();
+    form.append("name", input.name);
+    form.append("file", input.audio, input.filename);
+    if (input.language) form.append("language", input.language);
+    if (input.referenceText) form.append("referenceText", input.referenceText);
+    if (input.mode) form.append("mode", input.mode);
+    if (input.replace) form.append("replace", "true");
+    const response = await authorizedFetch("/api/multimodal/voices/clone", { method: "POST", body: form });
+    return await response.json() as { voice: string; name: string; referenceText?: string };
+  }
+
+  /** A voice designed from a description, speaking `text` (audio; nothing is saved). */
+  async function designHubVoice(input: { description: string; text: string; language?: string }): Promise<Blob> {
+    const response = await authorizedFetch("/api/multimodal/voices/design", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    return await response.blob();
+  }
+
+  async function listTrainingJobs(): Promise<{ enabled: boolean; jobs: VoiceTrainingJob[] }> {
+    const response = await authorizedFetch("/api/multimodal/voices/training");
+    return await response.json() as { enabled: boolean; jobs: VoiceTrainingJob[] };
+  }
+
+  async function startVoiceTraining(input: { name: string; language: string; files: File[] }): Promise<{ jobId: string }> {
+    const form = new FormData();
+    form.append("name", input.name);
+    form.append("language", input.language);
+    for (const file of input.files) form.append("file", file, file.name);
+    const response = await authorizedFetch("/api/multimodal/voices/training", { method: "POST", body: form });
+    return await response.json() as { jobId: string };
+  }
+
+  async function cancelVoiceTraining(jobId: string): Promise<void> {
+    await authorizedFetch(`/api/multimodal/voices/training/${encodeURIComponent(jobId)}`, { method: "DELETE" });
+  }
+
   async function removeTtsVoice(voiceId: string): Promise<void> {
     const response = await authorizedFetch(`/api/multimodal/voices/${encodeURIComponent(voiceId)}`, {
       method: "DELETE",
@@ -4254,13 +4390,28 @@ export const useGatewayStore = defineStore("gateway", () => {
     quality?: string;
     gender?: string;
     speed?: number;
-  }): Promise<Blob> {
+  }, options: { signal?: AbortSignal } = {}): Promise<Blob> {
     const response = await authorizedFetch("/api/multimodal/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     return await response.blob();
+  }
+
+  /**
+   * Keeps the voice for `language` loaded on the speech service, which unloads an idle one — and
+   * the first sentence after that waits for the load. Returns how long the synthesis took.
+   */
+  async function warmSpeech(language: string): Promise<number | undefined> {
+    const response = await authorizedFetch("/api/multimodal/tts/warm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language }),
+    });
+    const body = await response.json() as { ms?: unknown };
+    return typeof body.ms === "number" ? body.ms : undefined;
   }
 
   async function analyzeImageFile(file: File): Promise<string> {
@@ -4399,11 +4550,12 @@ export const useGatewayStore = defineStore("gateway", () => {
   async function summarizeForSpeech(input: {
     text: string;
     maxSentences?: number;
-  }): Promise<string> {
+  }, options: { signal?: AbortSignal } = {}): Promise<string> {
     const response = await authorizedFetch("/api/multimodal/summarize-for-speech", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (!response.ok) {
       throw new Error(`Summarisation failed: ${response.status}`);
@@ -4516,8 +4668,15 @@ export const useGatewayStore = defineStore("gateway", () => {
     transcribeAudio,
     listVoices,
     saveTtsVoice,
+    listHubVoices,
+    cloneHubVoice,
+    designHubVoice,
+    listTrainingJobs,
+    startVoiceTraining,
+    cancelVoiceTraining,
     removeTtsVoice,
     synthesizeSpeech,
+    warmSpeech,
     summarizeForSpeech,
     analyzeImageFile,
     getOrchestrationConfig,

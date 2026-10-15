@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { subAgentProgressStatus } from "../gateway/sub-agent-progress-status.js";
+import { subAgentHeartbeat, subAgentProgressStatus } from "../gateway/sub-agent-progress-status.js";
 
 describe("sub-agent lifecycle → dashboard status", () => {
   it("turns started and completed into a delegating status line", () => {
@@ -18,5 +18,20 @@ describe("sub-agent lifecycle → dashboard status", () => {
     const message = subAgentProgressStatus({ kind: "completed", agentName: "peer", iteration: 1, summary: "x".repeat(2_000) })?.message ?? "";
     expect(message.length).toBeLessThanOrEqual(200);
     expect(message.endsWith("…")).toBe(true);
+  });
+});
+
+// A specialist composing a long reply sent "thinking" beats that were dropped here: its row stood
+// still for minutes, and the only sign of life went to the watchdog.
+describe("sub-agent heartbeat → its delegation's row", () => {
+  it("says what the specialist is doing, as data the page words", () => {
+    expect(subAgentHeartbeat({ kind: "thinking", activity: "composing", chars: 4_000 })).toEqual({ activity: "composing", chars: 4_000 });
+    expect(subAgentHeartbeat({ kind: "thinking", activity: "planning" })).toEqual({ activity: "planning" });
+    expect(subAgentHeartbeat({ kind: "thinking", activity: "steering" })).toEqual({ activity: "steering" });
+  });
+
+  it("is nothing for other events, or a beat that does not say what it is (a federated peer's)", () => {
+    expect(subAgentHeartbeat({ kind: "thinking" })).toBeNull();
+    expect(subAgentHeartbeat({ kind: "started", activity: "planning" })).toBeNull();
   });
 });

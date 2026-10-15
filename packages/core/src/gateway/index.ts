@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
@@ -63,7 +64,9 @@ import { getRuntimeStatusSnapshot } from "../runtime/status.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, imageRequestBoundsError, requestImageGeneration } from "../multimodal/image-generation.js";
-import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
+import { readBodyWithin, sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
+import { hubVoiceFor, requestHubSpeech, type HubConnection, type HubVoice } from "../multimodal/tts-stt-gateway.js";
+import { HubVoiceError, cancelTraining, cloneHubVoice, deleteHubVoice, designHubVoice, listTrainingJobs, startTraining } from "../multimodal/tts-stt-voices.js";
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { checkInput } from "../guardrails/input.js";
@@ -160,6 +163,9 @@ function originFromUrl(url: string | undefined): string | null {
     return null;
   }
 }
+
+/** How long a spoken summary may take before the dashboard reads the answer itself. */
+const SPEECH_SUMMARY_TIMEOUT_MS = 30_000;
 
 export function createGateway() {
   const config = getConfig();
@@ -409,21 +415,30 @@ export function createGateway() {
       return directResponse;
     }
 
-    const openAiForm = new FormData();
-    openAiForm.append("file", input.audioBlob, input.filename);
-    openAiForm.append("model", input.model);
-    if (normalizedLanguage) openAiForm.append("language", normalizedLanguage);
-    if (input.prompt) openAiForm.append("prompt", input.prompt);
-
-    const openAiResponse = await fetchWithTimeout(
-      upstreamUrl(input.baseUrl, "/v1/audio/transcriptions"),
-      {
-        method: "POST",
-        headers: upstreamHeaders(input.apiKey),
-        body: openAiForm,
-      },
-      input.timeoutMs,
-    );
+    // "auto" means: let the service detect the language. It is not sent: the OpenAI API refuses it.
+    // verbose_json returns the language the service detected, which picks the voice that answers;
+    // a service that does not know verbose_json is asked again for plain JSON.
+    const sendOpenAiTranscription = (verbose: boolean) => {
+      const openAiForm = new FormData();
+      openAiForm.append("file", input.audioBlob, input.filename);
+      openAiForm.append("model", input.model);
+      if (normalizedLanguage && normalizedLanguage !== "auto") openAiForm.append("language", normalizedLanguage);
+      if (input.prompt) openAiForm.append("prompt", input.prompt);
+      if (verbose) openAiForm.append("response_format", "verbose_json");
+      return fetchWithTimeout(
+        upstreamUrl(input.baseUrl, "/v1/audio/transcriptions"),
+        {
+          method: "POST",
+          headers: upstreamHeaders(input.apiKey),
+          body: openAiForm,
+        },
+        input.timeoutMs,
+      );
+    };
+    let openAiResponse = await sendOpenAiTranscription(true);
+    if (openAiResponse.status === 400 || openAiResponse.status === 422) {
+      openAiResponse = await sendOpenAiTranscription(false);
+    }
 
     if (openAiResponse.status !== 404 && openAiResponse.status !== 405) {
       return openAiResponse;
@@ -690,6 +705,31 @@ export function createGateway() {
 
     return sendChunkedTtsRequests(input, {
       requestChunk: sendSingleTtsRequest,
+      bodyTimeoutMs: input.timeoutMs,
+    });
+  }
+
+  /** The TTS-STT gateway a TTS config names. */
+  function hubConnection(tts: { baseUrl: string; apiKey?: string; timeoutMs: number }): HubConnection {
+    return { baseUrl: tts.baseUrl, ...(tts.apiKey ? { apiKey: tts.apiKey } : {}), timeoutMs: tts.timeoutMs };
+  }
+
+  /** A voice-library failure as the route answers it: the service's own status and sentence. */
+  function hubVoiceFailure(c: Context, error: unknown): Response {
+    if (error instanceof HubVoiceError) {
+      const status = error.status >= 400 && error.status < 600 ? error.status : 502;
+      return c.json({ error: error.message }, status as ContentfulStatusCode);
+    }
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+  }
+
+  /** Speech from a TTS-STT gateway (multimodal/tts-stt-gateway.ts), long text in chunks as on the other APIs. */
+  async function sendHubTtsRequest(input: { text: string; language: string; voice?: HubVoice; speed?: number }): Promise<Response> {
+    const tts = currentMultimodalConfig().tts;
+    const connection = hubConnection(tts);
+    return sendChunkedTtsRequests({ text: input.text }, {
+      requestChunk: (chunk) => requestHubSpeech({ ...connection, ...input, text: chunk.text }),
+      bodyTimeoutMs: tts.timeoutMs,
     });
   }
 
@@ -2010,7 +2050,9 @@ export function createGateway() {
     const model = String(formData.get("model") ?? multimodalConfig.stt.model);
 
     const languageValue = formData.get("language");
-    const language = typeof languageValue === "string" && languageValue.trim() ? languageValue.trim() : undefined;
+    const language = typeof languageValue === "string" && languageValue.trim()
+      ? languageValue.trim()
+      : multimodalConfig.stt.language;
 
     const promptValue = formData.get("prompt");
     const prompt = typeof promptValue === "string" && promptValue.trim() ? promptValue.trim() : undefined;
@@ -2041,10 +2083,16 @@ export function createGateway() {
             return "";
           }).filter(Boolean).join(" ").trim()
         : "";
+      // The first of the text fields that IS text: a service that wraps its result in an object came
+      // back as "[object Object]".
+      const text = [body["text"], body["transcription"], body["result"]].find((value): value is string => typeof value === "string")
+        ?? segments;
+      const detected = [body["language"], body["detected_language"], body["lang"]].find((value): value is string => typeof value === "string" && value.trim() !== "");
+      const duration = typeof body["duration"] === "number" ? body["duration"] : undefined;
       return c.json({
-        text: String(body["text"] ?? body["transcription"] ?? body["result"] ?? segments ?? ""),
-        language: body["language"] ?? body["detected_language"] ?? body["lang"],
-        duration: body["duration"] ?? body["processing_time"],
+        text: text.trim(),
+        ...(detected ? { language: detected.trim() } : {}),
+        ...(duration !== undefined ? { duration } : {}),
       });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
@@ -2088,10 +2136,14 @@ export function createGateway() {
       return c.json({ error: "name is required" }, 400);
     }
 
+    const ttsApi = multimodalConfig.tts.api;
+    if (ttsApi === "tts-stt-gateway") {
+      return c.json({ error: "Save a voice through the voice library (/api/multimodal/voices/clone) on a TTS-STT gateway." }, 400);
+    }
     const languageValue = formData.get("language");
     const language = typeof languageValue === "string" && languageValue.trim()
-      ? normalizeTtsLanguage(languageValue.trim(), multimodalConfig.tts.api)
-      : normalizeTtsLanguage(multimodalConfig.tts.defaultLanguage, multimodalConfig.tts.api);
+      ? normalizeTtsLanguage(languageValue.trim(), ttsApi)
+      : normalizeTtsLanguage(multimodalConfig.tts.defaultLanguage, ttsApi);
     const referenceTextValue = formData.get("referenceText") ?? formData.get("ref_text");
     const referenceText = typeof referenceTextValue === "string" && referenceTextValue.trim()
       ? referenceTextValue.trim()
@@ -2171,12 +2223,26 @@ export function createGateway() {
       return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable voice management.");
     }
 
+    const voiceId = c.req.param("id");
+    if (!voiceId?.trim()) return c.json({ error: "voice id is required" }, 400);
+
+    if (multimodalConfig.tts.api === "tts-stt-gateway") {
+      // A voice the chat speaks a language with is not deleted from under it.
+      const usedFor = Object.entries(multimodalConfig.tts.voices).filter(([, ref]) => ref === voiceId).map(([language]) => language);
+      if (usedFor.length) {
+        return c.json({ error: `This voice speaks ${usedFor.join(", ")} — choose another voice for it first.` }, 409);
+      }
+      try {
+        await deleteHubVoice(hubConnection(multimodalConfig.tts), voiceId);
+        return c.json({ ok: true, voice_id: voiceId });
+      } catch (error) {
+        return hubVoiceFailure(c, error);
+      }
+    }
+
     if (multimodalConfig.tts.api !== "qwen-compatible") {
       return c.json({ error: "Voice deletion is only supported for qwen-compatible TTS backends." }, 400);
     }
-
-    const voiceId = c.req.param("id");
-    if (!voiceId?.trim()) return c.json({ error: "voice id is required" }, 400);
 
     try {
       const upstream = await fetchWithTimeout(
@@ -2198,6 +2264,124 @@ export function createGateway() {
       return c.json({ ok: true, voice_id: voiceId });
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    }
+  });
+
+  // ── A TTS-STT gateway's voice library (multimodal/tts-stt-voices.ts) ──────
+  // Clone, design and train voices on the speech service, which the browser cannot reach itself.
+
+  /** The configured speech service, or the response saying why there is none to manage. */
+  const hubForVoices = (c: Context): HubConnection | Response => {
+    const tts = currentMultimodalConfig().tts;
+    if (!multimodalServiceConfigured(tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to manage voices.");
+    }
+    if (tts.api !== "tts-stt-gateway") {
+      return c.json({ error: "This works with a TTS-STT gateway (multimodal.tts.api \"tts-stt-gateway\")." }, 400);
+    }
+    return hubConnection(tts);
+  };
+
+  app.post("/api/multimodal/voices/clone", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const hub = hubForVoices(c);
+    if (hub instanceof Response) return hub;
+    const form = await c.req.raw.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) return c.json({ error: "file is required" }, 400);
+    const text = (key: string) => {
+      const value = form.get(key);
+      return typeof value === "string" && value.trim() ? value.trim() : undefined;
+    };
+    const name = text("name");
+    if (!name) return c.json({ error: "name is required" }, 400);
+    const mode = text("mode");
+    try {
+      return c.json(await cloneHubVoice(hub, {
+        name,
+        audio: file,
+        filename: file.name || "sample.wav",
+        language: text("language"),
+        referenceText: text("referenceText"),
+        ...(mode === "icl" || mode === "xvector" ? { mode } : {}),
+        replace: text("replace") === "true",
+      }));
+    } catch (error) {
+      return hubVoiceFailure(c, error);
+    }
+  });
+
+  app.post("/api/multimodal/voices/design", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const hub = hubForVoices(c);
+    if (hub instanceof Response) return hub;
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const description = typeof body["description"] === "string" ? body["description"].trim() : "";
+    const text = typeof body["text"] === "string" ? body["text"].trim() : "";
+    if (!description || !text) return c.json({ error: "description and text are required" }, 400);
+    try {
+      const audio = await designHubVoice(hub, {
+        description,
+        text,
+        ...(typeof body["language"] === "string" ? { language: body["language"] } : {}),
+      });
+      return new Response(audio, { status: 200, headers: { "Content-Type": audio.type || "audio/wav", "Cache-Control": "no-store" } });
+    } catch (error) {
+      return hubVoiceFailure(c, error);
+    }
+  });
+
+  app.get("/api/multimodal/voices/training", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const hub = hubForVoices(c);
+    if (hub instanceof Response) return hub;
+    try {
+      return c.json(await listTrainingJobs(hub));
+    } catch (error) {
+      return hubVoiceFailure(c, error);
+    }
+  });
+
+  app.post("/api/multimodal/voices/training", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const hub = hubForVoices(c);
+    if (hub instanceof Response) return hub;
+    const form = await c.req.raw.formData();
+    const files = form.getAll("file").filter((entry): entry is File => entry instanceof File);
+    const name = form.get("name");
+    const language = form.get("language");
+    const epochs = Number(form.get("epochs"));
+    try {
+      return c.json(await startTraining(hub, {
+        name: typeof name === "string" ? name : "",
+        ...(typeof language === "string" ? { language } : {}),
+        ...(Number.isInteger(epochs) && epochs > 0 ? { epochs } : {}),
+        files: files.map((file) => ({ audio: file, filename: file.name || "recording.wav" })),
+      }));
+    } catch (error) {
+      return hubVoiceFailure(c, error);
+    }
+  });
+
+  app.delete("/api/multimodal/voices/training/:jobId", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const hub = hubForVoices(c);
+    if (hub instanceof Response) return hub;
+    try {
+      await cancelTraining(hub, c.req.param("jobId"));
+      return c.json({ ok: true });
+    } catch (error) {
+      return hubVoiceFailure(c, error);
     }
   });
 
@@ -2233,7 +2417,21 @@ export function createGateway() {
       const audioExamplePath = explicitAudioExamplePath
         ? explicitAudioExamplePath
         : multimodalConfig.tts.voiceSamplePath;
-      const upstream = await sendTtsRequest({
+      const requestedLanguage = typeof body["language"] === "string" && body["language"].trim()
+        ? body["language"].trim()
+        : multimodalConfig.tts.defaultLanguage;
+      const upstream = multimodalConfig.tts.api === "tts-stt-gateway"
+        ? await sendHubTtsRequest({
+            text,
+            language: requestedLanguage,
+            voice: hubVoiceFor(
+              multimodalConfig.tts.voices,
+              requestedLanguage,
+              typeof body["voice"] === "string" ? body["voice"] : typeof body["voiceId"] === "string" ? body["voiceId"] : undefined,
+            ),
+            speed: typeof body["speed"] === "number" ? body["speed"] : undefined,
+          })
+        : await sendTtsRequest({
         api: multimodalConfig.tts.api,
         baseUrl: multimodalConfig.tts.baseUrl,
         apiKey: multimodalConfig.tts.apiKey,
@@ -2272,7 +2470,7 @@ export function createGateway() {
         });
       }
 
-      const audio = await upstream.arrayBuffer();
+      const audio = await readBodyWithin(upstream, multimodalConfig.tts.timeoutMs);
       return new Response(audio, {
         status: 200,
         headers: {
@@ -2311,9 +2509,14 @@ export function createGateway() {
       ? Math.min(Math.max(1, Math.round(body["maxSentences"])), 5)
       : (multimodalConfig.tts.speakReplySummaryMaxSentences ?? 3);
 
+    // A spoken summary is a few sentences the listener is waiting for: the routing tier (the fast
+    // model, thinking off), a ceiling on its length, and a time limit. It ran on the main model
+    // with none of the three, and the voice started only after a full main-model generation.
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), SPEECH_SUMMARY_TIMEOUT_MS);
     try {
-      const { getChatProvider } = await import("../providers/index.js");
-      const provider = getChatProvider();
+      const { resolveRoutingTierProvider } = await import("../agent/routing-tier-provider.js");
+      const provider = resolveRoutingTierProvider();
       // The prompt names the reply's language; the detector is normally loaded at boot already.
       await warmTextLanguageDetector();
       const llmResponse = await provider.complete(
@@ -2328,12 +2531,66 @@ export function createGateway() {
           },
         ],
         [],
+        abort.signal,
+        { controls: { enableThinking: false, reasoningEffort: "none" }, maxTokens: 120 * maxSentences },
       );
       const summary = (llmResponse.content ?? "").trim();
       if (!summary) return c.json({ error: "Summarisation returned empty response" }, 500);
       return c.json({ summary });
     } catch (error) {
+      if (abort.signal.aborted) return c.json({ error: `Summarisation timed out after ${SPEECH_SUMMARY_TIMEOUT_MS / 1000} s` }, 504);
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 502);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  /**
+   * Warms the voice that speaks `language`: a few words are synthesised and thrown away. A speech
+   * service unloads an idle model (5 minutes on the TTS-STT gateway), and the first sentence after
+   * that waited for the load — 13 s for a cloned voice. Only real synthesis keeps it loaded; a health
+   * check does not. The dashboard calls this when speech output is switched on, and every few minutes
+   * while it stays on.
+   */
+  app.post("/api/multimodal/tts/warm", async (c) => {
+    const token = extractBearerToken(c.req.header("Authorization"));
+    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const multimodalConfig = currentMultimodalConfig();
+    if (!multimodalServiceConfigured(multimodalConfig.tts.baseUrl)) {
+      return disabledServiceResponse("TTS is disabled: configure multimodal.tts.baseUrl to enable speech synthesis.");
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      body = await c.req.json<Record<string, unknown>>();
+    } catch {
+      // No body: the default language.
+    }
+    const language = typeof body["language"] === "string" && body["language"].trim()
+      ? body["language"].trim()
+      : multimodalConfig.tts.defaultLanguage;
+    const text = /^de|^german/i.test(language) ? "Hallo." : "Hello.";
+    const startedAt = Date.now();
+    try {
+      const upstream = multimodalConfig.tts.api === "tts-stt-gateway"
+        ? await sendHubTtsRequest({ text, language, voice: hubVoiceFor(multimodalConfig.tts.voices, language) })
+        : await sendTtsRequest({
+            api: multimodalConfig.tts.api,
+            baseUrl: multimodalConfig.tts.baseUrl,
+            apiKey: multimodalConfig.tts.apiKey,
+            timeoutMs: multimodalConfig.tts.timeoutMs,
+            text,
+            model: multimodalConfig.tts.model,
+            language,
+            speaker: multimodalConfig.tts.defaultSpeaker,
+            savedVoiceId: multimodalConfig.tts.defaultVoiceId,
+          });
+      if (!upstream.ok) {
+        return c.json({ ok: false, error: await extractUpstreamError(upstream, "Speech synthesis failed") }, 502);
+      }
+      await readBodyWithin(upstream, multimodalConfig.tts.timeoutMs);
+      return c.json({ ok: true, ms: Date.now() - startedAt });
+    } catch (error) {
+      return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 502);
     }
   });
 
