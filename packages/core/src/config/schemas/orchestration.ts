@@ -341,6 +341,12 @@ export const OrchestrationSchema = z.object({
    *  so it stays gated until pass^k shows the quality lift beats the latency. Requires
    *  qaDeliveryLoop. */
   qaDeliveryLoopEscalateToCoordinator: z.boolean().default(false),
+  /** When true, the QA delivery loop ships its last rewrite even though no verdict passed it (the
+   *  behaviour before 2026-10-17). Default false: an unconfirmed rewrite is withheld and the answer
+   *  the loop was given ships. Measured on this deployment, the verdict failed correct answers
+   *  60–100% of the time, so the rewrites mostly answered flaws that did not exist and sometimes
+   *  wrote the reviewer's mistake into the reply. A rewrite a verdict passed still ships. */
+  qaShipUnconfirmedRepairs: z.boolean().default(false),
   /** Evidence-demanding reviewer prompt for the QA delivery gate. The parser always marks bare or
    *  malformed reviewer output UNVERIFIED; when this is true, the prompt additionally requires a
    *  concrete tool-result/artifact ground for PASS. Delivery still fails open, but only an

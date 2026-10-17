@@ -55,7 +55,7 @@ const DELEGATED = "[browser_agent]: Artikel unter 50 €: NW-1201 34,90 €, NW-
 const ANSWER = "Die acht Artikel unter 50 € kosten zusammen 227,40 € (NW-1201, NW-1203, NW-2102, NW-3101, NW-3102, NW-3103, NW-3105 und NW-3106). Die Preise stammen aus der Produkttabelle der drei Katalogseiten; Versandkosten sind nicht eingerechnet, und das Sonderangebot NW-3106 zählt mit seinem aktuellen Preis.";
 const REVIEWER_FLAW = "FAIL: Die Summe der aufgeführten Preise beträgt 227,30 €, nicht 227,40 €.";
 
-async function runRepairedTurn(rewrite: string) {
+async function runRepairedTurn(rewrite: string, reviewer: "fails-then-passes" | "always-fails" = "fails-then-passes") {
   getConfig().orchestration.qaDeliveryLoop = true;
   getConfig().orchestration.relaySingleDeliverable = false;
   const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
@@ -66,8 +66,13 @@ async function runRepairedTurn(rewrite: string) {
       ? toolCallStream("delegate_1", "delegate_to_agent", { agentName: "browser_agent", task: "Sum the catalogue's articles under 50 EUR." })
       : textStream(ANSWER);
   });
+  // The reviewer fails the answer, then passes the rewrite: only a rewrite a verdict passed ships
+  // (shipOnlyConfirmedRepairs), and what is under test here is whether the figure check lets it through.
+  let verdicts = 0;
   completeMock.mockImplementation(async (messages: Array<{ role: string; content: string }>) => ({
-    content: messages[0]?.content.startsWith("You are a concise QA reviewer") ? REVIEWER_FLAW : rewrite,
+    content: messages[0]?.content.startsWith("You are a concise QA reviewer")
+      ? (++verdicts === 1 || reviewer === "always-fails" ? REVIEWER_FLAW : "PASS — evidence: die Summe 227,40 € aus web_table")
+      : rewrite,
     tool_calls: [],
     usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     finishReason: "stop",
@@ -119,6 +124,39 @@ describe("a QA repair and the figures it states", () => {
 
     expect(turn.response).toContain("Zusammen kosten die acht Artikel");
     expect(refusals()).toEqual([]);
+  });
+});
+
+describe("a QA rewrite no verdict passed", () => {
+  afterEach(() => {
+    resetConfigForTests();
+    unregisterTool("delegate_to_agent");
+    streamMock.mockReset();
+    completeMock.mockReset();
+    logAuditMock.mockClear();
+    resetSessionsForTests();
+  });
+
+  const verificationRows = () => logAuditMock.mock.calls
+    .filter(([type, data]) => type === "flow_verification_passed" && (data as { reason?: string }).reason === "qa_delivery_loop")
+    .map(([, data]) => data as Record<string, unknown>);
+
+  it("is withheld: the answer the loop was given ships, and the audit row says so", async () => {
+    const reworded = "Zusammen kosten die acht Artikel unter 50 € genau 227,40 €: NW-1201, NW-1203, NW-2102, NW-3101, NW-3102, NW-3103, NW-3105 und NW-3106. Die Preise stammen aus der Produkttabelle der drei Katalogseiten; Versandkosten sind nicht eingerechnet, und das Sonderangebot NW-3106 zählt mit seinem aktuellen Preis.";
+    const turn = await runRepairedTurn(reworded, "always-fails");
+
+    expect(turn.response).toContain("Die acht Artikel unter 50 € kosten zusammen 227,40 €");
+    expect(turn.response).not.toContain("Zusammen kosten die acht Artikel");
+    expect(verificationRows()).toEqual([expect.objectContaining({ passed: false, improved: false, repairWithheld: true })]);
+  });
+
+  it("ships as before when orchestration.qaShipUnconfirmedRepairs is on", async () => {
+    const reworded = "Zusammen kosten die acht Artikel unter 50 € genau 227,40 €: NW-1201, NW-1203, NW-2102, NW-3101, NW-3102, NW-3103, NW-3105 und NW-3106. Die Preise stammen aus der Produkttabelle der drei Katalogseiten; Versandkosten sind nicht eingerechnet, und das Sonderangebot NW-3106 zählt mit seinem aktuellen Preis.";
+    getConfig().orchestration.qaShipUnconfirmedRepairs = true;
+    const turn = await runRepairedTurn(reworded, "always-fails");
+
+    expect(turn.response).toContain("Zusammen kosten die acht Artikel");
+    expect(verificationRows()).toEqual([expect.objectContaining({ passed: false, improved: true })]);
   });
 });
 

@@ -6395,7 +6395,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget"; repairWithheld?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6588,6 +6588,7 @@ async function runQaDeliveryGate(
     maxRounds,
     requireEvidence: effectiveRequireEvidence,
     strict: effectiveOrchestration().qaStrictVerdicts,
+    shipOnlyConfirmedRepairs: effectiveOrchestration().qaShipUnconfirmedRepairs !== true,
     ...(escalate ? { escalate } : {}),
   });
 
@@ -6630,6 +6631,7 @@ async function runQaDeliveryGate(
     ...(result.noVerdict ? { noVerdict: true } : {}),
     ...(result.flaws ? { flaws: result.flaws } : {}),
     ...(repairSkipped ? { repairSkipped } : {}),
+    ...(result.repairWithheld ? { repairWithheld: true } : {}),
   };
 }
 

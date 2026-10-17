@@ -4,8 +4,9 @@
  * After the orchestrator produces an answer, a QA check verifies it against the
  * turn plan's acceptance criteria. If it fails, the flaws are handed back for an
  * improvement pass, and the loop repeats — up to `maxRounds` — until the check
- * passes or the budget is exhausted (then the last improvement ships unverified;
- * the gate never blocks delivery and never spends a check call it can't act on).
+ * passes or the budget is exhausted (then the last improvement ships unverified, or with
+ * shipOnlyConfirmedRepairs the original answer; the gate never blocks delivery and never
+ * spends a check call it can't act on).
  * This generalises the existing one-shot riskGatedQA
  * verify-and-repair into the bounded "until the QA agent says it's fine" loop.
  *
@@ -146,6 +147,16 @@ export interface QaDeliveryDeps {
    *  (legacy), those ship uncaveated exactly as before the tri-state contract; the
    *  truthful `status` is still reported either way for scorecards/telemetry. */
   strict?: boolean;
+  /**
+   * Ship a rewrite only once a verdict has passed it; a loop that ends without that PASS ships the
+   * answer it was given. The delivery gate sets it (orchestration.qaShipUnconfirmedRepairs turns it
+   * off). Measured 2026-10-17 on this deployment's verdict: correct answers failed 60–100% of the
+   * time (it is asked for tool-result evidence it is never shown, and judges by its own, older
+   * knowledge), so a rewrite was mostly an answer to a flaw that did not exist. In session 56a9e04b
+   * the rewrite the loop shipped moved a marking from the mail's body into its subject, as the
+   * reviewer had wrongly claimed (5 of 6 replays did the same).
+   */
+  shipOnlyConfirmedRepairs?: boolean;
 }
 
 /**
@@ -192,6 +203,9 @@ export interface QaDeliveryResult {
   /** The last check produced no verdict — an empty or unparseable reply, or a thrown check.
    *  The answer ships (fail-open) with status `unverified` and `passed` false. */
   noVerdict?: boolean;
+  /** A rewrite was made but no verdict passed it, so the original answer ships instead
+   *  (shipOnlyConfirmedRepairs). */
+  repairWithheld?: boolean;
   /** True when the shipped answer must NOT be presented as QA-confirmed: its verdict
    *  was not an evidence-backed PASS. Under `strict` this covers a bare PASS, malformed
    *  reviewer output, and a thrown check; under legacy mode it is set only when
@@ -226,6 +240,11 @@ export async function runQaDeliveryLoop(
   // be explained without what the repair was asked to fix.
   const failedVerdictFlaws: string[] = [];
   const named = (): { flaws?: string[] } => (failedVerdictFlaws.length > 0 ? { flaws: [...failedVerdictFlaws] } : {});
+  // What ships when no verdict passed: the latest rewrite, or (shipOnlyConfirmedRepairs) the
+  // answer the loop was given.
+  const unconfirmed = (): { answer: string; repairWithheld?: true } => (deps.shipOnlyConfirmedRepairs === true && current !== answer
+    ? { answer, repairWithheld: true }
+    : { answer: current });
   for (let round = 0; round < maxRounds; round += 1) {
     let verdict: QaVerdict;
     try {
@@ -234,7 +253,7 @@ export async function runQaDeliveryLoop(
       // Check failed → fail open, ship the current answer. There is no verdict, so it did not
       // pass: the status is truthfully unverified, and whether that surfaces as a caveat is the
       // strict policy's call.
-      return { answer: current, rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true, ...named() };
+      return { ...unconfirmed(), rounds: round, passed: false, status: "unverified", escalated, unverified: deps.strict === true, noVerdict: true, ...named() };
     }
     if (verdict.pass) {
       // An empty or unparseable reply keeps pass:true so delivery fails open, but nobody judged
@@ -261,6 +280,11 @@ export async function runQaDeliveryLoop(
     }
 
     if (verdict.flaws?.trim()) failedVerdictFlaws.push(verdict.flaws.trim());
+    // A rewrite made in the last round is never checked, so under shipOnlyConfirmedRepairs it could
+    // not ship: do not spend the call on it.
+    if (deps.shipOnlyConfirmedRepairs === true && round === maxRounds - 1) {
+      return { ...unconfirmed(), rounds: round, passed: false, status: "fail", escalated, unverified: false, ...named() };
+    }
     const useEscalate = cheapImproveExhausted && !!deps.escalate;
     let improved: string | null;
     try {
@@ -274,17 +298,17 @@ export async function runQaDeliveryLoop(
     else cheapImproveExhausted = true;
     // Repair failed or produced nothing usable → stop; ship the best so far.
     if (!improved || !improved.trim()) {
-      return { answer: current, rounds: round + 1, passed: false, status: "fail", escalated, unverified: false, ...named() };
+      return { ...unconfirmed(), rounds: round + 1, passed: false, status: "fail", escalated, unverified: false, ...named() };
     }
     current = improved;
   }
 
-  // Budget exhausted: ship the last improvement. We deliberately do NOT spend an
-  // extra check call to verify it — the answer ships either way, so a final verdict
-  // would only refine an audit-only boolean at the cost of one whole slow-model call
-  // per turn. Report passed=false (we never got a confirming PASS within budget).
+  // Budget exhausted: ship the last improvement, or under shipOnlyConfirmedRepairs the original.
+  // We deliberately do NOT spend an extra check call on it: a final verdict would only refine an
+  // audit-only boolean at the cost of one whole slow-model call per turn. Report passed=false
+  // (we never got a confirming PASS within budget).
   const finalPass = false;
-  return { answer: current, rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false, ...named() };
+  return { ...unconfirmed(), rounds: maxRounds, passed: finalPass, status: "fail", escalated, unverified: false, ...named() };
 }
 
 /** How much of one verdict's flaws an audit row keeps. */
