@@ -4260,7 +4260,18 @@ async function _runTurn(
       if (!releasedAfterRoutingNudge && ((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
+          // Only the ungrounded-claim check fired: the draft states specifics no tool returned, and
+          // nothing says they are on the web. They may be the user's own (a mailbox, a calendar, a
+          // file), which a web researcher cannot reach. Pinning the researcher with the bare follow-up
+          // as its task sent "summarize the last two" to it; it read nothing and invented both mails
+          // (session 56d4f3e4). So name no agent and rewrite no delegation here: the orchestrator
+          // picks the specialist that holds the facts. The refusal backstop below still applies.
+          const ungroundedClaimsOnly = requiresUngroundedFactualResearch
+            && !requiresUrlFetch
+            && !(requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent);
+          const route: RequiredResearchFallbackRoute | null = ungroundedClaimsOnly
+            ? null
+            : requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -4275,6 +4286,13 @@ async function _runTurn(
                 "Delegate now (e.g. delegate_to_agent with researcher) to fetch and read the URL, THEN answer strictly from what it actually returns.",
                 "If you genuinely cannot fetch it, say so plainly instead of inventing its contents.",
                 "A tool-free answer that speaks to the URL's content is invalid for this turn.",
+              ].join(" ")
+            : ungroundedClaimsOnly
+            ? [
+                "COMPLIANCE CORRECTION: Your draft states specifics that no tool returned in this turn.",
+                "Do NOT answer from memory, and do NOT fill in what earlier results only named or listed.",
+                "Delegate now to the specialist that holds these facts: the one that reads the user's mail, calendar, or files when they are the user's own, a research agent when they are public.",
+                "Then answer strictly from what it returns; if they cannot be retrieved, say so plainly.",
               ].join(" ")
             : route
             ? buildSearchAgentsNoMatchFallbackPrompt(route)
