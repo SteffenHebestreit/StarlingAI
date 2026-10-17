@@ -98,6 +98,20 @@ function countAttachmentLeaves(node?: BodyNode | null): number {
   return n;
 }
 
+/**
+ * Refuses a search for every message that found none in a mailbox the server says holds some.
+ *
+ * That is the server's search failing, not an empty mailbox — and returned as an empty result it
+ * reads as one: the agent told the user their 570-message INBOX was empty (2026-10-17, Strato with
+ * IMAP4rev2 enabled). A narrower query matching nothing is an ordinary answer and passes.
+ */
+export function assertSearchConsistent(mailbox: string, imapQuery: Record<string, unknown>, found: number, exists: number | undefined): void {
+  const everything = imapQuery["all"] === true && Object.keys(imapQuery).length === 1;
+  if (everything && found === 0 && typeof exists === "number" && exists > 0) {
+    throw new Error(`The mail server's search found no messages in ${mailbox}, which holds ${exists} — its search is not working, so the mailbox could not be read.`);
+  }
+}
+
 /** Map a MIME charset label to a Node Buffer encoding, defaulting to utf8. */
 function normalizeCharset(cs?: string): BufferEncoding {
   const c = (cs ?? "").toLowerCase().replace(/[^a-z0-9]/g, ""); // "utf-8" → "utf8"
@@ -283,6 +297,7 @@ export class MailAccountClient {
     const lock = await this.client!.getMailboxLock(mailbox);
     try {
       const uids = await this.client!.search(imapQuery, { uid: true });
+      assertSearchConsistent(mailbox, imapQuery, uids ? uids.length : 0, this.client!.mailbox ? this.client!.mailbox.exists : undefined);
       if (!uids || uids.length === 0) return [];
       const recentUids = await this.selectNewestUids(uids, limit);
 
@@ -460,6 +475,11 @@ export class MailAccountClient {
         pass: this.account.imap.pass,
       },
       logger: false,
+      // imapflow switches on every extension a server offers (CONDSTORE, IMAP4rev2). With IMAP4rev2
+      // on, Strato answers SEARCH ALL on a 570-message INBOX with an empty ESEARCH — no message
+      // matched any search, and the agent told the user the mailbox was empty (2026-10-17). Nothing
+      // here uses either extension.
+      disableAutoEnable: true,
     });
     await this.client.connect();
     this.mailboxList = await this.client.list();
