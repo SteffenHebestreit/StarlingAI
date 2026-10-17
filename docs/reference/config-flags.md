@@ -17,7 +17,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:751 | 1 |
 | `admin` | packages/core/src/config/schema.ts:436 | 54 |
-| `agents` | packages/core/src/config/schema.ts:1760 | 190 |
+| `agents` | packages/core/src/config/schema.ts:1760 | 191 |
 | `alertmanager` | packages/core/src/config/schema.ts:1200 | 1 |
 | `all` | packages/core/src/config/schema.ts:1353 | 317 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1373 | 31 |
@@ -30,7 +30,7 @@ Every public schema field, where it is declared, and how many production files r
 | `alwaysEscalateTerms` | packages/core/src/config/schema.ts:1641 | 4 |
 | `ansibleBinary` | packages/core/src/config/schema.ts:1130 | 1 |
 | `ansiblePlaybookBinary` | packages/core/src/config/schema.ts:1131 | 1 |
-| `api` | packages/core/src/config/schema.ts:83 | 145 |
+| `api` | packages/core/src/config/schema.ts:83 | 146 |
 | `apiKey` | packages/core/src/config/schema.ts:69 | 37 |
 | `apiUrl` | packages/core/src/config/schema.ts:1106 | 1 |
 | `approvalChannel` | packages/core/src/config/schema.ts:1382 | 10 |
@@ -309,7 +309,7 @@ Every public schema field, where it is declared, and how many production files r
 | `name` | packages/core/src/config/schema.ts:2038 | 417 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:184 | 7 |
 | `network` | packages/core/src/config/schema.ts:749 | 60 |
-| `node` | packages/core/src/config/schema.ts:1107 | 261 |
+| `node` | packages/core/src/config/schema.ts:1107 | 262 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:584 | 3 |
 | `notes` | packages/core/src/config/schema.ts:855 | 65 |
 | `oneLiner` | packages/core/src/config/schema.ts:964 | 3 |
@@ -536,4 +536,4 @@ Every public schema field, where it is declared, and how many production files r
 | `windowMs` | packages/core/src/config/schema.ts:307 | 8 |
 | `workspaceAccess` | packages/core/src/config/schema.ts:1005 | 4 |
 | `workspaceName` | packages/core/src/config/schemas/retrieval.ts:160 | 3 |
-| `workspacePath` | packages/core/src/config/schema.ts:2068 | 135 |
+| `workspacePath` | packages/core/src/config/schema.ts:2068 | 136 |

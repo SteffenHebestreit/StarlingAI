@@ -1,6 +1,11 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { basename, dirname } from "node:path";
+import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
+import { scanBytes } from "../storage/scanner.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
-import { callMailService, formatMailServiceError, ok, fail } from "./mail-service-client.js";
+import { callMailService, formatMailServiceError, ok, fail, type MailServiceResponse } from "./mail-service-client.js";
+import { resolveWorkspaceWritePath } from "./workspace-path.js";
 
 const log = childLogger("tool:mail");
 
@@ -8,6 +13,79 @@ function parseStringArray(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (Array.isArray(value)) return value.map((item) => String(item));
   return [String(value)];
+}
+
+type MessageSummary = Record<string, unknown>;
+
+interface MailboxCount {
+  accountId: string;
+  mailbox: string;
+  matched: number;
+  exists: number | null;
+}
+
+/** The listing and, from a mail service that sends them, how many each mailbox matched and holds. */
+function searchResult(response: MailServiceResponse<unknown>): { messages: MessageSummary[]; counts: MailboxCount[] } {
+  const body = response.body;
+  if (Array.isArray(body)) return { messages: body as MessageSummary[], counts: [] };
+  const record = (body ?? {}) as { messages?: unknown; counts?: unknown };
+  return {
+    messages: Array.isArray(record.messages) ? record.messages as MessageSummary[] : [],
+    counts: Array.isArray(record.counts) ? record.counts as MailboxCount[] : [],
+  };
+}
+
+function messageLine(message: MessageSummary): string {
+  const attachments = Number(message["attachmentCount"] ?? 0);
+  const attachmentNote = attachments > 0 ? ` — ${attachments} attachment${attachments === 1 ? "" : "s"}` : "";
+  return `- [${String(message["accountId"])}] ${String(message["subject"])} from ${String(message["from"])} (${String(message["mailbox"])}#${String(message["uid"])} on ${String(message["date"])})${attachmentNote}`;
+}
+
+/**
+ * One line per mailbox searched: what matched, what is listed, what the mailbox holds. A listing
+ * stops at `limit`; read without these, 50 listed messages were reported as "the mailbox holds 48".
+ */
+function coverageLines(messages: MessageSummary[], counts: MailboxCount[]): string[] {
+  return counts.map((count) => {
+    const listed = messages.filter((message) => message["accountId"] === count.accountId && message["mailbox"] === count.mailbox).length;
+    const listing = count.matched === 0 ? "" : listed < count.matched ? `, the newest ${listed} listed` : ", all listed";
+    const holds = count.exists === null ? "" : `; the mailbox holds ${count.exists}`;
+    return `${count.accountId}/${count.mailbox}: ${count.matched} matched${listing}${holds}.`;
+  });
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * The attachments section of a read message. "none" is said outright: with no section at all, an
+ * agent asked for "the document in that mail" reported a 400 KB PDF as missing.
+ */
+function attachmentLines(attachments: unknown): string[] {
+  if (!Array.isArray(attachments)) return [];
+  if (attachments.length === 0) return ["", "Attachments: none."];
+  return [
+    "",
+    `Attachments (${attachments.length}) — mail_save_attachment saves one into the workspace by its number; extract_file_content then reads it:`,
+    ...attachments.map((entry: Record<string, unknown>, position: number) => {
+      const index = typeof entry["index"] === "number" ? entry["index"] : position + 1;
+      const embedded = entry["embedded"] === true ? " — shown inside the message body (a logo or inline picture)" : "";
+      return `${index}. ${String(entry["filename"] ?? "")} (${String(entry["contentType"] ?? "")}, ${formatBytes(Number(entry["size"] ?? 0))})${embedded}`;
+    }),
+  ];
+}
+
+/** A path segment from an account id or mailbox name: no separators, nothing to climb with. */
+function pathSegment(value: string): string {
+  return value.replace(/[^\w.@-]+/g, "_").replace(/^\.+/, "").slice(0, 80) || "_";
+}
+
+/** The attachment's own name, kept recognisable: its last segment, no leading dots, no separators. */
+function attachmentFileName(filename: string, index: number): string {
+  return basename(filename.replace(/\\/g, "/")).replace(/[^\p{L}\p{N}_.-]+/gu, "_").replace(/^\.+/, "").slice(-180) || `attachment-${index}`;
 }
 
 registerTool({
@@ -128,23 +206,25 @@ registerTool({
     },
   },
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const response = await callMailService<Array<Record<string, unknown>>>("/api/messages/search", {
+    const response = await callMailService<unknown>("/api/messages/search", {
       method: "POST",
       body: JSON.stringify({
         accountIds: parseStringArray(args["accountIds"]),
         mailboxes: parseStringArray(args["mailboxes"]),
         query: String(args["query"] ?? ""),
         limit: Number(args["limit"] ?? 20),
+        withCounts: true,
       }),
     });
     if (response.status >= 400) {
       return fail(formatMailServiceError(response));
     }
-    const messages = response.body ?? [];
-    const output = messages.length === 0
-      ? "No messages matched the query."
-      : messages.map((message) => `- [${String(message["accountId"])}] ${String(message["subject"])} from ${String(message["from"])} (${String(message["mailbox"])}#${String(message["uid"])} on ${String(message["date"])})`).join("\n");
-    return ok(output, { messages });
+    const { messages, counts } = searchResult(response);
+    const output = [
+      ...coverageLines(messages, counts),
+      ...(messages.length === 0 ? ["No messages matched the query."] : messages.map(messageLine)),
+    ].join("\n");
+    return ok(output, { messages, counts });
   },
 });
 
@@ -166,22 +246,24 @@ registerTool({
     },
   },
   async execute(args: Record<string, unknown>): Promise<ToolResult> {
-    const response = await callMailService<Array<Record<string, unknown>>>("/api/messages/search", {
+    const response = await callMailService<unknown>("/api/messages/search", {
       method: "POST",
       body: JSON.stringify({
         accountIds: parseStringArray(args["accountIds"]),
         query: "is:unread",
         limit: Number(args["limit"] ?? 20),
+        withCounts: true,
       }),
     });
     if (response.status >= 400) {
       return fail(formatMailServiceError(response));
     }
-    const messages = response.body ?? [];
-    const output = messages.length === 0
-      ? "No unread messages found."
-      : messages.map((message) => `- [${String(message["accountId"])}] ${String(message["subject"])} from ${String(message["from"])} (${String(message["mailbox"])}#${String(message["uid"])} on ${String(message["date"])})`).join("\n");
-    return ok(output, { messages });
+    const { messages, counts } = searchResult(response);
+    const output = [
+      ...coverageLines(messages, counts),
+      ...(messages.length === 0 ? ["No unread messages found."] : messages.map(messageLine)),
+    ].join("\n");
+    return ok(output, { messages, counts });
   },
 });
 
@@ -220,8 +302,81 @@ registerTool({
       `Date: ${String(message["date"] ?? "")}`,
       "",
       String(message["textBody"] ?? ""),
+      ...attachmentLines(message["attachments"]),
     ].join("\n");
     return ok(output, { message });
+  },
+});
+
+registerTool({
+  name: "mail_save_attachment",
+  description: "Save one attachment of a mail message into the workspace, virus-scanned, so extract_file_content can read it. index is the attachment number mail_read lists.",
+  embeddingDescription: "Save, download, open an email attachment: a PDF, form, or document attached to a mail. E-Mail-Anhang speichern, Anhang herunterladen, angehängtes Dokument oder Formular öffnen. Attachment to workspace file.",
+  parameters: {
+    type: "object",
+    properties: {
+      accountId: { type: "string" },
+      mailbox: { type: "string" },
+      uid: { type: "number" },
+      index: { type: "number", description: "Attachment number as mail_read lists it (1 = first).", default: 1 },
+    },
+    required: ["accountId", "mailbox", "uid"],
+  },
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+    const accountId = String(args["accountId"] ?? "").trim();
+    const mailbox = String(args["mailbox"] ?? "").trim();
+    const uid = Number(args["uid"] ?? 0);
+    const index = Number(args["index"] ?? 1);
+    if (!accountId || !mailbox || !Number.isInteger(uid) || uid <= 0 || !Number.isInteger(index) || index <= 0) {
+      return fail("accountId, mailbox, a positive integer uid and a positive integer index are required");
+    }
+    const response = await callMailService<Record<string, unknown>>("/api/messages/attachment", {
+      method: "POST",
+      body: JSON.stringify({ accountId, mailbox, uid, index }),
+    });
+    if (response.status >= 400) {
+      return fail(formatMailServiceError(response));
+    }
+    const filename = String(response.body["filename"] ?? `attachment-${index}`);
+    const contentType = String(response.body["contentType"] ?? "application/octet-stream");
+    const bytes = Buffer.from(String(response.body["contentBase64"] ?? ""), "base64");
+
+    const owner = String(response.body["accountId"] ?? accountId);
+    const relativeTarget = `mail-attachments/${pathSegment(owner)}/${pathSegment(mailbox)}-${uid}/${attachmentFileName(filename, index)}`;
+    // Mail is the commonest way malware arrives. The same fail-closed scan every upload passes
+    // runs before the file lands where agents read and the workspace serves it.
+    try {
+      const verdict = await scanBytes(bytes);
+      if (verdict.oversize) {
+        logAudit("upload_oversize_rejected", { key: relativeTarget, size: bytes.length, route: "mail_save_attachment" }, { sessionId: ctx.sessionId, severity: "warn" });
+        return fail("The attachment was not saved: it is too large to virus-scan.");
+      }
+      if (!verdict.clean) {
+        logAudit("upload_infected", { key: relativeTarget, signature: verdict.signature ?? "unknown", route: "mail_save_attachment" }, { sessionId: ctx.sessionId, severity: "warn" });
+        return fail(`The attachment was not saved: the virus scan found ${verdict.signature ?? "malware"}.`);
+      }
+    } catch (err) {
+      logAudit("upload_scan_failed", { key: relativeTarget, error: err instanceof Error ? err.message : String(err), route: "mail_save_attachment" }, { sessionId: ctx.sessionId, severity: "error" });
+      return fail("The attachment was not saved: virus scanning is unavailable right now.");
+    }
+
+    let target: { resolved: string; relativePath: string };
+    try {
+      target = resolveWorkspaceWritePath(relativeTarget, ctx.workspacePath);
+    } catch {
+      return fail("The attachment's file name does not resolve inside the workspace.");
+    }
+    try {
+      await mkdir(dirname(target.resolved), { recursive: true });
+      await writeFile(target.resolved, bytes);
+    } catch (err) {
+      return fail(`The attachment could not be written: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    log.info({ path: target.relativePath, bytes: bytes.length }, "mail_save_attachment wrote the attachment");
+    return ok(
+      `Saved attachment ${index} of message ${uid}, ${filename} (${contentType}, ${formatBytes(bytes.length)}), to ${target.relativePath}. Read it with extract_file_content and that path.`,
+      { path: target.relativePath, filename, contentType, size: bytes.length },
+    );
   },
 });
 

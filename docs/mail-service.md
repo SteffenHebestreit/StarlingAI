@@ -116,11 +116,12 @@ Body:
   "accountIds": ["work", "personal"],
   "mailboxes": ["INBOX"],
   "query": "is:unread from:billing@example.com",
-  "limit": 50
+  "limit": 50,
+  "withCounts": true
 }
 ```
 
-Returns normalized message summaries across one or many accounts.
+Returns normalized message summaries across one or many accounts. An account is named by its id or its address; an unknown one answers 404 with the ids the caller may use, one the caller may not use answers 403. With `"withCounts": true` the answer is `{ "messages": [...], "counts": [...] }`, one count per mailbox searched: `matched` (messages the query matched, of which the listing holds the newest `limit`) and `exists` (messages the mailbox holds). Without it the answer is the bare list.
 
 Each summary includes:
 
@@ -149,7 +150,22 @@ Body:
 }
 ```
 
-Returns a full normalized message record, including body and attachment metadata.
+Returns a full normalized message record, including body and attachment metadata. Each attachment carries `index` (1-based, the number the attachment endpoint takes), `filename`, `contentType`, `size`, and `embedded` (shown inside the HTML body, such as a signature logo).
+
+### `POST /api/messages/attachment`
+
+Body:
+
+```json
+{
+  "accountId": "work",
+  "mailbox": "INBOX",
+  "uid": 12345,
+  "index": 1
+}
+```
+
+Returns one attachment: `accountId`, `index`, `filename`, `contentType`, `size`, `embedded`, and `contentBase64`. 404 when the message has no attachment at that index, 413 above 25 MB. The service does not scan it; the gateway tool that saves it into a workspace does.
 
 ### `POST /api/messages/categorize`
 
@@ -219,6 +235,7 @@ The core gateway should expose these tools:
 - `mail_search`
 - `mail_read`
 - `mail_list_unread`
+- `mail_save_attachment` (virus-scans the file, fail-closed, before it lands in the workspace)
 - `mail_prepare_draft`
 - `mail_update_draft`
 - `mail_get_draft`
@@ -228,7 +245,7 @@ The core gateway should expose these tools:
 Tool tier policy:
 
 - read tools: Tier 0
-- draft create/update/categorize: Tier 1
+- draft create/update/categorize, `mail_save_attachment`: Tier 1
 - `mail_send_draft`: Tier 3 with mandatory per-call approval
 
 ## Mail Agent
@@ -248,6 +265,8 @@ Allowed tools:
 - `mail_search`
 - `mail_read`
 - `mail_list_unread`
+- `mail_save_attachment`
+- `extract_file_content`
 - `mail_prepare_draft`
 - `mail_update_draft`
 - `mail_get_draft`

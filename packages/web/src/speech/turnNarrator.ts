@@ -23,7 +23,7 @@ const TOOL_MILESTONES: ReadonlyArray<readonly [RegExp, Milestone]> = [
   [/^(?:execute_plan|record_plan)$/, "planning"],
   [/^(?:verify_page|verify_app|swarm_validate|lighthouse_audit|browser_axe_audit|run_test_suite)$/, "checking"],
   [/^(?:web_search|wikipedia_lookup|get_news_headlines|read_rss_feed|rag_search|search_documents|search_knowledge_base|workspace_search|federated_workspace_search|memory_search|mail_search|contacts_search|calendar_list_events|get_weather|get_fx_rate|get_crypto_price|grep_files|glob_files)$/, "searching"],
-  [/^(?:web_fetch|web_table|fetch_image|read_file|extract_file_content|spreadsheet_read|mail_read|research_notes_read|analyze_image|transcribe_audio|transcribe_video|extract_[a-z_]+)$/, "reading"],
+  [/^(?:web_fetch|web_table|fetch_image|read_file|extract_file_content|spreadsheet_read|mail_read|mail_save_attachment|research_notes_read|analyze_image|transcribe_audio|transcribe_video|extract_[a-z_]+)$/, "reading"],
   [/^(?:browser|computer)_[a-z_]+$/, "browsing"],
   [/^(?:shell_exec|run_script|ssh_exec|host_shell|http_request|sql_query|terraform_exec|vm_manage|proxmox_vm|(?:ansible|kubectl|helm|git)_[a-z_]+)$/, "running"],
   [/^(?:write_file|edit_file|generate_document|generate_docx|generate_pptx|generate_pdf|render_pdf|generate_website|generate_presentation|spreadsheet_write|pdf_fill|generate_ics|bundle_artifact_zip)$/, "writing"],

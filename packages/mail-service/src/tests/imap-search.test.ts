@@ -58,6 +58,13 @@ describe("searching a mailbox", () => {
     await expect(new MailAccountClient(account).searchSummaries("", ["INBOX"], 5)).resolves.toEqual([]);
   });
 
+  it("reports how many messages matched and how many the mailbox holds, beyond the ones it lists", async () => {
+    state.searchResult = [3, 9, 27];
+    const counts: Array<Record<string, unknown>> = [];
+    await new MailAccountClient(account).searchSummaries("is:unread", ["INBOX"], 2, counts);
+    expect(counts).toEqual([{ accountId: "work", mailbox: "INBOX", matched: 3, exists: 570 }]);
+  });
+
   it("judges only a search for everything", () => {
     expect(() => assertSearchConsistent("INBOX", { all: true }, 0, 3)).toThrow();
     expect(() => assertSearchConsistent("INBOX", { all: true }, 3, 3)).not.toThrow();

@@ -106,6 +106,7 @@ const TOOL_LABELS: Readonly<Record<string, Words>> = {
   mail_search: { en: "Search mail", de: "E-Mails durchsuchen" },
   mail_read: { en: "Read an email", de: "E-Mail lesen" },
   mail_list_unread: { en: "Unread mail", de: "Ungelesene E-Mails" },
+  mail_save_attachment: { en: "Save a mail attachment", de: "E-Mail-Anhang speichern" },
   calendar_list_events: { en: "Read the calendar", de: "Kalender lesen" },
   calendar_create_event: { en: "Create an appointment", de: "Termin anlegen" },
   contacts_search: { en: "Search contacts", de: "Kontakte durchsuchen" },

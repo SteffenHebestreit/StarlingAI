@@ -116,9 +116,13 @@ export interface MessageRef {
 }
 
 export interface ParsedAttachment {
+  /** 1-based position in the message, the number POST /api/messages/attachment takes. */
+  index: number;
   filename: string;
   contentType: string;
   size: number;
+  /** Shown inside the HTML body (a signature logo, an inline picture), not a file sent with the mail. */
+  embedded: boolean;
 }
 
 export interface ParsedMailMessage extends MessageRef {
