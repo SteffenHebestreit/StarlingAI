@@ -27,6 +27,7 @@ import {
   buildSourceSensitiveQuestionJudgeMessages,
   buildUngroundedClaimJudgeMessages,
 } from "../agent/ungrounded-claim-judge.js";
+import { buildQaVerdictInstruction, QA_DISCLOSURE_VERDICT_RULE, QA_VERDICT_SYSTEM_PROMPT } from "../agent/qa-delivery-loop.js";
 import { formatQaTurnRecord } from "../agent/qa-turn-record.js";
 import { DECISION_POINTS } from "../decisions/points.js";
 import { computeOutputTokenBudget, estimatePromptTokensForRequest, type LLMMessage, type LLMToolDef } from "../providers/lmstudio.js";
@@ -111,42 +112,27 @@ describe("decision prompts are the production builders' own", () => {
     }
   });
 
-  it("builds the QA verdict in the order runQaDeliveryGate writes it, with the evidence line when asked", () => {
+  it("builds the QA verdict with runQaDeliveryGate's own builder, with the evidence line when asked", () => {
     const c = S.syntheticCase("de", 1);
     const block = formatQaTurnRecord([{ role: "user" }], { opening: c.message, midTurn: [] });
     expect(block).toContain(c.message);
     const withEvidence = S.buildDecisionMessages("qa_verdict", c, SETTINGS);
-    const expectedLines = (passLine: string) => [
-      S.QA_VERDICT_LINES.intro,
-      S.QA_VERDICT_LINES.criteriaHeader,
-      "1. Die Antwort beantwortet jeden Teil der Anfrage.",
-      "2. Konkrete Zahlen, Fristen und Beträge sind belegt oder als unbestätigt gekennzeichnet.",
-      "3. Die Antwort ist auf Deutsch geschrieben.",
-      block,
-      "",
-      S.QA_VERDICT_LINES.answerHeader,
-      S.syntheticDraft(c),
-      "",
-      passLine,
-      S.QA_VERDICT_LINES.scope,
-      S.QA_VERDICT_LINES.fail,
-    ].join("\n");
+    const criteria = [
+      "Die Antwort beantwortet jeden Teil der Anfrage.",
+      "Konkrete Zahlen, Fristen und Beträge sind belegt oder als unbestätigt gekennzeichnet.",
+      "Die Antwort ist auf Deutsch geschrieben.",
+    ];
+    const expected = (requireEvidence: boolean) => buildQaVerdictInstruction({ criteria, answer: S.syntheticDraft(c), requireEvidence, turnRecordBlock: block });
     expect(withEvidence).toEqual([
-      { role: "system", content: S.QA_VERDICT_SYSTEM },
-      { role: "user", content: expectedLines(S.QA_VERDICT_LINES.passWithEvidence) },
+      { role: "system", content: QA_VERDICT_SYSTEM_PROMPT },
+      { role: "user", content: expected(true) },
     ]);
+    expect(withEvidence[1]!.content).toContain("PASS — evidence:");
+    // Every rule the runtime sends, the disclosure rule included (the probe's old copy lacked it).
+    expect(withEvidence[1]!.content).toContain(QA_DISCLOSURE_VERDICT_RULE);
     const plain = S.buildDecisionMessages("qa_verdict", c, { ...SETTINGS, qaRequireEvidence: false });
-    expect(plain[1]!.content).toBe(expectedLines(S.QA_VERDICT_LINES.passPlain));
-  });
-
-  it("keeps the QA verdict's copied lines identical to runtime.ts", () => {
-    const source = readFileSync(fileURLToPath(new URL("../agent/runtime.ts", import.meta.url)), "utf8");
-    for (const line of [S.QA_VERDICT_SYSTEM, ...Object.values(S.QA_VERDICT_LINES)]) {
-      expect(source, line.slice(0, 60)).toContain(JSON.stringify(line));
-    }
-    const squash = (text: string) => text.replace(/\s+/g, "");
-    expect(squash(source)).toContain(squash('...crit.map((c, i) => `${i + 1}. ${c}`), ...(disputedEvidenceBlock ? [disputedEvidenceBlock] : []), ...(turnRecordBlock ? [turnRecordBlock] : []), "", "ANSWER:", current, "", passLine,'));
-    expect(squash(source)).toContain(squash(`{ role: "system", content: ${JSON.stringify(S.QA_VERDICT_SYSTEM)} }, { role: "user", content: instruction },`));
+    expect(plain[1]!.content).toBe(expected(false));
+    expect(plain[1]!.content).not.toContain("PASS — evidence:");
   });
 
   it("has German and English cases for every shape, all distinct, and marks repeats past the topic list", () => {

@@ -27,7 +27,8 @@ import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js"
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
-import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, QA_DISCLOSURE_VERDICT_RULE, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, buildQaVerdictInstruction, QA_VERDICT_SYSTEM_PROMPT, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
+import { formatQaSourceBlock } from "./qa-source-block.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import type { TurnUserWords } from "./delegation-user-words.js";
 import {
@@ -4260,7 +4261,18 @@ async function _runTurn(
       if (!releasedAfterRoutingNudge && ((requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent) || requiresUrlFetch || requiresUngroundedFactualResearch) && !currentTurnHasExecutableOrchestration) {
         if (!delegatedResearchRetryUsed) {
           delegatedResearchRetryUsed = true;
-          const route: RequiredResearchFallbackRoute | null = requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
+          // Only the ungrounded-claim check fired: the draft states specifics no tool returned, and
+          // nothing says they are on the web. They may be the user's own (a mailbox, a calendar, a
+          // file), which a web researcher cannot reach. Pinning the researcher with the bare follow-up
+          // as its task sent "summarize the last two" to it; it read nothing and invented both mails
+          // (session 56d4f3e4). So name no agent and rewrite no delegation here: the orchestrator
+          // picks the specialist that holds the facts. The refusal backstop below still applies.
+          const ungroundedClaimsOnly = requiresUngroundedFactualResearch
+            && !requiresUrlFetch
+            && !(requiresDelegatedResearch && !_turnRetrievedKnowledgeBaseContent);
+          const route: RequiredResearchFallbackRoute | null = ungroundedClaimsOnly
+            ? null
+            : requiredResearchFallbackRoute ?? buildRequiredResearchFallbackRoute(researchSubject, initialDynamicGuidance, allowedToolNameSet, opts.allowedAgents);
           if (route) {
             requiredResearchFallbackRoute = route;
             searchAgentsNoMatchFallbackPrompt ||= buildSearchAgentsNoMatchFallbackPrompt(route);
@@ -4275,6 +4287,13 @@ async function _runTurn(
                 "Delegate now (e.g. delegate_to_agent with researcher) to fetch and read the URL, THEN answer strictly from what it actually returns.",
                 "If you genuinely cannot fetch it, say so plainly instead of inventing its contents.",
                 "A tool-free answer that speaks to the URL's content is invalid for this turn.",
+              ].join(" ")
+            : ungroundedClaimsOnly
+            ? [
+                "COMPLIANCE CORRECTION: Your draft states specifics that no tool returned in this turn.",
+                "Do NOT answer from memory, and do NOT fill in what earlier results only named or listed.",
+                "Delegate now to the specialist that holds these facts: the one that reads the user's mail, calendar, or files when they are the user's own, a research agent when they are public.",
+                "Then answer strictly from what it returns; if they cannot be retrieved, say so plainly.",
               ].join(" ")
             : route
             ? buildSearchAgentsNoMatchFallbackPrompt(route)
@@ -6377,7 +6396,7 @@ async function runQaDeliveryGate(
   escalate?: (current: string, flaws: string, crit: string[]) => Promise<string | null>,
   requireEvidence = false,
   turnUserWords?: TurnUserWords,
-): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget" }> {
+): Promise<{ answer: string; changed: boolean; rounds: number; passed: boolean; status: QaVerdictStatus; evidence?: string; artifactProbeStatus: ArtifactProbeStatus; artifactProbeCount: number; escalated: boolean; unverified: boolean; noVerdict?: boolean; flaws?: string[]; repairSkipped?: "answer_exceeds_repair_budget"; repairWithheld?: boolean }> {
   const verdictProvider = getChatProviderForTier("synthesis") ?? provider;
 
   // Tool-equipped clean-context judge (orchestration.qaToolJudge): when this turn produced
@@ -6505,32 +6524,21 @@ async function runQaDeliveryGate(
         }
       } catch { /* evidence sweep is best-effort */ }
     }
-    // No-PASS-without-evidence (orchestration.qaEvidenceRequired / implied by qaToolJudge): ask the
-    // reviewer to ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
-    // to "unverified" (ships with a caveat) by the loop — killing rubber-stamp passes.
-    const passLine = effectiveRequireEvidence
-      ? "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS — evidence: <one concrete verifiable fact from the answer's tool results / artifacts that proves the criteria are met>. A PASS with no such concrete evidence will NOT be trusted."
-      : "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS";
-    const instruction = [
-      "You are a strict QA reviewer. Judge ONLY whether the ANSWER below satisfies EVERY acceptance criterion for the user's task. Do not rewrite it.",
-      "Acceptance criteria:",
-      ...crit.map((c, i) => `${i + 1}. ${c}`),
-      ...(disputedEvidenceBlock ? [disputedEvidenceBlock] : []),
-      ...(turnRecordBlock ? [turnRecordBlock] : []),
-      "",
-      "ANSWER:",
-      current,
-      "",
-      passLine,
-      // Fraud-check rows: the two frauds a prose-only reviewer can
-      // still catch — silent scope expansion and debug debris surfaced in the
-      // answer itself. Verdict vocabulary stays strictly PASS/FAIL.
-      "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",
-      QA_DISCLOSURE_VERDICT_RULE,
-      "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
-    ].join("\n");
+    // orchestration.qaVerdictSeesSources: what this turn's tools returned, after the answer, so the
+    // evidence the PASS line asks for is in front of the reviewer ("" when off, or nothing fits).
+    const sourceBlock = effectiveOrchestration().qaVerdictSeesSources === true
+      ? formatQaSourceBlock(session.getHistory())
+      : "";
+    const instruction = buildQaVerdictInstruction({
+      criteria: crit,
+      answer: current,
+      requireEvidence: effectiveRequireEvidence,
+      disputedEvidenceBlock,
+      turnRecordBlock,
+      sourceBlock,
+    });
     const messages: LLMMessage[] = [
-      { role: "system", content: "You are a concise QA reviewer. Output only a verdict (PASS or FAIL: …), never a rewritten answer." },
+      { role: "system", content: QA_VERDICT_SYSTEM_PROMPT },
       { role: "user", content: instruction },
     ];
     const abort = new AbortController();
@@ -6570,6 +6578,7 @@ async function runQaDeliveryGate(
     maxRounds,
     requireEvidence: effectiveRequireEvidence,
     strict: effectiveOrchestration().qaStrictVerdicts,
+    shipOnlyConfirmedRepairs: effectiveOrchestration().qaShipUnconfirmedRepairs !== true,
     ...(escalate ? { escalate } : {}),
   });
 
@@ -6612,6 +6621,7 @@ async function runQaDeliveryGate(
     ...(result.noVerdict ? { noVerdict: true } : {}),
     ...(result.flaws ? { flaws: result.flaws } : {}),
     ...(repairSkipped ? { repairSkipped } : {}),
+    ...(result.repairWithheld ? { repairWithheld: true } : {}),
   };
 }
 

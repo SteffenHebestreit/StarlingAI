@@ -1,6 +1,6 @@
 import { simpleParser } from "mailparser";
 import type { AttachmentLike } from "mailparser";
-import type { ParsedMailMessage } from "./types.js";
+import type { ParsedAttachment, ParsedMailMessage } from "./types.js";
 
 export interface RawMailMessage {
   accountId: string;
@@ -68,11 +68,32 @@ export class EmailParser {
       date: date instanceof Date ? date.toISOString() : String(date),
       html,
       textBody,
-      attachments: (parsed.attachments ?? []).map((attachment: AttachmentLike, index: number) => ({
-        filename: attachment.filename || `attachment_${index + 1}`,
-        contentType: attachment.contentType || "application/octet-stream",
-        size: attachment.size || 0,
-      })),
+      attachments: (parsed.attachments ?? []).map(describeAttachment),
     };
   }
+
+  /**
+   * One attachment with its bytes, by the 1-based index `parse` lists it under. Both parse the
+   * same source with the same parser, so the numbering a reader was shown is the numbering
+   * this resolves. `found` is null when the message has no attachment at that position; `count`
+   * says how many it has.
+   */
+  static async attachment(rawMessage: RawMailMessage, index: number): Promise<{ count: number; found: { attachment: ParsedAttachment; content: Buffer } | null }> {
+    const parsed = await simpleParser(rawMessage.source);
+    const attachments = parsed.attachments ?? [];
+    const match = attachments[index - 1];
+    if (!match) return { count: attachments.length, found: null };
+    const content = match.content ?? Buffer.alloc(0);
+    return { count: attachments.length, found: { attachment: { ...describeAttachment(match, index - 1), size: content.length }, content } };
+  }
+}
+
+function describeAttachment(attachment: AttachmentLike, position: number): ParsedAttachment {
+  return {
+    index: position + 1,
+    filename: attachment.filename || `attachment_${position + 1}`,
+    contentType: attachment.contentType || "application/octet-stream",
+    size: attachment.size || 0,
+    embedded: attachment.related === true,
+  };
 }

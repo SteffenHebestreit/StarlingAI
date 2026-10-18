@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { MailboxSearchCount } from "../imap-client.js";
 
 /**
  * 2026-10-17: the agent told the user their mailbox was empty. The INBOX held 570 messages; imapflow
@@ -56,6 +57,13 @@ describe("searching a mailbox", () => {
     await expect(new MailAccountClient(account).searchSummaries("is:unread", ["INBOX"], 5)).resolves.toEqual([]);
     state.exists = 0;
     await expect(new MailAccountClient(account).searchSummaries("", ["INBOX"], 5)).resolves.toEqual([]);
+  });
+
+  it("reports how many messages matched and how many the mailbox holds, beyond the ones it lists", async () => {
+    state.searchResult = [3, 9, 27];
+    const counts: MailboxSearchCount[] = [];
+    await new MailAccountClient(account).searchSummaries("is:unread", ["INBOX"], 2, counts);
+    expect(counts).toEqual([{ accountId: "work", mailbox: "INBOX", matched: 3, exists: 570 }]);
   });
 
   it("judges only a search for everything", () => {

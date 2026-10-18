@@ -54,8 +54,17 @@ export async function callMailService<T>(
       },
       signal: controller.signal,
     });
-    const body = await response.json().catch(() => ({})) as T;
-    return { status: response.status, body };
+    const text = await response.text().catch(() => "");
+    let body: unknown = {};
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // A failure answered in plain text still says why; dropping it left "HTTP 404" alone.
+        if (!response.ok) body = { error: text.trim().slice(0, 500) };
+      }
+    }
+    return { status: response.status, body: body as T };
   } finally {
     clearTimeout(timer);
   }

@@ -7,6 +7,9 @@ declare module "mailparser" {
     filename?: string | null;
     contentType?: string | null;
     size?: number | null;
+    content?: Buffer;
+    /** Part of a multipart/related body: shown inside the HTML (a signature logo), not sent alongside it. */
+    related?: boolean;
   }
 
   export interface ParsedMailLike {

@@ -92,14 +92,31 @@ export function accountAllowsUser(account: MailAccountConfig, given: MailCaller 
   return allowed.some((entry) => entryNamesCaller(entry, caller));
 }
 
-/** Resolve an account by id, enforcing per-user access. 404 if unknown, 403 if denied. */
+/**
+ * The account a request names: by its id, or by its address. The account list shows both
+ * ("work: Work <me@example.com>"), and an agent that passed the address got
+ * "Unknown account" back, then reported the message it was asked to read as missing.
+ */
+export function findAccount(accounts: MailAccountConfig[], key: string): MailAccountConfig | undefined {
+  const wanted = key.trim().toLowerCase();
+  return accounts.find((entry) => entry.id === key)
+    ?? accounts.find((entry) => entry.id.toLowerCase() === wanted || (entry.address ?? "").trim().toLowerCase() === wanted);
+}
+
+/**
+ * Resolve an account by id or address, enforcing per-user access. 404 if unknown, naming the
+ * accounts the caller may use, so the next call can get it right; 403 if denied.
+ */
 export function getAccount(accounts: MailAccountConfig[], accountId: string, caller?: MailCaller | string): MailAccountConfig {
-  const account = accounts.find((entry) => entry.id === accountId);
+  const account = findAccount(accounts, accountId);
   if (!account) {
-    throw new HTTPException(404, { message: `Unknown account: ${accountId}` });
+    const usable = accounts.filter((entry) => accountAllowsUser(entry, caller)).map((entry) => entry.id);
+    throw new HTTPException(404, {
+      message: `Unknown account: ${accountId}. ${usable.length > 0 ? `Account ids: ${usable.join(", ")}.` : "No account is available."}`,
+    });
   }
   if (!accountAllowsUser(account, caller)) {
-    throw new HTTPException(403, { message: `Account '${accountId}' is restricted to specific users and not available to the current user.` });
+    throw new HTTPException(403, { message: `Account '${account.id}' is restricted to specific users and not available to the current user.` });
   }
   return account;
 }

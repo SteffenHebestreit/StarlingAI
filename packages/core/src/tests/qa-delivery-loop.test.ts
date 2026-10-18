@@ -92,6 +92,68 @@ describe("runQaDeliveryLoop", () => {
   });
 });
 
+describe("runQaDeliveryLoop — only a rewrite a verdict passed ships (shipOnlyConfirmedRepairs)", () => {
+  // Session 56a9e04b: the verdict failed a correct mail summary twice, for flaws that were not
+  // there, and the loop shipped its second, never-checked rewrite, which carried the reviewer's
+  // mistake into the reply.
+  it("ships a rewrite once a verdict has passed it", async () => {
+    let calls = 0;
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: ++calls > 1, flaws: "missing sources" }),
+      improve: async () => "v1-fixed",
+      shipOnlyConfirmedRepairs: true,
+    }));
+    expect(r.answer).toBe("v1-fixed");
+    expect(r.passed).toBe(true);
+    expect(r.repairWithheld).toBeUndefined();
+  });
+
+  it("ships the original when no verdict passed a rewrite, and skips the rewrite nobody could check", async () => {
+    const check = vi.fn(async () => ({ pass: false, flaws: "still wrong" }));
+    const improve = vi.fn(async (a: string) => a + "+");
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({ check, improve, maxRounds: 2, shipOnlyConfirmedRepairs: true }));
+    expect(r.answer).toBe("v0");
+    expect(r.repairWithheld).toBe(true);
+    expect(r.passed).toBe(false);
+    expect(r.status).toBe("fail");
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(improve).toHaveBeenCalledTimes(1);   // the second-round rewrite could never be checked
+    expect(r.flaws).toEqual(["still wrong", "still wrong"]);
+  });
+
+  it("ships the original when a later rewrite comes back empty or the re-check throws", async () => {
+    let round = 0;
+    const emptyLater = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "x" }),
+      improve: async () => (++round === 1 ? "v1" : ""),
+      maxRounds: 3,
+      shipOnlyConfirmedRepairs: true,
+    }));
+    expect(emptyLater.answer).toBe("v0");
+    expect(emptyLater.repairWithheld).toBe(true);
+
+    let checks = 0;
+    const thrown = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => { if (++checks > 1) throw new Error("model down"); return { pass: false, flaws: "x" }; },
+      improve: async () => "v1",
+      shipOnlyConfirmedRepairs: true,
+    }));
+    expect(thrown.answer).toBe("v0");
+    expect(thrown.repairWithheld).toBe(true);
+    expect(thrown.noVerdict).toBe(true);
+  });
+
+  it("withholds nothing when no rewrite was made", async () => {
+    const r = await runQaDeliveryLoop("v0", CRITERIA, deps({
+      check: async () => ({ pass: false, flaws: "x" }),
+      improve: async () => "",
+      shipOnlyConfirmedRepairs: true,
+    }));
+    expect(r.answer).toBe("v0");
+    expect(r.repairWithheld).toBeUndefined();
+  });
+});
+
 describe("runQaDeliveryLoop — coordinator escalation (staged-orchestration fidelity)", () => {
   it("escalates ONLY after a cheap improve round already failed the re-check", async () => {
     const improve = vi.fn(async (a: string) => a + " (reworded)");      // round 0 (cheap)

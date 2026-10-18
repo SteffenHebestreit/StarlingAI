@@ -203,6 +203,23 @@ describe("the QA delivery verdict at runtime", () => {
     expect(prompts[0]).not.toContain(QA_DISCLOSURE_RULE);
   });
 
+  it("shows the reviewer what the turn's specialist returned, after the answer, when qaVerdictSeesSources is on", async () => {
+    const { QA_SOURCE_HEADER } = await import("../agent/qa-source-block.js");
+    getConfig().orchestration.qaVerdictSeesSources = true;
+    const prompts = await runImageTurn({ artifacts: [] });
+    const [beforeAnswer, afterAnswer] = prompts[0]!.split("\nANSWER:\n");
+    expect(afterAnswer).toContain(QA_SOURCE_HEADER);
+    expect(afterAnswer).toContain("[image_creator]\nDas Bild wurde mit dem Qwen-Modell generiert: generated/images/sunset_qwen.png");
+    expect(afterAnswer!.indexOf(QA_SOURCE_HEADER)).toBeGreaterThan(afterAnswer!.indexOf(ANSWER.slice(0, 40)));
+    expect(beforeAnswer).not.toContain(QA_SOURCE_HEADER);
+  });
+
+  it("shows no source when qaVerdictSeesSources is off", async () => {
+    const { QA_SOURCE_HEADER } = await import("../agent/qa-source-block.js");
+    const prompts = await runImageTurn({ artifacts: [] });
+    expect(prompts[0]).not.toContain(QA_SOURCE_HEADER);
+  });
+
   it("does not tell the reviewer the rewrites' rule: an answer whose agent changed the user's value still fails", async () => {
     const { QA_ACTION_HONESTY_RULE } = await import("../agent/qa-delivery-loop.js");
     const prompts = await runImageTurn({ artifacts: [] });

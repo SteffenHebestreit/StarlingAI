@@ -1105,6 +1105,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  mail_save_attachment: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Save a mail attachment into the workspace after a virus scan",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   mail_list_unread: {
     tier: ToolTier.ZERO_READ_ONLY,
     description: "List unread messages across one or more configured mail accounts",

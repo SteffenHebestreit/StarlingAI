@@ -29,6 +29,12 @@
     // reviewer to ground its PASS is what makes the tri-state mean anything.
     "qaEvidenceRequired": true,
     "qaStrictVerdicts": true,
+    // The evidence the line above asks for: the verdict is shown what this turn's tools and
+    // specialists returned and judges facts against it, not its own knowledge. Without it the
+    // reviewer failed correct answers 60-100% of the time on this deployment. qa:verdict-eval
+    // (2026-10-18, 6 synthetic scenarios, 5 reps, two runs): correct answers passed 6 and 10 of
+    // 30 without, 20 and 23 of 30 with; bad answers failed 46/50 of 55 without, 47/50 with.
+    "qaVerdictSeesSources": true,
     // QA-304: deterministic artifact probes before the QA verdict — objective
     // FAILs for truncated/broken/dead artifacts, receipts for valid ones. No
     // model call; cheap and deterministic, so enabled with strict verdicts.
