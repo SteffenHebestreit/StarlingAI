@@ -602,6 +602,76 @@ describe("runtime delegated-loop regressions", () => {
     freshRuntime.unregisterTool("delegate_to_agent");
   });
 
+  it("lets the orchestrator pick the specialist that holds ungrounded specifics, instead of pinning the researcher", async () => {
+    // Session 56d4f3e4: "summarize the last two" (mails listed the turn before) was drafted from the
+    // subject lines. The ungrounded-claim check rightly rejected it, then pinned researcher with the
+    // bare follow-up as its task. The researcher has no mailbox; it read nothing and invented both
+    // mails. The facts were the user's own, so the delegation the model chose must run as chosen.
+    const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {
+      orchestration: { ungroundedFactualAnswerGuard: true },
+    });
+
+    let llmCallCount = 0;
+    streamMock.mockImplementation(() => {
+      llmCallCount += 1;
+      if (llmCallCount === 1) {
+        return createTextStream(
+          "Zusammenfassung der letzten beiden E-Mails:\n"
+          + "- Mail 1 vom 02.10.2026, 08:32 Uhr: Die Karte wurde abgeschlossen, Aufwand 14 Stunden, Budget 3.200 EUR.\n"
+          + "- Mail 2 vom 02.10.2026, 05:49 Uhr: Die Abrechnung umfasst 3 Positionen über 412,50 EUR, Frist 15.10.2026.\n"
+          + "- Beide Mails nennen Termine am 20.10.2026 und 27.10.2026, jeweils um 09:00 Uhr.\n"
+          + "- Die Gesamtsumme beträgt 3.612,50 EUR, das sind 12 % mehr als im Vormonat.\n"
+          + "Damit sind beide Nachrichten vollständig zusammengefasst und es besteht kein weiterer Handlungsbedarf.",
+        );
+      }
+      if (llmCallCount === 2) {
+        return createDelegateToolCallStream("mail_delegate", {
+          agentName: "mail_agent",
+          task: "Read the two newest messages in full and summarize what each says.",
+        });
+      }
+      return createTextStream("Both mails, as read by the mail agent: grounded summary.");
+    });
+
+    const delegateExecuteMock = vi.fn(async (_args: Record<string, unknown>) => ({
+      success: true,
+      output: "Read both messages: the full text of each.",
+      metadata: { agentName: "mail_agent", attemptedAgents: ["mail_agent"], delegationSucceeded: true, delegationOutcome: "success", terminalState: "completed" },
+    }));
+    freshRuntime.registerTool({
+      name: "delegate_to_agent",
+      description: "Delegate to a specialist.",
+      parameters: { type: "object", properties: {} },
+      execute: delegateExecuteMock,
+    });
+
+    const session = new freshRuntime.AgentSession({
+      channel: "test",
+      workspacePath: "/workspace",
+      systemPrompt: "You are a test agent.",
+    });
+
+    const result = await freshRuntime.runTurn({
+      session,
+      userMessage: "gib mir eine zusammenfassung der letzten beiden",
+    });
+
+    expect(result.guardrailEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delegation_required", details: "tool_free_research_answer_rejected" }),
+    ]));
+    expect(result.guardrailEvents).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ details: "required_research_original_task_enforced" }),
+    ]));
+    expect(delegateExecuteMock).toHaveBeenCalledTimes(1);
+    expect(delegateExecuteMock.mock.calls[0]![0]).toMatchObject({ agentName: "mail_agent" });
+    // The correction names no agent: the second request carries no "agentName=\"researcher\"" order.
+    const correction = JSON.stringify(streamMock.mock.calls[1]?.[0] ?? []);
+    expect(correction).toContain("COMPLIANCE CORRECTION");
+    expect(correction).not.toContain('agentName=\\"researcher\\"');
+
+    freshRuntime.unregisterTool("delegate_to_agent");
+  });
+
   it("does NOT force research when ungroundedFactualAnswerGuard is off (default)", async () => {
     const freshRuntime = await loadFreshRuntimeForToolMode("orchestration_only", {}); // flag defaults off
     streamMock.mockImplementation(() => createTextStream(

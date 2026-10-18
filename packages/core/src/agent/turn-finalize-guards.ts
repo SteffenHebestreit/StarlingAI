@@ -101,6 +101,8 @@ interface QaDeliveryGateResult {
   flaws?: string[];
   /** The repair did not run: the answer was too long to hand it whole (answerFitsRepair). */
   repairSkipped?: "answer_exceeds_repair_budget";
+  /** A rewrite was made, no verdict passed it, and the original answer shipped. */
+  repairWithheld?: boolean;
 }
 
 /** Structural result shape of runDeliverableConsistencyGate (declared locally). */
@@ -714,6 +716,7 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
         acceptanceCriteria: criteria.length,
         ...qaFlawsForAudit(gate.flaws),
         ...(gate.repairSkipped ? { repairSkipped: gate.repairSkipped } : {}),
+        ...(gate.repairWithheld ? { repairWithheld: true } : {}),
       }, { sessionId: session.id, severity: gate.changed || gate.unverified ? "warn" : "info" });
     }
   }

@@ -175,6 +175,7 @@ Write operations inside the workspace; session-level consent once.
 | `mail_delete_mailbox` | per-call | — | Delete an empty mailbox or folder for a configured mail account |
 | `mail_move` | — | — | Move one or more mail messages into another mailbox or folder |
 | `mail_prepare_draft` | — | — | Create a draft email for a specific configured mail account |
+| `mail_save_attachment` | — | — | Save a mail attachment into the workspace after a virus scan |
 | `mail_update_draft` | — | — | Update an existing mail draft |
 | `manage_knowledge_base` | — | — | Re-crawl, cancel a crawl, or delete a knowledge base and its indexed pages |
 | `memory_compact` | — | — | Compact and deduplicate durable workspace memory |

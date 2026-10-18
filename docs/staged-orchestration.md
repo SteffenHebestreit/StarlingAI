@@ -66,8 +66,28 @@ prompt.
   one-shot `riskGatedQA` repair into a bounded loop: a QA check verdicts the
   final answer against the plan's acceptance criteria, and on a `FAIL` the
   concrete flaws are handed back for one improvement pass, repeating until the
-  check passes or `qaDeliveryLoopMaxRounds` is reached (then the best answer so
-  far ships). Pure bounded loop in
+  check passes or `qaDeliveryLoopMaxRounds` is reached. A rewrite ships only once
+  a verdict has passed it; otherwise the answer the loop was given ships, the
+  rewrite nobody could check (the last round's) is not made, and the audit row
+  records `repairWithheld` (`orchestration.qaShipUnconfirmedRepairs` brings back
+  shipping the last rewrite). Measured 2026-10-17, the verdict failed correct
+  answers 60–100% of the time, so its rewrites mostly answered flaws that were not
+  there: it is asked for evidence from the turn's tool results but shown only the
+  criteria, the answer and the turn record. `orchestration.qaVerdictSeesSources`
+  (default off) adds what this turn's tools and specialists returned
+  ([qa-source-block.ts](../packages/core/src/agent/qa-source-block.ts)) after the
+  answer and has the verdict judge facts against it, not its own knowledge;
+  `pnpm --filter @starlingai/core qa:verdict-eval` measures both prompts on
+  synthetic scenarios (mail, research, attachment, calendar, disk usage, no
+  results). Two runs on 2026-10-18 (local orchestrator model, thinking off, 5
+  reps): correct answers passed 6 and 10 of 30 today, 20 and 23 of 30 with the
+  sources; fabricated or incomplete answers failed 46 and 50 of 55 today, 47 and
+  50 of 55 with them. Today's verdict passed an answer inventing two invoices
+  after a search with no hits 9 of 10 times, with the sources 0 of 10. Weak spots
+  with the sources: research (the model still calls a Node.js line it does not
+  know invented, 0–2 of 5), disk usage (it re-reads the figures, 1 of 5), and one
+  invented detail beside correct ones still passes 2–4 of 5 (a PASS cites one
+  fact, it does not check all of them). Pure bounded loop in
   [qa-delivery-loop.ts](../packages/core/src/agent/qa-delivery-loop.ts)
   (fail-open, unit-tested); the runtime supplies a synthesis-tier verdict `check`
   and a `forceSynthesis` `improve`, wired into `_runTurn` **after** the existing

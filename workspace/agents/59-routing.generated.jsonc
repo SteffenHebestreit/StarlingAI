@@ -588,7 +588,7 @@
           "user_channel"
         ],
         "oneLiner": "Mailbox triage/search/organize/draft/reply+send (send approval-gated); domain=communication. Distinct from notification_agent(one-way). Unreachable by any scene.",
-        "sourceHash": "24fffed7603b8048",
+        "sourceHash": "a9b17f6f8f51867f",
         "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
         "labeledAt": "2026-09-19"
       }

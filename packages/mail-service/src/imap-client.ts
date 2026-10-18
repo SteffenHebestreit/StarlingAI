@@ -34,6 +34,19 @@ export interface MailSearchSummary {
   textPreview: string;
 }
 
+/**
+ * What a search covered in one mailbox. A listing holds at most `limit` messages; without the
+ * totals, an agent shown 50 of 570 messages reported "the mailbox holds 48".
+ */
+export interface MailboxSearchCount {
+  accountId: string;
+  mailbox: string;
+  /** Messages the query matched, of which the listing shows the newest. */
+  matched: number;
+  /** Messages the mailbox holds, as the server reports it; null when it did not say. */
+  exists: number | null;
+}
+
 interface BodyNode {
   part?: string;
   type?: string;
@@ -228,7 +241,7 @@ export class MailAccountClient {
    * preview, which timed out the tool on heavy threads. envelope/bodyStructure are
    * tiny, and the text body is tens of KB at most.
    */
-  async searchSummaries(query: string, mailboxes: string[] = ["INBOX"], limit = 50): Promise<MailSearchSummary[]> {
+  async searchSummaries(query: string, mailboxes: string[] = ["INBOX"], limit = 50, counts?: MailboxSearchCount[]): Promise<MailSearchSummary[]> {
     await this.connect();
     try {
       const { imapQueries, mailboxHints } = GmailQueryParser.parse(query);
@@ -236,9 +249,17 @@ export class MailAccountClient {
       const allMailboxes = [...new Set([...mailboxes, ...resolvedHints])];
       const results: MailSearchSummary[] = [];
       const seen = new Set<string>();
+      // A query can split into several IMAP searches; a message two of them match counts once.
+      const matched = new Map<string, { uids: Set<number>; exists: number | null }>();
       for (const imapQuery of imapQueries) {
         for (const mailbox of allMailboxes) {
-          for (const summary of await this.fetchSummariesFromMailbox(mailbox, imapQuery, limit)) {
+          const onMatched = (uids: number[], exists: number | null): void => {
+            const entry = matched.get(mailbox) ?? { uids: new Set<number>(), exists: null };
+            for (const uid of uids) entry.uids.add(uid);
+            entry.exists = exists ?? entry.exists;
+            matched.set(mailbox, entry);
+          };
+          for (const summary of await this.fetchSummariesFromMailbox(mailbox, imapQuery, limit, onMatched)) {
             const dedupeKey = summary.messageId || `${summary.mailbox}:${summary.uid}`;
             if (seen.has(dedupeKey)) continue;
             seen.add(dedupeKey);
@@ -247,6 +268,9 @@ export class MailAccountClient {
         }
       }
       results.sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime());
+      for (const [mailbox, entry] of matched) {
+        counts?.push({ accountId: this.account.id, mailbox, matched: entry.uids.size, exists: entry.exists });
+      }
       return results.slice(0, limit);
     } finally {
       await this.disconnect();
@@ -293,11 +317,18 @@ export class MailAccountClient {
     return dated.slice(-limit).map((d) => d.uid).sort((a, b) => a - b);
   }
 
-  private async fetchSummariesFromMailbox(mailbox: string, imapQuery: Record<string, unknown>, limit = 50): Promise<MailSearchSummary[]> {
+  private async fetchSummariesFromMailbox(
+    mailbox: string,
+    imapQuery: Record<string, unknown>,
+    limit = 50,
+    onMatched?: (uids: number[], exists: number | null) => void,
+  ): Promise<MailSearchSummary[]> {
     const lock = await this.client!.getMailboxLock(mailbox);
     try {
       const uids = await this.client!.search(imapQuery, { uid: true });
-      assertSearchConsistent(mailbox, imapQuery, uids ? uids.length : 0, this.client!.mailbox ? this.client!.mailbox.exists : undefined);
+      const exists = this.client!.mailbox ? this.client!.mailbox.exists : undefined;
+      assertSearchConsistent(mailbox, imapQuery, uids ? uids.length : 0, exists);
+      onMatched?.(uids || [], typeof exists === "number" ? exists : null);
       if (!uids || uids.length === 0) return [];
       const recentUids = await this.selectNewestUids(uids, limit);
 

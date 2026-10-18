@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { EmailParser } from "./email-parser.js";
-import { MailAccountClient } from "./imap-client.js";
+import { MailAccountClient, type MailboxSearchCount } from "./imap-client.js";
 import { log } from "./logger.js";
 import { sendDraft } from "./smtp-client.js";
 import type { MailAccountConfig, MailSummary } from "./types.js";
@@ -16,6 +16,8 @@ const SearchRequestSchema = z.object({
   mailboxes: z.array(z.string()).optional(),
   query: z.string().default(""),
   limit: z.number().int().min(1).max(200).default(50),
+  /** Answer `{ messages, counts }` instead of the bare list: how many each mailbox matched and holds. */
+  withCounts: z.boolean().default(false),
 });
 
 const ReadRequestSchema = z.object({
@@ -23,6 +25,14 @@ const ReadRequestSchema = z.object({
   mailbox: z.string().min(1),
   uid: z.number().int().positive(),
 });
+
+const AttachmentRequestSchema = ReadRequestSchema.extend({
+  /** 1-based, as /api/messages/read lists the attachments. */
+  index: z.number().int().positive(),
+});
+
+/** Largest attachment handed out; the body carries it base64-encoded, a third larger again. */
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 
 const MailboxCreateSchema = z.object({
   accountId: z.string().min(1),
@@ -158,15 +168,19 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
   app.post("/api/messages/search", async (c) => {
     const body = SearchRequestSchema.parse(await c.req.json());
     const user = mailCaller((name) => c.req.header(name));
-    const targetAccounts = (body.accountIds?.length
-      ? opts.accounts.filter((account) => body.accountIds?.includes(account.id))
-      : opts.accounts).filter((account) => accountAllowsUser(account, user));
+    // A named account resolves like every other route: by id or address, 404 when unknown, 403
+    // when not the caller's. Filtering the list by id instead searched nothing for an address
+    // or a typo, and answered "no messages matched".
+    const targetAccounts = body.accountIds?.length
+      ? [...new Map(body.accountIds.map((id) => getAccount(opts.accounts, id, user)).map((account) => [account.id, account])).values()]
+      : opts.accounts.filter((account) => accountAllowsUser(account, user));
 
     const summaries: MailSummary[] = [];
+    const counts: MailboxSearchCount[] = [];
     for (const account of targetAccounts) {
       const client = new MailAccountClient(account);
       // Envelope/bodyStructure-based listing — no full RFC822 download (B17).
-      const items = await client.searchSummaries(body.query, body.mailboxes ?? ["INBOX"], body.limit);
+      const items = await client.searchSummaries(body.query, body.mailboxes ?? ["INBOX"], body.limit, counts);
       for (const item of items) {
         const category = await opts.store.getCategory({ accountId: item.accountId, mailbox: item.mailbox, uid: item.uid });
         summaries.push({ ...item, categories: category ? [category.category] : [], note: category?.note });
@@ -174,7 +188,8 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
     }
 
     summaries.sort((left, right) => new Date(right.date).getTime() - new Date(left.date).getTime());
-    return c.json(summaries.slice(0, body.limit));
+    const messages = summaries.slice(0, body.limit);
+    return body.withCounts ? c.json({ messages, counts }) : c.json(messages);
   });
 
   app.post("/api/messages/read", async (c) => {
@@ -192,6 +207,23 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
       categories: category ? [category.category] : [],
       note: category?.note,
     });
+  });
+
+  app.post("/api/messages/attachment", async (c) => {
+    const body = AttachmentRequestSchema.parse(await c.req.json());
+    const account = getAccount(opts.accounts, body.accountId, mailCaller((name) => c.req.header(name)));
+    const message = await new MailAccountClient(account).readMessage(body.mailbox, body.uid);
+    if (!message) {
+      return c.json({ error: "Message not found" }, 404);
+    }
+    const { count, found } = await EmailParser.attachment(message, body.index);
+    if (!found) {
+      return c.json({ error: `Message ${body.uid} has ${count} attachment(s); there is no attachment ${body.index}.` }, 404);
+    }
+    if (found.content.length > ATTACHMENT_MAX_BYTES) {
+      return c.json({ error: `Attachment ${body.index} is ${found.content.length} bytes, over the ${ATTACHMENT_MAX_BYTES}-byte limit.` }, 413);
+    }
+    return c.json({ accountId: account.id, ...found.attachment, contentBase64: found.content.toString("base64") });
   });
 
   app.post("/api/messages/move", async (c) => {
@@ -312,7 +344,9 @@ export function createApp(opts: { accounts: MailAccountConfig[]; store: DraftSto
   app.onError((err, c) => {
     log.error({ err }, "mail service request failed");
     if (err instanceof HTTPException) {
-      return err.getResponse();
+      // JSON, like every other error here: the gateway reads `error` from a JSON body, and the
+      // plain-text body getResponse() sends reached the agent as a bare "HTTP 404".
+      return c.json({ error: err.message }, err.status);
     }
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
   });

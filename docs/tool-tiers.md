@@ -128,6 +128,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `mail_list_mailboxes` | List mailboxes for a mail account | None |
 | `mail_search` | Search email across one or more accounts | None |
 | `mail_read` | Read a specific email message | None |
+| `mail_save_attachment` | Save a mail attachment into the workspace after a fail-closed virus scan | None |
 | `mail_list_unread` | List unread messages in a mailbox | None |
 | `mail_create_mailbox` | Create a mailbox folder | None |
 | `mail_delete_mailbox` | Delete an empty mailbox folder | None |
