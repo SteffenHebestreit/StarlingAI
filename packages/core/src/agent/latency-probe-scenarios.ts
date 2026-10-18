@@ -53,7 +53,7 @@ import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs } from "../tools/registry.js";
 import { getMainAssistantToolNames } from "./default-tools.js";
 import { buildProgressJudgePrompt } from "./progress-verifier.js";
-import { qaRequiresEvidence } from "./qa-delivery-loop.js";
+import { buildQaVerdictInstruction, QA_VERDICT_SYSTEM_PROMPT, qaRequiresEvidence } from "./qa-delivery-loop.js";
 import { formatQaTurnRecord } from "./qa-turn-record.js";
 import { buildReceptionistMessages } from "./receptionist.js";
 import { getReceptionistPersonaLines } from "./receptionist-policy.js";
@@ -591,41 +591,20 @@ export function buildFindingDistillMessages(objective: string, toolName: string,
   ];
 }
 
-/** The QA verdict prompt's fixed lines, as runQaDeliveryGate (agent/runtime.ts) writes them. */
-export const QA_VERDICT_SYSTEM = "You are a concise QA reviewer. Output only a verdict (PASS or FAIL: …), never a rewritten answer.";
-export const QA_VERDICT_LINES = {
-  intro: "You are a strict QA reviewer. Judge ONLY whether the ANSWER below satisfies EVERY acceptance criterion for the user's task. Do not rewrite it.",
-  criteriaHeader: "Acceptance criteria:",
-  answerHeader: "ANSWER:",
-  passWithEvidence: "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS — evidence: <one concrete verifiable fact from the answer's tool results / artifacts that proves the criteria are met>. A PASS with no such concrete evidence will NOT be trusted.",
-  passPlain: "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS",
-  scope: "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",
-  fail: "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
-} as const;
-
-/** The prose QA verdict prompt, without a disputed-evidence block (none exists on synthetic content). */
+/**
+ * The prose QA verdict prompt, from runQaDeliveryGate's own builder, without a disputed-evidence
+ * block (none exists on synthetic content) or a source block (orchestration.qaVerdictSeesSources,
+ * default off).
+ */
 export function buildQaVerdictMessages(input: {
   criteria: readonly string[];
   answer: string;
   turnRecordBlock: string;
   requireEvidence: boolean;
 }): LLMMessage[] {
-  const instruction = [
-    QA_VERDICT_LINES.intro,
-    QA_VERDICT_LINES.criteriaHeader,
-    ...input.criteria.map((c, i) => `${i + 1}. ${c}`),
-    ...(input.turnRecordBlock ? [input.turnRecordBlock] : []),
-    "",
-    QA_VERDICT_LINES.answerHeader,
-    input.answer,
-    "",
-    input.requireEvidence ? QA_VERDICT_LINES.passWithEvidence : QA_VERDICT_LINES.passPlain,
-    QA_VERDICT_LINES.scope,
-    QA_VERDICT_LINES.fail,
-  ].join("\n");
   return [
-    { role: "system", content: QA_VERDICT_SYSTEM },
-    { role: "user", content: instruction },
+    { role: "system", content: QA_VERDICT_SYSTEM_PROMPT },
+    { role: "user", content: buildQaVerdictInstruction(input) },
   ];
 }
 

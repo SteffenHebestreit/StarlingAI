@@ -347,6 +347,11 @@ export const OrchestrationSchema = z.object({
    *  60–100% of the time, so the rewrites mostly answered flaws that did not exist and sometimes
    *  wrote the reviewer's mistake into the reply. A rewrite a verdict passed still ships. */
   qaShipUnconfirmedRepairs: z.boolean().default(false),
+  /** When true, the QA delivery verdict is shown what this turn's tools returned (agent/qa-source-block.ts),
+   *  after the answer, and told to judge facts against it rather than its own knowledge. Without it the
+   *  verdict is asked for tool-result evidence it never sees. Default OFF: it changes the reviewer prompt;
+   *  `pnpm --filter @starlingai/core qa:verdict-eval` measures it against today's verdict first. */
+  qaVerdictSeesSources: z.boolean().default(false),
   /** Evidence-demanding reviewer prompt for the QA delivery gate. The parser always marks bare or
    *  malformed reviewer output UNVERIFIED; when this is true, the prompt additionally requires a
    *  concrete tool-result/artifact ground for PASS. Delivery still fails open, but only an

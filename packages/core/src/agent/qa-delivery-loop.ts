@@ -397,6 +397,51 @@ export const QA_DISCLOSURE_VERDICT_RULE = "A note that something was refused, fa
 export const QA_ACTION_HONESTY_RULE = "A flaw in what was done (a value submitted, an action taken) cannot be fixed by rewriting: "
   + "say what the tool results show was actually done and that it does not meet the request; never state that it did not happen.";
 
+/** The QA verdict call's system message. */
+export const QA_VERDICT_SYSTEM_PROMPT = "You are a concise QA reviewer. Output only a verdict (PASS or FAIL: …), never a rewritten answer.";
+
+/**
+ * The QA delivery gate's verdict instruction (runtime.ts runQaDeliveryGate's check, and the
+ * qa:verdict-eval script, which must judge exactly what the runtime sends). The blocks are optional
+ * and ride where the runtime has always put them; the source block, when given, follows the answer:
+ * placed before it, the reviewer read the source as part of the answer and passed one that left a
+ * mail out (measured 2026-10-17, 5 of 5).
+ */
+export function buildQaVerdictInstruction(input: {
+  criteria: readonly string[];
+  answer: string;
+  requireEvidence: boolean;
+  disputedEvidenceBlock?: string;
+  turnRecordBlock?: string;
+  sourceBlock?: string;
+}): string {
+  // No-PASS-without-evidence (orchestration.qaEvidenceRequired / implied by qaToolJudge): ask the
+  // reviewer to ground a PASS in a concrete verifiable fact. A PASS with no evidence is downgraded
+  // to "unverified" (ships with a caveat) by the loop — killing rubber-stamp passes.
+  const passLine = input.requireEvidence
+    ? "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS — evidence: <one concrete verifiable fact from the answer's tool results / artifacts that proves the criteria are met>. A PASS with no such concrete evidence will NOT be trusted."
+    : "Reply on a SINGLE line. If every criterion is fully met and the answer is internally consistent, reply exactly: PASS";
+  return [
+    "You are a strict QA reviewer. Judge ONLY whether the ANSWER below satisfies EVERY acceptance criterion for the user's task. Do not rewrite it.",
+    "Acceptance criteria:",
+    ...input.criteria.map((c, i) => `${i + 1}. ${c}`),
+    ...(input.disputedEvidenceBlock ? [input.disputedEvidenceBlock] : []),
+    ...(input.turnRecordBlock ? [input.turnRecordBlock] : []),
+    "",
+    "ANSWER:",
+    input.answer,
+    "",
+    ...(input.sourceBlock ? [input.sourceBlock, ""] : []),
+    passLine,
+    // Fraud-check rows: the two frauds a prose-only reviewer can
+    // still catch — silent scope expansion and debug debris surfaced in the
+    // answer itself. Verdict vocabulary stays strictly PASS/FAIL.
+    "Also FAIL when the answer reveals work OUTSIDE the task's declared scope (unrequested changes, drive-by refactors, 'improvements' nobody asked for) or shows debug leftovers in the deliverable (debug prints, placeholder text, commented-out scraps) — name the out-of-scope item or leftover.",
+    QA_DISCLOSURE_VERDICT_RULE,
+    "Otherwise reply: FAIL: <one concise sentence naming each unmet criterion / concrete flaw>.",
+  ].join("\n");
+}
+
 const REPAIR_ANSWER_LABEL = "Current answer to improve:";
 /** The verification is told to return the answer unchanged when it holds, so it is not labelled as one to improve. */
 const VERIFY_ANSWER_LABEL = "Your answer:";
