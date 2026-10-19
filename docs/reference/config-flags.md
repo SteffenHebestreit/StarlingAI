@@ -238,7 +238,7 @@ Every public schema field, where it is declared, and how many production files r
 | `leanContextInjection` | packages/core/src/config/schema.ts:1888 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:304 | 1 |
 | `leanToolCatalog` | packages/core/src/config/schema.ts:1878 | 3 |
-| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 59 |
+| `ledger` | packages/core/src/config/schemas/decisions.ts:101 | 60 |
 | `liftMinSamplesPerArm` | packages/core/src/config/schema.ts:1582 | 1 |
 | `loginUrl` | packages/core/src/config/schema.ts:850 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:551 | 8 |
@@ -301,7 +301,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1553 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
 | `mode` | packages/core/src/config/schema.ts:536 | 161 |
-| `model` | packages/core/src/config/schema.ts:1299 | 304 |
+| `model` | packages/core/src/config/schema.ts:1299 | 305 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1804 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1819 | 4 |
@@ -334,7 +334,7 @@ Every public schema field, where it is declared, and how many production files r
 | `password` | packages/core/src/config/schema.ts:849 | 50 |
 | `passwordHash` | packages/core/src/config/schema.ts:394 | 5 |
 | `passwordSelector` | packages/core/src/config/schema.ts:853 | 5 |
-| `path` | packages/core/src/config/schemas/decisions.ts:111 | 333 |
+| `path` | packages/core/src/config/schemas/decisions.ts:111 | 334 |
 | `pattern` | packages/core/src/config/schema.ts:1419 | 64 |
 | `patterns` | packages/core/src/config/schema.ts:1356 | 27 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 32 |
