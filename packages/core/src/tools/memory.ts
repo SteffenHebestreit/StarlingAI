@@ -16,7 +16,7 @@ import { dirname, extname } from "node:path";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome } from "../agent/outcomes.js";
-import { currentOutcomeRun, currentUserId } from "../runtime/request-context.js";
+import { currentIsEvalTraffic, currentOutcomeRun, currentUserId } from "../runtime/request-context.js";
 import { appendAgentMessage, writeSharedFact, readAllFacts, searchSharedFacts, isAtomicFactValue } from "../swarm/memory.js";
 import { appendEvidenceClaim } from "../swarm/evidence-ledger.js";
 import { emitSwarmEvent } from "../swarm/bus.js";
@@ -932,6 +932,16 @@ registerTool({
     const progress = run?.progress();
     // The run's account; outside a registered run, the request's.
     const account = run ? run.account : recordAccount();
+
+    // An eval run's lesson stays out of the ledger the live swarm reads, like its outcome
+    // (agent/sub-agent.ts recordOutcome): agents:evaluate runs under "sub:eval:<uuid>:…".
+    if (currentIsEvalTraffic() || ctx.sessionId.startsWith("sub:eval:")) {
+      return {
+        success: true,
+        output: `Lesson not stored: this is an evaluation run, which does not write to the lessons ledger.`,
+        metadata: { agentName, outcome, evalTraffic: true },
+      };
+    }
 
     // Shared root: the ledger describes the deployment's agents, and a per-user root holds one
     // account's slice of it.
