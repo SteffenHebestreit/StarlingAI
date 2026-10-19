@@ -2,6 +2,24 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 /** What a lab turn may do: tools that reach outside its scratch workspace are left out or stubbed. */
 
+describe("the lab process and Redis", () => {
+  afterEach(() => { delete process.env["SAI_HARNESS_LAB_PROCESS"]; vi.resetModules(); });
+
+  it("has no localhost default to write to, and the rate limiter falls back to its in-memory check", async () => {
+    const saved = process.env["REDIS_URL"];
+    delete process.env["REDIS_URL"];
+    process.env["SAI_HARNESS_LAB_PROCESS"] = "1";
+    try {
+      const { createClient } = await import("../guardrails/redis-client.js");
+      expect(() => createClient()).toThrow(/No Redis in the harness-lab process/);
+      const { checkRateLimit } = await import("../guardrails/rate-limiter.js");
+      expect((await checkRateLimit("lab-session", "request")).allowed).toBe(true);
+    } finally {
+      if (saved !== undefined) process.env["REDIS_URL"] = saved;
+    }
+  });
+});
+
 describe("harness-lab tool policy", () => {
   afterEach(() => { vi.resetModules(); });
 
