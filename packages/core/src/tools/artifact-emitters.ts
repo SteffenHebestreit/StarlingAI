@@ -9,10 +9,11 @@
  * the chat surface can preview it.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, extname } from "node:path";
+import { dirname } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { overwriteGuard, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { extensionNote, withRequiredExtension } from "./output-extension.js";
 
 const log = childLogger("tool:artifact-emitters");
 
@@ -53,7 +54,7 @@ registerTool({
       },
       output_file: {
         type: "string",
-        description: "Workspace-relative output path (must end in .svg). Defaults to a slug of the title.",
+        description: "Workspace-relative output path (.svg; another extension is replaced by it). Defaults to a slug of the title.",
       },
       width: {
         type: "number",
@@ -76,13 +77,11 @@ registerTool({
 
     const title = typeof args["title"] === "string" ? String(args["title"]).trim() : "";
     const overwrite = args["overwrite"] !== false;
-    const outputPath = (typeof args["output_file"] === "string" && String(args["output_file"]).trim())
+    // An SVG whatever the name says: a wrong extension is corrected, not refused.
+    const outputName = withRequiredExtension((typeof args["output_file"] === "string" && String(args["output_file"]).trim())
       ? String(args["output_file"]).trim()
-      : `${slugify(title || "illustration")}.svg`;
-
-    if (extname(outputPath).toLowerCase() !== ".svg") {
-      return fail("output_file must use the .svg extension");
-    }
+      : `${slugify(title || "illustration")}.svg`, ".svg");
+    const outputPath = outputName.path;
 
     const width = typeof args["width"] === "number" && Number.isFinite(args["width"]) ? Math.max(1, Math.trunc(args["width"])) : 600;
     const height = typeof args["height"] === "number" && Number.isFinite(args["height"]) ? Math.max(1, Math.trunc(args["height"])) : 400;
@@ -111,7 +110,7 @@ registerTool({
     log.info({ outputFile: resolved.relativePath, bytes: document.length }, "generate_svg wrote artifact");
     return {
       success: true,
-      output: `SVG saved to ${resolved.relativePath}.`,
+      output: `SVG saved to ${resolved.relativePath}.${extensionNote(outputName, ".svg")}`,
       metadata: {
         artifactKind: "image",
         outputPath: resolved.relativePath,
@@ -144,7 +143,7 @@ registerTool({
       },
       output_file: {
         type: "string",
-        description: "Workspace-relative output path (must end in .svg). Defaults to qr-code.svg.",
+        description: "Workspace-relative output path (.svg; another extension is replaced by it). Defaults to qr-code.svg.",
       },
       errorCorrection: {
         type: "string",
@@ -185,12 +184,10 @@ registerTool({
     const title = typeof args["title"] === "string" ? String(args["title"]).trim() : "";
     const overwrite = args["overwrite"] !== false;
 
-    const outputPath = (typeof args["output_file"] === "string" && String(args["output_file"]).trim())
+    const outputName = withRequiredExtension((typeof args["output_file"] === "string" && String(args["output_file"]).trim())
       ? String(args["output_file"]).trim()
-      : "qr-code.svg";
-    if (extname(outputPath).toLowerCase() !== ".svg") {
-      return fail("output_file must use the .svg extension");
-    }
+      : "qr-code.svg", ".svg");
+    const outputPath = outputName.path;
 
     let modules: boolean[][];
     try {
@@ -220,7 +217,7 @@ registerTool({
 
     return {
       success: true,
-      output: `QR code (${modules.length}x${modules.length} modules) saved to ${resolved.relativePath}.`,
+      output: `QR code (${modules.length}x${modules.length} modules) saved to ${resolved.relativePath}.${extensionNote(outputName, ".svg")}`,
       metadata: {
         artifactKind: "image",
         outputPath: resolved.relativePath,
@@ -291,7 +288,7 @@ registerTool({
       },
       output_file: {
         type: "string",
-        description: "Workspace-relative output path (must end in .ics). Defaults to calendar.ics.",
+        description: "Workspace-relative output path (.ics; another extension is replaced by it). Defaults to calendar.ics.",
       },
       overwrite: {
         type: "boolean",
@@ -306,12 +303,10 @@ registerTool({
 
     const calendarName = typeof args["calendarName"] === "string" ? String(args["calendarName"]).trim() : "";
     const overwrite = args["overwrite"] !== false;
-    const outputPath = (typeof args["output_file"] === "string" && String(args["output_file"]).trim())
+    const outputName = withRequiredExtension((typeof args["output_file"] === "string" && String(args["output_file"]).trim())
       ? String(args["output_file"]).trim()
-      : "calendar.ics";
-    if (extname(outputPath).toLowerCase() !== ".ics") {
-      return fail("output_file must use the .ics extension");
-    }
+      : "calendar.ics", ".ics");
+    const outputPath = outputName.path;
 
     let resolved: { resolved: string; relativePath: string };
     try {
@@ -339,7 +334,7 @@ registerTool({
 
     return {
       success: true,
-      output: `iCalendar with ${eventsInput.length} event(s) saved to ${resolved.relativePath}.`,
+      output: `iCalendar with ${eventsInput.length} event(s) saved to ${resolved.relativePath}.${extensionNote(outputName, ".ics")}`,
       metadata: {
         artifactKind: "document",
         outputPath: resolved.relativePath,

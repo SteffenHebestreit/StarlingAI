@@ -14,10 +14,11 @@
  * anything. See ../render/cdp-pdf.ts for why that shape was chosen.
  */
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, extname } from "node:path";
+import { dirname } from "node:path";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { overwriteGuard, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { extensionNote, withRequiredExtension } from "./output-extension.js";
 import { inlineLocalImagesInHtml } from "./inline-images.js";
 import { markdownToHtml } from "./website.js";
 import { renderHtmlToPdf, type PdfRenderOptions } from "../render/cdp-pdf.js";
@@ -150,7 +151,7 @@ registerTool({
 
     return {
       success: true,
-      output: `PDF saved to ${resolved.relativePath} (${render.bytes.length} bytes, ${theme} theme, ${pageSize}).`,
+      output: `PDF saved to ${resolved.relativePath} (${render.bytes.length} bytes, ${theme} theme, ${pageSize}).${resolved.note}`,
       metadata: {
         artifactKind: "document",
         outputPath: resolved.relativePath,
@@ -171,16 +172,14 @@ function resolveOutputPath(
   requested: unknown,
   title: string,
   workspacePath: string,
-): { ok: true; resolved: string; relativePath: string } | { ok: false; error: string } {
+): { ok: true; resolved: string; relativePath: string; note: string } | { ok: false; error: string } {
   const raw = typeof requested === "string" ? requested.trim() : "";
   const candidate = raw || `${slugify(title || "document")}.pdf`;
-  const withExt = extname(candidate) ? candidate : `${candidate}.pdf`;
-  if (extname(withExt).toLowerCase() !== ".pdf") {
-    return { ok: false, error: "output_file must use the .pdf extension" };
-  }
+  // A PDF whatever the name says: a wrong extension is corrected, not refused.
+  const name = withRequiredExtension(candidate, ".pdf");
   try {
-    const { resolved, relativePath } = resolveWorkspaceWritePath(withExt, workspacePath);
-    return { ok: true, resolved, relativePath };
+    const { resolved, relativePath } = resolveWorkspaceWritePath(name.path, workspacePath);
+    return { ok: true, resolved, relativePath, note: extensionNote(name, ".pdf") };
   } catch {
     return { ok: false, error: "output_file must be a relative path within the workspace" };
   }

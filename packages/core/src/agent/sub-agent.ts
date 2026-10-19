@@ -32,6 +32,7 @@ import { getConfig } from "../config/loader.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
+import { failedWriteTarget } from "./unwritten-file-claims.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, toolCallIdentity, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import type { Identity } from "../runtime/accounts.js";
@@ -2593,9 +2594,15 @@ export function readToolFailures(value: unknown): SubAgentToolFailure[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry): SubAgentToolFailure[] => {
     if (!entry || typeof entry !== "object") return [];
-    const { agent, tool, error, declinedByUser } = entry as Record<string, unknown>;
+    const { agent, tool, error, declinedByUser, target } = entry as Record<string, unknown>;
     if (typeof tool !== "string" || typeof error !== "string") return [];
-    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error, ...(declinedByUser === true ? { declinedByUser } : {}) }];
+    return [{
+      ...(typeof agent === "string" ? { agent } : {}),
+      tool,
+      error,
+      ...(typeof target === "string" && target ? { target } : {}),
+      ...(declinedByUser === true ? { declinedByUser } : {}),
+    }];
   });
 }
 
@@ -2753,6 +2760,9 @@ export interface SubAgentToolFailure {
   tool: string;
   /** First line of the error, redacted. */
   error: string;
+  /** The workspace file the call meant to write (its output_file, or a write tool's path): an
+   *  answer that names it as saved names a file that was never written (failedWriteTarget). */
+  target?: string;
   /** The call did nothing because the person said no (a Skip): listed as their choice, not as a
    *  failure. Set from the result's own flag (isDeclinedByUser), never from its text. */
   declinedByUser?: true;
@@ -7907,10 +7917,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         // the person declined (a Skip in the settings step) is recorded as that: listed as a failure,
         // it told the orchestrator the render had broken.
         if (!result.success && !isApprovalGateFailure(result.error ?? result.output)) {
+          const target = failedWriteTarget(tc.name, tc.arguments);
           toolFailures.push({
             agent: opts.agentName,
             tool: tc.name,
             error: firstToolErrorLine(result),
+            ...(target ? { target } : {}),
             ...(isDeclinedByUser(result.metadata) ? { declinedByUser: true as const } : {}),
           });
         }

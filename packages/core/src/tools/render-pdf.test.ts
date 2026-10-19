@@ -156,10 +156,11 @@ describe("render_pdf", () => {
     expect(renderMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a non-.pdf output_file", async () => {
+  it("saves a PDF asked for as .txt under .pdf, and says so", async () => {
     const result = await (await tool()).execute({ content: "x", output_file: "notes.txt" }, ctx());
-    expect(result.success).toBe(false);
-    expect(result.error).toContain(".pdf extension");
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("notes.pdf");
+    expect(result.output).toMatch(/ended in \.txt.*always \.pdf/);
   });
 
   it("rejects an output path that escapes the workspace", async () => {

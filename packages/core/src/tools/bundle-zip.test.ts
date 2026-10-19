@@ -77,13 +77,14 @@ describe("bundle_artifact_zip", () => {
     expect(result.error).toContain("at least one");
   });
 
-  it("rejects non-.zip output_file", async () => {
+  it("saves an archive asked for as .tgz under .zip, and says so", async () => {
     const result = await (await getTool()).execute({
       output_file: "out.tgz",
       inline: [{ archivePath: "x.txt", content: "hi" }],
     }, ctx());
-    expect(result.success).toBe(false);
-    expect(result.error).toContain(".zip");
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("out.zip");
+    expect(result.output).toMatch(/ended in \.tgz.*always \.zip/);
   });
 
   it("packs inline + workspace files into a valid zip with the expected entry names", async () => {

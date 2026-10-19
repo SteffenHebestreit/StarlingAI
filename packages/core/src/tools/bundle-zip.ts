@@ -8,12 +8,13 @@
  */
 import { mkdir, readdir, stat, unlink } from "node:fs/promises";
 import { Buffer } from "node:buffer";
-import { dirname, extname, join, posix, relative, sep } from "node:path";
+import { dirname, join, posix, relative, sep } from "node:path";
 import { createWriteStream } from "node:fs";
 import { ZipFile } from "yazl";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolResult } from "./registry.js";
 import { overwriteGuard, resolvePathWithinWorkspace, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { extensionNote, withRequiredExtension } from "./output-extension.js";
 import { guardPath, isSensitiveWorkspacePath } from "./filesystem.js";
 
 const log = childLogger("tool:bundle-zip");
@@ -131,7 +132,7 @@ registerTool({
     properties: {
       output_file: {
         type: "string",
-        description: "Workspace-relative output path (must end in .zip). Defaults to bundle.zip.",
+        description: "Workspace-relative output path (.zip; another extension is replaced by it). Defaults to bundle.zip.",
       },
       files: {
         type: "array",
@@ -174,12 +175,11 @@ registerTool({
       return fail("at least one of files, directories, or inline must be non-empty");
     }
 
-    const requestedOutput = (typeof args["output_file"] === "string" && String(args["output_file"]).trim())
+    // A zip whatever the name says: a wrong extension is corrected, not refused.
+    const outputName = withRequiredExtension((typeof args["output_file"] === "string" && String(args["output_file"]).trim())
       ? String(args["output_file"]).trim()
-      : "bundle.zip";
-    if (extname(requestedOutput).toLowerCase() !== ".zip") {
-      return fail("output_file must use the .zip extension");
-    }
+      : "bundle.zip", ".zip");
+    const requestedOutput = outputName.path;
 
     let resolvedOutput: { resolved: string; relativePath: string };
     try {
@@ -325,7 +325,7 @@ registerTool({
 
     return {
       success: true,
-      output: `Bundle (${plan.length} entries, ${bytesWritten} bytes) saved to ${resolvedOutput.relativePath}.`,
+      output: `Bundle (${plan.length} entries, ${bytesWritten} bytes) saved to ${resolvedOutput.relativePath}.${extensionNote(outputName, ".zip")}`,
       metadata: {
         artifactKind: "document",
         outputPath: resolvedOutput.relativePath,

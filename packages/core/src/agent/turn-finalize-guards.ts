@@ -32,6 +32,7 @@ import { requiresApproval } from "../guardrails/tool-tiers.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
 import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
+import { namedUnwrittenFiles, turnUnwrittenTargets, unwrittenFilesBanner } from "./unwritten-file-claims.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
 import { timedPhase } from "./turn-metrics.js";
 import {
@@ -1058,6 +1059,20 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       type: "artifact_completion_claim_unbacked_bannered",
       answerLength: finalResponse.length,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+  } else {
+    // The same honesty net for any request: the answer names, as saved, a file one of this turn's
+    // own writes failed to produce (agent/unwritten-file-claims.ts). The guard above needs the
+    // request to ask for a file; "visualise this as a diagram" does not, and diagram_designer's
+    // "saved under diagramme/abhaengigkeiten.md" after its write had failed went out unflagged.
+    const unwritten = namedUnwrittenFiles(finalResponse, turnUnwrittenTargets(session.getHistory()), artifactClaimOptions.fileExists);
+    if (unwritten.length > 0 && claimsArtifactWrittenButUnproduced(finalResponse, artifactClaimOptions)) {
+      finalResponse = unwrittenFilesBanner(unwritten) + finalResponse;
+      guardrailEvents.push({ type: "guardrail_flagged", details: "unwritten_file_claimed_bannered" });
+      logAudit("guardrail_flagged", {
+        type: "unwritten_file_claimed_bannered",
+        files: unwritten.slice(0, 5),
+      }, { sessionId: session.id, channel: session.channel, severity: "warn" });
+    }
   }
 
   // Artifact verification (orchestration.verifyArtifacts): open every file this turn
