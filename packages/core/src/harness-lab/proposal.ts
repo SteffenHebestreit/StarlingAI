@@ -24,7 +24,9 @@ import type { GateDecision } from "./gate.js";
 
 export const LAB_ASSISTANT_AGENT = "harness_lab";
 
-export function buildPromptChanges(basePrompts: Record<string, string>, edits: readonly LabEdit[], rationaleFor: (target: string) => string): ConversationPromptChange[] {
+export function buildPromptChanges(basePrompts: Record<string, string>, allEdits: readonly LabEdit[], rationaleFor: (target: string) => string): ConversationPromptChange[] {
+  // Skills are not config: a person adds an accepted one on the Skills page (the report holds its SKILL.md).
+  const edits = allEdits.filter((edit) => edit.op !== "add_skill");
   const targets = [...new Set(edits.map((edit) => edit.target))];
   const after = applyEdits(basePrompts, edits);
   return targets.map((target) => {
@@ -57,13 +59,15 @@ export type EmitResult = { proposal: ConversationConfigProposal } | { refused: s
 export function emitProposal(input: EmitInput): EmitResult {
   if (input.edits.length === 0) return { refused: "no edits to propose" };
   if (input.gate.verdict !== "accept") return { refused: `the gate did not accept the candidate (${input.gate.verdict})` };
+  const promptEdits = input.edits.filter((edit) => edit.op !== "add_skill");
+  if (promptEdits.length === 0) return { refused: "the accepted candidate only adds skills: add them on the Skills page from the report" };
   const config = getConfig();
-  const missing = input.edits.map((edit) => edit.target).find((target) => target !== MAIN_ASSISTANT_PROMPT_TARGET && !hasPromptTarget(config, target));
+  const missing = promptEdits.map((edit) => edit.target).find((target) => target !== MAIN_ASSISTANT_PROMPT_TARGET && !hasPromptTarget(config, target));
   if (missing) return { refused: `prompt target '${missing}' is not a configured agent` };
-  const peer = peerAgentRefusal(input.edits.map((edit) => edit.target));
+  const peer = peerAgentRefusal(promptEdits.map((edit) => edit.target));
   if (peer) return { refused: peer };
 
-  const rationaleFor = (target: string) => input.edits
+  const rationaleFor = (target: string) => promptEdits
     .filter((edit) => edit.target === target)
     .map((edit) => `${edit.id} (${edit.editor}/${edit.scope}, answers ${edit.moment}): ${edit.why}`)
     .join("\n");
@@ -73,7 +77,7 @@ export function emitProposal(input: EmitInput): EmitResult {
     status: "pending",
     mode: "prompt",
     request: `Harness lab run ${input.runId}: prompt edits that won on their target tasks without losing on the guard set.`,
-    summary: `${input.edits.length} edit(s) to ${promptChanges.map((c) => c.agentName).join(", ")} — ${input.gate.evidence} evidence. ${input.gate.reasons.join(" ")}`.slice(0, 1_200),
+    summary: `${promptEdits.length} edit(s) to ${promptChanges.map((c) => c.agentName).join(", ")} — ${input.gate.evidence} evidence. ${input.gate.reasons.join(" ")}`.slice(0, 1_200),
     assistantAgent: LAB_ASSISTANT_AGENT,
     ...(promptChanges.length === 1 ? { targetAgent: promptChanges[0]!.agentName } : {}),
     configChanges: [],

@@ -1,5 +1,5 @@
 /**
- * The lab's own model calls: editors, composer, selector. Local models only, by default the
+ * The lab's own model calls: editors, composer, selector, reflector. Local models only, by default the
  * swarm's primary model (the one the executor runs on, so the model server does not swap models
  * between a turn and the lab's call after it). A role may name another "<provider>/<model>"
  * (selfImprovement.harnessLab.roles); that model gets an endpoint of its own, never the primary's.
@@ -8,7 +8,7 @@ import { getConfig } from "../config/loader.js";
 import type { ModelConfig } from "../config/schema.js";
 import { createChatProvider, resolveProviderEndpoint } from "../providers/index.js";
 
-export type LabRole = "editor" | "composer" | "selector";
+export type LabRole = "editor" | "composer" | "selector" | "reflector";
 
 /** One call of a lab role: a system prompt and one user message in, the answer's text out. */
 export type LabComplete = (role: LabRole, system: string, user: string) => Promise<string>;

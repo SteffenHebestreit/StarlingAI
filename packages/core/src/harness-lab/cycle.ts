@@ -18,6 +18,7 @@ import { selectPair, type SelectorVerdict } from "./selector.js";
 import type { HarnessTask } from "./task-schema.js";
 import type { LabArm } from "./arm.js";
 import type { LabRunRecord } from "./turn-runner.js";
+import { reflect, type Reflection } from "./reflector.js";
 
 export const MAIN_TARGET = "main_assistant";
 /** Merged edits per prompt, and how much a prompt may grow in one cycle. */
@@ -31,6 +32,10 @@ export interface CycleDeps {
   /** The deployment's prompts as loaded: "main_assistant" and every sub-agent by name. */
   basePrompts: () => Record<string, string>;
   log: (line: string) => void;
+  /** The experience library's index for a task (its domain first); unset = no library. */
+  libraryIndex?: (task: HarnessTask) => string;
+  /** Ask the reflector after each task (writes nothing: the caller stores what it returns). */
+  reflect?: boolean;
 }
 
 export interface CycleOptions {
@@ -70,6 +75,8 @@ export interface CycleHealth {
 }
 
 export interface CycleResult {
+  /** One per task the editors worked on: the lesson the reflector drew, or why it drew none. */
+  reflections: Array<{ taskId: string; domain: string; reflection: Reflection | { noEntry: string } }>;
   screen: Array<{ taskId: string; score: RunScore }>;
   targets: string[];
   guards: string[];
@@ -103,10 +110,13 @@ export function armFor(name: string, base: Record<string, string>, edits: readon
   const changed = applyEdits(base, edits);
   const subAgentPrompts: Record<string, string> = {};
   for (const [target, text] of Object.entries(changed)) if (target !== MAIN_TARGET) subAgentPrompts[target] = text;
+  const skills = edits.filter((edit) => edit.op === "add_skill")
+    .map((edit) => ({ name: edit.skillName ?? edit.id, whenToUse: edit.whenToUse ?? "", procedure: edit.text }));
   return {
     name,
     ...(changed[MAIN_TARGET] !== undefined ? { mainAssistantInstructions: changed[MAIN_TARGET] } : {}),
     ...(Object.keys(subAgentPrompts).length > 0 ? { subAgentPrompts } : {}),
+    ...(skills.length > 0 ? { skills } : {}),
   };
 }
 
@@ -170,7 +180,8 @@ async function improveTask(task: HarnessTask, screenRun: LabRunRecord, deps: Cyc
 
   const candidates: ComposerCandidate[] = [];
   for (const kind of ["INV", "DOM"] as const) {
-    const result = await proposeEdits(kind, { task, digest, otherRunFailures, prompts }, `${kind}-${task.id}`, deps.complete);
+    const libraryIndex = deps.libraryIndex?.(task);
+    const result = await proposeEdits(kind, { task, digest, otherRunFailures, prompts, ...(libraryIndex ? { libraryIndex } : {}) }, `${kind}-${task.id}`, deps.complete);
     work.editors.push(result);
     health.editorAnswers += 1;
     if (result.outcome.kind !== "edits" || result.outcome.edits.length === 0) {
@@ -193,7 +204,7 @@ async function improveTask(task: HarnessTask, screenRun: LabRunRecord, deps: Cyc
     referenceDigest: digest.text,
     candidates,
     revalidate: (edit, text) => {
-      const result = validateEdit({ ...edit, text }, 0, {
+      const result = validateEdit({ ...edit, ...(edit.skillName ? { name: edit.skillName } : {}), text }, 0, {
         editor: edit.editor, idPrefix: edit.id, digest, prompts, taskText: taskText(task),
       });
       return typeof result === "string" ? result : { ...result, id: edit.id };
@@ -280,17 +291,22 @@ export async function runCycle(corpus: readonly HarnessTask[], opts: CycleOption
   const guards = opts.guards ?? corpus.filter((task) => task.role !== "target" && !targets.includes(task.id)).slice(0, opts.maxGuards).map((task) => task.id);
 
   const tasks: TaskWork[] = [];
+  const reflections: CycleResult["reflections"] = [];
   for (const id of targets) {
     deps.log(`task ${id}`);
-    const work = await improveTask(byId.get(id)!, screenRuns.get(id)!, deps, opts, health);
+    const task = byId.get(id)!;
+    const work = await improveTask(task, screenRuns.get(id)!, deps, opts, health);
     deps.log(`  → ${work.outcome}: ${work.reason}`);
     tasks.push(work);
+    if (deps.reflect && work.probes.length > 0) {
+      reflections.push({ taskId: id, domain: task.domain, reflection: await reflect(task, work, deps.complete) });
+    }
   }
 
   const base = deps.basePrompts();
   const wins = tasks.filter((work) => work.outcome === "win");
   const { merged, dropped } = mergeEdits(base, wins.map((work) => work.composed?.edits ?? []));
-  const result: CycleResult = { screen, targets, guards, tasks, merged, mergeDropped: dropped, gateResults: [], health };
+  const result: CycleResult = { reflections, screen, targets, guards, tasks, merged, mergeDropped: dropped, gateResults: [], health };
   if (merged.length === 0) return result;
 
   deps.log(`gate: ${merged.length} merged edit(s) on ${wins.length} target(s) and ${guards.length} guard(s)`);

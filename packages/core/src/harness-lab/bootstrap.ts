@@ -31,6 +31,8 @@ export interface LabProcess {
   liveWorkspacePath: string;
   /** The shared stores that were configured and are unset in this process. */
   isolatedStores: string[];
+  /** The copy of the live skill library every attempt starts from, or null when there is none. */
+  skillSnapshot: string | null;
 }
 
 let _started: LabProcess | null = null;
@@ -56,10 +58,15 @@ export async function startLabProcess(outDir: string): Promise<LabProcess> {
   const { loadConfig } = await import("../config/loader.js");
   const config = loadConfig({ skipCompiledWrite: true });
   const liveWorkspacePath = config.workspacePath;
+  // Every attempt starts from a copy of the live skill library, taken once: the base arm runs with
+  // the skills a live turn finds, and nothing an attempt does to skills reaches the live library.
+  const { setSkillSnapshot, snapshotSkills } = await import("./arm.js");
+  const skillSnapshot = snapshotSkills(liveWorkspacePath, join(outDir, "skills-snapshot"));
+  setSkillSnapshot(skillSnapshot);
   await import("../tools/register-builtins.js");
   const { initProviders } = await import("../providers/index.js");
   await initProviders();
 
-  _started = { outDir, liveWorkspacePath, isolatedStores };
+  _started = { outDir, liveWorkspacePath, isolatedStores, skillSnapshot };
   return _started;
 }

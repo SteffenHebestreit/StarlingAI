@@ -9,7 +9,7 @@
  * with the rule it broke, then counts as keeping the base.
  */
 import type { Digest } from "./digest.js";
-import { EDITOR_SCOPES, MAX_EDITS_PER_EDITOR, MAX_EDIT_CHARS, parseEditorOutput, type EditorKind, type EditorOutcome } from "./edit-format.js";
+import { EDITOR_SCOPES, MAX_EDITS_PER_EDITOR, MAX_EDIT_CHARS, MAX_SKILL_CHARS, parseEditorOutput, type EditorKind, type EditorOutcome } from "./edit-format.js";
 import type { LabComplete } from "./lab-config.js";
 import type { HarnessTask } from "./task-schema.js";
 
@@ -24,7 +24,7 @@ export interface EditorInput {
   otherRunFailures: string[];
   /** The prompts the editor may change, by target ("main_assistant" or a sub-agent that ran). */
   prompts: Record<string, string>;
-  /** The experience library's index, when there is one (P2). */
+  /** The experience library's index, when there is one: one line per entry, starting with its id. */
   libraryIndex?: string;
 }
 
@@ -44,12 +44,12 @@ Rules:
 - Prefer, in this order: a divergence from what the task asked, a repeated concrete failure, a visible risk.
 - The prompts are read on EVERY future turn: a rule must hold for other tasks of the same kind. Never copy the task's names, figures, addresses or wording into a rule.
 - Keeping the base is the right answer when the run failed for reasons no prompt controls (the model's noise, a broken tool, an ambiguous task) or when it did not fail at all.
-- At most ${MAX_EDITS_PER_EDITOR} edits, each at most ${MAX_EDIT_CHARS} characters. "append_rule" adds one rule at the end of a prompt; "replace_span" replaces text that occurs exactly once in it (copy it exactly into "find").
+- At most ${MAX_EDITS_PER_EDITOR} edits. "append_rule" adds one rule (at most ${MAX_EDIT_CHARS} characters) at the end of a prompt; "replace_span" replaces text that occurs exactly once in it (copy it exactly into "find"); "add_skill" adds a multi-step procedure (at most ${MAX_SKILL_CHARS} characters, target "skills") that is loaded only on turns matching its whenToUse: use it for a procedure, a rule for a one-line habit.
 - scope is one of: ${EDITOR_SCOPES[kind].join(", ")}.
 
 Answer with JSON only, one of:
 {"keepBase": true, "reason": "<one sentence>"}
-{"edits": [{"op": "append_rule" | "replace_span", "target": "<prompt name>", "scope": "<scope>", "text": "<the rule or the new text>", "find": "<replace_span only>", "moment": "M7", "why": "<one sentence>"}]}`;
+{"edits": [{"op": "append_rule" | "replace_span" | "add_skill", "target": "<prompt name, or skills>", "scope": "<scope>", "text": "<the rule, the new text, or the procedure>", "find": "<replace_span only>", "name": "<add_skill only>", "whenToUse": "<add_skill only: the shape of situation, not this task>", "moment": "M7", "fromEntry": "<only if it reuses an experience entry: its id>", "why": "<one sentence>"}]}`;
 }
 
 export function buildEditorUserMessage(input: EditorInput): string {
@@ -80,7 +80,8 @@ export interface EditorResult {
 
 /** Ask one editor. A malformed answer, or one whose every edit broke a rule, gets one repair round. */
 export async function proposeEdits(kind: EditorKind, input: EditorInput, idPrefix: string, complete: LabComplete): Promise<EditorResult> {
-  const ctx = { editor: kind, idPrefix, digest: input.digest, prompts: input.prompts, taskText: taskText(input.task) };
+  const libraryIds = new Set((input.libraryIndex ?? "").split("\n").map((line) => /^(L\d+)\b/.exec(line)?.[1]).filter((id): id is string => Boolean(id)));
+  const ctx = { editor: kind, idPrefix, digest: input.digest, prompts: input.prompts, taskText: taskText(input.task), libraryIds };
   const system = buildEditorSystemPrompt(kind);
   const user = buildEditorUserMessage(input);
   const first = parseEditorOutput(await complete("editor", system, user), ctx);

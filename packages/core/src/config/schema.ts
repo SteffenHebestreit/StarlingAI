@@ -1521,8 +1521,9 @@ export const SelfImprovementSchema = z.object({
       editor: z.string().min(1).optional(),
       composer: z.string().min(1).optional(),
       selector: z.string().min(1).optional(),
+      reflector: z.string().min(1).optional(),
     }).default({}),
-    /** Reasoning on for the lab's own calls (editors, composer, selector). */
+    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector). */
     enableThinking: z.boolean().default(true),
     /** Tools the lab leaves out or stubs in addition to its defaults (harness-lab/tool-policy.ts). */
     toolPolicy: z.object({

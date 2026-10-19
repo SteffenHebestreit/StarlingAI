@@ -26,6 +26,20 @@ pnpm harness-lab run [--targets 4 | --targets id,id] [--with e2e-site] [--dry-ru
 
 The report is written to `report.md` / `report.json` under `--out` (default `.starlingai/harness-lab/<timestamp>/`), and every attempt's record to `runs/`.
 
+## Skills and the experience library
+
+**Skill candidates.** An editor may propose `add_skill`: a multi-step procedure that is loaded only on turns matching its trigger.
+- A skill candidate is written into the candidate arm's scratch workspace only, never into the live library: draft skills are injected as soon as they exist.
+- Every attempt starts from a copy of the live library taken when the lab starts, so the base arm runs with the skills a live turn finds.
+- An accepted skill is not part of the config proposal. The report holds its `SKILL.md`; add it on the Skills page.
+
+**Experience library.** After each task the reflector writes at most one lesson, or none when the runs show no reusable contrast.
+- A lesson has: a cue (the shape of situation, never the task's facts), the component it concerns, the lesson itself, the evidence rows it rests on, and a confidence. "High" confidence is kept only for a task won on the record.
+- Once the gate has decided, each lesson gets a verdict: "helped" (the gate accepted), "hurt" (the candidate lost pairs or a guard), "no effect", or "confounded".
+- Lessons are stored in `harness-lab/library/entries.jsonl` under the deployment's state directory, with an `INDEX.md` for people.
+- The editors of the next run see the index, the task's own domain first, as examples. An edit that reuses an entry names it in `fromEntry` and still cites a moment of its own run.
+- A dry run writes no lessons.
+
 ## Isolation
 
 The lab runs in a process of its own: on the host, or as a second process inside the gateway container (`node packages/core/dist/scripts/harness-lab.js run …`). It never runs inside the gateway.
@@ -52,7 +66,7 @@ A task uses the E2E turn checks (`expect`). Its `role` is "target", "guard" or "
 | Key | Meaning |
 |---|---|
 | `enabled` | Default false. The CLI refuses to run while it is off. |
-| `roles.{editor,composer,selector}` | `"<provider>/<model>"` for each lab role. Unset means the swarm's primary model, so the model server does not swap between a turn and the lab's call after it. |
+| `roles.{editor,composer,selector,reflector}` | `"<provider>/<model>"` for each lab role. Unset means the swarm's primary model, so the model server does not swap between a turn and the lab's call after it. |
 | `enableThinking` | Reasoning on for the lab's own calls. |
 | `toolPolicy.{stub,deny}` | Tools the lab stubs or leaves out, on top of its defaults. |
 

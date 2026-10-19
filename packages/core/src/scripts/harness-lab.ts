@@ -168,6 +168,9 @@ async function main(): Promise<number> {
     for (const [name, agent] of Object.entries(current.subAgents)) prompts[name] = agent.systemPrompt ?? "";
     return prompts;
   };
+  const { appendEntries, finalVerdict, libraryDir, readEntries, renderIndex } = await import("../harness-lab/library.js");
+  const library = libraryDir(lab.liveWorkspacePath);
+  const known = readEntries(library);
   const startedAt = new Date().toISOString();
   const cycle = await runCycle(corpus.tasks, {
     ...DEFAULT_CYCLE,
@@ -176,7 +179,23 @@ async function main(): Promise<number> {
     maxGuards,
     kProbe,
     kGateMax: kGate,
-  }, { runAttempt, complete: createLabComplete(), basePrompts, log });
+  }, {
+    runAttempt,
+    complete: createLabComplete(),
+    basePrompts,
+    log,
+    reflect: true,
+    ...(known.length > 0 ? { libraryIndex: (task: (typeof corpus.tasks)[number]) => renderIndex(known, { domain: task.domain }) } : {}),
+  });
+
+  // What each task taught, with the verdict the run showed once the gate decided. A dry run writes
+  // nothing outside --out.
+  const lessons = cycle.reflections.flatMap(({ taskId, domain, reflection }) => {
+    if ("noEntry" in reflection) return [];
+    const work = cycle.tasks.find((t) => t.taskId === taskId)!;
+    return [{ ...reflection, runId, taskId, domain, verdict: finalVerdict(work, cycle.gate) }];
+  });
+  const libraryWritten = dryRun ? [] : appendEntries(library, lessons);
 
   const { emitProposal } = await import("../harness-lab/proposal.js");
   const proposal = !dryRun && cycle.gate?.verdict === "accept"
@@ -189,6 +208,7 @@ async function main(): Promise<number> {
   writeReport(outDir, {
     dryRun,
     cycle,
+    library: { dir: library, written: libraryWritten, drawn: lessons.length },
     ...(proposal ? { proposal } : {}),
     provenance: {
       runId,
@@ -196,7 +216,7 @@ async function main(): Promise<number> {
       finishedAt: new Date().toISOString(),
       gitRevision: git(["rev-parse", "--short", "HEAD"]) || "unknown",
       gitDirty: git(["status", "--porcelain"]).length > 0,
-      models: Object.fromEntries((["editor", "composer", "selector"] as const).map((role) => [role, labModelConfig(role).primary])),
+      models: Object.fromEntries((["editor", "composer", "selector", "reflector"] as const).map((role) => [role, labModelConfig(role).primary])),
       isolatedStores: lab.isolatedStores,
       deniedTools: [...policy.denied].sort(),
       stubbedTools: [...policy.stubbed].sort(),

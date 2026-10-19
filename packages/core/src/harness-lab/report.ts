@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { formatRow } from "./composer.js";
 import type { CycleResult } from "./cycle.js";
 import type { LabEdit } from "./edit-format.js";
+import type { ExperienceEntry } from "./library.js";
 import type { EmitResult } from "./proposal.js";
 import { scoreRun, type RunScore } from "./scoring.js";
 import type { LabRunRecord } from "./turn-runner.js";
@@ -30,6 +31,12 @@ export interface LabReport {
   cycle: CycleResult;
   proposal?: EmitResult;
   dryRun: boolean;
+  library?: { dir: string; written: ExperienceEntry[]; drawn: number };
+}
+
+/** A candidate skill as the Skills page takes it. */
+export function skillMarkdown(edit: LabEdit): string {
+  return [`---`, `name: ${edit.skillName ?? edit.id}`, `description: ${edit.whenToUse ?? ""}`, `whenToUse: ${edit.whenToUse ?? ""}`, `---`, ``, edit.text].join("\n");
 }
 
 function scoreText(score: RunScore): string {
@@ -79,6 +86,20 @@ export function renderMarkdown(report: LabReport): string {
     lines.push("", "| task | role | won | lost | tied | unscored | selector |", "|---|---|---|---|---|---|---|");
     for (const t of cycle.gate.tallies) lines.push(`| ${t.taskId} | ${t.role} | ${t.wins} | ${t.losses} | ${t.ties} | ${t.unscored} | ${t.selectorWins}:${t.selectorLosses} |`);
     lines.push("", `Unscored ${Math.round(cycle.gate.unscoredRate * 100)}% · sign test p ${cycle.gate.signTestP === null ? "n/a" : cycle.gate.signTestP.toFixed(3)} (reported, not deciding)`);
+  }
+  const skills = cycle.merged.filter((e) => e.op === "add_skill");
+  if (skills.length > 0) {
+    lines.push("", "## Skill candidates", "Not part of the proposal: if the gate accepted, add them on the Skills page.");
+    for (const edit of skills) lines.push("", `### ${edit.skillName ?? edit.id}`, "```markdown", skillMarkdown(edit), "```");
+  }
+  if (cycle.reflections.length > 0) {
+    lines.push("", "## Experience");
+    for (const r of cycle.reflections) {
+      lines.push("noEntry" in r.reflection
+        ? `- ${r.taskId}: no entry (${r.reflection.noEntry})`
+        : `- ${r.taskId}: [${r.reflection.confidence}] (${r.reflection.component}) when ${r.reflection.cue} → ${r.reflection.lesson}`);
+    }
+    if (report.library) lines.push(`Written to the library: ${report.library.written.map((e) => `${e.id} (${e.verdict})`).join(", ") || "nothing"}${report.dryRun ? " (dry run)" : ""}`);
   }
   lines.push("", "## Outcome");
   if (report.proposal && "proposal" in report.proposal) {
