@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { formatRow } from "./composer.js";
 import type { CycleResult } from "./cycle.js";
 import type { LabEdit } from "./edit-format.js";
-import type { ExperienceEntry } from "./library.js";
+import { cueText, type ExperienceEntry } from "./library.js";
 import type { EmitResult } from "./proposal.js";
 import { scoreRun, type RunScore } from "./scoring.js";
 import type { LabRunRecord } from "./turn-runner.js";
@@ -97,7 +97,7 @@ export function renderMarkdown(report: LabReport): string {
     for (const r of cycle.reflections) {
       lines.push("noEntry" in r.reflection
         ? `- ${r.taskId}: no entry (${r.reflection.noEntry})`
-        : `- ${r.taskId}: [${r.reflection.confidence}] (${r.reflection.component}) when ${r.reflection.cue} → ${r.reflection.lesson}`);
+        : `- ${r.taskId}: [${r.reflection.confidence}] (${r.reflection.component}) when ${cueText(r.reflection.cue)} → ${r.reflection.lesson}`);
     }
     if (report.library) lines.push(`Written to the library: ${report.library.written.map((e) => `${e.id} (${e.verdict})`).join(", ") || "nothing"}${report.dryRun ? " (dry run)" : ""}`);
   }

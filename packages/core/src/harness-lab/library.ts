@@ -67,6 +67,11 @@ export function appendEntries(dir: string, entries: Array<Omit<ExperienceEntry, 
   return written;
 }
 
+/** A cue as the index prints it after "when": a cue that starts with its own "when" loses it. */
+export function cueText(cue: string): string {
+  return cue.trim().replace(/^when\s+/i, "");
+}
+
 /**
  * The index the editors see: one line per entry, the task's own domain first, newest first, cut at
  * INDEX_MAX_CHARS.
@@ -79,7 +84,7 @@ export function renderIndex(entries: readonly ExperienceEntry[], opts: { domain?
   const lines: string[] = [];
   let used = 0;
   for (const e of ordered) {
-    const line = `${e.id} [${e.verdict}, ${e.confidence}] (${e.component}) when ${e.cue} → ${e.lesson}`;
+    const line = `${e.id} [${e.verdict}, ${e.confidence}] (${e.component}) when ${cueText(e.cue)} → ${e.lesson}`;
     if (used + line.length + 1 > maxChars) break;
     lines.push(line);
     used += line.length + 1;
