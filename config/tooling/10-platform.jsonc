@@ -122,7 +122,13 @@
     "requireApproval": true
   },
   "selfImprovement": {
-    "enabled": true
+    "enabled": true,
+    // The harness lab may run here (`pnpm harness-lab`, or as its own process in the gateway
+    // container). It changes nothing by being enabled: it runs only when started, and what it
+    // finds waits as a pending proposal in Settings → Config Assistant (docs/harness-lab.md).
+    "harnessLab": {
+      "enabled": true
+    }
   },
   // Third-party tool packages from the plugin directory. requireTrust stays ON, so
   // a plugin only loads against an operator-approved trust receipt.

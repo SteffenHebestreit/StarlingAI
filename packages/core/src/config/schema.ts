@@ -1507,6 +1507,30 @@ export const SelfImprovementSchema = z.object({
    * oldest remaining — so a long-running instance never accretes them unboundedly.
    */
   maxTrackedGaps: z.number().int().min(100).max(50_000).default(2000),
+  /**
+   * The harness lab (packages/core/src/harness-lab, `pnpm harness-lab`): an offline run that
+   * replays tasks on the current prompts and on candidate edits to them, and files a pending
+   * config-assistant proposal when a candidate wins on its targets without losing on a guard set.
+   * It runs in a process of its own, never in the gateway, and never applies anything itself.
+   */
+  harnessLab: z.object({
+    /** The CLI refuses to run while this is off. */
+    enabled: z.boolean().default(false),
+    /** "<provider>/<model>" per lab role; unset = the swarm's primary model. Local models only by intent. */
+    roles: z.object({
+      editor: z.string().min(1).optional(),
+      composer: z.string().min(1).optional(),
+      selector: z.string().min(1).optional(),
+      reflector: z.string().min(1).optional(),
+    }).default({}),
+    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector). */
+    enableThinking: z.boolean().default(true),
+    /** Tools the lab leaves out or stubs in addition to its defaults (harness-lab/tool-policy.ts). */
+    toolPolicy: z.object({
+      stub: z.array(z.string()).default([]),
+      deny: z.array(z.string()).default([]),
+    }).default({}),
+  }).default({}),
 });
 
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;

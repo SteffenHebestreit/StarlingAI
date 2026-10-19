@@ -1230,6 +1230,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         ...(userMessageLanguage ? { userMessageLanguage } : {}),
         // Not inherited either: a nested turn's message is a workflow step, not the person's words.
         ...(opts.userWords !== undefined ? { userWords: opts.userWords } : {}),
+        // Inherited: a turn nested in an eval turn is eval traffic too.
+        ...(opts.session.channel === "eval" || currentRequestContext()?.evalTraffic ? { evalTraffic: true as const } : {}),
       },
       () => runWithPhaseTimings(() => runTurnImpl(opts)),
     );

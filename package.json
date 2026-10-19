@@ -1,6 +1,6 @@
 {
   "name": "starlingai",
-  "version": "0.49.0",
+  "version": "0.50.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.6.0",
@@ -45,6 +45,7 @@
     "routing:eval:discriminance": "pnpm --filter @starlingai/core routing:eval:discriminance",
     "routing:taxonomy-check": "node scripts/routing-taxonomy-check.mjs",
     "e2e:env": "node scripts/e2e-env.mjs",
+    "harness-lab": "pnpm --filter @starlingai/core harness-lab",
     "e2e:evaluate": "pnpm --filter @starlingai/core e2e:evaluate",
     "e2e:validate": "pnpm --filter @starlingai/core e2e:validate",
     "e2e:setup": "pnpm --filter @starlingai/core e2e:setup"

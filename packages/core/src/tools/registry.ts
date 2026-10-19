@@ -435,7 +435,38 @@ export function registerTool(handler: ToolHandler): void {
     );
     return;
   }
+  if (_registrationPolicy) {
+    const admitted = _registrationPolicy(handler);
+    if (!admitted) return;
+    _registry.set(handler.name, admitted);
+    return;
+  }
   _registry.set(handler.name, handler);
+}
+
+/**
+ * Decides what a registered tool becomes: itself, a replacement (a stub), or nothing (left out).
+ * Only the harness-lab process installs one (harness-lab/tool-policy.ts).
+ */
+export type ToolRegistrationPolicy = (handler: ToolHandler) => ToolHandler | null;
+
+let _registrationPolicy: ToolRegistrationPolicy | null = null;
+
+/**
+ * Apply `policy` to every tool registered now and to every one registered later, so a tool a late
+ * import or a sync registers cannot slip past it. Returns a function that removes the policy for
+ * later registrations (the tools it already changed stay changed).
+ */
+export function installToolRegistrationPolicy(policy: ToolRegistrationPolicy): () => void {
+  _registrationPolicy = policy;
+  for (const [name, handler] of [..._registry]) {
+    const admitted = policy(handler);
+    if (admitted) _registry.set(name, admitted);
+    else _registry.delete(name);
+  }
+  return () => {
+    if (_registrationPolicy === policy) _registrationPolicy = null;
+  };
 }
 
 export function unregisterTool(name: string): void {

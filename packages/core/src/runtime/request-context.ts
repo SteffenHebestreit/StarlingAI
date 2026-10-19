@@ -98,6 +98,17 @@ export interface RequestContext {
    * started in the same millisecond, whose session ids are equal, each keep their own.
    */
   outcomeRun?: OutcomeRun;
+  /**
+   * The work is evaluation traffic (a turn on the "eval" channel, or nested in one): set by runTurn
+   * and inherited by everything it runs, so a sub-agent of an eval turn keeps out of the learning
+   * stores the live swarm reads (the outcome ledger and retrieval credit) like its turn does.
+   */
+  evalTraffic?: true;
+}
+
+/** Whether the active work is evaluation traffic (see RequestContext.evalTraffic). */
+export function currentIsEvalTraffic(): boolean {
+  return storage.getStore()?.evalTraffic === true;
 }
 
 /**
