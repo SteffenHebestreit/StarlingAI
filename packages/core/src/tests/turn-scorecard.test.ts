@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTurnQualityScorecard, createTurnQualitySignals } from "../agent/turn-scorecard.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals, turnLearningSignal } from "../agent/turn-scorecard.js";
 
 const base = {
   delegationCount: 2,
@@ -101,5 +101,76 @@ describe("turn quality scorecard", () => {
       outcomeStatus: "completed",
       partialOrFailureReason: null,
     });
+  });
+});
+describe("turn learning outcome", () => {
+  const qa = (qaStatus: "pass" | "fail" | "unverified") => ({ ...createTurnQualitySignals(), criteriaTotal: 2, qaStatus });
+
+  it("is a success only when a QA verdict passed the answer", () => {
+    expect(buildTurnQualityScorecard({ ...base, quality: qa("pass") })).toMatchObject({
+      learningOutcome: "success", learningBasis: "qa_pass",
+    });
+    // Completing, however long the answer, is not evidence of having helped.
+    expect(buildTurnQualityScorecard({ ...base, finalAnswerLength: 4_000 })).toMatchObject({
+      outcomeStatus: "completed", learningOutcome: "unknown", learningBasis: "no_verdict",
+    });
+  });
+
+  it("is a failure on every defect the turn recorded", () => {
+    const withheld = { ...createTurnQualitySignals(), answerWithheld: "raw_tool_output" as const };
+    const cases: Array<[Parameters<typeof buildTurnQualityScorecard>[0], string]> = [
+      [{ ...base, quality: qa("fail") }, "qa_failed"],
+      [{ ...base, quality: withheld }, "answer_withheld_raw_tool_output"],
+      [{ ...base, delegatedFiguresUnobserved: true }, "delegated_figures_unobserved"],
+      [{ ...base, wardenFailureCount: 2 }, "delegation_failures"],
+      [{ ...base, forcedSynthesisFired: true, finishReason: "loop_brake" }, "loop_brake"],
+      [{ ...base, failed: true, finishReason: "timeout" }, "timeout"],
+    ];
+    for (const [input, basis] of cases) {
+      expect(buildTurnQualityScorecard(input)).toMatchObject({ learningOutcome: "failure", learningBasis: basis });
+    }
+  });
+
+  it("an undecided verdict is no evidence, but does not hide a defect behind it", () => {
+    expect(buildTurnQualityScorecard({ ...base, quality: qa("unverified") })).toMatchObject({
+      outcomeStatus: "partial", learningOutcome: "unknown", learningBasis: "qa_unverified",
+    });
+    const artifactFailed = { ...qa("unverified"), artifactVerificationStatus: "fail" as const };
+    expect(buildTurnQualityScorecard({ ...base, quality: artifactFailed })).toMatchObject({
+      partialOrFailureReason: "qa_unverified",
+      learningOutcome: "failure",
+      learningBasis: "artifact_verification_failed",
+    });
+  });
+
+  it("a blocked or cancelled turn is no evidence", () => {
+    expect(buildTurnQualityScorecard({ ...base, blocked: true })).toMatchObject({ learningOutcome: "unknown", learningBasis: "blocked" });
+    expect(buildTurnQualityScorecard({ ...base, finishReason: "cancelled" })).toMatchObject({ learningOutcome: "unknown", learningBasis: "cancelled" });
+  });
+});
+
+describe("turnLearningSignal", () => {
+  const card = (learningOutcome: "success" | "failure" | "unknown", learningBasis: string, finalAnswerLength = 400) =>
+    ({ learningOutcome, learningBasis, finalAnswerLength });
+
+  it("records judged turns the same under both rules", () => {
+    for (const rule of ["verified", "substantive"] as const) {
+      expect(turnLearningSignal(card("success", "qa_pass"), rule)).toBe("success");
+      expect(turnLearningSignal(card("failure", "qa_failed"), rule)).toBe("failure");
+    }
+  });
+
+  it("verified: a turn nothing judged records nothing", () => {
+    expect(turnLearningSignal(card("unknown", "no_verdict"), "verified")).toBeNull();
+    expect(turnLearningSignal(card("unknown", "qa_unverified"), "verified")).toBeNull();
+  });
+
+  it("substantive: a turn nothing judged counts by the substance of its answer, whatever its language", () => {
+    expect(turnLearningSignal(card("unknown", "no_verdict", 51), "substantive")).toBe("success");
+    expect(turnLearningSignal(card("unknown", "qa_unverified", 400), "substantive")).toBe("success");
+    expect(turnLearningSignal(card("unknown", "no_verdict", 50), "substantive")).toBe("failure");
+    // Blocked and cancelled turns stay out under either rule.
+    expect(turnLearningSignal(card("unknown", "blocked"), "substantive")).toBeNull();
+    expect(turnLearningSignal(card("unknown", "cancelled"), "substantive")).toBeNull();
   });
 });

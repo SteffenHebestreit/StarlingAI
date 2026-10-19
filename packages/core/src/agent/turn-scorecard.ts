@@ -4,6 +4,12 @@ import type { ArtifactVerificationStatus } from "./artifact-verification-gate.js
 export type ScorecardQaStatus = QaVerdictStatus | "not_run";
 export type ArtifactProbeStatus = "not_requested" | "not_applicable" | "pass" | "fail" | "unverified" | "error";
 export type ScorecardOutcomeStatus = "completed" | "partial" | "failed" | "blocked" | "cancelled";
+/**
+ * What the turn teaches the learning loops (skill statistics and lift, skill distillation,
+ * retrieval credit, the trajectory cache). `success` only on a QA verdict that passed with cited
+ * evidence; `failure` on a concrete defect the turn recorded; `unknown` when nothing judged it.
+ */
+export type ScorecardLearningOutcome = "success" | "failure" | "unknown";
 
 export interface TurnQualitySignals {
   criteriaTotal: number;
@@ -48,6 +54,9 @@ export interface TurnQualityScorecard {
   artifactProbeCount: number;
   outcomeStatus: ScorecardOutcomeStatus;
   partialOrFailureReason: string | null;
+  learningOutcome: ScorecardLearningOutcome;
+  /** What decided learningOutcome: "qa_pass", the defect behind a failure, or why nothing judged the turn. */
+  learningBasis: string;
 }
 
 export interface BuildTurnQualityScorecardInput {
@@ -107,6 +116,58 @@ function outcomeFor(input: BuildTurnQualityScorecardInput, quality: TurnQualityS
   return { status: "completed", reason: null };
 }
 
+/**
+ * The learning outcome, read from what the turn recorded and never from the answer's wording. The
+ * answer's length and an English "I apologize" decided it before, so a long wrong answer, and an
+ * apology in any other language, counted as a success, and the skill lift test compared two arms of
+ * that noise. A turn nothing judged is `unknown`: completing is not evidence of having helped.
+ */
+function learningOutcomeFor(
+  input: BuildTurnQualityScorecardInput,
+  quality: TurnQualitySignals,
+  outcome: { status: ScorecardOutcomeStatus; reason: string | null },
+): { outcome: ScorecardLearningOutcome; basis: string } {
+  switch (outcome.status) {
+    case "blocked":
+    case "cancelled":
+      return { outcome: "unknown", basis: outcome.status };
+    case "failed":
+      return { outcome: "failure", basis: outcome.reason ?? "failed" };
+    case "completed":
+      return quality.qaStatus === "pass"
+        ? { outcome: "success", basis: "qa_pass" }
+        : { outcome: "unknown", basis: "no_verdict" };
+    case "partial": {
+      if (quality.qaStatus !== "unverified") return { outcome: "failure", basis: outcome.reason ?? "partial" };
+      // A verdict that decided nothing is no evidence either way, but it masks the defects
+      // outcomeFor checks after it, and those still are.
+      const rest = outcomeFor(input, { ...quality, qaStatus: "not_run" });
+      return rest.status === "completed"
+        ? { outcome: "unknown", basis: "qa_unverified" }
+        : { outcome: "failure", basis: rest.reason ?? "partial" };
+    }
+  }
+}
+
+/** skillLibrary.outcomeEvidence: whether a turn nothing judged counts at all. */
+export type LearningEvidenceRule = "verified" | "substantive";
+
+/**
+ * The scorecard's learning outcome as a success/failure to record, or null when the turn is no
+ * evidence under `rule`. "substantive" keeps the rule every turn had before for a turn nothing
+ * judged: a success when the answer is substantive (over 50 characters), a failure when it is a
+ * stub. A blocked or cancelled turn is never evidence.
+ */
+export function turnLearningSignal(
+  scorecard: Pick<TurnQualityScorecard, "learningOutcome" | "learningBasis" | "finalAnswerLength">,
+  rule: LearningEvidenceRule,
+): "success" | "failure" | null {
+  if (scorecard.learningOutcome !== "unknown") return scorecard.learningOutcome;
+  if (rule === "verified") return null;
+  if (scorecard.learningBasis !== "no_verdict" && scorecard.learningBasis !== "qa_unverified") return null;
+  return scorecard.finalAnswerLength > 50 ? "success" : "failure";
+}
+
 /** Build the single canonical quality payload carried by every terminal turn_scorecard event. */
 export function buildTurnQualityScorecard(input: BuildTurnQualityScorecardInput): TurnQualityScorecard {
   const quality = input.quality ?? createTurnQualitySignals();
@@ -115,6 +176,7 @@ export function buildTurnQualityScorecard(input: BuildTurnQualityScorecardInput)
     ? criteriaTotal
     : quality.criteriaCovered === null ? null : Math.min(criteriaTotal, toNonNegativeInteger(quality.criteriaCovered));
   const outcome = outcomeFor(input, quality);
+  const learning = learningOutcomeFor(input, quality, outcome);
 
   return {
     version: 2,
@@ -138,5 +200,7 @@ export function buildTurnQualityScorecard(input: BuildTurnQualityScorecardInput)
     artifactProbeCount: toNonNegativeInteger(quality.artifactProbeCount),
     outcomeStatus: outcome.status,
     partialOrFailureReason: outcome.reason,
+    learningOutcome: learning.outcome,
+    learningBasis: learning.basis,
   };
 }
