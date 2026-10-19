@@ -22,7 +22,8 @@ import { writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cach
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SwarmState } from "../tools/registry.js";
 import type { AgentSession } from "./session.js";
-import { buildTurnQualityScorecard, createTurnQualitySignals, type TurnQualitySignals } from "./turn-scorecard.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals, turnLearningSignal, type TurnQualitySignals } from "./turn-scorecard.js";
+import { getConfig } from "../config/loader.js";
 import type { TurnOutput } from "./turn-types.js";
 
 export interface FinalizeSuccessfulTurnParams {
@@ -134,8 +135,15 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     // synthesis, because only the runtime's early returns read the flag.
     delegatedFiguresUnobserved,
   });
-  // G33: Write trajectory for future cache reuse
-  if (shareFindingCount > 0 && finalResponse.length > 50) {
+  // What this turn teaches the learning loops comes from its scorecard (turnLearningSignal), never
+  // from the answer's wording. Skill statistics and distillation follow the deployment's evidence
+  // rule (skillLibrary.outcomeEvidence). Retrieval credit and the trajectory cache keep the
+  // substantive rule for a turn nothing judged: a retrieval left pending decays as unused
+  // (graphDecayUnusedMemories) or is credited by the session's next judged turn.
+  const skillSignal = turnLearningSignal(qualityScorecard, getConfig().skillLibrary.outcomeEvidence);
+  const retrievalSignal = turnLearningSignal(qualityScorecard, "substantive");
+  // G33: Write trajectory for future cache reuse — never one the turn itself recorded as failed.
+  if (shareFindingCount > 0 && finalResponse.length > 50 && qualityScorecard.learningOutcome !== "failure") {
     writeTrajectory(
       {
         channel: session.channel,
@@ -148,26 +156,18 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     ).catch(() => undefined);
   }
 
-  // E26: close the graph-memory retrieval feedback loop for this turn.
-  // A non-blocked turn that produced a substantive answer is treated as a
-  // successful outcome — memories retrieved during the turn get credited
-  // (wasUseful=true + importance boost). Same signal the sub-agent uses.
-  // An apology or stub answer is treated as an unhelpful outcome: the
-  // memories were retrieved and still didn't help, so mark them
-  // wasUseful=false and apply a modest importance penalty. This is the
-  // negative-signal counterpart that closes the E26 loop in both
-  // directions rather than relying solely on slow decay.
-  const isApology = finalResponse.toLowerCase().startsWith("i apologize");
   // Phase 3: credit/penalize the skills injected into this turn so retrieval
   // reliability is learned. Success graduates drafts to active in the store.
   // Only attribute on turns that actually did multi-step work — skills are
   // procedures, so a direct single-shot answer is not evidence the procedure
   // was followed (avoids inflating success rates on trivial turns).
   // Fire-and-forget async writes — never block the turn return.
+  // A turn that is no evidence under the evidence rule records nothing.
   // LRN-403 contamination guard: eval-channel turns (gateway-routed harness
   // runs, trap fixtures) must NEVER feed the learning loop — eval traffic in
   // the skill stats is training/eval overlap, and a trap case that deliberately
   // provokes failure would poison the success rates of whatever skill matched.
+  // The same holds for the importance of the memories an eval turn retrieved.
   const isEvalTraffic = session.channel === "eval";
   if (isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0)) {
     logAudit("skill_eval_contamination_skipped", {
@@ -181,25 +181,23 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
   if (!isEvalTraffic && delegationCount > 0) {
     void sweepEvidenceMigrationParity(session.id).catch(() => { /* shadow telemetry */ });
   }
-  if (!isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0) {
-    const outcome = finalResponse.length > 50 && !isApology ? "success" : "failure";
+  if (!isEvalTraffic && skillSignal && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0) {
     const skillWorkspace = session.getWorkspacePath();
     for (const slug of injectedSkillSlugs) {
-      void recordSkillOutcomeAsync(skillWorkspace, slug, outcome).catch(() => { /* non-critical */ });
+      void recordSkillOutcomeAsync(skillWorkspace, slug, skillSignal).catch(() => { /* non-critical */ });
     }
     // Held-out matches record the counterfactual baseline so skillLift can
     // tell whether injecting the skill actually moves the outcome.
     for (const slug of heldOutSkillSlugs) {
-      void recordSkillHoldoutOutcomeAsync(skillWorkspace, slug, outcome).catch(() => { /* non-critical */ });
+      void recordSkillHoldoutOutcomeAsync(skillWorkspace, slug, skillSignal).catch(() => { /* non-critical */ });
     }
   }
-  if (finalResponse.length > 50 && !isApology) {
-    graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
-    // Phase 2: distill a reusable skill from this successful multi-step turn
-    // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
-    // LRN-403: never distill from eval traffic — a skill learned from a trap
-    // fixture IS the training/eval overlap the holdout framework exists to prevent.
-    if (!isEvalTraffic) maybeDistillSkillFromTurn({
+  // Phase 2: distill a reusable skill from this successful multi-step turn
+  // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
+  // LRN-403: never distill from eval traffic — a skill learned from a trap
+  // fixture IS the training/eval overlap the holdout framework exists to prevent.
+  if (skillSignal === "success" && !isEvalTraffic) {
+    maybeDistillSkillFromTurn({
       workspacePath: session.getWorkspacePath(),
       sessionId: session.id,
       objective: userMessage,
@@ -208,7 +206,17 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
       sharedFindings: sharedFindingsThisTurn,
       swarmState: getTurnSwarmState(),
       loadedSkillSlugs: injectedSkillSlugs,
+      outcomeBasis: qualityScorecard.learningBasis,
     }).catch(() => undefined);
+  }
+  // E26: close the graph-memory retrieval feedback loop for this turn.
+  // A successful turn credits the memories retrieved during it (wasUseful=true
+  // + importance boost). A failed one marks them wasUseful=false with a modest
+  // importance penalty: the memories were retrieved and still didn't help.
+  // This is the negative-signal counterpart that closes the E26 loop in both
+  // directions rather than relying solely on slow decay.
+  if (retrievalSignal === "success") {
+    if (!isEvalTraffic) graphMarkSessionRetrievalsUseful(session.id, { boost: 0.04 }).catch(() => {});
     // G33 follow-up: positive signal — the injected cached trajectory
     // contributed to a successful answer. Pairs with `trajectory_cache_hit`
     // and `trajectory_cache_invalidated` so operators can compute the
@@ -225,10 +233,10 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
         { sessionId: session.id, channel: session.channel },
       );
     }
-  } else if (finalResponse.length <= 50 || isApology) {
-    graphMarkSessionRetrievalsUnhelpful(session.id, { penalty: 0.02 }).catch(() => {});
+  } else if (retrievalSignal === "failure") {
+    if (!isEvalTraffic) graphMarkSessionRetrievalsUnhelpful(session.id, { penalty: 0.02 }).catch(() => {});
     // G33 follow-up: if a cached trajectory was injected and the turn
-    // still ended in apology / stub, the cached evidence is almost
+    // still failed or ended in a stub, the cached evidence is almost
     // certainly stale or wrong. Invalidate it so future similar
     // queries don't keep inheriting the same bad outcome.
     if (injectedTrajectoryIdentity) {
@@ -238,7 +246,7 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
         {
           normalizedQuery: injectedTrajectoryIdentity.normalizedQuery.slice(0, 200),
           finishedAt: injectedTrajectoryIdentity.finishedAt,
-          reason: isApology ? "apology" : "stub_response",
+          reason: qualityScorecard.learningOutcome === "failure" ? qualityScorecard.learningBasis : "stub_response",
           finalAnswerChars: finalResponse.length,
         },
         { sessionId: session.id, channel: session.channel, severity: "warn" },

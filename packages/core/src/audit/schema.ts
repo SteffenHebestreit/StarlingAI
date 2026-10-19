@@ -184,6 +184,7 @@ export type CoreAuditEventType =
   | "self_improvement_deploy_failed"
   | "skill_authored"
   | "skill_distilled"
+  | "skill_distill_declined"
   | "skill_patched"
   | "skill_rolled_back"
   | "skill_outcome_recorded"

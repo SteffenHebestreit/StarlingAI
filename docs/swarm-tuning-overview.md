@@ -50,7 +50,7 @@ One clarification that removes most confusion (see [primitives taxonomy](#a-note
 | **Job** | An ordered chain of scene steps + triggers (api/cron/channel) | `jobs.<name>` shard, or `swarm_save_job` tool; **Jobs page** monitors | Its trigger, or `run_workflow` |
 | **Agent** | A worker persona: model + system prompt + tool allowlist + routing tags | `subAgents.<name>` shard, or `swarm_define_agent`; **Agents page** | Delegated to by the orchestrator |
 
-**Skills** — `skillLibrary.*`: `enabled`(true), `autoAuthor`(true), `minStepsToAuthor`(3), `maxInjected`(3), `retireBelowSuccessRate`(0.34), `retireMinUses`(5), `autoPromoteToScene`(true), `holdoutRate`(0). Stored at `skills/<slug>/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, `<shared>/.starlingai/users/<seg>/` for an account's own root. Inert until skills exist; semantic retrieval needs an embedding provider (falls back to keyword).
+**Skills** — `skillLibrary.*`: `enabled`(true), `autoAuthor`(true), `minStepsToAuthor`(3), `maxInjected`(3), `retireBelowSuccessRate`(0.34), `retireMinUses`(5), `autoPromoteToScene`(true), `holdoutRate`(0), `outcomeEvidence`(substantive). Stored at `skills/<slug>/` in the workspace's state directory: `<shared>/.starlingai/` for the shared root, `<shared>/.starlingai/users/<seg>/` for an account's own root. Inert until skills exist; semantic retrieval needs an embedding provider (falls back to keyword).
 
 **Scenes** — `SceneConfigSchema`: `task`(required), `params`, `allowedAgents`, `humanInLoopSteps`, `expectArtifact`, `triggers`, `approvalChannel`. A scene with `triggers` (regex `all` + optional `requiresActionVerb`) auto-trips the workflow guardrail; without them it's still discoverable via `search_workflows` but never force-routes. **No dedicated frontend page** — shards or `swarm_save_scene` only.
 
@@ -140,7 +140,8 @@ The swarm autonomously improves along these loops. **Most memory/skill loops are
 
 | Loop | What it does autonomously | Trigger | Lever (default) |
 |---|---|---|---|
-| **Skill distillation** | Condenses a successful trajectory into a reusable `SKILL.md` draft | successful multi-step turn (≥120-char answer, ≥`minStepsToAuthor` delegations) | `skillLibrary.autoAuthor`(**on**) |
+| **Skill distillation** | Condenses a successful trajectory into a reusable `SKILL.md` draft, written only when it cites the run's steps it rests on and rates its confidence medium or high (`skill_distill_declined` otherwise) | successful multi-step turn (≥120-char answer, ≥`minStepsToAuthor` delegations); "successful" per `skillLibrary.outcomeEvidence` | `skillLibrary.autoAuthor`(**on**) |
+| **Turn outcome for learning** | Decides what a turn teaches skill statistics, lift and distillation: a success on a QA verdict that passed, a failure on any defect the scorecard recorded (`turn_scorecard.learningOutcome`) | every turn | `skillLibrary.outcomeEvidence`(**substantive**: a turn nothing judged counts by its answer's substance; **verified**: it does not count, needs `orchestration.qaDeliveryLoop`) |
 | **Skill lifecycle driver** | Retires low-lift skills, merges duplicates, **promotes proven skills → scenes** | every 30 min | `retireBelowSuccessRate`(0.34), `retireMinUses`(5), `autoPromoteToScene`(**on**) |
 | **Skill lift / holdout** | Withholds a skill some % of the time to measure whether it *actually helps* | per-turn probability | `skillLibrary.holdoutRate`(**0 = off**; 0.15 to measure) |
 | **Trajectory cache (G33)** | Injects a semantically-similar recent turn's evidence to avoid re-researching | new turn matches a cached query (≥0.82) | **no flag** — governed by embedding availability; disable only by disabling embeddings |

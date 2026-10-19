@@ -98,7 +98,7 @@ Several soft nudges also ride here, all eval-gated default-OFF: `splitOrchestrat
 | **Embedding backfill** | durable (+ transient at search) | sweep step 2 / on write | vectors records lacking embeddings | transitively via consolidation + an embedding provider |
 | **E26 graph feedback** | cross-cutting (session edges) | retrieval + outcome | credits/penalizes memories by usefulness | active when MemGraph reachable (no flag) |
 | **MAGE graph jobs** | shared graph | cron (centrality hourly, communities daily, decay 03:40) | PageRank / communities / similarity / decay | hard-coded cron in `graph-jobs.ts`; MemGraph-gated |
-| **Trajectory write + self-invalidate** | workspace | turn finalize (had `share_finding`, >50-char answer) | caches evidence; bad outcomes invalidate | module constants (no flag) |
+| **Trajectory write + self-invalidate** | workspace | turn finalize (had `share_finding`, >50-char answer, no defect on the turn's scorecard) | caches evidence; a failed or stub turn invalidates what it was shown | module constants (no flag) |
 | **User-model updates** | user | assistant `user_model_update` | evolves the theory-of-user | granted tool; caps 10 items/280 chars |
 | **Memory steward** | workspace+user | on demand | dry-run curation report + nudge; never deletes silently | `curate_memory(apply=true)`; **Memory page → Curate** |
 

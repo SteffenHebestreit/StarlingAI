@@ -7,9 +7,11 @@ import {
   listSkillHistory,
   listSkillSupportFiles,
   listSkills,
+  markSkillPromoted,
   parseSkillFile,
   patchSkill,
   readSkillSupportFile,
+  recordSkillHoldoutOutcome,
   recordSkillOutcome,
   recordSkillOutcomeAsync,
   removeSkillSupportFile,
@@ -256,6 +258,35 @@ describe("skill library store", () => {
     expect(frontmatter.status).toBe("active");
     expect(frontmatter.whenToUse).toBe("Does a useful thing");
     expect(body).toContain("actual steps");
+  });
+
+  // Rewriting a skill kept the injected counts but dropped the held-out arm, so every rewrite
+  // restarted the lift measurement, and a promoted skill lost the pointer its rollback needs.
+  it("a rewrite keeps the held-out arm, the promotion pointer and the evidence the skill was learned from", () => {
+    const ws = workspace();
+    const learnedFrom = { basis: "qa_pass", steps: ["S2"], why: "Verified before drafting.", confidence: "high" as const };
+    const slug = writeSkill(ws, {
+      name: "Measured Procedure",
+      description: "A skill with lift measurements.",
+      procedure: "1. Gather. 2. Verify. 3. Draft.",
+      origin: "distilled",
+      learnedFrom,
+    }).frontmatter.slug;
+    recordSkillOutcome(ws, slug, "success");
+    recordSkillHoldoutOutcome(ws, slug, "success");
+    recordSkillHoldoutOutcome(ws, slug, "failure");
+    markSkillPromoted(ws, slug);
+
+    writeSkill(ws, {
+      name: "Measured Procedure",
+      description: "A skill with lift measurements.",
+      procedure: "1. Gather. 2. Verify twice. 3. Draft.",
+      learnedFrom: { ...learnedFrom, why: "A later write does not replace it." },
+    });
+
+    const meta = getSkill(ws, slug)!.meta;
+    expect(meta).toMatchObject({ uses: 1, successes: 1, holdoutUses: 2, holdoutSuccesses: 1, promotedAtVersion: 1, learnedFrom });
+    expect(meta.promotedToSceneAt).toEqual(expect.any(String));
   });
 });
 

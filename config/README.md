@@ -30,7 +30,8 @@ Two feature sections control the self-improving procedural-memory layer. Both ca
     "maxInjected": 3,           // max skills injected into the planner prompt per turn
     "retireBelowSuccessRate": 0.34, // archive skills below this success rate…
     "retireMinUses": 5,         // …once they have at least this many recorded uses
-    "autoPromoteToScene": true  // promote consistently reliable skills to workflow scenes
+    "autoPromoteToScene": true, // promote consistently reliable skills to workflow scenes
+    "outcomeEvidence": "substantive" // "verified": only turns a QA verdict judged count (needs orchestration.qaDeliveryLoop)
   },
   // Batched, guarded tool execution.
   "toolPipeline": {
