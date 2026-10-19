@@ -1,0 +1,83 @@
+// Validation of the lab's diagram-routing rule (proposal 5dd92813) on tasks the lab never saw.
+// Positive: a diagram request, worded three ways, must reach diagram_designer and produce a .mmd.
+// Counter-checks: a question ABOUT Mermaid syntax and an explicit request for the raw source as
+// text must still get Mermaid code in the reply; a rule that forbids inline code blocks for
+// diagrams must not break them. All content is invented.
+[
+  {
+    id: "val.diagram-flowchart-de",
+    title: "Flowchart of a leave request (German)",
+    origin: "manual",
+    domain: "diagrams",
+    role: "guard",
+    turns: [{
+      message: "Erstelle ein Mermaid-Flussdiagramm für die Urlaubsbeantragung: Antrag stellen → Teamleitung prüft → bei Zustimmung: Personalabteilung trägt ein → Bestätigung an die Mitarbeiterin; bei Ablehnung: Begründung senden. --auto",
+      timeoutMs: 1200000,
+      expect: {
+        events: { must: [{ type: "sub_agent_tool_call", where: { "data.tool": "generate_mermaid_diagram", "data.phase": "done", "data.success": true, "data.args.diagram": { regex: "[Aa]ntrag|[Tt]eamleitung" } } }] },
+        agents: { mustRun: ["diagram_designer"] },
+        artifacts: { minCount: 1, pathMatches: ["\\.mmd$"] },
+      },
+    }],
+  },
+  {
+    id: "val.diagram-sequence-en",
+    title: "Sequence diagram of a password reset (English)",
+    origin: "manual",
+    domain: "diagrams",
+    role: "guard",
+    turns: [{
+      message: "Draw a sequence diagram of a password reset: the user requests a reset, the web app asks the auth service for a token, the auth service emails a link, the user opens the link and sets a new password. --auto",
+      timeoutMs: 1200000,
+      expect: {
+        events: { must: [{ type: "sub_agent_tool_call", where: { "data.tool": "generate_mermaid_diagram", "data.phase": "done", "data.success": true, "data.args.diagram": { regex: "[Tt]oken|[Ll]ink" } } }] },
+        agents: { mustRun: ["diagram_designer"] },
+        artifacts: { minCount: 1, pathMatches: ["\\.mmd$"] },
+      },
+    }],
+  },
+  {
+    id: "val.diagram-dependencies-de",
+    title: "Module dependencies as a diagram, without naming Mermaid (German)",
+    origin: "manual",
+    domain: "diagrams",
+    role: "guard",
+    turns: [{
+      message: "Visualisiere die Abhängigkeiten zwischen diesen Modulen als Diagramm: Frontend nutzt das API-Gateway; das API-Gateway nutzt den Auth-Dienst und den Katalog-Dienst; der Katalog-Dienst nutzt die Datenbank. --auto",
+      timeoutMs: 1200000,
+      expect: {
+        events: { must: [{ type: "sub_agent_tool_call", where: { "data.tool": "generate_mermaid_diagram", "data.phase": "done", "data.success": true, "data.args.diagram": { regex: "[Gg]ateway|[Kk]atalog" } } }] },
+        agents: { mustRun: ["diagram_designer"] },
+        artifacts: { minCount: 1, pathMatches: ["\\.mmd$"] },
+      },
+    }],
+  },
+  {
+    id: "val.mermaid-syntax-question-de",
+    title: "Counter-check: a question about Mermaid syntax still gets an inline example",
+    origin: "manual",
+    domain: "diagrams",
+    role: "guard",
+    turns: [{
+      message: "Wie schreibe ich in Mermaid ein Flussdiagramm von oben nach unten? Erkläre es kurz mit einem winzigen Beispiel mit zwei Knoten.",
+      timeoutMs: 600000,
+      expect: {
+        reply: { matches: ["-->"], includesAny: ["TD", "TB"], language: "de" },
+      },
+    }],
+  },
+  {
+    id: "val.mermaid-raw-source-en",
+    title: "Counter-check: an explicit request for the raw source as text gets it in the reply",
+    origin: "manual",
+    domain: "diagrams",
+    role: "guard",
+    turns: [{
+      message: "Give me just the Mermaid source text, as plain text in your reply, for a diagram where A points to B and B points to C. No file, no image.",
+      timeoutMs: 600000,
+      expect: {
+        reply: { matches: ["A\\s*-->\\s*B", "B\\s*-->\\s*C"] },
+      },
+    }],
+  },
+]
