@@ -1883,12 +1883,21 @@ export function sessionArtifactEpoch(sessionId: string): number {
   return now;
 }
 
+/**
+ * How far a file's mtime may sit before the moment it was written after. The kernel stamps it from
+ * a coarse clock that lags Date.now() by up to a tick: a file written right after the scope began
+ * read as older than the scope, in 1994 of 2000 writes in the gateway image (up to 5.8 ms; 1.6 ms
+ * on Windows). That dropped the page of the S8 simulator turn, written within milliseconds of the
+ * turn's start, from the scan, and flaked CI on v0.50.0 and v0.50.1.
+ */
+const MTIME_CLOCK_SLACK_MS = 20;
+
 /** True when this file is inside the caller's scope — unscoped, or written since it began —
  *  and, when the caller asks whose it is, the caller's. */
 function withinScanScope(abs: string, scope: ArtifactScanScope | undefined): boolean {
   if (scope?.modifiedSinceMs !== undefined) {
     try {
-      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs) return false;
+      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs - MTIME_CLOCK_SLACK_MS) return false;
     } catch {
       return false;   // cannot date it, cannot claim it
     }
