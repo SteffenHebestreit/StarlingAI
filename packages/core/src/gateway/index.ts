@@ -126,6 +126,7 @@ import {
   configChangeRefusal,
   MAIN_ASSISTANT_PROMPT_TARGET,
   peerAgentRefusal,
+  stalePromptChange,
   proposalAgentNames,
   updateConversationConfigProposal,
 } from "../agent/config-assistant-proposals.js";
@@ -3103,6 +3104,8 @@ export function createGateway() {
     }
     const peerAgent = peerAgentRefusal(proposalAgentNames(proposal));
     if (peerAgent) return c.json({ error: peerAgent }, 409);
+    const stale = proposal.promptChanges.map((change) => stalePromptChange(cfg, change)).find(Boolean);
+    if (stale) return c.json({ error: stale }, 409);
 
     const applyProposal = (raw: Record<string, unknown>) => {
       for (const change of proposal.configChanges) {

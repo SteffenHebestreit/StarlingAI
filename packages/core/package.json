@@ -42,6 +42,7 @@
     "intent:bench": "cd ../.. && tsx packages/core/src/scripts/intent-bench.ts",
     "loops:replay": "tsx src/scripts/loops-replay.ts",
     "latency:probe": "cd ../.. && tsx packages/core/src/scripts/latency-probe.ts",
+    "harness-lab": "cd ../.. && tsx packages/core/src/scripts/harness-lab.ts",
     "qa:verdict-eval": "cd ../.. && tsx packages/core/src/scripts/qa-verdict-eval.ts",
     "scenes:evaluate": "tsx src/agent/scene-evaluation-cli.ts",
     "worker:scene": "tsx src/scene-worker-main.ts",

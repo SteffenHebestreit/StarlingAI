@@ -95,6 +95,7 @@ import { currentEffortTier } from "../runtime/effort-context.js";
 import {
   attachRequestSessionId,
   attachRequestOutcomeRun,
+  currentIsEvalTraffic,
   currentRequestContext,
   runWithCallAttribution,
   runWithRequestContext,
@@ -4585,16 +4586,22 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       // The ledger and the memory feedback below get the same verdict as the run's stats: a run that
       // masked figures it could not back did not succeed, whichever of the call sites reports it.
       const fields = { ...recordedFields, outcome: capOutcomeForUnbackedFigures(recordedFields.outcome, executionRecord) };
+      // An eval run (an eval turn's context, or an agents:evaluate parent "eval:<uuid>") keeps out of
+      // the ledger and the retrieval credit the live swarm reads, as its turn does (LRN-403): the
+      // ledger weights routing and timeouts, and a trap case fails on purpose.
+      const evalTraffic = currentIsEvalTraffic() || opts.parentSessionId.startsWith("eval:");
       // The outcomes ledger describes the DEPLOYMENT's agents, and every reader resolves it
       // against the shared root (tools/agent-routing.ts, gateway/sub-agent-routes.ts). Writing
       // it against a per-user execution root would split one ledger into one per account, with
       // the readers seeing only whatever the shared root happened to collect.
-      appendOutcome(getConfig().workspacePath, {
-        ...fields,
-        taskKeywords,
-        sharedFindingsCount: shareFindinCallCount,
-        ...(runAccount ? { account: runAccount } : {}),
-      });
+      if (!evalTraffic) {
+        appendOutcome(getConfig().workspacePath, {
+          ...fields,
+          taskKeywords,
+          sharedFindingsCount: shareFindinCallCount,
+          ...(runAccount ? { account: runAccount } : {}),
+        });
+      }
       // ADR-003 ack boundary: the run's outcome is durably recorded here. A
       // success/partial outcome means the delivered peer messages were processed
       // by the run — acknowledge them (idempotent). A failure leaves the claim
@@ -4604,6 +4611,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         a2aMessageClaim = null;
         claim.ack().catch(() => { /* unacked entries redeliver after the visibility timeout */ });
       }
+      if (evalTraffic) return;
       if (fields.outcome === "success" || fields.outcome === "partial") {
         // Partial outcomes credit less than full success — still positive,
         // because some of the retrieved memories *did* contribute.

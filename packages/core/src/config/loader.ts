@@ -74,15 +74,84 @@ export function isRuntimeSubAgent(name: string): boolean {
   return agent !== undefined && getConfig().subAgents[name] === agent;
 }
 
+/** A candidate harness for one arm of a harness-lab run (harness-lab/arm.ts): prompt text only. */
+export interface LabPromptOverlay {
+  /** Replaces agents.mainAssistant.customInstructions. */
+  mainAssistantInstructions?: string;
+  /** Replaces subAgents.<name>.systemPrompt; every name must be a loaded sub-agent. */
+  subAgentPrompts?: Record<string, string>;
+}
+
+/** The overlay in force and what it replaced on the config it was last laid on. */
+let _labOverlay: {
+  overlay: LabPromptOverlay;
+  laidOn: Config | null;
+  mainAssistant: Config["agents"]["mainAssistant"] | undefined;
+  subAgents: Map<string, SubAgentConfig>;
+} | null = null;
+
+function layLabOverlay(config: Config): void {
+  if (!_labOverlay) return;
+  const { overlay } = _labOverlay;
+  _labOverlay.laidOn = config;
+  _labOverlay.subAgents = new Map();
+  _labOverlay.mainAssistant = undefined;
+  if (overlay.mainAssistantInstructions !== undefined) {
+    _labOverlay.mainAssistant = config.agents.mainAssistant;
+    config.agents.mainAssistant = { ...config.agents.mainAssistant, customInstructions: overlay.mainAssistantInstructions };
+  }
+  const subAgents = config.subAgents as Record<string, SubAgentConfig>;
+  for (const [name, systemPrompt] of Object.entries(overlay.subAgentPrompts ?? {})) {
+    const base = subAgents[name];
+    if (!base) continue;
+    _labOverlay.subAgents.set(name, base);
+    subAgents[name] = { ...base, systemPrompt };
+  }
+}
+
+/**
+ * Lay a candidate harness's prompts over the loaded config, in memory, until the returned restore
+ * runs: the harness lab's arms (harness-lab/arm.ts). Never saved, and laid back over a reload.
+ * Unlike setRuntimeSubAgent, which marks an A2A peer's agents as not config, it leaves an agent a
+ * configured one, so a proposal for it is still possible. Only the dedicated lab process may lay it
+ * (SAI_HARNESS_LAB_PROCESS=1): in the gateway it would change every live turn.
+ */
+/** The dedicated harness-lab process (harness-lab/bootstrap.ts), never the gateway. */
+export function isHarnessLabProcess(): boolean {
+  return process.env["SAI_HARNESS_LAB_PROCESS"] === "1";
+}
+
+export function applyLabPromptOverlay(overlay: LabPromptOverlay): () => void {
+  if (!isHarnessLabProcess()) {
+    throw new Error("applyLabPromptOverlay runs only in the harness-lab process (SAI_HARNESS_LAB_PROCESS=1)");
+  }
+  if (_labOverlay) throw new Error("A lab prompt overlay is already in force; restore it first");
+  const config = getConfig();
+  const missing = Object.keys(overlay.subAgentPrompts ?? {}).filter((name) => !config.subAgents[name]);
+  if (missing.length > 0) throw new Error(`No loaded sub-agent named ${missing.join(", ")}`);
+  _labOverlay = { overlay, laidOn: null, mainAssistant: undefined, subAgents: new Map() };
+  layLabOverlay(config);
+  return () => {
+    const laid = _labOverlay;
+    _labOverlay = null;
+    if (!laid || laid.laidOn !== _config || !_config) return;
+    if (laid.mainAssistant) _config.agents.mainAssistant = laid.mainAssistant;
+    for (const [name, base] of laid.subAgents) (_config.subAgents as Record<string, SubAgentConfig>)[name] = base;
+  };
+}
+
 export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
   if (_config) return _config;
 
   _config = parseRawConfig(getEffectiveRawConfig());
   for (const [name, agent] of _runtimeSubAgents) (_config.subAgents as Record<string, SubAgentConfig>)[name] = agent;
+  layLabOverlay(_config);
   // The watch path skips this and writes only when a section actually changed (B21),
   // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
   // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
-  if (!opts.skipCompiledWrite) writeCompiledConfig(_config);
+  // The harness-lab process never writes it: its config carries a candidate's prompts, and the
+  // artifact is the deployment's.
+  if (!opts.skipCompiledWrite && !isHarnessLabProcess()) writeCompiledConfig(_config);
   return _config;
 }
 
@@ -172,6 +241,8 @@ export function resetConfigForTests(): void {
 }
 
 export function updateConfig(mutator: (raw: Record<string, unknown>) => void): Config {
+  // The runtime overlay file is the deployment's live config: a lab run proposes, it never writes.
+  if (isHarnessLabProcess()) throw new Error("The harness-lab process does not change the deployment's config");
   const baseRaw = getBaseRawConfig();
   const raw = getEffectiveRawConfig();
 

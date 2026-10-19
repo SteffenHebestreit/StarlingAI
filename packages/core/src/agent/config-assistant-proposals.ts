@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isRuntimeSubAgent } from "../config/loader.js";
@@ -29,6 +29,30 @@ export interface ConversationPromptChange {
   strategy: "replace" | "append";
   prompt: string;
   rationale: string;
+  /**
+   * sha256 of the target's prompt (trimmed) the change was made against. When set, applying it to
+   * a prompt that has changed since is refused (stalePromptChange): a "replace" written against an
+   * older prompt would silently undo whatever changed it.
+   */
+  baseSha256?: string;
+}
+
+/** sha256 of a prompt as stalePromptChange compares it. */
+export function promptSha256(prompt: string | undefined): string {
+  return createHash("sha256").update((prompt ?? "").trim()).digest("hex");
+}
+
+/** Why `change` must not be applied to `config` any more, or undefined when it still fits. */
+export function stalePromptChange(
+  config: { agents?: { mainAssistant?: { customInstructions?: string } }; subAgents?: Record<string, { systemPrompt?: string } | undefined> },
+  change: ConversationPromptChange,
+): string | undefined {
+  if (!change.baseSha256) return undefined;
+  const current = change.agentName === MAIN_ASSISTANT_PROMPT_TARGET
+    ? config.agents?.mainAssistant?.customInstructions
+    : config.subAgents?.[change.agentName]?.systemPrompt;
+  if (promptSha256(current) === change.baseSha256) return undefined;
+  return `The prompt of '${change.agentName}' has changed since this proposal was made; applying it would undo that change`;
 }
 
 export interface ConversationProposalFeedback {

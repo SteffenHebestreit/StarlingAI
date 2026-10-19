@@ -55,7 +55,7 @@ const ReplyExpectationSchema = z.object({
   maxChars: z.number().int().positive().optional(),
 }).strict();
 
-const TurnExpectationSchema = z.object({
+export const TurnExpectationSchema = z.object({
   /** Final turn status as the gateway reports it. Default "ok". */
   status: z.enum(["ok", "error", "blocked"]).optional(),
   reply: ReplyExpectationSchema.optional(),
