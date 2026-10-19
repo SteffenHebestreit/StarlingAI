@@ -12,7 +12,9 @@ import { extractInfraFailureSignature } from "../agent/infra-failure.js";
 import { subscribeToAudit } from "../audit/logger.js";
 import { evaluateTurnExpectations, type ArtifactRef } from "../e2e/assertions.js";
 import type { AuditEventLike } from "../e2e/gateway-client.js";
+import { parseOverrideFlags } from "../gateway/override-flags.js";
 import { principalIdentity } from "../runtime/user-scope.js";
+import { SELF_SANDBOXING_TOOLS } from "../tools/registry.js";
 import { withArm, type LabArm } from "./arm.js";
 import type { HarnessTask } from "./task-schema.js";
 import { setStubSink, type StubbedCall } from "./tool-policy.js";
@@ -111,17 +113,23 @@ export async function runLabAttempt(task: HarnessTask, arm: LabArm, opts: RunAtt
         let status: LabTurnRecord["status"] = "ok";
         let error: string | undefined;
         let scorecard: TurnQualityScorecard | undefined;
+        // A message written for the chat may carry its inline flags (--auto, --agent, --effort …).
+        const { clean, flags } = parseOverrideFlags(turn.message);
+        const agent = turn.agent ?? flags.forceAgent;
+        const effort = turn.effort ?? flags.effort;
         try {
           const out = await runTurn({
             session,
-            userMessage: turn.message,
-            userWords: turn.message,
-            ...(turn.agent ? { directiveAgent: turn.agent } : {}),
-            ...(turn.effort ? { effortTier: turn.effort } : {}),
+            userMessage: clean,
+            userWords: clean,
+            ...(agent ? { directiveAgent: agent } : {}),
+            ...(effort ? { effortTier: effort } : {}),
+            ...(flags.maxIterationsOverride !== undefined ? { maxIterationsOverride: flags.maxIterationsOverride } : {}),
             autoApprove: false,
-            // Nobody is there to approve: a call that needs it is refused, as a person declining would.
-            approvalCallback: async () => false,
-            turnTimeoutOverrideMs: turn.timeoutMs ?? task.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
+            // Nobody is there to approve. --auto approves only the tools that run in a sandbox of
+            // their own; every other call that needs approval is refused, as a person declining would.
+            approvalCallback: async (tool) => flags.autoApprove && SELF_SANDBOXING_TOOLS.has(tool),
+            turnTimeoutOverrideMs: turn.timeoutMs ?? (flags.turnTimeoutSec !== undefined ? flags.turnTimeoutSec * 1000 : undefined) ?? task.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
             onToolCall: (id, name, args) => { toolCalls.set(id, { id, name, args }); },
             onToolResult: (id, name, result) => {
               const call = toolCalls.get(id) ?? { id, name, args: {} };

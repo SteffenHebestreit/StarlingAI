@@ -35,6 +35,8 @@ export const HarnessTaskSchema = z.object({
   domain: z.string().default("general"),
   /** "target": the lab may improve the harness on it; "guard": it only protects against regressions. */
   role: z.enum(["target", "guard", "both"]).default("both"),
+  /** Services beyond the model the task needs (the E2E service names, e.g. "e2e-site", "sandbox"). */
+  requires: z.array(z.string()).default([]),
   turns: z.array(LabTurnSchema).min(1).max(3),
   /** What a practitioner would hand over, for the editors and the selector. */
   deliverable: z.object({

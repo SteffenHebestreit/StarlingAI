@@ -60,6 +60,7 @@ function task(expect: HarnessTask["turns"][number]["expect"]): HarnessTask {
     tags: [],
     domain: "general",
     role: "both",
+    requires: [],
     turns: [{ message: "Send the weekly report to the team.", expect }],
   };
 }
