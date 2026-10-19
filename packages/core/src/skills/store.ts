@@ -110,8 +110,21 @@ export interface SkillMeta {
    *  exactly what was withdrawn. Cleared when the promotion is rolled back. */
   promotedToSceneAt?: string;
   promotedAtVersion?: number;
+  /** Why a distilled skill was written (skills/distiller.ts). Absent on skills written by hand. */
+  learnedFrom?: SkillEvidence;
   /** Cached embedding of the search document (number[] for JSON). */
   embedding?: number[];
+}
+
+/** The evidence a distilled skill rests on: what judged its source turn, and which steps of that run. */
+export interface SkillEvidence {
+  /** The source turn's learning basis: "qa_pass" when a QA verdict passed it, "no_verdict" when nothing judged it. */
+  basis: string;
+  /** Ids of the run's steps the procedure rests on (S1, F2, … from the distiller's digest). */
+  steps: string[];
+  /** One sentence: what in those steps made the run work. */
+  why: string;
+  confidence: "high" | "medium";
 }
 
 export interface Skill {
@@ -134,6 +147,8 @@ export interface WriteSkillInput {
   /** Opt this skill into deterministic lifecycle curation. Defaults to distilled-only. */
   curatorManaged?: boolean;
   sourceSessionId?: string;
+  /** The evidence a distilled skill rests on; kept from the first write. */
+  learnedFrom?: SkillEvidence;
   /** Force a specific slug (e.g. when updating a known skill). */
   slug?: string;
 }
@@ -144,6 +159,8 @@ export interface PatchSkillInput {
   oldString: string;
   newString: string;
   replaceAll?: boolean;
+  /** Recorded in the skill's history in place of the generic summary, e.g. the evidence for the patch. */
+  summary?: string;
 }
 
 export type SkillHistoryAction = "write_skill" | "patch" | "write_file" | "remove_file" | "rollback";
@@ -263,7 +280,7 @@ export function writeSkill(workspacePath: string, input: WriteSkillInput): Skill
     throw new Error("Skill requires a name, description, and procedure body");
   }
 
-  assertNoCredential(`${name}\n${description}\n${whenToUse}\n${body}`);
+  assertNoCredential(`${name}\n${description}\n${whenToUse}\n${body}\n${input.learnedFrom?.why ?? ""}`);
 
   const existing = getSkill(workspacePath, slug);
   const now = new Date().toISOString();
@@ -308,12 +325,19 @@ export function writeSkill(workspacePath: string, input: WriteSkillInput): Skill
     successes: existing?.meta.successes ?? 0,
     failures: existing?.meta.failures ?? 0,
     patches: existing?.meta.patches ?? 0,
+    // The held-out arm and the promotion pointer survive a rewrite like the injected counts do:
+    // dropping them restarted the lift measurement and orphaned a promoted scene's rollback.
+    holdoutUses: existing?.meta.holdoutUses ?? 0,
+    holdoutSuccesses: existing?.meta.holdoutSuccesses ?? 0,
     lastViewedAt: existing?.meta.lastViewedAt,
     lastUsedAt: existing?.meta.lastUsedAt,
     lastPatchedAt: existing?.meta.lastPatchedAt,
     sourceSessionId: existing?.meta.sourceSessionId ?? input.sourceSessionId,
     pinned: existing?.meta.pinned ?? false,
     archivedAt: status === "archived" ? (existing?.meta.archivedAt ?? now) : undefined,
+    promotedToSceneAt: existing?.meta.promotedToSceneAt,
+    promotedAtVersion: existing?.meta.promotedAtVersion,
+    learnedFrom: existing?.meta.learnedFrom ?? input.learnedFrom,
     // Drop the cached embedding when content changes — service recomputes lazily.
     embedding: contentChanged ? undefined : existing?.meta.embedding,
   };
@@ -422,7 +446,7 @@ export function patchSkill(workspacePath: string, slug: string, input: PatchSkil
   const next = input.replaceAll === true
     ? raw.split(input.oldString).join(input.newString)
     : raw.replace(input.oldString, input.newString);
-  assertNoCredential(next);
+  assertNoCredential(`${next}\n${input.summary ?? ""}`);
 
   if (input.filePath) {
     const relativePath = normalizeSupportPath(input.filePath);
@@ -437,7 +461,7 @@ export function patchSkill(workspacePath: string, slug: string, input: PatchSkil
       nextExists: true,
       previousContent: raw,
       nextContent: next,
-      summary: "Patched support file",
+      summary: input.summary ?? "Patched support file",
     });
     bumpSkillPatch(workspacePath, skill, true);
     return getSkill(workspacePath, safe) ?? skill;
@@ -460,7 +484,7 @@ export function patchSkill(workspacePath: string, slug: string, input: PatchSkil
     nextExists: true,
     previousContent: raw,
     nextContent: serializeSkillFile(parsed.frontmatter, parsed.body),
-    summary: "Patched SKILL.md",
+    summary: input.summary ?? "Patched SKILL.md",
   });
   return getSkill(workspacePath, safe) ?? { frontmatter: parsed.frontmatter, body: parsed.body, meta: patchedMeta };
 }
@@ -797,8 +821,17 @@ function coerceSkillMeta(raw: Partial<SkillMeta>, slug: string): SkillMeta {
     archivedAt: raw.archivedAt,
     promotedToSceneAt: raw.promotedToSceneAt,
     promotedAtVersion: typeof raw.promotedAtVersion === "number" ? raw.promotedAtVersion : undefined,
+    learnedFrom: coerceSkillEvidence(raw.learnedFrom),
     embedding: Array.isArray(raw.embedding) ? raw.embedding : undefined,
   };
+}
+
+function coerceSkillEvidence(raw: unknown): SkillEvidence | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Partial<SkillEvidence>;
+  if (typeof r.basis !== "string" || typeof r.why !== "string" || !Array.isArray(r.steps)) return undefined;
+  if (r.confidence !== "high" && r.confidence !== "medium") return undefined;
+  return { basis: r.basis, steps: r.steps.filter((s): s is string => typeof s === "string"), why: r.why, confidence: r.confidence };
 }
 
 function readSkillMeta(workspacePath: string, slug: string): SkillMeta {

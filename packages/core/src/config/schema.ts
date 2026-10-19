@@ -1556,6 +1556,19 @@ export const SkillLibrarySchema = z.object({
    * speed for decision safety.
    */
   liftMinSamplesPerArm: z.number().int().min(1).max(100).default(5),
+  /**
+   * Which turns count as evidence for skill statistics (uses, success rate, lift) and for
+   * distillation. Either way a turn whose scorecard recorded a defect (a failed QA verdict, a
+   * withheld answer, a failed artifact check, figures no tool returned, failed delegations, a
+   * forced synthesis) counts as a failure and is never distilled.
+   * - "verified": only a turn with a QA verdict that passed with cited evidence counts as a
+   *   success; a turn nothing judged is not counted at all. Needs orchestration.qaDeliveryLoop,
+   *   which gives planned turns a verdict; without it the skill statistics stop moving.
+   * - "substantive": a turn nothing judged counts as a success when its answer is substantive
+   *   (over 50 characters), as every completed turn did before. For deployments without the
+   *   QA delivery loop.
+   */
+  outcomeEvidence: z.enum(["verified", "substantive"]).default("substantive"),
 });
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;
