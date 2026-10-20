@@ -60,13 +60,14 @@ describe("Wave B artifact emitters", () => {
     expect(written).toContain('<rect x="0"');
   });
 
-  it("generate_svg rejects non-.svg output_file", async () => {
+  it("generate_svg saves an SVG asked for as .png under .svg, and says so", async () => {
     const result = await (await getTool("generate_svg")).execute({
       svg: "<svg></svg>",
       output_file: "bad.png",
     }, ctx());
-    expect(result.success).toBe(false);
-    expect(result.error).toContain(".svg");
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("bad.svg");
+    expect(result.output).toMatch(/ended in \.png.*always \.svg/);
   });
 
   // ── generate_qr_code ──────────────────────────────────────────────────

@@ -62,7 +62,10 @@ describe("generate_document", () => {
     expect(content).toContain("Ship date: 2026-03-30");
   });
 
-  it("rejects mismatched output extensions", async () => {
+  // A mismatched extension used to fail the call, and a specialist that did not retry then
+  // reported a file that was never written (harness-lab validation 2026-10-19). The file is the
+  // format's either way, so it is saved under the format's extension and the result says so.
+  it("saves under the format's extension when the requested name carries another, and says so", async () => {
     const result = await runTool("generate_document", {
       title: "Bad Extension",
       content: "text",
@@ -70,8 +73,11 @@ describe("generate_document", () => {
       output_file: "brief.md",
     });
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/\.json extension/i);
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("generated/brief.json");
+    expect(result.output).toMatch(/ended in \.md.*always \.json/);
+    expect(existsSync(join(tempDir, "generated", "brief.json"))).toBe(true);
+    expect(existsSync(join(tempDir, "generated", "brief.md"))).toBe(false);
   });
 
   it("respects overwrite=false", async () => {
@@ -290,6 +296,20 @@ describe("generate_mermaid_diagram", () => {
     const content = readFileSync(outputPath, "utf8");
     expect(content).toContain('%%{init: { "theme": "forest" }}%%');
     expect(content).toContain("flowchart TD");
+  });
+
+  it("saves a diagram asked for as .md under .mmd, the name diagram_designer then reports", async () => {
+    const result = await runTool("generate_mermaid_diagram", {
+      title: "Abhängigkeiten",
+      diagram: "flowchart LR\n  Frontend --> Gateway",
+      output_file: "diagramme/abhaengigkeiten.md",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("generated/diagramme/abhaengigkeiten.mmd");
+    expect(result.output).toMatch(/ended in \.md/);
+    expect(result.metadata).toMatchObject({ outputPath: "generated/diagramme/abhaengigkeiten.mmd", filename: "abhaengigkeiten.mmd" });
+    expect(existsSync(join(tempDir, "generated", "diagramme", "abhaengigkeiten.mmd"))).toBe(true);
   });
 
   it("preserves an existing Mermaid init block", async () => {

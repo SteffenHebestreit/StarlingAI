@@ -32,6 +32,7 @@ import { getConfig } from "../config/loader.js";
 import { turnSteeringManager } from "./turn-steering.js";
 import { rootSessionOf } from "./session-ids.js";
 import { STEERING_PREFIX } from "./turn-boundary.js";
+import { failedWriteTarget } from "./unwritten-file-claims.js";
 import { currentEffortProfile, effectiveOrchestration, effectiveSubAgentTurnSloMs } from "../runtime/effort-context.js";
 import { getToolsAsLLMDefs, executeTool, normalizeToolCall, toolCallIdentity, type ToolContext, type SwarmState, type ToolResult } from "../tools/registry.js";
 import type { Identity } from "../runtime/accounts.js";
@@ -1882,12 +1883,21 @@ export function sessionArtifactEpoch(sessionId: string): number {
   return now;
 }
 
+/**
+ * How far a file's mtime may sit before the moment it was written after. The kernel stamps it from
+ * a coarse clock that lags Date.now() by up to a tick: a file written right after the scope began
+ * read as older than the scope, in 1994 of 2000 writes in the gateway image (up to 5.8 ms; 1.6 ms
+ * on Windows). That dropped the page of the S8 simulator turn, written within milliseconds of the
+ * turn's start, from the scan, and flaked CI on v0.50.0 and v0.50.1.
+ */
+const MTIME_CLOCK_SLACK_MS = 20;
+
 /** True when this file is inside the caller's scope — unscoped, or written since it began —
  *  and, when the caller asks whose it is, the caller's. */
 function withinScanScope(abs: string, scope: ArtifactScanScope | undefined): boolean {
   if (scope?.modifiedSinceMs !== undefined) {
     try {
-      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs) return false;
+      if (fs.statSync(abs).mtimeMs < scope.modifiedSinceMs - MTIME_CLOCK_SLACK_MS) return false;
     } catch {
       return false;   // cannot date it, cannot claim it
     }
@@ -2593,9 +2603,15 @@ export function readToolFailures(value: unknown): SubAgentToolFailure[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry): SubAgentToolFailure[] => {
     if (!entry || typeof entry !== "object") return [];
-    const { agent, tool, error, declinedByUser } = entry as Record<string, unknown>;
+    const { agent, tool, error, declinedByUser, target } = entry as Record<string, unknown>;
     if (typeof tool !== "string" || typeof error !== "string") return [];
-    return [{ ...(typeof agent === "string" ? { agent } : {}), tool, error, ...(declinedByUser === true ? { declinedByUser } : {}) }];
+    return [{
+      ...(typeof agent === "string" ? { agent } : {}),
+      tool,
+      error,
+      ...(typeof target === "string" && target ? { target } : {}),
+      ...(declinedByUser === true ? { declinedByUser } : {}),
+    }];
   });
 }
 
@@ -2753,6 +2769,9 @@ export interface SubAgentToolFailure {
   tool: string;
   /** First line of the error, redacted. */
   error: string;
+  /** The workspace file the call meant to write (its output_file, or a write tool's path): an
+   *  answer that names it as saved names a file that was never written (failedWriteTarget). */
+  target?: string;
   /** The call did nothing because the person said no (a Skip): listed as their choice, not as a
    *  failure. Set from the result's own flag (isDeclinedByUser), never from its text. */
   declinedByUser?: true;
@@ -7907,10 +7926,12 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         // the person declined (a Skip in the settings step) is recorded as that: listed as a failure,
         // it told the orchestrator the render had broken.
         if (!result.success && !isApprovalGateFailure(result.error ?? result.output)) {
+          const target = failedWriteTarget(tc.name, tc.arguments);
           toolFailures.push({
             agent: opts.agentName,
             tool: tc.name,
             error: firstToolErrorLine(result),
+            ...(target ? { target } : {}),
             ...(isDeclinedByUser(result.metadata) ? { declinedByUser: true as const } : {}),
           });
         }

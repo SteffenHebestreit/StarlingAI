@@ -313,7 +313,9 @@ function toolFailureLines(failures: unknown, frameAgent: string | undefined, dec
     if (!tool) continue;
     const agent = recordedName(value["agent"]);
     const error = typeof value["error"] === "string" ? singleLine(value["error"], 160) : "";
-    const line = `- ${tool}${agent && agent !== frameAgent ? ` by ${agent}` : ""}: ${error || "no error text"}`;
+    // The file it meant to write: nothing was written there, so the reply must not name it as saved.
+    const target = typeof value["target"] === "string" && value["target"] ? ` (wanted to write ${singleLine(value["target"], 120)}; nothing was written)` : "";
+    const line = `- ${tool}${agent && agent !== frameAgent ? ` by ${agent}` : ""}${target}: ${error || "no error text"}`;
     counts.set(line, (counts.get(line) ?? 0) + 1);
   }
   return [...counts].map(([line, count]) => (count > 1 ? `${line} (x${count})` : line));

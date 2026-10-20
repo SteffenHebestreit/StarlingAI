@@ -69,6 +69,12 @@ describe("failed tool calls inside a delegated run", () => {
           tools: ["delegate_to_agent"],
           maxIterations: 4,
         },
+        diagram_designer: {
+          description: "Draws Mermaid diagrams.",
+          systemPrompt: "DIAG-5M1 Draw the diagram with generate_mermaid_diagram.",
+          tools: ["generate_mermaid_diagram"],
+          maxIterations: 4,
+        },
         coder: {
           description: "Writes and runs code in the sandbox.",
           systemPrompt: "CODER-KQ Write the script, run it in the sandbox and report what it printed.",
@@ -116,6 +122,15 @@ describe("failed tool calls inside a delegated run", () => {
       parameters: { type: "object", properties: {} },
       async execute() {
         return { success: false, output: "", error: "HTTP 403 Forbidden" };
+      },
+    });
+    // The refusal of the harness-lab validation run (2026-10-19), before the emitters corrected the name.
+    registerTool({
+      name: "generate_mermaid_diagram",
+      description: "Render a Mermaid diagram.",
+      parameters: { type: "object", properties: {} },
+      async execute() {
+        return { success: false, output: "", error: "output_file must use the .mmd extension" };
       },
     });
     registerTool({
@@ -209,6 +224,39 @@ describe("failed tool calls inside a delegated run", () => {
 
     expect(toolResultsIn(completeMock.mock.calls.at(-1)![0] as Message[])).toBe(3);
     expect(result.toolFailures).toEqual([{ agent: "researcher", tool: "web_fetch", error: "HTTP 403 Forbidden" }]);
+  }, 30_000);
+
+  it("a failed write records the file it meant to write, and a coordinator passes that on", async () => {
+    // Harness-lab validation 2026-10-19: the refusal was recorded, the file name was not, and the
+    // reply named that file as saved.
+    await registerLeafTools();
+    completeMock.mockImplementation(async (messages: Message[]) => {
+      if (systemIncludes(messages, "DIAG-5M1")) {
+        return toolResultsIn(messages) === 0
+          ? call("m1", "generate_mermaid_diagram", { mermaid: "graph TD; A-->B", output_file: "diagramme/abhaengigkeiten.md" })
+          : answer("Das Diagramm wurde erfolgreich erstellt und unter diagramme/abhaengigkeiten.md gespeichert.");
+      }
+      if (toolResultsIn(messages) === 0) {
+        return call("dl1", "delegate_to_agent", { agentName: "diagram_designer", task: "Draw the dependency diagram." });
+      }
+      return answer("Done.");
+    });
+
+    const { runSubAgentWithStats } = await import("../agent/sub-agent.js");
+    const result = await runSubAgentWithStats({
+      agentName: "art_director",
+      task: "Get the dependency diagram drawn.",
+      parentSessionId: "parent-failures-target",
+      workspacePath: tempDir,
+    });
+
+    // Beside the coordinator's own failed delegation (its specialist's only call failed).
+    expect(result.toolFailures).toContainEqual({
+      agent: "diagram_designer",
+      tool: "generate_mermaid_diagram",
+      error: "output_file must use the .mmd extension",
+      target: "diagramme/abhaengigkeiten.md",
+    });
   }, 30_000);
 
   it("delegate_to_agent carries them in its metadata as specialistToolFailures", async () => {

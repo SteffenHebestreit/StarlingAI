@@ -1,9 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, extname } from "node:path";
+import { dirname } from "node:path";
 import { PDFDocument, StandardFonts, type PDFFont, rgb } from "pdf-lib";
 import { childLogger } from "../logger.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { overwriteGuard, resolveWorkspaceWritePath } from "./workspace-path.js";
+import { extensionNote, withRequiredExtension } from "./output-extension.js";
 import { inlineLocalImagesInHtml, inlineLocalImagesInMarkdown } from "./inline-images.js";
 
 const log = childLogger("tool:document-output");
@@ -108,7 +109,7 @@ registerTool({
 
     return {
       success: true,
-      output: `Document saved to ${resolvedOutput.relativePath} as ${format}.`,
+      output: `Document saved to ${resolvedOutput.relativePath} as ${format}.${resolvedOutput.note}`,
       metadata: {
         artifactKind: "document",
         outputPath: resolvedOutput.relativePath,
@@ -189,7 +190,7 @@ registerTool({
 
     return {
       success: true,
-      output: `PDF saved to ${resolvedOutput.relativePath}.`,
+      output: `PDF saved to ${resolvedOutput.relativePath}.${resolvedOutput.note}`,
       metadata: {
         artifactKind: "document",
         outputPath: resolvedOutput.relativePath,
@@ -271,7 +272,7 @@ registerTool({
 
     return {
       success: true,
-      output: `Mermaid diagram saved to ${resolvedOutput.relativePath}.`,
+      output: `Mermaid diagram saved to ${resolvedOutput.relativePath}.${resolvedOutput.note}`,
       metadata: {
         artifactKind: "diagram",
         outputPath: resolvedOutput.relativePath,
@@ -392,7 +393,7 @@ registerTool({
 
     return {
       success: true,
-      output: `Chart HTML saved to ${resolvedOutput.relativePath}.`,
+      output: `Chart HTML saved to ${resolvedOutput.relativePath}.${resolvedOutput.note}`,
       metadata: {
         artifactKind: "chart_report",
         outputPath: resolvedOutput.relativePath,
@@ -478,22 +479,16 @@ function resolveOutputPath(input: {
   title: string;
   format: DocumentFormat | "pdf" | "mermaid";
   workspacePath: string;
-}): { success: true; resolved: string; relativePath: string } | { success: false; error: string } {
+}): { success: true; resolved: string; relativePath: string; note: string } | { success: false; error: string } {
   const extension = FORMAT_EXTENSION[input.format];
   const fallbackName = `${slugifyTitle(input.title || "document")}${extension}`;
   const requestedPath = input.requestedPath.trim() || fallbackName;
-  const currentExtension = extname(requestedPath).toLowerCase();
-  const normalizedPath = currentExtension
-    ? requestedPath
-    : `${requestedPath}${extension}`;
-
-  if (extname(normalizedPath).toLowerCase() !== extension) {
-    return { success: false, error: `output_file must use the ${extension} extension for ${input.format} output` };
-  }
+  // The file is this format whatever the name says: a wrong extension is corrected, not refused.
+  const name = withRequiredExtension(requestedPath, extension);
 
   try {
-    const { resolved, relativePath } = resolveWorkspaceWritePath(normalizedPath, input.workspacePath);
-    return { success: true, resolved, relativePath };
+    const { resolved, relativePath } = resolveWorkspaceWritePath(name.path, input.workspacePath);
+    return { success: true, resolved, relativePath, note: extensionNote(name, extension) };
   } catch {
     return { success: false, error: "output_file must be a relative path within the workspace" };
   }

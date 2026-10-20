@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -165,6 +165,30 @@ describe("resume detection reads the workspace, not the task text", () => {
       const found = findUnfilledStubFiles(dir);
       expect(found.count).toBe(1);
       expect(found.files.join(",")).toContain("app.js");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("counts a file written right after the scope began, though the kernel dated it a few ms earlier", async () => {
+    // The kernel's mtime clock lags Date.now() by up to a tick (5.8 ms measured in the gateway
+    // image): the S8 simulator page, written within milliseconds of the turn's start, fell out of
+    // the turn's scope and its repair never ran (CI, v0.50.0 and v0.50.1).
+    const { findUnfilledStubFiles } = await import("../agent/sub-agent.js");
+    const dir = mkdtempSync(join(tmpdir(), "sai-scope-clock-"));
+    try {
+      mkdirSync(join(dir, "generated"), { recursive: true });
+      const fresh = join(dir, "generated", "fresh.js");
+      const old = join(dir, "generated", "old.js");
+      writeFileSync(fresh, `throw new Error("${MARKER}: loop");`, "utf8");
+      writeFileSync(old, `throw new Error("${MARKER}: core");`, "utf8");
+      const scopeStart = Date.now();
+      utimesSync(fresh, new Date(scopeStart - 6), new Date(scopeStart - 6));
+      utimesSync(old, new Date(scopeStart - 60_000), new Date(scopeStart - 60_000));
+
+      const found = findUnfilledStubFiles(dir, { modifiedSinceMs: scopeStart });
+      expect(found.files.join(",")).toContain("fresh.js");
+      expect(found.files.join(",")).not.toContain("old.js");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
