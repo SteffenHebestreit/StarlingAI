@@ -168,7 +168,7 @@ const WORD_END = String.raw`(?![\p{L}\d_/])`;
 const EN_VERB = `${WORD_START}${EN_COMPLETION_VERB}${WORD_END}`;
 const DE_VERB = `${WORD_START}${DE_COMPLETION_PARTICIPLE}${WORD_END}`;
 const ANY_COMPLETION_VERB = `${WORD_START}(?:${EN_COMPLETION_VERB}|${DE_COMPLETION_PARTICIPLE})${WORD_END}`;
-const ARTIFACT_FILE_EXT = "html?|pdf|docx?|pptx?|xlsx?|zip|csv|md|json|svg|png|jpe?g";
+const ARTIFACT_FILE_EXT = "html?|pdf|docx?|pptx?|xlsx?|zip|csv|md|mmd|json|svg|png|jpe?g";
 
 // German perfect: the participle closes the clause, so the window stops at a comma — a
 // subordinate clause after the comma is not the speaker's claim.
@@ -333,6 +333,14 @@ function claimClauses(text: string): string[] {
   }
   push(text.length, false);
   return clauses;
+}
+
+/** Every clause naming `needle` (case-insensitive) is negated ("konnte unter x.mmd nicht gespeichert
+ *  werden"): the answer says that file is not done. False when no clause names it. */
+export function namesOnlyAsNotDone(text: string, needle: string): boolean {
+  const lower = needle.toLowerCase();
+  const naming = claimClauses(text ?? "").filter((clause) => clause.toLowerCase().includes(lower));
+  return naming.length > 0 && naming.every((clause) => CLAIM_NEGATION_RE.test(withoutArtifactFileNames(clause)));
 }
 
 /**

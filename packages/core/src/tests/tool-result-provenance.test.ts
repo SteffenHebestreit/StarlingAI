@@ -221,6 +221,17 @@ describe("tool calls that failed inside the specialist", () => {
     expect(record).not.toContain("not a name");
   });
 
+  it("name the file a failed write meant to write, as not written", () => {
+    const record = formatDelegatedRunRecord({
+      agentName: "diagram_designer",
+      specialistToolFailures: [
+        { agent: "diagram_designer", tool: "generate_mermaid_diagram", error: "output_file must use the .mmd extension", target: "diagramme/abhaengigkeiten.md" },
+      ],
+    });
+    expect(record).toBe(`${TOOL_FAILURES_HEADER}
+- generate_mermaid_diagram (wanted to write diagramme/abhaengigkeiten.md; nothing was written): output_file must use the .mmd extension`);
+  });
+
   it("list a call the user declined as their choice, apart from the failures, and step past it like them", () => {
     // A Skip in the settings step is success:false for the specialist, which must not retry it; listed
     // under the failures it told the orchestrator the render had broken.
