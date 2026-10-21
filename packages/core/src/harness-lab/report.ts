@@ -92,6 +92,11 @@ export function renderMarkdown(report: LabReport): string {
     lines.push("", "## Skill candidates", "Not part of the proposal: if the gate accepted, add them on the Skills page.");
     for (const edit of skills) lines.push("", `### ${edit.skillName ?? edit.id}`, "```markdown", skillMarkdown(edit), "```");
   }
+  const hooks = cycle.merged.filter((e) => e.op === "add_hook" && e.hook);
+  if (hooks.length > 0) {
+    lines.push("", "## Enforcement hooks", "Part of the proposal as config changes under enforcementHooks (tools/enforcement-hooks.ts).");
+    for (const edit of hooks) lines.push("", `### ${edit.hookId ?? edit.id}`, "```json", JSON.stringify(edit.hook, null, 2), "```");
+  }
   if (cycle.reflections.length > 0) {
     lines.push("", "## Experience");
     for (const r of cycle.reflections) {

@@ -34,6 +34,12 @@ The report is written to `report.md` / `report.json` under `--out` (default `.st
 - Every attempt starts from a copy of the live library taken when the lab starts, so the base arm runs with the skills a live turn finds.
 - An accepted skill is not part of the config proposal. The report holds its `SKILL.md`; add it on the Skills page.
 
+**Hook candidates.** Where a fix belongs to a tool rather than a prompt, the INV editor may propose `add_hook`: one enforcement hook (`append_hint`, `cap_tool` or `verify_write`, see `packages/core/src/tools/enforcement-hooks.ts`).
+- It must watch a tool the run called and name a moment of it, like any edit.
+- A hint must not carry the task's own facts, a pattern must compile, and a cap leaves the tool at least one call: taking a tool away is a person's decision.
+- The candidate arm runs with the hook laid over the deployment's hooks, in the lab process's memory only.
+- An accepted hook goes into the proposal as a config change under `enforcementHooks.<id>`, applied with consent like the prompt edits beside it. The report shows it as JSON.
+
 **Experience library.** After each task the reflector writes at most one lesson, or none when the runs show no reusable contrast.
 - A lesson has: a cue (the shape of situation, never the task's facts), the component it concerns, the lesson itself, the evidence rows it rests on, and a confidence. "High" confidence is kept only for a task won on the record.
 - Once the gate has decided, each lesson gets a verdict: "helped" (the gate accepted), "hurt" (the candidate lost pairs or a guard), "no effect", or "confounded".

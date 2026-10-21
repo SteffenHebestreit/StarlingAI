@@ -12,6 +12,7 @@ import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
+import { enforceAfterToolCall, enforceBeforeToolCall } from "./enforcement-hooks.js";
 
 const registryLog = childLogger("tool-registry");
 
@@ -928,6 +929,9 @@ export async function executeTool(
   // native `starlingai.*` attrs AND the standard `gen_ai.*` semconv attrs (with
   // the `execute_tool {name}` span name) so a GenAI-aware backend renders this
   // as a tool call — additive, our own dashboards are unaffected.
+  // Enforcement hooks (tools/enforcement-hooks.ts): a capped tool is refused before it runs.
+  const capped = enforceBeforeToolCall(name, context);
+  if (capped) return capped;
   return withSpan(
     genAi.toolSpanName(name),
     {
@@ -996,6 +1000,8 @@ export async function executeTool(
       } else {
         result = await runHandler();
       }
+      // A hint after a recurring error, a write checked at once (tools/enforcement-hooks.ts).
+      result = enforceAfterToolCall(name, args, context, result);
       span.setAttribute("starlingai.tool.success", result.success);
       if (!result.success && result.error) {
         span.setAttribute("starlingai.tool.error", result.error.slice(0, 240));

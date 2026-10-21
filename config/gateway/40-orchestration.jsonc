@@ -168,6 +168,12 @@
     // instead of silently averaging conflicting answers. No-op when the slices agree.
     "subAgentDisagreementVerify": true,
 
+    // Best of two for a deliverable at max effort (agent/best-of-two.ts): only when a session runs
+    // at the "max" effort tier, the orchestrator's delegation that asks for a file runs twice, one
+    // run after the other, and the better result is kept (the record first, a swap-checked selector
+    // on a tie). Every other tier runs once, so this costs nothing until someone picks "max".
+    "bestOfTwoDeliverables": true,
+
     // Run 663ac153 anti-duplication nudges — enabled here for the next pass^k test.
     //
     // write_file regeneration nudge. A builder that hits the completion-token limit mid-write often

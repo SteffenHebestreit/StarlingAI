@@ -664,6 +664,12 @@ export const OrchestrationSchema = z.object({
    *  averaging conflicting answers. No-op (no added latency) when the slices agree. Default OFF
    *  until pass^k confirms the check is worth its one extra routing-tier call. */
   subAgentDisagreementVerify: z.boolean().default(false),
+  /** Best of two for a deliverable at max effort (agent/best-of-two.ts): at the "max" effort tier, the
+   *  orchestrator's delegation that asks for a file runs twice, one run after the other, and the better
+   *  result is kept: the record decides first (completed, files that hold up), a selector asked in both
+   *  orders only when it cannot. Every other tier and every chat answer runs once. Default off: on the
+   *  local models it doubles the time of those turns. */
+  bestOfTwoDeliverables: z.boolean().default(false),
   /** B24 — toolset size ABOVE which the per-turn tool-rerank embedding kicks in. A small
    *  toolset doesn't need semantic reranking (all tools fit the model's attention), so we
    *  skip the embedding round-trip for it. Default 6 preserves the long-standing hardcoded

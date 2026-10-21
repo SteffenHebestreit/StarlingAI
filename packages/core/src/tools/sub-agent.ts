@@ -82,6 +82,15 @@ import {
   isNarrativeOnlyDeliverableFailure,
   formatArtifactReferencesForSharedContext,
 } from "./delegation-artifact-classification.js";
+import {
+  bestOfTwoApplies,
+  parseSelectorAnswer as parseBestOfTwoSelectorAnswer,
+  runBestOfTwo,
+  SELECTOR_SYSTEM as BEST_OF_TWO_SELECTOR_SYSTEM,
+  selectorUser as bestOfTwoSelectorUser,
+} from "../agent/best-of-two.js";
+import { resolveRoutingTierProvider } from "../agent/routing-tier-provider.js";
+import { checkBuiltPage } from "./page-check.js";
 // Re-export the classifiers external modules/tests import via "./sub-agent.js" so the god-file
 // extraction stays call-site-transparent (ephemeral-agent-factory, source-sensitive-delegation, tests).
 export {
@@ -2574,7 +2583,36 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       let runViewedTabPages: string[] = [];
 
       if (typeof runSubAgentWithStats === "function") {
-        const maybeResult = await runSubAgentWithStats(subAgentArgs);
+        // Best of two for a deliverable at max effort (agent/best-of-two.ts): the orchestrator's own
+        // delegation that asks for a file runs twice, one after the other, and the better run is kept.
+        const maybeResult = bestOfTwoApplies({ asksForFile: delegationAsksForFile(request.task, request.deliverable), nested: Boolean(ctx.currentAgentName) })
+          ? await runBestOfTwo({
+            task: request.task,
+            agentName: candidate,
+            workspacePath: ctx.workspacePath,
+            sessionId: ctx.sessionId,
+            ...(typeof delegationDeadlineMs === "number" ? { deadlineMs: delegationDeadlineMs } : {}),
+            ...(ctx.signal ? { signal: ctx.signal } : {}),
+            // The second run gets a wrap-up nudge of its own: the first run's moment has passed.
+            run: (attempt) => runSubAgentWithStats(attempt === 1 ? subAgentArgs : {
+              ...subAgentArgs,
+              softDeadlineMs: (() => {
+                const softMs = Date.now() + resolveSoftDeadlineOffsetMs(delegationCeilingMs, agentCfg?.turnTimeoutMs);
+                return typeof delegationDeadlineMs === "number" ? Math.min(softMs, delegationDeadlineMs) : softMs;
+              })(),
+            }),
+          }, {
+            checkPage: checkBuiltPage,
+            askSelector: async (task, first, second) => {
+              const response = await resolveRoutingTierProvider().complete(
+                [{ role: "system", content: BEST_OF_TWO_SELECTOR_SYSTEM }, { role: "user", content: bestOfTwoSelectorUser(task, first, second) }],
+                [],
+                ctx.signal,
+              );
+              return parseBestOfTwoSelectorAnswer(response.content);
+            },
+          })
+          : await runSubAgentWithStats(subAgentArgs);
         if (
           maybeResult
           && typeof maybeResult.output === "string"
