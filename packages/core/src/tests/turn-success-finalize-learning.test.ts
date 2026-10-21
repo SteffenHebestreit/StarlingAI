@@ -28,8 +28,8 @@ vi.mock("../memory/graph-service.js", () => ({
 vi.mock("../swarm/evidence-migration.js", () => ({ sweepEvidenceMigrationParity: vi.fn(async () => undefined) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
 
-import { finalizeSuccessfulTurn, type FinalizeSuccessfulTurnParams } from "../agent/turn-success-finalize.js";
-import { createTurnQualitySignals } from "../agent/turn-scorecard.js";
+import { earlyReturnTeaches, finalizeSuccessfulTurn, recordTurnLearning, type FinalizeSuccessfulTurnParams } from "../agent/turn-success-finalize.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals } from "../agent/turn-scorecard.js";
 import { recordSkillHoldoutOutcomeAsync, recordSkillOutcomeAsync } from "../skills/store.js";
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { invalidateTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
@@ -125,5 +125,36 @@ describe("finalizeSuccessfulTurn — what the learning loops record", () => {
     expect(maybeDistillSkillFromTurn).not.toHaveBeenCalled();
     expect(graphMarkSessionRetrievalsUseful).not.toHaveBeenCalled();
     expect(graphMarkSessionRetrievalsUnhelpful).not.toHaveBeenCalled();
+  });
+});
+
+describe("an early return teaches the learning loops too", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.outcomeEvidence = "verified";
+  });
+
+  // A turn the loop brake ended: delegations kept failing, so its scorecard records a defect.
+  const loopBrake = buildTurnQualityScorecard({
+    delegationCount: 3, shareFindingCount: 0, forcedSynthesisFired: true, wardenFailureCount: 3,
+    finalAnswerLength: 400, toolIterations: 6, finishReason: "delegate_loop_terminated", blocked: false, artifactCount: 0,
+  });
+
+  it("the loop brake's turn counts against the skills it ran with", () => {
+    expect(loopBrake).toMatchObject({ learningOutcome: "failure" });
+    const p = params();
+    recordTurnLearning({ ...p, qualityScorecard: loopBrake });
+    expect(recordSkillOutcomeAsync).toHaveBeenCalledWith("/tmp/ws", "cited-report", "failure");
+    expect(recordSkillHoldoutOutcomeAsync).toHaveBeenCalledWith("/tmp/ws", "held-skill", "failure");
+    expect(graphMarkSessionRetrievalsUnhelpful).toHaveBeenCalled();
+  });
+
+  it("is no evidence after a model or provider error, or an abort", () => {
+    expect(earlyReturnTeaches("delegate_loop_terminated")).toBe(true);
+    expect(earlyReturnTeaches("single_deliverable_relayed")).toBe(true);
+    expect(earlyReturnTeaches("oversight_floor_synthesized")).toBe(true);
+    expect(earlyReturnTeaches("llm_error_partial_salvaged")).toBe(false);
+    expect(earlyReturnTeaches("llm_error_evidence_backstop")).toBe(false);
+    expect(earlyReturnTeaches("aborted_synthesized")).toBe(false);
   });
 });

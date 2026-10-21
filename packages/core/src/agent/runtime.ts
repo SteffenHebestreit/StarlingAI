@@ -265,7 +265,7 @@ export {
 // Terminal honesty/guard blocks that fire on the assembled finalResponse (god-file seam).
 import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-finalize-guards.js";
 // Clean-success terminal tail (god-file seam).
-import { finalizeSuccessfulTurn } from "./turn-success-finalize.js";
+import { earlyReturnTeaches, finalizeSuccessfulTurn, recordTurnLearning } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
 import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
@@ -2443,6 +2443,30 @@ async function _runTurn(
       quality: turnQualitySignals,
       delegatedFiguresUnobserved: _turnDelegatedFiguresUnobserved,
     });
+  // An early return's scorecard teaches the learning loops as a normal ending's does
+  // (finalizeSuccessfulTurn): the loop brake's turn counts against its skills, a relayed deliverable for
+  // them. A model or provider error, or an abort, teaches nothing (earlyReturnTeaches).
+  const earlyReturnLearning = (output: TurnOutput): TurnOutput => {
+    const scorecard = output.qualityScorecard;
+    if (scorecard && earlyReturnTeaches(scorecard.finishReason)) {
+      recordTurnLearning({
+        session,
+        qualityScorecard: scorecard,
+        finalResponse: output.response,
+        iterationCount,
+        delegationCount: _turnDelegationCount,
+        shareFindingCount: _turnShareFindingCount,
+        sharedFindingsThisTurn,
+        freshnessSensitive: initialDynamicGuidance?.freshnessSensitive ?? false,
+        injectedSkillSlugs,
+        heldOutSkillSlugs,
+        injectedTrajectoryIdentity: shownTrajectoryIdentity,
+        userMessage,
+        getTurnSwarmState,
+      });
+    }
+    return output;
+  };
   // Final-response QA gate: at most ONE corrective build per turn (shared latch across both
   // finalization paths — normal-stop and forced-terminal).
   let qaCorrectiveBuildUsed = false;
@@ -2755,12 +2779,12 @@ async function _runTurn(
           // Truthful scorecard: without this, the outer fallback fabricates zeroed
           // counters and a 'completed' classification for a timed-out partial turn.
           _forcedSynthesisFired = true;
-          return {
+          return earlyReturnLearning({
             response: finalResponse, toolCallsExecuted: iterationCount,
             guardrailEvents, usage: totalUsage, blocked: false,
             swarmState: getTurnSwarmState(), performance,
             qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "aborted_synthesized"),
-          };
+          });
         }
       }
       return blocked(
@@ -2962,12 +2986,12 @@ async function _runTurn(
             });
             // Truthful scorecard for the floor delivery (see the timeout path above).
             _forcedSynthesisFired = true;
-            return {
+            return earlyReturnLearning({
               response: finalResponse, toolCallsExecuted: iterationCount,
               guardrailEvents, usage: totalUsage, blocked: false,
               swarmState: getTurnSwarmState(), performance,
               qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "oversight_floor_synthesized"),
-            };
+            });
           }
           // Synthesis came back empty — fall through and keep looping (never worse than today).
         }
@@ -3403,7 +3427,7 @@ async function _runTurn(
             logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, {
               sessionId: session.id, channel: session.channel, severity: "info",
             });
-            return {
+            return earlyReturnLearning({
               response: finalResponse,
               toolCallsExecuted: iterationCount,
               guardrailEvents,
@@ -3412,7 +3436,7 @@ async function _runTurn(
               swarmState: getTurnSwarmState(),
               performance,
               qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_partial_salvaged"),
-            };
+            });
           }
         }
         const delegateEvidence = findRecentDelegateEvidence(session.getHistory(), { scopeToCurrentTurn: true });
@@ -3455,7 +3479,7 @@ async function _runTurn(
             channel: session.channel,
             severity: "info",
           });
-          return {
+          return earlyReturnLearning({
             response: finalResponse,
             toolCallsExecuted: iterationCount,
             guardrailEvents,
@@ -3464,7 +3488,7 @@ async function _runTurn(
             swarmState: getTurnSwarmState(),
             performance,
             qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "llm_error_evidence_backstop"),
-          };
+          });
         }
         return blocked(
           `LLM error: ${String(err)}`,
@@ -4639,7 +4663,7 @@ async function _runTurn(
             severity: "info",
           });
 
-          return {
+          return earlyReturnLearning({
             response: finalResponse,
             toolCallsExecuted: iterationCount,
             guardrailEvents,
@@ -4648,7 +4672,7 @@ async function _runTurn(
             swarmState: getTurnSwarmState(),
             performance,
             qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "delegate_loop_terminated"),
-          };
+          });
         }
 
         toolResultMessages.push({
@@ -5229,7 +5253,7 @@ async function _runTurn(
               severity: "info",
             });
 
-            return {
+            return earlyReturnLearning({
               response: finalResponse,
               toolCallsExecuted: iterationCount,
               guardrailEvents,
@@ -5238,7 +5262,7 @@ async function _runTurn(
               swarmState: getTurnSwarmState(),
               performance,
               qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "delegate_loop_terminated"),
-            };
+            });
           }
 
           runtimeNote =
@@ -5549,7 +5573,7 @@ async function _runTurn(
           }, { sessionId: session.id, channel: session.channel, severity: "info" });
           logAudit("turn_performance", { ...performance, usage: totalUsage }, { sessionId: session.id, channel: session.channel });
           logAudit("message_sent", { length: finalResponse.length, toolCalls: iterationCount, usage: totalUsage, performance }, { sessionId: session.id, channel: session.channel });
-          return {
+          return earlyReturnLearning({
             response: finalResponse,
             toolCallsExecuted: iterationCount,
             guardrailEvents,
@@ -5558,7 +5582,7 @@ async function _runTurn(
             swarmState: getTurnSwarmState(),
             performance,
             qualityScorecard: buildCurrentTurnScorecard(finalResponse.length, "single_deliverable_relayed"),
-          };
+          });
         }
         // Artifact-aware variant: when the orchestration produced attached files,
         // the final answer answers what the request asked and lists the files,

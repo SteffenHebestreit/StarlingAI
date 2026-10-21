@@ -134,7 +134,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:57 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:212 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:654 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:951 | 68 |
+| `deliverable` | packages/core/src/config/schema.ts:951 | 69 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:414 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:417 | 1 |
 | `deny` | packages/core/src/config/schema.ts:1533 | 17 |
@@ -327,7 +327,7 @@ Every public schema field, where it is declared, and how many production files r
 | `otlpHeaders` | packages/core/src/config/schema.ts:614 | 1 |
 | `outcomeEvidence` | packages/core/src/config/schema.ts:1597 | 2 |
 | `outputSecretScan` | packages/core/src/config/schema.ts:1284 | 5 |
-| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 18 |
+| `oversight` | packages/core/src/config/schemas/effort.ts:52 | 19 |
 | `pageSpeedInsightsApiKey` | packages/core/src/config/schema.ts:1223 | 1 |
 | `pageTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:194 | 1 |
 | `params` | packages/core/src/config/schema.ts:1372 | 61 |
@@ -370,7 +370,7 @@ Every public schema field, where it is declared, and how many production files r
 | `promptInjectionBlock` | packages/core/src/config/schema.ts:1283 | 6 |
 | `promptPer1m` | packages/core/src/config/schema.ts:575 | 1 |
 | `protocol` | packages/core/src/config/schema.ts:765 | 54 |
-| `provider` | packages/core/src/config/schema.ts:496 | 152 |
+| `provider` | packages/core/src/config/schema.ts:496 | 153 |
 | `providers` | packages/core/src/config/schema.ts:1275 | 106 |
 | `publicUrl` | packages/core/src/config/schema.ts:357 | 7 |
 | `qaDeliveryLoop` | packages/core/src/config/schemas/orchestration.ts:317 | 5 |

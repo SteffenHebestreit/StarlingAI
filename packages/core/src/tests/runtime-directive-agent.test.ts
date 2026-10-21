@@ -20,6 +20,18 @@ const completeMock = vi.hoisted(() => vi.fn(async () => ({
   usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
   finishReason: "stop",
 })));
+/** What the learning loops were handed: every turn's ending reaches them, early returns too. */
+const learned = vi.hoisted(() => [] as string[]);
+vi.mock("../agent/turn-success-finalize.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agent/turn-success-finalize.js")>();
+  return {
+    ...actual,
+    recordTurnLearning: (p: Parameters<typeof actual.recordTurnLearning>[0]) => {
+      learned.push(p.qualityScorecard.finishReason);
+      actual.recordTurnLearning(p);
+    },
+  };
+});
 /** The routing-tier model: none by default, as when no routing tier is configured. */
 const routingTier = vi.hoisted(() => ({ complete: null as null | ((messages: Array<{ content?: unknown }>) => Promise<unknown>) }));
 
@@ -834,6 +846,7 @@ describe("a turn the user directed to one agent", () => {
     // ends with it; read from the directive as it stood before the round's tools ran, the relay
     // was held here as well.
     specialistReport.text = longReport("Why invoices.py undercharges", "int() truncates the cent in total()");
+    learned.length = 0;
     const { AgentSession, runTurn } = await loadRuntime();
     let call = 0;
     streamMock.mockImplementation(() => {
@@ -846,6 +859,8 @@ describe("a turn the user directed to one agent", () => {
 
     expect(delegated).toHaveLength(1);
     expect(result.performance?.finishReason).toBe("single_deliverable_relayed");
+    // The relayed deliverable is evidence for the learning loops, as a normal ending is.
+    expect(learned).toEqual(["single_deliverable_relayed"]);
     expect(streamMock).toHaveBeenCalledTimes(1);
     expect(result.response).toContain("int() truncates the cent in total()");
   });
