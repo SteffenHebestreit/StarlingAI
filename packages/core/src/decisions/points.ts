@@ -38,7 +38,8 @@ export type DecisionPointId =
   | "slices_disagree"
   | "goal_met"
   | "finding_relevant"
-  | "run_drifting";
+  | "run_drifting"
+  | "corrects_previous";
 
 function point(id: DecisionPointId, question: string, options: Record<string, string>, protect?: string, maxLen?: number): DecisionPointDefinition {
   return Object.freeze({ id, question, options: Object.freeze(options), ...(protect ? { protect } : {}), ...(maxLen !== undefined ? { maxLen } : {}) });
@@ -145,6 +146,25 @@ export const RUN_DRIFTING = point(
   "drifting",
 );
 
+/**
+ * The person's next message as feedback on the turn before it: does it say that answer was wrong, missed
+ * the request or did not work? (agent/user-correction.ts). Asked beside the new turn, which never waits for
+ * it; a "corrects" turns that earlier turn's recorded skill success into a failure. "corrects" is
+ * protected: a missed correction leaves a wrong success in the skill statistics.
+ */
+export const CORRECTS_PREVIOUS = point(
+  "corrects_previous",
+  "An AI assistant answered the user, and the user sent the next message. Decide whether the new message says that the previous "
+  + "answer was wrong, incomplete, missed what was asked or did not work: a correction or complaint about it, however politely put. "
+  + "A follow-up that builds on the answer, a new variant asked for on purpose, an answer to a question the assistant asked, a new "
+  + "topic and thanks are not corrections.",
+  {
+    corrects: "Corrects: the message says the previous answer was wrong, missed the request or did not work.",
+    continues: "Something else: a follow-up, a new variant on purpose, an answer to the assistant's question, a new topic, thanks.",
+  },
+  "corrects",
+);
+
 export const DECISION_POINTS: Readonly<Record<DecisionPointId, DecisionPointDefinition>> = Object.freeze({
   fast_lane: FAST_LANE,
   source_sensitive: SOURCE_SENSITIVE,
@@ -153,4 +173,5 @@ export const DECISION_POINTS: Readonly<Record<DecisionPointId, DecisionPointDefi
   goal_met: GOAL_MET,
   finding_relevant: FINDING_RELEVANT,
   run_drifting: RUN_DRIFTING,
+  corrects_previous: CORRECTS_PREVIOUS,
 });

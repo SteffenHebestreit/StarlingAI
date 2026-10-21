@@ -53,6 +53,7 @@ import { runWithRequestContext, runWithCallAttribution, currentRequestContext } 
 import { bindRequestUserInput, HUMAN_WAIT_RECHECK_MS, trackHumanWaits } from "./user-input-broker.js";
 import { TRIAGE_PROMPT_VERSION, runTriage, type TriageOutcome } from "./triage.js";
 import { resolveRoutingTierProvider } from "./routing-tier-provider.js";
+import { checkPreviousTurnCorrection } from "./user-correction.js";
 import {
   classifyTurnProgress,
   buildTurnOversightPrompt,
@@ -1217,6 +1218,17 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
       // Any attribution already set means a turn (or a sub-agent) is running this one.
       nested: currentRequestContext()?.callSite !== undefined,
     });
+    // What the person typed may say the previous answer was wrong (skillLibrary.userCorrectionSignal,
+    // agent/user-correction.ts): judged beside this turn, which never waits for it. Only words a person
+    // typed are judged: a scene or job template never corrects anything.
+    if (opts.userWords?.trim() && currentRequestContext()?.callSite === undefined) {
+      void checkPreviousTurnCorrection({
+        sessionId: opts.session.id,
+        channel: opts.session.channel,
+        userMessage: opts.userWords,
+        provider: resolveRoutingTierProvider,
+      });
+    }
     delivered = await runWithRequestContext(
       {
         identity: opts.session.identity(),

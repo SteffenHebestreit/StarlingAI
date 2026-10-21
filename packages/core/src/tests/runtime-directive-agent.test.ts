@@ -32,6 +32,18 @@ vi.mock("../agent/turn-success-finalize.js", async (importOriginal) => {
     },
   };
 });
+/** The words the correction check was handed: only what a person typed. */
+const correctionChecks = vi.hoisted(() => [] as string[]);
+vi.mock("../agent/user-correction.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agent/user-correction.js")>();
+  return {
+    ...actual,
+    checkPreviousTurnCorrection: (p: Parameters<typeof actual.checkPreviousTurnCorrection>[0]) => {
+      correctionChecks.push(p.userMessage);
+      return undefined;
+    },
+  };
+});
 /** The routing-tier model: none by default, as when no routing tier is configured. */
 const routingTier = vi.hoisted(() => ({ complete: null as null | ((messages: Array<{ content?: unknown }>) => Promise<unknown>) }));
 
@@ -847,6 +859,7 @@ describe("a turn the user directed to one agent", () => {
     // was held here as well.
     specialistReport.text = longReport("Why invoices.py undercharges", "int() truncates the cent in total()");
     learned.length = 0;
+    correctionChecks.length = 0;
     const { AgentSession, runTurn } = await loadRuntime();
     let call = 0;
     streamMock.mockImplementation(() => {
@@ -855,14 +868,19 @@ describe("a turn the user directed to one agent", () => {
     });
 
     const session = new AgentSession({ channel: "test", workspacePath: mkdtempSync(join(tmpdir(), "sai-directive-ws-")), systemPrompt: "You are a test agent." });
-    const result = await runTurn({ session, userMessage: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
+    const result = await runTurn({ session, userMessage: MESSAGE, userWords: MESSAGE, allowedAgents: ["code_analyst"], directiveAgent: "code_analyst" });
 
     expect(delegated).toHaveLength(1);
     expect(result.performance?.finishReason).toBe("single_deliverable_relayed");
+    // What the person typed is checked as feedback on the turn before; a turn without typed words is not.
+    expect(correctionChecks).toEqual([MESSAGE]);
     // The relayed deliverable is evidence for the learning loops, as a normal ending is.
     expect(learned).toEqual(["single_deliverable_relayed"]);
     expect(streamMock).toHaveBeenCalledTimes(1);
     expect(result.response).toContain("int() truncates the cent in total()");
+    // A turn with no typed words (a scene or job step) is not checked as a correction.
+    await runTurn({ session, userMessage: "Run the nightly summary job." });
+    expect(correctionChecks).toEqual([MESSAGE]);
   });
 
   it("stays directed when a task graph's node was turned away, though the turn before ran the agent under its id", async () => {

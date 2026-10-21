@@ -262,8 +262,13 @@
   // Both arms count only turns a QA verdict judged: the QA delivery loop runs here
   // (gateway/40-orchestration.jsonc), so a turn nothing judged is no evidence, and
   // distillation learns only from a verified success.
+  // A message that says the previous answer was wrong, missed the request or did not work turns
+  // that turn's recorded successes into failures (agent/user-correction.ts). The routing tier
+  // judged 144 of 144 labelled cases right, German and English, 0.95 s each, beside the turn
+  // (pnpm --filter @starlingai/core corrections:bench --repeat 3, 2026-10-21).
   "skillLibrary": {
     "holdoutRate": 0.15,
-    "outcomeEvidence": "verified"
+    "outcomeEvidence": "verified",
+    "userCorrectionSignal": true
   }
 }

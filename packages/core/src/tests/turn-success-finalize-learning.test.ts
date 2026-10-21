@@ -35,6 +35,7 @@ import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { invalidateTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUnhelpful, graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
 import { logAudit } from "../audit/logger.js";
+import { resetUserCorrectionForTests, takeLearnedTurn } from "../agent/user-correction.js";
 import type { AgentSession } from "../agent/session.js";
 
 function params(overrides: Partial<FinalizeSuccessfulTurnParams> & { channel?: string } = {}): FinalizeSuccessfulTurnParams {
@@ -156,5 +157,29 @@ describe("an early return teaches the learning loops too", () => {
     expect(earlyReturnTeaches("llm_error_partial_salvaged")).toBe(false);
     expect(earlyReturnTeaches("llm_error_evidence_backstop")).toBe(false);
     expect(earlyReturnTeaches("aborted_synthesized")).toBe(false);
+  });
+});
+
+describe("what the next message can still correct", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetUserCorrectionForTests();
+    state.outcomeEvidence = "verified";
+  });
+
+  it("keeps what the turn recorded for its skills until the session's next message", () => {
+    finalizeSuccessfulTurn(params({ qualitySignals: qa("pass") }));
+    expect(takeLearnedTurn("sess-1")).toMatchObject({ injectedSkillSlugs: ["cited-report"], heldOutSkillSlugs: ["held-skill"], recorded: "success", workspacePath: "/tmp/ws" });
+    // A turn nothing judged recorded nothing, and is kept as that: a correction records a failure for it.
+    finalizeSuccessfulTurn(params());
+    expect(takeLearnedTurn("sess-1")).toMatchObject({ recorded: null });
+  });
+
+  it("keeps nothing for eval traffic, and a turn without skill evidence forgets the one before", () => {
+    finalizeSuccessfulTurn(params({ channel: "eval", qualitySignals: qa("pass") }));
+    expect(takeLearnedTurn("sess-1")).toBeUndefined();
+    finalizeSuccessfulTurn(params({ qualitySignals: qa("pass") }));
+    finalizeSuccessfulTurn(params({ delegationCount: 0 }));
+    expect(takeLearnedTurn("sess-1")).toBeUndefined();
   });
 });

@@ -25,6 +25,7 @@ import type { AgentSession } from "./session.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, turnLearningSignal, type TurnQualityScorecard, type TurnQualitySignals } from "./turn-scorecard.js";
 import { getConfig } from "../config/loader.js";
 import type { TurnOutput } from "./turn-types.js";
+import { rememberLearnedTurn } from "./user-correction.js";
 
 export interface FinalizeSuccessfulTurnParams {
   session: AgentSession;
@@ -237,6 +238,12 @@ export function recordTurnLearning(p: TurnLearningInput): void {
       void recordSkillHoldoutOutcomeAsync(skillWorkspace, slug, skillSignal).catch(() => { /* non-critical */ });
     }
   }
+  // The next message may say this answer was wrong (agent/user-correction.ts): what was recorded for
+  // the turn's skills is kept until then. A turn that recorded none forgets the one before it.
+  const skillEvidence = !isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0;
+  rememberLearnedTurn(session.id, skillEvidence
+    ? { at: Date.now(), workspacePath: session.getWorkspacePath(), injectedSkillSlugs, heldOutSkillSlugs, recorded: skillSignal, answer: finalResponse }
+    : null);
   // Phase 2: distill a reusable skill from this successful multi-step turn
   // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
   // LRN-403: never distill from eval traffic — a skill learned from a trap

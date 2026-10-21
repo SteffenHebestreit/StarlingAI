@@ -1595,6 +1595,13 @@ export const SkillLibrarySchema = z.object({
    *   QA delivery loop.
    */
   outcomeEvidence: z.enum(["verified", "substantive"]).default("substantive"),
+  /**
+   * The person's next message as feedback on the turn before it (agent/user-correction.ts): when it
+   * says that answer was wrong, missed the request or did not work (decision point corrects_previous,
+   * asked beside the new turn), that turn's recorded skill successes become failures, and one nothing
+   * judged records a failure. Off by default: the judgement costs a routing-tier call per follow-up.
+   */
+  userCorrectionSignal: z.boolean().default(false),
 });
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;
