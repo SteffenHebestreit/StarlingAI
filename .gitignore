@@ -120,3 +120,7 @@ eval/routing/live-cases.jsonl
 # eval/e2e/.credentials.local.json; their hashes go to config/gateway/31-e2e.local.jsonc, covered above).
 eval/e2e/**/*.local.json
 eval/e2e/**/*.local.jsonc
+
+# Harness lab: tasks derived from live failed turns, not yet reviewed (`pnpm harness-lab harvest`).
+# Synthetic, but nobody has checked them yet; only an accepted task moves into eval/harness-lab/tasks/.
+eval/harness-lab/inbox/

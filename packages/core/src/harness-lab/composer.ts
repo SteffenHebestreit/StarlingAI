@@ -47,6 +47,7 @@ Rules:
 - Every decision names its evidence: the probe result or the reference moment it rests on.
 - Each candidate ran only a few times: one good or bad run is weak evidence. A defect in one run of several is noise; an edit aimed at it is overfitting.
 - Agreement between candidates is support, not proof. Weigh the downside of an edit as heavily as its upside.
+- Two edits that give the same instruction in other words are one rule twice: keep the shorter or clearer one and drop the other, naming the one you kept as its evidence.
 - Keeping no edit at all is a valid and common answer.
 
 Answer with JSON only:

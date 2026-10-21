@@ -15,7 +15,8 @@ import { childLogger } from "../logger.js";
 
 const log = childLogger("agent:session-redis");
 
-const SESSION_KEY = (id: string) => `sai:session:${id}`;
+/** The key of one session's record; the harness lab's harvest reads it (harness-lab/harvest-stores.ts). */
+export const SESSION_KEY = (id: string) => `sai:session:${id}`;
 const SESSION_INDEX_KEY = "sai:session-index";
 const CHANNEL_SESSION_KEY = (channelType: string, senderId: string) =>
   `sai:ch:${channelType}:${senderId}`;

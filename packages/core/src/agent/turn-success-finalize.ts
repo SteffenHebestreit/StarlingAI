@@ -22,9 +22,10 @@ import { writeTrajectory, invalidateTrajectory } from "../memory/trajectory-cach
 import { graphMarkSessionRetrievalsUseful, graphMarkSessionRetrievalsUnhelpful } from "../memory/graph-service.js";
 import type { SwarmState } from "../tools/registry.js";
 import type { AgentSession } from "./session.js";
-import { buildTurnQualityScorecard, createTurnQualitySignals, turnLearningSignal, type TurnQualitySignals } from "./turn-scorecard.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals, turnLearningSignal, type TurnQualityScorecard, type TurnQualitySignals } from "./turn-scorecard.js";
 import { getConfig } from "../config/loader.js";
 import type { TurnOutput } from "./turn-types.js";
+import { rememberLearnedTurn } from "./user-correction.js";
 
 export interface FinalizeSuccessfulTurnParams {
   session: AgentSession;
@@ -135,6 +136,51 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
     // synthesis, because only the runtime's early returns read the flag.
     delegatedFiguresUnobserved,
   });
+  recordTurnLearning({
+    session, qualityScorecard, finalResponse, iterationCount, delegationCount, shareFindingCount,
+    sharedFindingsThisTurn, freshnessSensitive, injectedSkillSlugs, heldOutSkillSlugs,
+    injectedTrajectoryIdentity, userMessage, getTurnSwarmState,
+  });
+
+  return {
+    response: finalResponse,
+    toolCallsExecuted: iterationCount,
+    guardrailEvents,
+    usage: totalUsage,
+    blocked: false,
+    swarmState: getTurnSwarmState(),
+    performance,
+    qualityScorecard,
+  };
+}
+
+/** What the learning loops read from a finished turn (recordTurnLearning). */
+export type TurnLearningInput = Pick<FinalizeSuccessfulTurnParams,
+  | "session" | "finalResponse" | "iterationCount" | "delegationCount" | "shareFindingCount" | "sharedFindingsThisTurn"
+  | "freshnessSensitive" | "injectedSkillSlugs" | "heldOutSkillSlugs" | "injectedTrajectoryIdentity" | "userMessage"
+  | "getTurnSwarmState"> & { qualityScorecard: TurnQualityScorecard };
+
+/**
+ * Whether an early return's scorecard is evidence for the learning loops. A model or provider error
+ * (llm_error_*) and an abort say nothing about a prompt or a skill; the loop brake's
+ * (delegate_loop_terminated), the oversight floor's and a relayed deliverable's do.
+ */
+export function earlyReturnTeaches(finishReason: string): boolean {
+  return !/^(?:llm_error|aborted)/.test(finishReason);
+}
+
+/**
+ * Fire the post-turn learning signals from the turn's scorecard: the skill outcomes and holdout
+ * baseline, distillation, retrieval credit, the trajectory cache. Every write is fire-and-forget.
+ * A normal ending (finalizeSuccessfulTurn) and the runtime's early returns both come through here:
+ * before, a turn the loop brake ended, or one that relayed its deliverable, taught nothing.
+ */
+export function recordTurnLearning(p: TurnLearningInput): void {
+  const {
+    session, qualityScorecard, finalResponse, iterationCount, delegationCount, shareFindingCount,
+    sharedFindingsThisTurn, freshnessSensitive, injectedSkillSlugs, heldOutSkillSlugs,
+    injectedTrajectoryIdentity, userMessage, getTurnSwarmState,
+  } = p;
   // What this turn teaches the learning loops comes from its scorecard (turnLearningSignal), never
   // from the answer's wording. Skill statistics and distillation follow the deployment's evidence
   // rule (skillLibrary.outcomeEvidence). Retrieval credit and the trajectory cache keep the
@@ -192,6 +238,12 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
       void recordSkillHoldoutOutcomeAsync(skillWorkspace, slug, skillSignal).catch(() => { /* non-critical */ });
     }
   }
+  // The next message may say this answer was wrong (agent/user-correction.ts): what was recorded for
+  // the turn's skills is kept until then. A turn that recorded none forgets the one before it.
+  const skillEvidence = !isEvalTraffic && (injectedSkillSlugs.length > 0 || heldOutSkillSlugs.length > 0) && delegationCount > 0;
+  rememberLearnedTurn(session.id, skillEvidence
+    ? { at: Date.now(), workspacePath: session.getWorkspacePath(), injectedSkillSlugs, heldOutSkillSlugs, recorded: skillSignal, answer: finalResponse }
+    : null);
   // Phase 2: distill a reusable skill from this successful multi-step turn
   // (gated by skillLibrary.autoAuthor). Best-effort — never blocks the turn.
   // LRN-403: never distill from eval traffic — a skill learned from a trap
@@ -253,15 +305,4 @@ export function finalizeSuccessfulTurn(p: FinalizeSuccessfulTurnParams): TurnOut
       );
     }
   }
-
-  return {
-    response: finalResponse,
-    toolCallsExecuted: iterationCount,
-    guardrailEvents,
-    usage: totalUsage,
-    blocked: false,
-    swarmState: getTurnSwarmState(),
-    performance,
-    qualityScorecard,
-  };
 }

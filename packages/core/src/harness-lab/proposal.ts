@@ -7,22 +7,85 @@
  * carries the hash of the prompt it was measured against, so applying it after someone changed
  * that prompt is refused instead of undoing their change (stalePromptChange). No flow-memory entry
  * is written here: flow guidance reaches the prompts, and a proposal nobody approved must not.
+ *
+ * A proposal names the tasks it was won on (tags "task:<id>"): until someone decides on it, a later
+ * run does not take those tasks as targets again (pendingLabTargets). A new proposal that covers
+ * every change of an older pending one (the same prompts, and the same rules in other words, or a
+ * replace measured on the same prompt) supersedes it: applying both would add one rule twice.
  */
 import {
   createConversationConfigProposal,
   hasPromptTarget,
+  listConversationConfigProposals,
   MAIN_ASSISTANT_PROMPT_TARGET,
   peerAgentRefusal,
   promptSha256,
+  updateConversationConfigProposal,
   type ConversationConfigProposal,
   type ConversationPromptChange,
 } from "../agent/config-assistant-proposals.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { applyEdits, type LabEdit } from "./edit-format.js";
+import { applyEdits, ruleOverlap, type LabEdit } from "./edit-format.js";
 import type { GateDecision } from "./gate.js";
 
 export const LAB_ASSISTANT_AGENT = "harness_lab";
+const TASK_TAG = "task:";
+/** How far back the proposal store is read for the lab's own pending proposals. */
+const PROPOSAL_SCAN_LIMIT = 500;
+
+function pendingLabProposals(workspacePath: string): ConversationConfigProposal[] {
+  return listConversationConfigProposals(workspacePath, PROPOSAL_SCAN_LIMIT)
+    .filter((proposal) => proposal.status === "pending" && proposal.assistantAgent === LAB_ASSISTANT_AGENT);
+}
+
+/** The tasks a pending lab proposal was won on, each with the reason to skip it as a target. */
+export function pendingLabTargets(workspacePath: string): Map<string, string> {
+  const skip = new Map<string, string>();
+  for (const proposal of pendingLabProposals(workspacePath)) {
+    for (const tag of proposal.tags) {
+      if (tag.startsWith(TASK_TAG) && !skip.has(tag.slice(TASK_TAG.length))) {
+        skip.set(tag.slice(TASK_TAG.length), `has a pending lab proposal (${proposal.id}): decide on it first`);
+      }
+    }
+  }
+  return skip;
+}
+
+function lines(prompt: string): string[] {
+  return prompt.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+/** Whether `newer` makes `older` redundant: every change of the older one is in the newer one. */
+export function coversChange(newer: readonly ConversationPromptChange[], older: ConversationPromptChange): boolean {
+  return newer.some((change) => {
+    if (change.agentName !== older.agentName) return false;
+    if (older.strategy === "replace") return change.strategy === "replace" && change.baseSha256 !== undefined && change.baseSha256 === older.baseSha256;
+    const newerLines = lines(change.prompt);
+    return lines(older.prompt).every((line) => newerLines.some((other) => other === line || ruleOverlap(other, line) !== null));
+  });
+}
+
+/** Mark the older pending lab proposals `proposal` covers as superseded (rejected, with a note); their ids. */
+export function supersedeCoveredProposals(workspacePath: string, proposal: ConversationConfigProposal): string[] {
+  const superseded: string[] = [];
+  for (const older of pendingLabProposals(workspacePath)) {
+    if (older.id === proposal.id || older.promptChanges.length === 0) continue;
+    if (!older.promptChanges.every((change) => coversChange(proposal.promptChanges, change))) continue;
+    updateConversationConfigProposal(workspacePath, older.id, (current) => ({
+      ...current,
+      status: "rejected",
+      tags: [...current.tags, `superseded-by:${proposal.id}`],
+      feedbackHistory: [...current.feedbackHistory, {
+        ts: new Date().toISOString(),
+        outcome: "rejected",
+        notes: `Superseded by harness-lab proposal ${proposal.id}, which makes the same changes.`,
+      }],
+    }));
+    superseded.push(older.id);
+  }
+  return superseded;
+}
 
 export function buildPromptChanges(basePrompts: Record<string, string>, allEdits: readonly LabEdit[], rationaleFor: (target: string) => string): ConversationPromptChange[] {
   // Skills are not config: a person adds an accepted one on the Skills page (the report holds its SKILL.md).
@@ -54,7 +117,7 @@ export interface EmitInput {
   gate: GateDecision;
 }
 
-export type EmitResult = { proposal: ConversationConfigProposal } | { refused: string };
+export type EmitResult = { proposal: ConversationConfigProposal; superseded: string[] } | { refused: string };
 
 export function emitProposal(input: EmitInput): EmitResult {
   if (input.edits.length === 0) return { refused: "no edits to propose" };
@@ -83,14 +146,20 @@ export function emitProposal(input: EmitInput): EmitResult {
     configChanges: [],
     promptChanges,
     validations: [...gateLines, ...input.composerRows.map((row) => `composer: ${row}`), ...(input.gate.signTestP !== null ? [`sign test p = ${input.gate.signTestP.toFixed(3)} (reported, not deciding)`] : [])],
-    tags: ["harness-lab", `evidence:${input.gate.evidence}`],
+    tags: [
+      "harness-lab",
+      `evidence:${input.gate.evidence}`,
+      ...[...new Set(input.gate.tallies.filter((t) => t.role === "target").map((t) => t.taskId))].map((id) => `${TASK_TAG}${id}`),
+    ],
   });
+  const superseded = supersedeCoveredProposals(input.liveWorkspacePath, proposal);
   logAudit("harness_lab_proposal_created", {
     proposalId: proposal.id,
     runId: input.runId,
     targets: promptChanges.map((c) => c.agentName),
     strategies: promptChanges.map((c) => c.strategy),
     evidence: input.gate.evidence,
+    ...(superseded.length > 0 ? { superseded } : {}),
   }, { severity: "info" });
-  return { proposal };
+  return { proposal, superseded };
 }

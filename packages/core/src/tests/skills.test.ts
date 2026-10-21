@@ -15,6 +15,7 @@ import {
   recordSkillOutcome,
   recordSkillOutcomeAsync,
   removeSkillSupportFile,
+  reviseSkillSuccessToFailureAsync,
   rollbackSkillHistory,
   setSkillPinned,
   setSkillStatus,
@@ -131,6 +132,32 @@ describe("skill library store", () => {
     expect(loaded.meta.uses).toBe(2);
     expect(loaded.meta.failures).toBe(1);
     expect(skillSuccessRate(loaded.meta)).toBe(0.5);
+  });
+
+  it("turns a recorded success into a failure when the person's next message corrected the turn", async () => {
+    const ws = workspace();
+    const slug = writeSkill(ws, {
+      name: "Corrected Outcome Skill",
+      description: "Verify a success can be revised.",
+      procedure: "Do the steps whose outcome the person later corrected.",
+    }).frontmatter.slug;
+    await recordSkillOutcomeAsync(ws, slug, "success");
+    await recordSkillOutcomeAsync(ws, slug, "success");
+    recordSkillHoldoutOutcome(ws, slug, "success");
+
+    await reviseSkillSuccessToFailureAsync(ws, slug);
+    let loaded = getSkill(ws, slug)!;
+    expect(loaded.meta).toMatchObject({ uses: 2, successes: 1, failures: 1 });
+    await reviseSkillSuccessToFailureAsync(ws, slug, true);
+    loaded = getSkill(ws, slug)!;
+    expect(loaded.meta).toMatchObject({ holdoutUses: 1, holdoutSuccesses: 0 });
+
+    // Nothing left to revise: never below zero, never a failure out of nothing.
+    await reviseSkillSuccessToFailureAsync(ws, slug);
+    await reviseSkillSuccessToFailureAsync(ws, slug);
+    await reviseSkillSuccessToFailureAsync(ws, slug, true);
+    loaded = getSkill(ws, slug)!;
+    expect(loaded.meta).toMatchObject({ uses: 2, successes: 0, failures: 2, holdoutUses: 1, holdoutSuccesses: 0 });
   });
 
   it("rejects credential-shaped content", () => {

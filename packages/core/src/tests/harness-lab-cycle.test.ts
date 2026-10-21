@@ -95,7 +95,8 @@ describe("a harness-lab cycle", () => {
   it("a candidate that wins one pair and loses another does not win its task", async () => {
     const result = await runCycle(corpus, DEFAULT_CYCLE, deps({ secondProbeBreaks: true }));
     expect(result.tasks[0]).toMatchObject({ outcome: "keep_base" });
-    expect(result.tasks[0]?.reason).toMatch(/1 won, 1 lost/);
+    // Four pairs by default (DEFAULT_CYCLE.kProbe): the one the second probe broke is enough.
+    expect(result.tasks[0]?.reason).toMatch(/3 won, 1 lost/);
     expect(result.merged).toEqual([]);
   });
 

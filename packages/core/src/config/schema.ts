@@ -1522,8 +1522,10 @@ export const SelfImprovementSchema = z.object({
       composer: z.string().min(1).optional(),
       selector: z.string().min(1).optional(),
       reflector: z.string().min(1).optional(),
+      /** Rewrites a failed live turn as a synthetic task (harness-lab/harvest.ts); it reads the original. */
+      anonymizer: z.string().min(1).optional(),
     }).default({}),
-    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector). */
+    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector, anonymizer). */
     enableThinking: z.boolean().default(true),
     /** Tools the lab leaves out or stubs in addition to its defaults (harness-lab/tool-policy.ts). */
     toolPolicy: z.object({
@@ -1593,6 +1595,13 @@ export const SkillLibrarySchema = z.object({
    *   QA delivery loop.
    */
   outcomeEvidence: z.enum(["verified", "substantive"]).default("substantive"),
+  /**
+   * The person's next message as feedback on the turn before it (agent/user-correction.ts): when it
+   * says that answer was wrong, missed the request or did not work (decision point corrects_previous,
+   * asked beside the new turn), that turn's recorded skill successes become failures, and one nothing
+   * judged records a failure. Off by default: the judgement costs a routing-tier call per follow-up.
+   */
+  userCorrectionSignal: z.boolean().default(false),
 });
 
 export type SkillLibraryConfig = z.infer<typeof SkillLibrarySchema>;

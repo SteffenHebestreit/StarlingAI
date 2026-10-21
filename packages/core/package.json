@@ -1,6 +1,6 @@
 {
   "name": "@starlingai/core",
-  "version": "0.50.2",
+  "version": "0.51.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -36,6 +36,7 @@
     "decisions:export": "tsx src/scripts/decisions-export.ts",
     "decisions:bootstrap": "cd ../.. && tsx packages/core/src/scripts/decisions-bootstrap.ts",
     "decisions:bench": "cd ../.. && tsx packages/core/src/scripts/decisions-bench.ts",
+    "corrections:bench": "cd ../.. && tsx packages/core/src/scripts/corrections-bench.ts",
     "decisions:readout": "cd ../.. && tsx packages/core/src/scripts/decisions-readout.ts",
     "latency:report": "tsx src/scripts/latency-report.ts",
     "intent:report": "tsx src/scripts/intent-report.ts",

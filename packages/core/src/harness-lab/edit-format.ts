@@ -95,6 +95,36 @@ export function taskFactScreen(text: string, taskText: string, prompt: string): 
   return null;
 }
 
+/** Share of the shorter rule's content words the other one has too, above which two rules are one. */
+export const RULE_OVERLAP = 0.6;
+const RULE_OVERLAP_MIN_WORDS = 4;
+
+/** A rule's content words, with a trailing plural "s" dropped: "diagrams" and "diagram" are one. */
+function ruleWords(text: string): Set<string> {
+  const words = new Set<string>();
+  for (const word of text.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? []) {
+    if (word.length < 4) continue;
+    words.add(word.length > 4 && word.endsWith("s") && !word.endsWith("ss") ? word.slice(0, -1) : word);
+  }
+  return words;
+}
+
+/**
+ * Two appended rules that say the same thing in other words (the first accepted proposal, 2026-10-19,
+ * appended two lines that both sent diagram requests to diagram_designer: 8 of the shorter one's 11
+ * content words were in the other). Null below RULE_OVERLAP.
+ */
+export function ruleOverlap(a: string, b: string): number | null {
+  const wa = ruleWords(a);
+  const wb = ruleWords(b);
+  const smaller = Math.min(wa.size, wb.size);
+  if (smaller < RULE_OVERLAP_MIN_WORDS) return null;
+  let shared = 0;
+  for (const word of wa) if (wb.has(word)) shared += 1;
+  const overlap = shared / smaller;
+  return overlap >= RULE_OVERLAP ? overlap : null;
+}
+
 function normalize(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
