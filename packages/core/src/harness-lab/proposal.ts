@@ -122,8 +122,9 @@ export type EmitResult = { proposal: ConversationConfigProposal; superseded: str
 export function emitProposal(input: EmitInput): EmitResult {
   if (input.edits.length === 0) return { refused: "no edits to propose" };
   if (input.gate.verdict !== "accept") return { refused: `the gate did not accept the candidate (${input.gate.verdict})` };
-  const promptEdits = input.edits.filter((edit) => edit.op !== "add_skill");
-  if (promptEdits.length === 0) return { refused: "the accepted candidate only adds skills: add them on the Skills page from the report" };
+  const promptEdits = input.edits.filter((edit) => edit.op !== "add_skill" && edit.op !== "add_hook");
+  const hookEdits = input.edits.filter((edit) => edit.op === "add_hook" && edit.hook && edit.hookId);
+  if (promptEdits.length === 0 && hookEdits.length === 0) return { refused: "the accepted candidate only adds skills: add them on the Skills page from the report" };
   const config = getConfig();
   const missing = promptEdits.map((edit) => edit.target).find((target) => target !== MAIN_ASSISTANT_PROMPT_TARGET && !hasPromptTarget(config, target));
   if (missing) return { refused: `prompt target '${missing}' is not a configured agent` };
@@ -134,16 +135,25 @@ export function emitProposal(input: EmitInput): EmitResult {
     .filter((edit) => edit.target === target)
     .map((edit) => `${edit.id} (${edit.editor}/${edit.scope}, answers ${edit.moment}): ${edit.why}`)
     .join("\n");
-  const promptChanges = buildPromptChanges(input.basePrompts, input.edits, rationaleFor);
+  const promptChanges = buildPromptChanges(input.basePrompts, input.edits.filter((edit) => edit.op !== "add_hook"), rationaleFor);
+  // A hook goes in as a config change under enforcementHooks, applied like any other with consent.
+  const configChanges = hookEdits.map((edit) => ({
+    path: `enforcementHooks.${edit.hookId}`,
+    value: edit.hook,
+    reason: `${edit.id} (${edit.editor}/${edit.scope}, answers ${edit.moment}): ${edit.why || edit.text}`,
+  }));
   const gateLines = input.gate.tallies.map((t) => `${t.role} ${t.taskId}: ${t.wins} won, ${t.losses} lost, ${t.ties} tied${t.unscored ? `, ${t.unscored} unscored` : ""}${t.selectorWins + t.selectorLosses > 0 ? `; selector ${t.selectorWins}:${t.selectorLosses}` : ""}`);
   const proposal = createConversationConfigProposal(input.liveWorkspacePath, {
     status: "pending",
     mode: "prompt",
     request: `Harness lab run ${input.runId}: prompt edits that won on their target tasks without losing on the guard set.`,
-    summary: `${promptEdits.length} edit(s) to ${promptChanges.map((c) => c.agentName).join(", ")} — ${input.gate.evidence} evidence. ${input.gate.reasons.join(" ")}`.slice(0, 1_200),
+    summary: `${[
+      promptEdits.length > 0 ? `${promptEdits.length} edit(s) to ${promptChanges.map((c) => c.agentName).join(", ")}` : "",
+      hookEdits.length > 0 ? `${hookEdits.length} enforcement hook(s) (${hookEdits.map((e) => e.hookId).join(", ")})` : "",
+    ].filter(Boolean).join(" and ")} — ${input.gate.evidence} evidence. ${input.gate.reasons.join(" ")}`.slice(0, 1_200),
     assistantAgent: LAB_ASSISTANT_AGENT,
     ...(promptChanges.length === 1 ? { targetAgent: promptChanges[0]!.agentName } : {}),
-    configChanges: [],
+    configChanges,
     promptChanges,
     validations: [...gateLines, ...input.composerRows.map((row) => `composer: ${row}`), ...(input.gate.signTestP !== null ? [`sign test p = ${input.gate.signTestP.toFixed(3)} (reported, not deciding)`] : [])],
     tags: [
@@ -156,7 +166,7 @@ export function emitProposal(input: EmitInput): EmitResult {
   logAudit("harness_lab_proposal_created", {
     proposalId: proposal.id,
     runId: input.runId,
-    targets: promptChanges.map((c) => c.agentName),
+    targets: [...promptChanges.map((c) => c.agentName), ...hookEdits.map((e) => `hook:${e.hookId}`)],
     strategies: promptChanges.map((c) => c.strategy),
     evidence: input.gate.evidence,
     ...(superseded.length > 0 ? { superseded } : {}),

@@ -186,6 +186,8 @@ export type CoreAuditEventType =
   | "skill_distilled"
   | "skill_distill_declined"
   | "user_correction_detected"
+  | "enforcement_hook_fired"
+  | "best_of_two_decided"
   | "harness_lab_run_completed"
   | "harness_lab_proposal_created"
   | "skill_patched"

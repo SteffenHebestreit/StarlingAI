@@ -28,6 +28,8 @@ export interface LabArm {
   subAgentPrompts?: Record<string, string>;
   /** Skills this arm adds on top of the deployment's (see setSkillSnapshot). */
   skills?: LabSkill[];
+  /** Enforcement hooks this arm adds to the deployment's, by id (tools/enforcement-hooks.ts). */
+  hooks?: Record<string, import("../config/schema.js").EnforcementHook>;
 }
 
 /**
@@ -91,6 +93,9 @@ export async function withArm<T>(arm: LabArm, scratchRoot: string, attemptKey: s
       ...(arm.subAgentPrompts ? { subAgentPrompts: arm.subAgentPrompts } : {}),
     });
   config.workspacePath = workspacePath;
+  // An arm's hooks are laid over the deployment's for its attempts only, in this process's memory.
+  const previousHooks = config.enforcementHooks;
+  if (arm.hooks) config.enforcementHooks = { ...previousHooks, ...arm.hooks };
   try {
     return await fn(workspacePath);
   } finally {
@@ -98,5 +103,6 @@ export async function withArm<T>(arm: LabArm, scratchRoot: string, attemptKey: s
     // restore only knows that one.
     restore();
     getConfig().workspacePath = previousWorkspace;
+    if (arm.hooks) getConfig().enforcementHooks = previousHooks;
   }
 }

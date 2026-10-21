@@ -26,11 +26,14 @@ export interface EditorInput {
   prompts: Record<string, string>;
   /** The experience library's index, when there is one: one line per entry, starting with its id. */
   libraryIndex?: string;
+  /** The tools the reference runs called, the orchestrator's and the sub-agents': what a hook may watch. */
+  toolNames?: string[];
 }
 
 const DIMENSION: Record<EditorKind, string> = {
   INV: `You own HOW the agent works: its procedure, its tool use, its delegation, how it completes. You do NOT add domain rules, required sections or subject-matter facts.
-Map each failure to the cheapest fix: one procedural rule where the run went wrong.`,
+Map each failure to the cheapest fix: one procedural rule where the run went wrong.
+Where the fix belongs to a TOOL rather than a prompt, "add_hook" (target "hooks") adds an enforcement hook instead of a rule: {"action": "append_hint", "tools": [...], "errorMatches": "<optional regex>", "after": 1, "hint": "..."} puts a hint beside a recurring error of that tool; {"action": "cap_tool", "tools": [...], "maxCalls": N, "message": "..."} caps its calls per run; {"action": "verify_write", "tools": [...]} checks every file it reports writing. Optional "agents": [...] limits it. Only for a tool the run called.`,
   DOM: `You own WHAT a practitioner knows: the shape of the deliverable the user needs, the sources it must rest on, its structure. You do NOT diagnose commands, retries, tool errors, reading order or delegation.
 Never invent an authority, a standard, an identifier or a citation.`,
 };
@@ -49,7 +52,7 @@ Rules:
 
 Answer with JSON only, one of:
 {"keepBase": true, "reason": "<one sentence>"}
-{"edits": [{"op": "append_rule" | "replace_span" | "add_skill", "target": "<prompt name, or skills>", "scope": "<scope>", "text": "<the rule, the new text, or the procedure>", "find": "<replace_span only>", "name": "<add_skill only>", "whenToUse": "<add_skill only: the shape of situation, not this task>", "moment": "M7", "fromEntry": "<only if it reuses an experience entry: its id>", "why": "<one sentence>"}]}`;
+{"edits": [{"op": "append_rule" | "replace_span" | "add_skill"${kind === "INV" ? ' | "add_hook"' : ""}, "target": "<prompt name, or skills${kind === "INV" ? ", or hooks" : ""}>", "scope": "<scope>", "text": "<the rule, the new text, the procedure${kind === "INV" ? ", or what the hook is for" : ""}>", "find": "<replace_span only>", "name": "<add_skill only>", "whenToUse": "<add_skill only: the shape of situation, not this task>",${kind === "INV" ? ' "hook": {<add_hook only>},' : ""} "moment": "M7", "fromEntry": "<only if it reuses an experience entry: its id>", "why": "<one sentence>"}]}`;
 }
 
 export function buildEditorUserMessage(input: EditorInput): string {
@@ -81,7 +84,7 @@ export interface EditorResult {
 /** Ask one editor. A malformed answer, or one whose every edit broke a rule, gets one repair round. */
 export async function proposeEdits(kind: EditorKind, input: EditorInput, idPrefix: string, complete: LabComplete): Promise<EditorResult> {
   const libraryIds = new Set((input.libraryIndex ?? "").split("\n").map((line) => /^(L\d+)\b/.exec(line)?.[1]).filter((id): id is string => Boolean(id)));
-  const ctx = { editor: kind, idPrefix, digest: input.digest, prompts: input.prompts, taskText: taskText(input.task), libraryIds };
+  const ctx = { editor: kind, idPrefix, digest: input.digest, prompts: input.prompts, taskText: taskText(input.task), libraryIds, ...(input.toolNames ? { toolNames: new Set(input.toolNames) } : {}) };
   const system = buildEditorSystemPrompt(kind);
   const user = buildEditorUserMessage(input);
   const first = parseEditorOutput(await complete("editor", system, user), ctx);

@@ -1,12 +1,14 @@
 /**
  * The edits a lab editor may propose, and the rules every one must pass before it runs.
  *
- * Two operations only, both small: append one rule to a prompt, or replace one exact span of it.
+ * Small operations only: append one rule to a prompt, replace one exact span of it, add a skill, or
+ * (the INV editor) add an enforcement hook, one of three fixed actions on a tool's calls.
  * Every edit names the moment of the run it answers (digest.ts); an edit that cannot is
  * speculation. An editor owns one dimension: INV how the agent works, DOM what a practitioner
  * knows. And an edit goes into a prompt every turn reads, so it must not carry the task's own
  * facts: those are wrong anchors for the next task (taskFactScreen).
  */
+import { EnforcementHookSchema, type EnforcementHook } from "../config/schema.js";
 import type { Digest } from "./digest.js";
 
 export type EditorKind = "INV" | "DOM";
@@ -23,13 +25,15 @@ export const MAX_REPLACE_GROWTH = 300;
 export const MAX_SKILL_CHARS = 1_500;
 /** The pseudo-target of add_skill edits: the skill library, not a prompt. */
 export const SKILLS_TARGET = "skills";
+/** The pseudo-target of add_hook edits: the enforcement hooks (tools/enforcement-hooks.ts). */
+export const HOOKS_TARGET = "hooks";
 
 export interface LabEdit {
   /** Stable within a run: "<editor>-<candidate>-<n>", e.g. "INV-t3-1". */
   id: string;
   editor: EditorKind;
-  op: "append_rule" | "replace_span" | "add_skill";
-  /** "main_assistant", a sub-agent's name, or SKILLS_TARGET for add_skill. */
+  op: "append_rule" | "replace_span" | "add_skill" | "add_hook";
+  /** "main_assistant", a sub-agent's name, SKILLS_TARGET for add_skill, HOOKS_TARGET for add_hook. */
   target: string;
   scope: string;
   text: string;
@@ -38,6 +42,9 @@ export interface LabEdit {
   /** add_skill only: the skill's name and the one-line situation it applies to. */
   skillName?: string;
   whenToUse?: string;
+  /** add_hook only: the hook and the id it is proposed under. */
+  hook?: EnforcementHook;
+  hookId?: string;
   /** The moment of the reference run it answers, e.g. "M7". */
   moment: string;
   /** The experience entry it reuses, if any ("L12"): an example, re-verified by its own moment. */
@@ -55,6 +62,8 @@ export interface EditContext {
   taskText: string;
   /** Ids of the experience entries the editor was shown; an edit may name one of them. */
   libraryIds?: ReadonlySet<string>;
+  /** The tools the run called: an add_hook edit watches at least one of them. */
+  toolNames?: ReadonlySet<string>;
 }
 
 export type EditorOutcome =
@@ -167,7 +176,8 @@ function citedEntry(raw: Record<string, unknown>, index: number, ctx: EditContex
 export function validateEdit(raw: Record<string, unknown>, index: number, ctx: EditContext): LabEdit | string {
   const op = raw["op"];
   if (op === "add_skill") return validateSkillEdit(raw, index, ctx);
-  if (op !== "append_rule" && op !== "replace_span") return `edit ${index + 1}: op must be append_rule, replace_span or add_skill`;
+  if (op === "add_hook") return validateHookEdit(raw, index, ctx);
+  if (op !== "append_rule" && op !== "replace_span") return `edit ${index + 1}: op must be append_rule, replace_span, add_skill or add_hook`;
   const target = typeof raw["target"] === "string" ? raw["target"].trim() : "";
   const prompt = ctx.prompts[target];
   if (prompt === undefined) return `edit ${index + 1}: target "${target}" is not one of ${Object.keys(ctx.prompts).join(", ")}`;
@@ -217,6 +227,43 @@ ${text}`, ctx.taskText, "");
   return { id: `${ctx.idPrefix}-${index + 1}`, editor: ctx.editor, op: "add_skill", target: SKILLS_TARGET, scope, text, skillName, whenToUse, moment, ...entry, why };
 }
 
+/**
+ * An add_hook edit (the INV editor's): one enforcement hook, watching a tool the run called. A hint
+ * must hold for other tasks (the task's own facts are refused, as in a rule), a pattern must compile,
+ * and a cap leaves the tool at least one call: taking a tool away is a person's decision.
+ */
+function validateHookEdit(raw: Record<string, unknown>, index: number, ctx: EditContext): LabEdit | string {
+  if (ctx.editor !== "INV") return `edit ${index + 1}: add_hook is an INV edit (how the agent works with its tools)`;
+  const scope = typeof raw["scope"] === "string" ? raw["scope"].trim() : "";
+  if (!EDITOR_SCOPES[ctx.editor].includes(scope)) return `edit ${index + 1}: scope must be one of ${EDITOR_SCOPES[ctx.editor].join(", ")}`;
+  const moment = citedMoment(raw["moment"], ctx.digest);
+  if (!moment) return `edit ${index + 1}: moment must name a moment of the run (M1…); an edit that cannot is speculation`;
+  const parsed = EnforcementHookSchema.safeParse(raw["hook"]);
+  if (!parsed.success) return `edit ${index + 1}: hook is not a valid enforcement hook (${parsed.error.issues[0]?.message ?? "invalid"})`;
+  const hook = parsed.data;
+  if (ctx.toolNames && !hook.tools.some((tool) => ctx.toolNames!.has(tool))) {
+    return `edit ${index + 1}: the hook watches no tool the run called (${hook.tools.join(", ")})`;
+  }
+  const unknownAgent = (hook.agents ?? []).find((agent) => ctx.prompts[agent] === undefined);
+  if (unknownAgent) return `edit ${index + 1}: agent "${unknownAgent}" is not one of ${Object.keys(ctx.prompts).join(", ")}`;
+  if (hook.action === "cap_tool" && hook.maxCalls < 1) return `edit ${index + 1}: a cap leaves the tool at least one call`;
+  if (hook.action === "append_hint" && hook.errorMatches) {
+    try { new RegExp(hook.errorMatches, "i"); } catch { return `edit ${index + 1}: errorMatches is not a regular expression`; }
+  }
+  const words = [hook.action === "append_hint" ? hook.hint : "", hook.action === "cap_tool" ? hook.message ?? "" : ""].join("\n").trim();
+  const fact = words ? taskFactScreen(words, ctx.taskText, "") : null;
+  if (fact) return `edit ${index + 1}: ${fact}; a hook acts on other tasks too`;
+  const text = typeof raw["text"] === "string" && raw["text"].trim() ? raw["text"].trim().slice(0, MAX_EDIT_CHARS) : `${hook.action} on ${hook.tools.join(", ")}`;
+  const entry = citedEntry(raw, index, ctx);
+  if (typeof entry === "string") return entry;
+  const why = typeof raw["why"] === "string" ? raw["why"].trim().slice(0, 200) : "";
+  const hookId = `lab-${ctx.idPrefix}-${index + 1}`.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  return {
+    id: `${ctx.idPrefix}-${index + 1}`, editor: ctx.editor, op: "add_hook", target: HOOKS_TARGET, scope, text,
+    hook: { ...hook, description: hook.description ?? text }, hookId, moment, ...entry, why,
+  };
+}
+
 /** An editor's answer: keep the base, or its valid edits (at most MAX_EDITS_PER_EDITOR) and why the others failed. */
 export function parseEditorOutput(content: string, ctx: EditContext): EditorOutcome {
   const raw = extractJsonObject(content);
@@ -247,7 +294,7 @@ export function parseEditorOutput(content: string, ctx: EditContext): EditorOutc
 export function applyEdits(prompts: Record<string, string>, edits: readonly LabEdit[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const edit of edits) {
-    if (edit.op === "add_skill") continue;
+    if (edit.op === "add_skill" || edit.op === "add_hook") continue;
     const current = out[edit.target] ?? prompts[edit.target] ?? "";
     if (edit.op === "append_rule") {
       out[edit.target] = current.trim() ? `${current.trimEnd()}\n${edit.text}` : edit.text;

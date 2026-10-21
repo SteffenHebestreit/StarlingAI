@@ -323,7 +323,9 @@ export function peerAgentRefusal(names: Iterable<string | undefined>): string | 
  * jwtSecret, secretAccessKey). Matched anywhere in the name, "token" caught maxTokens, a knob the
  * assistant's own snapshot lists: such a proposal was shown as applyable and then refused.
  */
-const MUTABLE_TOP_LEVEL_KEYS = new Set(["agents", "subagents", "scenes"]);
+// enforcementHooks: one of three fixed actions per hook (tools/enforcement-hooks.ts), which the
+// harness lab proposes; nothing in it runs code.
+const MUTABLE_TOP_LEVEL_KEYS = new Set(["agents", "subagents", "scenes", "enforcementhooks"]);
 const CREDENTIAL_SEGMENT = /(?:secret|password|token|api_?key|private_?key|access_?key|credentials?)$/i;
 
 /** A field named as a credential: apiKey, botToken, jwtSecret, secretAccessKey — not maxTokens. */
