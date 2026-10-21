@@ -682,6 +682,26 @@ export async function recordSkillHoldoutOutcomeAsync(
   await persistSkillMetaAsync(workspacePath, skill.meta);
 }
 
+/**
+ * A success recorded for this skill that the person's next message showed to be a failure
+ * (agent/user-correction.ts): one success becomes a failure, the uses stay. `holdout` revises the
+ * held-out count instead, whose failures are its uses less its successes. A draft that success
+ * graduated stays active; nothing records which success graduated it. Fire-and-forget.
+ */
+export async function reviseSkillSuccessToFailureAsync(workspacePath: string, slug: string, holdout = false): Promise<void> {
+  const skill = await readSkillAsync(workspacePath, slug);
+  if (!skill) return;
+  if (holdout) {
+    if ((skill.meta.holdoutSuccesses ?? 0) < 1) return;
+    skill.meta.holdoutSuccesses = (skill.meta.holdoutSuccesses ?? 0) - 1;
+  } else {
+    if (skill.meta.successes < 1) return;
+    skill.meta.successes -= 1;
+    skill.meta.failures += 1;
+  }
+  await persistSkillMetaAsync(workspacePath, skill.meta);
+}
+
 /** Async embedding cache — writes only the meta sidecar, fire-and-forget. */
 export async function setSkillEmbeddingAsync(
   workspacePath: string,

@@ -28,13 +28,14 @@ vi.mock("../memory/graph-service.js", () => ({
 vi.mock("../swarm/evidence-migration.js", () => ({ sweepEvidenceMigrationParity: vi.fn(async () => undefined) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: vi.fn() }));
 
-import { finalizeSuccessfulTurn, type FinalizeSuccessfulTurnParams } from "../agent/turn-success-finalize.js";
-import { createTurnQualitySignals } from "../agent/turn-scorecard.js";
+import { earlyReturnTeaches, finalizeSuccessfulTurn, recordTurnLearning, type FinalizeSuccessfulTurnParams } from "../agent/turn-success-finalize.js";
+import { buildTurnQualityScorecard, createTurnQualitySignals } from "../agent/turn-scorecard.js";
 import { recordSkillHoldoutOutcomeAsync, recordSkillOutcomeAsync } from "../skills/store.js";
 import { maybeDistillSkillFromTurn } from "../skills/distiller.js";
 import { invalidateTrajectory, writeTrajectory } from "../memory/trajectory-cache.js";
 import { graphMarkSessionRetrievalsUnhelpful, graphMarkSessionRetrievalsUseful } from "../memory/graph-service.js";
 import { logAudit } from "../audit/logger.js";
+import { resetUserCorrectionForTests, takeLearnedTurn } from "../agent/user-correction.js";
 import type { AgentSession } from "../agent/session.js";
 
 function params(overrides: Partial<FinalizeSuccessfulTurnParams> & { channel?: string } = {}): FinalizeSuccessfulTurnParams {
@@ -125,5 +126,60 @@ describe("finalizeSuccessfulTurn — what the learning loops record", () => {
     expect(maybeDistillSkillFromTurn).not.toHaveBeenCalled();
     expect(graphMarkSessionRetrievalsUseful).not.toHaveBeenCalled();
     expect(graphMarkSessionRetrievalsUnhelpful).not.toHaveBeenCalled();
+  });
+});
+
+describe("an early return teaches the learning loops too", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.outcomeEvidence = "verified";
+  });
+
+  // A turn the loop brake ended: delegations kept failing, so its scorecard records a defect.
+  const loopBrake = buildTurnQualityScorecard({
+    delegationCount: 3, shareFindingCount: 0, forcedSynthesisFired: true, wardenFailureCount: 3,
+    finalAnswerLength: 400, toolIterations: 6, finishReason: "delegate_loop_terminated", blocked: false, artifactCount: 0,
+  });
+
+  it("the loop brake's turn counts against the skills it ran with", () => {
+    expect(loopBrake).toMatchObject({ learningOutcome: "failure" });
+    const p = params();
+    recordTurnLearning({ ...p, qualityScorecard: loopBrake });
+    expect(recordSkillOutcomeAsync).toHaveBeenCalledWith("/tmp/ws", "cited-report", "failure");
+    expect(recordSkillHoldoutOutcomeAsync).toHaveBeenCalledWith("/tmp/ws", "held-skill", "failure");
+    expect(graphMarkSessionRetrievalsUnhelpful).toHaveBeenCalled();
+  });
+
+  it("is no evidence after a model or provider error, or an abort", () => {
+    expect(earlyReturnTeaches("delegate_loop_terminated")).toBe(true);
+    expect(earlyReturnTeaches("single_deliverable_relayed")).toBe(true);
+    expect(earlyReturnTeaches("oversight_floor_synthesized")).toBe(true);
+    expect(earlyReturnTeaches("llm_error_partial_salvaged")).toBe(false);
+    expect(earlyReturnTeaches("llm_error_evidence_backstop")).toBe(false);
+    expect(earlyReturnTeaches("aborted_synthesized")).toBe(false);
+  });
+});
+
+describe("what the next message can still correct", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetUserCorrectionForTests();
+    state.outcomeEvidence = "verified";
+  });
+
+  it("keeps what the turn recorded for its skills until the session's next message", () => {
+    finalizeSuccessfulTurn(params({ qualitySignals: qa("pass") }));
+    expect(takeLearnedTurn("sess-1")).toMatchObject({ injectedSkillSlugs: ["cited-report"], heldOutSkillSlugs: ["held-skill"], recorded: "success", workspacePath: "/tmp/ws" });
+    // A turn nothing judged recorded nothing, and is kept as that: a correction records a failure for it.
+    finalizeSuccessfulTurn(params());
+    expect(takeLearnedTurn("sess-1")).toMatchObject({ recorded: null });
+  });
+
+  it("keeps nothing for eval traffic, and a turn without skill evidence forgets the one before", () => {
+    finalizeSuccessfulTurn(params({ channel: "eval", qualitySignals: qa("pass") }));
+    expect(takeLearnedTurn("sess-1")).toBeUndefined();
+    finalizeSuccessfulTurn(params({ qualitySignals: qa("pass") }));
+    finalizeSuccessfulTurn(params({ delegationCount: 0 }));
+    expect(takeLearnedTurn("sess-1")).toBeUndefined();
   });
 });

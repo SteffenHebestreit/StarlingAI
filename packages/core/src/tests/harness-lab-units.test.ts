@@ -5,6 +5,7 @@ import { compose, type ComposerCandidate } from "../harness-lab/composer.js";
 import { combinePicks } from "../harness-lab/selector.js";
 import { gateDecision, type GateTaskResult } from "../harness-lab/gate.js";
 import { mergeEdits } from "../harness-lab/cycle.js";
+import { RULE_OVERLAP, ruleOverlap } from "../harness-lab/edit-format.js";
 import { buildPromptChanges } from "../harness-lab/proposal.js";
 import { promptSha256, stalePromptChange } from "../agent/config-assistant-proposals.js";
 import { scenarioToTask } from "../harness-lab/import-seeds.js";
@@ -186,6 +187,28 @@ describe("gate", () => {
 });
 
 describe("merging the winners' edits", () => {
+  // The two lines of the first accepted proposal (2026-10-19): one rule, said twice.
+  const INV_LINE = "Requests for structured visual diagrams (e.g., Mermaid, flowcharts, sequence diagrams) are NOT direct answers. Explicitly forbid inline markdown code blocks for them; instead, mandate delegation to diagram_designer or use the generate_mermaid_diagram tool immediately.";
+  const DOM_LINE = "Generate a Mermaid flowchart, sequence diagram, or other structured visual diagram → diagram_designer (it owns generate_mermaid_diagram).";
+
+  it("keeps one of two appended rules that say the same thing: the shorter", () => {
+    expect(ruleOverlap(INV_LINE, DOM_LINE)).toBeGreaterThanOrEqual(RULE_OVERLAP);
+    const { merged, dropped } = mergeEdits({ main_assistant: MAIN }, [[edit("inv", INV_LINE), edit("dom", DOM_LINE)]]);
+    expect(merged.map((e) => e.id)).toEqual(["dom"]);
+    expect(dropped).toEqual([expect.stringMatching(/^inv: says what dom says \(\d+% of its words\), and is longer$/)]);
+    // In either order.
+    expect(mergeEdits({ main_assistant: MAIN }, [[edit("dom", DOM_LINE)], [edit("inv", INV_LINE)]]).merged.map((e) => e.id)).toEqual(["dom"]);
+  });
+
+  it("keeps two rules about the same agent that say different things", () => {
+    const routing = "Send diagram requests (flowcharts, sequence diagrams) to diagram_designer instead of answering them yourself.";
+    const naming = "When diagram_designer reports a saved diagram, quote the file path it returned and never invent another name.";
+    expect(ruleOverlap(routing, naming)).toBeNull();
+    expect(mergeEdits({ main_assistant: MAIN }, [[edit("a", routing), edit("b", naming)]]).merged.map((e) => e.id)).toEqual(["a", "b"]);
+    // Too short to judge: never merged on a handful of words.
+    expect(ruleOverlap("Cite sources.", "Cite your sources.")).toBeNull();
+  });
+
   it("keeps identical text once, one replace per span, three edits and 1200 characters per prompt", () => {
     const replace = (id: string, text: string): LabEdit => ({ ...edit(id), op: "replace_span", find: "Keep answers short.", text });
     const big = (id: string) => edit(id, `${id} ${"y".repeat(390)}`);

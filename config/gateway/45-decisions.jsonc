@@ -22,7 +22,9 @@
   // Points: fast_lane, source_sensitive, ungrounded_draft, slices_disagree, goal_met,
   // finding_relevant (shared-fact distillation: Laya may only say "nothing relevant", which saves
   // the extraction call) and run_drifting (the semantic progress judge, itself off by default:
-  // Laya may only say "on track"; winding a run down stays the routing tier's call).
+  // Laya may only say "on track"; winding a run down stays the routing tier's call) and
+  // corrects_previous (does the person's next message correct the answer before it? asked beside the
+  // new turn for skillLibrary.userCorrectionSignal; Laya may only say "something else").
   // Report: `pnpm --filter @starlingai/core decisions:report`.
   //
   // "browser": laya-browser beside the browser agent. It clicks and selects on its own — never a
