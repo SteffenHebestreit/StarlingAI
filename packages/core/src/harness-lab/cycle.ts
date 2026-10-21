@@ -116,6 +116,21 @@ function agentsThatRan(records: readonly LabRunRecord[]): string[] {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
 }
 
+/** The tools the runs called, the orchestrator's and every sub-agent's. */
+export function toolsThatRan(records: readonly LabRunRecord[]): string[] {
+  const names = new Set<string>();
+  for (const record of records) {
+    for (const turn of record.turns) {
+      for (const call of turn.toolCalls) if (call.name) names.add(call.name);
+      for (const event of turn.events) {
+        const tool = event.type === "sub_agent_tool_call" ? event.data?.["tool"] : undefined;
+        if (typeof tool === "string" && tool) names.add(tool);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
 /** A candidate harness: the base prompts with `edits` applied, as the overlay of one arm. */
 export function armFor(name: string, base: Record<string, string>, edits: readonly LabEdit[]): LabArm {
   const changed = applyEdits(base, edits);
@@ -123,11 +138,13 @@ export function armFor(name: string, base: Record<string, string>, edits: readon
   for (const [target, text] of Object.entries(changed)) if (target !== MAIN_TARGET) subAgentPrompts[target] = text;
   const skills = edits.filter((edit) => edit.op === "add_skill")
     .map((edit) => ({ name: edit.skillName ?? edit.id, whenToUse: edit.whenToUse ?? "", procedure: edit.text }));
+  const hooks = Object.fromEntries(edits.filter((edit) => edit.op === "add_hook" && edit.hook && edit.hookId).map((edit) => [edit.hookId!, edit.hook!]));
   return {
     name,
     ...(changed[MAIN_TARGET] !== undefined ? { mainAssistantInstructions: changed[MAIN_TARGET] } : {}),
     ...(Object.keys(subAgentPrompts).length > 0 ? { subAgentPrompts } : {}),
     ...(skills.length > 0 ? { skills } : {}),
+    ...(Object.keys(hooks).length > 0 ? { hooks } : {}),
   };
 }
 
@@ -206,7 +223,7 @@ async function improveTask(task: HarnessTask, screenRun: LabRunRecord, deps: Cyc
   const candidates: ComposerCandidate[] = [];
   for (const kind of ["INV", "DOM"] as const) {
     const libraryIndex = deps.libraryIndex?.(task);
-    const result = await proposeEdits(kind, { task, digest, otherRunFailures, prompts, ...(libraryIndex ? { libraryIndex } : {}) }, `${kind}-${task.id}`, deps.complete);
+    const result = await proposeEdits(kind, { task, digest, otherRunFailures, prompts, toolNames: toolsThatRan(references), ...(libraryIndex ? { libraryIndex } : {}) }, `${kind}-${task.id}`, deps.complete);
     work.editors.push(result);
     health.editorAnswers += 1;
     if (result.outcome.kind !== "edits" || result.outcome.edits.length === 0) {
