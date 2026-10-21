@@ -1522,8 +1522,10 @@ export const SelfImprovementSchema = z.object({
       composer: z.string().min(1).optional(),
       selector: z.string().min(1).optional(),
       reflector: z.string().min(1).optional(),
+      /** Rewrites a failed live turn as a synthetic task (harness-lab/harvest.ts); it reads the original. */
+      anonymizer: z.string().min(1).optional(),
     }).default({}),
-    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector). */
+    /** Reasoning on for the lab's own calls (editors, composer, selector, reflector, anonymizer). */
     enableThinking: z.boolean().default(true),
     /** Tools the lab leaves out or stubs in addition to its defaults (harness-lab/tool-policy.ts). */
     toolPolicy: z.object({

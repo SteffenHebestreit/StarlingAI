@@ -8,7 +8,7 @@
  * Model calls and turn runs are injected (CycleDeps), so the whole flow runs in tests on stubs.
  */
 import { buildDigest } from "./digest.js";
-import { applyEdits, validateEdit, type EditorKind, type LabEdit } from "./edit-format.js";
+import { applyEdits, ruleOverlap, validateEdit, type EditorKind, type LabEdit } from "./edit-format.js";
 import { proposeEdits, taskText, type EditorResult } from "./editors.js";
 import { compose, formatRow, summarizeRun, type ComposeResult, type ComposerCandidate } from "./composer.js";
 import { gateDecision, DEFAULT_GATE, type GateDecision, type GateOptions, type GateTaskResult, type PairedAttempt } from "./gate.js";
@@ -44,12 +44,23 @@ export interface CycleOptions {
   /** Explicit guard ids; unset = every corpus task that can guard and is not a target, up to maxGuards. */
   guards?: string[];
   maxGuards: number;
+  /**
+   * Runs per candidate, per reference and of the composed set. Two were too few on the local models
+   * (2026-10-19): both candidates fixed the Mermaid task in one of two probes, which the composer read,
+   * rightly, as weak evidence and dropped; with four, the composed set won all four pairs.
+   */
   kProbe: number;
   kGateMax: number;
   gate: GateOptions;
+  /**
+   * Failing tasks the screen must not pick as targets, with why: a pending lab proposal already
+   * answers them. Unapplied, it is not in the prompts this run starts from, so the task fails again,
+   * and a nightly run would propose the same fix every night.
+   */
+  skipTargets?: ReadonlyMap<string, string>;
 }
 
-export const DEFAULT_CYCLE: CycleOptions = { targets: 4, maxGuards: 12, kProbe: 2, kGateMax: 3, gate: DEFAULT_GATE };
+export const DEFAULT_CYCLE: CycleOptions = { targets: 4, maxGuards: 12, kProbe: 4, kGateMax: 3, gate: DEFAULT_GATE };
 
 export interface TaskWork {
   taskId: string;
@@ -121,9 +132,10 @@ export function armFor(name: string, base: Record<string, string>, edits: readon
 }
 
 /**
- * The edits of every winning task, per prompt: identical texts once, a second replace of the same
- * span dropped, at most MAX_EDITS_PER_TARGET per prompt and MAX_GROWTH_PER_TARGET characters of
- * growth, and the main assistant's instructions within their limit.
+ * The edits of every winning task, per prompt: identical texts once, of two appended rules that say
+ * the same thing the shorter one, a second replace of the same span dropped, at most
+ * MAX_EDITS_PER_TARGET per prompt and MAX_GROWTH_PER_TARGET characters of growth, and the main
+ * assistant's instructions within their limit. The gate then runs what is merged.
  */
 export function mergeEdits(base: Record<string, string>, wins: readonly LabEdit[][]): { merged: LabEdit[]; dropped: string[] } {
   const merged: LabEdit[] = [];
@@ -131,6 +143,19 @@ export function mergeEdits(base: Record<string, string>, wins: readonly LabEdit[
   for (const edit of wins.flat()) {
     const same = merged.filter((m) => m.target === edit.target);
     if (same.some((m) => m.text.trim() === edit.text.trim())) { dropped.push(`${edit.id}: same text as an edit already kept`); continue; }
+    if (edit.op === "append_rule") {
+      const twin = same.find((m) => m.op === "append_rule" && ruleOverlap(m.text, edit.text) !== null);
+      if (twin) {
+        const share = Math.round(ruleOverlap(twin.text, edit.text)! * 100);
+        if (edit.text.trim().length < twin.text.trim().length) {
+          merged.splice(merged.indexOf(twin), 1, edit);
+          dropped.push(`${twin.id}: says what ${edit.id} says (${share}% of its words), and is longer`);
+        } else {
+          dropped.push(`${edit.id}: says what ${twin.id} says (${share}% of its words), and is not shorter`);
+        }
+        continue;
+      }
+    }
     if (edit.op === "replace_span" && same.some((m) => m.op === "replace_span" && m.find === edit.find)) { dropped.push(`${edit.id}: replaces a span another kept edit replaces`); continue; }
     if (same.length >= MAX_EDITS_PER_TARGET) { dropped.push(`${edit.id}: ${edit.target} already has ${MAX_EDITS_PER_TARGET} edits`); continue; }
     const after = applyEdits(base, [...same, edit])[edit.target] ?? "";
@@ -285,6 +310,11 @@ export async function runCycle(corpus: readonly HarnessTask[], opts: CycleOption
     deps.log(`screen ${task.id}: ${score.unscored ? "unscored" : `${score.delivered ? "delivered" : "NOT delivered"}, ${score.checksFailed} check(s) failed`}`);
   }
   const targets = explicitTargets ?? screen.filter((s) => isFailing(s.score))
+    .filter((s) => {
+      const why = opts.skipTargets?.get(s.taskId);
+      if (why) deps.log(`not a target: ${s.taskId} ${why}`);
+      return !why;
+    })
     .sort((a, b) => scoreValue(a.score) - scoreValue(b.score))
     .slice(0, typeof opts.targets === "number" ? opts.targets : 4)
     .map((s) => s.taskId);
