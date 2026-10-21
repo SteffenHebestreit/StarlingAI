@@ -1,0 +1,39 @@
+{
+  // Enforcement hooks (packages/core/src/tools/enforcement-hooks.ts): a fixed set of actions on tool
+  // calls, applied by the tool registry to the orchestrator's calls and every sub-agent's. No code
+  // runs from here: each hook is one of three actions, by id, and shards merge by id.
+  //
+  //   append_hint   once a watched tool failed `after` times in a run (error matching `errorMatches`,
+  //                 a case-insensitive regular expression, when set), its failures carry `hint`
+  //   cap_tool      a watched tool runs at most `maxCalls` times per run; further calls are refused
+  //   verify_write  a watched tool that reports a written file has it checked at once: it exists, is
+  //                 not empty, holds the content a file writer wrote, and an emitted JSON, SVG or
+  //                 Mermaid file has that form; a failed check is a failure the model sees
+  //
+  // `tools` is required; `agents` limits a hook ("main_assistant" is the orchestrator), unset means
+  // every agent. A run is a sub-agent's run, or the orchestrator's turn. Every firing is audited as
+  // enforcement_hook_fired. The harness lab may propose hooks; a person applies them.
+  "enforcementHooks": {
+    "verify-writes": {
+      "action": "verify_write",
+      "description": "A write a tool reports as done is checked at once, so a broken or missing file is repaired in the same run instead of being reported as delivered.",
+      "tools": ["write_file", "edit_file", "generate_mermaid_diagram", "generate_svg", "generate_document"]
+    }
+    // Examples, not active:
+    //
+    // "mermaid-extension-hint": {
+    //   "action": "append_hint",
+    //   "tools": ["generate_mermaid_diagram"],
+    //   "errorMatches": "extension",
+    //   "after": 1,
+    //   "hint": "Name the output file with the .mmd extension, e.g. diagrams/flow.mmd."
+    // },
+    // "one-web-search-per-run": {
+    //   "action": "cap_tool",
+    //   "tools": ["web_search"],
+    //   "agents": ["main_assistant"],
+    //   "maxCalls": 3,
+    //   "message": "Delegate further research to the researcher."
+    // }
+  }
+}

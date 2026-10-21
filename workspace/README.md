@@ -9,6 +9,7 @@ This directory holds configuration that the **agent swarm can self-tune** at run
 | `agents/` | Main assistant settings + sub-agent definitions, **sharded by tier** (`00-platform`, `10-core-agents`, `20-primary-agents`, `30-secondary-agents`) |
 | `jobs/` | Operator-managed reusable job definitions exposed by the dashboard/API |
 | `scenes/` | Named workflow / mission definitions |
+| `hooks/` | Enforcement hooks by id: a hint after a recurring tool error, a per-run cap on a tool, a write checked at once (`packages/core/src/tools/enforcement-hooks.ts`) |
 | `tools/` | Swarm-invented dynamic tool bundles (JSON) — written only by the tool-development pipeline (sandbox-tested + approved), hot-loaded into the registry as `selfdev__*` tools |
 | `generated/` | *(generated, gitignored)* Agent-authored run output — decks, papers, fetched images, served apps. This is the **default write sandbox**: an agent's file tools are confined here unless it declares `workspaceAccess: "full"` |
 | `runtime/` | `runtime.overrides.json` — live overrides written by the config-assistant |

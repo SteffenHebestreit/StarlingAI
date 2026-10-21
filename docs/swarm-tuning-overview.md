@@ -108,7 +108,7 @@ There is **no `Workflow` type** — `run_workflow` is a uniform verb over `Workf
 
 ### Orchestration behavior flags
 
-Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`); a few — including `trustModelRouting` and `softRoutingEnforcement` — are declared in `config/schema.ts` instead. **Most are default-ON and shipped** (don't re-propose); the honesty/reuse family is default-OFF pending eval. The deployment shard `config/gateway/40-orchestration.jsonc` sets 21 orchestration keys, **19 of them ON** — including the whole QA-delivery and honesty family (`qaDeliveryLoop`, `qaStrictVerdicts`, `qaDeterministicProbes`, `freshnessHonestyGuard`, `citationHonestyGuard`, `ungroundedFactualAnswerGuard`, `failedResearchHonestyBackstop`, …). Read that shard for the authoritative per-deployment state; the schema defaults are not what this deployment runs.
+Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`); a few — including `trustModelRouting` and `softRoutingEnforcement` — are declared in `config/schema.ts` instead. **Most are default-ON and shipped** (don't re-propose); the honesty/reuse family is default-OFF pending eval. The deployment shard `config/gateway/40-orchestration.jsonc` sets 34 orchestration keys, **28 of them ON** — including the whole QA-delivery and honesty family (`qaDeliveryLoop`, `qaStrictVerdicts`, `qaDeterministicProbes`, `freshnessHonestyGuard`, `citationHonestyGuard`, `ungroundedFactualAnswerGuard`, `failedResearchHonestyBackstop`, …). Read that shard for the authoritative per-deployment state; the schema defaults are not what this deployment runs.
 
 | Family | Flags (default) | Purpose |
 |---|---|---|
@@ -118,8 +118,10 @@ Most live in `config/schemas/orchestration.ts` (keys are `orchestration.<flag>`)
 | **Honesty guards** | all **default-OFF** (eval-gated) | Don't dress up / fabricate / oversell; add unverified-source caveats |
 | **Grounding** | `qaEvidenceAnchoring`(on), `qaEvidenceRequired`(off) | No PASS without evidence |
 | **Oversight** | `oversight`(on, off at max effort), `maxEffortTurnOversight` | Runtime goal-satisfied / stall checks |
+| **Best of two** | `bestOfTwoDeliverables`(schema off / **shard on**) | At the `max` effort tier only, the orchestrator's delegation that asks for a file runs twice, one after the other; the record decides (completed, files that hold up), a selector asked in both orders only on a tie; the winner's files stay (`best_of_two_decided`) |
 | **Reuse / anti-dup** | all default-OFF | Detect and reuse prior deliverables |
 | **Caps / depth / parallelism** | `perTurnCaps`/`subAgentToolCaps`/`coordinatorToolCaps`={} | Throttle tool calls, delegation depth, fan-out |
+| **Enforcement hooks** | `enforcementHooks` by id, in `workspace/hooks/*.jsonc` (shipped: `verify-writes`) | Three fixed actions on tool calls, no code: `append_hint` (a hint after a recurring error), `cap_tool` (a per-run cap), `verify_write` (a reported write checked at once); every firing audited as `enforcement_hook_fired` |
 
 > **Hard ceiling correction:** the absolute per-turn abort is `gateway.turnTimeoutMs` (**600000 = 10 min**), *not* an effort/orchestration key. Effort tiers set SLO *budgets* (`agents.performance.*SloMs`), not the kill-switch.
 

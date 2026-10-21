@@ -1538,6 +1538,55 @@ export const SelfImprovementSchema = z.object({
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
 export type SelfImprovementConfig = z.infer<typeof SelfImprovementSchema>;
 
+/**
+ * Enforcement hooks (tools/enforcement-hooks.ts): a fixed set of actions on tool calls, declared as
+ * config so the harness lab or a person can add one without any code running. Kept in workspace
+ * shards (workspace/hooks/*.jsonc) as a record by id, so shards merge by key.
+ *
+ * Every hook names the tools it watches and, optionally, the agents ("main_assistant" for the
+ * orchestrator); unset agents means every agent. Its counts run per agent run (a sub-agent's run, the
+ * orchestrator's turn).
+ */
+const HookScopeFields = {
+  /** What it is for, for people reading the shard and the audit. */
+  description: z.string().max(400).optional(),
+  enabled: z.boolean().default(true),
+  tools: z.array(z.string().min(1)).min(1),
+  agents: z.array(z.string().min(1)).optional(),
+};
+
+export const EnforcementHookSchema = z.discriminatedUnion("action", [
+  /**
+   * After a watched tool failed `after` times in a run (with an error matching `errorMatches`, a
+   * case-insensitive regular expression, when set), its failures carry `hint` to the model.
+   */
+  z.object({
+    action: z.literal("append_hint"),
+    ...HookScopeFields,
+    errorMatches: z.string().min(1).max(200).optional(),
+    after: z.number().int().min(1).default(1),
+    hint: z.string().min(1).max(600),
+  }).strict(),
+  /** A watched tool runs at most `maxCalls` times per run; further calls are refused with `message`. */
+  z.object({
+    action: z.literal("cap_tool"),
+    ...HookScopeFields,
+    maxCalls: z.number().int().min(0),
+    message: z.string().max(400).optional(),
+  }).strict(),
+  /**
+   * A watched tool that reports a written file has it checked at once: the file exists and is not
+   * empty, a file writer's content is in it, and an emitted JSON, SVG or Mermaid file has that form.
+   * A check that fails turns the call into a failure the model sees.
+   */
+  z.object({
+    action: z.literal("verify_write"),
+    ...HookScopeFields,
+  }).strict(),
+]);
+
+export type EnforcementHook = z.infer<typeof EnforcementHookSchema>;
+
 export const SkillLibrarySchema = z.object({
   /**
    * Enable the procedural Skill Library: swarm-authored, self-improving
@@ -2050,6 +2099,8 @@ export const ConfigSchema = z.object({
   toolDevelopment: ToolDevelopmentSchema.default({}),
   selfImprovement: SelfImprovementSchema.default({}),
   skillLibrary: SkillLibrarySchema.default({}),
+  /** Enforcement hooks by id (tools/enforcement-hooks.ts); workspace/hooks/*.jsonc. */
+  enforcementHooks: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]*$/), EnforcementHookSchema).default({}),
   memory: MemoryConfigSchema.default({}),
   toolPipeline: ToolPipelineSchema.default({}),
   dataFeeds: DataFeedsSchema.default({}),
