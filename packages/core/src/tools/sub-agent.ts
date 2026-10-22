@@ -3888,7 +3888,11 @@ registerTool({
     const config = getConfig();
     const promoted = readPromotedAgents(config.workspacePath);
     const all: Record<string, import("../config/schema.js").SubAgentConfig> = { ...config.subAgents, ...promoted };
-    const filter = typeof args["filter"] === "string" ? args["filter"].trim().toLowerCase() : "";
+    // Underscores, hyphens and spaces separate words alike: an agent is named evidence_analyst and
+    // asked for as "evidence analyst". In the E2E run of 2026-10-22 a workflow step looked up the
+    // scene's next agents that way, found none, and delegated the step to no agent.
+    const words = (text: string) => text.toLowerCase().replace(/[\s_-]+/g, " ").trim();
+    const filter = typeof args["filter"] === "string" ? words(args["filter"]) : "";
 
     const entries = Object.keys(all)
       .filter((name) => name !== ctx.currentAgentName)
@@ -3896,8 +3900,7 @@ registerTool({
       .map((name) => ({ name, cfg: all[name]! }))
       .filter(({ name, cfg }) => {
         if (!filter) return true;
-        const hay = `${name} ${cfg.description ?? ""} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`.toLowerCase();
-        return hay.includes(filter);
+        return words(`${name} ${cfg.description ?? ""} ${(cfg.capabilities ?? []).join(" ")} ${(cfg.tags ?? []).join(" ")}`).includes(filter);
       });
 
     if (entries.length === 0) {
