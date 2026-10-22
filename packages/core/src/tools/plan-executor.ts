@@ -255,7 +255,7 @@ function isReasoningOnlyLeaf(plan: TurnPlan, step: TurnPlanStep): boolean {
  * reading the deployment's configured mode here handed those turns back every direct tool the
  * runtime had just taken away, through a plan step.
  */
-function stepToolReachable(tool: string, ctx: ToolContext): boolean {
+export function stepToolReachable(tool: string, ctx: ToolContext): boolean {
   return !ctx.allowedTools
     || ctx.allowedTools.includes(tool)
     || (ctx.loadableTools ?? []).includes(tool);
