@@ -226,6 +226,7 @@ export type CoreAuditEventType =
   | "delegation_tab_reader_saw_blank_tab"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
+  | "delegation_routing_under_threshold_run"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"
