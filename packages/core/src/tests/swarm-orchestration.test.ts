@@ -1603,6 +1603,7 @@ describe("swarm orchestration tools", () => {
         tools: ["read_file", "write_file"],
         maxIterations: 4,
       },
+      agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 },
     });
     runSubAgentWithStatsMock.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => (
       args.agentName === "chart_writer"

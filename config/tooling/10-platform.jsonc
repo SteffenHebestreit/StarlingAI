@@ -214,6 +214,11 @@
     "serviceUrl": "http://kali-pentest:5010"
   },
   "mcp": {
+    // A server whose connection is gone is reconnected on the next call to it (once per 10 s per
+    // server) instead of every call failing until the gateway restarts: in the E2E run of
+    // 2026-10-22 the playwright container went away mid-run and every browser step after it
+    // answered "Not connected".
+    "autoReconnect": true,
     "servers": {
       // Connects to the headed browser-vnc Chrome over CDP instead of launching
       // its own headless browser, so the browser the swarm drives is the same one

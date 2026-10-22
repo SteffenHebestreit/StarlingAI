@@ -76,10 +76,10 @@ describe("an MCP server reconnected after a failed call is bridged again", () =>
   let resetConfig: () => void;
   let clock = Date.UTC(2026, 9, 9, 12);
 
-  const writeConfig = (servers: Record<string, { autoStart: boolean }>) => {
+  const writeConfig = (servers: Record<string, { autoStart: boolean }>, autoReconnect = true) => {
     writeFileSync(configPath, JSON.stringify({
       mcp: {
-        autoReconnect: true,
+        autoReconnect,
         servers: Object.fromEntries(Object.entries(servers).map(([name, { autoStart }]) =>
           [name, { transport: "stdio", command: "echo", args: [], autoStart }])),
       },
@@ -379,5 +379,40 @@ describe("an MCP server reconnected after a failed call is bridged again", () =>
     expect(bridged("reader")).toEqual([]);
     expect(live("reader")).toBeUndefined();
     expect(fake.made.at(-1)!.disconnects).toBe(1);
+  });
+
+  // E2E 2026-10-22: the playwright container went away mid-run. The gateway's own browser tools
+  // call the connection directly (callPlaywrightTool), past the bridged tools' reconnect, and every
+  // browser call after it failed with "Not connected" until the gateway restarted.
+  describe("the gateway's own browser tools", () => {
+    let callPlaywrightTool: typeof import("../tools/multimodal.js").callPlaywrightTool;
+    beforeAll(async () => { ({ callPlaywrightTool } = await import("../tools/multimodal.js")); });
+
+    it("reconnect the server when its connection is gone, and send the call once more", async () => {
+      const old = blip("playwright");
+      fake.answers["browser_snapshot"] = page(`${PUBLIC}/katalog`);
+
+      expect(await callPlaywrightTool("browser_snapshot", {})).toBe(page(`${PUBLIC}/katalog`));
+      const now = live("playwright")!;
+      expect(now.id).not.toBe(old.id);
+      expect(old.disconnects).toBe(1);
+      expect(fake.calls).toEqual([`#${now.id} browser_snapshot`]);
+    });
+
+    it("leave a call the server may still be running alone: a timeout is not a lost connection", async () => {
+      const conn = live("playwright")!;
+      conn.client.callTool = async () => { throw new Error("MCP error -32001: Request timed out"); };
+
+      await expect(callPlaywrightTool("browser_snapshot", {})).rejects.toThrow(/timed out/);
+      expect(live("playwright")).toBe(conn);
+    });
+
+    it("stay down when mcp.autoReconnect is off", async () => {
+      writeConfig({ playwright: { autoStart: true }, reader: { autoStart: true } }, false);
+      const old = blip("playwright");
+
+      await expect(callPlaywrightTool("browser_snapshot", {})).rejects.toThrow(/Connection closed/);
+      expect(live("playwright")).toBe(old);
+    });
   });
 });

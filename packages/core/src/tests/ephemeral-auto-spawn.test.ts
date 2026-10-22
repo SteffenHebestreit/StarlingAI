@@ -91,7 +91,7 @@ function makeConfig(ws: string) {
       },
     },
     // No matching sub-agents — forces low-confidence routing
-    subAgents: {},
+    subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
     guardrails: { enabled: false },
   };
 }
@@ -132,9 +132,11 @@ describe("G34: ephemeral auto-spawn", () => {
           architectAgentName: "agent_architect",
         },
       },
-      subAgents: {},
+      subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
     }), "utf-8");
     process.env["SAI_CONFIG_PATH"] = cfgPath;
+    // The loader fixes its config source when first imported, and afterEach imported it last.
+    vi.resetModules();
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -185,9 +187,11 @@ describe("G34: ephemeral auto-spawn", () => {
           architectAgentName: "agent_architect",
         },
       },
-      subAgents: {},
+      subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
     }), "utf-8");
     process.env["SAI_CONFIG_PATH"] = cfgPath;
+    // The loader fixes its config source when first imported, and afterEach imported it last.
+    vi.resetModules();
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),
@@ -248,9 +252,11 @@ describe("G34: ephemeral auto-spawn", () => {
           architectAgentName: "agent_architect",
         },
       },
-      subAgents: {},
+      subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
     }), "utf-8");
     process.env["SAI_CONFIG_PATH"] = cfgPath;
+    // The loader fixes its config source when first imported, and afterEach imported it last.
+    vi.resetModules();
 
     const [{ getTool }] = await Promise.all([
       import("../tools/registry.js"),

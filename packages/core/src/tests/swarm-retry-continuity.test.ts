@@ -358,10 +358,12 @@ describe("H1.2: architect-spawned ephemeral agents always run in-process", () =>
           architectAgentName: "agent_architect",
         },
       },
-      subAgents: {},
+      subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
       guardrails: { enabled: false },
     }), "utf-8");
     process.env["SAI_CONFIG_PATH"] = join(ws, "starlingai.json");
+    // The loader fixes its config source when first imported, and afterEach imported it last.
+    vi.resetModules();
 
     // Architect LLM returns a spec with web_search (a gateway-bound tool)
     completeMock.mockResolvedValue({
