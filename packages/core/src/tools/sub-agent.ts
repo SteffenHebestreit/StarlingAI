@@ -1006,7 +1006,13 @@ function buildDelegationFailureMessage(title: string, detail: string, opts?: { p
   return `${prefix}\n${trimmedDetail}`;
 }
 
-async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: string[]): Promise<AgentRoutingCandidate[]> {
+async function routeAgentCandidates(
+  query: string,
+  ctx: ToolContext,
+  exclude: string[],
+  /** Filled with the router's near misses when no agent was ranked at any confidence. */
+  nearMissesOut?: Array<{ name: string; score: number }>,
+): Promise<AgentRoutingCandidate[]> {
   const excluded = new Set(exclude);
   if (ctx.currentAgentName) {
     excluded.add(ctx.currentAgentName);
@@ -1061,6 +1067,7 @@ async function routeAgentCandidates(query: string, ctx: ToolContext, exclude: st
 
     // Total routing failure — no agent at any confidence. Auto-record for self-improvement.
     if (candidates.length === 0) {
+      nearMissesOut?.push(...(low.nearMisses ?? []).filter((miss) => !excluded.has(miss.name)));
       recordCapabilityGap({
         description: `Delegation failed — no agent found for task: "${query.slice(0, 300)}"`,
         exampleInput: query.slice(0, 500),
@@ -1813,8 +1820,26 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // Run first for all undirected delegations — deterministic, uses
       // accumulated outcome data, and incurs no extra latency.
       if (candidateQueue.length === 0) {
-        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting());
+        const nearMisses: Array<{ name: string; score: number }> = [];
+        const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting(), nearMisses);
         await settleUserFile(allRoutingCandidates);
+        // A SCENE'S OWN AGENT BEFORE NO AGENT. Inside a scene the agents a delegation may reach are
+        // the few chosen for that work (ctx.allowedAgents), and the router's floor, set for the whole
+        // catalog, can leave every one of them under it: in the E2E run of 2026-10-22 a
+        // verified_research_brief step asked for the briefing, the router ranked nothing, its near
+        // misses were source_verifier at 0.714 and evidence_analyst at 0.700, and the delegation
+        // failed with no agent tried. The nearest one that can hand back what the step asks for is
+        // kept as the pick the queue falls back to when no ephemeral agent is made. Outside a scene
+        // a near miss stays telemetry (agent-routing.ts).
+        if (allRoutingCandidates.length === 0 && (ctx.allowedAgents?.length ?? 0) > 0) {
+          const nearest = nearMisses.find((miss) => agentCanFulfillArtifactTask(miss.name, request, ctx));
+          if (nearest) {
+            underThresholdPick ??= {
+              name: nearest.name, description: "", model: "", confidence: "low", score: nearest.score,
+              matchedTerms: [], capabilities: [], tags: [],
+            };
+          }
+        }
         // THE TURN TRIGGER, for a routed pick. The research gate reads the task's words, which match
         // English only, and the router ranks by topic. On the E2E run of 2026-10-08 a plan step
         // asking in German to fetch a page named an agent the catalog does not have (web_crawler),

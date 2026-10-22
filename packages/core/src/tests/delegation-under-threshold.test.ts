@@ -16,7 +16,7 @@ import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.j
 const runner = vi.hoisted(() => vi.fn());
 const architect = vi.hoisted(() => vi.fn());
 const audit = vi.hoisted(() => vi.fn());
-const ranking = vi.hoisted(() => ({ current: [] as Array<{ name: string; score: number }> }));
+const ranking = vi.hoisted(() => ({ current: [] as Array<{ name: string; score: number }>, near: [] as Array<{ name: string; score: number }> }));
 
 vi.mock("../agent/sub-agent.js", () => ({
   // runSubAgent is how the architect is asked for its spec; runSubAgentWithStats runs a delegation.
@@ -40,7 +40,8 @@ vi.mock("../tools/agent-routing.js", async (importOriginal) => {
         name: entry.name, description: `${entry.name} test agent`, model: "mock", confidence: "high" as const,
         score: entry.score, matchedTerms: [], capabilities: [], tags: [],
       })),
-      weakCandidates: [], gated: false, trippedAgents: [], allLowConfidence: false, nearMisses: [],
+      weakCandidates: [], gated: false, trippedAgents: [], allLowConfidence: false,
+      nearMisses: ranking.current.length > 0 ? [] : ranking.near.filter((entry) => !(opts?.excludeAgents ?? []).includes(entry.name)),
     }),
   };
 });
@@ -70,15 +71,16 @@ describe("a routed pick under the threshold", () => {
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
   };
-  const delegate = async (sessionId: string) => {
+  const delegate = async (sessionId: string, scope: Partial<ToolContext> = {}) => {
     const { getTool } = await import("../tools/registry.js");
     await import("../tools/sub-agent.js");
-    return getTool("delegate_to_agent")!.execute({ task: TASK, deliverable: "file" }, { sessionId, workspacePath: tempDir } as ToolContext);
+    return getTool("delegate_to_agent")!.execute({ task: TASK, deliverable: "file" }, { sessionId, workspacePath: tempDir, ...scope } as ToolContext);
   };
 
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-under-threshold-"));
     ranking.current = [{ name: "content_writer", score: 0.745 }, { name: "web_coder", score: 0.724 }];
+    ranking.near = [];
     runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
       output: "Die Hauptüberschrift wurde ersetzt.",
       artifacts: [{ outputPath: "generated/aktionen/herbst.html", sourceTool: "edit_file" }],
@@ -136,6 +138,29 @@ describe("a routed pick under the threshold", () => {
     expect(rows("architect_fallback_failed")).toEqual([
       expect.objectContaining({ reason: "architect_agent_missing", architectAgentName: "agent_architect" }),
     ]);
+  }, 30_000);
+
+  // E2E 2026-10-22: inside the verified_research_brief scene the router ranked none of the scene's
+  // agents; its near misses were source_verifier (0.714) and evidence_analyst (0.700).
+  it("runs a scene's nearest agent when the router ranked none of them", async () => {
+    await writeConfig(true, false);
+    ranking.current = [];
+    ranking.near = [{ name: "web_coder", score: 0.714 }, { name: "content_writer", score: 0.7 }];
+    const result = await delegate("under-threshold-scene-near-miss", { allowedAgents: ["content_writer", "web_coder"] });
+
+    expect(ranAgents()).toEqual(["web_coder"]);
+    expect(result.success).toBe(true);
+    expect(rows("delegation_routing_under_threshold_run")).toEqual([expect.objectContaining({ agent: "web_coder", score: 0.714 })]);
+  }, 30_000);
+
+  it("leaves a near miss outside a scene as it was: no agent", async () => {
+    await writeConfig(true, false);
+    ranking.current = [];
+    ranking.near = [{ name: "web_coder", score: 0.714 }];
+    const result = await delegate("under-threshold-open-near-miss");
+
+    expect(ranAgents()).toEqual([]);
+    expect(result.success).toBe(false);
   }, 30_000);
 
   it("leaves the task to the ephemeral agent the architect makes", async () => {
