@@ -850,6 +850,17 @@ async function findReusableSessionEvidence(
   if (!enoughEvidence) {
     return null;
   }
+  // A REPEAT IS SERVED, THE NEXT AGENT RUNS. What this turn gathered stands in for a delegation that
+  // would gather it again: the agent asked has already returned a result on this subject (every
+  // completed run leaves one, appendPartialResult). An agent that has not is being asked for its own
+  // work on that evidence — a ledger, a verification, a summary — and the evidence handed back is
+  // its input, not its result. In the E2E run of 2026-10-22 the verified_research_brief scene's step
+  // delegated to evidence_analyst, then to source_verifier, each with the researcher's findings in
+  // the task; both were served those findings in a second, neither ran, and the step reported a
+  // reuse loop and ended with nothing analysed or verified.
+  if (!relevantPartials.some((match) => match.agentName === candidate)) {
+    return null;
+  }
 
   return {
     output: formatReusableSessionEvidenceOutput(relevantFacts, relevantPartials),
