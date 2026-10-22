@@ -144,6 +144,7 @@ export type CoreAuditEventType =
   | "long_running_generation_auto_resolved"
   // Progress verifier — oversight for max-effort silent-unbounded runs
   | "progress_verifier_intervened"
+  | "sub_agent_table_compute_nudged"
   // Max-effort turn oversight — orchestrator-level re-plan / never-empty floor
   | "turn_oversight_redirected"
   | "turn_oversight_floor"
