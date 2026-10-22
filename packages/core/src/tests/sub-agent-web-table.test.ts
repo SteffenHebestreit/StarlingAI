@@ -381,6 +381,33 @@ describe("a table read on several pages", () => {
     expect(nudges()).toHaveLength(1);
   }, 30_000);
 
+  // The next run called web_table on its own, for the open tab only (page 3 of 3), and counted the
+  // other pages by eye.
+  const readOnly = (...urls: string[]): ToolResult => ({
+    success: true,
+    output: `max(column 2 "Preis") = 79,00 — all 6 rows\nread: ${urls.join(", ")}`,
+    metadata: { webTable: { source: "tab", urls, finalUrls: urls, pagesRead: urls.length, computed: [] } },
+  });
+  const P1 = "http://93.184.215.14/katalog/seite-1.html";
+  const P2 = "http://93.184.215.14/katalog/seite-2.html";
+
+  it("asks when web_table read only some of the pages, naming the rest", async () => {
+    await runProbe(
+      [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), toolCall("t1", "web_table", { source: "tab", aggregates: ["max"] }), text(DRAFT), text("KEEP")],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click", "web_table"], fakes: { ...browse(), web_table: () => readOnly(P2) } },
+    );
+    expect(nudges()).toHaveLength(1);
+    expect(lastUserMessage()).toContain(`web_table read only 1 of them, not ${P1}.`);
+  }, 30_000);
+
+  it("does not ask when web_table read every page the table was seen on", async () => {
+    await runProbe(
+      [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), toolCall("t1", "web_table", { url: [P1, P2], aggregates: ["count"] }), text("Unter 50 € kosten 8 Artikel.")],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click", "web_table"], fakes: { ...browse(), web_table: () => readOnly(P1, P2) } },
+    );
+    expect(nudges()).toEqual([]);
+  }, 30_000);
+
   it("does not ask for a table seen on one page only", async () => {
     await runProbe(
       [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), text(DRAFT)],

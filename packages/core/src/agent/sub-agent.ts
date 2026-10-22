@@ -4478,6 +4478,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // The pages this run saw a table on (pageShowingTable), for the final-answer nudge below: a
     // table spread over pages is computed with web_table, not counted by eye.
     const tablePagesSeen = new Set<string>();
+    // The pages a web_table call read (its urls and finalUrls, comparablePageUrl form).
+    const tablePagesComputed = new Set<string>();
     let tableComputeDraft: string | null = null;
     // The figure keys of the values web_table computed in this run (its counts, sums and averages,
     // never a min or a max, at most 32), handed up as computedAggregateKeys: an aggregate over an
@@ -6993,12 +6995,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         // Its prompt already says to compute such figures with the table tool; nothing in the run
         // held it to that. Whether the answer states a count or a total is in its words, in any
         // language, so the model decides: the run saw a table on two or more pages, has web_table,
-        // has not called it, and is asked once to compute what its answer states over those rows,
-        // or to keep the answer (KEEP), which then stands as it was written.
+        // has not had it read every one of them, and is asked once to compute what its answer
+        // states over those rows, or to keep the answer (KEEP), which then stands as it was
+        // written. Every one: in the next run it called web_table on its own, for the minimum and
+        // the maximum of the open tab, which showed page 3 of 3, and counted the rest by eye.
         if (
           tableComputeDraft === null
           && tablePagesSeen.size >= 2
-          && !toolNames.includes("web_table")
+          && [...tablePagesSeen].some((page) => !tablePagesComputed.has(page))
           && tools.some((tool) => tool.name === "web_table")
           && !blockedToolReasons.has("web_table")
           && iterations + 1 < maxIterations
@@ -7011,12 +7015,16 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           if (draft.length > 0) {
             tableComputeDraft = draft;
             const pages = [...tablePagesSeen];
+            const uncovered = pages.filter((page) => !tablePagesComputed.has(page));
             history.push({ role: "assistant", content: draft });
             history.push({
               role: "user",
               content: [
-                `You read a table on ${pages.length} pages (${pages.slice(0, 8).join(", ")}) and computed nothing over its rows.`,
-                "If your answer states a count, a total, an average, a minimum or a maximum over those rows, compute it now with one web_table call: url as the list of those pages, the column, aggregates, and where for a filter. It reads the pages itself. Then answer with what it returned.",
+                `You read a table on ${pages.length} pages (${pages.slice(0, 8).join(", ")}) and `
+                  + (uncovered.length === pages.length
+                    ? "computed nothing over its rows."
+                    : `web_table read only ${pages.length - uncovered.length} of them, not ${uncovered.slice(0, 8).join(", ")}.`),
+                "If your answer states a count, a total, an average, a minimum or a maximum over those rows, compute it now with one web_table call: url as the list of all those pages, the column, aggregates, and where for a filter. It reads the pages itself. Then answer with what it returned.",
                 "If your answer states none of these, reply with just KEEP.",
               ].join("\n"),
             });
@@ -8422,7 +8430,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
             const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; computed?: unknown } | undefined;
             for (const list of [webTable?.urls, webTable?.finalUrls]) {
               if (!Array.isArray(list)) continue;
-              for (const url of list) if (typeof url === "string") readPageUrls.add(comparablePageUrl(url));
+              for (const url of list) {
+                if (typeof url !== "string") continue;
+                readPageUrls.add(comparablePageUrl(url));
+                tablePagesComputed.add(comparablePageUrl(url));
+              }
             }
             // Only what web_table computed: a min or a max is a cell's value, and recorded from
             // every aggregate, a max that a 10-row listing showed waived its coverage check.

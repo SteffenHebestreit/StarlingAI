@@ -760,6 +760,7 @@ describe("create_ephemeral_agent policy", () => {
             },
           },
         },
+        subAgents: { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } },
       }),
     );
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");

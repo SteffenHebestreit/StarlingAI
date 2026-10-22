@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolContext } from "../tools/registry.js";
@@ -422,6 +422,12 @@ describe("the research gate's turn trigger", () => {
   }, 30_000);
 
   it("keeps a builder on its step after the architect fallback ran an ephemeral agent", async () => {
+    // The deployment this models has its architect agent: the fallback asks only one that exists.
+    const configFile = join(tempDir, "starlingai.json");
+    const withArchitect = JSON.parse(readFileSync(configFile, "utf8")) as { subAgents: Record<string, unknown> };
+    withArchitect.subAgents["agent_architect"] = { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 };
+    writeFileSync(configFile, JSON.stringify(withArchitect), "utf8");
+    (await import("../config/loader.js")).resetConfigForTests();
     runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({
       output: args.agentName === "agent_architect"
         ? JSON.stringify({ agentName: "site_scout", description: "Reads one website.", systemPrompt: "Read the site and report.", tools: ["web_search", "web_fetch"], maxIterations: 3 })
