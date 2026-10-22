@@ -310,7 +310,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1604 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
 | `mode` | packages/core/src/config/schema.ts:536 | 161 |
-| `model` | packages/core/src/config/schema.ts:1299 | 311 |
+| `model` | packages/core/src/config/schema.ts:1299 | 312 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1862 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1877 | 4 |
