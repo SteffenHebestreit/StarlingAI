@@ -506,6 +506,61 @@ describe("swarm orchestration tools", () => {
     expect(runSubAgentWithStatsMock.mock.calls.map((c) => c[0].agentName)).toContain("image_sourcer");
   }, 30_000);
 
+  it("runs the agent asked to work on this turn's evidence, and serves only a repeat from it (E2E 2026-10-22)", async () => {
+    // The verified_research_brief step delegated to evidence_analyst, then source_verifier, each with
+    // the researcher's findings in its task. Both were served those findings back and never ran.
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-reuse-next-agent-"));
+    tempDirs.push(tempDir);
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      agents: { defaults: { model: { primary: "mock-model" } } },
+      subAgents: {
+        researcher: {
+          description: "Research specialist.",
+          tools: ["web_search", "web_fetch", "share_finding"],
+          capabilities: ["research", "documentation lookup"],
+          maxIterations: 4,
+        },
+        evidence_analyst: {
+          description: "Builds an evidence ledger from gathered findings.",
+          tools: ["read_shared_facts", "share_finding"],
+          capabilities: ["evidence-ledger construction", "source-attribution preservation"],
+          maxIterations: 4,
+        },
+      },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    vi.resetModules();
+
+    const sessionId = "session-reuse-next-agent";
+    const memory = await import("../swarm/memory.js");
+    await memory.writeSharedFact(sessionId, "kestrel_founded", "Kestrel Lampenbau founded 1974 (source: http://kestrel-lampen.test/)");
+    await memory.writeSharedFact(sessionId, "kestrel_staff", "Kestrel Lampenbau employs 212 people (source: http://kestrel-lampen.test/)");
+    await memory.appendPartialResult({
+      sessionId, taskId: "task_1", agentName: "researcher",
+      content: "Kestrel Lampenbau: founded 1974, 212 employees, warehouses Ostkai and Lindenhof (source: http://kestrel-lampen.test/)",
+      ts: new Date().toISOString(),
+    });
+    const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
+    const delegate = getTool("delegate_to_agent")!;
+    const routingQuery = "Kestrel Lampenbau founded employees source";
+
+    const analysed = await delegate.execute({
+      agentName: "evidence_analyst", routingQuery, deliverable: "answer",
+      task: "Build the evidence ledger for Kestrel Lampenbau from these findings, keeping each source: founded 1974, 212 employees (source: http://kestrel-lampen.test/).",
+    }, { sessionId, workspacePath: tempDir });
+    expect(analysed.metadata?.["reusedFromSessionMemory"]).not.toBe(true);
+    expect(runSubAgentWithStatsMock.mock.calls.map((c) => c[0].agentName)).toEqual(["evidence_analyst"]);
+
+    // The researcher asked again for what it already returned is a repeat: served, not re-run.
+    const repeated = await delegate.execute({
+      agentName: "researcher", routingQuery, deliverable: "answer",
+      task: "Find the founding year and staff count of Kestrel Lampenbau with sources.",
+    }, { sessionId, workspacePath: tempDir });
+    expect(repeated.metadata?.["reusedFromSessionMemory"]).toBe(true);
+    expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
   it("ignores undefined fallback agents instead of attempting them", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-swarm-delegate-"));
     tempDirs.push(tempDir);

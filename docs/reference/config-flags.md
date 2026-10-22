@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:57 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:212 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:654 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:951 | 70 |
+| `deliverable` | packages/core/src/config/schema.ts:951 | 71 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:414 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:417 | 1 |
 | `deny` | packages/core/src/config/schema.ts:1533 | 17 |
@@ -310,7 +310,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1604 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:887 | 1 |
 | `mode` | packages/core/src/config/schema.ts:536 | 161 |
-| `model` | packages/core/src/config/schema.ts:1299 | 311 |
+| `model` | packages/core/src/config/schema.ts:1299 | 312 |
 | `modelModeration` | packages/core/src/config/schema.ts:1295 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1862 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1877 | 4 |
@@ -421,7 +421,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:608 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:983 | 159 |
+| `role` | packages/core/src/config/schema.ts:983 | 160 |
 | `roles` | packages/core/src/config/schema.ts:1520 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:459 | 1 |
 | `routing` | packages/core/src/config/schema.ts:276 | 118 |

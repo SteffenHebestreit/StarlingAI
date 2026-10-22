@@ -144,6 +144,7 @@ export type CoreAuditEventType =
   | "long_running_generation_auto_resolved"
   // Progress verifier — oversight for max-effort silent-unbounded runs
   | "progress_verifier_intervened"
+  | "sub_agent_table_compute_nudged"
   // Max-effort turn oversight — orchestrator-level re-plan / never-empty floor
   | "turn_oversight_redirected"
   | "turn_oversight_floor"
@@ -226,6 +227,7 @@ export type CoreAuditEventType =
   | "delegation_tab_reader_saw_blank_tab"
   | "delegation_routing_embedding_degraded"
   | "delegation_routing_shortened_recovered"
+  | "delegation_routing_under_threshold_run"
   | "delegation_depth_ceiling_enforced"
   | "delegation_halted_operator_stop"
   | "delegation_halted_partial_evidence"

@@ -440,3 +440,41 @@ describe("record_plan — a reuse step that names no workflow", () => {
     expect(output).not.toMatch(/no workflow/);
   });
 });
+
+describe("record_plan — a direct step names a tool the caller has", () => {
+  // E2E 2026-10-22: an orchestration-only turn planned read_file and edit_file as direct steps. The
+  // folded run refused both, the plan counted as a failed delegation, and the warden stopped the turn
+  // after the next one.
+  const orchestrator = { sessionId: "record-plan-reach", workspacePath: "/w", allowedTools: ["delegate_to_agent", "record_plan"], loadableTools: ["web_search"] };
+
+  it("refuses the plan, names each such step, and records nothing", async () => {
+    const result = await getTool("record_plan")!.execute({
+      objective: "update the heading",
+      steps: [
+        { id: "s1", description: "read the page", kind: "direct", tool: "read_file", toolArgs: { path: "a.html" } },
+        { id: "s2", description: "look it up", kind: "direct", tool: "web_search", toolArgs: { query: "x" } },
+        { id: "s3", description: "change it", kind: "direct", tool: "edit_file", toolArgs: { path: "a.html" } },
+      ],
+    }, orchestrator as never);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/s1 \(read_file\), s3 \(edit_file\)/);
+    expect(result.error).not.toMatch(/web_search/);
+    expect(result.error).toMatch(/"delegate" step/);
+
+    const { loadTurnPlan } = await import("../agent/turn-plan.js");
+    expect(await loadTurnPlan("record-plan-reach")).toBeNull();
+  });
+
+  it("records a plan whose direct steps it can call, or that are its own reasoning", async () => {
+    const result = await getTool("record_plan")!.execute({
+      objective: "look it up",
+      steps: [
+        { id: "s1", description: "search", kind: "direct", tool: "web_search", toolArgs: { query: "x" } },
+        { id: "s2", description: "decide the framing", kind: "direct" },
+        { id: "s3", description: "edit the page", kind: "delegate" },
+      ],
+    }, { ...orchestrator, sessionId: "record-plan-reach-ok" } as never);
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+  });
+});

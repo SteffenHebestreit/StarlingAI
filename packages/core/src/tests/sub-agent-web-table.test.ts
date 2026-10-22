@@ -316,3 +316,99 @@ describe("web_table in a sub-agent run", () => {
     expect(toolMessages().some((message) => message.startsWith("sum(column 4 \"Südtal\") = 8 "))).toBe(true);
   }, 30_000);
 });
+
+/**
+ * E2E 2026-10-22: browser_agent read a three-page catalogue, never called web_table, and answered
+ * "7 Artikel unter 50 €" beside a list of eight. A run that saw a table on two or more pages and
+ * has not computed over it is asked once, before its answer stands.
+ */
+describe("a table read on several pages", () => {
+  afterEach(async () => {
+    delete process.env["SAI_CONFIG_PATH"];
+    recordedCalls.length = 0;
+    auditEvents.length = 0;
+    responseQueue.mockReset();
+    vi.resetModules();
+    (await import("../config/loader.js")).resetConfigForTests();
+    await (await import("../swarm/memory.js")).resetSharedMemoryForTests();
+  });
+
+  const page = (n: number, table = true): ToolResult => ({
+    success: true,
+    output: [
+      "### Page",
+      `- Page URL: http://93.184.215.14/katalog/seite-${n}.html`,
+      `- Page Title: Katalog ${n}`,
+      "### Snapshot",
+      "```yaml",
+      table ? "- table [ref=e5]:\n  - row \"Artikel Preis\" [ref=e6]\n  - row \"Zange 12,90 €\" [ref=e7]" : "- paragraph [ref=e5]: Kontakt",
+      "```",
+    ].join("\n"),
+  });
+  const browse = (secondHasTable = true) => ({
+    browser_navigate: () => page(1),
+    browser_click: () => page(2, secondHasTable),
+  });
+  const DRAFT = "Unter 50 € kosten 7 Artikel.";
+  const nudges = () => auditEvents.filter((e) => e.event === "sub_agent_table_compute_nudged");
+  const lastUserMessage = () => String(recordedCalls.at(-1)!.messages.filter((m) => m.role === "user").at(-1)!.content);
+
+  it("asks once to compute over it, and keeps the answer as written on KEEP", async () => {
+    const { result } = await runProbe(
+      [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), text(DRAFT), text("KEEP")],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click", "web_table"], fakes: { ...browse(), web_table: () => computed("8") } },
+    );
+    expect(nudges()).toHaveLength(1);
+    expect(nudges()[0]!.payload["pages"]).toBe(2);
+    expect(lastUserMessage()).toContain("http://93.184.215.14/katalog/seite-1.html, http://93.184.215.14/katalog/seite-2.html");
+    expect(result.output).toContain(DRAFT);
+    expect(result.output).not.toMatch(/KEEP/);
+  }, 30_000);
+
+  it("answers with what web_table computed when the model computes", async () => {
+    const { result, spies } = await runProbe(
+      [
+        toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }),
+        toolCall("c1", "browser_click", { ref: "e9" }),
+        text(DRAFT),
+        toolCall("t1", "web_table", { url: ["http://93.184.215.14/katalog/seite-1.html", "http://93.184.215.14/katalog/seite-2.html"], column: "Preis", aggregates: ["count"], where: [{ column: "Preis", op: "<", value: 50 }] }),
+        text("Unter 50 € kosten 8 Artikel."),
+      ],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click", "web_table"], fakes: { ...browse(), web_table: () => computed("8") } },
+    );
+    expect(spies["web_table"]).toHaveBeenCalledTimes(1);
+    expect(result.output).toContain("8 Artikel");
+    expect(nudges()).toHaveLength(1);
+  }, 30_000);
+
+  it("does not ask for a table seen on one page only", async () => {
+    await runProbe(
+      [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), text(DRAFT)],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click", "web_table"], fakes: { ...browse(false), web_table: () => computed("8") } },
+    );
+    expect(nudges()).toEqual([]);
+  }, 30_000);
+
+  it("does not ask a run without web_table", async () => {
+    await runProbe(
+      [toolCall("n1", "browser_navigate", { url: "http://93.184.215.14/katalog/" }), toolCall("c1", "browser_click", { ref: "e9" }), text(DRAFT)],
+      { maxIterations: 8, agentTools: ["browser_navigate", "browser_click"], fakes: browse() },
+    );
+    expect(nudges()).toEqual([]);
+  }, 30_000);
+});
+
+describe("pageShowingTable", () => {
+  it.each([
+    ["browser_click", {}, "- Page URL: http://h.test/a/seite-2.html\n```yaml\n- table [ref=e1]:\n  - row", "http://h.test/a/seite-2.html"],
+    ["browser_navigate", { url: "http://h.test/a/" }, "- Page URL: http://h.test/a/seite-1.html#top\n- grid [ref=e1]", "http://h.test/a/seite-1.html"],
+    ["browser_snapshot", {}, "- Page URL: http://h.test/x\n- list [ref=e1]:\n  - listitem: table of contents", null],
+    ["web_fetch", { url: "http://h.test/p" }, "| Artikel | Preis |\n|---|---|\n| Zange | 12,90 |", "http://h.test/p"],
+    ["web_fetch", { url: "http://h.test/p" }, "<table><tr><td>1</td></tr></table>", "http://h.test/p"],
+    ["web_fetch", { url: "http://h.test/p" }, "Price | per | unit", null],
+    ["read_file", { path: "a.md" }, "| a |\n|---|", null],
+  ])("%s → %s", async (tool, args, result, expected) => {
+    const { pageShowingTable } = await import("../agent/sub-agent.js");
+    expect(pageShowingTable(tool, args as Record<string, unknown>, result)).toBe(expected);
+  });
+});

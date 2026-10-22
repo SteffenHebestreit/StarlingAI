@@ -850,6 +850,17 @@ async function findReusableSessionEvidence(
   if (!enoughEvidence) {
     return null;
   }
+  // A REPEAT IS SERVED, THE NEXT AGENT RUNS. What this turn gathered stands in for a delegation that
+  // would gather it again: the agent asked has already returned a result on this subject (every
+  // completed run leaves one, appendPartialResult). An agent that has not is being asked for its own
+  // work on that evidence — a ledger, a verification, a summary — and the evidence handed back is
+  // its input, not its result. In the E2E run of 2026-10-22 the verified_research_brief scene's step
+  // delegated to evidence_analyst, then to source_verifier, each with the researcher's findings in
+  // the task; both were served those findings in a second, neither ran, and the step reported a
+  // reuse loop and ended with nothing analysed or verified.
+  if (!relevantPartials.some((match) => match.agentName === candidate)) {
+    return null;
+  }
 
   return {
     output: formatReusableSessionEvidenceOutput(relevantFacts, relevantPartials),
@@ -1298,6 +1309,11 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
   let biddingTried = false;
   let bestAutoMatchScore: number | undefined;
   let bestAutoMatchConfidence: "high" | "medium" | "low" | undefined;
+  // The top pick of a routing round whose candidates passed the gates but scored under
+  // skillMatchThreshold, so nothing was queued: an ephemeral agent is to take the task. When none can
+  // be made, this agent runs instead (see where the queue runs dry below).
+  let underThresholdPick: AgentRoutingCandidate | undefined;
+  let architectTried = false;
   let lastFailureWasInfrastructure = false;
   let bestPartialResult:
     | {
@@ -1692,6 +1708,36 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
     return routingCandidates;
   };
 
+  // Whether the architect may design an ephemeral agent for this task now. Not after an
+  // infrastructure-level failure (host unreachable, etc.): an ephemeral agent would face the exact
+  // same connectivity problem. And honor the substantive-partial-evidence keystone above: once an
+  // attempt left real usable evidence, do NOT escalate to an architect-built ephemeral either. The
+  // ephemeral starts cold, scopes itself from whatever shared facts are most recent (audit b5107ae4:
+  // it re-researched ONLY the TP4056 charger out of a whole device design), and its result then
+  // REPLACES the broader partial evidence. Surface the partial via the tail return instead — the
+  // orchestrator synthesizes from it.
+  const architectMayRun = (): boolean =>
+    !explicitAgentRequested
+    && !lastFailureWasInfrastructure
+    && !longRunningGenerationManager.isStopRequested(ctx.sessionId)
+    && !(bestPartialResult && partialResultHasSubstantiveEvidence(bestPartialResult.output));
+  /** The delegation's result from an ephemeral agent's run, or null when a partial result outranks it. */
+  const architectOutcome = (architectResult: ToolResult): ToolResult | null => {
+    clearTaskBids(taskId);
+    if (!architectResult.success && bestPartialResult) return null;
+    taskState.status = architectResult.success ? "completed" : "failed";
+    taskState.output = architectResult.success ? architectResult.output : undefined;
+    taskState.error = architectResult.success ? undefined : architectResult.error;
+    ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
+    publishSwarmState(ctx);
+    const architectFailures = architectResult.metadata?.["specialistToolFailures"];
+    if (Array.isArray(architectFailures)) specialistToolFailures.push(...architectFailures);
+    return {
+      ...architectResult,
+      metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success, ...withToolFailures() },
+    };
+  };
+
   while (true) {
     // Abort early if the parent turn was cancelled
     if (ctx.signal?.aborted) {
@@ -1859,6 +1905,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               score: topCandidate.score,
             });
             candidateQueue.push(topCandidate.name);
+          } else {
+            underThresholdPick ??= topCandidate;
           }
         }
       }
@@ -1911,6 +1959,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
               score: Number(top.score.toFixed(3)),
               confidence: top.confidence,
             }, { sessionId: ctx.sessionId });
+          } else if (top) {
+            underThresholdPick ??= top;
           }
         }
       }
@@ -1998,6 +2048,32 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           }
           candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
         }
+      }
+
+      // NEVER UNTRIED WHEN ROUTING HAD A PICK. A pick under skillMatchThreshold leaves the task to an
+      // ephemeral agent, and when none can be made (generation is off, or the architect returned no
+      // spec) the delegation used to fail with no agent tried. In the E2E run of 2026-10-22 an update
+      // of a workspace file was routed to content_writer at 0.745 under the deployment's 0.75 (the
+      // other four candidates within 0.02 of it), the architect's answer held no JSON, and the turn
+      // reported that no agent was available. The architect is asked here, first; the pick runs when
+      // it makes nothing.
+      if (candidateQueue.length === 0 && underThresholdPick && attemptedAgents.length === 0 && !architectTried && architectMayRun()) {
+        architectTried = true;
+        const architectResult = await runArchitectFallback(request.task, ctx);
+        const settled = architectResult ? architectOutcome(architectResult) : null;
+        if (settled) return settled;
+        logAudit("delegation_routing_under_threshold_run", {
+          taskTitle: title,
+          agent: underThresholdPick.name,
+          score: Number(underThresholdPick.score.toFixed(3)),
+          skillMatchThreshold,
+        }, { sessionId: ctx.sessionId });
+        routingCandidateMap.set(underThresholdPick.name, {
+          confidence: underThresholdPick.confidence,
+          matchedTerms: underThresholdPick.matchedTerms,
+          score: underThresholdPick.score,
+        });
+        candidateQueue.push(underThresholdPick.name);
       }
 
       if (candidateQueue.length === 0) break;
@@ -3015,40 +3091,17 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
 
   // ── Architect fallback ────────────────────────────────────────────────────
   // When routing found zero candidates (no agent was even tried), ask the LLM
-  // architect to design a purpose-built ephemeral agent for this task.
-  // Skip architect if the failure was infrastructure-level (host unreachable, etc.) —
-  // an ephemeral agent would face the exact same connectivity problem.
+  // architect to design a purpose-built ephemeral agent for this task. Asked
+  // where the queue first runs dry when routing had an under-threshold pick
+  // (underThresholdPick), so that agent can run if no ephemeral is made.
   if (
-    !explicitAgentRequested
-    && !lastFailureWasInfrastructure
-    && !longRunningGenerationManager.isStopRequested(ctx.sessionId)
-    // Honor the substantive-partial-evidence keystone above: once an attempt
-    // left real usable evidence, do NOT escalate to an architect-built
-    // ephemeral either. The ephemeral starts cold, scopes itself from whatever
-    // shared facts are most recent (audit b5107ae4: it re-researched ONLY the
-    // TP4056 charger out of a whole device design), and its result then
-    // REPLACES the broader partial evidence at the return below. Surface the
-    // partial via the tail return instead — the orchestrator synthesizes from it.
-    && !(bestPartialResult && partialResultHasSubstantiveEvidence(bestPartialResult.output))
+    !architectTried
+    && architectMayRun()
     && (attemptedAgents.length === 0 || shouldGenerateEphemeralAgent(bestAutoMatchScore, skillMatchThreshold))
   ) {
     const architectResult = await runArchitectFallback(request.task, ctx);
-    if (architectResult) {
-      clearTaskBids(taskId);
-      if (architectResult.success || !bestPartialResult) {
-        taskState.status = architectResult.success ? "completed" : "failed";
-        taskState.output = architectResult.success ? architectResult.output : undefined;
-        taskState.error = architectResult.success ? undefined : architectResult.error;
-        ensureSwarmState(ctx, request.task).updatedAt = new Date().toISOString();
-        publishSwarmState(ctx);
-        const architectFailures = architectResult.metadata?.["specialistToolFailures"];
-        if (Array.isArray(architectFailures)) specialistToolFailures.push(...architectFailures);
-        return {
-          ...architectResult,
-          metadata: { ...architectResult.metadata, taskId, attemptedAgents, skillMatchThreshold, bestAutoMatchScore, delegationSucceeded: architectResult.success, ...withToolFailures() },
-        };
-      }
-    }
+    const settled = architectResult ? architectOutcome(architectResult) : null;
+    if (settled) return settled;
   }
 
   if (bestPartialResult) {
