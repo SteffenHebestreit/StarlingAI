@@ -44,8 +44,8 @@
 import { REPO_ROOT, resolveOutDir, startLabProcess } from "../harness-lab/bootstrap.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
 class UsageError extends Error {}
 
@@ -207,7 +207,22 @@ async function main(): Promise<number> {
   });
   if (corpus.tasks.length === 0) throw new UsageError(`no runnable task under ${tasksDir} (try \`pnpm harness-lab import --write\`)`);
   const { runLabAttempt } = await import("../harness-lab/turn-runner.js");
-  const scratchRoot = join(outDir, "scratch");
+  // Attempt workspaces must be bindable into the code sandbox, which nothing under .starlingai is:
+  // under generated/ while the run lasts, moved under --out when it stops (harness-lab/scratch.ts).
+  const { archiveLabScratch, labScratchRoot } = await import("../harness-lab/scratch.js");
+  const scratchRoot = labScratchRoot(lab.liveWorkspacePath, runId);
+  // What an earlier run of the same parent left there when it was killed outright goes to its own --out.
+  const scratchParent = dirname(scratchRoot);
+  if (existsSync(scratchParent)) {
+    for (const stale of readdirSync(scratchParent)) {
+      const staleOut = join(dirname(outDir), stale);
+      if (stale !== basename(scratchRoot) && existsSync(staleOut)) archiveLabScratch(join(scratchParent, stale), staleOut);
+    }
+  }
+  pendingScratch = { root: scratchRoot, outDir, archive: archiveLabScratch };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => { archivePendingScratch(); process.exit(130); });
+  }
   const runsDir = join(outDir, "runs");
   mkdirSync(runsDir, { recursive: true });
   const runAttempt = async (task: (typeof corpus.tasks)[number], arm: import("../harness-lab/arm.js").LabArm, attempt: number) => {
@@ -411,7 +426,22 @@ async function main(): Promise<number> {
   return cycle.gate?.verdict === "no_verdict" ? 3 : 0;
 }
 
+/** The run's attempt workspaces, to move under its --out whichever way it stops. */
+let pendingScratch: { root: string; outDir: string; archive: (root: string, outDir: string) => void } | null = null;
+
+function archivePendingScratch(): void {
+  if (!pendingScratch) return;
+  const { root, outDir, archive } = pendingScratch;
+  pendingScratch = null;
+  try {
+    archive(root, outDir);
+  } catch (err) {
+    process.stderr.write(`harness-lab: could not move the attempt workspaces from ${root}: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}
+
 async function finish(): Promise<void> {
+  archivePendingScratch();
   const { flushAuditLog } = await import("../audit/logger.js");
   const { flushSessionStore } = await import("../agent/session.js");
   await flushAuditLog();
@@ -421,6 +451,7 @@ async function finish(): Promise<void> {
 main().then(
   (code) => process.exit(code),
   (err: unknown) => {
+    archivePendingScratch();
     if (err instanceof UsageError) {
       process.stderr.write(`harness-lab: ${err.message}\n`);
       process.exit(2);
