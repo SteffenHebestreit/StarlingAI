@@ -52,7 +52,7 @@ const TASK = "Öffne die Datei generated/aktionen/herbst.html, ersetze die Haupt
 
 describe("a routed pick under the threshold", () => {
   let tempDir = "";
-  const writeConfig = async (ephemeralEnabled: boolean) => {
+  const writeConfig = async (ephemeralEnabled: boolean, architect = true) => {
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
       workspacePath: tempDir,
       agents: {
@@ -62,6 +62,7 @@ describe("a routed pick under the threshold", () => {
       subAgents: {
         content_writer: { description: "Writes documents.", systemPrompt: "Test.", tools: ["read_file", "write_file", "edit_file"], maxIterations: 4 },
         web_coder: { description: "Builds web pages.", systemPrompt: "Test.", tools: ["read_file", "write_file", "edit_file"], maxIterations: 4 },
+        ...(architect ? { agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 } } : {}),
       },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
@@ -121,6 +122,20 @@ describe("a routed pick under the threshold", () => {
     expect(architect).not.toHaveBeenCalled();
     expect(ranAgents()).toEqual(["content_writer"]);
     expect(result.success).toBe(true);
+  }, 30_000);
+
+  // The deployment's architect agent was removed on 2026-08-15 while ephemeralGeneration stayed
+  // on: every fallback asked an agent that does not exist and failed as "No JSON object found".
+  it("runs without asking an architect agent the deployment does not have", async () => {
+    await writeConfig(true, false);
+    const result = await delegate("under-threshold-no-architect");
+
+    expect(architect).not.toHaveBeenCalled();
+    expect(ranAgents()).toEqual(["content_writer"]);
+    expect(result.success).toBe(true);
+    expect(rows("architect_fallback_failed")).toEqual([
+      expect.objectContaining({ reason: "architect_agent_missing", architectAgentName: "agent_architect" }),
+    ]);
   }, 30_000);
 
   it("leaves the task to the ephemeral agent the architect makes", async () => {

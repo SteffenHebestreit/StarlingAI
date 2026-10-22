@@ -257,6 +257,18 @@ function buildArchitectPrompt(task: string, previousContext?: string): string {
 async function requestArchitectSpec(task: string, ctx: ToolContext, previousContext?: string): Promise<ArchitectEphemeralSpec | null> {
   const settings = getEphemeralGenerationSettings();
   const architectAgentName = settings.architectAgentName;
+  // No agent of that name, no spec: asking one ran nothing and came back as "No JSON object found
+  // in architect response", which is how every architect fallback has failed since the agent was
+  // removed from the deployment (workspace/agents/00-platform.jsonc). Said as what it is.
+  const config = getConfig();
+  if (!withPromotedAgents(config.subAgents, ctx.workspacePath ?? config.workspacePath)[architectAgentName]) {
+    logAudit(
+      "architect_fallback_failed",
+      { reason: "architect_agent_missing", architectAgentName },
+      { sessionId: ctx.sessionId, severity: "warn" },
+    );
+    return null;
+  }
   const architectPrompt = buildArchitectPrompt(task, previousContext);
 
   try {

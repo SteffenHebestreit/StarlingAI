@@ -66,6 +66,7 @@ describe("the user's own words reach every delegated specialist", () => {
       subAgents: {
         researcher: { description: "Finds sources on the web.", systemPrompt: "Research.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
         summarizer: { description: "Summarizes findings into a short brief.", systemPrompt: "Summarize.", tools: ["read_file"], maxIterations: 4 },
+        agent_architect: { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 },
       },
     }), "utf8");
     process.env["SAI_CONFIG_PATH"] = join(tempDir, "starlingai.json");
