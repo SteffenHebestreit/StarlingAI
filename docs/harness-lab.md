@@ -54,6 +54,7 @@ The lab runs in a process of its own: on the host, or as a second process inside
 - **Candidate prompts are in memory only.** A candidate's prompts are laid over the loaded config in memory (`applyLabPromptOverlay`). That process can write neither the compiled config nor the runtime overlay.
 - **Shared stores are unset.** Redis, Postgres, Memgraph and QuestDB are switched off for the lab process. Its audit log and session store live under `--out`.
 - **Each attempt is sandboxed in its own workspace.** Every attempt runs in a fresh scratch workspace, on the `eval` channel, as a synthetic principal. Eval traffic stays out of skill statistics, distillation, the outcome ledger and retrieval credit.
+  - The scratch workspaces live under `generated/.harness-lab/<run>/` while the run lasts, because the code sandbox may bind nothing under `.starlingai` (the socket proxy refuses it: state and secrets live there). When the run stops, finished, paused or failed, they move to `<out>/scratch/` and `generated/` is left as it was.
 - **Tools that reach outside the scratch workspace are left out or stubbed.**
   - Left out: real infrastructure, desktops, mailboxes, credentials and the deployment's own config.
   - Stubbed: messages, schedules and writes to shared stores. The call and its arguments are recorded, but nothing runs.
