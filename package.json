@@ -68,7 +68,7 @@
       "@grpc/proto-loader>protobufjs": "^7.6.1",
       "@opentelemetry/otlp-transformer>protobufjs": "^8.4.1",
       "vitest": "3.2.6",
-      "dompurify": "^3.4.11",
+      "dompurify": "^3.4.17",
       "@opentelemetry/core": "^2.8.0",
       "qs": "^6.15.2",
       "ip-address": "^10.5.0",
