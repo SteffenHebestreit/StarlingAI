@@ -6,7 +6,7 @@ import { childLogger } from "../logger.js";
 import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { hubVoiceFor, requestHubSpeech } from "../multimodal/tts-stt-gateway.js";
 import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
-import { getMcpConnections } from "../mcp/registry.js";
+import { getMcpConnections, reconnectAfterFailedCall } from "../mcp/registry.js";
 import {
   ImageGenerationTimeoutError,
   ImageRenderTooLongError,
@@ -1851,23 +1851,47 @@ function adaptElementArgument(args: Record<string, unknown>, inputSchema: Record
   return args;
 }
 
+/**
+ * The MCP client's errors for a connection that is gone: the transport closed under a pending
+ * request, or a call made after it closed. Not a timeout: the server may still be running that
+ * call, and a reconnect would run it twice.
+ */
+const MCP_CONNECTION_GONE_RE = /\bNot connected\b|\bConnection closed\b/i;
+
 export async function callPlaywrightTool(toolName: string, args: Record<string, unknown>): Promise<string> {
   const connection = getMcpConnections().get("playwright");
   if (!connection) {
     throw new Error("Playwright MCP server is not connected");
   }
 
-  const availableTools = new Set((connection.tools ?? []).map((tool) => tool.name));
-  const resolvedToolName = toolName === "browser_screenshot" && !availableTools.has(toolName) && availableTools.has("browser_take_screenshot")
-    ? "browser_take_screenshot"
-    : toolName;
-
-  if (resolvedToolName !== toolName) {
-    log.info({ requestedToolName: toolName, resolvedToolName }, "Resolved legacy Playwright tool name");
+  const call = (conn: typeof connection) => {
+    const availableTools = new Set((conn.tools ?? []).map((tool) => tool.name));
+    const resolvedToolName = toolName === "browser_screenshot" && !availableTools.has(toolName) && availableTools.has("browser_take_screenshot")
+      ? "browser_take_screenshot"
+      : toolName;
+    if (resolvedToolName !== toolName) {
+      log.info({ requestedToolName: toolName, resolvedToolName }, "Resolved legacy Playwright tool name");
+    }
+    const schema = (conn.tools ?? []).find((tool) => tool.name === resolvedToolName)?.inputSchema;
+    return conn.client.callTool({ name: resolvedToolName, arguments: adaptElementArgument(args, schema) })
+      .then((result) => ({ result, resolvedToolName }));
+  };
+  // THE BROWSER COMES BACK WHEN ITS SERVER DOES. The gateway's browser tools call the playwright
+  // connection here, past the bridged tools' reconnect, so a server that went away left every
+  // later browser call failing with "Not connected" until the gateway restarted: in the E2E run
+  // of 2026-10-22 the playwright container went away mid-run and every browser step after it
+  // failed. A call that finds the connection gone reconnects the server (reconnectAfterFailedCall:
+  // mcp.autoReconnect, throttled) and is sent once more.
+  let answered: Awaited<ReturnType<typeof call>>;
+  try {
+    answered = await call(connection);
+  } catch (err) {
+    if (!MCP_CONNECTION_GONE_RE.test(err instanceof Error ? err.message : String(err))) throw err;
+    const reconnected = await reconnectAfterFailedCall("playwright");
+    if (!reconnected) throw err;
+    answered = await call(reconnected);
   }
-
-  const schema = (connection.tools ?? []).find((tool) => tool.name === resolvedToolName)?.inputSchema;
-  const result = await connection.client.callTool({ name: resolvedToolName, arguments: adaptElementArgument(args, schema) });
+  const { result, resolvedToolName } = answered;
   const output = (result.content as Array<{ type: string; text?: string }> | undefined)
     ?.map(item => (item.type === "text" ? (item.text ?? "") : JSON.stringify(item)))
     .join("\n")

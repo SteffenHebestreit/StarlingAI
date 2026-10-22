@@ -181,22 +181,16 @@ function _registerBridgedTool(
         } catch (err) {
           // One lazy reconnect + retry when the server dropped (config-gated, throttled),
           // so a restarted MCP server self-heals instead of every call staying dead.
-          if (getConfig().mcp?.autoReconnect) {
-            const last = _reconnectThrottle.get(serverName) ?? 0;
-            if (Date.now() - last >= MCP_RECONNECT_THROTTLE_MS) {
-              _reconnectThrottle.set(serverName, Date.now());
-              const reconnected = await reconnectServer(serverName);
-              // The server came back with the tools it lists now, which need not include this one;
-              // its tool is unregistered then, and the call is not retried on a server that no
-              // longer offers it.
-              if (reconnected && !reconnected.tools.some((tool) => tool.name === mcpToolName)) {
-                return { success: false, output: "", error: `MCP call failed: ${String(err)}. After reconnecting, ${serverName} no longer offers ${mcpToolName}.` };
-              }
-              if (reconnected) {
-                try { return await runCall(reconnected); }
-                catch (retryErr) { return { success: false, output: "", error: `MCP call failed after reconnect: ${String(retryErr)}` }; }
-              }
-            }
+          const reconnected = await reconnectAfterFailedCall(serverName);
+          // The server came back with the tools it lists now, which need not include this one;
+          // its tool is unregistered then, and the call is not retried on a server that no
+          // longer offers it.
+          if (reconnected && !reconnected.tools.some((tool) => tool.name === mcpToolName)) {
+            return { success: false, output: "", error: `MCP call failed: ${String(err)}. After reconnecting, ${serverName} no longer offers ${mcpToolName}.` };
+          }
+          if (reconnected) {
+            try { return await runCall(reconnected); }
+            catch (retryErr) { return { success: false, output: "", error: `MCP call failed after reconnect: ${String(retryErr)}` }; }
           }
           return { success: false, output: "", error: `MCP call failed: ${String(err)}` };
         }
@@ -244,6 +238,20 @@ async function guardBrowserCall(mcpToolName: string, args: Record<string, unknow
 // Per-server reconnect throttle so a flapping server can't trigger a reconnect storm.
 const _reconnectThrottle = new Map<string, number>();
 const MCP_RECONNECT_THROTTLE_MS = 10_000;
+
+/**
+ * The server connected again after a call to it failed: when mcp.autoReconnect is on, once per
+ * MCP_RECONNECT_THROTTLE_MS per server. Null when it was not tried or did not connect. Every
+ * caller of a server goes through here, the bridged mcp__<server>__* tools and the gateway's own
+ * browser tools alike (tools/multimodal.ts callPlaywrightTool).
+ */
+export async function reconnectAfterFailedCall(serverName: string): Promise<McpClientConnection | null> {
+  if (!getConfig().mcp?.autoReconnect) return null;
+  const last = _reconnectThrottle.get(serverName) ?? 0;
+  if (Date.now() - last < MCP_RECONNECT_THROTTLE_MS) return null;
+  _reconnectThrottle.set(serverName, Date.now());
+  return reconnectServer(serverName);
+}
 
 /**
  * Reconnect a SINGLE bridged server (not the whole fleet) after a failed call.

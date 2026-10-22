@@ -52,7 +52,7 @@ Every public schema field, where it is declared, and how many production files r
 | `automation` | packages/core/src/config/schema.ts:1155 | 12 |
 | `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 2 |
 | `autoPromoteToScene` | packages/core/src/config/schema.ts:1616 | 3 |
-| `autoReconnect` | packages/core/src/config/schema.ts:835 | 1 |
+| `autoReconnect` | packages/core/src/config/schema.ts:835 | 2 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
 | `autoStart` | packages/core/src/config/schema.ts:740 | 3 |
 | `backend` | packages/core/src/config/schema.ts:551 | 96 |
@@ -519,7 +519,7 @@ Every public schema field, where it is declared, and how many production files r
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:145 | 7 |
 | `topP` | packages/core/src/config/schema.ts:173 | 4 |
 | `translateGoal` | packages/core/src/config/schemas/decisions.ts:99 | 1 |
-| `transport` | packages/core/src/config/schema.ts:736 | 31 |
+| `transport` | packages/core/src/config/schema.ts:736 | 32 |
 | `triggers` | packages/core/src/config/schema.ts:1446 | 31 |
 | `trust` | packages/core/src/config/schema.ts:2134 | 20 |
 | `trustModelRouting` | packages/core/src/config/schema.ts:325 | 2 |
