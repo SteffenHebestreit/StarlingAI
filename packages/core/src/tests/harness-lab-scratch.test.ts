@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { archiveLabScratch, labScratchRoot } from "../harness-lab/scratch.js";
 import { resolveDockerWorkspaceBind } from "../tools/workspace-mount.js";
+// @ts-expect-error — plain .mjs, no types (as tests/docker-socket-proxy.test.ts imports it)
 import { isAllowedBindSource } from "../../../../docker/docker-socket-proxy/bind-policy.mjs";
 
 /**
