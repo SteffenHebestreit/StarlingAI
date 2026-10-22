@@ -387,6 +387,24 @@ export function comparablePageUrl(url: string): string {
 }
 
 /**
+ * The page a browser or fetch result showed a table on (comparablePageUrl form), or null. A browser
+ * result is read by its structure: the accessibility snapshot's `table`/`grid` node and the page
+ * address the browser reports, which is the page a click led to and where a redirect ended. A fetch
+ * result has an HTML or Markdown table, at the URL it was asked for.
+ */
+export function pageShowingTable(tool: string, args: Record<string, unknown> | undefined, result: string): string | null {
+  const browser = tool.startsWith("browser_") || tool.startsWith("mcp__playwright__");
+  if (!browser && tool !== "web_fetch") return null;
+  const table = browser
+    ? /^\s*- (?:table|grid)\b/m.test(result)
+    : /<table\b/i.test(result) || /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/m.test(result);
+  if (!table) return null;
+  const shown = browser ? /Page URL:\s*(\S+)/.exec(result)?.[1] : undefined;
+  const url = shown ?? (typeof args?.["url"] === "string" ? args["url"] : undefined);
+  return url ? comparablePageUrl(url) : null;
+}
+
+/**
  * Whether a web_table call may run after the evidence strip withdrew the gathering tools. web_table
  * is not a gathering tool (it reads no page without a table), so the strip leaves it callable, and
  * a run told "write the final answer now" could fetch ten new pages with it. Computing over pages
@@ -4457,6 +4475,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // The pages this run has read (web_fetch, browser_navigate and web_table, comparablePageUrl
     // form): after the evidence strip, web_table may compute over these and fetch nothing new.
     const readPageUrls = new Set<string>();
+    // The pages this run saw a table on (pageShowingTable), for the final-answer nudge below: a
+    // table spread over pages is computed with web_table, not counted by eye.
+    const tablePagesSeen = new Set<string>();
+    let tableComputeDraft: string | null = null;
     // The figure keys of the values web_table computed in this run (its counts, sums and averages,
     // never a min or a max, at most 32), handed up as computedAggregateKeys: an aggregate over an
     // 18-row listing is short by construction, and the
@@ -6965,7 +6987,52 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
           }
         }
 
+        // A TABLE READ ACROSS PAGES IS COMPUTED, NOT COUNTED BY EYE. In the E2E run of 2026-10-22
+        // browser_agent read a three-page catalogue, never called web_table, and answered "7
+        // Artikel unter 50 €" beside a list of eight; in another run it summed seven of the eight.
+        // Its prompt already says to compute such figures with the table tool; nothing in the run
+        // held it to that. Whether the answer states a count or a total is in its words, in any
+        // language, so the model decides: the run saw a table on two or more pages, has web_table,
+        // has not called it, and is asked once to compute what its answer states over those rows,
+        // or to keep the answer (KEEP), which then stands as it was written.
+        if (
+          tableComputeDraft === null
+          && tablePagesSeen.size >= 2
+          && !toolNames.includes("web_table")
+          && tools.some((tool) => tool.name === "web_table")
+          && !blockedToolReasons.has("web_table")
+          && iterations + 1 < maxIterations
+          && !lrgOperatorStop
+          && !supervisorStop
+          && !opts.signal?.aborted
+          && !longRunningGenerationManager.isStopRequested(subSessionId)
+        ) {
+          const draft = normalizeSubAgentOutput(response.content).trim();
+          if (draft.length > 0) {
+            tableComputeDraft = draft;
+            const pages = [...tablePagesSeen];
+            history.push({ role: "assistant", content: draft });
+            history.push({
+              role: "user",
+              content: [
+                `You read a table on ${pages.length} pages (${pages.slice(0, 8).join(", ")}) and computed nothing over its rows.`,
+                "If your answer states a count, a total, an average, a minimum or a maximum over those rows, compute it now with one web_table call: url as the list of those pages, the column, aggregates, and where for a filter. It reads the pages itself. Then answer with what it returned.",
+                "If your answer states none of these, reply with just KEEP.",
+              ].join("\n"),
+            });
+            logAudit("sub_agent_table_compute_nudged", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              pages: pages.length,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "info" });
+            iterations++;
+            continue;
+          }
+        }
+
         let result = normalizeSubAgentOutput(response.content);
+        if (tableComputeDraft !== null && /^\W*KEEP\W*$/i.test(result.trim())) result = tableComputeDraft;
 
         // Recovery: if the agent used tools (gathered real content) but returned
         // an empty final response, force one synthesis pass so the fetched data
@@ -8349,6 +8416,8 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         if (result.success) {
           const urlArg = (tc.arguments as Record<string, unknown> | undefined)?.["url"];
           if ((tc.name === "web_fetch" || tc.name === "browser_navigate") && typeof urlArg === "string") readPageUrls.add(comparablePageUrl(urlArg));
+          const tablePage = pageShowingTable(tc.name, tc.arguments as Record<string, unknown> | undefined, resultContent);
+          if (tablePage) tablePagesSeen.add(tablePage);
           if (tc.name === "web_table") {
             const webTable = result.metadata?.["webTable"] as { urls?: unknown; finalUrls?: unknown; computed?: unknown } | undefined;
             for (const list of [webTable?.urls, webTable?.finalUrls]) {

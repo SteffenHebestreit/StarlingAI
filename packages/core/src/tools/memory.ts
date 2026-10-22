@@ -27,6 +27,9 @@ import { getConfig } from "../config/loader.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { getSession } from "../agent/session.js";
+import { claimsArtifactWrittenButUnproduced, classifyDeliverableIntent } from "../agent/deliverable-intent.js";
+import { extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
+import { currentTurnStartIndex } from "../agent/turn-boundary.js";
 import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
@@ -426,6 +429,37 @@ const SCOPE_DOWNGRADE_NOTE = " (requested scope 'user' was stored to workspace: 
 
 const AGENT_SCOPE_NOT_SEARCHED_NOTE = "Agent lessons are searchable only by the account they were recorded for, and this request has no account: the agent scope was not searched.";
 
+const UNMADE_CHANGE_REFUSED =
+  "Not stored: this states the change the user asked for as done, but nothing has been created or changed in this turn. "
+  + "Make the change first and store it once a result confirms it, or store what actually happened.";
+
+/**
+ * A STORED FACT IS NOT HOW A CHANGE IS MADE. The turn asked for a file to be created or changed,
+ * nothing has been produced in it yet, and the memory states that change as done
+ * (claimsArtifactWrittenButUnproduced, the reader the false-completion guard applies to a reply).
+ * In the E2E run of 2026-10-22 an orchestrator asked to update a heading in a file that did not
+ * exist first stored "the heading … was updated to …" as a workspace fact and only then looked;
+ * its reply was honest, the stored fact was not, and later turns would recall it. Checked for the
+ * orchestrator's own writes: a specialist's file reaches the turn's history only when its
+ * delegation returns, after the run that wrote it.
+ */
+function claimsUnmadeChange(content: string, ctx: ToolContext): boolean {
+  if (rootSessionOf(ctx.sessionId) !== ctx.sessionId) return false;
+  const history = getSession(ctx.sessionId)?.getHistory() as Array<{ role: string; content?: unknown; metadata?: Record<string, unknown> }> | undefined;
+  if (!history) return false;
+  const start = currentTurnStartIndex(history);
+  const opening = start >= 0 ? history[start]!.content : undefined;
+  if (typeof opening !== "string" || !classifyDeliverableIntent(opening).wantsArtifactMutation) return false;
+  const produced: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  for (const message of history.slice(start + 1)) {
+    if (message.role === "tool" && message.metadata && typeof message.metadata === "object") {
+      extractArtifactsFromMetadata(message.metadata, produced, seen);
+    }
+  }
+  return produced.length === 0 && claimsArtifactWrittenButUnproduced(content);
+}
+
 registerTool({
   name: "memory_store",
   description:
@@ -479,6 +513,10 @@ registerTool({
     if (!key) return { success: false, output: "", error: "key is required" };
     if (!content) return { success: false, output: "", error: "content is required" };
     if (requestedScope !== "workspace" && requestedScope !== "user") return { success: false, output: "", error: "scope must be 'workspace' or 'user'" };
+    if (claimsUnmadeChange(content, ctx)) {
+      logAudit("guardrail_flagged", { type: "memory_store_unmade_change_refused", key }, { sessionId: ctx.sessionId, severity: "warn" });
+      return { success: false, output: "", error: UNMADE_CHANGE_REFUSED };
+    }
     const resolved = resolveDurableWriteScope(requestedScope, ctx);
     if ("refused" in resolved) return { success: false, output: "", error: resolved.refused };
     const { scope, downgraded } = resolved;

@@ -32,7 +32,7 @@ import { requiresApproval } from "../guardrails/tool-tiers.js";
 import type { ChatProvider } from "../providers/lmstudio.js";
 import type { AgentSession } from "./session.js";
 import type { DeliverableIntent } from "./deliverable-intent.js";
-import { namedUnwrittenFiles, turnUnwrittenTargets, unwrittenFilesBanner } from "./unwritten-file-claims.js";
+import { namedUnwrittenFiles, turnToolFailureLines, turnUnwrittenTargets, unwrittenFilesBanner } from "./unwritten-file-claims.js";
 import type { DynamicTurnGuidance } from "./intent-classifier.js";
 import { timedPhase } from "./turn-metrics.js";
 import {
@@ -298,6 +298,37 @@ export function repairedArtifactsNote(repaired: readonly string[], unrepaired: r
   return localizedFixedText({ de: `Hinweis: ${de.join(" ")}`, en: `Note: ${en.join(" ")}` });
 }
 
+/**
+ * What the false-completion guard asks the model to write instead of a claim nothing backs. It names
+ * what this turn's tools reported as failed (turnToolFailureLines): when one of them is why nothing
+ * was changed, that is what the user needs to hear. It used to ask for what the turn did and an
+ * offer to build the file now, whatever had stopped it; in the E2E run of 2026-10-22 the file to
+ * update did not exist, the user had said not to create one, and the reply offered to build it.
+ */
+export function falseCompletionRewriteInstruction(failures: readonly string[]): string {
+  const reported = failures.length > 0
+    ? ` This turn's tools reported these failures:\n${failures.map((line) => `- ${line}`).join("\n")}\nIf one of them is why the artifact was not created or changed, say so plainly, in the user's terms.`
+    : "";
+  return "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — OR it re-pastes an earlier turn's answer almost verbatim — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed and do NOT re-post a previous turn's answer as if this turn's request were done. "
+    + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state plainly that the artifact was NOT created or modified this turn and summarize what you actually DID (e.g. gathered/listed information).${reported} `
+    + "Then offer the next step that fits what stopped it and what the user asked for (never one the user ruled out). Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.";
+}
+
+/** The reply the false-completion guard ships when the model's rewrite cannot be used: fixed text, with the failures the turn's tools reported. */
+export function falseCompletionFallback(failures: readonly string[]): string {
+  if (failures.length === 0) {
+    return localizedFixedText({
+      de: "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.",
+      en: "I did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.",
+    });
+  }
+  const list = failures.map((line) => `- ${line}`).join("\n");
+  return localizedFixedText({
+    de: `Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert. Gemeldet wurde:\n${list}\n\nSag mir, wie es weitergehen soll.`,
+    en: `I did **not** create or modify the requested file in this turn. What was reported:\n${list}\n\nTell me how you'd like to proceed.`,
+  });
+}
+
 /** A file's content hash, or null when it cannot be read: what tells a file a build changed from one it did not. */
 function artifactFingerprint(absPath: string): string | null {
   try {
@@ -483,18 +514,15 @@ export async function applyTerminalResponseGuards(ctx: TerminalGuardContext): Pr
       finishReason: terminalFinishReason,
       answerLength: finalResponse.length,
     }, { sessionId: session.id, channel: session.channel, severity: "warn" });
-    const honest = await ctx.forceSynthesis(
-      session, provider, signal,
-      "Your draft claims the requested file/presentation/document was created, updated, inserted, or embedded — OR it re-pastes an earlier turn's answer almost verbatim — but NOTHING was actually written to the workspace in THIS turn (no file was produced). Do NOT claim it was created or changed and do NOT re-post a previous turn's answer as if this turn's request were done. "
-      + `Reply briefly and honestly ${IN_REPLY_LANGUAGE}: state plainly that the artifact was NOT created or modified this turn, summarize what you actually DID (e.g. gathered/listed information), and offer to have the content specialist build or update the file now. Do NOT invent a file path and do NOT restate a success you cannot point to in this turn's own results.`,
-    );
+    const failures = turnToolFailureLines(session.getHistory());
+    const honest = await ctx.forceSynthesis(session, provider, signal, falseCompletionRewriteInstruction(failures));
     const candidate = honest ? sanitizeUserFacingAssistantResponse(honest, iterationCount) : null;
     finalResponse = (candidate && candidate.trim().length >= 40
       && !isExecutionChatterOnly(candidate)
       && !claimsArtifactWrittenButUnproduced(candidate, artifactClaimOptions)
       && !looksLikeRegurgitatedPriorAnswer(candidate, session.getHistory()))
       ? candidate
-      : "Ich habe die angeforderte Datei in diesem Schritt **nicht** erstellt oder geändert — ich habe nur die angefragten Informationen gesammelt. Bestätige kurz, dann lasse ich den passenden Spezialisten die Datei jetzt damit bauen bzw. aktualisieren.\n\nI did **not** create or modify the requested file in this turn — I only gathered the requested information. Confirm and I'll have the right specialist build or update it now.";
+      : falseCompletionFallback(failures);
   }
 
   // Tracks whether an ACCEPTANCE-CRITERIA QA check actually ran this turn (the

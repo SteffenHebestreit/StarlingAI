@@ -18,7 +18,7 @@ vi.mock("../audit/logger.js", () => ({
   subscribeToAudit: () => () => {},
 }));
 
-const { failedWriteTarget, namedUnwrittenFiles, turnUnwrittenTargets, unwrittenFilesBanner } = await import("../agent/unwritten-file-claims.js");
+const { failedWriteTarget, namedUnwrittenFiles, turnToolFailureLines, turnUnwrittenTargets, unwrittenFilesBanner } = await import("../agent/unwritten-file-claims.js");
 const { claimsArtifactWrittenButUnproduced, namesOnlyAsNotDone, classifyDeliverableIntent } = await import("../agent/deliverable-intent.js");
 const { applyTerminalResponseGuards } = await import("../agent/turn-finalize-guards.js");
 const { AgentSession, resetSessionsForTests } = await import("../agent/session.js");
@@ -145,18 +145,18 @@ describe("the terminal guards on a turn whose write failed", () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  const turnCtx = (answer: string, failures: unknown[]) => {
+  const turnCtx = (answer: string, failures: unknown[], request = REQUEST) => {
     const session = new AgentSession({ channel: "test", workspacePath: workspace, systemPrompt: "You are a test agent." });
-    session.addMessage({ role: "user", content: REQUEST });
+    session.addMessage({ role: "user", content: request });
     session.addMessage({ role: "assistant", content: "", tool_calls: [{ id: "d1", type: "function", function: { name: "delegate_to_agent", arguments: "{\"agentName\":\"diagram_designer\"}" } }] });
     session.addMessage({ role: "tool", tool_call_id: "d1", content: "Delegated result from diagram_designer — TASK COMPLETED.", metadata: { agentName: "diagram_designer", specialistToolFailures: failures } });
     return {
       signal: new AbortController().signal,
       session,
       provider: {} as never,
-      userMessage: REQUEST,
+      userMessage: request,
       toolContext: { sessionId: session.id, workspacePath: workspace } as ToolContext,
-      deliverableIntent: classifyDeliverableIntent(REQUEST),
+      deliverableIntent: classifyDeliverableIntent(request),
       initialDynamicGuidance: null,
       rawResponse: answer,
       iterationCount: 2,
@@ -179,7 +179,7 @@ describe("the terminal guards on a turn whose write failed", () => {
       incrementDelegationCount: () => undefined,
       guardrailEvents: [] as Array<{ type: string; details: string }>,
       finalizeUserFacingAssistantResponse: async (raw: string) => raw,
-      forceSynthesis: async () => null,
+      forceSynthesis: async (..._args: unknown[]): Promise<string | null> => null,
       collectTurnArtifactAttachments: () => [],
       runQaDeliveryGate: async () => { throw new Error("no plan, so the QA delivery loop must not run"); },
       runDeliverableConsistencyGate: async () => { throw new Error("deliverableConsistencyQa is off"); },
@@ -223,5 +223,58 @@ describe("the terminal guards on a turn whose write failed", () => {
     const reply = "Ich habe die Datei diagramme/abhaengigkeiten.md auf dem Server aktualisiert.";
     const ctx = turnCtx(reply, [{ tool: "web_fetch", error: "HTTP 403" }]);
     expect(await applyTerminalResponseGuards(ctx as never)).toBe(reply);
+  });
+
+  // E2E 2026-10-22: the file to update did not exist and the user had said not to create one. The
+  // specialist's read_file reported it; the reply the guard shipped said only that nothing was
+  // changed, and offered to build the file.
+  describe("the false-completion guard on a turn whose specialist said why", () => {
+    const UPDATE = "Aktualisiere die Datei generated/aktionen/herbst.html: Die Hauptüberschrift soll „Herbstaktion 2026“ lauten. Lege dafür keine neue Datei an.";
+    const CLAIM = "Die Hauptüberschrift in generated/aktionen/herbst.html wurde auf „Herbstaktion 2026“ aktualisiert.";
+    const NOT_FOUND = { agent: "web_coder", tool: "read_file", error: "File not found: generated/aktionen/herbst.html" };
+
+    it("asks the rewrite to say what stopped the change, and never for a step the user ruled out", async () => {
+      const ctx = turnCtx(CLAIM, [NOT_FOUND], UPDATE);
+      const instructions: string[] = [];
+      ctx.forceSynthesis = async (...args: unknown[]) => { instructions.push(String(args[3])); return null; };
+      await applyTerminalResponseGuards(ctx as never);
+      expect(instructions).toHaveLength(1);
+      expect(instructions[0]).toContain("- read_file: File not found: generated/aktionen/herbst.html");
+      expect(instructions[0]).toMatch(/never one the user ruled out/);
+      expect(instructions[0]).not.toMatch(/offer to have the content specialist build/);
+    });
+
+    it("ships the reported failure when the rewrite cannot be used, in one language", async () => {
+      const reply = await applyTerminalResponseGuards(turnCtx(CLAIM, [NOT_FOUND], UPDATE) as never);
+      expect(reply).toContain("- read_file: File not found: generated/aktionen/herbst.html");
+      expect(reply).not.toMatch(/bauen|build or update/);
+      expect(/Ich habe/.test(reply) !== /I did/.test(reply)).toBe(true);
+      expect(audit.map((row) => row.data["type"])).toContain("artifact_completion_claim_unbacked_suppressed");
+    });
+
+    it("keeps the offer to build when nothing reported a failure", async () => {
+      const reply = await applyTerminalResponseGuards(turnCtx(CLAIM, [], UPDATE) as never);
+      expect(reply).toMatch(/bauen bzw\. aktualisieren|build or update it now/);
+    });
+  });
+});
+
+describe("turnToolFailureLines", () => {
+  it("reads this turn's reported failures once each, and not a declined call or an earlier turn's", () => {
+    const history = [
+      user("Erstell mir einen Bericht."),
+      delegation("d0"),
+      delegated("d0", [{ tool: "web_fetch", error: "HTTP 500" }]),
+      { role: "assistant", content: "Fertig." } as Message,
+      user(REQUEST),
+      delegation("d1"),
+      delegated("d1", [REFUSAL, { tool: "web_fetch", error: "HTTP 403" }, { tool: "write_file", error: "denied", declinedByUser: true }]),
+      delegation("d2"),
+      delegated("d2", [{ tool: "web_fetch", error: "HTTP 403" }]),
+    ];
+    expect(turnToolFailureLines(history)).toEqual([
+      "generate_mermaid_diagram: output_file must use the .mmd extension",
+      "web_fetch: HTTP 403",
+    ]);
   });
 });

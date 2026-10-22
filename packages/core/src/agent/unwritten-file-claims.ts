@@ -79,6 +79,33 @@ export function turnUnwrittenTargets(history: readonly HistoryMessage[]): string
 }
 
 /**
+ * What this turn's delegations reported as failed tool calls, "tool: error", each once and oldest
+ * first: the reason a requested change did not happen, when one was given. In the E2E run of
+ * 2026-10-22 web_coder's read_file answered "File not found: generated/e2e-guards/sommeraktion.html",
+ * and the reply the false-completion guard wrote instead of the model's said only that nothing was
+ * changed. A call the user declined is not a failure of the work.
+ */
+export function turnToolFailureLines(history: readonly HistoryMessage[], max = 4): string[] {
+  const lines = new Set<string>();
+  let start = 0;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (startsTurn(history[i]!)) { start = i; break; }
+  }
+  for (const message of history.slice(start)) {
+    if (message.role !== "tool") continue;
+    const failures = message.metadata?.["specialistToolFailures"];
+    if (!Array.isArray(failures)) continue;
+    for (const failure of failures) {
+      const f = failure as Record<string, unknown> | null;
+      if (!f || f["declinedByUser"] === true || typeof f["tool"] !== "string" || typeof f["error"] !== "string") continue;
+      const error = f["error"].trim();
+      if (error) lines.add(`${f["tool"]}: ${error}`);
+    }
+  }
+  return [...lines].slice(0, max);
+}
+
+/**
  * The unwritten targets the answer names that do not exist (as given, or under generated/). A
  * target the answer only names as not done ("konnte nicht gespeichert werden") is left out.
  */

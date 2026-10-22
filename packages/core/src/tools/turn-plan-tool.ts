@@ -13,7 +13,7 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
-import { planHasDispatchableStep } from "./plan-executor.js";
+import { planHasDispatchableStep, stepToolReachable } from "./plan-executor.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { deliverableParameterSchema } from "./delegation-artifact-classification.js";
@@ -87,6 +87,22 @@ registerTool({
           + "\"delegate\" to hand it to a specialist, \"reuse\" to run an existing workflow (name it in `workflow`), or "
           + "\"direct\" for a tool call you make yourself (name it in `tool`). Re-record with the steps you intend to run — "
           + "or, if this turn needs no plan, skip record_plan and just answer.",
+      };
+    }
+    // A DIRECT STEP NAMES A TOOL THE CALLER HAS. execute_plan refuses one that names any other
+    // (stepToolReachable), but by then the step has failed, and a plan with a failed step is a failed
+    // delegation to the turn: the warden stops a turn after two. In the E2E run of 2026-10-22 an
+    // orchestrator planned read_file and edit_file as direct steps, which an orchestration-only turn
+    // does not offer; the folded run refused both, the one delegation after it failed too, and the
+    // turn was stopped with nothing tried twice. Refused here, the plan is a correction instead.
+    const unreachable = plan.steps.filter((step) => step.kind === "direct" && step.tool && !stepToolReachable(step.tool, ctx));
+    if (unreachable.length > 0) {
+      return {
+        success: false,
+        output: "",
+        error: `Step${unreachable.length === 1 ? "" : "s"} ${unreachable.map((step) => `${step.id} (${step.tool})`).join(", ")} `
+          + `name${unreachable.length === 1 ? "s a tool" : " tools"} you cannot call in this turn. Make ${unreachable.length === 1 ? "it a" : "each a"} `
+          + "\"delegate\" step for the specialist that can (leave `agent` unset to have it routed), or drop it, and re-record the plan.",
       };
     }
     await persistTurnPlan(ctx.sessionId, plan);
