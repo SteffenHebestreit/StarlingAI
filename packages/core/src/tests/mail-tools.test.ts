@@ -175,4 +175,51 @@ describe("mail tools", () => {
     expect(result.success).toBe(true);
     expect(result.output).toContain("draft-1");
   });
+
+  describe("a turn sends one message per recipients and subject", () => {
+    // E2E 2026-10-23: one plan step's mail_agent run read the customer's mail and answered it, the
+    // next step's run wrote the answer again and sent it, and the customer got it twice.
+    const drafts: Record<string, { to: string[]; subject: string }> = {
+      "draft-a": { to: ["einkauf@polarhafen-handel.test"], subject: "Re: Anfrage Lieferzeit" },
+      "draft-b": { to: ["Einkauf@polarhafen-handel.test "], subject: "Re:  Anfrage Lieferzeit" },
+      "draft-c": { to: ["einkauf@polarhafen-handel.test"], subject: "Re: Anfrage Lieferzeit Werkbank" },
+    };
+    const service = () => {
+      const sends: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const match = String(input).match(/\/api\/drafts\/([^/]+)(\/send)?$/);
+        const id = decodeURIComponent(match?.[1] ?? "");
+        if (match?.[2] && init?.method === "POST") {
+          sends.push(id);
+          return jsonResponse({ id, status: "sent", ...drafts[id] });
+        }
+        return jsonResponse({ id, status: "draft", accountId: "eval", ...drafts[id] });
+      }));
+      return sends;
+    };
+    const send = async (draftId: string, sessionId: string, turnId: string) => {
+      const { getTool } = await import("../tools/registry.js");
+      const { runWithRequestContext } = await import("../runtime/request-context.js");
+      return runWithRequestContext({ turnId }, () => getTool("mail_send_draft")!.execute({ draftId }, { sessionId, workspacePath: "/workspace" }));
+    };
+
+    it("refuses a second draft to the same recipients under the same subject, from any run of the turn", async () => {
+      const sends = service();
+      expect((await send("draft-a", "sub:root-1:mail_agent:1", "turn-1")).success).toBe(true);
+      // The next step's run, same turn: the same reply, its address and subject spelled a little differently.
+      const again = await send("draft-b", "sub:root-1:mail_agent:2", "turn-1");
+      expect(again.success).toBe(false);
+      expect(again.error).toMatch(/^Not sent: this turn already sent draft draft-a to einkauf@polarhafen-handel\.test/);
+      expect(sends).toEqual(["draft-a"]);
+    });
+
+    it("sends another subject in the same turn, and the same message in a later turn", async () => {
+      const sends = service();
+      expect((await send("draft-a", "sub:root-2:mail_agent:1", "turn-2")).success).toBe(true);
+      expect((await send("draft-c", "sub:root-2:mail_agent:2", "turn-2")).success).toBe(true);
+      // The user asks again in the next turn: that is a request of its own.
+      expect((await send("draft-b", "sub:root-2:mail_agent:3", "turn-3")).success).toBe(true);
+      expect(sends).toEqual(["draft-a", "draft-c", "draft-b"]);
+    });
+  });
 });
