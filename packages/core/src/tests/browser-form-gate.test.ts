@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ToolContext } from "../tools/registry.js";
-import { checkFieldValue, resetBrowserFormGateForTests, valueIsUsers } from "../tools/browser-form-gate.js";
+import { checkFieldValue, checkRadioClick, parseRadioChoice, resetBrowserFormGateForTests, valueIsUsers } from "../tools/browser-form-gate.js";
 
 /**
  * E2E 2026-10-22 (core-ix-browser-order-form-quantity-refused): the browser agent typed the 1200
@@ -70,5 +70,51 @@ describe("browser_type and browser_select_option", () => {
     await getTool("browser_select_option")!.execute({ ref: "e33", element: "Versandart", values: ["express"] }, ctx);
     const overnight = await getTool("browser_select_option")!.execute({ ref: "e33", element: "Versandart", values: ["overnight"] }, ctx);
     expect(overnight.error).toMatch(/^Not entered: Versandart holds "express"/);
+  });
+});
+
+/**
+ * E2E 2026-10-23 (core-ix-browser-order-form-express-refused): the page refused Express for freight
+ * goods, the agent clicked the Standard radio button and submitted again. The answers below are what
+ * browser_evaluate gave for RADIO_CHOICE_FUNCTION on the fixture's kontakt.html after Express was clicked.
+ */
+const evaluated = (checked: string, target: string, targetChecked = false) => [
+  "### Result",
+  JSON.stringify({ group: "versand", checked: [checked, checked, checked.toLowerCase()], target: [target, target, target.toLowerCase()], targetChecked }, null, 2),
+  "### Ran Playwright code",
+  "```js",
+  "await page.getByRole('radio', { name: 'Standard' }).evaluate('(element) => {…}');",
+  "```",
+].join("\n");
+
+describe("a radio choice the user made stays chosen", () => {
+  const EXPRESS = { opening: "Fülle das Bestellformular aus: Artikel NW-2106, Menge 2, Versandart Express, die Datenschutzhinweise bestätigen.", midTurn: [] };
+  const click = (answer: string, userWords: typeof EXPRESS | undefined = EXPRESS) => checkRadioClick({ choice: parseRadioChoice(answer), userWords });
+
+  it("reads the page's answer", () => {
+    expect(parseRadioChoice(evaluated("Express", "Standard"))).toEqual({
+      group: "versand", checked: ["Express", "Express", "express"], target: ["Standard", "Standard", "standard"], targetChecked: false,
+    });
+    // Not a radio button, an evaluation that failed, or no answer at all: nothing to check.
+    expect(parseRadioChoice("### Result\nnull\n### Ran Playwright code")).toBeNull();
+    expect(parseRadioChoice("### Error\nTimeoutError")).toBeNull();
+    expect(parseRadioChoice("")).toBeNull();
+  });
+
+  it("refuses a click that moves the group off the user's option to one the user did not name", () => {
+    expect(click(evaluated("Express", "Standard"))).toMatch(/^Not clicked: "Express" is selected in versand, the option the user chose, and "Standard" is not one the user chose\./);
+  });
+
+  it("lets the user's own option through, an alternative the user named, and a group the user did not choose in", () => {
+    // The page's default is Standard; the user asked for Express.
+    expect(click(evaluated("Standard", "Express"))).toBeNull();
+    // "Express, sonst Standard": both are the user's.
+    expect(click(evaluated("Express", "Standard"), { opening: "Versandart Express, sonst Standard.", midTurn: [] })).toBeNull();
+    // Clicking the option that is already checked changes nothing.
+    expect(click(evaluated("Express", "Express", true))).toBeNull();
+    // The user named no shipping at all.
+    expect(click(evaluated("Express", "Standard"), { opening: "Fülle das Bestellformular mit Menge 2 aus.", midTurn: [] })).toBeNull();
+    // A turn no person opened.
+    expect(checkRadioClick({ choice: parseRadioChoice(evaluated("Express", "Standard")), userWords: undefined })).toBeNull();
   });
 });
