@@ -478,3 +478,50 @@ describe("record_plan — a direct step names a tool the caller has", () => {
     expect(result.success).toBe(true);
   });
 });
+
+describe("record_plan — a plan that cannot make the change the turn asked for", () => {
+  // E2E 2026-10-22: asked to update a heading in a file, an orchestration-only turn planned "read
+  // the file" and "replace the heading" as its own reasoning steps, declared both done without a
+  // call, and was held to the final answer with nothing looked at.
+  const UPDATE = "Aktualisiere die Datei generated/aktionen/herbst.html: Die Hauptüberschrift soll „Herbstaktion 2026“ lauten.";
+  const OWN_STEPS = [
+    { id: "s1", description: "Die Datei lesen und die Überschrift finden", kind: "direct" },
+    { id: "s2", description: "Die Überschrift ersetzen", kind: "direct" },
+  ];
+  const turn = async (opening: string) => {
+    const { createSession } = await import("../agent/session.js");
+    const session = createSession({ channel: "test", workspacePath: "/w", systemPrompt: "You are a test agent." });
+    session.addMessage({ role: "user", content: opening });
+    return session;
+  };
+  const record = (sessionId: string, steps: unknown[]) =>
+    getTool("record_plan")!.execute({ objective: "update the heading", steps }, { sessionId, workspacePath: "/w" } as never);
+
+  afterEach(async () => { (await import("../agent/session.js")).resetSessionsForTests(); });
+
+  it("refuses a plan of the orchestrator's own steps only, and records nothing", async () => {
+    const session = await turn(UPDATE);
+    const result = await record(session.id, OWN_STEPS);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/no step of this plan can do that/);
+    expect(result.error).toMatch(/"delegate" step/);
+    const { loadTurnPlan } = await import("../agent/turn-plan.js");
+    expect(await loadTurnPlan(session.id)).toBeNull();
+  });
+
+  it("records it with a step that can make the change", async () => {
+    const session = await turn(UPDATE);
+    const result = await record(session.id, [...OWN_STEPS, { id: "s3", description: "Die Datei ändern", kind: "delegate" }]);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("records it on a turn that asked for no change, or once the change was produced", async () => {
+    const asking = await turn("Was steht in der Hauptüberschrift von generated/aktionen/herbst.html?");
+    expect((await record(asking.id, OWN_STEPS)).error).toBeUndefined();
+
+    const changed = await turn(UPDATE);
+    changed.addMessage({ role: "assistant", content: "", tool_calls: [{ id: "d1", type: "function", function: { name: "delegate_to_agent", arguments: "{}" } }] });
+    changed.addMessage({ role: "tool", tool_call_id: "d1", content: "Delegated result from web_coder — TASK COMPLETED.", metadata: { artifacts: [{ outputPath: "generated/aktionen/herbst.html", filename: "herbst.html" }] } });
+    expect((await record(changed.id, OWN_STEPS)).error).toBeUndefined();
+  });
+});
