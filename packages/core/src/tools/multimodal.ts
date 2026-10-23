@@ -7,7 +7,7 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { hubVoiceFor, requestHubSpeech } from "../multimodal/tts-stt-gateway.js";
 import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { getMcpConnections, reconnectAfterFailedCall } from "../mcp/registry.js";
-import { checkFieldValue } from "./browser-form-gate.js";
+import { checkFieldValue, checkRadioClick, parseRadioChoice, RADIO_CHOICE_FUNCTION } from "./browser-form-gate.js";
 import { browserWatchdog } from "./browser-watchdog.js";
 import {
   ImageGenerationTimeoutError,
@@ -1459,6 +1459,13 @@ function registerBrowserTool(input: {
           const refusal = checkFieldValue({ runId: ctx.sessionId, ref: args["ref"], element: args["element"], value, userWords: ctx.turnUserWords });
           if (refusal) return fail(refusal);
         }
+      }
+      // A click on a radio button changes a choice without a value: the page says what it would change.
+      if (input.mcpToolName === "browser_click" && ctx.turnUserWords && typeof args["ref"] === "string") {
+        const answer = await callPlaywrightTool("browser_evaluate", { element: args["element"], ref: args["ref"], function: RADIO_CHOICE_FUNCTION })
+          .catch(() => "");
+        const refusal = checkRadioClick({ choice: parseRadioChoice(answer), userWords: ctx.turnUserWords });
+        if (refusal) return fail(refusal);
       }
       if (input.guardUrlArg) {
         const raw = args[input.guardUrlArg];

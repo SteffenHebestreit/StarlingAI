@@ -103,7 +103,7 @@ Every public schema field, where it is declared, and how many production files r
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1678 | 1 |
 | `container` | packages/core/src/config/schema.ts:757 | 85 |
 | `contextWindow` | packages/core/src/config/schema.ts:127 | 14 |
-| `control` | packages/core/src/config/schema.ts:1826 | 62 |
+| `control` | packages/core/src/config/schema.ts:1826 | 63 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:921 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:359 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:877 | 11 |
