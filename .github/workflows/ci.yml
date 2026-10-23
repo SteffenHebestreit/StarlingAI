@@ -20,7 +20,9 @@ jobs:
     # Pinned, not ubuntu-latest: that label moves to a new image on GitHub's schedule
     # (Ubuntu 26 from 2026-10-19), which would change the toolchain under an unchanged commit.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The core coverage run alone takes 13-21 min on these runners and the other steps about 4: at 25
+    # the v0.52.7 main run was cancelled 6 s into the reference-docs step, with every check green.
+    timeout-minutes: 40
     # Real Redis for the two-process coordination integration tests (DST-102).
     # REDIS_URL is deliberately NOT set job-wide: unit tests stay hermetic on the
     # in-process fallback; only the scoped integration step below points at this.
