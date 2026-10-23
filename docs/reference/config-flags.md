@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:751 | 1 |
 | `admin` | packages/core/src/config/schema.ts:436 | 54 |
-| `after` | packages/core/src/config/schema.ts:1567 | 297 |
+| `after` | packages/core/src/config/schema.ts:1567 | 298 |
 | `agents` | packages/core/src/config/schema.ts:1555 | 200 |
 | `alertmanager` | packages/core/src/config/schema.ts:1200 | 1 |
 | `all` | packages/core/src/config/schema.ts:1353 | 327 |
@@ -137,7 +137,7 @@ Every public schema field, where it is declared, and how many production files r
 | `defaultVoiceId` | packages/core/src/config/schemas/multimodal.ts:57 | 6 |
 | `defaultWidth` | packages/core/src/config/schemas/multimodal.ts:212 | 4 |
 | `delegationTimeoutMs` | packages/core/src/config/schema.ts:654 | 4 |
-| `deliverable` | packages/core/src/config/schema.ts:951 | 71 |
+| `deliverable` | packages/core/src/config/schema.ts:951 | 72 |
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:414 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:417 | 1 |
 | `deny` | packages/core/src/config/schema.ts:1533 | 17 |
@@ -298,7 +298,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxUploadBytes` | packages/core/src/config/schemas/multimodal.ts:252 | 5 |
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:876 | 5 |
-| `message` | packages/core/src/config/schema.ts:1575 | 358 |
+| `message` | packages/core/src/config/schema.ts:1575 | 359 |
 | `method` | packages/core/src/config/schema.ts:1088 | 92 |
 | `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:893 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1669 | 1 |

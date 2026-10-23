@@ -27,9 +27,8 @@ import { getConfig } from "../config/loader.js";
 import { recordAccount } from "../runtime/user-scope.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { getSession } from "../agent/session.js";
-import { claimsArtifactWrittenButUnproduced, classifyDeliverableIntent } from "../agent/deliverable-intent.js";
-import { extractArtifactsFromMetadata } from "../agent/artifact-metadata.js";
-import { currentTurnStartIndex } from "../agent/turn-boundary.js";
+import { claimsArtifactWrittenButUnproduced } from "../agent/deliverable-intent.js";
+import { orchestratorTurnChangeState } from "../agent/turn-change-request.js";
 import {
   compactUserMemoryRecords,
   compactWorkspaceMemoryRecords,
@@ -441,23 +440,11 @@ const UNMADE_CHANGE_REFUSED =
  * exist first stored "the heading … was updated to …" as a workspace fact and only then looked;
  * its reply was honest, the stored fact was not, and later turns would recall it. Checked for the
  * orchestrator's own writes: a specialist's file reaches the turn's history only when its
- * delegation returns, after the run that wrote it.
+ * delegation returns, after the run that wrote it (orchestratorTurnChangeState).
  */
 function claimsUnmadeChange(content: string, ctx: ToolContext): boolean {
-  if (rootSessionOf(ctx.sessionId) !== ctx.sessionId) return false;
-  const history = getSession(ctx.sessionId)?.getHistory() as Array<{ role: string; content?: unknown; metadata?: Record<string, unknown> }> | undefined;
-  if (!history) return false;
-  const start = currentTurnStartIndex(history);
-  const opening = start >= 0 ? history[start]!.content : undefined;
-  if (typeof opening !== "string" || !classifyDeliverableIntent(opening).wantsArtifactMutation) return false;
-  const produced: Array<Record<string, unknown>> = [];
-  const seen = new Set<string>();
-  for (const message of history.slice(start + 1)) {
-    if (message.role === "tool" && message.metadata && typeof message.metadata === "object") {
-      extractArtifactsFromMetadata(message.metadata, produced, seen);
-    }
-  }
-  return produced.length === 0 && claimsArtifactWrittenButUnproduced(content);
+  const change = orchestratorTurnChangeState(ctx.sessionId);
+  return change !== null && change.wantsChange && !change.produced && claimsArtifactWrittenButUnproduced(content);
 }
 
 registerTool({
