@@ -24,6 +24,7 @@ type Reply = { status: number; json?: unknown };
 async function checkEndpoints(
   reranker: Record<string, unknown>,
   reply: (url: string, init?: RequestInit) => Reply,
+  extra: Record<string, unknown> = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "sai-endpoint-probes-"));
   tempDirs.push(dir);
@@ -35,6 +36,7 @@ async function checkEndpoints(
       },
     },
     retrieval: { reranker: { enabled: true, apiKey: "key", ...reranker } },
+    ...extra,
   }), "utf8");
   process.env["SAI_CONFIG_PATH"] = join(dir, "starlingai.json");
   vi.resetModules();
@@ -130,5 +132,29 @@ describe("an embedding model the server serves under an unlisted alias", () => {
       url === "http://models.test/v1/models" ? { status: 200, json: { data: [{ id: "qwen3-embedding-0.6b" }] } } : modelServer(true)(url));
     expect(byRole("orchestrator")?.ok).toBe(false);
     expect(requests.some((request) => request.url.endsWith("/chat/completions"))).toBe(false);
+  });
+});
+
+/**
+ * 2026-10-23: every agent with a model of its own is a probe target, and they name the same server.
+ * One pass sent ~90 identical /v1/models requests at once; with the model host's name not resolving,
+ * their DNS lookups starved every other connection in the gateway, which never started listening.
+ */
+describe("one probe pass reads a server's model list once", () => {
+  it("for every target on that server, each still judged on its own model", async () => {
+    const subAgents = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`agent_${i}`, {
+      description: "d", systemPrompt: "s", model: { primary: i % 2 ? "lmstudio/qwen" : "lmstudio/qwen-27b" },
+    }]));
+    const { endpoints, requests } = await checkEndpoints({ baseUrl: "http://reranker:80", enabled: false }, modelServer(true), { subAgents });
+    const listReads = () => requests.filter((request) => request.url === "http://models.test/v1/models").length;
+    expect(endpoints.filter((endpoint) => endpoint.role.startsWith("subagent:")).length).toBeGreaterThanOrEqual(30);
+    expect(listReads()).toBe(1);
+    expect(endpoints.find((endpoint) => endpoint.role === "subagent:agent_1")?.ok).toBe(true);
+    expect(endpoints.find((endpoint) => endpoint.role === "subagent:agent_0")?.ok).toBe(false);
+
+    // The next pass reads it again: nothing is kept between passes.
+    const { syncModelEndpointRuntimeStatus } = await import("../runtime/model-endpoints.js");
+    await syncModelEndpointRuntimeStatus();
+    expect(listReads()).toBe(2);
   });
 });
