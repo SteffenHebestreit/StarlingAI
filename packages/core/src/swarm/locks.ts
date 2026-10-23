@@ -206,8 +206,22 @@ export async function acquireTaskLease(scope: TaskLeaseScope, ttlMs = DEFAULT_LE
   return acquisition.status === "acquired" ? acquisition.lease : null;
 }
 
-/** Renew only when this lease is still the current owner, reporting whether a
- *  failure is definitive (`lost`) or a transient backend problem (`unavailable`). */
+/**
+ * A LEASE NOBODY TOOK IS STILL OURS. The key holds our value: extend it. The key is gone and its
+ * fence counter still holds our token: nobody acquired the task since (every acquire increments
+ * the fence), so the key is set back. Anything else is a takeover, and lost. The key used to be
+ * read alone, so a lease that expired while its renewals could not reach Redis was lost although
+ * no one had taken it, and a researcher's three and a half minutes of finished work were thrown
+ * away (E2E 2026-10-22, the one lease loss in seven days).
+ */
+const RENEW_OR_RECLAIM_LUA =
+  "local v = redis.call('get', KEYS[1]) "
+  + "if v == ARGV[1] then redis.call('pexpire', KEYS[1], ARGV[2]) return 1 end "
+  + "if not v and redis.call('get', KEYS[2]) == ARGV[3] then redis.call('psetex', KEYS[1], ARGV[2], ARGV[1]) return 2 end "
+  + "return 0";
+
+/** Renew only when this lease is still the current owner (or reclaim it when nobody took it),
+ *  reporting whether a failure is definitive (`lost`) or a transient backend problem (`unavailable`). */
 export async function renewTaskLeaseState(lease: TaskLease, ttlMs = lease.ttlMs): Promise<TaskLeaseRenewal> {
   const ttl = Math.max(1_000, Math.floor(ttlMs));
   const value = leaseValue(lease);
@@ -216,14 +230,17 @@ export async function renewTaskLeaseState(lease: TaskLease, ttlMs = lease.ttlMs)
     if (!redis) return "unavailable";
     try {
       const renewed = await (redis as { eval: (...args: unknown[]) => Promise<unknown> }).eval(
-        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
-        1,
+        RENEW_OR_RECLAIM_LUA,
+        2,
         lease.key,
+        `${lease.key}:fence`,
         value,
         String(ttl),
+        String(lease.fencingToken),
       );
-      // Redis answered: 0 is a definitive ownership loss (expired or superseded).
-      if (Number(renewed) !== 1) return "lost";
+      // Redis answered: 0 is a definitive ownership loss (superseded, or gone with its fence moved on).
+      if (Number(renewed) === 2) log.info({ key: lease.key, fencingToken: lease.fencingToken }, "Task lease reclaimed: it had expired and nobody acquired it since");
+      if (Number(renewed) !== 1 && Number(renewed) !== 2) return "lost";
       lease.ttlMs = ttl;
       lease.expiresAt = Date.now() + ttl;
       return "renewed";
@@ -233,12 +250,16 @@ export async function renewTaskLeaseState(lease: TaskLease, ttlMs = lease.ttlMs)
     }
   }
 
-  // The local map is authoritative in single-process mode: a mismatch is definitive.
+  // The local map is authoritative in single-process mode: a mismatch is definitive, and an
+  // expired entry is ours again while its fence has not moved on.
   const current = localLeases.get(lease.key);
-  if (!current || current.expiresAt <= Date.now() || current.value !== value) return "lost";
-  current.expiresAt = Date.now() + ttl;
+  const now = Date.now();
+  const held = current && current.expiresAt > now && current.value === value;
+  const unclaimed = (!current || current.expiresAt <= now) && localFences.get(lease.key) === lease.fencingToken;
+  if (!held && !unclaimed) return "lost";
+  localLeases.set(lease.key, { value, fencingToken: lease.fencingToken, expiresAt: now + ttl });
   lease.ttlMs = ttl;
-  lease.expiresAt = current.expiresAt;
+  lease.expiresAt = now + ttl;
   return "renewed";
 }
 
@@ -247,20 +268,35 @@ export async function renewTaskLease(lease: TaskLease, ttlMs = lease.ttlMs): Pro
   return await renewTaskLeaseState(lease, ttlMs) === "renewed";
 }
 
-/** True only while this exact fence is still current. Call before publishing terminal work. */
-export async function isTaskLeaseCurrent(lease: TaskLease): Promise<boolean> {
-  const value = leaseValue(lease);
-  if (lease.backend === "redis") {
-    const redis = await getRedis();
-    if (!redis) return false;
-    try {
-      return await (redis as { get: (key: string) => Promise<string | null> }).get(lease.key) === value;
-    } catch {
-      return false;
-    }
+/** How often, and how far apart, the pre-publish check asks again when the backend did not answer. */
+const CONFIRM_ATTEMPTS = 3;
+const CONFIRM_RETRY_MS = 1_000;
+
+/**
+ * Whether this fence still owns the task, for the check before publishing terminal work: renewed
+ * or reclaimed (renewTaskLeaseState) is current, a takeover is lost, and a backend that did not
+ * answer is asked again, then reported unavailable. The check used to read a client error as a
+ * loss: the client rejects every command while it reconnects (enableOfflineQueue: false), so a
+ * reconnect at the moment a run finished discarded the run's result.
+ */
+export async function confirmTaskLease(lease: TaskLease): Promise<"current" | "lost" | "unavailable"> {
+  for (let attempt = 1; ; attempt += 1) {
+    const state = await renewTaskLeaseState(lease);
+    if (state === "renewed") return "current";
+    if (state === "lost") return "lost";
+    if (attempt >= CONFIRM_ATTEMPTS) return "unavailable";
+    await new Promise((resolve) => setTimeout(resolve, CONFIRM_RETRY_MS));
   }
-  const current = localLeases.get(lease.key);
-  return Boolean(current && current.expiresAt > Date.now() && current.value === value);
+}
+
+/**
+ * False only when another worker took the task. A backend that still did not answer is not that:
+ * no worker can take a task without it either, and finished work is not thrown away for it.
+ */
+export async function isTaskLeaseCurrent(lease: TaskLease): Promise<boolean> {
+  const state = await confirmTaskLease(lease);
+  if (state === "unavailable") log.warn({ key: lease.key }, "Task lease backend unavailable at publish; publishing the finished result");
+  return state !== "lost";
 }
 
 /** Release only the exact fenced owner. Safe after expiry or takeover. */

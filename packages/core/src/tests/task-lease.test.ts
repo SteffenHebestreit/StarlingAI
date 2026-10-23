@@ -139,3 +139,42 @@ describe("fenced task leases", () => {
     await releaseTaskLease(lease!);
   });
 });
+/**
+ * E2E 2026-10-22: a researcher's lease was reported lost when its run finished, the one loss in seven
+ * days, and three and a half minutes of finished work were thrown away. Nobody had taken the task:
+ * the check read the key alone, and a client error as a loss.
+ */
+describe("a lease nobody took is still ours", () => {
+  afterEach(async () => {
+    delete process.env["REDIS_URL"];
+    await resetLocksForTests();
+  });
+
+  it("reclaims a lease that expired while nobody acquired the task", async () => {
+    const lease = await acquireTaskLease(scope(), 1_000);
+    await pause(1_100);
+    expect(await isTaskLeaseCurrent(lease!)).toBe(true);
+    // Reclaimed, so a contender is turned away again.
+    expect(await acquireTaskLease(scope(), 1_000)).toBeNull();
+    await releaseTaskLease(lease!);
+  });
+
+  it("loses a lease another worker acquired after it expired", async () => {
+    const first = await acquireTaskLease(scope(), 1_000);
+    await pause(1_100);
+    const second = await acquireTaskLease(scope(), 1_000);
+    expect(second).not.toBeNull();
+    expect(await isTaskLeaseCurrent(first!)).toBe(false);
+    expect(await isTaskLeaseCurrent(second!)).toBe(true);
+    await releaseTaskLease(second!);
+  });
+
+  it("does not throw finished work away when the backend does not answer", async () => {
+    process.env["REDIS_URL"] = "redis://127.0.0.1:1";
+    const lease = {
+      key: taskLeaseKey(scope()), scope: scope(), owner: "owner-1", fencingToken: 1,
+      ttlMs: 60_000, expiresAt: Date.now() + 60_000, backend: "redis" as const,
+    };
+    expect(await isTaskLeaseCurrent(lease)).toBe(true);
+  }, 15_000);
+});

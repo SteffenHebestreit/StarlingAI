@@ -2436,6 +2436,8 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
           attemptedAgents,
           delegationSucceeded: false,
           leaseLost: true,
+          // Which noticed: a renewal the backend answered with a takeover, or the check before publishing.
+          leaseLostVia: leaseHeartbeat.lost ? "heartbeat" : "check",
           fencingToken: lease.fencingToken,
         },
       };

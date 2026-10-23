@@ -85,7 +85,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:449 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:451 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:118 | 4 |
-| `command` | packages/core/src/config/schema.ts:737 | 57 |
+| `command` | packages/core/src/config/schema.ts:737 | 58 |
 | `completes` | packages/core/src/config/schema.ts:953 | 16 |
 | `completionPer1m` | packages/core/src/config/schema.ts:576 | 1 |
 | `composer` | packages/core/src/config/schema.ts:1522 | 18 |

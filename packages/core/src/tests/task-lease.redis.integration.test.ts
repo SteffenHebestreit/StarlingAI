@@ -97,4 +97,21 @@ describe.skipIf(!REDIS_URL)("task lease — real Redis integration (DST-102 gate
     })).toBe(true);
     expect((await readTaskLeaseResult(scope))?.output).toBe("authoritative");
   }, 60_000);
+
+  // E2E 2026-10-22: a lease reported lost when its run finished, though nobody had taken the task.
+  it("reclaims an expired lease whose fence nobody moved; a takeover is still lost", async () => {
+    const scope = { sessionId: `lease-reclaim-${Date.now()}`, taskId: "t1", taskSignature: "redis reclaim check", workspacePath: "/integration", userId: "ci" };
+    const first = await tryAcquireTaskLease(scope, 1_000);
+    expect(first.status).toBe("acquired");
+    if (first.status !== "acquired") return;
+    await pause(1_500); // expired, nobody acquired since
+    expect(await isTaskLeaseCurrent(first.lease)).toBe(true);
+    expect((await tryAcquireTaskLease(scope, 1_000)).status).toBe("contended");
+
+    await pause(1_500);
+    const second = await tryAcquireTaskLease(scope, 1_000);
+    expect(second.status).toBe("acquired");
+    expect(await isTaskLeaseCurrent(first.lease)).toBe(false);
+    expect(await renewTaskLease(first.lease, 1_000)).toBe(false);
+  }, 30_000);
 });
