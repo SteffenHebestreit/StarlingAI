@@ -171,36 +171,62 @@ async function checkEndpoint(target: EndpointTarget): Promise<ModelEndpointHealt
   return target.probe === "health" ? checkHealthEndpoint(target) : checkModelsEndpoint(target);
 }
 
+interface ModelListRead {
+  status?: number;
+  models?: string[];
+  error?: string;
+}
+
+const modelListReads = new Map<string, Promise<ModelListRead>>();
+
+/**
+ * An endpoint's model list, read once for every target that shares its URL and key while a read is
+ * under way. Every agent with a model of its own is a target, and they mostly name the same server:
+ * one probe pass sent ~90 identical requests for /v1/models at once. While the model host's name
+ * did not resolve (2026-10-23, each lookup failing after ~4 s), those lookups held the resolver
+ * threads every DNS lookup in the process shares, every minute, and the gateway's own connections
+ * to Redis and processmem timed out behind them; it never started listening.
+ */
+function readModelList(target: EndpointTarget): Promise<ModelListRead> {
+  const url = toModelsUrl(target.baseUrl);
+  const key = `${url}::${target.apiKey ?? ""}`;
+  let read = modelListReads.get(key);
+  if (!read) {
+    read = (async (): Promise<ModelListRead> => {
+      try {
+        const response = await requestEndpoint(target, url);
+        if (!response.ok) return { status: response.status, error: `HTTP ${response.status}` };
+        try {
+          return { status: response.status, models: extractAdvertisedModels(await response.json()) };
+        } catch (error) {
+          return { status: response.status, error: `Invalid /v1/models response: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    })().finally(() => modelListReads.delete(key));
+    modelListReads.set(key, read);
+  }
+  return read;
+}
+
 /** The endpoint read by its OpenAI model list (/models): healthy when it lists the configured model. */
 async function checkModelsEndpoint(target: EndpointTarget): Promise<ModelEndpointHealth> {
   try {
-    const response = await requestEndpoint(target, toModelsUrl(target.baseUrl));
-    if (!response.ok) {
+    const list = await readModelList(target);
+    if (list.models === undefined) {
       return {
         role: target.role,
         model: target.model,
         baseUrl: target.baseUrl,
         source: target.source,
         ok: false,
-        status: response.status,
-        error: `HTTP ${response.status}`,
+        ...(list.status !== undefined ? { status: list.status } : {}),
+        error: list.error ?? "No model list",
       };
     }
-
-    let availableModels: string[];
-    try {
-      availableModels = extractAdvertisedModels(await response.json());
-    } catch (error) {
-      return {
-        role: target.role,
-        model: target.model,
-        baseUrl: target.baseUrl,
-        source: target.source,
-        ok: false,
-        status: response.status,
-        error: `Invalid /v1/models response: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
+    const response = { status: list.status };
+    const availableModels = list.models;
 
     const matchedModel = findMatchingModel(target.model, availableModels)
       ?? (target.role === "embeddings" && await embedsUnderConfiguredName(target) ? target.model : undefined);
