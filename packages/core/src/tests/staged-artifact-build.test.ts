@@ -588,6 +588,15 @@ describe("staged artifact build — directive injection", () => {
     expect(userTurnAt14).not.toContain("about 24 fill passes");
   });
 
+  it("leaves a run without room for the passes to write its file directly (E2E 2026-10-22)", async () => {
+    // summarizer (maxIterations 6) was staged for a four-part brief inside a scene: skeleton, three
+    // fills, and the answer was due with the fourth marker still in the file.
+    const flags = { stagedArtifactBuilds: true, stagedArtifactBuildDirective: true };
+    const tools = ["write_file", "edit_file", "read_file"];
+    expect(await runAndCaptureSystemPrompt(flags, PROBE_LARGE_TASK, tools, undefined, 7)).not.toContain("STAGED BUILD");
+    expect(await runAndCaptureSystemPrompt(flags, PROBE_LARGE_TASK, tools, undefined, 8)).toContain("STAGED BUILD");
+  });
+
   it("injects the directive at ITERATION 0 when the prompt flag is on", async () => {
     // Iteration 0 is the only one that matters: the measured failure never completed a
     // single iteration, so any nudge gated on prior tool calls or on a fraction of the

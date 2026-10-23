@@ -14,6 +14,7 @@ import { getConfig } from "../config/loader.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
 import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
 import { planHasDispatchableStep, stepToolReachable } from "./plan-executor.js";
+import { orchestratorTurnChangeState } from "../agent/turn-change-request.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { turnSteeringManager } from "../agent/turn-steering.js";
 import { deliverableParameterSchema } from "./delegation-artifact-classification.js";
@@ -103,6 +104,21 @@ registerTool({
         error: `Step${unreachable.length === 1 ? "" : "s"} ${unreachable.map((step) => `${step.id} (${step.tool})`).join(", ")} `
           + `name${unreachable.length === 1 ? "s a tool" : " tools"} you cannot call in this turn. Make ${unreachable.length === 1 ? "it a" : "each a"} `
           + "\"delegate\" step for the specialist that can (leave `agent` unset to have it routed), or drop it, and re-record the plan.",
+      };
+    }
+    // A PLAN THAT CANNOT MAKE THE CHANGE ASKED FOR. Every step is the orchestrator's own reasoning
+    // (no tool, agent or workflow), the turn asked for a file to be created or changed, and none has
+    // been produced: nothing this plan runs can make it, and execute_plan takes the orchestrator's
+    // word that such a step is done. In the E2E run of 2026-10-22 an orchestration-only turn
+    // planned "read the file" and "replace the heading" as its own steps, declared both done
+    // without a call, was held to the final answer, and its delegation after that was refused.
+    const change = orchestratorTurnChangeState(ctx.sessionId);
+    if (change?.wantsChange && !change.produced && plan.steps.every((step) => step.kind === "direct" && !step.tool)) {
+      return {
+        success: false,
+        output: "",
+        error: "This turn asks for a file to be created or changed, and no step of this plan can do that: each is your own reasoning, with no tool, agent or workflow. "
+          + "Make the step that reads or changes the file a \"delegate\" step for the specialist that can (leave `agent` unset to have it routed), and re-record the plan.",
       };
     }
     await persistTurnPlan(ctx.sessionId, plan);

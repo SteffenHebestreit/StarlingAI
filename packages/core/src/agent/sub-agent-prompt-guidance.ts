@@ -63,6 +63,15 @@ export const STAGED_BUILD_REQUIRED_TOOLS = ["write_file", "edit_file"] as const;
 export const STAGED_BUILD_TASK_CHAR_THRESHOLD = 600;
 
 /**
+ * The iterations a staged build needs room for: the skeleton, a pass per subsystem and the
+ * answer. A run with fewer writes its file directly. In the E2E run of 2026-10-22 summarizer
+ * (maxIterations 6) was staged for a four-part brief inside a scene: skeleton, three fills, and
+ * the answer was due with the fourth marker still in the file; the marker correction only sends a
+ * run back while an iteration is left, and the builder that could repair it was outside the scene.
+ */
+export const STAGED_BUILD_MIN_ITERATIONS = 8;
+
+/**
  * A line that opens a fenced block: a run of three or more backticks or tildes, then at
  * most one info word ("javascript") and the end of the line. A longer info string
  * (```js title="a.js") is not read as an opener, and the task is then measured whole.

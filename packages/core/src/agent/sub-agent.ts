@@ -145,6 +145,7 @@ import {
   buildSubAgentAgentDiscoveryGuidance,
   sanitizeSubAgentTask,
   isStagedArtifactBuildRun,
+  STAGED_BUILD_MIN_ITERATIONS,
   stagedBuildTaskChars,
   ownsResumeEvidence,
   holdsOneShotAssembler,
@@ -3634,7 +3635,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     const stagedBuildFlags = effectiveOrchestration();
     const stagedBuildCandidate = stagedBuildFlags.stagedArtifactBuilds !== false
       && opts.deliverable !== "answer"
-      && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask);
+      && isStagedArtifactBuildRun(effectiveToolNames, sanitizedTask)
+      // Room for the skeleton, a pass per subsystem and the answer (STAGED_BUILD_MIN_ITERATIONS).
+      && maxIterations >= STAGED_BUILD_MIN_ITERATIONS;
     // RESUME vs FRESH. The classifier above reads task size and tool capability, which cannot
     // distinguish "build me X" from "X exists, finish it" — and run 2dc5832c is what that costs:
     // a finish-it delegation received the skeleton directive and answered it with a skeleton,

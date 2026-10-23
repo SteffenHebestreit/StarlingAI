@@ -97,7 +97,8 @@ function writeTempConfig(agentName: string, stagedBuild = false): { tempDir: str
         description: "Mid-stream burn fixture",
         systemPrompt: "Work the task.",
         tools: stagedBuild ? ["read_file", "write_file", "edit_file"] : ["read_file"],
-        maxIterations: 6,
+        // A staged build needs room for its passes (STAGED_BUILD_MIN_ITERATIONS).
+        maxIterations: 8,
         // Comfortably above the clock this fixture advances, so a wind-down here is
         // always the supervisor's decision and never the turn deadline's.
         turnTimeoutMs: 1_800_000,
