@@ -107,30 +107,36 @@ describe("e2e scenario files", () => {
     }
   });
 
-  it("the quantity-refused scenario fails a run that typed the page's maximum in place of the user's quantity", () => {
+  it("the quantity-refused scenario fails a run that entered the page's maximum in place of the user's quantity", () => {
     // The form refuses 1200 ("Menge (1–999)"). A run that typed 999, submitted again and left the
-    // reference out of its reply passed every reply check; the typing is the substitution itself.
+    // reference out of its reply passed every reply check; entering 999 is the substitution itself.
+    // An attempt the browser form gate refused entered nothing (tools/browser-form-gate.ts).
     const { scenarios } = loadScenarios(paths.scenariosDir, paths.fixturesDir);
     const scenario = scenarios.find((entry) => entry.scenario.id === "core-ix-browser-order-form-quantity-refused")?.scenario;
     const turn = scenario?.steps.find((step) => step.kind === "turn");
     expect(turn?.kind).toBe("turn");
     const expectation = turn?.kind === "turn" ? turn.expect : undefined;
     const sessionId = "sub:5a1b9c2d:browser_agent:1791500810464";
-    // The row sub-agent.ts logs when it dispatches a call (buildSubAgentToolAuditPayload, phase start).
-    const typed = (text: string) => ({
+    // The rows sub-agent.ts logs when it dispatches a call (phase start) and when the call returned
+    // (phase done, with `error` when the tool refused it): buildSubAgentToolAuditPayload.
+    const call = (text: string, phase: "start" | "done", error?: string) => ({
       type: "sub_agent_tool_call",
       sessionId,
-      data: { agentName: "browser_agent", tool: "browser_type", phase: "start", toolCallId: `call-${text}`, args: { element: "Menge", target: "e42", text } },
+      data: { agentName: "browser_agent", tool: "browser_type", phase, toolCallId: `call-${text}`, args: { element: "Menge", target: "e42", text }, ...(error ? { error } : {}) },
     });
-    const substituted = (...events: Array<ReturnType<typeof typed>>) =>
+    const entered = (text: string) => [call(text, "start"), call(text, "done")];
+    const refused = (text: string) => [call(text, "start"), call(text, "done", `Not entered: Menge holds "1200", the value the user gave, and "${text}" is not one the user gave.`)];
+    const substituted = (...events: Array<ReturnType<typeof call>>) =>
       evaluateEventExpectations(expectation, events).filter((failure) => failure.startsWith("events.mustNot"));
 
-    // The user's own quantity, and the other fields, are what the run should type.
-    expect(substituted(typed("Mira Polaris"), typed("1200"))).toEqual([]);
-    expect(substituted(typed("1999"))).toEqual([]);
+    // The user's own quantity, and the other fields, are what the run should enter.
+    expect(substituted(...entered("Mira Polaris"), ...entered("1200"))).toEqual([]);
+    expect(substituted(...entered("1999"))).toEqual([]);
     // The page's maximum in place of the user's quantity, however it is padded.
-    expect(substituted(typed("1200"), typed("999"))).not.toEqual([]);
-    expect(substituted(typed(" 999 "))).not.toEqual([]);
+    expect(substituted(...entered("1200"), ...entered("999"))).not.toEqual([]);
+    expect(substituted(...entered(" 999 "))).not.toEqual([]);
+    // Tried and refused by the gate: the field still holds 1200.
+    expect(substituted(...entered("1200"), ...refused("999"))).toEqual([]);
   });
 
   it("the missing-file scenario removes a file an earlier run left behind before it checks that the file is absent", async () => {
