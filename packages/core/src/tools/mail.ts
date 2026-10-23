@@ -6,6 +6,8 @@ import { scanBytes } from "../storage/scanner.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 import { callMailService, formatMailServiceError, ok, fail, type MailServiceResponse } from "./mail-service-client.js";
 import { resolveWorkspaceWritePath } from "./workspace-path.js";
+import { currentRequestContext } from "../runtime/request-context.js";
+import { rootSessionOf } from "../agent/session-ids.js";
 
 const log = childLogger("tool:mail");
 
@@ -608,6 +610,32 @@ registerTool({
   },
 });
 
+/**
+ * The messages each turn has sent, by recipients and subject.
+ *
+ * The mail service sends a draft once; a second draft of the same reply is another draft. In the E2E
+ * run of 2026-10-23 a plan gave mail_agent one step to read the customer's mail and the next to answer
+ * it. The first run answered it as well, and the second wrote the answer again and sent it: the
+ * customer got it twice. So a turn sends one message to the same recipients under the same subject,
+ * whichever run of it sends: the turn is the request context's turn id, which every run a turn starts
+ * inherits.
+ */
+const sentByTurn = new Map<string, Array<{ recipients: string; subject: string; draftId: string; at: string }>>();
+const SENT_TURNS_KEPT = 256;
+
+function sendTurnKey(ctx: ToolContext): string {
+  return currentRequestContext()?.turnId ?? `${rootSessionOf(ctx.sessionId)}@${ctx.turnStartedAt ?? ""}`;
+}
+
+function recipientsKey(draft: Record<string, unknown>): string {
+  const list = (value: unknown) => Array.isArray(value) ? value.map((entry) => String(entry).trim().toLowerCase()).filter(Boolean) : [];
+  return [...new Set([...list(draft["to"]), ...list(draft["cc"]), ...list(draft["bcc"])])].sort().join(",");
+}
+
+function subjectKey(subject: unknown): string {
+  return String(subject ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 registerTool({
   name: "mail_send_draft",
   description: "Send a prepared mail draft through the configured mail account. This tool always requires user approval.",
@@ -623,11 +651,26 @@ registerTool({
     const draftId = String(args["draftId"] ?? "").trim();
     if (!draftId) return fail("draftId is required");
     log.info({ sessionId: ctx.sessionId, draftId }, "mail_send_draft executing");
+    const turn = sendTurnKey(ctx);
+    // Unread, the draft is sent as before: the service answers the send itself.
+    const pending = await callMailService<Record<string, unknown>>(`/api/drafts/${encodeURIComponent(draftId)}`, { method: "GET" })
+      .catch(() => ({ status: 599, body: {} as Record<string, unknown> }));
+    const recipients = pending.status < 400 ? recipientsKey(pending.body) : "";
+    const subject = pending.status < 400 ? subjectKey(pending.body["subject"]) : "";
+    const earlier = recipients ? sentByTurn.get(turn)?.find((sent) => sent.recipients === recipients && sent.subject === subject) : undefined;
+    if (earlier) {
+      logAudit("guardrail_flagged", { type: "mail_send_repeat_refused", draftId, earlierDraftId: earlier.draftId }, { sessionId: ctx.sessionId, severity: "warn" });
+      return fail(`Not sent: this turn already sent draft ${earlier.draftId} to ${recipients} with the subject "${String(pending.body["subject"] ?? "")}" (${earlier.at}). Report that message as the one sent; do not send it again.`);
+    }
     const response = await callMailService<Record<string, unknown>>(`/api/drafts/${encodeURIComponent(draftId)}/send`, {
       method: "POST",
     });
     if (response.status >= 400) {
       return fail(formatMailServiceError(response));
+    }
+    if (recipients) {
+      if (!sentByTurn.has(turn) && sentByTurn.size >= SENT_TURNS_KEPT) sentByTurn.delete(sentByTurn.keys().next().value!);
+      sentByTurn.set(turn, [...(sentByTurn.get(turn) ?? []), { recipients, subject, draftId, at: new Date().toISOString() }]);
     }
     return ok(`Draft ${draftId} sent successfully.`, { draft: response.body });
   },
