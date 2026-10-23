@@ -7,6 +7,7 @@ import { sendChunkedTtsRequests } from "../multimodal/tts-chunking.js";
 import { hubVoiceFor, requestHubSpeech } from "../multimodal/tts-stt-gateway.js";
 import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { getMcpConnections, reconnectAfterFailedCall } from "../mcp/registry.js";
+import { checkFieldValue } from "./browser-form-gate.js";
 import {
   ImageGenerationTimeoutError,
   ImageRenderTooLongError,
@@ -1447,8 +1448,17 @@ function registerBrowserTool(input: {
     name: input.name,
     description: input.description,
     parameters: input.parameters,
-    async execute(args) {
+    async execute(args, ctx) {
       const { checkUrlSsrf, leaveRefusedPage, refusedBrowserAnswer } = await import("./web.js");
+      // A value the user chose stays in its field (browser-form-gate.ts).
+      if (input.mcpToolName === "browser_type" || input.mcpToolName === "browser_select_option") {
+        const entered = input.mcpToolName === "browser_type" ? [args["text"]] : [args["values"]].flat();
+        for (const value of entered) {
+          if (typeof value !== "string") continue;
+          const refusal = checkFieldValue({ runId: ctx.sessionId, ref: args["ref"], element: args["element"], value, userWords: ctx.turnUserWords });
+          if (refusal) return fail(refusal);
+        }
+      }
       if (input.guardUrlArg) {
         const raw = args[input.guardUrlArg];
         if (typeof raw === "string" && raw.trim()) {

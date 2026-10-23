@@ -62,7 +62,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1304 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 101 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:85 | 102 |
 | `bucket` | packages/core/src/config/schema.ts:523 | 35 |
 | `budget` | packages/core/src/config/schema.ts:1791 | 106 |
 | `budgets` | packages/core/src/config/schema.ts:584 | 16 |
@@ -237,7 +237,7 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:246 | 30 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1134 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1132 | 1 |
-| `label` | packages/core/src/config/schema.ts:289 | 163 |
+| `label` | packages/core/src/config/schema.ts:289 | 164 |
 | `labeledAt` | packages/core/src/config/schema.ts:968 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:967 | 1 |
 | `language` | packages/core/src/config/schemas/multimodal.ts:39 | 115 |
@@ -319,7 +319,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1302 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:586 | 2 |
 | `mounts` | packages/core/src/config/schema.ts:748 | 13 |
-| `name` | packages/core/src/config/schema.ts:2135 | 439 |
+| `name` | packages/core/src/config/schema.ts:2135 | 440 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:184 | 7 |
 | `network` | packages/core/src/config/schema.ts:749 | 60 |
 | `node` | packages/core/src/config/schema.ts:1107 | 278 |
@@ -525,7 +525,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:325 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:506 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:353 | 23 |
-| `type` | packages/core/src/config/schema.ts:1029 | 537 |
+| `type` | packages/core/src/config/schema.ts:1029 | 538 |
 | `unbackedActionClaims` | packages/core/src/config/schemas/orchestration.ts:935 | 1 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:150 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:183 | 4 |
