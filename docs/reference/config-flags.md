@@ -207,7 +207,7 @@ Every public schema field, where it is declared, and how many production files r
 | `historyLimit` | packages/core/src/config/schemas/channels.ts:22 | 5 |
 | `holdoutRate` | packages/core/src/config/schema.ts:1626 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:624 | 1 |
-| `host` | packages/core/src/config/schema.ts:772 | 131 |
+| `host` | packages/core/src/config/schema.ts:772 | 132 |
 | `http` | packages/core/src/config/schema.ts:817 | 98 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1374 | 20 |
 | `id` | packages/core/src/config/schema.ts:405 | 359 |
