@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:57 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:751 | 1 |
 | `admin` | packages/core/src/config/schema.ts:436 | 54 |
-| `after` | packages/core/src/config/schema.ts:1567 | 299 |
+| `after` | packages/core/src/config/schema.ts:1567 | 300 |
 | `agents` | packages/core/src/config/schema.ts:1555 | 200 |
 | `alertmanager` | packages/core/src/config/schema.ts:1200 | 1 |
 | `all` | packages/core/src/config/schema.ts:1353 | 328 |
@@ -493,7 +493,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:985 | 23 |
 | `tags` | packages/core/src/config/schema.ts:632 | 81 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:59 | 5 |
-| `task` | packages/core/src/config/schema.ts:1364 | 179 |
+| `task` | packages/core/src/config/schema.ts:1364 | 180 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1960 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:510 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:717 | 1 |
