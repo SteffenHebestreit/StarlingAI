@@ -14,6 +14,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PRODUCT } from "../product/index.js";
 import type { UserInputOutcome } from "../agent/user-input.js";
 
+/**
+ * A 600 ms timer, measured with Date.now(), can come out a millisecond or two short: timers and the
+ * clock round differently (CI, 2026-10-23: 599). What these tests check is that the wait moved the
+ * deadline, not the timer's precision.
+ */
+const TIMER_SLACK_MS = 5;
+
 const streamMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../providers/index.js", () => {
@@ -189,7 +196,7 @@ describe("the orchestrator turn deadline and a person answering", () => {
     // The call's whole length once: the 600 ms wait as a human wait, the rest as delegation wait.
     // Counted twice, the extension would be the call plus another 600 ms.
     const extension = turnContext!._turnDeadlineMs! - deadlineBefore!;
-    expect(callMs).toBeGreaterThanOrEqual(600);
+    expect(callMs).toBeGreaterThanOrEqual(600 - TIMER_SLACK_MS);
     expect(extension).toBeGreaterThanOrEqual(callMs);
     expect(extension).toBeLessThan(callMs + 300);
   }, 30_000);
@@ -232,7 +239,7 @@ describe("the orchestrator turn deadline and a person answering", () => {
 
     expect(seen.staticAfter).toBe(seen.staticBefore);
     expect(seen.liveBefore).toBe(seen.staticBefore);
-    expect(seen.liveAfter! - seen.liveBefore!).toBeGreaterThanOrEqual(600);
+    expect(seen.liveAfter! - seen.liveBefore!).toBeGreaterThanOrEqual(600 - TIMER_SLACK_MS);
   }, 30_000);
 
   it("does not read a long answer as silence: a turn producing up to its question survives it (review #13)", async () => {
