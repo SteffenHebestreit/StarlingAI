@@ -225,25 +225,29 @@ export async function main() {
   // plugins, dynamic tools) has registered.  The first `rerankToolsForTask`
   // call in a live turn is otherwise a thundering herd against the embedding
   // provider; warming up here amortizes that cost into startup.
-  try {
-    const { warmToolEmbeddings } = await import("./tools/registry.js");
-    const warm = await warmToolEmbeddings();
-    if (warm.warmed > 0 || warm.skipped > 0) {
-      log.info(
-        { warmed: warm.warmed, skipped: warm.skipped, durationMs: warm.durationMs },
-        "Tool embeddings warmed",
-      );
-      const { logAudit } = await import("./audit/logger.js");
-      logAudit("tool_embeddings_warmed", {
-        warmed: warm.warmed,
-        skipped: warm.skipped,
-        durationMs: warm.durationMs,
-        source: "startup",
-      });
+  // Not awaited: the gateway starts serving whether or not the embedding provider answers. With
+  // the model host unreachable (2026-10-23) the awaited warm-up held startup for good.
+  void (async () => {
+    try {
+      const { warmToolEmbeddings } = await import("./tools/registry.js");
+      const warm = await warmToolEmbeddings();
+      if (warm.warmed > 0 || warm.skipped > 0) {
+        log.info(
+          { warmed: warm.warmed, skipped: warm.skipped, durationMs: warm.durationMs },
+          "Tool embeddings warmed",
+        );
+        const { logAudit } = await import("./audit/logger.js");
+        logAudit("tool_embeddings_warmed", {
+          warmed: warm.warmed,
+          skipped: warm.skipped,
+          durationMs: warm.durationMs,
+          source: "startup",
+        });
+      }
+    } catch (err) {
+      log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
     }
-  } catch (err) {
-    log.warn({ err }, "Tool embedding warm-up failed — continuing with lazy embeddings");
-  }
+  })();
 
   // Load the language detector before the first turn (~80 ms, ~30 MB), so the first turn's
   // status lines, banners and spoken summary name the right language instead of the default.

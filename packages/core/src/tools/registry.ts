@@ -3,7 +3,7 @@ import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.j
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import type { TurnUserWords } from "../agent/delegation-user-words.js";
 import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
-import { computeQueryEmbedding, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
+import { computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentRequestContext } from "../runtime/request-context.js";
 import { pairedIdentity } from "../runtime/user-scope.js";
@@ -690,22 +690,38 @@ export async function warmToolEmbeddings(
     ? toolNames.map((n) => _registry.get(n)).filter((h): h is ToolHandler => !!h)
     : [..._registry.values()];
 
+  // IN BATCHES, AND NOT PAST A BATCH THE PROVIDER COULD NOT ANSWER. This used to send one request
+  // per tool, all at once. On 2026-10-23 the model host's name stopped resolving (each lookup failed
+  // after ~4 s): ~250 lookups held the four resolver threads every DNS lookup shares, the gateway's
+  // own connections to Redis and processmem timed out behind them, and the gateway never started
+  // listening. A batch is one request; a batch that comes back empty ends the warm-up, and tools
+  // are embedded on demand when a turn first needs them.
   let warmed = 0;
   let skipped = 0;
-  await Promise.all(
-    targets.map(async (handler) => {
-      const key = _toolEmbeddingKey(handler);
-      if (_toolEmbeddingCache.has(key)) {
-        skipped += 1;
-        return;
-      }
-      const vec = await _getToolEmbedding(handler);
-      if (vec) warmed += 1;
-    }),
-  );
+  const pending: ToolHandler[] = [];
+  for (const handler of targets) {
+    if (_toolEmbeddingCache.has(_toolEmbeddingKey(handler))) skipped += 1;
+    else pending.push(handler);
+  }
+  for (let start = 0; start < pending.length; start += TOOL_EMBEDDING_WARM_BATCH) {
+    const batch = pending.slice(start, start + TOOL_EMBEDDING_WARM_BATCH);
+    const vectors = await computeTextEmbeddings(batch.map(_toolEmbeddingText));
+    let answered = 0;
+    batch.forEach((handler, i) => {
+      const vec = vectors[i];
+      if (!vec) return;
+      _toolEmbeddingCache.set(_toolEmbeddingKey(handler), vec);
+      answered += 1;
+    });
+    warmed += answered;
+    if (answered === 0) break;
+  }
 
   return { warmed, skipped, durationMs: Date.now() - startedAt };
 }
+
+/** Tools embedded per warm-up request. */
+export const TOOL_EMBEDDING_WARM_BATCH = 64;
 
 /**
  * Repair a tool call whose name was mangled by the model.
