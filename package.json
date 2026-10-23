@@ -1,6 +1,6 @@
 {
   "name": "starlingai",
-  "version": "0.52.4",
+  "version": "0.52.5",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.6.0",
