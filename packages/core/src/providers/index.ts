@@ -637,6 +637,17 @@ export async function initProviders(): Promise<void> {
       ...health,
     }, { severity: health.healthy ? "info" : "warn" });
 
+    // The agent index does not wait for the chat model: the embedding model is served on its own,
+    // and the build retries itself until it answers. Started only once the chat model had answered,
+    // a gateway that booted while the model host was down never built it: routing found no agent
+    // and sent every task to the fallback, and tool and memory recall lost their embeddings, long
+    // after the host was back.
+    const embeddingModel = config.agents.defaults.model.embeddingModel;
+    if (embeddingModel) {
+      const subAgents = withPromotedAgents(config.subAgents ?? {}, config.workspacePath);
+      buildAgentIndex(subAgents, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
+    }
+
     if (!health.healthy) {
       log.error(
         { error: health.error, provider: endpoint.providerId, baseUrl: endpoint.baseUrl },
@@ -675,13 +686,6 @@ export async function initProviders(): Promise<void> {
       configuredModel: modelId,
       toolCallingVerified: toolsSupported,
     });
-
-    // Build semantic agent search index if an embedding model is configured
-    const embeddingModel = config.agents.defaults.model.embeddingModel;
-    if (embeddingModel) {
-      const subAgents = withPromotedAgents(config.subAgents ?? {}, config.workspacePath);
-      buildAgentIndex(subAgents, getEmbeddingProvider(), embeddingModel).catch(() => undefined);
-    }
   } catch (err) {
     markRuntimeComponentFailure("providers", err);
     throw err;
