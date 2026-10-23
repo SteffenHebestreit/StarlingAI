@@ -131,6 +131,7 @@ export type CoreAuditEventType =
   | "computer_heartbeat_lost"
   // Browser session — noVNC live preview + human handoff
   | "browser_session_register"
+  | "browser_watchdog_recovery"
   | "browser_session_assist_requested"
   | "browser_session_assist_resolved"
   | "browser_session_assist_timeout"

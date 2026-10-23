@@ -8,6 +8,7 @@ import { hubVoiceFor, requestHubSpeech } from "../multimodal/tts-stt-gateway.js"
 import { fetchTtsVoiceCatalog } from "../multimodal/tts-voice-catalog.js";
 import { getMcpConnections, reconnectAfterFailedCall } from "../mcp/registry.js";
 import { checkFieldValue } from "./browser-form-gate.js";
+import { browserWatchdog } from "./browser-watchdog.js";
 import {
   ImageGenerationTimeoutError,
   ImageRenderTooLongError,
@@ -1485,10 +1486,14 @@ function registerBrowserTool(input: {
           await leaveRefusedPage();
           return fail(`Refusing to show the page the browser is on: ${refused}. The browser was sent to about:blank.`);
         }
+        void browserWatchdog().then((watchdog) => watchdog.noteSuccess()).catch(() => {});
         return { success: true, output, metadata: { server: "playwright", tool: input.mcpToolName } };
       } catch (error) {
         log.error({ err: error, tool: input.mcpToolName }, "browser tool failed");
-        return fail(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        // A browser that stopped taking CDP connections is restarted (browser-watchdog.ts), off this call's path.
+        void browserWatchdog().then((watchdog) => watchdog.noteFailure(message)).catch(() => {});
+        return fail(message);
       }
     },
   });
