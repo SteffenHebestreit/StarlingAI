@@ -26,7 +26,7 @@ function run(taskId: string, arm: LabArm, attempt: number, failures: string[]): 
   };
 }
 
-function deps(opts: { guardRegresses?: boolean; secondProbeBreaks?: boolean } = {}): CycleDeps & { calls: string[] } {
+function deps(opts: { guardRegresses?: boolean; secondProbeBreaks?: boolean; gateTies?: boolean } = {}): CycleDeps & { calls: string[] } {
   const calls: string[] = [];
   return {
     calls,
@@ -42,6 +42,8 @@ function deps(opts: { guardRegresses?: boolean; secondProbeBreaks?: boolean } = 
           broken.turns[0]!.reply = "";
           return broken;
         }
+        // Gate attempts are numbered from 101.
+        if (opts.gateTies && attempt > 100) return run(t.id, arm, attempt, []);
         return run(t.id, arm, attempt, withRule ? [] : ["reply does not include \"total\""]);
       }
       if (t.id === "g1" && withRule && opts.guardRegresses) return run(t.id, arm, attempt, ["reply is in the wrong language"]);
@@ -83,6 +85,16 @@ describe("a harness-lab cycle", () => {
     expect(d.calls.filter((c) => c.startsWith("g1:gate-candidate"))).toHaveLength(1);
     expect(d.calls.filter((c) => c.startsWith("t-fail:gate-candidate"))).toHaveLength(3);
     expect(result.health.editorValidEdits).toBe(1);
+  });
+
+  it("runs a target whose gate pairs all tie again: the selector's word alone is one verdict per pair", async () => {
+    const d = deps({ gateTies: true });
+    const result = await runCycle(corpus, DEFAULT_CYCLE, d);
+    expect(result.tasks[0]?.outcome).toBe("win");
+    expect(d.calls.filter((c) => c.startsWith("t-fail:gate-candidate"))).toHaveLength(DEFAULT_CYCLE.kGateMax);
+    // Guards that tied still run once.
+    expect(d.calls.filter((c) => c.startsWith("g1:gate-candidate"))).toHaveLength(1);
+    expect(result.gate?.verdict).toBe("reject");
   });
 
   it("rejects the candidate when a guard regresses", async () => {

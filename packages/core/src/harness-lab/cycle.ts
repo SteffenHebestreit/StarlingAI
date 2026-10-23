@@ -289,8 +289,12 @@ async function runGate(merged: LabEdit[], targets: HarnessTask[], guards: Harnes
     let ran = 0;
     for (const [index, task] of tasks.entries()) {
       const result = results[index]!;
-      // Past the first round only where the arms disagreed or the selector could not decide.
-      if (k > 1 && !result.attempts.some((p) => compareScores(p.candidate, p.base) !== 0 || p.selector === "inconsistent")) continue;
+      // Past the first round only where the arms disagreed or the selector could not decide, and on a
+      // target whose pairs all tied: its only evidence is the selector's, and one verdict accepted the
+      // nightly run's proposal of 2026-10-23.
+      const unsettled = result.attempts.some((p) => compareScores(p.candidate, p.base) !== 0 || p.selector === "inconsistent");
+      const selectorOnly = result.role === "target" && result.attempts.every((p) => compareScores(p.candidate, p.base) === 0);
+      if (k > 1 && !unsettled && !selectorOnly) continue;
       // Interleaved: base first on odd rounds, the candidate first on even ones.
       const [b, c] = k % 2 === 1
         ? [await deps.runAttempt(task, { name: "base" }, 100 + k), await deps.runAttempt(task, candidateArm, 100 + k)]

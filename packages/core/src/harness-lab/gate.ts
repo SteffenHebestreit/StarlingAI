@@ -51,7 +51,10 @@ export interface GateOptions {
   guardTotalLossMargin: number;
   /** Targets together must win at least this many more pairs than they lose (deterministic evidence). */
   targetWinMargin: number;
-  /** Selector-only evidence: share of target pairs the selector must win consistently, with no loss. */
+  /**
+   * Selector-only evidence: share of target pairs the selector must win consistently, with no loss,
+   * and at least targetWinMargin such wins: the selector's word does not count for more than a check's.
+   */
   selectorWinShare: number;
 }
 
@@ -116,7 +119,8 @@ export function gateDecision(results: readonly GateTaskResult[], opts: GateOptio
   const decided = targets.reduce((sum, t) => sum + t.wins + t.losses, 0);
   const selectorWins = targets.reduce((sum, t) => sum + t.selectorWins, 0);
   const selectorLosses = targets.reduce((sum, t) => sum + t.selectorLosses, 0);
-  if (decided === 0 && targetPairs > 0 && selectorLosses === 0 && selectorWins / targetPairs >= opts.selectorWinShare) {
+  if (decided === 0 && targetPairs > 0 && selectorLosses === 0 && selectorWins >= opts.targetWinMargin
+    && selectorWins / targetPairs >= opts.selectorWinShare) {
     return {
       ...base,
       verdict: "accept",

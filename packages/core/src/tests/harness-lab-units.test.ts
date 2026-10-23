@@ -181,6 +181,13 @@ describe("gate", () => {
     expect(gateDecision([target([pair({}, {}, "candidate"), pair({}, {}, "base"), pair({}, {}, "candidate")]), guard([same])]).verdict).toBe("reject");
   });
 
+  it("does not accept on one selector verdict: it needs as many as a deterministic accept needs won pairs", () => {
+    // The nightly run of 2026-10-23: one target pair, tied, the selector's one consistent verdict.
+    expect(gateDecision([target([pair({}, {}, "candidate")]), guard([same])]).verdict).toBe("reject");
+    expect(gateDecision([target([pair({}, {}, "candidate"), pair({}, {}, "candidate")]), guard([same])]))
+      .toMatchObject({ verdict: "accept", evidence: "selector-only" });
+  });
+
   it("is no verdict when too many pairs could not be scored", () => {
     expect(gateDecision([target([fixed, pair({ unscored: true }, {})]), guard([same])]).verdict).toBe("no_verdict");
   });
