@@ -70,6 +70,48 @@ describe("filesystem tools", () => {
     expect(existsSync(join(tempDir, "generated/e2e-guards/sommeraktion.html"))).toBe(false);
   });
 
+  it("write_file asks once before it creates a file its run found missing", async () => {
+    // E2E guards, 2026-10-23: qa_guard read the file it was to change, got the line above, and
+    // created the file with its next write.
+    const { getTool } = await import("../tools/registry.js");
+    const path = "generated/e2e-guards/sommeraktion.html";
+    const target = join(tempDir, path);
+    const run = { sessionId: "sub:root-missing:qa_guard:1", workspacePath: tempDir };
+    const content = "<h1>Sommeraktion 2026</h1>";
+    expect((await getTool("read_file")!.execute({ path }, run)).success).toBe(false);
+
+    const first = await getTool("write_file")!.execute({ path, content, mode: "create" }, run);
+    expect(first.success).toBe(false);
+    expect(first.error).toMatch(/^Not written: generated\/e2e-guards\/sommeraktion\.html did not exist when this run read it\./);
+    expect(first.error).toMatch(/If your task is to create it, call write_file again\.$/);
+    expect(existsSync(target)).toBe(false);
+
+    // Asked once: the run that means to create it does so with its next call.
+    const second = await getTool("write_file")!.execute({ path, content, mode: "create" }, run);
+    expect(second.success).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe(content);
+  });
+
+  it("asks only the run that found the file missing, and after edit_file too", async () => {
+    const { getTool } = await import("../tools/registry.js");
+    const path = "generated/e2e-guards/neu.html";
+    const content = "<p>neu</p>";
+    // Another run that never looked writes it straight away.
+    const other = { sessionId: "sub:root-other:web_coder:1", workspacePath: tempDir };
+    const edited = { sessionId: "sub:root-edit:coder:1", workspacePath: tempDir };
+    expect((await getTool("edit_file")!.execute({ path, old_string: "a", new_string: "b" }, edited)).success).toBe(false);
+    expect((await getTool("write_file")!.execute({ path, content }, other)).success).toBe(true);
+    rmSync(join(tempDir, path));
+    // The run whose edit_file found it missing is asked, in every write mode.
+    const asked = await getTool("write_file")!.execute({ path, content, mode: "append" }, edited);
+    expect(asked.error).toMatch(/^Not written: /);
+    // A file that exists by the time of the write is no longer the missing file: nothing to ask.
+    const again = { sessionId: "sub:root-exists:coder:1", workspacePath: tempDir };
+    expect((await getTool("read_file")!.execute({ path }, again)).success).toBe(false);
+    writeFileSync(join(tempDir, path), "<p>alt</p>");
+    expect((await getTool("write_file")!.execute({ path, content }, again)).success).toBe(true);
+  });
+
   it("reads jsonc files used by workspace agent shards", async () => {
     const { getTool } = await import("../tools/registry.js");
     const tool = getTool("read_file");

@@ -320,6 +320,37 @@ function countLines(text: string): number {
 export const MISSING_FILE_IS_NOT_A_CHANGE =
   "Creating this file is a different action from changing it: if your task is to change it, report it as missing instead of creating it.";
 
+/**
+ * The files each run found missing (read_file, edit_file), and those its write_file already asked about.
+ *
+ * The line above did not hold. In the E2E guards scenario of 2026-10-23 qa_guard read the file the user
+ * had asked to change and not to create, got the line, and created the file with its next write. So the
+ * write that would create such a file is where the run is asked: it is refused once, with the question,
+ * and goes through when the run calls again. In the two days of audit before it, 19 runs had found a
+ * file missing and only that one wrote it; a run that does mean to create the file pays one call.
+ */
+const missingFilesByRun = new Map<string, { missing: Set<string>; asked: Set<string> }>();
+const MISSING_FILE_RUNS_KEPT = 256;
+
+function noteMissingFile(ctx: ToolContext, resolved: string): void {
+  if (!ctx.sessionId) return;
+  let run = missingFilesByRun.get(ctx.sessionId);
+  if (!run) {
+    if (missingFilesByRun.size >= MISSING_FILE_RUNS_KEPT) missingFilesByRun.delete(missingFilesByRun.keys().next().value!);
+    run = { missing: new Set(), asked: new Set() };
+    missingFilesByRun.set(ctx.sessionId, run);
+  }
+  run.missing.add(resolved);
+}
+
+/** Whether this write would create a file its run found missing, and the run was not asked about it yet. */
+function firstCreateOfMissingFile(ctx: ToolContext, resolved: string): boolean {
+  const run = ctx.sessionId ? missingFilesByRun.get(ctx.sessionId) : undefined;
+  if (!run?.missing.has(resolved) || run.asked.has(resolved) || existsSync(resolved)) return false;
+  run.asked.add(resolved);
+  return true;
+}
+
 registerTool({
   name: "read_file",
   description: "Read the contents of a file within the workspace directory. A file over ~16 KB comes back as head+tail — pass offset/limit to read any other window of it.",
@@ -345,6 +376,7 @@ registerTool({
       return { success: false, output: "", error: "Path escapes workspace boundary" };
     }
     if (!existsSync(resolved)) {
+      noteMissingFile(ctx, resolved);
       return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
     }
 
@@ -736,6 +768,15 @@ registerTool({
       return { success: false, output: "", error: `File type ${ext} is not allowed for writing` };
     }
 
+    if (firstCreateOfMissingFile(ctx, resolved)) {
+      logAudit("guardrail_flagged", { type: "write_file_create_after_missing_read", path: relativePath }, { sessionId: ctx.sessionId, severity: "info" });
+      return {
+        success: false,
+        output: "",
+        error: `Not written: ${relativePath} did not exist when this run read it. If your task is to change that file, it is missing: report that, and do not create it. If your task is to create it, call write_file again.`,
+      };
+    }
+
     // Opened once, held to its zone as it is opened (openContainedWorkspaceFile): guardWritePath
     // judged the path when it was resolved, and a sandbox can swap a directory on the way for a link
     // in between. The file is not truncated by the open; every read and write below goes through it.
@@ -893,7 +934,10 @@ registerTool({
 
     if (!safe) return { success: false, output: "", error: writeRefusalError(refusal) };
     if (!oldStr) return { success: false, output: "", error: "old_string cannot be empty" };
-    if (!existsSync(resolved)) return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
+    if (!existsSync(resolved)) {
+      noteMissingFile(ctx, resolved);
+      return { success: false, output: "", error: `File not found: ${path}\n${MISSING_FILE_IS_NOT_A_CHANGE}` };
+    }
 
     const stat = statSync(resolved);
     if (stat.size > MAX_TEXT_FILE_BYTES) {
