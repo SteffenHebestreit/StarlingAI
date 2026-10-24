@@ -103,7 +103,7 @@ export const AnthropicProviderSchema = z.object({
 
 export const ProvidersSchema = z.object({
   lmstudio: LMStudioProviderSchema.optional(),
-  openaiCompatible: z.record(OpenAICompatibleProviderSchema).default({}),
+  openaiCompatible: z.record(z.string(), OpenAICompatibleProviderSchema).default({}),
   ollama: OllamaProviderSchema.optional(),
   anthropic: AnthropicProviderSchema.optional(),
 });
@@ -611,7 +611,7 @@ export const TracingSchema = z.object({
   /** OTLP HTTP endpoint URL (e.g. http://localhost:4318/v1/traces). */
   otlpEndpoint: z.string().url().default("http://localhost:4318/v1/traces"),
   /** Optional headers (e.g. {"x-honeycomb-team": "..."}) for the OTLP exporter. */
-  otlpHeaders: z.record(z.string()).optional(),
+  otlpHeaders: z.record(z.string(), z.string()).optional(),
   /** Trace sampling probability 0..1.  Default 1.0 = sample every trace. */
   sampleRate: z.number().min(0).max(1).default(1),
   /** Service name reported in spans.  Defaults to "starlingai". */
@@ -736,7 +736,7 @@ export const McpStdioServerSchema = z.object({
   transport: z.literal("stdio"),
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   autoStart: z.boolean().default(true),
 });
 
@@ -744,7 +744,7 @@ export const McpDockerRunServerSchema = z.object({
   transport: z.literal("docker"),
   image: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   mounts: z.array(z.string()).default([]),
   network: z.string().optional(),
   /** Extra host mappings injected as --add-host=host:ip (e.g. ["myhost.internal:192.168.1.50"]) */
@@ -763,7 +763,7 @@ export const McpHttpServerSchema = z.object({
   transport: z.literal("http"),
   url: z.string().url(),           // StreamableHTTP or legacy JSON-RPC endpoint
   protocol: z.enum(["streamable", "legacy-jsonrpc"]).default("streamable"),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   autoStart: z.boolean().default(true),
 });
 
@@ -824,7 +824,7 @@ export const McpServerExposeSchema = z.object({
 export type McpServerExposeConfig = z.infer<typeof McpServerExposeSchema>;
 
 export const McpConfigSchema = z.object({
-  servers: z.record(McpServerConfigSchema).default({}),
+  servers: z.record(z.string(), McpServerConfigSchema).default({}),
   /** Expose StarlingAI itself as an MCP server (Stage 12 / Open Interop). */
   expose: McpServerExposeSchema.default({}),
   /**
@@ -848,7 +848,7 @@ export const SiteCredentialSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),     // supports $ENV and secret: prefixes
   loginUrl: z.string().url().optional(),            // override if login page != root
-  urls: z.record(z.string()).optional(),            // named URL shortcuts, e.g. { "leads": "http://..." }
+  urls: z.record(z.string(), z.string()).optional(),            // named URL shortcuts, e.g. { "leads": "http://..." }
   usernameSelector: z.string().optional(),          // CSS selector hint for Playwright
   passwordSelector: z.string().optional(),
   submitSelector: z.string().optional(),
@@ -858,7 +858,7 @@ export const SiteCredentialSchema = z.object({
   allowedUsers: z.array(z.string()).default([]),
 });
 
-export const SitesSchema = z.record(SiteCredentialSchema);  // keyed by hostname
+export const SitesSchema = z.record(z.string(), SiteCredentialSchema);  // keyed by hostname
 
 export type SiteCredential = z.infer<typeof SiteCredentialSchema>;
 
@@ -1005,7 +1005,7 @@ export const SubAgentConfigSchema = z.object({
   workspaceAccess: z.enum(["full", "generated"]).optional(),
 });
 
-export const SubAgentsSchema = z.record(SubAgentConfigSchema);
+export const SubAgentsSchema = z.record(z.string(), SubAgentConfigSchema);
 export type SubAgentConfig = z.infer<typeof SubAgentConfigSchema>;
 
 // ─── Approval channels ────────────────────────────────────────────────────────
@@ -1047,7 +1047,7 @@ export const OutboundWebhookApprovalChannelSchema = z.object({
   /** Shared secret — included in the outbound payload and expected back on the callback */
   secret: z.string().min(16),
   /** Extra headers on the outbound POST (e.g. Authorization for n8n) */
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** Timeout in ms before auto-deny (default 10 min) */
   timeoutMs: z.number().int().default(600_000),
 });
@@ -1062,7 +1062,7 @@ export const SyncWebhookApprovalChannelSchema = z.object({
   type: z.literal("sync_webhook"),
   /** URL that receives the POST and responds with { approved: boolean } */
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** Timeout for the synchronous response (default 30 s) */
   timeoutMs: z.number().int().default(30_000),
 });
@@ -1073,7 +1073,7 @@ export const ApprovalChannelSchema = z.discriminatedUnion("type", [
   SyncWebhookApprovalChannelSchema,
 ]);
 
-export const ApprovalChannelsSchema = z.record(ApprovalChannelSchema);
+export const ApprovalChannelsSchema = z.record(z.string(), ApprovalChannelSchema);
 export type ApprovalChannelConfig = z.infer<typeof ApprovalChannelSchema>;
 
 
@@ -1086,7 +1086,7 @@ export const WebhookToolSchema = z.object({
   description: z.string().min(1),
   url: z.string().url(),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("POST"),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** SEC-106: declare this endpoint side-effect-free (a status page, a search).
    *  Default FALSE — webhooks exist to trigger things, and GET-trigger hooks
    *  (Jenkins build URLs, cache purges) are common, so the HTTP verb is NOT
@@ -1095,7 +1095,7 @@ export const WebhookToolSchema = z.object({
   readOnly: z.boolean().default(false),
 });
 
-export const WebhooksSchema = z.record(WebhookToolSchema);
+export const WebhooksSchema = z.record(z.string(), WebhookToolSchema);
 export type WebhookToolConfig = z.infer<typeof WebhookToolSchema>;
 
 
@@ -1115,7 +1115,7 @@ export const InfrastructureVmProxmoxProfileSchema = z.object({
 export const InfrastructureVmWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).default(120000),
 });
 
@@ -1139,7 +1139,7 @@ export const InfrastructureAutomationLocalCliProfileSchema = z.object({
 export const InfrastructureAutomationWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).optional(),
 });
 
@@ -1150,11 +1150,11 @@ export const InfrastructureAutomationProfileSchema = z.discriminatedUnion("type"
 
 export const InfrastructureSchema = z.object({
   virtualization: z.object({
-    profiles: z.record(InfrastructureVmProfileSchema).default({}),
+    profiles: z.record(z.string(), InfrastructureVmProfileSchema).default({}),
   }).default({}),
   automation: z.object({
     defaultProfile: z.string().min(1).optional(),
-    profiles: z.record(InfrastructureAutomationProfileSchema).default({}),
+    profiles: z.record(z.string(), InfrastructureAutomationProfileSchema).default({}),
   }).default({}),
 });
 
@@ -1172,7 +1172,7 @@ export const PrometheusInstanceSchema = z.object({
   baseUrl: z.string().url(),
   bearerToken: z.string().optional(),
   basicAuth: BasicAuthSchema.optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1180,7 +1180,7 @@ export const AlertmanagerInstanceSchema = z.object({
   baseUrl: z.string().url(),
   bearerToken: z.string().optional(),
   basicAuth: BasicAuthSchema.optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1188,7 +1188,7 @@ export const GrafanaInstanceSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
   orgId: z.number().int().min(1).optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1196,9 +1196,9 @@ export const MonitoringSchema = z.object({
   defaultPrometheus: z.string().min(1).optional(),
   defaultAlertmanager: z.string().min(1).optional(),
   defaultGrafana: z.string().min(1).optional(),
-  prometheus: z.record(PrometheusInstanceSchema).default({}),
-  alertmanager: z.record(AlertmanagerInstanceSchema).default({}),
-  grafana: z.record(GrafanaInstanceSchema).default({}),
+  prometheus: z.record(z.string(), PrometheusInstanceSchema).default({}),
+  alertmanager: z.record(z.string(), AlertmanagerInstanceSchema).default({}),
+  grafana: z.record(z.string(), GrafanaInstanceSchema).default({}),
 });
 
 
@@ -1217,7 +1217,7 @@ export const GitHubInstanceSchema = z.object({
 
 export const SourceForgeSchema = z.object({
   defaultGithub: z.string().min(1).optional(),
-  github: z.record(GitHubInstanceSchema).default({}),
+  github: z.record(z.string(), GitHubInstanceSchema).default({}),
   /** Optional API key for Google PageSpeed Insights (lighthouse_audit).
    *  Avoids the strict anonymous quota. Supports $ENV / secret: refs. */
   pageSpeedInsightsApiKey: z.string().optional(),
@@ -1235,7 +1235,7 @@ export const PentestKaliServiceProfileSchema = z.object({
 export const PentestWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).default(300000),
 });
 
@@ -1247,7 +1247,7 @@ export const PentestProfileSchema = z.discriminatedUnion("type", [
 export const PentestSchema = z.object({
   serviceUrl: z.string().url().default("http://kali-pentest:5010"),
   defaultProfile: z.string().min(1).optional(),
-  profiles: z.record(PentestProfileSchema).default({}),
+  profiles: z.record(z.string(), PentestProfileSchema).default({}),
 });
 
 export const MailServiceSchema = z.object({
@@ -1268,11 +1268,11 @@ export const DataFeedProviderEntrySchema = z.object({
   /** API key for paid/keyed providers. Supports `$ENV_VAR` and `secret:key` refs. */
   apiKey: z.string().optional(),
   /** Provider-specific configuration overrides (passed verbatim to the provider). */
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const DataFeedsSchema = z.object({
-  providers: z.record(DataFeedProviderEntrySchema).default({}),
+  providers: z.record(z.string(), DataFeedProviderEntrySchema).default({}),
 });
 
 export type DataFeedsConfig = z.infer<typeof DataFeedsSchema>;
@@ -1369,7 +1369,7 @@ export const SceneConfigSchema = z.object({
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
-  params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
+  params: z.record(z.string(), SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
   humanInLoopSteps: z.array(z.string()).optional(), // tool names that require user approval in this scene
   // When true and this scene runs as a single-agent job step, the job runner verifies the
@@ -1385,7 +1385,7 @@ export const SceneConfigSchema = z.object({
   approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
 });
 
-export const ScenesSchema = z.record(SceneConfigSchema);
+export const ScenesSchema = z.record(z.string(), SceneConfigSchema);
 export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 
 // ─── Jobs ────────────────────────────────────────────────────────────────────
@@ -1395,20 +1395,20 @@ export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 export const JobStepSchema = z.object({
   scene: z.string().min(1),
   label: z.string().optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const ApiJobTriggerSchema = z.object({
   type: z.literal("api"),
   webhookKey: z.string().min(16).optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const CronJobTriggerSchema = z.object({
   type: z.literal("cron"),
   expression: z.string().min(1),
   enabled: z.boolean().default(true),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const ChannelJobTriggerSchema = z.object({
@@ -1424,7 +1424,7 @@ export const ChannelJobTriggerSchema = z.object({
   replyText: z.string().min(1).optional(),
   captureMessageAs: z.string().min(1).optional(),
   captureRemainderAs: z.string().min(1).optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const JobTriggerSchema = z.discriminatedUnion("type", [
@@ -1441,14 +1441,14 @@ export const JobConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  params: z.record(SceneParamSchema).optional(),
+  params: z.record(z.string(), SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),
   /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
   catalogTriggers: WorkflowCatalogTriggersSchema,
 });
 
-export const JobsSchema = z.record(JobConfigSchema);
+export const JobsSchema = z.record(z.string(), JobConfigSchema);
 export type JobConfig = z.infer<typeof JobConfigSchema>;
 export type JobTriggerConfig = z.infer<typeof JobTriggerSchema>;
 export type JobStepConfig = z.infer<typeof JobStepSchema>;
@@ -1859,7 +1859,7 @@ export const ConfigSchema = z.object({
        *  from the dashboard header. An implicit "claude" preset exists
        *  whenever providers.anthropic is configured (model from
        *  providers.anthropic.defaultModel). */
-      modelPresets: z.record(ModelPresetSchema).default({}),
+      modelPresets: z.record(z.string(), ModelPresetSchema).default({}),
       /** Currently active preset name; unset = the configured local default.
        *  Persisted by the dashboard switch into the runtime overlay. */
       activeModelPreset: z.string().optional(),
@@ -2105,7 +2105,7 @@ export const ConfigSchema = z.object({
   toolPipeline: ToolPipelineSchema.default({}),
   dataFeeds: DataFeedsSchema.default({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
-  computerUse: z.record(z.unknown()).default({}),
+  computerUse: z.record(z.string(), z.unknown()).default({}),
   auth: AuthSchema.default({}),
   storage: StorageSchema.default({}),
   cost: CostSchema.default({}),
@@ -2161,7 +2161,7 @@ export const ConfigSchema = z.object({
    * here; each extension validates its own slice with the `configSchema` from
    * its manifest at boot.
    */
-  extensions: z.record(z.unknown()).default({}),
+  extensions: z.record(z.string(), z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
   orchestration: OrchestrationSchema.default({}),
   effort: EffortSchema.default({}),
