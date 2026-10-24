@@ -14,6 +14,12 @@
  * value and the new one is not the user's. Not refused: a field the agent filled itself, the same
  * value in another format ("1.200" for "1200", compared by digits), and an alternative the user
  * named ("Express, sonst Standard"), which is the user's own too.
+ *
+ * A radio button is chosen by a click, which carries no value: in the E2E run of 2026-10-23 the page
+ * refused Express for freight goods, and the agent clicked Standard and submitted again. Before a
+ * click the page is asked what it would change (RADIO_CHOICE_FUNCTION, through browser_evaluate):
+ * a click that moves a radio group off the option the user named, to one the user did not name, is
+ * refused the same way.
  */
 import type { TurnUserWords } from "../agent/delegation-user-words.js";
 
@@ -95,6 +101,60 @@ export function checkFieldValue(input: {
   if (ref) fields.byRef.set(ref, entry);
   if (name) fields.byLabel.set(name, entry);
   return null;
+}
+
+/**
+ * Runs on a click's target in the page (browser_evaluate) before the click. For a radio button, or the
+ * label of one, the names of its group's checked option and of its own: label text, the label up to
+ * its first line break or parenthesis, aria-label and value. Null for anything else.
+ */
+export const RADIO_CHOICE_FUNCTION = `(element) => {
+  const input = element instanceof HTMLInputElement ? element : (element.control || (element.querySelector && element.querySelector("input")));
+  if (!input || input.type !== "radio" || !input.name) return null;
+  const scope = input.form || document;
+  const group = Array.from(scope.querySelectorAll("input[type=radio]")).filter((radio) => radio.name === input.name);
+  const names = (radio) => {
+    const text = radio.labels && radio.labels[0] ? radio.labels[0].innerText : "";
+    return [text, text.split(/[\\n(]/)[0], radio.getAttribute("aria-label") || "", radio.value || ""].map((name) => name.trim()).filter(Boolean);
+  };
+  const checked = group.find((radio) => radio.checked);
+  return { group: input.name, checked: checked ? names(checked) : [], target: names(input), targetChecked: input.checked };
+}`;
+
+export interface RadioChoice {
+  group: string;
+  /** Names of the option checked now; empty when none is. */
+  checked: string[];
+  /** Names of the option the click would check. */
+  target: string[];
+  targetChecked: boolean;
+}
+
+/** The RadioChoice in a browser_evaluate answer (a "### Result" section holding its JSON), or null. */
+export function parseRadioChoice(answer: string): RadioChoice | null {
+  const result = answer.match(/### Result\s*\n([\s\S]*?)(?:\n###|$)/)?.[1]?.trim();
+  if (!result) return null;
+  try {
+    const value = JSON.parse(result) as Partial<RadioChoice> | null;
+    if (!value || typeof value.group !== "string" || !Array.isArray(value.checked) || !Array.isArray(value.target)) return null;
+    const names = (list: unknown[]) => list.filter((name): name is string => typeof name === "string");
+    return { group: value.group, checked: names(value.checked), target: names(value.target), targetChecked: value.targetChecked === true };
+  } catch {
+    return null;
+  }
+}
+
+/** An option is the user's when one of its names is in the user's words. A name under 3 characters says nothing. */
+const optionIsUsers = (names: readonly string[], userWords: TurnUserWords | undefined) =>
+  names.some((name) => name.trim().length >= 3 && valueIsUsers(name, userWords));
+
+/** Checks a click by what it would change in a radio group. Returns the refusal to give the agent, or null. */
+export function checkRadioClick(input: { choice: RadioChoice | null; userWords: TurnUserWords | undefined }): string | null {
+  const choice = input.choice;
+  if (!choice || choice.targetChecked || choice.checked.length === 0) return null;
+  if (!optionIsUsers(choice.checked, input.userWords) || optionIsUsers(choice.target, input.userWords)) return null;
+  return `Not clicked: "${choice.checked[0]}" is selected in ${choice.group}, the option the user chose, and "${choice.target[0]}" is not one the user chose. `
+    + "Do not replace a choice the user made to get the form through: report what the page said about it and leave the choice to the user.";
 }
 
 export function resetBrowserFormGateForTests(): void {
