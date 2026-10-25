@@ -61,6 +61,7 @@ export const EffortSchema = z.object({
   default: EffortTierSchema.default("medium"),
   /** Per-tier overrides layered on top of the built-in profiles (BUILTIN_EFFORT_PROFILES).
    *  Only specify the fields you want to change; omitted fields keep the built-in value. */
-  profiles: z.record(EffortTierSchema, EffortProfileSchema).default({}),
+  // Partial: zod 4 reads a record keyed by an enum as one that holds every key.
+  profiles: z.partialRecord(EffortTierSchema, EffortProfileSchema).default({}),
 });
 export type EffortConfig = z.infer<typeof EffortSchema>;

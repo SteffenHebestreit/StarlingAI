@@ -76,7 +76,12 @@ const DraftCreateSchema = z.object({
   }).optional(),
 });
 
-const DraftUpdateSchema = DraftCreateSchema.partial().omit({ accountId: true });
+// A PATCH names only what it changes. cc and bcc lose their default here: zod 4 runs a default inside
+// .partial(), and draft-store spreads the patch over the draft, so [] would empty both lists.
+const DraftUpdateSchema = DraftCreateSchema.extend({
+  cc: z.array(z.string().email()),
+  bcc: z.array(z.string().email()),
+}).partial().omit({ accountId: true });
 
 const CategorizeRequestSchema = z.object({
   items: z.array(z.object({

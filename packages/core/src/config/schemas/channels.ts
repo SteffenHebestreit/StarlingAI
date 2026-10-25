@@ -74,13 +74,13 @@ export const ChannelSignalSchema = ChannelBaseSchema.extend({
 });
 
 export const ChannelsSchema = z.object({
-  webchat: ChannelWebChatSchema.default({}),
-  telegram: ChannelTelegramSchema.default({}),
-  slack: ChannelSlackSchema.default({}),
-  discord: ChannelDiscordSchema.default({}),
-  whatsapp: ChannelWhatsappSchema.default({}),
-  email: ChannelEmailSchema.default({}),
-  signal: ChannelSignalSchema.default({}),
+  webchat: ChannelWebChatSchema.prefault({}),
+  telegram: ChannelTelegramSchema.prefault({}),
+  slack: ChannelSlackSchema.prefault({}),
+  discord: ChannelDiscordSchema.prefault({}),
+  whatsapp: ChannelWhatsappSchema.prefault({}),
+  email: ChannelEmailSchema.prefault({}),
+  signal: ChannelSignalSchema.prefault({}),
 });
 
 export type ChannelSlackConfig = z.infer<typeof ChannelSlackSchema>;

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { productEnv } from "../product/index.js";
 import { ACCOUNT_ID_RE, reservedAccountIdProblem } from "../runtime/accounts.js";
+import { partialWithoutDefaults } from "./partial-schema.js";
 
 // Domain sub-schemas extracted into config/schemas/* (pure relocation). They are
 // re-exported here so the long-standing `from "../config/schema.js"` import path
@@ -436,8 +437,10 @@ export const OidcRoleMappingSchema = z.object({
   admin: z.array(z.string()).default([]),
   operator: z.array(z.string()).default([]),
   viewer: z.array(z.string()).default([]),
-  defaultRole: AuthRoleSchema.optional(),
-}).default({});
+  // Unset unless configured: zod 4 runs a default inside .optional(), and AuthRoleSchema's "operator"
+  // would stand in for the role the gateway falls back to.
+  defaultRole: AuthRoleSchema.unwrap().optional(),
+}).prefault({});
 
 /**
  * OpenID Connect provider (e.g. Keycloak). Used for SSO human login and, when
@@ -469,7 +472,7 @@ export const OidcConfigSchema = z.object({
      *  (audience confusion). The audience is the boundary that distinguishes peer service
      *  tokens from ordinary human tokens. */
     audience: z.string().optional(),
-  }).default({}).refine(
+  }).prefault({}).refine(
     (a) => !a.enabled || (typeof a.audience === "string" && a.audience.trim() !== ""),
     { message: "auth.oidc.a2a.audience is required when auth.oidc.a2a.enabled is true (prevents A2A audience confusion)" },
   ),
@@ -549,8 +552,8 @@ export const UploadScanSchema = z.object({
 
 export const StorageSchema = z.object({
   backend: z.enum(["local", "s3"]).default("local"),
-  s3: S3StorageSchema.default({}),
-  scan: UploadScanSchema.default({}),
+  s3: S3StorageSchema.prefault({}),
+  scan: UploadScanSchema.prefault({}),
 });
 
 export type StorageConfig = z.infer<typeof StorageSchema>;
@@ -584,7 +587,7 @@ export const CostSchema = z.object({
   budgets: z.object({
     dailyUsd: z.number().min(0).default(0),
     monthlyUsd: z.number().min(0).default(0),
-  }).default({}),
+  }).prefault({}),
   /**
    * Hard-stop enforcement. When true (and `enabled`), a new turn is REFUSED once
    * the current day's or month's priced spend has reached the corresponding hard
@@ -676,7 +679,7 @@ export const FederationSchema = z.object({
     allowPrivateHosts: z.boolean().default(false),
     /** Hard cap on the number of peers a single discovery pass may add. */
     maxDiscoveredPeers: z.number().int().min(0).max(1000).default(50),
-  }).default({}),
+  }).prefault({}),
 });
 
 export type FederationPeerConfig = z.infer<typeof FederationPeerSchema>;
@@ -818,7 +821,7 @@ export const McpServerExposeSchema = z.object({
     enabled: z.boolean().default(true),
     /** When true the HTTP transport requires the same JWT as `/api/*`.  Disable only for trusted local sockets. */
     requireAuth: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
 });
 
 export type McpServerExposeConfig = z.infer<typeof McpServerExposeSchema>;
@@ -826,7 +829,7 @@ export type McpServerExposeConfig = z.infer<typeof McpServerExposeSchema>;
 export const McpConfigSchema = z.object({
   servers: z.record(z.string(), McpServerConfigSchema).default({}),
   /** Expose StarlingAI itself as an MCP server (Stage 12 / Open Interop). */
-  expose: McpServerExposeSchema.default({}),
+  expose: McpServerExposeSchema.prefault({}),
   /**
    * Lazily reconnect a bridged MCP server (once, throttled) when a tool call
    * fails, so a crashed/restarted server self-heals instead of staying dead
@@ -981,7 +984,7 @@ export const SubAgentConfigSchema = z.object({
    *  never enforced, and one live value ("desktop") was outside the claimed set. */
   domain: z.string().optional(),
   role: z.enum(["coordinator", "specialist", "reviewer", "generator", "supervisor", "planner"]).optional(),
-  model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
+  model: partialWithoutDefaults(ModelConfigSchema).optional(),    // overrides agents.defaults.model
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all
   maxIterations: z.number().int().min(1).max(30).default(5), // hard cap on tool-call loops
@@ -1151,11 +1154,11 @@ export const InfrastructureAutomationProfileSchema = z.discriminatedUnion("type"
 export const InfrastructureSchema = z.object({
   virtualization: z.object({
     profiles: z.record(z.string(), InfrastructureVmProfileSchema).default({}),
-  }).default({}),
+  }).prefault({}),
   automation: z.object({
     defaultProfile: z.string().min(1).optional(),
     profiles: z.record(z.string(), InfrastructureAutomationProfileSchema).default({}),
-  }).default({}),
+  }).prefault({}),
 });
 
 
@@ -1302,7 +1305,7 @@ export const GuardrailsSchema = z.object({
     moderateToolOutputs: z.boolean().default(true),
     maxChars: z.number().int().min(256).max(32000).default(6000),
     blockOn: z.enum(["unsafe", "controversial_or_unsafe"]).default("unsafe"),
-  }).default({}),
+  }).prefault({}),
   /**
    * Exact host names the SSRF guard lets through although they RESOLVE to a private
    * (RFC 1918 / unique-local) address: a local fixture service, such as the e2e test site
@@ -1531,8 +1534,8 @@ export const SelfImprovementSchema = z.object({
     toolPolicy: z.object({
       stub: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),
-    }).default({}),
-  }).default({}),
+    }).prefault({}),
+  }).prefault({}),
 });
 
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
@@ -1800,7 +1803,7 @@ export const MissionSchema = z.object({
     childReserveTokens: z.number().int().min(0).default(8_000),
     childReserveToolCalls: z.number().int().min(0).default(15),
     childReserveActiveTimeMs: z.number().int().min(0).default(600_000),
-  }).default({}),
+  }).prefault({}),
   /**
    * Provider capacity broker (CAP-204): a cross-process weighted semaphore per
    * provider endpoint, so multiple gateway/worker processes honor ONE
@@ -1825,7 +1828,7 @@ export const MissionSchema = z.object({
    */
   control: z.object({
     distributedCancel: z.boolean().default(false),
-  }).default({}),
+  }).prefault({}),
   capacity: z.object({
     mode: z.enum(["off", "shadow", "enforce"]).default("off"),
     /** Concurrent weighted units per provider endpoint (single-GPU default: 2). */
@@ -1834,7 +1837,7 @@ export const MissionSchema = z.object({
     acquireTimeoutMs: z.number().int().min(0).default(30_000),
     /** Permit TTL — a crashed holder frees its units within this window (ms). */
     permitTtlMs: z.number().int().min(5_000).default(120_000),
-  }).default({}),
+  }).prefault({}),
 });
 export type MissionConfig = z.infer<typeof MissionSchema>;
 
@@ -1849,12 +1852,12 @@ export const ConfigSchema = z.object({
    * refilled by its schema default. See docs/forking.md.
    */
   configRemovals: z.array(z.string()).default([]),
-  providers: ProvidersSchema.default({}),
-  deployment: DeploymentSchema.default({}),
-  mission: MissionSchema.default({}),
+  providers: ProvidersSchema.prefault({}),
+  deployment: DeploymentSchema.prefault({}),
+  mission: MissionSchema.prefault({}),
   agents: z.object({
     defaults: z.object({
-      model: ModelConfigSchema.default({}),
+      model: ModelConfigSchema.prefault({}),
       /** Named alternates for the default chat model, switchable at runtime
        *  from the dashboard header. An implicit "claude" preset exists
        *  whenever providers.anthropic is configured (model from
@@ -1875,9 +1878,9 @@ export const ConfigSchema = z.object({
        *     execution specialist (researcher, coder, …) stays on its own configured model.
        *  Persisted by the dashboard switch into the runtime overlay alongside activeModelPreset. */
       modelPresetScope: z.enum(["all", "unspecified", "coordinator_qa"]).default("all"),
-    }).default({}),
-    mainAssistant: MainAssistantConfigSchema.default({}),
-    ephemeralGeneration: EphemeralGenerationSchema.default({}),
+    }).prefault({}),
+    mainAssistant: MainAssistantConfigSchema.prefault({}),
+    ephemeralGeneration: EphemeralGenerationSchema.prefault({}),
     /** When true, ALL sub-agents default to containerized execution (Docker isolation).
      *  Individual agents can opt out by setting container.disabled: true in their config.
      *  Defaults to true to align with the "every agent runs in an isolated container"
@@ -1891,7 +1894,7 @@ export const ConfigSchema = z.object({
     defaultContainerized: z.boolean().default(
       productEnv("DEFAULT_CONTAINERIZED") === "false" ? false : true,
     ),
-    rateLimit: RateLimitSchema.default({}),
+    rateLimit: RateLimitSchema.prefault({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),
     /** Session pruning check interval in ms */
@@ -2056,7 +2059,7 @@ export const ConfigSchema = z.object({
        * replays forever, successful calls as progress, no busy arm). See agent/sub-agent.ts.
        */
       loopBrake: z.boolean().default(true),
-    }).default({}),
+    }).prefault({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
      * They are observability signals, not mid-flight kills (turnTimeoutMs handles
@@ -2074,44 +2077,44 @@ export const ConfigSchema = z.object({
       maxToolCallsPerTask: z.number().int().min(0).default(0),
       /** Cap on wall-clock duration for a single delegation attempt (ms). */
       maxDurationMsPerTask: z.number().int().min(0).default(0),
-    }).default({}),
-  }).default({}),
+    }).prefault({}),
+  }).prefault({}),
   subAgents: SubAgentsSchema.default({}),
   scenes: ScenesSchema.default({}),
   jobs: JobsSchema.default({}),
-  channels: ChannelsSchema.default({}),
-  gateway: GatewaySchema.default({}),
-  guardrails: GuardrailsSchema.default({}),
-  multimodal: MultimodalSchema.default({}),
-  retrieval: RetrievalSchema.default({}),
+  channels: ChannelsSchema.prefault({}),
+  gateway: GatewaySchema.prefault({}),
+  guardrails: GuardrailsSchema.prefault({}),
+  multimodal: MultimodalSchema.prefault({}),
+  retrieval: RetrievalSchema.prefault({}),
   /** The Laya decision layer: fast local answers to the swarm's yes/no and pick-one questions. */
-  decisions: DecisionsSchema.default({}),
+  decisions: DecisionsSchema.prefault({}),
   render: RenderSchema,
-  mcp: McpConfigSchema.default({}),
+  mcp: McpConfigSchema.prefault({}),
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
-  infrastructure: InfrastructureSchema.default({}),
-  monitoring: MonitoringSchema.default({}),
-  sourceForge: SourceForgeSchema.default({}),
-  pentest: PentestSchema.default({}),
-  mail: MailServiceSchema.default({}),
-  toolDevelopment: ToolDevelopmentSchema.default({}),
-  selfImprovement: SelfImprovementSchema.default({}),
-  skillLibrary: SkillLibrarySchema.default({}),
+  infrastructure: InfrastructureSchema.prefault({}),
+  monitoring: MonitoringSchema.prefault({}),
+  sourceForge: SourceForgeSchema.prefault({}),
+  pentest: PentestSchema.prefault({}),
+  mail: MailServiceSchema.prefault({}),
+  toolDevelopment: ToolDevelopmentSchema.prefault({}),
+  selfImprovement: SelfImprovementSchema.prefault({}),
+  skillLibrary: SkillLibrarySchema.prefault({}),
   /** Enforcement hooks by id (tools/enforcement-hooks.ts); workspace/hooks/*.jsonc. */
   enforcementHooks: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]*$/), EnforcementHookSchema).default({}),
-  memory: MemoryConfigSchema.default({}),
-  toolPipeline: ToolPipelineSchema.default({}),
-  dataFeeds: DataFeedsSchema.default({}),
+  memory: MemoryConfigSchema.prefault({}),
+  toolPipeline: ToolPipelineSchema.prefault({}),
+  dataFeeds: DataFeedsSchema.prefault({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
   computerUse: z.record(z.string(), z.unknown()).default({}),
-  auth: AuthSchema.default({}),
-  storage: StorageSchema.default({}),
-  cost: CostSchema.default({}),
-  tracing: TracingSchema.default({}),
-  federation: FederationSchema.default({}),
-  a2a: A2ASchema.default({}),
+  auth: AuthSchema.prefault({}),
+  storage: StorageSchema.prefault({}),
+  cost: CostSchema.prefault({}),
+  tracing: TracingSchema.prefault({}),
+  federation: FederationSchema.prefault({}),
+  a2a: A2ASchema.prefault({}),
   /**
    * Plugin SDK — third-party tool packages loaded from a directory at
    * startup.  When `enabled` is false the loader is skipped entirely.
@@ -2141,7 +2144,7 @@ export const ConfigSchema = z.object({
      *  manifest-declared vars), per-call timeouts, and crash containment — a
      *  dead plugin degrades, the gateway never goes down with it. */
     isolation: z.enum(["in_process", "worker"]).default("in_process"),
-  }).default({}),
+  }).prefault({}),
   /**
    * Built-in tool surface control.  Forks disable whole capability families
    * here instead of deleting upstream tool files (deletions are the worst
@@ -2154,7 +2157,7 @@ export const ConfigSchema = z.object({
     disabledGroups: z.array(z.string()).default([]),
     /** Individual tool names to skip at registration. */
     disabledTools: z.array(z.string()).default([]),
-  }).default({}),
+  }).prefault({}),
   /**
    * Per-extension config slices for first-party core extensions
    * (src/extensions/<name>/), keyed by extension name. Passed through opaquely
@@ -2163,9 +2166,9 @@ export const ConfigSchema = z.object({
    */
   extensions: z.record(z.string(), z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
-  orchestration: OrchestrationSchema.default({}),
-  effort: EffortSchema.default({}),
-  receptionist: ReceptionistSchema.default({}),
+  orchestration: OrchestrationSchema.prefault({}),
+  effort: EffortSchema.prefault({}),
+  receptionist: ReceptionistSchema.prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

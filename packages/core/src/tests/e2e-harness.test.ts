@@ -1524,10 +1524,11 @@ describe("e2e harness — loader", () => {
     const messages = issues.map((issue) => `${issue.file}: ${issue.message}`);
     expect(scenarios.map((entry) => entry.scenario.id).sort()).toEqual(["many-a", "many-b", "template-one", "valid-one"]);
     expect(messages).toEqual(expect.arrayContaining([
-      "bad.jsonc: Bad Id: id: Invalid",
-      "bad.jsonc: Bad Id: title: String must contain at least 3 character(s)",
-      "bad.jsonc: Bad Id: steps: Array must contain at least 1 element(s)",
-      "extra.jsonc: extra-key: (root): Unrecognized key(s) in object: 'foo'",
+      // The field and what is wrong with it, in zod 4's words.
+      "bad.jsonc: Bad Id: id: Invalid string: must match pattern /^[a-z0-9][a-z0-9-]*$/",
+      "bad.jsonc: Bad Id: title: Too small: expected string to have >=3 characters",
+      "bad.jsonc: Bad Id: steps: Too small: expected array to have >=1 items",
+      'extra.jsonc: extra-key: (root): Unrecognized key: "foo"',
       'zz-dup.jsonc: duplicate id "valid-one" (first defined in valid.jsonc)',
       expect.stringMatching(/^syntax\.jsonc: not valid JSON5: /),
       'semantic.jsonc: semantic-issues: steps[0] (turn): attachment "missing.txt" not found in eval/e2e/fixtures/',
