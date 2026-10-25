@@ -1,6 +1,6 @@
 {
   "name": "@starlingai/web",
-  "version": "0.52.9",
+  "version": "0.52.10",
   "private": true,
   "type": "module",
   "scripts": {
