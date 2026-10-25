@@ -221,7 +221,8 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * model" had nothing to be matched against: the agent guessed `model: "Qwen"`, the router
    * answered 404, and the retry quietly landed on the other engine.
    */
-  tierLabels: z.record(z.enum(["fast", "quality"]), z.string().min(1)).default({}),
+  // Partial: zod 4 reads a record keyed by an enum as one that holds every key.
+  tierLabels: z.partialRecord(z.enum(["fast", "quality"]), z.string().min(1)).default({}),
   /**
    * The settings step: before every render in an interactive chat turn, generate_image shows the
    * person what it is about to run (engine, prompt, size, steps, seed, base picture) and lets them
@@ -237,7 +238,7 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
     configureTimeoutMs: z.number().int().min(10_000).max(900_000).default(600_000),
     /** How many earlier pictures the form offers as the base of an edit. */
     maxBaseCandidates: z.number().int().min(0).max(12).default(6),
-  }).default({}),
+  }).prefault({}),
 });
 
 export const MultimodalWakeWordSchema = z.object({
@@ -250,10 +251,10 @@ export const MultimodalWakeWordSchema = z.object({
 
 export const MultimodalSchema = z.object({
   maxUploadBytes: z.number().int().min(1024).max(104_857_600).default(20_971_520),
-  files: MultimodalFileServiceSchema.default({}),
-  stt: MultimodalSpeechToTextSchema.default({}),
-  tts: MultimodalTextToSpeechSchema.default({}),
-  wakeWord: MultimodalWakeWordSchema.default({}),
+  files: MultimodalFileServiceSchema.prefault({}),
+  stt: MultimodalSpeechToTextSchema.prefault({}),
+  tts: MultimodalTextToSpeechSchema.prefault({}),
+  wakeWord: MultimodalWakeWordSchema.prefault({}),
   imageGeneration: MultimodalImageGenerationSchema.optional(),
 });
 

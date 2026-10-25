@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { productEnv } from "../product/index.js";
 import { ACCOUNT_ID_RE, reservedAccountIdProblem } from "../runtime/accounts.js";
+import { partialWithoutDefaults } from "./partial-schema.js";
 
 // Domain sub-schemas extracted into config/schemas/* (pure relocation). They are
 // re-exported here so the long-standing `from "../config/schema.js"` import path
@@ -103,7 +104,7 @@ export const AnthropicProviderSchema = z.object({
 
 export const ProvidersSchema = z.object({
   lmstudio: LMStudioProviderSchema.optional(),
-  openaiCompatible: z.record(OpenAICompatibleProviderSchema).default({}),
+  openaiCompatible: z.record(z.string(), OpenAICompatibleProviderSchema).default({}),
   ollama: OllamaProviderSchema.optional(),
   anthropic: AnthropicProviderSchema.optional(),
 });
@@ -436,8 +437,10 @@ export const OidcRoleMappingSchema = z.object({
   admin: z.array(z.string()).default([]),
   operator: z.array(z.string()).default([]),
   viewer: z.array(z.string()).default([]),
-  defaultRole: AuthRoleSchema.optional(),
-}).default({});
+  // Unset unless configured: zod 4 runs a default inside .optional(), and AuthRoleSchema's "operator"
+  // would stand in for the role the gateway falls back to.
+  defaultRole: AuthRoleSchema.unwrap().optional(),
+}).prefault({});
 
 /**
  * OpenID Connect provider (e.g. Keycloak). Used for SSO human login and, when
@@ -469,7 +472,7 @@ export const OidcConfigSchema = z.object({
      *  (audience confusion). The audience is the boundary that distinguishes peer service
      *  tokens from ordinary human tokens. */
     audience: z.string().optional(),
-  }).default({}).refine(
+  }).prefault({}).refine(
     (a) => !a.enabled || (typeof a.audience === "string" && a.audience.trim() !== ""),
     { message: "auth.oidc.a2a.audience is required when auth.oidc.a2a.enabled is true (prevents A2A audience confusion)" },
   ),
@@ -549,8 +552,8 @@ export const UploadScanSchema = z.object({
 
 export const StorageSchema = z.object({
   backend: z.enum(["local", "s3"]).default("local"),
-  s3: S3StorageSchema.default({}),
-  scan: UploadScanSchema.default({}),
+  s3: S3StorageSchema.prefault({}),
+  scan: UploadScanSchema.prefault({}),
 });
 
 export type StorageConfig = z.infer<typeof StorageSchema>;
@@ -584,7 +587,7 @@ export const CostSchema = z.object({
   budgets: z.object({
     dailyUsd: z.number().min(0).default(0),
     monthlyUsd: z.number().min(0).default(0),
-  }).default({}),
+  }).prefault({}),
   /**
    * Hard-stop enforcement. When true (and `enabled`), a new turn is REFUSED once
    * the current day's or month's priced spend has reached the corresponding hard
@@ -611,7 +614,7 @@ export const TracingSchema = z.object({
   /** OTLP HTTP endpoint URL (e.g. http://localhost:4318/v1/traces). */
   otlpEndpoint: z.string().url().default("http://localhost:4318/v1/traces"),
   /** Optional headers (e.g. {"x-honeycomb-team": "..."}) for the OTLP exporter. */
-  otlpHeaders: z.record(z.string()).optional(),
+  otlpHeaders: z.record(z.string(), z.string()).optional(),
   /** Trace sampling probability 0..1.  Default 1.0 = sample every trace. */
   sampleRate: z.number().min(0).max(1).default(1),
   /** Service name reported in spans.  Defaults to "starlingai". */
@@ -676,7 +679,7 @@ export const FederationSchema = z.object({
     allowPrivateHosts: z.boolean().default(false),
     /** Hard cap on the number of peers a single discovery pass may add. */
     maxDiscoveredPeers: z.number().int().min(0).max(1000).default(50),
-  }).default({}),
+  }).prefault({}),
 });
 
 export type FederationPeerConfig = z.infer<typeof FederationPeerSchema>;
@@ -736,7 +739,7 @@ export const McpStdioServerSchema = z.object({
   transport: z.literal("stdio"),
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   autoStart: z.boolean().default(true),
 });
 
@@ -744,7 +747,7 @@ export const McpDockerRunServerSchema = z.object({
   transport: z.literal("docker"),
   image: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   mounts: z.array(z.string()).default([]),
   network: z.string().optional(),
   /** Extra host mappings injected as --add-host=host:ip (e.g. ["myhost.internal:192.168.1.50"]) */
@@ -763,7 +766,7 @@ export const McpHttpServerSchema = z.object({
   transport: z.literal("http"),
   url: z.string().url(),           // StreamableHTTP or legacy JSON-RPC endpoint
   protocol: z.enum(["streamable", "legacy-jsonrpc"]).default("streamable"),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   autoStart: z.boolean().default(true),
 });
 
@@ -818,15 +821,15 @@ export const McpServerExposeSchema = z.object({
     enabled: z.boolean().default(true),
     /** When true the HTTP transport requires the same JWT as `/api/*`.  Disable only for trusted local sockets. */
     requireAuth: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
 });
 
 export type McpServerExposeConfig = z.infer<typeof McpServerExposeSchema>;
 
 export const McpConfigSchema = z.object({
-  servers: z.record(McpServerConfigSchema).default({}),
+  servers: z.record(z.string(), McpServerConfigSchema).default({}),
   /** Expose StarlingAI itself as an MCP server (Stage 12 / Open Interop). */
-  expose: McpServerExposeSchema.default({}),
+  expose: McpServerExposeSchema.prefault({}),
   /**
    * Lazily reconnect a bridged MCP server (once, throttled) when a tool call
    * fails, so a crashed/restarted server self-heals instead of staying dead
@@ -848,7 +851,7 @@ export const SiteCredentialSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),     // supports $ENV and secret: prefixes
   loginUrl: z.string().url().optional(),            // override if login page != root
-  urls: z.record(z.string()).optional(),            // named URL shortcuts, e.g. { "leads": "http://..." }
+  urls: z.record(z.string(), z.string()).optional(),            // named URL shortcuts, e.g. { "leads": "http://..." }
   usernameSelector: z.string().optional(),          // CSS selector hint for Playwright
   passwordSelector: z.string().optional(),
   submitSelector: z.string().optional(),
@@ -858,7 +861,7 @@ export const SiteCredentialSchema = z.object({
   allowedUsers: z.array(z.string()).default([]),
 });
 
-export const SitesSchema = z.record(SiteCredentialSchema);  // keyed by hostname
+export const SitesSchema = z.record(z.string(), SiteCredentialSchema);  // keyed by hostname
 
 export type SiteCredential = z.infer<typeof SiteCredentialSchema>;
 
@@ -981,7 +984,7 @@ export const SubAgentConfigSchema = z.object({
    *  never enforced, and one live value ("desktop") was outside the claimed set. */
   domain: z.string().optional(),
   role: z.enum(["coordinator", "specialist", "reviewer", "generator", "supervisor", "planner"]).optional(),
-  model: ModelConfigSchema.partial().optional(),    // overrides agents.defaults.model
+  model: partialWithoutDefaults(ModelConfigSchema).optional(),    // overrides agents.defaults.model
   systemPrompt: z.string().optional(),              // specialist persona
   tools: z.array(z.string()).optional(),            // allowed tool names; undefined = inherit all
   maxIterations: z.number().int().min(1).max(30).default(5), // hard cap on tool-call loops
@@ -1005,7 +1008,7 @@ export const SubAgentConfigSchema = z.object({
   workspaceAccess: z.enum(["full", "generated"]).optional(),
 });
 
-export const SubAgentsSchema = z.record(SubAgentConfigSchema);
+export const SubAgentsSchema = z.record(z.string(), SubAgentConfigSchema);
 export type SubAgentConfig = z.infer<typeof SubAgentConfigSchema>;
 
 // ─── Approval channels ────────────────────────────────────────────────────────
@@ -1047,7 +1050,7 @@ export const OutboundWebhookApprovalChannelSchema = z.object({
   /** Shared secret — included in the outbound payload and expected back on the callback */
   secret: z.string().min(16),
   /** Extra headers on the outbound POST (e.g. Authorization for n8n) */
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** Timeout in ms before auto-deny (default 10 min) */
   timeoutMs: z.number().int().default(600_000),
 });
@@ -1062,7 +1065,7 @@ export const SyncWebhookApprovalChannelSchema = z.object({
   type: z.literal("sync_webhook"),
   /** URL that receives the POST and responds with { approved: boolean } */
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** Timeout for the synchronous response (default 30 s) */
   timeoutMs: z.number().int().default(30_000),
 });
@@ -1073,7 +1076,7 @@ export const ApprovalChannelSchema = z.discriminatedUnion("type", [
   SyncWebhookApprovalChannelSchema,
 ]);
 
-export const ApprovalChannelsSchema = z.record(ApprovalChannelSchema);
+export const ApprovalChannelsSchema = z.record(z.string(), ApprovalChannelSchema);
 export type ApprovalChannelConfig = z.infer<typeof ApprovalChannelSchema>;
 
 
@@ -1086,7 +1089,7 @@ export const WebhookToolSchema = z.object({
   description: z.string().min(1),
   url: z.string().url(),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).default("POST"),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   /** SEC-106: declare this endpoint side-effect-free (a status page, a search).
    *  Default FALSE — webhooks exist to trigger things, and GET-trigger hooks
    *  (Jenkins build URLs, cache purges) are common, so the HTTP verb is NOT
@@ -1095,7 +1098,7 @@ export const WebhookToolSchema = z.object({
   readOnly: z.boolean().default(false),
 });
 
-export const WebhooksSchema = z.record(WebhookToolSchema);
+export const WebhooksSchema = z.record(z.string(), WebhookToolSchema);
 export type WebhookToolConfig = z.infer<typeof WebhookToolSchema>;
 
 
@@ -1115,7 +1118,7 @@ export const InfrastructureVmProxmoxProfileSchema = z.object({
 export const InfrastructureVmWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).default(120000),
 });
 
@@ -1139,7 +1142,7 @@ export const InfrastructureAutomationLocalCliProfileSchema = z.object({
 export const InfrastructureAutomationWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).optional(),
 });
 
@@ -1150,12 +1153,12 @@ export const InfrastructureAutomationProfileSchema = z.discriminatedUnion("type"
 
 export const InfrastructureSchema = z.object({
   virtualization: z.object({
-    profiles: z.record(InfrastructureVmProfileSchema).default({}),
-  }).default({}),
+    profiles: z.record(z.string(), InfrastructureVmProfileSchema).default({}),
+  }).prefault({}),
   automation: z.object({
     defaultProfile: z.string().min(1).optional(),
-    profiles: z.record(InfrastructureAutomationProfileSchema).default({}),
-  }).default({}),
+    profiles: z.record(z.string(), InfrastructureAutomationProfileSchema).default({}),
+  }).prefault({}),
 });
 
 
@@ -1172,7 +1175,7 @@ export const PrometheusInstanceSchema = z.object({
   baseUrl: z.string().url(),
   bearerToken: z.string().optional(),
   basicAuth: BasicAuthSchema.optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1180,7 +1183,7 @@ export const AlertmanagerInstanceSchema = z.object({
   baseUrl: z.string().url(),
   bearerToken: z.string().optional(),
   basicAuth: BasicAuthSchema.optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1188,7 +1191,7 @@ export const GrafanaInstanceSchema = z.object({
   baseUrl: z.string().url(),
   apiKey: z.string().optional(),
   orgId: z.number().int().min(1).optional(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(300000).default(30000),
 });
 
@@ -1196,9 +1199,9 @@ export const MonitoringSchema = z.object({
   defaultPrometheus: z.string().min(1).optional(),
   defaultAlertmanager: z.string().min(1).optional(),
   defaultGrafana: z.string().min(1).optional(),
-  prometheus: z.record(PrometheusInstanceSchema).default({}),
-  alertmanager: z.record(AlertmanagerInstanceSchema).default({}),
-  grafana: z.record(GrafanaInstanceSchema).default({}),
+  prometheus: z.record(z.string(), PrometheusInstanceSchema).default({}),
+  alertmanager: z.record(z.string(), AlertmanagerInstanceSchema).default({}),
+  grafana: z.record(z.string(), GrafanaInstanceSchema).default({}),
 });
 
 
@@ -1217,7 +1220,7 @@ export const GitHubInstanceSchema = z.object({
 
 export const SourceForgeSchema = z.object({
   defaultGithub: z.string().min(1).optional(),
-  github: z.record(GitHubInstanceSchema).default({}),
+  github: z.record(z.string(), GitHubInstanceSchema).default({}),
   /** Optional API key for Google PageSpeed Insights (lighthouse_audit).
    *  Avoids the strict anonymous quota. Supports $ENV / secret: refs. */
   pageSpeedInsightsApiKey: z.string().optional(),
@@ -1235,7 +1238,7 @@ export const PentestKaliServiceProfileSchema = z.object({
 export const PentestWebhookProfileSchema = z.object({
   type: z.literal("webhook"),
   url: z.string().url(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   timeoutMs: z.number().int().min(1000).max(900000).default(300000),
 });
 
@@ -1247,7 +1250,7 @@ export const PentestProfileSchema = z.discriminatedUnion("type", [
 export const PentestSchema = z.object({
   serviceUrl: z.string().url().default("http://kali-pentest:5010"),
   defaultProfile: z.string().min(1).optional(),
-  profiles: z.record(PentestProfileSchema).default({}),
+  profiles: z.record(z.string(), PentestProfileSchema).default({}),
 });
 
 export const MailServiceSchema = z.object({
@@ -1268,11 +1271,11 @@ export const DataFeedProviderEntrySchema = z.object({
   /** API key for paid/keyed providers. Supports `$ENV_VAR` and `secret:key` refs. */
   apiKey: z.string().optional(),
   /** Provider-specific configuration overrides (passed verbatim to the provider). */
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const DataFeedsSchema = z.object({
-  providers: z.record(DataFeedProviderEntrySchema).default({}),
+  providers: z.record(z.string(), DataFeedProviderEntrySchema).default({}),
 });
 
 export type DataFeedsConfig = z.infer<typeof DataFeedsSchema>;
@@ -1302,7 +1305,7 @@ export const GuardrailsSchema = z.object({
     moderateToolOutputs: z.boolean().default(true),
     maxChars: z.number().int().min(256).max(32000).default(6000),
     blockOn: z.enum(["unsafe", "controversial_or_unsafe"]).default("unsafe"),
-  }).default({}),
+  }).prefault({}),
   /**
    * Exact host names the SSRF guard lets through although they RESOLVE to a private
    * (RFC 1918 / unique-local) address: a local fixture service, such as the e2e test site
@@ -1369,7 +1372,7 @@ export const SceneConfigSchema = z.object({
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
   webhookKey: z.string().min(16).optional(),   // shared secret for unauthenticated webhook calls
-  params: z.record(SceneParamSchema).optional(),    // named {{param|default}} template vars
+  params: z.record(z.string(), SceneParamSchema).optional(),    // named {{param|default}} template vars
   allowedAgents: z.array(z.string()).optional(),    // restrict which sub-agents this scene may use
   humanInLoopSteps: z.array(z.string()).optional(), // tool names that require user approval in this scene
   // When true and this scene runs as a single-agent job step, the job runner verifies the
@@ -1385,7 +1388,7 @@ export const SceneConfigSchema = z.object({
   approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
 });
 
-export const ScenesSchema = z.record(SceneConfigSchema);
+export const ScenesSchema = z.record(z.string(), SceneConfigSchema);
 export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 
 // ─── Jobs ────────────────────────────────────────────────────────────────────
@@ -1395,20 +1398,20 @@ export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 export const JobStepSchema = z.object({
   scene: z.string().min(1),
   label: z.string().optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const ApiJobTriggerSchema = z.object({
   type: z.literal("api"),
   webhookKey: z.string().min(16).optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const CronJobTriggerSchema = z.object({
   type: z.literal("cron"),
   expression: z.string().min(1),
   enabled: z.boolean().default(true),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const ChannelJobTriggerSchema = z.object({
@@ -1424,7 +1427,7 @@ export const ChannelJobTriggerSchema = z.object({
   replyText: z.string().min(1).optional(),
   captureMessageAs: z.string().min(1).optional(),
   captureRemainderAs: z.string().min(1).optional(),
-  params: z.record(z.string()).optional(),
+  params: z.record(z.string(), z.string()).optional(),
 });
 
 export const JobTriggerSchema = z.discriminatedUnion("type", [
@@ -1441,14 +1444,14 @@ export const JobConfigSchema = z.object({
   routing: RoutingTaxonomySchema.optional(),
   /** GENERATED routing taxonomy — the seeded labels, overridable by `routing`. */
   routingGenerated: RoutingTaxonomyGeneratedSchema.optional(),
-  params: z.record(SceneParamSchema).optional(),
+  params: z.record(z.string(), SceneParamSchema).optional(),
   steps: z.array(JobStepSchema).min(1),
   triggers: z.array(JobTriggerSchema).optional(),
   /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
   catalogTriggers: WorkflowCatalogTriggersSchema,
 });
 
-export const JobsSchema = z.record(JobConfigSchema);
+export const JobsSchema = z.record(z.string(), JobConfigSchema);
 export type JobConfig = z.infer<typeof JobConfigSchema>;
 export type JobTriggerConfig = z.infer<typeof JobTriggerSchema>;
 export type JobStepConfig = z.infer<typeof JobStepSchema>;
@@ -1531,8 +1534,8 @@ export const SelfImprovementSchema = z.object({
     toolPolicy: z.object({
       stub: z.array(z.string()).default([]),
       deny: z.array(z.string()).default([]),
-    }).default({}),
-  }).default({}),
+    }).prefault({}),
+  }).prefault({}),
 });
 
 export type ToolDevelopmentConfig = z.infer<typeof ToolDevelopmentSchema>;
@@ -1800,7 +1803,7 @@ export const MissionSchema = z.object({
     childReserveTokens: z.number().int().min(0).default(8_000),
     childReserveToolCalls: z.number().int().min(0).default(15),
     childReserveActiveTimeMs: z.number().int().min(0).default(600_000),
-  }).default({}),
+  }).prefault({}),
   /**
    * Provider capacity broker (CAP-204): a cross-process weighted semaphore per
    * provider endpoint, so multiple gateway/worker processes honor ONE
@@ -1825,7 +1828,7 @@ export const MissionSchema = z.object({
    */
   control: z.object({
     distributedCancel: z.boolean().default(false),
-  }).default({}),
+  }).prefault({}),
   capacity: z.object({
     mode: z.enum(["off", "shadow", "enforce"]).default("off"),
     /** Concurrent weighted units per provider endpoint (single-GPU default: 2). */
@@ -1834,7 +1837,7 @@ export const MissionSchema = z.object({
     acquireTimeoutMs: z.number().int().min(0).default(30_000),
     /** Permit TTL — a crashed holder frees its units within this window (ms). */
     permitTtlMs: z.number().int().min(5_000).default(120_000),
-  }).default({}),
+  }).prefault({}),
 });
 export type MissionConfig = z.infer<typeof MissionSchema>;
 
@@ -1849,17 +1852,17 @@ export const ConfigSchema = z.object({
    * refilled by its schema default. See docs/forking.md.
    */
   configRemovals: z.array(z.string()).default([]),
-  providers: ProvidersSchema.default({}),
-  deployment: DeploymentSchema.default({}),
-  mission: MissionSchema.default({}),
+  providers: ProvidersSchema.prefault({}),
+  deployment: DeploymentSchema.prefault({}),
+  mission: MissionSchema.prefault({}),
   agents: z.object({
     defaults: z.object({
-      model: ModelConfigSchema.default({}),
+      model: ModelConfigSchema.prefault({}),
       /** Named alternates for the default chat model, switchable at runtime
        *  from the dashboard header. An implicit "claude" preset exists
        *  whenever providers.anthropic is configured (model from
        *  providers.anthropic.defaultModel). */
-      modelPresets: z.record(ModelPresetSchema).default({}),
+      modelPresets: z.record(z.string(), ModelPresetSchema).default({}),
       /** Currently active preset name; unset = the configured local default.
        *  Persisted by the dashboard switch into the runtime overlay. */
       activeModelPreset: z.string().optional(),
@@ -1875,9 +1878,9 @@ export const ConfigSchema = z.object({
        *     execution specialist (researcher, coder, …) stays on its own configured model.
        *  Persisted by the dashboard switch into the runtime overlay alongside activeModelPreset. */
       modelPresetScope: z.enum(["all", "unspecified", "coordinator_qa"]).default("all"),
-    }).default({}),
-    mainAssistant: MainAssistantConfigSchema.default({}),
-    ephemeralGeneration: EphemeralGenerationSchema.default({}),
+    }).prefault({}),
+    mainAssistant: MainAssistantConfigSchema.prefault({}),
+    ephemeralGeneration: EphemeralGenerationSchema.prefault({}),
     /** When true, ALL sub-agents default to containerized execution (Docker isolation).
      *  Individual agents can opt out by setting container.disabled: true in their config.
      *  Defaults to true to align with the "every agent runs in an isolated container"
@@ -1891,7 +1894,7 @@ export const ConfigSchema = z.object({
     defaultContainerized: z.boolean().default(
       productEnv("DEFAULT_CONTAINERIZED") === "false" ? false : true,
     ),
-    rateLimit: RateLimitSchema.default({}),
+    rateLimit: RateLimitSchema.prefault({}),
     /** Maximum tool-call iterations for the orchestrator per turn */
     maxToolIterations: z.number().int().min(1).max(100).default(20),
     /** Session pruning check interval in ms */
@@ -2056,7 +2059,7 @@ export const ConfigSchema = z.object({
        * replays forever, successful calls as progress, no busy arm). See agent/sub-agent.ts.
        */
       loopBrake: z.boolean().default(true),
-    }).default({}),
+    }).prefault({}),
     /**
      * Soft per-task budgets enforced AFTER a delegated sub-agent finishes.
      * They are observability signals, not mid-flight kills (turnTimeoutMs handles
@@ -2074,44 +2077,44 @@ export const ConfigSchema = z.object({
       maxToolCallsPerTask: z.number().int().min(0).default(0),
       /** Cap on wall-clock duration for a single delegation attempt (ms). */
       maxDurationMsPerTask: z.number().int().min(0).default(0),
-    }).default({}),
-  }).default({}),
+    }).prefault({}),
+  }).prefault({}),
   subAgents: SubAgentsSchema.default({}),
   scenes: ScenesSchema.default({}),
   jobs: JobsSchema.default({}),
-  channels: ChannelsSchema.default({}),
-  gateway: GatewaySchema.default({}),
-  guardrails: GuardrailsSchema.default({}),
-  multimodal: MultimodalSchema.default({}),
-  retrieval: RetrievalSchema.default({}),
+  channels: ChannelsSchema.prefault({}),
+  gateway: GatewaySchema.prefault({}),
+  guardrails: GuardrailsSchema.prefault({}),
+  multimodal: MultimodalSchema.prefault({}),
+  retrieval: RetrievalSchema.prefault({}),
   /** The Laya decision layer: fast local answers to the swarm's yes/no and pick-one questions. */
-  decisions: DecisionsSchema.default({}),
+  decisions: DecisionsSchema.prefault({}),
   render: RenderSchema,
-  mcp: McpConfigSchema.default({}),
+  mcp: McpConfigSchema.prefault({}),
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
-  infrastructure: InfrastructureSchema.default({}),
-  monitoring: MonitoringSchema.default({}),
-  sourceForge: SourceForgeSchema.default({}),
-  pentest: PentestSchema.default({}),
-  mail: MailServiceSchema.default({}),
-  toolDevelopment: ToolDevelopmentSchema.default({}),
-  selfImprovement: SelfImprovementSchema.default({}),
-  skillLibrary: SkillLibrarySchema.default({}),
+  infrastructure: InfrastructureSchema.prefault({}),
+  monitoring: MonitoringSchema.prefault({}),
+  sourceForge: SourceForgeSchema.prefault({}),
+  pentest: PentestSchema.prefault({}),
+  mail: MailServiceSchema.prefault({}),
+  toolDevelopment: ToolDevelopmentSchema.prefault({}),
+  selfImprovement: SelfImprovementSchema.prefault({}),
+  skillLibrary: SkillLibrarySchema.prefault({}),
   /** Enforcement hooks by id (tools/enforcement-hooks.ts); workspace/hooks/*.jsonc. */
   enforcementHooks: z.record(z.string().regex(/^[a-z0-9][a-z0-9_-]*$/), EnforcementHookSchema).default({}),
-  memory: MemoryConfigSchema.default({}),
-  toolPipeline: ToolPipelineSchema.default({}),
-  dataFeeds: DataFeedsSchema.default({}),
+  memory: MemoryConfigSchema.prefault({}),
+  toolPipeline: ToolPipelineSchema.prefault({}),
+  dataFeeds: DataFeedsSchema.prefault({}),
   /** Computer use configuration — validated separately by Joi, passed through by Zod. */
-  computerUse: z.record(z.unknown()).default({}),
-  auth: AuthSchema.default({}),
-  storage: StorageSchema.default({}),
-  cost: CostSchema.default({}),
-  tracing: TracingSchema.default({}),
-  federation: FederationSchema.default({}),
-  a2a: A2ASchema.default({}),
+  computerUse: z.record(z.string(), z.unknown()).default({}),
+  auth: AuthSchema.prefault({}),
+  storage: StorageSchema.prefault({}),
+  cost: CostSchema.prefault({}),
+  tracing: TracingSchema.prefault({}),
+  federation: FederationSchema.prefault({}),
+  a2a: A2ASchema.prefault({}),
   /**
    * Plugin SDK — third-party tool packages loaded from a directory at
    * startup.  When `enabled` is false the loader is skipped entirely.
@@ -2141,7 +2144,7 @@ export const ConfigSchema = z.object({
      *  manifest-declared vars), per-call timeouts, and crash containment — a
      *  dead plugin degrades, the gateway never goes down with it. */
     isolation: z.enum(["in_process", "worker"]).default("in_process"),
-  }).default({}),
+  }).prefault({}),
   /**
    * Built-in tool surface control.  Forks disable whole capability families
    * here instead of deleting upstream tool files (deletions are the worst
@@ -2154,18 +2157,18 @@ export const ConfigSchema = z.object({
     disabledGroups: z.array(z.string()).default([]),
     /** Individual tool names to skip at registration. */
     disabledTools: z.array(z.string()).default([]),
-  }).default({}),
+  }).prefault({}),
   /**
    * Per-extension config slices for first-party core extensions
    * (src/extensions/<name>/), keyed by extension name. Passed through opaquely
    * here; each extension validates its own slice with the `configSchema` from
    * its manifest at boot.
    */
-  extensions: z.record(z.unknown()).default({}),
+  extensions: z.record(z.string(), z.unknown()).default({}),
   workspacePath: z.string().default("/workspace"),
-  orchestration: OrchestrationSchema.default({}),
-  effort: EffortSchema.default({}),
-  receptionist: ReceptionistSchema.default({}),
+  orchestration: OrchestrationSchema.prefault({}),
+  effort: EffortSchema.prefault({}),
+  receptionist: ReceptionistSchema.prefault({}),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

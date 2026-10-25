@@ -1,4 +1,5 @@
 import { OrchestrationSchema, type OrchestrationConfig } from "../config/schemas/orchestration.js";
+import { partialWithoutDefaults } from "../config/partial-schema.js";
 
 export type OrchestrationConfigUpdate =
   | { ok: true; value: OrchestrationConfig; stored: Record<string, unknown> }
@@ -35,7 +36,7 @@ export function mergePlainObjects(base: Record<string, unknown>, patch: Record<s
  * the mutator persists, so the store never fills up with materialized defaults.
  */
 export function mergeOrchestrationConfigUpdate(stored: unknown, body: unknown): OrchestrationConfigUpdate {
-  const partial = OrchestrationSchema.partial().safeParse(body);
+  const partial = partialWithoutDefaults(OrchestrationSchema).safeParse(body);
   if (!partial.success) {
     return { ok: false, error: "Invalid orchestration configuration", details: partial.error.flatten() };
   }

@@ -61,7 +61,7 @@ export const DecisionsSchema = z.object({
     minSamples: z.number().int().min(5).max(10_000).default(30),
     /** The share of Laya's qualified cases the incumbent still decides, to keep measuring. */
     auditRate: z.number().min(0).max(1).default(0.1),
-  }).default({}),
+  }).prefault({}),
   /**
    * laya-browser beside the browser agent (decisions/browser-step.ts) — any agent holding browser_click.
    *
@@ -97,7 +97,7 @@ export const DecisionsSchema = z.object({
      * before asking it.
      */
     translateGoal: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
   ledger: z.object({
     /**
      * Record every decision Laya was asked about: the case, both answers, who decided. The
@@ -109,7 +109,7 @@ export const DecisionsSchema = z.object({
      * `sai stop --volumes` leaves in place — it is training data, not session state.
      */
     path: z.string().optional(),
-  }).default({}),
+  }).prefault({}),
   /**
    * The incumbent read by its logits (decisions/logit-readout.ts): the same resident model asked
    * the point's question with its options under the letters Laya reads, for ONE token with
@@ -154,6 +154,6 @@ export const DecisionsSchema = z.object({
      * Absent: 1, the model's own distribution.
      */
     temperatures: z.record(z.string(), z.record(z.string(), z.number().min(0.05).max(20))).default({}),
-  }).default({}),
+  }).prefault({}),
 });
 export type DecisionsConfig = z.infer<typeof DecisionsSchema>;
