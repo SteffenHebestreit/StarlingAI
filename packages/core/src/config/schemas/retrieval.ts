@@ -206,12 +206,12 @@ export const KnowledgeBasesSchema = z.object({
 export type KnowledgeBasesConfig = z.infer<typeof KnowledgeBasesSchema>;
 
 export const RetrievalSchema = z.object({
-  reranker: RetrievalRerankerSchema.default({}),
+  reranker: RetrievalRerankerSchema.prefault({}),
   /** Ceiling on concurrent embedding requests — see EmbeddingConcurrencySchema. */
   embeddingConcurrency: EmbeddingConcurrencySchema,
-  search: RetrievalSearchSchema.default({}),
-  documentRag: DocumentRagSchema.default({}),
-  knowledgeBases: KnowledgeBasesSchema.default({}),
+  search: RetrievalSearchSchema.prefault({}),
+  documentRag: DocumentRagSchema.prefault({}),
+  knowledgeBases: KnowledgeBasesSchema.prefault({}),
 });
 
 export type RetrievalSearchConfig = z.infer<typeof RetrievalSearchSchema>;

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node
 import { dirname, resolve } from "node:path";
 import { z } from "zod";
 import { childLogger } from "../logger.js";
+import { partialWithoutDefaults } from "../config/partial-schema.js";
 
 import { userScopedDir, userStateBaseDir } from "../runtime/user-scope.js";
 
@@ -56,10 +57,10 @@ export const MainAssistantPersonalityProfileSchema = MainAssistantPersonalityEdi
 
 export type MainAssistantPersonalityProfile = z.infer<typeof MainAssistantPersonalityProfileSchema>;
 
-const MainAssistantPersonalityIdentityUpdateSchema = MainAssistantPersonalityIdentitySchema.partial();
-const MainAssistantPersonalityVoiceUpdateSchema = MainAssistantPersonalityVoiceSchema.partial();
-const MainAssistantPersonalityCollaborationUpdateSchema = MainAssistantPersonalityCollaborationSchema.partial();
-const MainAssistantPersonalityGrowthUpdateSchema = MainAssistantPersonalityGrowthSchema.partial();
+const MainAssistantPersonalityIdentityUpdateSchema = partialWithoutDefaults(MainAssistantPersonalityIdentitySchema);
+const MainAssistantPersonalityVoiceUpdateSchema = partialWithoutDefaults(MainAssistantPersonalityVoiceSchema);
+const MainAssistantPersonalityCollaborationUpdateSchema = partialWithoutDefaults(MainAssistantPersonalityCollaborationSchema);
+const MainAssistantPersonalityGrowthUpdateSchema = partialWithoutDefaults(MainAssistantPersonalityGrowthSchema);
 
 export const MainAssistantPersonalityUpdateSchema = z.object({
   identity: z.union([z.string().trim().min(1).max(1000), MainAssistantPersonalityIdentityUpdateSchema]).optional(),

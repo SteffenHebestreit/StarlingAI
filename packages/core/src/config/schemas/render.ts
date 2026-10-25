@@ -29,7 +29,7 @@ export const RenderSchema = z.object({
     settleMs: z.number().int().min(0).max(10000).default(400),
     /** Hard cap on the HTML pushed into the page, so a runaway document can't wedge Chrome. */
     maxHtmlBytes: z.number().int().min(10000).max(50000000).default(8000000),
-  }).default({}),
-}).default({});
+  }).prefault({}),
+}).prefault({});
 
 export type RenderConfig = z.infer<typeof RenderSchema>;

@@ -59,7 +59,8 @@ function schemaEntries(path) {
   for (const match of text.matchAll(/^[ \t]{2,}([a-zA-Z][a-zA-Z0-9_]*)\s*:\s*z\./gm)) {
     const lineStart = match.index ?? 0;
     const line = text.slice(lineStart, text.indexOf("\n", lineStart) === -1 ? text.length : text.indexOf("\n", lineStart));
-    const defaultMatch = /\.default\(([^)]*)\)/.exec(line);
+    // .prefault() is zod 4's default that is parsed through the field's schema, as zod 3's .default() was.
+    const defaultMatch = /\.(?:default|prefault)\(([^)]*)\)/.exec(line);
     fields.push({
       name: match[1],
       schemaFile: normalized(path),

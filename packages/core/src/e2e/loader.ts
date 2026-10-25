@@ -135,7 +135,7 @@ export function semanticIssues(scenario: E2EScenario, fixturesDir: string): stri
   return issues;
 }
 
-function formatZodIssue(issue: { path: (string | number)[]; message: string }): string {
+function formatZodIssue(issue: { path: PropertyKey[]; message: string }): string {
   const path = issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
   return `${path}: ${issue.message}`;
 }

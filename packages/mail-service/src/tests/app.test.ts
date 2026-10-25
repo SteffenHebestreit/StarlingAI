@@ -168,3 +168,23 @@ describe("mail service app", () => {
     expect(deleteMessageMock).toHaveBeenCalledWith("INBOX", 99, false);
   });
 });
+
+describe("a draft PATCH", () => {
+  it("that changes the subject leaves cc and bcc as they are", async () => {
+    // zod 4 runs a default inside .partial(): cc and bcc came back as [], and draft-store spreads the
+    // patch over the stored draft, which emptied both lists.
+    store.getDraft.mockResolvedValueOnce({
+      id: "d1", accountId: "work", to: ["a@example.com"], cc: ["c@example.com"], bcc: ["b@example.com"],
+      subject: "old", textBody: "t", status: "draft",
+    });
+    store.updateDraft.mockImplementationOnce(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch }));
+    const app = createApp({ accounts, store: store as never });
+    const response = await app.request("/api/drafts/d1", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject: "new" }),
+    });
+    expect(response.status).toBe(200);
+    expect(store.updateDraft).toHaveBeenLastCalledWith("d1", { subject: "new" });
+  });
+});
