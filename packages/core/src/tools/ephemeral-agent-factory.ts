@@ -26,7 +26,8 @@ import { readRecentOutcomes } from "../agent/outcomes.js";
 import { getToolTier, ToolTier } from "../guardrails/tool-tiers.js";
 import { promoteEphemeralAgent, withPromotedAgents, PROMOTION_MIN_SUCCESSES, PROMOTION_MIN_SUCCESS_RATE } from "../agent/promoted-agents.js";
 import { buildAgentIndex } from "../providers/embeddings.js";
-import { getEmbeddingProvider } from "../providers/index.js";
+import { applyActiveModelPreset, createChatProvider, getEmbeddingProvider } from "../providers/index.js";
+import { runWithCallAttribution } from "../runtime/request-context.js";
 import { formatSharedContextForPrompt } from "../swarm/memory.js";
 import { isWebReachingToolName, looksLikeFailureResult, looksLikeArtifactDeliverableMiss } from "./sub-agent.js";
 import {
@@ -254,22 +255,65 @@ function buildArchitectPrompt(task: string, previousContext?: string): string {
   ].join("\n");
 }
 
+/** What the built-in architect must answer with (buildArchitectPrompt's schema, held by the model server). */
+const ARCHITECT_SPEC_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    agentName: { type: "string" },
+    description: { type: "string" },
+    systemPrompt: { type: "string" },
+    tools: { type: "array", items: { type: "string" } },
+    maxIterations: { type: "integer" },
+    model: { type: "object", properties: { primary: { type: "string" }, temperature: { type: "number" } } },
+  },
+  required: ["agentName", "description", "systemPrompt", "tools", "maxIterations"],
+};
+
+/**
+ * The built-in architect: one call to the deployment's default model with the architect prompt, held
+ * to the spec's schema. It needs no agent in the catalog. The catalog's agents are where a deployment
+ * starts, not what it is limited to: a task none of them fits gets an agent made for it, and one that
+ * keeps succeeding is promoted (maybePromoteEphemeral). From 2026-06-19 to 2026-10 this ran only
+ * through a catalog agent, agent_architect; the roster cleanup removed it as redundant, and every
+ * fallback since failed with no agent made.
+ */
+async function designWithBuiltInArchitect(architectPrompt: string, ctx: ToolContext): Promise<string> {
+  const config = getConfig();
+  const provider = createChatProvider({ ...applyActiveModelPreset(config.agents.defaults.model, config), temperature: 0.1 });
+  const response = await runWithCallAttribution({ callSite: "sub_agent", agentName: "ephemeral_architect", sessionId: ctx.sessionId }, () =>
+    provider.complete([{ role: "user", content: architectPrompt }], [], ctx.signal, {
+      // A schema-held answer with thinking on spends the budget before the JSON starts.
+      controls: { enableThinking: false },
+      responseFormat: { name: "ephemeral_agent_spec", schema: ARCHITECT_SPEC_SCHEMA, strict: false },
+    }));
+  return response.content ?? "";
+}
+
 async function requestArchitectSpec(task: string, ctx: ToolContext, previousContext?: string): Promise<ArchitectEphemeralSpec | null> {
   const settings = getEphemeralGenerationSettings();
-  const architectAgentName = settings.architectAgentName;
-  // No agent of that name, no spec: asking one ran nothing and came back as "No JSON object found
-  // in architect response", which is how every architect fallback has failed since the agent was
-  // removed from the deployment (workspace/agents/00-platform.jsonc). Said as what it is.
-  const config = getConfig();
-  if (!withPromotedAgents(config.subAgents, ctx.workspacePath ?? config.workspacePath)[architectAgentName]) {
-    logAudit(
-      "architect_fallback_failed",
-      { reason: "architect_agent_missing", architectAgentName },
-      { sessionId: ctx.sessionId, severity: "warn" },
-    );
-    return null;
-  }
   const architectPrompt = buildArchitectPrompt(task, previousContext);
+  const config = getConfig();
+  // A catalog architect is an override. Configured and absent, it is said as what it is, and the
+  // built-in architect designs the agent: the fallback does not depend on the roster.
+  const configured = settings.architectAgentName;
+  const architectAgentName = configured && withPromotedAgents(config.subAgents, ctx.workspacePath ?? config.workspacePath)[configured]
+    ? configured
+    : undefined;
+  if (configured && !architectAgentName) {
+    logAudit("guardrail_flagged", { type: "architect_agent_missing", architectAgentName: configured, using: "built-in" }, { sessionId: ctx.sessionId, severity: "warn" });
+  }
+  if (!architectAgentName) {
+    try {
+      return parseArchitectSpec(await designWithBuiltInArchitect(architectPrompt, ctx));
+    } catch (error) {
+      logAudit(
+        "architect_fallback_failed",
+        { reason: "builtin_architect_error", err: String(error) },
+        { sessionId: ctx.sessionId, severity: "warn" },
+      );
+      return null;
+    }
+  }
 
   try {
     const response = await runSubAgent({
@@ -544,7 +588,7 @@ export async function runArchitectFallback(task: string, ctx: ToolContext): Prom
 
   logAudit(
     "architect_fallback_started",
-    { agentName: ephemeralName, tools, maxIterations, model: model?.primary ?? null, architectAgentName: settings.architectAgentName },
+    { agentName: ephemeralName, tools, maxIterations, model: model?.primary ?? null, architectAgentName: settings.architectAgentName ?? "built-in" },
     { sessionId: ctx.sessionId },
   );
   // An ephemeral agent has no catalog taxonomy, so the research gate counts it as reaching outside

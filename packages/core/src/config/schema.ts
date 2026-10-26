@@ -329,7 +329,13 @@ export const MainAssistantConfigSchema = z.object({
 export const EphemeralGenerationSchema = z.object({
   enabled: z.boolean().default(true),
   skillMatchThreshold: z.number().min(0).max(1).default(0.7),
-  architectAgentName: z.string().min(1).default("agent_architect"),
+  /**
+   * A catalog agent to design ephemeral agents in place of the built-in architect. Unset by default:
+   * the fallback designs them itself (tools/ephemeral-agent-factory.ts), so a deployment with no agent
+   * defined still gets one for a task nothing in the catalog fits. The default used to name
+   * agent_architect, and removing that agent from the roster switched the fallback off.
+   */
+  architectAgentName: z.string().min(1).optional(),
 });
 
 // Channel schemas (ChannelWebChatSchema … ChannelsSchema + the *Config types)
