@@ -311,6 +311,7 @@ export function stepHint(step: TurnStep, now = Date.now(), lang: TurnLanguage = 
     const wait = Math.max(0, ((step.userInput?.engineFreeAt ?? now) - now) / 1000);
     const waiting = wait >= 1 ? turnText.afterEarlierRender(lang, roughDuration(wait)) : "";
     if (expected && expected > 0) return `${turnText.usually(lang, roughDuration(expected))}${waiting}`;
+    if ((step.userInput?.tier ?? step.args?.["tier"]) === "balanced") return `${turnText.usually(lang, "1 min")}${waiting}`;
     const slow = step.userInput?.tier
       ? step.userInput.tier === "quality"
       : str(step.args?.["baseImage"]) || step.args?.["tier"] === "quality";

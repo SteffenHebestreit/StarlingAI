@@ -101,6 +101,34 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    */
   qualityTimeoutMs: z.number().int().min(10_000).max(600_000).default(210_000),
   /**
+   * Model id for a tier BETWEEN the two in cost. Unset unless the deployment has one. On the cluster
+   * this was written for it is FLUX 3 Image Klein on the quality tier's graphics chip: 64.6 s at
+   * 1024x1024 against 10 s fast and 322-335 s quality (measured 2026-10-26), and it edits by
+   * reference (see `referenceEditModels`).
+   */
+  balancedModel: z.string().min(1).optional(),
+  /** Wall clock for the balanced tier's reference render (16 steps at 1024x1024); the quality tier's when unset. */
+  balancedTimeoutMs: z.number().int().min(10_000).max(600_000).optional(),
+  /** Generation defaults for the BALANCED tier, where they differ from the fast tier's. */
+  balancedDefaults: z.object({
+    steps: z.number().int().min(1).max(100).optional(),
+    guidanceScale: z.number().min(0).max(20).optional(),
+    negativePrompt: z.string().optional(),
+  }).optional(),
+  /**
+   * Models (also listed in `initImageModels`) that EDIT BY REFERENCE: the engine reads the base
+   * picture beside the instruction and keeps whatever the prompt does not ask to change. They take
+   * no `strength` and no `mask` — the endpoint refuses both by name — so the client sends neither,
+   * routes a masked edit to an engine that edits by img2img, and checks for `usage.mode` "reference".
+   */
+  referenceEditModels: z.array(z.string()).default([]),
+  /**
+   * Models that render on ONE device, keyed by a name for it, e.g. `{ "igpu": ["image-quality",
+   * "image-balanced"] }`. Their renders take one slot between them (`maxConcurrent`; a per-model
+   * ceiling does not apply), because two at once on one graphics chip each take about twice as long.
+   */
+  deviceGroups: z.record(z.string(), z.array(z.string())).default({}),
+  /**
    * How long the image SERVER waits for a render before it gives up — set it to the limit of the
    * server or of a proxy in front of it (llama-swap: `peers.<peer>.timeouts.responseHeader`). Unset
    * where there is none.
@@ -222,7 +250,7 @@ export const MultimodalImageGenerationSchema = MultimodalServiceSchema.extend({
    * answered 404, and the retry quietly landed on the other engine.
    */
   // Partial: zod 4 reads a record keyed by an enum as one that holds every key.
-  tierLabels: z.partialRecord(z.enum(["fast", "quality"]), z.string().min(1)).default({}),
+  tierLabels: z.partialRecord(z.enum(["fast", "balanced", "quality"]), z.string().min(1)).default({}),
   /**
    * The settings step: before every render in an interactive chat turn, generate_image shows the
    * person what it is about to run (engine, prompt, size, steps, seed, base picture) and lets them

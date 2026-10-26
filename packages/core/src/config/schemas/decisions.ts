@@ -36,6 +36,19 @@ export const DecisionsSchema = z.object({
    * whatever the modes say, so the default install behaves exactly as without this layer.
    */
   baseUrl: z.string().default(""),
+  /**
+   * A decision model served in the System One format (llama.cpp's POST /v1/systemone, the
+   * Jev-compatible endpoint), e.g. behind the llama-swap that serves the chat models. With baseUrl
+   * and model set, the decision points ask it instead of the Laya sidecar; laya-browser keeps the
+   * sidecar at decisions.baseUrl. baseUrl may end in /v1, as the chat endpoints' do.
+   */
+  systemOne: z.object({
+    baseUrl: z.string().default(""),
+    /** Sent as "Authorization: Bearer <apiKey>" (llama-swap's apiKeys). */
+    apiKey: z.string().optional(),
+    /** The decision model's id as the server lists it (GET /v1/models). */
+    model: z.string().default(""),
+  }).prefault({}),
   /** How long one answer may take before the incumbent's is used. */
   timeoutMs: z.number().int().min(50).max(15_000).default(1_500),
   /**

@@ -703,6 +703,22 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const lms = (p["lmstudio"] as Record<string, unknown> | undefined) ?? {};
     raw["providers"] = { ...(p as object), lmstudio: { ...lms, apiKey: primaryModelKey } };
   }
+  // A System One decision model on the same llama-swap as chat (decisions.systemOne): with a model
+  // named and no baseUrl of its own it follows SAI_PRIMARY_MODEL_URL and the primary key, as image
+  // generation does, so the two endpoints cannot drift and the key is never written into config. A
+  // baseUrl or apiKey set in config wins.
+  const decisionsRaw = raw["decisions"] as Record<string, unknown> | undefined;
+  const systemOneRaw = decisionsRaw?.["systemOne"] as Record<string, unknown> | undefined;
+  if (systemOneRaw && String(systemOneRaw["model"] ?? "").trim() && !String(systemOneRaw["baseUrl"] ?? "").trim() && primaryModelUrl) {
+    raw["decisions"] = {
+      ...decisionsRaw,
+      systemOne: {
+        ...systemOneRaw,
+        baseUrl: primaryModelUrl,
+        ...(!String(systemOneRaw["apiKey"] ?? "").trim() && primaryModelKey ? { apiKey: primaryModelKey } : {}),
+      },
+    };
+  }
   if (env["ANTHROPIC_API_KEY"]) {
     const p = (raw["providers"] as Record<string, unknown> | undefined) ?? {};
     const ant = (p["anthropic"] as Record<string, unknown> | undefined) ?? {};

@@ -10,6 +10,7 @@ import { getMcpConnections, reconnectAfterFailedCall } from "../mcp/registry.js"
 import { checkFieldValue, checkRadioClick, parseRadioChoice, RADIO_CHOICE_FUNCTION } from "./browser-form-gate.js";
 import { browserWatchdog } from "./browser-watchdog.js";
 import {
+  IMAGE_GENERATION_TIERS,
   ImageGenerationTimeoutError,
   ImageRenderTooLongError,
   ImageUpstreamRequestError,
@@ -28,6 +29,7 @@ import {
   requestImageGeneration,
   resolveNamedImageEngine,
   type ImageGenerationRequest,
+  type ImageGenerationTier,
 } from "../multimodal/image-generation.js";
 import {
   IMAGE_SETTINGS_KIND,
@@ -543,10 +545,11 @@ registerTool({
 });
 
 const GENERATE_IMAGE_DESCRIPTION =
-  "Generate an image from a text prompt and save it to the workspace. Two tiers: `fast` (the default,"
-  + " seconds on dedicated hardware, costs the rest of the system nothing) and `quality` (minutes, runs one"
-  + " at a time cluster-wide and slows every other model on that machine while it runs). See the `tier`"
-  + " parameter for when each is right. In a chat the user may first see your settings and keep them,"
+  "Generate an image from a text prompt, or edit an existing one, and save it to the workspace. Up to three"
+  + " tiers: `fast` (the default, seconds on dedicated hardware, costs the rest of the system nothing),"
+  + " `balanced` (about a minute) and `quality` (minutes); the last two share one graphics chip, run one at a"
+  + " time and slow every other model on that machine while they run. See the `tier` parameter for when"
+  + " each is right. In a chat the user may first see your settings and keep them,"
   + " change engine, prompt, size, steps, seed or base picture, paint a mask, or skip the render; the"
   + " output says which settings ran and who chose them. Report those, and never re-render to restore yours.";
 
@@ -643,19 +646,21 @@ registerTool({
       seed: { type: "number", description: "Optional random seed for reproducible results" },
       tier: {
         type: "string",
-        enum: ["fast", "quality"],
+        enum: ["fast", "balanced", "quality"],
         description:
-          "Which engine renders it. 'fast' is the default: about ten seconds on dedicated hardware,"
-          + " costing the rest of the system nothing — right for an ordinary picture, a realistic"
-          + " one included (with the register first it comes back photographic). 'quality' takes"
-          + " minutes (this tool's description says how many), runs one at a time across the whole cluster and slows every"
-          + " other model on that machine by roughly 70% while it runs. Choose 'quality' when the"
-          + " user was unhappy with a fast result or asks for a better one, names the quality"
-          + " engine, or when the new picture must keep an EXISTING picture's layout: measured here"
-          + " with the seed pinned, the fast engine ignored a described layout in 6 renders out of"
-          + " 6, while the quality engine followed it. A user who names an engine or tier gets"
-          + " exactly that one; if it fails, say so — never render on the other tier and present"
-          + " it as what they asked for.",
+          "Which engine renders it; this tool's description lists the ones this deployment has and how"
+          + " long each takes. 'fast' is the default: about ten seconds on dedicated hardware, costing the"
+          + " rest of the system nothing — right for an ordinary picture, a realistic one included (with the"
+          + " register first it comes back photographic). It cannot follow a detailed layout: measured with"
+          + " the seed pinned, it ignored a described layout in 6 renders out of 6. 'balanced' takes about a"
+          + " minute and 'quality' about five; both run on one graphics chip shared with other models and"
+          + " slow them by roughly 70% while they render. Choose 'balanced' when the user was unhappy with a"
+          + " fast result or wants a better picture, when the picture must keep a described layout (it"
+          + " followed one in the render measured), and for EDITS — see `baseImage`. Choose 'quality' when"
+          + " the user asks for the best quality or names the quality engine, when a real place, building"
+          + " or object must look like itself (measured: it drew the real Frauenkirche where 'balanced' drew"
+          + " a generic dome), and for edits with a mask. A user who names an engine or tier gets exactly"
+          + " that one; if it fails, say so — never render on another tier and present it as what they asked for.",
       },
       baseImage: {
         type: "string",
@@ -663,19 +668,25 @@ registerTool({
           "Relative workspace path to an existing image to EDIT rather than replace. Use this when"
           + " the user wants something changed INSIDE a picture while its look stays — add, remove,"
           + " fix, recolour — because without it the elements they asked to keep will disappear."
+          + " The engines edit differently. 'balanced' edits BY INSTRUCTION: write the change as the"
+          + " prompt ('Add a sloth hanging from the tree on the right. Keep everything else as it is.')"
+          + " and it keeps the rest of the picture, with no mask and no strength — measured: it added the"
+          + " animal and left the scene in place, in about 2.5 minutes. 'quality' edits by strength (see"
+          + " `strength`) and is the only one that takes a `mask`. With no tier stated, an edit goes to"
+          + " 'balanced', or to 'quality' when a mask is passed."
           + " Do NOT use it to change the picture's LOOK ('make it realistic', 'as a painting'):"
-          + " an edit inherits its base's look at every strength that keeps the layout, so the"
-          + " result comes back in the old style. For that, describe the existing layout in the"
-          + " prompt and generate without baseImage on tier 'quality' — measured here, that engine"
-          + " reproduced a described layout as a photograph, where a 0.75 edit of the same picture"
-          + " stayed an illustration and the fast engine ignored the layout. If the"
-          + " backend cannot edit, this fails with a clear message: report that honestly instead"
-          + " of passing a fresh generation off as a revision.",
+          + " on every engine an edit keeps its base's look — a 0.75 'quality' edit of a stylised picture"
+          + " stayed an illustration, and a 'balanced' edit told to make one a realistic photograph came"
+          + " back nearly unchanged. For that, describe the existing layout in the prompt and generate"
+          + " WITHOUT baseImage on tier 'balanced' or 'quality', and say that the arrangement is"
+          + " re-interpreted rather than copied. If the backend cannot edit, this fails with a clear"
+          + " message: report that honestly instead of passing a fresh generation off as a revision.",
       },
       strength: {
         type: "number",
         description:
-          "With `baseImage`, how much of the original is re-rendered, 0 to 1. Low (0.2-0.35)"
+          "Only for an edit on the 'quality' engine; 'balanced' edits by instruction and takes none."
+          + " With `baseImage`, how much of the original is re-rendered, 0 to 1. Low (0.2-0.35)"
           + " moves tone and colour only and cannot add or remove anything; 0.65-0.8 rebuilds"
           + " most of the content while the broad layout survives; above ~0.85 keeps nothing"
           + " and is a fresh image with extra steps. Defaults to 0.45. To ADD, REMOVE or"
@@ -698,7 +709,8 @@ registerTool({
         type: "string",
         description:
           "With `baseImage`, a relative workspace path to an RGBA PNG selecting WHICH REGION may"
-          + " change — everything outside it is returned untouched. ALPHA semantics: a"
+          + " change — everything outside it is returned untouched. Only the 'quality' engine takes one,"
+          + " so a masked edit renders there. ALPHA semantics: a"
           + " TRANSPARENT pixel may be edited, an OPAQUE pixel is protected. Getting that"
           + " backwards edits exactly the part the user wanted kept and still returns a"
           + " perfectly plausible picture, so never guess the polarity. The mask must select"
@@ -744,13 +756,17 @@ registerTool({
       // that lists what exists costs one cheap iteration and points at the right engine.
       const choices = imageTierChoices(config);
       const statedTier = stringArg(args["tier"])?.toLowerCase();
-      if (statedTier && statedTier !== "fast" && statedTier !== "quality") {
+      // A tier this deployment does not have is refused the same way: "balanced" on a cluster with
+      // no balanced engine would otherwise fail at the backend after the settings step.
+      const knownTier = (IMAGE_GENERATION_TIERS as readonly string[]).includes(statedTier ?? "")
+        && (statedTier === "fast" || choices.length === 0 || choices.some((choice) => choice.tier === statedTier));
+      if (statedTier && !knownTier) {
         return fail(
           `Unknown tier "${stringArg(args["tier"])}". This deployment has: ${describeImageTierChoices(config) || "`fast`"}.`
           + " Nothing was rendered.",
         );
       }
-      let requestedTier = statedTier as "fast" | "quality" | undefined;
+      let requestedTier = statedTier as ImageGenerationTier | undefined;
       const namedModel = stringArg(args["model"]);
       if (namedModel && choices.length > 0) {
         const tierOfName = resolveNamedImageEngine(config, namedModel);
@@ -966,8 +982,12 @@ registerTool({
           + settingsStep.note
           + maskNote
           + (result.tierUpgradedForEdit
-            ? ` — NOTE: editing is only available on the slower quality tier, so this used it`
-              + " rather than the fast one. Say so if the user asked for speed."
+            ? ` — NOTE: the engine asked for cannot take this edit, so it ran on the ${result.tier} tier`
+              + `${engine ? ` (${engine})` : ""}. Say so if the user asked for a particular engine or for speed.`
+            : "")
+          + (result.referenceEdit && typeof args["strength"] === "number"
+            ? ` — NOTE: \`strength\` did not apply: ${engine ?? "this engine"} edits by instruction, so the`
+              + " prompt alone decided what changed."
             : "")
           + (result.engineArgsRemoved
             ? " — NOTE: an <sd_cpp_extra_args> block was removed from the prompt before it was sent; settings"

@@ -19,8 +19,13 @@ export interface ImageEngine {
   label?: string;
   /** Renders 1024×1024 only. */
   fixedSize: boolean;
-  /** Can take a base picture (and a mask) to edit. */
+  /** Can take a base picture to edit. */
   canEdit: boolean;
+  /**
+   * Edits BY INSTRUCTION: the prompt says what changes and the rest of the picture is kept. Such an
+   * engine takes no strength and no mask, and an edit costs REFERENCE_EDIT_WORK times a new picture.
+   */
+  editsByReference: boolean;
   /** What it renders with when nothing is set — the settings `expectedSeconds` was measured at. */
   defaults: { width: number; height: number; steps: number; guidanceScale: number; negativePrompt?: string };
   /** At `defaults`; estimateRenderSeconds scales it to any other settings. */
@@ -128,7 +133,8 @@ export interface ImageSettingsAnswer {
     seed: number | null;
     edit: null | {
       baseCandidateId: string;
-      strength: number;
+      /** Absent for an engine that edits by reference. */
+      strength?: number;
       maskDataUrl?: string | null;
       keepAgentMask?: boolean;
       maskBlur?: number;
@@ -183,6 +189,7 @@ export function readImageSettingsPayload(raw: unknown): ImageSettingsPayload | n
       ...(str(engine["label"]) ? { label: str(engine["label"]) } : {}),
       fixedSize: engine["fixedSize"] === true,
       canEdit: engine["canEdit"] === true,
+      editsByReference: engine["editsByReference"] === true,
       defaults: {
         width: num(defaults["width"]) ?? DEFAULT_BOUNDS.size.fixed,
         height: num(defaults["height"]) ?? DEFAULT_BOUNDS.size.fixed,
@@ -299,17 +306,22 @@ export const LONG_RENDER_SECONDS = 600;
  * showed "~3 min" for 57 steps at 1344x768, a render of about eight.
  */
 export function estimateRenderSeconds(
-  engine: Pick<ImageEngine, "defaults" | "expectedSeconds"> | undefined,
-  settings: { steps: number; width: number; height: number; guidanceScale: number },
+  engine: Pick<ImageEngine, "defaults" | "expectedSeconds"> & { editsByReference?: boolean } | undefined,
+  settings: { steps: number; width: number; height: number; guidanceScale: number; baseCandidateId?: string | null },
 ): number {
   if (!engine || !(engine.expectedSeconds > 0)) return 0;
   const { defaults } = engine;
   const steps = settings.steps / defaults.steps;
   const area = (settings.width * settings.height) / (defaults.width * defaults.height);
   const cfg = defaults.guidanceScale <= 1 && settings.guidanceScale > 1 ? 2 : 1;
-  const work = steps * area * cfg;
+  // An edit on a reference engine attends over the base picture too (IMAGE_REFERENCE_EDIT_WORK in core).
+  const reference = engine.editsByReference && settings.baseCandidateId ? REFERENCE_EDIT_WORK : 1;
+  const work = steps * area * cfg * reference;
   return engine.expectedSeconds * (Number.isFinite(work) && work > 0 ? work : 1);
 }
+
+/** Mirrors IMAGE_REFERENCE_EDIT_WORK in core: measured 157.9 s with one reference against 64.6 s without. */
+const REFERENCE_EDIT_WORK = 2.45;
 
 /** What the agent's own settings should take — the collapsed card's time, and Auto's. */
 export function agentEstimateSeconds(payload: ImageSettingsPayload): number {
@@ -508,8 +520,11 @@ export function selectBase(form: ImageSettingsForm, payload: ImageSettingsPayloa
     next.mask = base.id === payload.agent.baseCandidateId && payload.agent.hasMask && payload.agentMask ? "agent" : "none";
     next.maskDataUrl = undefined;
   }
-  if (!engineFor(payload, next.tier)?.canEdit) {
-    const editor = payload.engines.find((engine) => engine.canEdit);
+  // The cheapest engine that can take this edit, as the server picks it: one that edits by
+  // instruction unless a mask is kept, which only an engine that edits the picture itself honours.
+  const fits = (engine: ImageEngine | undefined) => Boolean(engine?.canEdit) && !(next.mask !== "none" && engine?.editsByReference);
+  if (!fits(engineFor(payload, next.tier))) {
+    const editor = payload.engines.find(fits) ?? payload.engines.find((engine) => engine.canEdit);
     if (editor) next = selectEngine(next, payload, editor.tier);
     // selectEngine may resize a fixed-size engine; an edit always keeps its own size.
     next.width = size.width;
@@ -633,7 +648,13 @@ export function validateForm(form: ImageSettingsForm, payload: ImageSettingsPayl
     if (tooLong) add("steps", tooLong);
   }
 
-  if (base) {
+  if (base && engine?.editsByReference) {
+    // Refused like on the server: the engine reads the instruction, not a region.
+    if (form.mask !== "none") {
+      const maskers = payload.engines.filter((candidate) => candidate.canEdit && !candidate.editsByReference).map((candidate) => engineLabel(candidate));
+      add("mask", `${engineLabel(engine)} edits by instruction and takes no mask${maskers.length > 0 ? `; choose ${maskers.join(" or ")} for a masked edit, or remove the mask` : "; remove the mask"}.`);
+    }
+  } else if (base) {
     if (!Number.isFinite(form.strength) || form.strength < bounds.strength[0] || form.strength > bounds.strength[1]) {
       add("strength", `From ${bounds.strength[0]} to ${bounds.strength[1]}.`);
     }
@@ -673,7 +694,8 @@ export function buildConfigureAnswer(form: ImageSettingsForm, payload: ImageSett
       edit: base
         ? {
             baseCandidateId: base.id,
-            strength: form.strength,
+            // A reference engine takes none; the server would ignore it, the summary would not.
+            ...(engineFor(payload, form.tier)?.editsByReference ? {} : { strength: form.strength }),
             ...mask,
             ...(form.mask !== "none" && sendBlur ? { maskBlur: form.maskBlur } : {}),
           }
