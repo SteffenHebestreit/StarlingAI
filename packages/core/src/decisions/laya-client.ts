@@ -6,6 +6,12 @@
  *   → { "answers": { id: { "choice": key, "probabilities": { key: p }, "maxLen": tokens, "truncatedTokens": n } },
  *       "model": "...", "ms": 12 }
  *
+ * With decisions.systemOne set the same question goes to a decision model llama.cpp serves:
+ *
+ *   POST {baseUrl}/v1/systemone
+ *   { "model", "state": { ... }, "questions": { id: { "type": "choice", "instructions", "criteria": { key: description } } } }
+ *   → { "model", "answers": { id: { "choice": key, "probabilities": { key: p }, "confidence" } } }
+ *
  * Never throws: every failure is `null`, and the caller's incumbent decides. A sidecar that is down
  * would otherwise cost every decision its full timeout, so after a run of failures it is not asked
  * for a cooldown; the first answer after that closes the breaker again.
@@ -73,9 +79,18 @@ function finiteCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
-/** Is a sidecar configured at all? Without one, no point asks Laya whatever its mode. */
+/** The System One decision model the points ask instead of the sidecar, or null when none is configured. */
+function systemOneTarget(): { url: string; apiKey?: string; model: string } | null {
+  const target = getConfig().decisions?.systemOne;
+  const base = target?.baseUrl?.trim().replace(/\/+$/, "").replace(/\/v1$/, "") ?? "";
+  const model = target?.model?.trim() ?? "";
+  if (!base || !model) return null;
+  return { url: `${base}/v1/systemone`, model, ...(target?.apiKey?.trim() ? { apiKey: target.apiKey.trim() } : {}) };
+}
+
+/** Is a decider configured at all (the sidecar or a System One model)? Without one, no point asks whatever its mode. */
 export function layaConfigured(): boolean {
-  return Boolean(getConfig().decisions?.baseUrl?.trim());
+  return Boolean(getConfig().decisions?.baseUrl?.trim()) || systemOneTarget() !== null;
 }
 
 function endpoint(path: string): string {
@@ -135,29 +150,38 @@ export async function askLaya(
   if (!layaConfigured()) return null;
   const now = Date.now();
   if (circuitOpenUntil > now) return null;
-  const timeoutMs = getConfig().decisions.timeoutMs;
+  const { timeoutMs } = getConfig().decisions;
+  const systemOne = systemOneTarget();
   const started = Date.now();
   try {
-    const question = {
-      id: point.id,
-      question: point.question,
-      options: point.options,
-      state,
-      // The point's own window (points.ts maxLen); without it the sidecar reads the checkpoint's default.
-      ...(point.maxLen !== undefined ? { max_len: point.maxLen } : {}),
-    };
-    const response = await fetch(endpoint("/v1/decide"), {
+    const body = systemOne
+      ? {
+        model: systemOne.model,
+        state,
+        questions: { [point.id]: { type: "choice", instructions: point.question, criteria: point.options } },
+      }
+      : {
+        questions: [{
+          id: point.id,
+          question: point.question,
+          options: point.options,
+          state,
+          // The point's own window (points.ts maxLen); without it the sidecar reads the checkpoint's default.
+          ...(point.maxLen !== undefined ? { max_len: point.maxLen } : {}),
+        }],
+      };
+    const response = await fetch(systemOne ? systemOne.url : endpoint("/v1/decide"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions: [question] }),
+      headers: { "Content-Type": "application/json", ...(systemOne?.apiKey ? { Authorization: `Bearer ${systemOne.apiKey}` } : {}) },
+      body: JSON.stringify(body),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       recordFailure(Date.now(), `HTTP ${response.status}`);
       return null;
     }
-    const body = await response.json() as { answers?: Record<string, unknown> };
-    const answer = readAnswer(body.answers?.[point.id], point, Date.now() - started, modelOf(body));
+    const answered = await response.json() as { answers?: Record<string, unknown> };
+    const answer = readAnswer(answered.answers?.[point.id], point, Date.now() - started, modelOf(answered) || (systemOne?.model ?? ""));
     if (!answer) {
       recordFailure(Date.now(), "answer does not fit the options");
       return null;

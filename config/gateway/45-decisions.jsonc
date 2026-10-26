@@ -57,6 +57,15 @@
   // with today's answer, ECE before and after a fitted temperature, flips under a swapped option
   // order, wall time).
   "decisions": {
+    // The decision points ask kev-4b instead of the Laya sidecar: Kev-4B, a decision model llama.cpp
+    // serves at /v1/systemone, resident on the cluster's llama-swap next to the chat models (evox2,
+    // llama-swap >= v262). The loader points it at SAI_PRIMARY_MODEL_URL with the primary key.
+    // Measured zero-shot on the committed cases (2026-10-26): fast_lane 88.5% and source_sensitive
+    // 98.5% against the incumbent's 96.7 / 96.9, German as English, every negation pair read right;
+    // one question p50 57 ms on evox2 against ~0.8 s for the incumbent's call. Its gate evidence
+    // starts from nothing (it is kept per model), so "adaptive" watches it until it qualifies.
+    // laya-browser keeps the sidecar (SAI_LAYA_URL). To go back to the sidecar: remove this block.
+    "systemOne": { "model": "kev-4b" },
     "defaultMode": "adaptive",
     "adaptive": { "targetAgreement": 0.9, "minSamples": 30, "auditRate": 0.1 },
     "browser": { "mode": "adaptive" },

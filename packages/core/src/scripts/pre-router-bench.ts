@@ -6,7 +6,7 @@
  *   pnpm --filter @starlingai/core routing:prerouter [--cases <jsonl> [--cases <jsonl> …]] [--k 8] [--laya-url http://127.0.0.1:18080]
  *     [--out <dir>] [--split all|calibration|test] [--train-out <jsonl>] [--describe description|oneliner]
  *     [--keying language|answer] [--target 0.9] [--min-samples 30] [--round-ms 7900] [--min-coverage 0]
- *     [--limit n] [--no-laya] [--backend laya|readout]
+ *     [--limit n] [--no-laya] [--backend laya|readout|systemone] [--systemone-url http://127.0.0.1:18090] [--systemone-model <id>]
  *
  * Per case: the production capsule for the message (resolveAgentRouting with the discovery
  * prefetch's own options, meta-factory agents dropped, cut to four), the embedding ranking behind
@@ -63,6 +63,7 @@ import {
   parseLayaAnswer,
   parsePreRouterArgs,
   pickFromReadout,
+  pickFromSystemOne,
   preRouteGold,
   splitOf,
   agentDescriptionText,
@@ -113,6 +114,54 @@ async function layaHealth(baseUrl: string): Promise<Record<string, unknown>> {
   } catch (err) {
     if (err instanceof EnvironmentError) throw err;
     throw new EnvironmentError(`Laya is not reachable at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * The same question as one "choice" at llama.cpp's /v1/systemone: the options and their
+ * descriptions are the criteria, the message is the state.
+ */
+async function askSystemOne(
+  baseUrl: string,
+  model: string,
+  built: BuiltPreRouteQuestion,
+  timeoutMs = LAYA_TIMEOUT_MS,
+): Promise<NonNullable<PreRouteObservation["laya"]> | { error: string }> {
+  const started = performance.now();
+  try {
+    const response = await fetch(`${baseUrl}/v1/systemone`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        state: built.request.state,
+        questions: { [built.request.id]: { type: "choice", instructions: built.request.question, criteria: built.request.options } },
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = await readJson(response) as { answers?: Record<string, unknown> } | null;
+    const elapsed = Math.round((performance.now() - started) * 10) / 10;
+    if (!response.ok) {
+      const detail = body && typeof body === "object" ? JSON.stringify(body).slice(0, 300) : "";
+      return { error: `HTTP ${response.status} ${detail}`.trim() };
+    }
+    return pickFromSystemOne(body?.answers?.[built.request.id], built.keys, `systemone:${model}`, elapsed);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function systemOneHealth(baseUrl: string, model: string): Promise<Record<string, unknown>> {
+  try {
+    const response = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
+    if (!response.ok) throw new EnvironmentError(`/v1/models answered HTTP ${response.status} at ${baseUrl}`);
+    const body = await readJson(response) as { data?: Array<{ id?: unknown }> } | null;
+    const ids = (body?.data ?? []).map((entry) => String(entry.id ?? ""));
+    if (!ids.includes(model)) throw new EnvironmentError(`${baseUrl} does not serve ${model} (it lists ${ids.join(", ") || "nothing"})`);
+    return { backend: "systemone", url: baseUrl, model };
+  } catch (err) {
+    if (err instanceof EnvironmentError) throw err;
+    throw new EnvironmentError(`the decision-model server is not reachable at ${baseUrl}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -257,6 +306,11 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
       built.keys,
       `readout:${readoutModel}`,
     );
+  } else if (!args.noLaya && args.backend === "systemone") {
+    const url = args.systemOneUrl!;
+    const model = args.systemOneModel!;
+    health = await systemOneHealth(url, model);
+    askAnswerer = (built, timeoutMs) => askSystemOne(url, model, built, timeoutMs);
   } else if (!args.noLaya) {
     health = await layaHealth(args.layaUrl);
   }
@@ -283,6 +337,7 @@ async function run(args: PreRouterBenchArgs): Promise<number> {
     casesFile,
     casesSha256,
     ...(args.backend ? { backend: args.backend } : {}),
+    ...(args.backend === "systemone" ? { systemOneUrl: args.systemOneUrl, systemOneModel: args.systemOneModel } : {}),
     ...(readoutModel ? { readoutModel } : {}),
   };
   const source = captureEvaluationSourceState(REPO_ROOT);

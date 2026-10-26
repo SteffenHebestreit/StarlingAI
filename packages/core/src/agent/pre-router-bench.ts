@@ -242,12 +242,32 @@ export interface PreRouteObservation {
 
 // ── The readout backend ──────────────────────────────────────────────────────────────────────────
 
-/** Who answers the question: the Laya sidecar, or the resident model read by its logits. */
-export type PreRouteBackend = "laya" | "readout";
+/**
+ * Who answers the question: the Laya sidecar, the resident model read by its logits, or a decision
+ * model served at llama.cpp's /v1/systemone (the Jev-compatible format; Julia-1, Kev, lev and Laya
+ * itself have GGUF builds), the same question asked as one "choice".
+ */
+export type PreRouteBackend = "laya" | "readout" | "systemone";
 
 /** The name the report gives the answerer. */
 export function answererName(backend: PreRouteBackend | undefined): string {
-  return backend === "readout" ? "Readout" : "Laya";
+  return backend === "readout" ? "Readout" : backend === "systemone" ? "SystemOne" : "Laya";
+}
+
+/**
+ * A /v1/systemone answer as an observation's pick. The probabilities stand in for the readout's
+ * log-scores, so the report's calibration covers this backend too.
+ */
+export function pickFromSystemOne(raw: unknown, keys: readonly string[], model: string, ms: number): NonNullable<PreRouteObservation["laya"]> | { error: string } {
+  const pick = parseLayaAnswer(raw, keys);
+  if (!pick) return { error: "systemone: the answer does not fit the options" };
+  return {
+    choice: pick.choice,
+    top: pick.top,
+    ms,
+    model,
+    logScores: keys.map((key) => Math.log(Math.max(pick.probabilities[key]!, 1e-12))),
+  };
 }
 
 /**
@@ -922,6 +942,9 @@ export interface PreRouteBenchSettings {
   backend?: PreRouteBackend;
   /** With the readout backend: the model it read. */
   readoutModel?: string;
+  /** With the systemone backend: the server and the model asked. */
+  systemOneUrl?: string;
+  systemOneModel?: string;
 }
 
 export interface PreRouteBenchReport {
@@ -1015,7 +1038,7 @@ export function buildPreRouteReport(input: {
     warnings.push(`${who} answered as ${all.laya.models.length} different versions (${all.laya.models.join(", ")}) during one run: the gate keeps a version's evidence apart, and these numbers mix them.`);
   }
   // Laya's window; the resident model reads the whole question.
-  if (input.overWindow > 0 && settings.backend !== "readout") {
+  if (input.overWindow > 0 && (settings.backend ?? "laya") === "laya") {
     warnings.push(`${input.overWindow} question(s) are estimated over Laya's ${LAYA_WINDOW_TOKENS}-token window even with shortened options: the model cut something of its own choosing.`);
   }
   const maxK = Math.max(settings.k, ...observations.map((o) => Math.min(o.order.length, MAX_CANDIDATES)));
@@ -1104,7 +1127,9 @@ export function formatPreRouteMarkdown(report: PreRouteBenchReport): string {
     + `K = ${settings.k} agents + none, descriptions from ${settings.describe}. `
     + (settings.backend === "readout"
       ? `Readout of ${settings.readoutModel ?? "the routing tier"} (one token, the option letters' top list), ${counts.answered}/${counts.asked} answered`
-      : `Laya: ${settings.layaUrl ?? "not asked"}, ${counts.answered}/${counts.asked} answered`)
+      : settings.backend === "systemone"
+        ? `SystemOne: ${settings.systemOneModel ?? "?"} at ${settings.systemOneUrl ?? "?"}, ${counts.answered}/${counts.asked} answered`
+        : `Laya: ${settings.layaUrl ?? "not asked"}, ${counts.answered}/${counts.asked} answered`)
     + `${report.slices["all"]?.laya.models.length ? ` by ${report.slices["all"]!.laya.models.join(", ")}` : ""}. Generated ${report.generatedAt}.`, "");
 
   const columns = Object.keys(report.slices);
@@ -1233,9 +1258,14 @@ export interface PreRouterBenchArgs {
   limit?: number;
   /** Absent: Laya. */
   backend?: PreRouteBackend;
+  /** With --backend systemone: the llama.cpp server, and the model asked (its id in /v1/models). */
+  systemOneUrl?: string;
+  systemOneModel?: string;
 }
 
 export class BenchUsageError extends Error {}
+
+export const DEFAULT_SYSTEMONE_URL = "http://127.0.0.1:18090";
 
 export const DEFAULT_LAYA_URL = "http://127.0.0.1:18080";
 
@@ -1247,7 +1277,7 @@ export const DEFAULT_ROUND_MS = 7_900;
 
 const VALUE_FLAGS = new Set([
   "cases", "k", "laya-url", "out", "split", "train-out", "describe", "keying",
-  "target", "min-samples", "round-ms", "min-coverage", "limit", "backend",
+  "target", "min-samples", "round-ms", "min-coverage", "limit", "backend", "systemone-url", "systemone-model",
 ]);
 const BOOLEAN_FLAGS = new Set(["no-laya"]);
 
@@ -1318,7 +1348,13 @@ export function parsePreRouterArgs(argv: readonly string[]): PreRouterBenchArgs 
   const limit = values.get("limit");
   if (limit !== undefined) args.limit = numberIn("limit", limit, 1, 1_000_000, true);
   const backend = values.get("backend");
-  if (backend !== undefined) args.backend = oneOf("backend", backend, ["laya", "readout"] as const);
+  if (backend !== undefined) args.backend = oneOf("backend", backend, ["laya", "readout", "systemone"] as const);
+  if (args.backend === "systemone") {
+    const model = values.get("systemone-model");
+    if (!model) throw new BenchUsageError("--backend systemone needs --systemone-model <id as /v1/models lists it>");
+    args.systemOneModel = model;
+    args.systemOneUrl = (values.get("systemone-url") ?? DEFAULT_SYSTEMONE_URL).replace(/\/+$/, "");
+  }
   return args;
 }
 
