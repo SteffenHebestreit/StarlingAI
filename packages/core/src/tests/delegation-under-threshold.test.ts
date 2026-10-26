@@ -15,6 +15,8 @@ import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.j
  */
 const runner = vi.hoisted(() => vi.fn());
 const architect = vi.hoisted(() => vi.fn());
+// The built-in architect: one completion on the default model (tools/ephemeral-agent-factory.ts).
+const builtin = vi.hoisted(() => vi.fn());
 const audit = vi.hoisted(() => vi.fn());
 const ranking = vi.hoisted(() => ({ current: [] as Array<{ name: string; score: number }>, near: [] as Array<{ name: string; score: number }> }));
 
@@ -23,6 +25,10 @@ vi.mock("../agent/sub-agent.js", () => ({
   runSubAgent: architect,
   runSubAgentWithStats: runner,
 }));
+vi.mock("../providers/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../providers/index.js")>();
+  return { ...actual, createChatProvider: () => ({ complete: builtin }) };
+});
 vi.mock("../audit/logger.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../audit/logger.js")>();
   return {
@@ -53,12 +59,12 @@ const TASK = "Öffne die Datei generated/aktionen/herbst.html, ersetze die Haupt
 
 describe("a routed pick under the threshold", () => {
   let tempDir = "";
-  const writeConfig = async (ephemeralEnabled: boolean, architect = true) => {
+  const writeConfig = async (ephemeralEnabled: boolean, architect = true, architectAgentName: string | undefined = "agent_architect") => {
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
       workspacePath: tempDir,
       agents: {
         defaults: { model: { primary: "mock-model" } },
-        ephemeralGeneration: { enabled: ephemeralEnabled, skillMatchThreshold: 0.75, architectAgentName: "agent_architect" },
+        ephemeralGeneration: { enabled: ephemeralEnabled, skillMatchThreshold: 0.75, ...(architectAgentName ? { architectAgentName } : {}) },
       },
       subAgents: {
         content_writer: { description: "Writes documents.", systemPrompt: "Test.", tools: ["read_file", "write_file", "edit_file"], maxIterations: 4 },
@@ -98,6 +104,7 @@ describe("a routed pick under the threshold", () => {
     delete process.env["SAI_CONFIG_PATH"];
     runner.mockReset();
     architect.mockReset();
+    builtin.mockReset();
     audit.mockReset();
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
@@ -126,18 +133,45 @@ describe("a routed pick under the threshold", () => {
     expect(result.success).toBe(true);
   }, 30_000);
 
-  // The deployment's architect agent was removed on 2026-08-15 while ephemeralGeneration stayed
-  // on: every fallback asked an agent that does not exist and failed as "No JSON object found".
-  it("runs without asking an architect agent the deployment does not have", async () => {
-    await writeConfig(true, false);
-    const result = await delegate("under-threshold-no-architect");
+  // The deployment's architect agent was removed from the roster on 2026-06-19 while
+  // ephemeralGeneration stayed on, and every fallback since made no agent. The catalog is where a
+  // deployment starts: with no architect in it, the built-in one designs the agent.
+  const HEADING_EDITOR = { agentName: "heading_editor", description: "Edits one heading.", systemPrompt: "Edit the heading.", tools: ["read_file", "edit_file"], maxIterations: 3 };
+
+  it("has the built-in architect design the agent when the deployment configures none", async () => {
+    await writeConfig(true, false, undefined);
+    builtin.mockResolvedValue({ content: JSON.stringify(HEADING_EDITOR) });
+    await delegate("under-threshold-builtin-architect");
 
     expect(architect).not.toHaveBeenCalled();
+    expect(builtin).toHaveBeenCalledTimes(1);
+    const [messages, , , options] = builtin.mock.calls[0] as [Array<{ content: string }>, unknown, unknown, { responseFormat?: { name: string } }];
+    expect(messages[0]!.content).toContain("Herbstaktion 2026");
+    expect(options.responseFormat?.name).toBe("ephemeral_agent_spec");
+    expect(ranAgents()).not.toContain("content_writer");
+    expect(ranAgents().some((name) => name.includes("heading_editor"))).toBe(true);
+    expect(rows("delegation_routing_under_threshold_run")).toEqual([]);
+  }, 30_000);
+
+  it("uses the built-in architect, and says so, when the configured one is not in the catalog", async () => {
+    await writeConfig(true, false);
+    builtin.mockResolvedValue({ content: JSON.stringify(HEADING_EDITOR) });
+    await delegate("under-threshold-architect-missing");
+
+    expect(architect).not.toHaveBeenCalled();
+    expect(builtin).toHaveBeenCalledTimes(1);
+    expect(rows("guardrail_flagged")).toContainEqual(expect.objectContaining({ type: "architect_agent_missing", architectAgentName: "agent_architect", using: "built-in" }));
+  }, 30_000);
+
+  it("runs the routed pick when the built-in architect makes no spec", async () => {
+    await writeConfig(true, false, undefined);
+    builtin.mockResolvedValue({ content: "I would design a file editor agent for this." });
+    const result = await delegate("under-threshold-builtin-no-spec");
+
+    expect(builtin).toHaveBeenCalledTimes(1);
     expect(ranAgents()).toEqual(["content_writer"]);
     expect(result.success).toBe(true);
-    expect(rows("architect_fallback_failed")).toEqual([
-      expect.objectContaining({ reason: "architect_agent_missing", architectAgentName: "agent_architect" }),
-    ]);
+    expect(rows("architect_fallback_failed")).toEqual([expect.objectContaining({ reason: "builtin_architect_error" })]);
   }, 30_000);
 
   // E2E 2026-10-22: inside the verified_research_brief scene the router ranked none of the scene's
@@ -151,6 +185,20 @@ describe("a routed pick under the threshold", () => {
     expect(ranAgents()).toEqual(["web_coder"]);
     expect(result.success).toBe(true);
     expect(rows("delegation_routing_under_threshold_run")).toEqual([expect.objectContaining({ agent: "web_coder", score: 0.714 })]);
+  }, 30_000);
+
+  it("inside a scene runs the scene's agent before asking the architect", async () => {
+    // 2026-10-26: with the built-in architect working, a scene's near-miss researcher was replaced by
+    // an ephemeral agent the scene's author never chose.
+    await writeConfig(true, false, undefined);
+    builtin.mockResolvedValue({ content: JSON.stringify(HEADING_EDITOR) });
+    ranking.current = [];
+    ranking.near = [{ name: "web_coder", score: 0.714 }];
+    const result = await delegate("under-threshold-scene-first", { allowedAgents: ["content_writer", "web_coder"] });
+
+    expect(ranAgents()).toEqual(["web_coder"]);
+    expect(builtin).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
   }, 30_000);
 
   it("leaves a near miss outside a scene as it was: no agent", async () => {

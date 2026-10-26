@@ -1503,7 +1503,9 @@ describe("swarm orchestration tools", () => {
     const tempDir = mkdtempSync(join(tmpdir(), `starlingai-swarm-${name}-`));
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
-    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "mock-model" } } }, subAgents }), "utf8");
+    // A catalog that holds agent_architect names it as the architect, in place of the built-in one.
+    const architect = "agent_architect" in subAgents ? { ephemeralGeneration: { architectAgentName: "agent_architect" } } : {};
+    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { model: { primary: "mock-model" } }, ...architect }, subAgents }), "utf8");
     process.env["SAI_CONFIG_PATH"] = configPath;
     vi.resetModules();
     return tempDir;

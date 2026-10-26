@@ -63,6 +63,8 @@ describe("the user's own words reach every delegated specialist", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-user-words-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      // The catalog architect below designs the ephemeral agents, in place of the built-in one.
+      agents: { ephemeralGeneration: { architectAgentName: "agent_architect" } },
       subAgents: {
         researcher: { description: "Finds sources on the web.", systemPrompt: "Research.", tools: ["web_search", "web_fetch"], maxIterations: 4 },
         summarizer: { description: "Summarizes findings into a short brief.", systemPrompt: "Summarize.", tools: ["read_file"], maxIterations: 4 },

@@ -422,10 +422,12 @@ describe("the research gate's turn trigger", () => {
   }, 30_000);
 
   it("keeps a builder on its step after the architect fallback ran an ephemeral agent", async () => {
-    // The deployment this models has its architect agent: the fallback asks only one that exists.
+    // The deployment this models configures a catalog architect, which the fallback asks in place of
+    // the built-in one.
     const configFile = join(tempDir, "starlingai.json");
-    const withArchitect = JSON.parse(readFileSync(configFile, "utf8")) as { subAgents: Record<string, unknown> };
+    const withArchitect = JSON.parse(readFileSync(configFile, "utf8")) as { subAgents: Record<string, unknown>; agents?: { ephemeralGeneration?: Record<string, unknown> } };
     withArchitect.subAgents["agent_architect"] = { description: "Designs ephemeral agents.", systemPrompt: "Return the agent spec as JSON.", tools: [], maxIterations: 1 };
+    withArchitect.agents = { ...withArchitect.agents, ephemeralGeneration: { ...withArchitect.agents?.ephemeralGeneration, architectAgentName: "agent_architect" } };
     writeFileSync(configFile, JSON.stringify(withArchitect), "utf8");
     (await import("../config/loader.js")).resetConfigForTests();
     runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => ({

@@ -2082,11 +2082,19 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
       // other four candidates within 0.02 of it), the architect's answer held no JSON, and the turn
       // reported that no agent was available. The architect is asked here, first; the pick runs when
       // it makes nothing.
-      if (candidateQueue.length === 0 && underThresholdPick && attemptedAgents.length === 0 && !architectTried && architectMayRun()) {
-        architectTried = true;
-        const architectResult = await runArchitectFallback(request.task, ctx);
-        const settled = architectResult ? architectOutcome(architectResult) : null;
-        if (settled) return settled;
+      //
+      // Inside a scene the order turns: the scene's author chose its agents, and the pick is one of
+      // them. With the architect working again (2026-10-26), a verified_research_brief step's
+      // researcher, a near miss there, was replaced by an ephemeral nordlicht_researcher. The scene's
+      // agent runs first; the architect is asked after it, by the fallback at the end of the queue.
+      const sceneScoped = (ctx.allowedAgents?.length ?? 0) > 0;
+      if (candidateQueue.length === 0 && underThresholdPick && attemptedAgents.length === 0 && !architectTried && (sceneScoped || architectMayRun())) {
+        if (!sceneScoped) {
+          architectTried = true;
+          const architectResult = await runArchitectFallback(request.task, ctx);
+          const settled = architectResult ? architectOutcome(architectResult) : null;
+          if (settled) return settled;
+        }
         logAudit("delegation_routing_under_threshold_run", {
           taskTitle: title,
           agent: underThresholdPick.name,

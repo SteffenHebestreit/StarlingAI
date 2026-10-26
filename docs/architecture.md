@@ -99,7 +99,7 @@ Complex capabilities emerge from the interaction of simple agents. A user asks f
 
 This emergence is observable and increasingly reproducible: delegations emit audit, usage, routing, and tracing data. Outcome-weighted routing can use prior performance as one signal, while the target learning loop adds holdouts and canaries so promotion measures causal lift rather than easy-task correlation.
 
-When ephemeral generation is enabled and no registered agent matches a task strongly enough, the **emergent architect fallback** can activate: if the best routed or bid specialist scores below the configured skill-match threshold, the dedicated `agent_architect` specialist designs a purpose-built temporary agent. Repeatedly successful configurations can be promoted to `.starlingai/promoted_agents.json`; the target architecture requires holdout evidence and canary rollout before broad trust.
+When ephemeral generation is enabled and no registered agent matches a task strongly enough, the **emergent architect fallback** can activate: if the best routed or bid specialist scores below the configured skill-match threshold, the built-in architect designs a purpose-built temporary agent (one call to the default model; `agents.ephemeralGeneration.architectAgentName` can name a catalog agent to do it instead). The catalog is where a deployment starts, not what it is limited to: with no agent defined at all, every task gets a temporary agent until some prove themselves. Repeatedly successful configurations can be promoted to `.starlingai/promoted_agents.json`; the target architecture requires holdout evidence and canary rollout before broad trust.
 
 The collective memory layer (`swarm/memory.ts`) gives agents a shared knowledge pool backed by Redis Hash/List structures with embedding-backed semantic lookup (`write_shared_fact`, `read_shared_facts`, `share_finding`), so discoveries made by one agent in a session are available to all peers.
 
@@ -195,7 +195,7 @@ The current `v0.45.8` codebase implements the swarm vision through **Stage 13** 
 | **Swarm bus** | 2 | Implemented | Redis Pub/Sub with in-process EventEmitter fallback (`swarm/bus.ts`) |
 | **Distributed task locks** | 2 | Partial; hardening planned | Leases are scoped (tenant/user/workspace/session/signature-hashed key), heartbeat-renewed, fenced with monotonic tokens, and acquired before `task_claimed`; a contended task is not executed. Still Partial: two-process/chaos acceptance tests and result-following (DST-103) are pending, so a contender skips the task instead of receiving the winner's result. |
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
-| **Emergent architect fallback** | 2 | Implemented | `agent_architect` designs ephemeral agents when no catalog match clears the skill threshold |
+| **Emergent architect fallback** | 2 | Implemented | The built-in architect (or a configured catalog agent) designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
 | **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
 | **Warden agent** | 3 | Implemented per process | Detects tool storms, repeated failures, escape attempts, rate-limit floods, SLO breaches, and infrastructure faults; cross-process observation and cancellation remain planned. |
