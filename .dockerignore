@@ -1,6 +1,10 @@
 node_modules
 **/node_modules
 **/.git
+# Local tooling state, git worktrees among it: each a copy of the repo with its own .starlingai, so
+# the build context of every image built from the root carried 33 of them (about 23 MB per build) and
+# buildkit cancelled the build-only pass while agent-worker and computer-remote were still loading it.
+.claude
 **/.env
 dist
 **/dist
