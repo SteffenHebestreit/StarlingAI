@@ -187,6 +187,20 @@ describe("a routed pick under the threshold", () => {
     expect(rows("delegation_routing_under_threshold_run")).toEqual([expect.objectContaining({ agent: "web_coder", score: 0.714 })]);
   }, 30_000);
 
+  it("inside a scene runs the scene's agent before asking the architect", async () => {
+    // 2026-10-26: with the built-in architect working, a scene's near-miss researcher was replaced by
+    // an ephemeral agent the scene's author never chose.
+    await writeConfig(true, false, undefined);
+    builtin.mockResolvedValue({ content: JSON.stringify(HEADING_EDITOR) });
+    ranking.current = [];
+    ranking.near = [{ name: "web_coder", score: 0.714 }];
+    const result = await delegate("under-threshold-scene-first", { allowedAgents: ["content_writer", "web_coder"] });
+
+    expect(ranAgents()).toEqual(["web_coder"]);
+    expect(builtin).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+  }, 30_000);
+
   it("leaves a near miss outside a scene as it was: no agent", async () => {
     await writeConfig(true, false);
     ranking.current = [];
