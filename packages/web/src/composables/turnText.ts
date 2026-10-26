@@ -183,7 +183,8 @@ export const turnText = {
   files: (lang: TurnLanguage, count: number) => plural(lang, count, ["file", "files"], ["Datei", "Dateien"]),
 
   usually: (lang: TurnLanguage, duration: string) => lang === "de" ? `meist ~${duration}` : `usually ~${duration}`,
-  qualityTierUsually: (lang: TurnLanguage) => lang === "de" ? "Qualitätsstufe — meist 2–3 min" : "quality tier — usually 2–3 min",
+  // 40 steps at 1024x1024 measured 322-335 s (2026-10-26); "2-3 min" was the 20-step figure.
+  qualityTierUsually: (lang: TurnLanguage) => lang === "de" ? "Qualitätsstufe — meist ~5 min" : "quality tier — usually ~5 min",
   afterEarlierRender: (lang: TurnLanguage, duration: string) => lang === "de"
     ? `, sobald ein früheres Bild fertig ist (~${duration})`
     : `, once the engine finishes an earlier render (~${duration})`,

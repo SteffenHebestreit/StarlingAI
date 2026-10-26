@@ -14,8 +14,15 @@ export type ImageGenerationApi = "automatic1111-compatible" | "comfyui" | "opena
  * graphics chip and drops that station's chat throughput by about 70% while it runs, one
  * generation at a time cluster-wide. So a caller asking for "quality" is spending someone
  * else's latency, and the choice belongs in the request rather than in a default.
+ *
+ * `balanced` sits between the two (FLUX 3 Image Klein on the same graphics chip, measured 64.6 s
+ * at 1024x1024 against 10 s fast and 322-335 s quality), and edits by reference: the picture is
+ * read beside the instruction instead of being re-noised from a strength.
  */
-export type ImageGenerationTier = "fast" | "quality";
+export type ImageGenerationTier = "fast" | "balanced" | "quality";
+
+/** The tiers in order of cost, cheapest first — the order engines are listed and an edit looks for one. */
+export const IMAGE_GENERATION_TIERS: readonly ImageGenerationTier[] = ["fast", "balanced", "quality"];
 
 export interface ImageGenerationBackendConfig {
   api: ImageGenerationApi;
@@ -25,10 +32,27 @@ export interface ImageGenerationBackendConfig {
   model?: string;
   /** Model id for the slow, higher-fidelity tier. Absent means the backend has only one. */
   qualityModel?: string;
+  /** Model id for the tier between the two in cost. Absent means there is none. */
+  balancedModel?: string;
   /** What each tier's engine is called, so a user naming one can be understood. */
   tierLabels?: Partial<Record<ImageGenerationTier, string>>;
   /** Wall-clock bound for the quality tier, which is far longer than the fast one. */
   qualityTimeoutMs?: number;
+  /** Wall-clock bound for the balanced tier; the quality tier's when unset. */
+  balancedTimeoutMs?: number;
+  /**
+   * Models that EDIT BY REFERENCE — a subset of `initImageModels`. Such an engine reads the base
+   * picture beside the instruction and keeps whatever the prompt does not ask to change, so it
+   * takes no `strength` and no `mask`; the endpoint refuses both. The others edit by img2img:
+   * the base is the starting point, `strength` sets how far the result may travel, a mask limits where.
+   */
+  referenceEditModels?: string[];
+  /**
+   * Models that render on the SAME device, keyed by a name for it. Their renders are serialised as
+   * one, because two at once on one graphics chip each take about twice as long — enough to push a
+   * quality render past the image server's own limit.
+   */
+  deviceGroups?: Record<string, string[]>;
   /** How many generations may run at once for a model. Hardware-dependent; see the schema. */
   maxConcurrent?: number;
   maxConcurrentPerModel?: Record<string, number>;
@@ -52,6 +76,12 @@ export interface ImageGenerationBackendConfig {
   defaultNegativePrompt?: string;
   /** Sampling defaults for the quality tier, where they differ from the fast tier's. */
   qualityDefaults?: {
+    steps?: number;
+    guidanceScale?: number;
+    negativePrompt?: string;
+  };
+  /** Sampling defaults for the balanced tier, where they differ from the fast tier's. */
+  balancedDefaults?: {
     steps?: number;
     guidanceScale?: number;
     negativePrompt?: string;
@@ -143,6 +173,8 @@ interface ResolvedImageRequest extends ImageGenerationRequest {
   tierUpgradedForEdit?: boolean;
   /** True when an `<sd_cpp_extra_args>` block was removed from the prompt (stripEngineArgs). */
   engineArgsRemoved?: boolean;
+  /** An edit on an engine that edits by reference (referenceEditModels). */
+  referenceEdit?: boolean;
   width: number;
   height: number;
   steps: number;
@@ -179,6 +211,8 @@ export interface ImageGenerationResult {
   tierUpgradedForEdit?: boolean;
   /** Set when an `<sd_cpp_extra_args>` block was removed from the prompt before it was sent. */
   engineArgsRemoved?: boolean;
+  /** Set when the edit ran on an engine that edits by reference: no strength or mask was used. */
+  referenceEdit?: boolean;
   /** Set when the render carried a negative prompt at guidance ≤ 1, where it changes nothing. */
   negativePromptIgnored?: boolean;
   mimeType: string;
@@ -225,8 +259,31 @@ export function imageTierChoices(config: ImageGenerationBackendConfig): ImageTie
     choices.push({ tier, model, ...(label ? { label } : {}) });
   };
   add("fast", config.model);
+  if (config.balancedModel !== config.model && config.balancedModel !== config.qualityModel) add("balanced", config.balancedModel);
   if (config.qualityModel !== config.model) add("quality", config.qualityModel);
   return choices;
+}
+
+/** Whether `model` edits by reference (see referenceEditModels) rather than by img2img strength. */
+export function imageModelEditsByReference(config: ImageGenerationBackendConfig, model: string | undefined): boolean {
+  return Boolean(model) && (config.referenceEditModels?.includes(model!) ?? false);
+}
+
+/**
+ * The cheapest tier that can perform an edit, and its model; undefined when none can. A mask needs
+ * an engine that edits the picture itself, so it never goes to one that edits by reference.
+ */
+export function imageEditTier(
+  config: ImageGenerationBackendConfig,
+  options: { masked: boolean },
+): { tier: ImageGenerationTier; model: string } | undefined {
+  for (const tier of IMAGE_GENERATION_TIERS) {
+    const model = engineModelForTier(config, tier);
+    if (!model || !config.initImageModels?.includes(model)) continue;
+    if (options.masked && imageModelEditsByReference(config, model)) continue;
+    return { tier, model };
+  }
+  return undefined;
 }
 
 /**
@@ -352,6 +409,7 @@ export async function requestImageGeneration(
     tier: result.tier ?? request.tier,
     ...(request.tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     ...(request.engineArgsRemoved ? { engineArgsRemoved: true } : {}),
+    ...(request.referenceEdit ? { referenceEdit: true } : {}),
     ...(negativePromptHasNoEffect(request) ? { negativePromptIgnored: true } : {}),
   };
 }
@@ -387,8 +445,9 @@ function resolveImageRequest(
   const tierOfModel = (named: string | undefined): ImageGenerationTier | undefined =>
     !named ? undefined
       : config.qualityModel && named === config.qualityModel ? "quality"
-        : config.model && named === config.model ? "fast"
-          : undefined; // A model outside the configured pair: the stated tier picks defaults.
+        : config.balancedModel && named === config.balancedModel ? "balanced"
+          : config.model && named === config.model ? "fast"
+            : undefined; // A model outside the configured ones: the stated tier picks defaults.
   let tier: ImageGenerationTier = tierOfModel(input.model) ?? input.tier ?? "fast";
   let model = input.model;
 
@@ -410,16 +469,21 @@ function resolveImageRequest(
   // candidates from `input.model`, so naming a model made the two comparisons identical, the
   // upgrade could never fire, and the request fell through to a flat refusal further down —
   // defeating the capability for exactly the caller who was most specific about what it wanted.
+  //
+  // With two engines that edit, the upgrade goes to the CHEAPEST one that can take this edit:
+  // the balanced engine edits by reference — the instruction alone, no mask needed, ~2.5 min —
+  // and a MASKED edit goes to one that edits the picture itself, since a reference engine has
+  // no region it could be held to (imageEditTier).
   let tierUpgradedForEdit = false;
   if (input.initImage) {
-    const canEdit = (named: string | undefined): boolean =>
-      Boolean(named) && (config.initImageModels?.includes(named!) ?? false);
-    const editModel = config.qualityModel ?? config.model;
-    const current = model
-      ?? (tier === "quality" ? config.qualityModel ?? config.model : config.model);
-    if (!canEdit(current) && canEdit(editModel)) {
-      tier = "quality";
-      model = editModel;
+    const masked = Boolean(input.mask);
+    const current = model ?? engineModelForTier(config, tier);
+    const fits = Boolean(current) && (config.initImageModels?.includes(current!) ?? false)
+      && !(masked && imageModelEditsByReference(config, current));
+    const target = fits ? undefined : imageEditTier(config, { masked });
+    if (target) {
+      tier = target.tier;
+      model = target.model;
       tierUpgradedForEdit = true;
     }
   }
@@ -452,6 +516,7 @@ function resolveImageRequest(
     ...(model ? { model } : {}),
     ...(tierUpgradedForEdit ? { tierUpgradedForEdit: true } : {}),
     ...(prompt.removed || negative?.removed ? { engineArgsRemoved: true } : {}),
+    ...(input.initImage && imageModelEditsByReference(config, targetModel) ? { referenceEdit: true } : {}),
     // A masked edit keeps its protected region only with a feather; see DEFAULT_MASK_BLUR.
     ...(input.mask && input.maskBlur === undefined ? { maskBlur: DEFAULT_MASK_BLUR } : {}),
     width: input.width ?? editSize?.width ?? tierDefaults.width,
@@ -504,7 +569,7 @@ export interface ImageTierDefaults {
 }
 
 export function imageTierDefaults(config: ImageGenerationBackendConfig, tier: ImageGenerationTier): ImageTierDefaults {
-  const tierDefaults = tier === "quality" ? config.qualityDefaults : undefined;
+  const tierDefaults = tier === "quality" ? config.qualityDefaults : tier === "balanced" ? config.balancedDefaults : undefined;
   const negativePrompt = tierDefaults?.negativePrompt ?? config.defaultNegativePrompt;
   return {
     width: config.defaultWidth ?? OPENAI_IMAGE_SIZE,
@@ -517,10 +582,18 @@ export function imageTierDefaults(config: ImageGenerationBackendConfig, tier: Im
 
 /**
  * How long each tier takes for its REFERENCE RENDER (IMAGE_TIER_REFERENCE_RENDER), in seconds:
- * about ten for the fast engine, ~170 for a quality render at 1024x1024 and 20 steps (measured
- * 169 s). Every other request's time is this scaled by imageRenderWork.
+ * about ten for the fast engine, ~65 for a balanced render at 1024x1024 and 16 steps (FLUX 3 Image
+ * Klein, measured 64.6 s), ~170 for a quality render at 1024x1024 and 20 steps (measured 169 s).
+ * Every other request's time is this scaled by imageRenderWork.
  */
-export const IMAGE_TIER_EXPECTED_SECONDS: Record<ImageGenerationTier, number> = { fast: 10, quality: 170 };
+export const IMAGE_TIER_EXPECTED_SECONDS: Record<ImageGenerationTier, number> = { fast: 10, balanced: 65, quality: 170 };
+
+/**
+ * How much longer a REFERENCE edit takes than a new picture of the same size and steps: the model
+ * attends over the reference's tokens as well as the picture's. Measured on the balanced engine at
+ * 1024x1024, 16 steps: 157.9 s with one reference against 64.6 s without.
+ */
+export const IMAGE_REFERENCE_EDIT_WORK = 2.45;
 
 /**
  * The render each IMAGE_TIER_EXPECTED_SECONDS figure was MEASURED at. A fact about the hardware,
@@ -532,11 +605,16 @@ export const IMAGE_TIER_EXPECTED_SECONDS: Record<ImageGenerationTier, number> = 
  */
 export const IMAGE_TIER_REFERENCE_RENDER: Record<ImageGenerationTier, ImageSize & { steps: number; guidanceScale: number }> = {
   fast: { width: 1024, height: 1024, steps: 20, guidanceScale: 7.5 },
+  balanced: { width: 1024, height: 1024, steps: 16, guidanceScale: 1 },
   quality: { width: 1024, height: 1024, steps: 20, guidanceScale: 1 },
 };
 
-/** The parts of a resolved request that decide how long it renders. */
-export type ImageRenderShape = Pick<ImageRequestPreview, "tier" | "width" | "height" | "steps" | "guidanceScale">;
+/**
+ * The parts of a resolved request that decide how long it renders. `referenceEdit` is set for an
+ * edit on an engine that edits by reference, which costs IMAGE_REFERENCE_EDIT_WORK times a new picture.
+ */
+export type ImageRenderShape = Pick<ImageRequestPreview, "tier" | "width" | "height" | "steps" | "guidanceScale">
+  & { referenceEdit?: boolean };
 
 /**
  * The work a resolved request is, relative to its tier's reference render: 1 renders in the tier's
@@ -554,14 +632,15 @@ export function imageRenderWork(_config: ImageGenerationBackendConfig, request: 
   const steps = request.steps / reference.steps;
   const area = (request.width * request.height) / (reference.width * reference.height);
   const cfg = reference.guidanceScale <= 1 && request.guidanceScale > 1 ? 2 : 1;
-  const work = steps * area * cfg;
+  const work = steps * area * cfg * (request.referenceEdit ? IMAGE_REFERENCE_EDIT_WORK : 1);
   return Number.isFinite(work) && work > 0 ? work : 1;
 }
 
 /** The budget a tier is configured with, before the request's own work scales it. */
 function tierTimeoutMs(config: ImageGenerationBackendConfig, tier: ImageGenerationTier): number {
-  if (tier !== "quality") return config.timeoutMs;
-  return config.qualityBackend?.timeoutMs ?? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000);
+  const quality = config.qualityBackend?.timeoutMs ?? config.qualityTimeoutMs ?? Math.max(config.timeoutMs, 200_000);
+  if (tier === "balanced") return config.balancedTimeoutMs ?? quality;
+  return tier === "quality" ? quality : config.timeoutMs;
 }
 
 /**
@@ -819,6 +898,8 @@ export interface ImageRequestPreview {
   /** The model the tier resolves to; empty when nothing is configured. */
   model: string;
   tierUpgradedForEdit: boolean;
+  /** An edit on an engine that edits by reference: no strength, no mask, ~2.5x the time. */
+  referenceEdit: boolean;
   width: number;
   height: number;
   steps: number;
@@ -842,6 +923,7 @@ export function previewImageRequest(
     tier: request.tier,
     model: request.model ?? engineModelForTier(config, request.tier) ?? "",
     tierUpgradedForEdit: request.tierUpgradedForEdit === true,
+    referenceEdit: request.referenceEdit === true,
     width: request.width,
     height: request.height,
     steps: request.steps,
@@ -855,6 +937,9 @@ export function engineModelForTier(
   config: ImageGenerationBackendConfig,
   tier: ImageGenerationTier,
 ): string | undefined {
+  // No fallback for the balanced tier: a deployment without one has no balanced engine, and
+  // quietly rendering on another would label one engine's picture as the other's.
+  if (tier === "balanced") return config.balancedModel;
   return tier === "quality" ? config.qualityModel ?? config.model : config.model;
 }
 
@@ -1401,11 +1486,25 @@ export function imageDeviceBusyMs(config: ImageGenerationBackendConfig, tier: Im
   return gateKey ? Math.max(0, (deviceBusyUntil.get(gateKey) ?? 0) - Date.now()) : 0;
 }
 
-/** The key each adapter holds its slot and busy mark under; ComfyUI queues on its own and has none. */
+/**
+ * The key each adapter holds its slot and busy mark under; ComfyUI queues on its own and has none.
+ * Models in one of `deviceGroups` share their device's key, so they render one at a time between
+ * them and a render abandoned on one keeps the other waiting too.
+ */
 function renderGateKey(effective: ImageGenerationBackendConfig, tier: ImageGenerationTier, model?: string): string | undefined {
   if (effective.api === "comfyui") return undefined;
-  if (effective.api === "openai-compatible") return model ?? engineModelForTier(effective, tier);
-  return model ?? effective.model ?? effective.baseUrl;
+  const key = effective.api === "openai-compatible"
+    ? model ?? engineModelForTier(effective, tier)
+    : model ?? effective.model ?? effective.baseUrl;
+  return key ? imageDeviceKey(effective, key) : undefined;
+}
+
+/** The device a model renders on: its `deviceGroups` name, or the model itself when it has its own. */
+export function imageDeviceKey(config: ImageGenerationBackendConfig, model: string): string {
+  for (const [device, models] of Object.entries(config.deviceGroups ?? {})) {
+    if (models.includes(model)) return `device:${device}`;
+  }
+  return model;
 }
 
 /** One render with its model's slot held: waits out an abandoned render first, then runs. */
@@ -1460,8 +1559,13 @@ async function requestOpenAiImageGeneration(
   budget: RenderBudget,
 ): Promise<ImageGenerationResult> {
   const tier = input.tier;
-  const model = input.model
-    ?? (tier === "quality" ? config.qualityModel ?? config.model : config.model);
+  if (tier === "balanced" && !config.balancedModel && !input.model) {
+    throw new Error(
+      "The balanced tier was requested but multimodal.imageGeneration.balancedModel is not set."
+      + " Configure it, or generate on another tier.",
+    );
+  }
+  const model = input.model ?? engineModelForTier(config, tier);
   if (!model) {
     throw new Error(
       "No image model configured. Set multimodal.imageGeneration.model (and qualityModel for the slow tier).",
@@ -1509,10 +1613,21 @@ async function requestOpenAiImageGeneration(
     // around that, which is closed). `mask` is also validated and rejected with param "mask"
     // when it selects nothing, selects everything, or is not an image.
     payload["image"] = input.initImage;
-    payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
-    if (input.mask) {
-      payload["mask"] = input.mask;
-      if (typeof input.maskBlur === "number") payload["mask_blur"] = input.maskBlur;
+    if (imageModelEditsByReference(config, model)) {
+      // A reference engine keeps what the prompt does not ask to change; it has no strength to
+      // travel by and no region to hold to, and its endpoint refuses both by name.
+      if (input.mask) {
+        throw new Error(
+          `${imageEngineLabel(config, tier) ?? model} edits by reference and cannot take a mask. Describe the`
+          + " change in the prompt instead, or edit on an engine that takes masks. Nothing was rendered.",
+        );
+      }
+    } else {
+      payload["strength"] = input.strength ?? DEFAULT_EDIT_STRENGTH;
+      if (input.mask) {
+        payload["mask"] = input.mask;
+        if (typeof input.maskBlur === "number") payload["mask_blur"] = input.maskBlur;
+      }
     }
   } else if (input.mask) {
     // Loud rather than silently dropped: the generations route rejects a mask anyway, and a
@@ -1530,7 +1645,7 @@ async function requestOpenAiImageGeneration(
   // that can be rejected locally — an unset quality model, a size this endpoint refuses —
   // has already thrown, so a config mistake still fails in milliseconds rather than after
   // waiting out someone else's generation.
-  return renderInSlot(config, model, budget,
+  return renderInSlot(config, imageDeviceKey(config, model), budget,
     () => sendOpenAiImageRequest(config, input, model, payload, budget.timeoutMs),
   );
 }
@@ -1663,7 +1778,7 @@ async function requestAutomatic1111ImageGeneration(
 
   // One in flight per model here as well: the quality tier reaches its device through this
   // adapter, and that device generates serially.
-  const gateKey = model ?? config.baseUrl;
+  const gateKey = imageDeviceKey(config, model ?? config.baseUrl);
   return renderInSlot(config, gateKey, budget, () => sendAutomatic1111Request(config, input, model, payload, budget.timeoutMs));
 }
 
@@ -2100,6 +2215,19 @@ function assertEditWasApplied(input: ResolvedImageRequest, body: Record<string, 
   if (!usage) return; // A backend that reports nothing cannot be checked; the allowlist gates those.
 
   const mode = stringField(usage["mode"]);
+  if (input.referenceEdit) {
+    // The endpoint reports "reference" only when it sent the picture to the engine as a reference;
+    // an endpoint left on img2img for a model listed in referenceEditModels answers "img2img".
+    // (Verified separately that the engine applies it: sd-server logs its flux2 reference preset,
+    // and the result is pixel-identical to `sd-cli -r` at the same seed.)
+    if (mode !== "reference") {
+      throw new Error(
+        `The backend did not read the base image as a reference${mode ? ` (mode "${mode}")` : " (no mode reported)"}.`
+        + " The result is not an edit of the earlier image — do not present it as a revision of it.",
+      );
+    }
+    return;
+  }
   const applied = numericField(usage["strength"]);
   const asked = input.strength ?? DEFAULT_EDIT_STRENGTH;
 

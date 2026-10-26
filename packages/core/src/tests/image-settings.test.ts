@@ -17,6 +17,7 @@ import {
   collectBaseCandidates,
   describeAgentMask,
   describeImageSettingsForAgent,
+  describeRenderSettings,
   describeReusedMaskForAgent,
   describeSettingsChange,
   validateImageSettingsAnswer,
@@ -139,11 +140,11 @@ describe("the settings proposal", () => {
 
     expect(proposal.engines).toEqual([
       {
-        tier: "fast", model: "image", label: "Segmind Vega", fixedSize: true, canEdit: false,
+        tier: "fast", model: "image", label: "Segmind Vega", fixedSize: true, canEdit: false, editsByReference: false,
         defaults: { width: 1024, height: 1024, steps: 20, guidanceScale: 7.5 }, expectedSeconds: 10,
       },
       {
-        tier: "quality", model: "image-quality", label: "Qwen-Image 2.1", fixedSize: false, canEdit: true,
+        tier: "quality", model: "image-quality", label: "Qwen-Image 2.1", fixedSize: false, canEdit: true, editsByReference: false,
         defaults: { width: 1024, height: 1024, steps: 20, guidanceScale: 1 }, expectedSeconds: 170,
       },
     ]);
@@ -906,5 +907,62 @@ describe("the agent's own base is always on offer", () => {
       tier: "quality", prompt: "x", negativePrompt: "", width: 1024, height: 1024, steps: 20, guidanceScale: 1, seed: null, edit: null,
     });
     expect(change.changed).not.toContain("baseImage");
+  });
+});
+
+describe("an engine that edits by reference", () => {
+  // FLUX 3 Image Klein on the cluster: the prompt says what changes and the rest is kept, so an
+  // edit there takes no strength and no mask (the endpoint refuses both by name).
+  const THREE: ImageGenerationBackendConfig = {
+    ...CONFIG,
+    balancedModel: "image-balanced",
+    tierLabels: { ...CONFIG.tierLabels, balanced: "FLUX 3 Image Klein" },
+    initImageModels: ["image-quality", "image-balanced"],
+    referenceEditModels: ["image-balanced"],
+    balancedDefaults: { steps: 16, guidanceScale: 1 },
+  };
+  const threeContext = async (fixture: Fixture) => ({
+    config: THREE,
+    proposal: buildImageSettingsProposal(THREE, fixture.agentRequest, fixture.candidates),
+    candidates: fixture.candidates,
+  });
+
+  it("is listed between the others, as able to edit by reference, at its own time", async () => {
+    const proposal = buildImageSettingsProposal(THREE, { prompt: "a lighthouse" }, []);
+    expect(proposal.engines.map((engine) => [engine.tier, engine.canEdit, engine.editsByReference])).toEqual([
+      ["fast", false, false], ["balanced", true, true], ["quality", true, false],
+    ]);
+    expect(proposal.engines[1]).toMatchObject({ defaults: { steps: 16, guidanceScale: 1 }, expectedSeconds: 65 });
+  });
+
+  it("takes the agent's edit, and offers no strength for it", async () => {
+    const fixture = await editFixture();
+    const proposal = buildImageSettingsProposal(THREE, fixture.agentRequest, fixture.candidates);
+
+    expect(proposal.agent).toMatchObject({ tier: "balanced", width: 320, height: 256, baseCandidateId: "c1", hasMask: false });
+    expect(proposal.agent).not.toHaveProperty("strength");
+  });
+
+  it("refuses a painted mask on it, naming the engine that takes one", async () => {
+    const fixture = await editFixture();
+    const verdict = await validateImageSettingsAnswer(withSettings(await validEditAnswer(), { tier: "balanced" }), await threeContext(fixture));
+
+    expect(verdict.ok).toBe(false);
+    expect((verdict as { errors: Array<{ field: string; message: string }> }).errors)
+      .toContainEqual({ field: "settings.edit.mask", message: "FLUX 3 Image Klein edits by instruction and takes no mask; choose Qwen-Image 2.1 for a masked edit, or remove the mask" });
+  });
+
+  it("accepts an edit on it without a strength, and runs it without one", async () => {
+    const fixture = await editFixture();
+    const answer = withEdit(withSettings(await validEditAnswer(), { tier: "balanced" }), { maskDataUrl: null, strength: undefined, maskBlur: undefined });
+    const verdict = await validateImageSettingsAnswer(answer, await threeContext(fixture));
+
+    expect(verdict.ok, JSON.stringify(verdict)).toBe(true);
+    const settings = (verdict as { value: ImageSettingsDecision }).value.settings!;
+    expect(settings.edit).not.toHaveProperty("strength");
+    const request = applyImageSettings(fixture.agentRequest, settings);
+    expect(request).not.toHaveProperty("strength");
+    expect(describeRenderSettings(THREE, request, { baseLabel: "harbour.png" }))
+      .toContain("an edit of harbour.png by instruction (the prompt says what changes)");
   });
 });

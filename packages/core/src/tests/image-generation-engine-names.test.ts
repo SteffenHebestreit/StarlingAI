@@ -151,4 +151,45 @@ describe("generate_image: engines are named, checked and reported", () => {
     expect(cased.success, String(cased.error)).toBe(true);
     expect(cased.output).toContain("quality tier (Qwen-Image 2.1)");
   });
+
+  it("refuses the balanced tier where the deployment has none, before anything is sent", async () => {
+    const { fetchMock } = stubCluster();
+
+    const result = await run({ prompt: "a jungle river", tier: "balanced" });
+
+    expect(result.success).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.error).toContain('Unknown tier "balanced"');
+  });
+
+  it("edits on the balanced engine by instruction, and says the strength it was given did not apply", async () => {
+    await writeConfig({
+      ...IMAGE_CONFIG,
+      balancedModel: "image-balanced",
+      tierLabels: { ...IMAGE_CONFIG.tierLabels, balanced: "FLUX 3 Image Klein" },
+      initImageModels: ["image-quality", "image-balanced"],
+      referenceEditModels: ["image-balanced"],
+      balancedDefaults: { steps: 16, guidanceScale: 1 },
+    });
+    writeFileSync(join(tempDir, "base.png"), Buffer.from(PNG_1X1, "base64"));
+    const posts: Body[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!init?.method || init.method === "GET") return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      const body = JSON.parse(String(init.body)) as Body;
+      posts.push(body);
+      expect(String(input)).toMatch(/\/images\/edits$/);
+      return new Response(JSON.stringify({ data: [{ b64_json: PNG_1X1 }], usage: { mode: "reference" } }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }));
+
+    const result = await run({ prompt: "Add a sloth on the right tree. Keep everything else.", baseImage: "base.png", strength: 0.6 });
+
+    expect(result.success, String(result.error)).toBe(true);
+    expect(posts[0]).toMatchObject({ model: "image-balanced", steps: 16 });
+    expect(posts[0]).not.toHaveProperty("strength");
+    expect(result.output).toContain("on the balanced tier (FLUX 3 Image Klein)");
+    expect(result.output).toContain("it ran on the balanced tier (FLUX 3 Image Klein)");
+    expect(result.output).toContain("`strength` did not apply: FLUX 3 Image Klein edits by instruction");
+  });
 });

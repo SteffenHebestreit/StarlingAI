@@ -27,6 +27,7 @@ import {
   fitsImageSizeBounds,
   imageDeviceBusyMs,
   imageEngineLabel,
+  imageModelEditsByReference,
   imageRenderLimitSeconds,
   imageRenderOverLimit,
   imageTierChoices,
@@ -103,6 +104,11 @@ export interface ImageSettingsEngine {
   label?: string;
   fixedSize: boolean;
   canEdit: boolean;
+  /**
+   * It edits BY REFERENCE: the prompt says what changes and the rest is kept, so an edit on it
+   * takes no strength and no mask, and costs IMAGE_REFERENCE_EDIT_WORK times a new picture.
+   */
+  editsByReference: boolean;
   /** What the engine renders with when nothing is set. */
   defaults: { width: number; height: number; steps: number; guidanceScale: number; negativePrompt?: string };
   /**
@@ -161,7 +167,8 @@ export interface ChosenImageSettings {
   seed: number | null;
   edit: null | {
     base: BaseCandidate;
-    strength: number;
+    /** Absent for an engine that edits by reference, which takes none. */
+    strength?: number;
     /** A mask the person painted: PNG bytes, and the share of the picture it lets change. */
     mask?: { bytes: Buffer; coverage: number };
     keepAgentMask: boolean;
@@ -326,6 +333,7 @@ export function imageSettingsEngines(config: ImageGenerationBackendConfig): Imag
       ...(label ? { label } : {}),
       fixedSize: Boolean(choice.model) && (config.fixedSizeModels?.includes(choice.model) ?? false),
       canEdit: Boolean(choice.model) && (config.initImageModels?.includes(choice.model) ?? false),
+      editsByReference: imageModelEditsByReference(config, choice.model),
       // The size is sent with the steps and guidance because the form scales the time by all of
       // them: 57 steps at 1344x768 is ~8 minutes on the quality engine, not "~3 min".
       defaults: {
@@ -379,7 +387,8 @@ export function buildImageSettingsProposal(
       guidanceScale: resolved.guidanceScale,
       ...(typeof agentRequest.seed === "number" ? { seed: agentRequest.seed } : {}),
       ...(agentBase ? { baseCandidateId: agentBase.id } : {}),
-      ...(agentRequest.initImage ? { strength: agentRequest.strength ?? DEFAULT_EDIT_STRENGTH } : {}),
+      // A reference edit has no strength; offering the default would show a knob that does nothing.
+      ...(agentRequest.initImage && !resolved.referenceEdit ? { strength: agentRequest.strength ?? DEFAULT_EDIT_STRENGTH } : {}),
       ...(typeof agentRequest.maskBlur === "number" ? { maskBlur: agentRequest.maskBlur } : {}),
       hasMask: Boolean(agentRequest.mask),
     },
@@ -533,6 +542,8 @@ async function checkSettings(
   // said against the steps, with what would fit, and the question stays open.
   const over = imageRenderOverLimit(context.config, {
     tier: engine.tier, width: width as number, height: height as number, steps, guidanceScale,
+    // A reference edit attends over the reference as well: ~2.5x the same picture without one.
+    referenceEdit: Boolean(edit) && engine.editsByReference,
   });
   if (over) {
     return fail("steps", `about ${describeRenderDuration(over.expectedSeconds)}, and the image server stops any render`
@@ -582,8 +593,13 @@ async function checkEdit(
   if (!base) fail("baseCandidateId", "not one of the offered pictures");
 
   const bounds = IMAGE_SETTINGS_BOUNDS;
-  const strength = numberIn(raw["strength"], bounds.strength[0], bounds.strength[1])
-    ?? fail("strength", `a number from ${bounds.strength[0]} to ${bounds.strength[1]}`);
+  // A reference engine keeps what the prompt does not ask to change: no strength to check, and
+  // none carried on, so the summary does not report a setting that never ran.
+  const byReference = engine?.editsByReference === true;
+  const strength = byReference
+    ? undefined
+    : numberIn(raw["strength"], bounds.strength[0], bounds.strength[1])
+      ?? fail("strength", `a number from ${bounds.strength[0]} to ${bounds.strength[1]}`);
   let maskBlur: number | undefined;
   if (raw["maskBlur"] !== undefined && raw["maskBlur"] !== null) {
     maskBlur = integerIn(raw["maskBlur"], bounds.maskBlur[0], bounds.maskBlur[1])
@@ -607,11 +623,22 @@ async function checkEdit(
     else if (base && !base.fitsBounds) fail("maskDataUrl", "this picture is too large to paint a mask on; render without one");
     else if (base) mask = await checkMask(maskRaw, base, fail);
   }
+  if (byReference && (mask || keepAgentMask)) {
+    // Refused, not dropped: the person painted a region, and an engine that cannot be held to one
+    // would change whatever it read the prompt as asking for.
+    const maskers = context.proposal.engines.filter((candidate) => candidate.canEdit && !candidate.editsByReference)
+      .map((candidate) => candidate.label ?? candidate.tier);
+    errors.push({
+      field: "settings.edit.mask",
+      message: `${engine?.label ?? engine?.tier ?? "this engine"} edits by instruction and takes no mask; `
+        + (maskers.length > 0 ? `choose ${maskers.join(" or ")} for a masked edit, or remove the mask` : "remove the mask"),
+    });
+  }
 
-  if (errors.length > before || !base || strength === undefined) return undefined;
+  if (errors.length > before || !base || (!byReference && strength === undefined)) return undefined;
   return {
     base,
-    strength,
+    ...(strength !== undefined ? { strength } : {}),
     ...(mask ? { mask } : {}),
     keepAgentMask,
     ...(maskBlur !== undefined ? { maskBlur } : {}),
@@ -698,7 +725,8 @@ export function applyImageSettings(
     steps: settings.steps,
     guidanceScale: settings.guidanceScale,
     ...(settings.seed !== null ? { seed: settings.seed } : {}),
-    ...(edit ? { initImage: edit.base.bytes.toString("base64"), strength: edit.strength } : {}),
+    ...(edit ? { initImage: edit.base.bytes.toString("base64") } : {}),
+    ...(edit?.strength !== undefined ? { strength: edit.strength } : {}),
     ...(mask ? { mask } : {}),
     ...(mask && typeof maskBlur === "number" ? { maskBlur } : {}),
   };
@@ -731,7 +759,7 @@ export function describeSettingsChange(
     if (proposal.mode === "edit" && agent.baseCandidateId) note("baseImage", "no base picture (a new picture)");
   } else {
     if (edit.base.id !== agent.baseCandidateId) note("baseImage", `base ${edit.base.label}`);
-    if (edit.strength !== agent.strength) note("strength", `strength ${edit.strength}`);
+    if (edit.strength !== undefined && edit.strength !== agent.strength) note("strength", `strength ${edit.strength}`);
     if (edit.mask) note("mask", `painted a mask (~${Math.max(1, Math.round(edit.mask.coverage * 100))}% of the picture)`);
     else if (agent.hasMask && !edit.keepAgentMask) note("mask", "no mask");
     if (edit.maskBlur !== undefined && edit.maskBlur !== agent.maskBlur) note("maskBlur", `feather ${edit.maskBlur}`);
@@ -757,7 +785,9 @@ export function describeRenderSettings(
       : negativePromptHasNoEffect(resolved) ? "a negative prompt (no effect at this guidance)"
         : "a negative prompt",
   ];
-  if (request.initImage) {
+  if (request.initImage && resolved.referenceEdit) {
+    parts.push(`an edit of ${extras.baseLabel ?? "the base picture"} by instruction (the prompt says what changes)`);
+  } else if (request.initImage) {
     const mask = extras.maskPath
       ? ` with the mask ${extras.maskPath}${extras.maskCoverage !== undefined ? ` (~${Math.max(1, Math.round(extras.maskCoverage * 100))}% may change)` : ""}`
       : request.mask ? " with a mask" : ", no mask";

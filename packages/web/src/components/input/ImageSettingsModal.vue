@@ -133,7 +133,18 @@
               To keep the edit, use the agent's settings.
             </p>
 
-            <template v-if="selectedBase">
+            <template v-if="selectedBase && selectedEngine?.editsByReference">
+              <p class="ism__muted">
+                {{ engineLabel(selectedEngine) }} edits by instruction: say in the prompt what should change, and the
+                rest of the picture is kept. It takes no strength and no mask.
+              </p>
+              <p v-if="form.mask !== 'none'" class="ism__warn">
+                A mask is set, and this engine cannot use one.
+                <button type="button" class="ism__link" @click="form.mask = 'none'; form.maskDataUrl = undefined">Remove mask</button>
+              </p>
+              <p v-if="errors.mask" class="ism__error">{{ errors.mask }}</p>
+            </template>
+            <template v-else-if="selectedBase">
               <div class="ism__field-head">
                 <label for="ism-strength" class="ism__label">Strength</label>
                 <span class="ism__value">{{ form.strength.toFixed(2) }}</span>

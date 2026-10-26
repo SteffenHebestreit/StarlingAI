@@ -67,10 +67,25 @@
       "api": "openai-compatible",
       "model": "image",
       "qualityModel": "image-quality",
+      // BALANCED TIER (added 2026-10-26): FLUX 3 Image Klein (Black Forest Labs, 2026-10-15; 5.6B,
+      // step-distilled), llama-swap selector `image-balanced` -> corsair `flux-klein`, on the same
+      // iGPU as the quality engine. Measured on corsair against the other two:
+      //   1024x1024, 16 steps -> 64.6 s   (fast ~10 s, quality at 40 steps 322-335 s)
+      //   one reference edit   -> 157.9 s
+      //   4-px grid metric 7.4 % against the quality engine's 31 % on the same prompt and seed
+      //   poster text spelled right by both; the quality engine drew the REAL Frauenkirche, this
+      //   one a generic dome -- world-knowledge fidelity is what quality keeps over it.
+      // It EDITS BY REFERENCE: "Add a sloth hanging from the tree on the right. Keep everything
+      // else." kept the scene and added the animal, with no mask (referenceEditModels below). A
+      // reference edit told to "make it a realistic photograph" barely changed the look (mean
+      // distance 10.2, the same as re-render noise), so a LOOK change is still a new picture.
+      // License: FLUX Kommunity License -- non-commercial, outputs commercially usable under
+      // US$5M revenue with output filtering.
+      "balancedModel": "image-balanced",
       // The engines' own names, which is what users say ("nimm das qwen model"). generate_image
       // lists them to the agent and accepts either name or model id; any other name is refused
       // before a render instead of 404ing at the router and falling back to the fast engine.
-      "tierLabels": { "fast": "Segmind Vega", "quality": "Qwen-Image 2.1" },
+      "tierLabels": { "fast": "Segmind Vega", "balanced": "FLUX 3 Image Klein", "quality": "Qwen-Image 2.1" },
       // Generous for a ~12 s tier. The client holds a slot per model, so a caller that has to
       // wait for a device is NOT spending this budget — it starts counting once the request
       // is actually on the wire.
@@ -82,6 +97,12 @@
       // for its defaults below; a request with more steps, a larger size or true CFG gets
       // proportionally more, never less. The 40-step quality default therefore gets 600 s.
       "qualityTimeoutMs": 300000,
+      // The balanced reference render (16 steps, 1024x1024) took 64.6 s, a cold load ~8 s; a
+      // reference edit gets 2.45x this through IMAGE_REFERENCE_EDIT_WORK.
+      "balancedTimeoutMs": 180000,
+      // The quality and balanced engines share corsair's iGPU: two renders at once each take about
+      // twice as long, which would push a 40-step quality render past maxRenderMs. One slot between them.
+      "deviceGroups": { "corsair-igpu": ["image-quality", "image-balanced"] },
       // The cluster's OWN limit: llama-swap gives up on a request to its corsair peer after
       // `peers.corsair.timeouts.responseHeader` (600 s), and the quality engine sends nothing
       // until the picture is done. So any render longer than this fails whatever our timeouts
@@ -129,7 +150,11 @@
       //
       // The generations route now answers 400 "does not accept 'image'" rather than quietly
       // rendering something new, so a mistake here is loud at both ends.
-      "initImageModels": ["image-quality"],
+      "initImageModels": ["image-quality", "image-balanced"],
+      // ...of which these edit BY REFERENCE (no strength, no mask; the endpoint refuses both). An
+      // edit with no tier stated goes to the cheapest engine that can take it: here the balanced
+      // one, or the quality one when a mask is passed.
+      "referenceEditModels": ["image-balanced"],
       // The tiers disagree about guidance and BOTH read the field, so one shared value is
       // wrong for one of them. Measured with the seed pinned so only guidance could vary:
       // the fast tier rendered differently at 1.0 than at 7.5, and the quality tier took 22 s
@@ -167,6 +192,9 @@
       //   is present on BOTH builds; upstream (#2041) traces the 2K grid to sd.cpp's DiT output
       //   rather than the VAE. Rollback on corsair: ~/sd-upgrade/rollback-to-889.sh.
       "qualityDefaults": { "steps": 40, "guidanceScale": 1 },
+      // FLUX 3 Image Klein is step-distilled to 16 steps and runs without CFG (BFL's README and
+      // sd.cpp's docs/flux3.md); a negative prompt therefore does nothing at these defaults either.
+      "balancedDefaults": { "steps": 16, "guidanceScale": 1 },
       // NOT ACTIVE — and now has nothing to point at: re-tested 2026-09-26, the worker's shim
       // answers POST /sdapi/v1/txt2img with 404 "this server exposes /v1/images/generations and
       // /v1/images/edits". The CLIENT support for it is shipped and tested; only a route is missing.
