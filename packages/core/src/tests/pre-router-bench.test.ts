@@ -40,6 +40,7 @@ import {
   parsePreRouterArgs,
   isAnswererOutage,
   pickFromReadout,
+  pickFromSystemOne,
   preRouteCalibration,
   preRouteGold,
   qualifyLevel,
@@ -210,6 +211,19 @@ describe("Laya's answer", () => {
 function routingCase(expect: RoutingEvalCase["expect"], extra: Partial<RoutingEvalCase> = {}): RoutingEvalCase {
   return { id: "c", query: "q", expect, ...extra };
 }
+
+describe("a System One answer", () => {
+  const keys = ["researcher", "content_writer", "none"];
+  it("is a pick over the question's keys, with its probabilities as log-scores for the calibration", () => {
+    const pick = pickFromSystemOne({ choice: "content_writer", probabilities: { researcher: 0.1, content_writer: 0.8, none: 0.1 } }, keys, "systemone:Kev-4B", 41);
+    expect(pick).toMatchObject({ choice: "content_writer", top: 0.8, ms: 41, model: "systemone:Kev-4B" });
+    expect("logScores" in pick && pick.logScores!.map((score) => Number(Math.exp(score).toFixed(3)))).toEqual([0.1, 0.8, 0.1]);
+  });
+  it("is an error when it names an option it was not offered or is not its own argmax", () => {
+    expect(pickFromSystemOne({ choice: "coder", probabilities: { researcher: 0.1, content_writer: 0.8, none: 0.1 } }, keys, "m", 1)).toEqual({ error: "systemone: the answer does not fit the options" });
+    expect(pickFromSystemOne({ choice: "none", probabilities: { researcher: 0.1, content_writer: 0.8, none: 0.1 } }, keys, "m", 1)).toHaveProperty("error");
+  });
+});
 
 describe("the gold of a routing case", () => {
   it("is the acceptable set, with a named target or top added", () => {
@@ -769,6 +783,14 @@ describe("the command line", () => {
 
   it("passes over the separator pnpm may hand through", () => {
     expect(parsePreRouterArgs(["--", "--k", "4"]).k).toBe(4);
+  });
+
+  it("asks a decision model at /v1/systemone with --backend systemone, which needs the model", () => {
+    expect(parsePreRouterArgs(["--backend", "systemone", "--systemone-model", "Kev-4B-Q8_0"])).toMatchObject({
+      backend: "systemone", systemOneModel: "Kev-4B-Q8_0", systemOneUrl: "http://127.0.0.1:18090",
+    });
+    expect(parsePreRouterArgs(["--backend", "systemone", "--systemone-model", "m", "--systemone-url", "http://h:9/"]).systemOneUrl).toBe("http://h:9");
+    expect(() => parsePreRouterArgs(["--backend", "systemone"])).toThrow(/needs --systemone-model/);
   });
 
   it("keeps every --cases file in order, so the gold-none cases can join the live ones, and refuses one given twice", () => {

@@ -5,7 +5,7 @@
  * would save (agent/decisions-bench.ts has the arithmetic and why agreement alone is not enough).
  *
  *   pnpm --filter @starlingai/core decisions:bench [--points fast_lane,source_sensitive] [--cases <jsonl>]
- *     [--laya-url http://127.0.0.1:18080] [--no-incumbent] [--no-laya] [--repeat 1] [--split all|calibration|test]
+ *     [--laya-url http://127.0.0.1:18080] [--protocol laya|systemone] [--model <id>] [--no-incumbent] [--no-laya] [--repeat 1] [--split all|calibration|test]
  *     [--target 0.9] [--min 30] [--audit-rate 0.1] [--max-rare-miss 0.1]
  *     [--frequency fast_lane=0.6,source_sensitive=1] [--prior fast_lane=0.06] [--train-out <jsonl>] [--out <dir>]
  *     [--negation] [--order-swap]
@@ -79,7 +79,7 @@ import { buildDecisionReport } from "./decisions-report.js";
 class UsageError extends Error {}
 
 const VALUE_FLAGS = new Set([
-  "points", "cases", "laya-url", "repeat", "split", "target", "min", "audit-rate", "max-rare-miss", "frequency", "prior", "train-out", "out",
+  "points", "cases", "laya-url", "protocol", "model", "repeat", "split", "target", "min", "audit-rate", "max-rare-miss", "frequency", "prior", "train-out", "out",
 ]);
 const SWITCHES = new Set(["no-incumbent", "no-laya", "negation", "order-swap"]);
 const DEFAULT_LAYA_URL = "http://127.0.0.1:18080";
@@ -198,6 +198,15 @@ async function main(): Promise<number> {
   const config = loadConfig({ skipCompiledWrite: true });
   config.workspacePath = outDir;
   config.decisions.baseUrl = useLaya ? layaUrl : "";
+  // --protocol systemone: the Laya arm asks the decision model --model at --laya-url's /v1/systemone
+  // (decisions.systemOne, laya-client.ts) instead of the sidecar.
+  const protocol = values.get("protocol");
+  if (protocol !== undefined && protocol !== "laya" && protocol !== "systemone") throw new UsageError(`--protocol takes laya or systemone (got "${protocol}")`);
+  if (protocol === "systemone") {
+    const decisionModel = values.get("model");
+    if (!decisionModel) throw new UsageError("--protocol systemone needs --model <id as /v1/models lists it>");
+    config.decisions.systemOne = { baseUrl: useLaya ? layaUrl : "", model: decisionModel };
+  }
   config.decisions.defaultMode = "off";
   config.decisions.points = {};
   config.decisions.ledger = { ...config.decisions.ledger, enabled: false };

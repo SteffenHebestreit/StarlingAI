@@ -293,6 +293,39 @@ describe("who decides", () => {
     expect(fetchMock, "a sidecar that failed three times is still asked").toHaveBeenCalledTimes(3);
   });
 
+  it("asks a decision model llama.cpp serves in the System One format when the protocol says so", async () => {
+    // The chat endpoint's base, /v1 and all, and the llama-swap key; the sidecar stays configured for laya-browser.
+    await writeConfig({
+      baseUrl: "http://laya:8080",
+      systemOne: { baseUrl: "http://decide:8080/v1/", apiKey: "test-key", model: "Kev-4B-Q8_0" },
+      points: { source_sensitive: { mode: "laya", threshold: 0.5 } },
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      model: "Kev-4B-Q8_0",
+      answers: { source_sensitive: { type: "choice", choice: "yes", probabilities: { yes: 0.9, no: 0.1 }, confidence: 0.8 } },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await sourceSensitive(GERMAN, incumbentAnswering(false).run);
+    expect(outcome).toMatchObject({ value: true, decidedBy: "laya" });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("http://decide:8080/v1/systemone");
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer test-key");
+    const sent = JSON.parse(String(init.body)) as { model: string; state: { message: string }; questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }> };
+    expect(sent.model).toBe("Kev-4B-Q8_0");
+    expect(sent.state.message).toBe(GERMAN);
+    expect(sent.questions["source_sensitive"]).toMatchObject({ type: "choice", instructions: decisions.SOURCE_SENSITIVE.question, criteria: decisions.SOURCE_SENSITIVE.options });
+  });
+
+  it("asks a System One model with no sidecar configured at all", async () => {
+    await writeConfig({ systemOne: { baseUrl: "http://decide:8080", model: "Kev-4B-Q8_0" }, points: { source_sensitive: { mode: "laya", threshold: 0.5 } } });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      answers: { source_sensitive: { choice: "no", probabilities: { yes: 0.2, no: 0.8 } } },
+    }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await sourceSensitive(GERMAN, incumbentAnswering(true).run)).toMatchObject({ value: false, decidedBy: "laya" });
+    expect(String((fetchMock.mock.calls[0] as unknown as [string])[0])).toBe("http://decide:8080/v1/systemone");
+  });
+
   it("rejects an answer that does not fit the options instead of misreading it", async () => {
     await writeConfig({ baseUrl: "http://laya:8080", points: { source_sensitive: { mode: "laya", threshold: 0.5 } } });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({

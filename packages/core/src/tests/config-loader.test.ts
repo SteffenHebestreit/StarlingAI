@@ -328,6 +328,29 @@ describe("config loader mutable overlay", () => {
     }
   });
 
+  it("points a named System One decision model at the primary endpoint and key, unless config sets its own", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-systemone-"));
+    const baseConfigPath = join(tempDir, "starlingai.json");
+    process.env["SAI_CONFIG_PATH"] = baseConfigPath;
+    process.env["SAI_PRIMARY_MODEL_URL"] = "https://models.test/v1";
+    process.env["SAI_PRIMARY_MODEL_KEY"] = "primary-key";
+    const load = async (decisions: Record<string, unknown>) => {
+      writeFileSync(baseConfigPath, JSON.stringify({ decisions }), "utf8");
+      vi.resetModules();
+      return (await import("../config/loader.js")).loadConfig().decisions;
+    };
+    try {
+      expect((await load({ systemOne: { model: "kev-4b" } })).systemOne).toEqual({ baseUrl: "https://models.test/v1", apiKey: "primary-key", model: "kev-4b" });
+      // No model named: nothing is asked, so nothing is filled in.
+      expect((await load({})).systemOne).toEqual({ baseUrl: "", model: "" });
+      // Its own endpoint and key win.
+      expect((await load({ systemOne: { model: "kev-4b", baseUrl: "http://gpu:8080", apiKey: "own" } })).systemOne)
+        .toEqual({ baseUrl: "http://gpu:8080", apiKey: "own", model: "kev-4b" });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("still honors the legacy SAI_LMSTUDIO_* aliases when the neutral vars are unset (back-compat)", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-config-env-alias-"));
     const baseConfigPath = join(tempDir, "starlingai.json");
