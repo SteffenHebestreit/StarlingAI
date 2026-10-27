@@ -94,15 +94,23 @@ The original text reaches the local model only. It is never written to a file, a
 ## Nightly runs
 
 ```
-node scripts/harness-lab-nightly.mjs [--budget 4h] [--quiet 10m] [--no-harvest]
+sai start --harness-lab        # or --all, or SAI_ENABLE_HARNESS_LAB=1 in .env
 ```
 
-The wrapper is for a timer on the host (Windows Task Scheduler, cron), never the gateway's own cron. Inside the gateway container it first harvests the last two days' failed turns into the inbox, then runs `harness-lab nightly`. That is `run` with three additions:
+The stack runs the nightly lab itself, in a container of its own: the `harness-lab` service. It uses the gateway's image, environment and mounts, but not its process, port or health check. It needs no timer on the host and nobody logged on, and it runs whenever the stack runs. Every day at `SAI_HARNESS_LAB_AT` (default `02:30`), a clock in `SAI_HARNESS_LAB_TZ` (an IANA zone such as `Europe/Berlin`, default `UTC`), it runs one night. A night missed while the stack was down is not made up. Its output goes to the container's log and to `.starlingai/harness-lab/nightly.log`. To run a night now:
+
+```
+docker exec -d starlingai-harness-lab-1 node packages/core/dist/scripts/harness-lab-timer.js --once --log /workspace/.starlingai/harness-lab/nightly.log
+```
+
+On a host without the service, `node scripts/harness-lab-nightly.mjs [--budget 4h] [--quiet 10m] [--no-harvest]` runs the same night inside the gateway container, for a timer on the host (Windows Task Scheduler, cron). The gateway's own cron never runs it. A lock (`timer.lock` in the nightly root) keeps two nights from running at once, whoever started them; a night that finds it held is skipped (exit 5).
+
+A night first harvests the last two days' failed turns into the inbox, then runs `harness-lab nightly`. That is `run` with three additions:
 - **It gives way to live use.** Before every new attempt it reads the end of the live audit log, and waits while someone sent a message within the quiet window. Lab turns and live turns share the model server.
 - **It has a time budget.** Once the budget is spent, the run stops before its next new attempt (exit code 4).
 - **The next night goes on with that run.** Every attempt and lab model call is recorded under the run's directory, keyed by what went in. Replayed in order, the records give the editors the same input, so they propose the same edits, and the run continues where it stopped. Nothing recorded against older prompts or another core version is served again.
 
-Any `run` on an `--out` that holds an earlier run continues it the same way. The registration commands are in the wrapper's header. Nightly runs and their `state.json` live under `.starlingai/harness-lab/nightly/` in the deployment's workspace.
+Any `run` on an `--out` that holds an earlier run continues it the same way. The host timer's registration commands are in the wrapper's header. Nightly runs and their `state.json` live under `.starlingai/harness-lab/nightly/` in the deployment's workspace.
 
 ## Configuration
 

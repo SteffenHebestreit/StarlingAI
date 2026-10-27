@@ -173,6 +173,33 @@ services:
       # still caught by the same interval×retries after it — no check weakening.
       start_period: 80s
 
+  # ── Harness lab, nightly ──────────────────────────────────────────────────
+  # The harness lab's nightly run (docs/harness-lab.md) in a container of its own: the gateway's
+  # image, environment and mounts, not its process, port or health check, and no timer on the host
+  # (nobody has to be logged on). Every day at SAI_HARNESS_LAB_AT, a clock in SAI_HARNESS_LAB_TZ, it
+  # harvests failed live turns into the review inbox and runs `harness-lab nightly`, which gives way
+  # to live use and files at most one pending proposal; nothing is applied without a person. Behind
+  # the `harness-lab` profile: `sai start --harness-lab` (or --all, or SAI_ENABLE_HARNESS_LAB=1 in
+  # .env). The image is the gateway's build, so it is never pulled. Run a night now:
+  #   docker exec -d starlingai-harness-lab-1 node packages/core/dist/scripts/harness-lab-timer.js --once --log /workspace/.starlingai/harness-lab/nightly.log
+  harness-lab:
+    extends: gateway
+    profiles: ["harness-lab"]
+    build: !reset null
+    pull_policy: never
+    ports: !reset []
+    healthcheck: !override
+      disable: true
+    command:
+      - node
+      - packages/core/dist/scripts/harness-lab-timer.js
+      - --at
+      - ${SAI_HARNESS_LAB_AT:-02:30}
+      - --tz
+      - ${SAI_HARNESS_LAB_TZ:-UTC}
+      - --log
+      - /workspace/.starlingai/harness-lab/nightly.log
+
   # ── Filtering docker-socket proxy ─────────────────────────────────────────
   # The ONLY container that touches /var/run/docker.sock. The gateway reaches the
   # Docker Engine API through this over TCP (never the raw socket). It default-
