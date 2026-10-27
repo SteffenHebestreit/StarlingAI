@@ -24,11 +24,12 @@
  * the corpus (--accept, stamped as reviewed) or drops it (--reject). The lab runs no task from the
  * inbox, and no failure-derived task without a review.
  *
- * `nightly` is `run` for a timer on the host (never the gateway's cron): it gives way to live use
- * (--quiet: no new attempt while a message came in within that window), stops before its next new
- * attempt once its --budget is spent, and the next nightly run goes on with the run it paused. Any
- * `run` goes on with what an earlier run on the same --out recorded (harness-lab/replay.ts), and no
- * run takes a task as a target that a pending lab proposal already answers.
+ * `nightly` is `run` for a timer (the stack's `harness-lab` service, scripts/harness-lab-timer.ts, or
+ * one on the host; never the gateway's cron): it gives way to live use (--quiet: no new attempt while
+ * a message came in within that window), stops before its next new attempt once its --budget is
+ * spent, and the next nightly run goes on with the run it paused. Any `run` goes on with what an
+ * earlier run on the same --out recorded (harness-lab/replay.ts), and no run takes a task as a target
+ * that a pending lab proposal already answers.
  *
  * It runs in a process of its own (harness-lab/bootstrap.ts), on the host or inside the gateway
  * container (`node packages/core/dist/scripts/harness-lab.js run …`), never in the gateway itself:
