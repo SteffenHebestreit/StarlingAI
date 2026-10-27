@@ -166,6 +166,7 @@ async function cmdStart() {
       "computer-desktop":{ type: "boolean", default: false },
       rag:               { type: "boolean", default: false },
       laya:              { type: "boolean", default: false },
+      "harness-lab":     { type: "boolean", default: false },
       companions:        { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
     },
@@ -180,6 +181,7 @@ async function cmdStart() {
   const desktop     = values["computer-desktop"] || values.all;
   const ragFlag     = values.rag || values.all;
   const layaFlag    = values.laya || values.all;
+  const labFlag     = values["harness-lab"] || values.all;
 
   hdr(`${PRODUCT.name} — Starting up`);
 
@@ -234,6 +236,11 @@ async function cmdStart() {
   if (pentest) profileArgs.push("--profile", "pentest");
   if (desktop) profileArgs.push("--profile", "computer-desktop");
   if (wantLaya) profileArgs.push("--profile", "laya");
+  // The harness lab's nightly timer (the `harness-lab` service), OFF by default: it runs real lab
+  // turns on the model server every night. Opt in with `sai start --harness-lab` or
+  // SAI_ENABLE_HARNESS_LAB=1 in .env; it also needs selfImprovement.harnessLab.enabled.
+  const wantLab = labFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_HARNESS_LAB || "");
+  if (wantLab) profileArgs.push("--profile", "harness-lab");
   // The reranker and the Laya sidecar only get the GPU when a host NVIDIA GPU is present
   // (or forced via SAI_GPU=1). Otherwise they run on CPU. SAI_GPU=0 forces CPU.
   const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
@@ -245,6 +252,9 @@ async function cmdStart() {
     ok(useGpu
       ? "RAG enabled (engram + reranker) — GPU detected, reranker on GPU"
       : "RAG enabled (engram + reranker) — no GPU, reranker on CPU");
+  }
+  if (wantLab) {
+    ok(`Harness lab nightly timer enabled: every day at ${process.env.SAI_HARNESS_LAB_AT || "02:30"} (${process.env.SAI_HARNESS_LAB_TZ || "UTC"})`);
   }
   if (wantLaya) {
     ok(useGpu
@@ -446,7 +456,7 @@ async function cmdStop() {
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya"];
+  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya", "--profile", "harness-lab"];
   // The e2e test services (`pnpm e2e:env up`) run in this project on the stack's networks;
   // `down` has to remove them too, or it cannot remove those networks.
   if (existsSync("docker-compose.e2e.yml")) {
@@ -808,6 +818,10 @@ ${BOLD}Commands:${RESET}
     --laya                             Include the Laya decision sidecar (fast local
                                        decisions; GPU when present). Persist with
                                        SAI_ENABLE_LAYA=1 in .env
+    --harness-lab                      Include the harness lab's nightly timer (a night
+                                       of lab runs at SAI_HARNESS_LAB_AT in
+                                       SAI_HARNESS_LAB_TZ). Persist with
+                                       SAI_ENABLE_HARNESS_LAB=1 in .env
     --pentest                          Include Kali pentest service
     --computer-desktop                 Include VNC desktop container
     --companions                       Also start the companion stacks declared in
