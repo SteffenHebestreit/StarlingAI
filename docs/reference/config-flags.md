@@ -50,7 +50,7 @@ Every public schema field, where it is declared, and how many production files r
 | `autoConsolidateSessions` | packages/core/src/config/schema.ts:1674 | 1 |
 | `autoIngestAttachments` | packages/core/src/config/schemas/retrieval.ts:99 | 3 |
 | `automation` | packages/core/src/config/schema.ts:1164 | 12 |
-| `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 2 |
+| `autonomousModeAntiRefusal` | packages/core/src/config/schemas/orchestration.ts:77 | 3 |
 | `autoPromoteToScene` | packages/core/src/config/schema.ts:1625 | 3 |
 | `autoReconnect` | packages/core/src/config/schema.ts:844 | 2 |
 | `autoResearchOnRefusal` | packages/core/src/config/schemas/effort.ts:50 | 3 |
@@ -429,7 +429,7 @@ Every public schema field, where it is declared, and how many production files r
 | `role` | packages/core/src/config/schema.ts:992 | 160 |
 | `roles` | packages/core/src/config/schema.ts:1529 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:468 | 1 |
-| `routing` | packages/core/src/config/schema.ts:277 | 118 |
+| `routing` | packages/core/src/config/schema.ts:277 | 119 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:879 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:836 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:787 | 1 |

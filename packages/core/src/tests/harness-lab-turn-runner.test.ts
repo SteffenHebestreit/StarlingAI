@@ -190,6 +190,60 @@ describe("a harness-lab attempt", () => {
     expect(seen).toEqual([true]);
   });
 
+  // The chat sets autoApprove for --auto, and the runtime read that as "unattended" too. The lab
+  // approves through its own callback, so its --auto turns ran as attended ones: never forced to
+  // their first call, ask_user without its unattended answer.
+  it("an --auto task runs unattended, as in the chat, and still approves only through its own callback", async () => {
+    const seen: Array<{ unattended?: boolean; autoApprove?: boolean; asks: boolean; approves: string[] }> = [];
+    const searchThenAnswer = () => {
+      let calls = 0;
+      streamMock.mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) {
+          return (async function* () {
+            yield { type: "tool_call_start", toolCallId: "w1", toolName: "memory_search" };
+            yield { type: "tool_call_delta", toolCallId: "w1", argumentsDelta: JSON.stringify({ query: "report" }) };
+            yield { type: "done", finishReason: "tool_calls", usage: USAGE };
+          })();
+        }
+        return (async function* () {
+          yield { type: "text_delta", content: "Done." };
+          yield { type: "done", finishReason: "stop", usage: USAGE };
+        })();
+      });
+    };
+    const { runLabAttempt } = await load();
+    const registry = await import("../tools/registry.js");
+    registry.registerTool({
+      name: "memory_search",
+      description: "Search memory.",
+      parameters: { type: "object", properties: { query: { type: "string" } } },
+      execute: async (_args, ctx) => {
+        seen.push({
+          ...(ctx.unattended !== undefined ? { unattended: ctx.unattended } : {}),
+          ...(ctx.autoApprove !== undefined ? { autoApprove: ctx.autoApprove } : {}),
+          asks: typeof ctx.inputCallback === "function",
+          approves: [],
+        });
+        for (const tool of ["shell_exec", "mail_send_draft"]) {
+          if ((await ctx.approvalCallback?.(tool, {})) === true) seen.at(-1)!.approves.push(tool);
+        }
+        return { success: true, output: "nothing" };
+      },
+    });
+    const withMessage = (message: string): HarnessTask => ({ ...task(undefined), turns: [{ message }] });
+
+    searchThenAnswer();
+    await runLabAttempt(withMessage("Send the weekly report to the team. --auto"), { name: "base" }, { runId: "run-5", attempt: 1, scratchRoot: tmp("lab-runner-scratch-"), graceMs: 20 });
+    searchThenAnswer();
+    await runLabAttempt(withMessage("Send the weekly report to the team."), { name: "base" }, { runId: "run-6", attempt: 1, scratchRoot: tmp("lab-runner-scratch-"), graceMs: 20 });
+
+    expect(seen).toEqual([
+      { unattended: true, autoApprove: false, asks: true, approves: ["shell_exec"] },
+      { unattended: false, autoApprove: false, asks: false, approves: [] },
+    ]);
+  });
+
   it("reports the task's checks that failed", async () => {
     storeThenAnswer();
     const { runLabAttempt } = await load();

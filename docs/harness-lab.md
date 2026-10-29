@@ -58,7 +58,7 @@ The lab runs in a process of its own: on the host, or as a second process inside
 - **Tools that reach outside the scratch workspace are left out or stubbed.**
   - Left out: real infrastructure, desktops, mailboxes, credentials and the deployment's own config.
   - Stubbed: messages, schedules and writes to shared stores. The call and its arguments are recorded, but nothing runs.
-  - `--auto` in a task message approves only tools that run in a sandbox of their own.
+  - `--auto` in a task message approves only tools that run in a sandbox of their own. Everything else `--auto` does in the chat, it does here too: an artifact build is forced to its first tool call, and `ask_user` answers itself.
   - Add your own entries with `selfImprovement.harnessLab.toolPolicy`.
 
 ## Tasks

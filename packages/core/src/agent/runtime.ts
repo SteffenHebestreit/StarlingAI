@@ -1979,8 +1979,12 @@ async function _runTurn(
   // which is never forced, or on an --agent directive turn, whose directive forces the call until
   // its agent has run (see the routing arm below); there the word lists decide as before. With the
   // flag off or without --auto nothing is asked.
+  // --auto is the turn's unattended flag, not its approval: the harness lab runs --auto tasks with
+  // its own approval callback, and keyed on autoApprove its turns were never armed, so the lab
+  // measured a base the chat never runs (RunTurnOptions.unattended).
+  const unattended = opts.unattended ?? opts.autoApprove === true;
   const autoArtifactArmed = (getConfig().orchestration?.autonomousModeAntiRefusal ?? false)
-    && opts.autoApprove === true;
+    && unattended;
   // Typed by assertion: it may be assigned inside the prefetch's callback, which narrowing does
   // not follow.
   let produceIntentRead = null as Promise<ProduceIntentReadOutcome> | null;
@@ -2022,7 +2026,7 @@ async function _runTurn(
   // and failed releases the directive without counting as a delegation; that turn is left to the
   // orchestrator, as a turn without a reading is.)
   // Set before iteration 0's prompt assembly finishes awaiting the prefetch, and never on a late
-  // or failed prefetch. autoArtifactArmed is the one gate on this path: the flag and autoApprove
+  // or failed prefetch. autoArtifactArmed is the one gate on this path: the flag and unattended
   // are not checked again for it below, so every other turn starts the prefetch exactly as before,
   // asks no readout and can never be armed by it.
   let prefetchRoutedToDeliverable = false;
@@ -2200,7 +2204,7 @@ async function _runTurn(
       structural: {
         documentGrounded: documentRagFoundDocs,
         reusePriorEvidence: reusePriorDelegateEvidenceForFollowUp,
-        autonomous: opts.autoApprove === true,
+        autonomous: unattended,
         // What the turn physically carries, as a taxonomy input modality. Purely
         // structural — an attachment, a link, or pasted source — and the signal the fusion
         // uses to prefer an agent that can actually READ the input over one that merely
@@ -2316,7 +2320,7 @@ async function _runTurn(
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
     // continue on your stated assumption". Before, the tool refused and the model looped on it.
-    inputCallback: opts.inputCallback ?? (opts.autoApprove ? unattendedInputCallback : undefined),
+    inputCallback: opts.inputCallback ?? (unattended ? unattendedInputCallback : undefined),
     requestUserInput: bindRequestUserInput({ requesterSessionId: session.id, signal }),
     onSubAgentProgress: opts.onSubAgentProgress,
     onComputerAction: opts.onComputerAction,
@@ -2332,6 +2336,7 @@ async function _runTurn(
     turnStartedAt,
     humanInLoopSteps: opts.humanInLoopSteps,
     autoApprove: opts.autoApprove,
+    unattended,
     maxIterationsOverride: opts.maxIterationsOverride,
     turnTimeoutOverrideMs: opts.turnTimeoutOverrideMs,
     onSwarmState: opts.onSwarmState,
@@ -3142,13 +3147,13 @@ async function _runTurn(
       // then rejects and re-runs. Gated on !delegatedResearchRetryUsed so it releases the
       // moment the routing-nudge fallback path takes over (no dead-end), and on
       // _turnDelegationCount===0 so the model can synthesize freely once a specialist ran.
-      // #3 (audit 763394da): `--auto` (autoApprove) means "run autonomously" — a
+      // #3 (audit 763394da): `--auto` (unattended) means "run autonomously" — a
       // tool-free clarifying question / "I can't create files" refusal (plus a
       // false "I gathered and verified" claim with zero tool calls) is never an
       // acceptable answer to an --auto artifact build. When autonomousModeAntiRefusal
-      // is on, an autoApprove turn whose deliverable-intent classifier saw an
+      // is on, an unattended turn whose deliverable-intent classifier saw an
       // artifact request also forces the first tool call, even if the narrower
-      // requiresArtifactDelegation signal did not fire. Structural (autoApprove +
+      // requiresArtifactDelegation signal did not fire. Structural (unattended +
       // wantsArtifact); no topic/keywords.
       // The word lists also fire on a question about making one ("Wie erstelle ich eine
       // Präsentation in PowerPoint?"), so the intent readout is asked as well (started where the
@@ -3162,7 +3167,7 @@ async function _runTurn(
       // lists are English and German, and a request they miss ("Zeichne … als
       // Mermaid-Flussdiagramm") was answered inline although routing had put diagram_designer
       // first. That signal is gated once, where the prefetch starts (autoArtifactArmed: the same
-      // flag and autoApprove), and is true only when that gate passed. It reads the top agent's
+      // flag and unattended), and is true only when that gate passed. It reads the top agent's
       // tools, not the request, so it forces only with the intent readout's word that the request
       // asks for something to be made or done (startProduceIntentRead, started with the prefetch):
       // a question the readout reads as an answer is not forced, and without a reading the
@@ -5833,7 +5838,7 @@ async function _runTurn(
   if (
     loopBrakeExit !== undefined
     && activeMainAssistantToolMode === "orchestration_only"
-    && opts.autoApprove !== true
+    && !unattended
     && _turnDelegationCount === 0
     && !workflowRunCompletedThisTurn
     && !isWorkflowExecutionTurn
