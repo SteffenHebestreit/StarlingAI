@@ -494,15 +494,14 @@ describe("Laya first, where its answer could be taken", () => {
 
   it("(h) waits only where an answer Laya may take has qualified, not any answer of the point", async () => {
     await writeConfig(ADAPTIVE);
-    // "yes" has qualified; the caller lets Laya take "no" alone (as the receptionist lets it take "task" only).
+    // "yes" has qualified; the point lets Laya take "no" alone (as fast_lane lets it take "task" only).
     qualifyYes();
     layaAfter(20);
     const incumbent = incumbentAnswering(false, 5);
     const pending = decisions.decide<boolean>({
-      point: decisions.SOURCE_SENSITIVE,
+      point: { ...decisions.SOURCE_SENSITIVE, layaMayTake: ["no"] },
       state: { message: GERMAN },
       languageOf: GERMAN,
-      layaMayTake: ["no"],
       incumbent: incumbent.run,
       toKey: (value) => (value ? "yes" : "no"),
       fromKey: (key) => key === "yes",
@@ -528,7 +527,6 @@ describe("a point read through its own window", () => {
       point: decisions.FINDING_RELEVANT,
       state: { objective: ENGLISH, content: "Menu. Cookies." },
       languageOf: ENGLISH,
-      layaMayTake: ["irrelevant"],
       incumbent,
       toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
       fromKey: () => "",

@@ -62,6 +62,11 @@ function protectOf(point: BenchPointId): { protect?: string } {
   return protect !== undefined ? { protect } : {};
 }
 
+/** The answers decide() lets Laya take alone, from the point itself for the same reason; null: all. */
+function layaMayTakeOf(point: BenchPointId): readonly string[] | null {
+  return DECISION_POINTS[point].layaMayTake ?? null;
+}
+
 /**
  * The defaults come from the 25 attributed turns of 2026-09-21..25 (one user, image requests only): thin, and
  * overridable per run. The priors are the observed rates with one pseudo-case on each side, because 0 of 15 and
@@ -71,8 +76,8 @@ export const BENCH_PROFILES: Readonly<Record<BenchPointId, BenchPointProfile>> =
   fast_lane: Object.freeze({
     point: "fast_lane",
     rareClass: "small_talk",
-    // agent/receptionist.ts: only the model can write the small-talk reply, so Laya may only send a message on.
-    layaMayTake: Object.freeze(["task"]),
+    // Only the model can write the small-talk reply, so Laya may only send a message on.
+    layaMayTake: layaMayTakeOf("fast_lane"),
     ...protectOf("fast_lane"),
     // The front desk asked its model on 15 of 25 turns; it skips long messages without a call.
     frequencyPerTurn: 0.6,
@@ -87,8 +92,8 @@ export const BENCH_PROFILES: Readonly<Record<BenchPointId, BenchPointProfile>> =
   source_sensitive: Object.freeze({
     point: "source_sensitive",
     rareClass: "yes",
-    // agent/runtime.ts passes no restriction: Laya may say either, but "no" only once its "yes" recall holds.
-    layaMayTake: null,
+    // No restriction: Laya may say either, but "no" only once its "yes" recall holds.
+    layaMayTake: layaMayTakeOf("source_sensitive"),
     ...protectOf("source_sensitive"),
     // The up-front judge ran on 25 of 25 turns.
     frequencyPerTurn: 1,

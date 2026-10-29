@@ -87,8 +87,6 @@ export async function judgeCorrection(
     languageOf: message,
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
-    // Laya may only say "something else" on its own: a correction changes what the statistics hold.
-    layaMayTake: ["continues"],
     incumbent: async (decisionSignal) => {
       const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "correction_judge" }, () => provider.complete(
         [{ role: "system", content: CORRECTION_JUDGE_SYSTEM }, { role: "user", content: correctionJudgeUser(answer, message) }],

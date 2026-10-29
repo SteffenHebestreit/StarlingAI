@@ -21,7 +21,7 @@ Every public schema field, where it is declared, and how many production files r
 | `after` | packages/core/src/config/schema.ts:1576 | 301 |
 | `agents` | packages/core/src/config/schema.ts:1564 | 201 |
 | `alertmanager` | packages/core/src/config/schema.ts:1209 | 1 |
-| `all` | packages/core/src/config/schema.ts:1362 | 328 |
+| `all` | packages/core/src/config/schema.ts:1362 | 329 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1382 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1325 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -115,7 +115,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:591 | 13 |
 | `customInstructions` | packages/core/src/config/schema.ts:313 | 5 |
 | `dailyUsd` | packages/core/src/config/schema.ts:594 | 2 |
-| `default` | packages/core/src/config/schema.ts:1338 | 308 |
+| `default` | packages/core/src/config/schema.ts:1338 | 307 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1206 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1900 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1228 | 1 |
@@ -499,7 +499,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:994 | 23 |
 | `tags` | packages/core/src/config/schema.ts:641 | 81 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:72 | 5 |
-| `task` | packages/core/src/config/schema.ts:1373 | 180 |
+| `task` | packages/core/src/config/schema.ts:1373 | 179 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1969 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:510 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:726 | 1 |

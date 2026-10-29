@@ -277,7 +277,6 @@ export async function assessRunProgress(params: {
       languageOf: params.objective,
       ...(params.sessionId ? { sessionId: params.sessionId } : {}),
       ...(params.signal ? { signal: params.signal } : {}),
-      layaMayTake: ["on_track"],
       incumbent: async (decisionSignal) => {
         const response = await runWithCallAttribution({ callSite: "routing_tier", agentName: "progress_judge" }, () => params.provider.complete(
           buildProgressJudgePrompt({ objective: params.objective, recentActivity: params.recentActivity }),
@@ -1091,7 +1090,7 @@ export async function distillFindingForSharedFacts(params: {
     const deadline = AbortSignal.timeout(params.deadlineMs ?? DISTILL_CALL_DEADLINE_MS);
     const signal = params.signal ? AbortSignal.any([params.signal, deadline]) : deadline;
     // "Nothing relevant here" is the one answer Laya may give alone: the call is then not waited for.
-    // Relevant content still goes to the model, the only one that can extract it (decisions/decide.ts).
+    // Relevant content still goes to the model, the only one that can extract it (FINDING_RELEVANT.layaMayTake).
     const outcome = await decideWithReadout<string>({
       point: FINDING_RELEVANT,
       // The same 6,000 characters the extraction reads. Laya used to get the first 2,400 and may say
@@ -1102,7 +1101,6 @@ export async function distillFindingForSharedFacts(params: {
       languageOf: objective,
       ...(params.sessionId ? { sessionId: params.sessionId } : {}),
       signal,
-      layaMayTake: ["irrelevant"],
       incumbent: async (decisionSignal) => {
         // Labelled like the other routing-tier verdicts: unlabelled, its provider row read as the
         // researcher's own call. Not a DECISION_POINT_BY_AGENT entry in the latency report: the

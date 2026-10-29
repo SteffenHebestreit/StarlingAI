@@ -170,7 +170,6 @@ export async function runReceptionist(
       point: FAST_LANE,
       state: { message: userMessage },
       languageOf: userMessage,
-      layaMayTake: ["task"],
       incumbent: (signal) => deps.complete(messages, signal),
       toKey: (reply) => (receptionistEscalated(reply, confidenceAttempt) ? "task" : "small_talk"),
       fromKey: () => ESCALATE_SENTINEL,

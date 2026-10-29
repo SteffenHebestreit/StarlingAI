@@ -29,6 +29,13 @@ export interface DecisionPointDefinition {
    * through another window earns its handover again.
    */
   readonly maxLen?: number;
+  /**
+   * The answers Laya may give on its own; absent, all of them. The others still go to the incumbent —
+   * for an answer only the incumbent can act on, such as the receptionist's "small talk", whose reply
+   * only the LLM can write. Laya is asked either way, so every answer keeps being measured; an answer
+   * left out here is never handed over, however well it agrees (decisions:report says so).
+   */
+  readonly layaMayTake?: readonly string[];
 }
 
 export type DecisionPointId =
@@ -41,8 +48,20 @@ export type DecisionPointId =
   | "run_drifting"
   | "corrects_previous";
 
-function point(id: DecisionPointId, question: string, options: Record<string, string>, protect?: string, maxLen?: number): DecisionPointDefinition {
-  return Object.freeze({ id, question, options: Object.freeze(options), ...(protect ? { protect } : {}), ...(maxLen !== undefined ? { maxLen } : {}) });
+function point(
+  id: DecisionPointId,
+  question: string,
+  options: Record<string, string>,
+  extra: { protect?: string; maxLen?: number; layaMayTake?: readonly string[] } = {},
+): DecisionPointDefinition {
+  return Object.freeze({
+    id,
+    question,
+    options: Object.freeze(options),
+    ...(extra.protect ? { protect: extra.protect } : {}),
+    ...(extra.maxLen !== undefined ? { maxLen: extra.maxLen } : {}),
+    ...(extra.layaMayTake ? { layaMayTake: Object.freeze([...extra.layaMayTake]) } : {}),
+  });
 }
 
 /** Receptionist: small talk it can answer itself, or a task for the full assistant (agent/receptionist.ts). */
@@ -55,6 +74,8 @@ export const FAST_LANE = point(
     small_talk: "Small talk: greeting, thanks, goodbye, how are you, what is your name, what can you do.",
     task: "A task or real question: do, find, create, check, compute, explain or look up something.",
   },
+  // Small talk is answered by the receptionist's model, so only "task" (hand it on) can be Laya's.
+  { layaMayTake: ["task"] },
 );
 
 /** Up-front source-sensitivity judge: research before drafting? (agent/ungrounded-claim-judge.ts). */
@@ -68,7 +89,7 @@ export const SOURCE_SENSITIVE = point(
     yes: "Yes: it depends on specific real-world facts that must be verified or may have changed.",
     no: "No: general knowledge, a concept in principle, reasoning, writing, code, small talk, or the user's own content.",
   },
-  "yes",
+  { protect: "yes" },
 );
 
 /** Post-draft judge: does a tool-free draft lean on unsourced external facts? (agent/ungrounded-claim-judge.ts). */
@@ -82,7 +103,7 @@ export const UNGROUNDED_DRAFT = point(
     yes: "Yes: it relies on specific external facts that would need a source.",
     no: "No: general knowledge, a definition, reasoning, advice, a calculation, code, small talk, or the user's own content.",
   },
-  "yes",
+  { protect: "yes" },
 );
 
 /** Parallel slices: do independent results for one task contradict each other? (agent/sub-agent-disagreement.ts). */
@@ -94,7 +115,7 @@ export const SLICES_DISAGREE = point(
     agree: "Consistent: no contradiction, only differences in wording, detail or coverage.",
     disagree: "Conflicting: they contradict each other on a fact, figure, conclusion or recommendation.",
   },
-  "disagree",
+  { protect: "disagree" },
 );
 
 /** Sub-agent oversight: is the evidence already enough to answer? (agent/sub-agent.ts assessOversightGoalMet). */
@@ -106,7 +127,7 @@ export const GOAL_MET = point(
     done: "Done: the evidence already covers every acceptance criterion.",
     continue: "Continue: at least one criterion is clearly not covered yet.",
   },
-  "continue",
+  { protect: "continue" },
 );
 
 /**
@@ -126,8 +147,7 @@ export const FINDING_RELEVANT = point(
     relevant: "Relevant: it holds at least one fact, figure, name, date, price or source that serves the objective.",
     irrelevant: "Nothing relevant: only page chrome, banners, errors or content about something else.",
   },
-  "relevant",
-  4096,
+  { protect: "relevant", maxLen: 4096, layaMayTake: ["irrelevant"] },
 );
 
 /**
@@ -143,14 +163,15 @@ export const RUN_DRIFTING = point(
     on_track: "On track: the recent activity serves the objective, even if slowly or indirectly.",
     drifting: "Drifting: clearly working on the wrong thing, stuck repeating itself, or contradicting the objective.",
   },
-  "drifting",
+  { protect: "drifting", layaMayTake: ["on_track"] },
 );
 
 /**
  * The person's next message as feedback on the turn before it: does it say that answer was wrong, missed
  * the request or did not work? (agent/user-correction.ts). Asked beside the new turn, which never waits for
  * it; a "corrects" turns that earlier turn's recorded skill success into a failure. "corrects" is
- * protected: a missed correction leaves a wrong success in the skill statistics.
+ * protected: a missed correction leaves a wrong success in the skill statistics. Only "continues" can be
+ * Laya's alone: a correction changes what the statistics hold.
  */
 export const CORRECTS_PREVIOUS = point(
   "corrects_previous",
@@ -162,7 +183,7 @@ export const CORRECTS_PREVIOUS = point(
     corrects: "Corrects: the message says the previous answer was wrong, missed the request or did not work.",
     continues: "Something else: a follow-up, a new variant on purpose, an answer to the assistant's question, a new topic, thanks.",
   },
-  "corrects",
+  { protect: "corrects", layaMayTake: ["continues"] },
 );
 
 export const DECISION_POINTS: Readonly<Record<DecisionPointId, DecisionPointDefinition>> = Object.freeze({
