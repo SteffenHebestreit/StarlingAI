@@ -60,6 +60,7 @@ The lab runs in a process of its own: on the host, or as a second process inside
   - Stubbed: messages, schedules and writes to shared stores. The call and its arguments are recorded, but nothing runs.
   - `--auto` in a task message approves only tools that run in a sandbox of their own. Everything else `--auto` does in the chat, it does here too: an artifact build is forced to its first tool call, and `ask_user` answers itself.
   - Add your own entries with `selfImprovement.harnessLab.toolPolicy`.
+- **Routing is warm before the first attempt.** The process routes one request and throws the answer away once the agent index is built. Cold, the first attempt's routing came after its prompt was built, so the turn ran as if no agent had matched.
 
 ## Tasks
 
