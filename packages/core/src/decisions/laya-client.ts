@@ -150,7 +150,8 @@ export async function askLaya(
   if (!layaConfigured()) return null;
   const now = Date.now();
   if (circuitOpenUntil > now) return null;
-  const { timeoutMs } = getConfig().decisions;
+  const decisions = getConfig().decisions;
+  const timeoutMs = decisions.points[point.id]?.timeoutMs ?? decisions.timeoutMs;
   const systemOne = systemOneTarget();
   const started = Date.now();
   try {

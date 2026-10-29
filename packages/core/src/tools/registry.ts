@@ -280,6 +280,9 @@ export interface ToolContext {
   humanInLoopSteps?: string[];
   /** When true, all tool approval prompts are automatically approved for this turn. */
   autoApprove?: boolean;
+  /** The turn runs with nobody watching (RunTurnOptions.unattended, resolved). A workflow step's
+   *  nested turn inherits it. */
+  unattended?: boolean;
   /** Override sub-agent maxIterations for delegated tasks this turn. */
   maxIterationsOverride?: number;
   /** Override the per-turn timeout in ms for delegated tasks. 0 disables timeout inheritance. */

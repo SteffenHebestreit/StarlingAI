@@ -610,7 +610,7 @@ export function buildQaVerdictMessages(input: {
 
 /**
  * One decision call's messages, from its production builder. Each shape gets the case its Laya
- * point may answer alone where the point restricts that (decisions/decide.ts layaMayTake): a task
+ * point may answer alone where the point restricts that (decisions/points.ts layaMayTake): a task
  * for the receptionist, page chrome for the distillation, an on-track run for the progress judge.
  * Those are the calls whose cost Laya can remove.
  */

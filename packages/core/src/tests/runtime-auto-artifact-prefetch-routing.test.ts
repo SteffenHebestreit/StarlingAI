@@ -433,6 +433,18 @@ describe("an --auto turn routed to a deliverable-emitting agent is forced to cal
     expect(waitMs).toBeGreaterThanOrEqual(400);
     expect(performance?.llmTimeMs).toBeLessThan(waitMs / 2);
   });
+
+  // The harness lab runs --auto tasks with its own approval callback and autoApprove off: keyed on
+  // autoApprove, its turns were never armed, and its base answered this request inline.
+  it("an unattended turn that approves tools itself is forced like an --auto one", async () => {
+    const loaded = await load({ capsule: { agents: [{ name: "diagram_designer", confidence: "high" }] } });
+    readoutMock.mockResolvedValue(modeReading("PRODUCE"));
+    streamMock.mockImplementation(() => textStream("Hier ist das Diagramm."));
+    const session = new loaded.AgentSession({ channel: "test", workspacePath: loaded.workspacePath, systemPrompt: "You are a test agent." });
+    await loaded.runTurn({ session, userMessage: MERMAID_REQUEST, unattended: true, approvalCallback: async () => false });
+    expect((streamMock.mock.calls[0]?.[3] as { toolChoice?: unknown } | undefined)?.toolChoice).toBe("required");
+    expect(readoutMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("no other turn asks the readout", () => {

@@ -11,6 +11,7 @@ import { promptSha256, stalePromptChange } from "../agent/config-assistant-propo
 import { scenarioToTask } from "../harness-lab/import-seeds.js";
 import type { RunScore } from "../harness-lab/scoring.js";
 import type { LabRunRecord } from "../harness-lab/turn-runner.js";
+import { warmLabRouting } from "../harness-lab/warmup.js";
 
 const MAIN = "Answer in the user's language.\nKeep answers short.";
 
@@ -261,5 +262,30 @@ describe("seed import", () => {
   ])("skips %j", (over, reason) => {
     const result = scenarioToTask(scenario(over));
     expect("skip" in result && result.skip).toMatch(reason);
+  });
+});
+
+describe("routing warm-up before the first attempt", () => {
+  it("routes once, after the agent index is built", async () => {
+    let checks = 0;
+    const order: string[] = [];
+    const warmed = await warmLabRouting({
+      ready: () => { checks += 1; order.push(`ready:${checks >= 3}`); return checks >= 3; },
+      route: async () => { order.push("route"); },
+      pollMs: 1,
+    });
+    expect(warmed).toBe(true);
+    expect(order).toEqual(["ready:false", "ready:false", "ready:true", "route"]);
+  });
+
+  it("gives up when the index is never built, without routing", async () => {
+    let routed = 0;
+    const warmed = await warmLabRouting({ ready: () => false, route: async () => { routed += 1; }, timeoutMs: 20, pollMs: 5 });
+    expect(warmed).toBe(false);
+    expect(routed).toBe(0);
+  });
+
+  it("a failed routing query does not stop the lab", async () => {
+    await expect(warmLabRouting({ ready: () => true, route: async () => { throw new Error("reranker down"); } })).resolves.toBe(true);
   });
 });

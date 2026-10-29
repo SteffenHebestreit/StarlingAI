@@ -22,6 +22,12 @@ export const DecisionPointSettingsSchema = z.object({
   mode: DecisionModeSchema.optional(),
   /** For mode `laya`: the top probability from which Laya's answer is taken. */
   threshold: z.number().min(0.5).max(1).optional(),
+  /**
+   * Overrides `timeoutMs` for this point: for one no turn waits on whose case is long (finding_relevant
+   * reads 6,000 characters). Three timeouts in a row open the breaker for every point, the ones on a
+   * turn's path included.
+   */
+  timeoutMs: z.number().int().min(50).max(15_000).optional(),
 });
 
 /**

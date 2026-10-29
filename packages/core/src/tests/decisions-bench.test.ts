@@ -509,6 +509,30 @@ describe("the rows", () => {
     expect(items[0]!.gold["source_sensitive"]!.label).toBe("A");
   });
 
+  it("say of an answer the point never hands over that the incumbent decides it, however well it agrees", async () => {
+    const { buildDecisionReport, renderDecisionReport } = await import("../scripts/decisions-report.js");
+    // finding_relevant lets Laya give only "irrelevant" alone: "relevant" needs the extraction.
+    // Both answers agree on every case alike, so only the point's restriction can tell them apart.
+    const rows = (["relevant", "irrelevant"] as const).flatMap((choice) => Array.from({ length: 60 }, (_, i) => ({
+      ts: `2026-10-29T00:${String(i).padStart(2, "0")}:00.000Z`,
+      point: "finding_relevant",
+      language: "en" as const,
+      state: {},
+      mode: "adaptive",
+      laya: { choice, top: 0.95, probabilities: { relevant: choice === "relevant" ? 0.95 : 0.05, irrelevant: choice === "irrelevant" ? 0.95 : 0.05 }, ms: 600, model: "kev" },
+      incumbent: { choice, ms: 11_000 },
+      decidedBy: "incumbent" as const,
+    })));
+    const [report] = buildDecisionReport(rows, 0.9, 30);
+    const byAnswer = Object.fromEntries(report!.answers.map((answer) => [answer.answer, answer]));
+    expect(byAnswer["irrelevant"]).toMatchObject({ mayDecideAlone: true });
+    expect(byAnswer["irrelevant"]!.qualifiedLevel).not.toBeNull();
+    expect(byAnswer["relevant"]).toMatchObject({ mayDecideAlone: false, qualifiedLevel: null });
+    const text = renderDecisionReport([report!], 0.9, 30);
+    expect(text).toContain('Laya says "relevant" → never decides alone (finding_relevant lets Laya give only "irrelevant" on its own)');
+    expect(text).toMatch(/Laya says "irrelevant" → qualified from/);
+  });
+
   it("reads llama-server's timings in either spelling, and no made-up zeros", () => {
     expect(readTimings({ prompt_n: 40, cache_n: 480, prompt_ms: 51.5, predicted_n: 6, predicted_ms: 101 })).toEqual({ promptN: 40, cacheN: 480, promptMs: 51.5, predictedN: 6, predictedMs: 101 });
     expect(readTimings({ promptN: 3, cacheN: -1 })).toEqual({ promptN: 3 });

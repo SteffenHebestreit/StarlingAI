@@ -77,6 +77,14 @@ export async function startLabProcess(outDir: string): Promise<LabProcess> {
   await import("../tools/register-builtins.js");
   const { initProviders } = await import("../providers/index.js");
   await initProviders();
+  // initProviders starts the agent index and does not wait for it: the first attempt would route
+  // cold and get no capsule (harness-lab/warmup.ts).
+  if (config.agents.defaults.model.embeddingModel) {
+    const { warmLabRouting, ROUTING_WARMUP_QUERY } = await import("./warmup.js");
+    const { isEmbeddingAvailable } = await import("../providers/embeddings.js");
+    const { prefetchCapabilityCandidates } = await import("../agent/discovery-prefetch.js");
+    await warmLabRouting({ ready: isEmbeddingAvailable, route: () => prefetchCapabilityCandidates(ROUTING_WARMUP_QUERY) });
+  }
 
   _started = { outDir, liveWorkspacePath, isolatedStores, skillSnapshot };
   return _started;
