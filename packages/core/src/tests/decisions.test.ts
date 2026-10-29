@@ -494,15 +494,14 @@ describe("Laya first, where its answer could be taken", () => {
 
   it("(h) waits only where an answer Laya may take has qualified, not any answer of the point", async () => {
     await writeConfig(ADAPTIVE);
-    // "yes" has qualified; the caller lets Laya take "no" alone (as the receptionist lets it take "task" only).
+    // "yes" has qualified; the point lets Laya take "no" alone (as fast_lane lets it take "task" only).
     qualifyYes();
     layaAfter(20);
     const incumbent = incumbentAnswering(false, 5);
     const pending = decisions.decide<boolean>({
-      point: decisions.SOURCE_SENSITIVE,
+      point: { ...decisions.SOURCE_SENSITIVE, layaMayTake: ["no"] },
       state: { message: GERMAN },
       languageOf: GERMAN,
-      layaMayTake: ["no"],
       incumbent: incumbent.run,
       toKey: (value) => (value ? "yes" : "no"),
       fromKey: (key) => key === "yes",
@@ -528,7 +527,6 @@ describe("a point read through its own window", () => {
       point: decisions.FINDING_RELEVANT,
       state: { objective: ENGLISH, content: "Menu. Cookies." },
       languageOf: ENGLISH,
-      layaMayTake: ["irrelevant"],
       incumbent,
       toKey: (distilled) => (distilled ? "relevant" : "irrelevant"),
       fromKey: () => "",
@@ -581,6 +579,25 @@ describe("a point read through its own window", () => {
       expect(existsSync(ledgerPath)).toBe(true);
     });
     expect(JSON.parse(readFileSync(ledgerPath, "utf8").trim()).laya.model).toBe("laya-test");
+  });
+});
+
+describe("a point's own timeout", () => {
+  it("waits longer for a point no turn waits on, and only for that point", async () => {
+    // One global limit, a longer one for finding_relevant; the decider answers both after 200 ms.
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow", timeoutMs: 100, points: { finding_relevant: { timeoutMs: 1_000 } } });
+    vi.stubGlobal("fetch", vi.fn((_url: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const body = JSON.parse(String(init?.body)) as { questions: Array<{ id: string; options: Record<string, string> }> };
+      const question = body.questions[0]!;
+      const [first, second] = Object.keys(question.options);
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify({
+        answers: { [question.id]: { choice: first, probabilities: { [first!]: 0.9, [second!]: 0.1 } } },
+        model: "laya-test",
+      }), { status: 200, headers: { "Content-Type": "application/json" } })), 200);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); });
+    })));
+    expect((await decisions.askLaya(decisions.FINDING_RELEVANT, { objective: ENGLISH, content: "Prices: 4.90 EUR." }))?.choice).toBe("relevant");
+    expect(await decisions.askLaya(decisions.FAST_LANE, { message: ENGLISH }), "the global limit still holds elsewhere").toBeNull();
   });
 });
 

@@ -37,7 +37,13 @@ export interface LevelRow {
 export interface AnswerReport {
   answer: string;
   levels: LevelRow[];
+  /** The level from which the gate lets Laya give this answer alone; null below it, and always null where the point never lets Laya give it alone. */
   qualifiedLevel: number | null;
+  /**
+   * False where the point never lets Laya give this answer on its own (decisions/points.ts
+   * `layaMayTake`): it is measured like the others, and however well it agrees, the incumbent decides.
+   */
+  mayDecideAlone: boolean;
 }
 
 export interface PointReport {
@@ -106,6 +112,7 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
     const agreeing = both.filter((row) => row.laya!.choice === row.incumbent!.choice).length;
     // The gate's recall guard: the cases the incumbent answered the point's protected answer.
     const protect = DECISION_POINTS[point as DecisionPointId]?.protect;
+    const mayTake = DECISION_POINTS[point as DecisionPointId]?.layaMayTake;
     const protectedRows = protect ? both.filter((row) => row.incumbent!.choice === protect) : [];
     // What the gate itself keeps: per answer, the newest cases with a finite confidence, in ledger order.
     const kept = new Map<string, LedgerRow[]>();
@@ -137,7 +144,8 @@ export function buildDecisionReport(rows: LedgerRow[], target: number, min: numb
         { targetAgreement: target, minSamples: min },
         guarded ? { answer, protectedCases: guardCases.map((row) => ({ answer: row.laya!.choice, top: row.laya!.top })) } : undefined,
       );
-      return { answer, levels, qualifiedLevel };
+      const mayDecideAlone = mayTake === undefined || mayTake.includes(answer);
+      return { answer, levels, qualifiedLevel: mayDecideAlone ? qualifiedLevel : null, mayDecideAlone };
     });
     return {
       point,
@@ -159,7 +167,7 @@ function pct(value: number | null): string {
   return value === null ? "–" : `${(value * 100).toFixed(1)}%`;
 }
 
-function render(report: PointReport[], target: number, min: number): string {
+export function renderDecisionReport(report: PointReport[], target: number, min: number): string {
   const floor = levelSampleFloor({ targetAgreement: target, minSamples: min });
   const lines = [
     `Decision ledger — agreement with the incumbent. The gate tests the levels from the highest down and stops at the first below a lower bound of ${pct(target)}; `
@@ -172,7 +180,11 @@ function render(report: PointReport[], target: number, min: number): string {
     for (const answer of point.answers) {
       const levels = answer.levels.filter((row) => row.cases > 0)
         .map((row) => `≥${row.level}: ${row.cases} cases ${pct(row.agreement)} (lb ${pct(row.lowerBound)})`).join(" | ");
-      lines.push(`   Laya says "${answer.answer}" → ${answer.qualifiedLevel === null ? "not qualified" : `qualified from ${answer.qualifiedLevel}`}`);
+      const allowed = DECISION_POINTS[point.point as DecisionPointId]?.layaMayTake ?? [];
+      const verdict = !answer.mayDecideAlone
+        ? `never decides alone (${point.point} lets Laya give only ${allowed.map((a) => `"${a}"`).join(", ")} on its own)`
+        : answer.qualifiedLevel === null ? "not qualified" : `qualified from ${answer.qualifiedLevel}`;
+      lines.push(`   Laya says "${answer.answer}" → ${verdict}`);
       if (levels) lines.push(`      ${levels}`);
     }
     lines.push("");
@@ -194,7 +206,7 @@ async function main(): Promise<void> {
     ...browserRowsForReport(await readLedgerRows(browserLedger) as unknown as Array<Record<string, unknown>>),
   ];
   const report = buildDecisionReport(rows, target, min);
-  console.log(process.argv.includes("--json") ? JSON.stringify(report, null, 2) : render(report, target, min));
+  console.log(process.argv.includes("--json") ? JSON.stringify(report, null, 2) : renderDecisionReport(report, target, min));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

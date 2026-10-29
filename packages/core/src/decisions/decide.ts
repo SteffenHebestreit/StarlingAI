@@ -44,12 +44,6 @@ export interface DecisionRequest<T> {
   toKey: (value: T) => string;
   /** The decision an option key stands for. */
   fromKey: (key: string) => T;
-  /**
-   * The answers Laya may give on its own; default all. The others still go to the incumbent — for
-   * an answer only the incumbent can act on, such as the receptionist's "small talk", whose reply
-   * only the LLM can write. Laya is asked either way, so every answer keeps being measured.
-   */
-  layaMayTake?: readonly string[];
   sessionId?: string;
   /** The caller's own cancellation: aborts the question to Laya as well. */
   signal?: AbortSignal;
@@ -152,7 +146,7 @@ const NEVER_ABORTED = new AbortController().signal;
 function layaCouldDecide(request: DecisionRequest<unknown>, mode: DecisionMode, language: LanguageBucket, adaptive: GateSettings): boolean {
   if (mode === "laya") return true;
   const expected = expectedLayaModel(request.point);
-  const answers = request.layaMayTake ?? Object.keys(request.point.options);
+  const answers = request.point.layaMayTake ?? Object.keys(request.point.options);
   return answers.some((answer) => (expected !== null ? [expected] : modelsWithSamples(request.point.id, language, answer))
     .some((model) => qualifiedLevel(request.point.id, language, answer, adaptive, model, request.point.protect) !== null));
 }
@@ -233,7 +227,7 @@ export async function decide<T>(request: DecisionRequest<T>): Promise<DecisionOu
     laya = await layaAnswer;
   }
   const layaQualifies = laya !== null
-    && (request.layaMayTake?.includes(laya.choice) ?? true)
+    && (request.point.layaMayTake?.includes(laya.choice) ?? true)
     && (mode === "laya" ? laya.top >= threshold : layaMayDecide(request.point.id, language, laya.choice, laya.top, adaptive, laya.model, request.point.protect));
   // A share of the cases Laya would take still goes to the incumbent in adaptive mode: without
   // them the agreement could not be measured once Laya decides, and drift would go unseen.
