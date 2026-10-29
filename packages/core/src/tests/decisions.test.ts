@@ -582,6 +582,25 @@ describe("a point read through its own window", () => {
   });
 });
 
+describe("a point's own timeout", () => {
+  it("waits longer for a point no turn waits on, and only for that point", async () => {
+    // One global limit, a longer one for finding_relevant; the decider answers both after 200 ms.
+    await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "shadow", timeoutMs: 100, points: { finding_relevant: { timeoutMs: 1_000 } } });
+    vi.stubGlobal("fetch", vi.fn((_url: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const body = JSON.parse(String(init?.body)) as { questions: Array<{ id: string; options: Record<string, string> }> };
+      const question = body.questions[0]!;
+      const [first, second] = Object.keys(question.options);
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify({
+        answers: { [question.id]: { choice: first, probabilities: { [first!]: 0.9, [second!]: 0.1 } } },
+        model: "laya-test",
+      }), { status: 200, headers: { "Content-Type": "application/json" } })), 200);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal!.reason); });
+    })));
+    expect((await decisions.askLaya(decisions.FINDING_RELEVANT, { objective: ENGLISH, content: "Prices: 4.90 EUR." }))?.choice).toBe("relevant");
+    expect(await decisions.askLaya(decisions.FAST_LANE, { message: ENGLISH }), "the global limit still holds elsewhere").toBeNull();
+  });
+});
+
 describe("the ledger", () => {
   it("rebuilds the gate's evidence at start, from cases where both answered", async () => {
     await writeConfig({ baseUrl: "http://laya:8080", defaultMode: "adaptive", adaptive: { targetAgreement: 0.9, minSamples: 30, auditRate: 0 } });
