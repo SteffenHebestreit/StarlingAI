@@ -129,6 +129,11 @@ export async function runLabAttempt(task: HarnessTask, arm: LabArm, opts: RunAtt
             // Nobody is there to approve. --auto approves only the tools that run in a sandbox of
             // their own; every other call that needs approval is refused, as a person declining would.
             approvalCallback: async (tool) => flags.autoApprove && SELF_SANDBOXING_TOOLS.has(tool),
+            // Everything else --auto does in the chat it does here: the forced first call of an
+            // artifact build, ask_user answering itself. Without it the lab's base ran with that call
+            // never armed, and answered the Mermaid task inline in one run of four (night of
+            // 2026-10-28): the failure the forced call is there to prevent.
+            unattended: flags.autoApprove,
             turnTimeoutOverrideMs: turn.timeoutMs ?? (flags.turnTimeoutSec !== undefined ? flags.turnTimeoutSec * 1000 : undefined) ?? task.timeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
             onToolCall: (id, name, args) => { toolCalls.set(id, { id, name, args }); },
             onToolResult: (id, name, result) => {

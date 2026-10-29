@@ -79,6 +79,11 @@ export interface RunTurnOptions {
   humanInLoopSteps?: string[];
   /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
   autoApprove?: boolean;
+  /** The turn runs with nobody watching (`--auto`): the forced first call of
+   *  orchestration.autonomousModeAntiRefusal, ask_user answering itself, routing's `autonomous`
+   *  input. Unset, it follows autoApprove, which the chat sets for `--auto`. A caller that runs an
+   *  `--auto` turn but approves tools itself (the harness lab) sets this alone. */
+  unattended?: boolean;
   /** Override sub-agent maxIterations for delegated tasks this turn. 0 disables the cap. */
   maxIterationsOverride?: number;
   /** When set, this turn is a tool-dev session — iteration limits are lifted. */

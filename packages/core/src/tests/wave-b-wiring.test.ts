@@ -17,7 +17,7 @@ describe("wave B/C wiring is in place", () => {
     expect(count(runtime, "filterForcedOrchestrationTools(activeTools, forcedPlanState)")).toBe(1);
     expect(count(runtime, "[MID_TURN_USER_MESSAGE_METADATA]: true")).toBe(2);   // steering + oversight redirect
     expect(count(runtime, "runArtifactVerificationGate({")).toBeGreaterThanOrEqual(1);   // the relay path
-    expect(count(runtime, "inputCallback: opts.inputCallback ?? (opts.autoApprove ? unattendedInputCallback : undefined)")).toBe(1);
+    expect(count(runtime, "inputCallback: opts.inputCallback ?? (unattended ? unattendedInputCallback : undefined)")).toBe(1);
     expect(count(runtime, "allowedAgents: opts.allowedAgents,")).toBeGreaterThanOrEqual(2);  // tool context + prompt assembly
     expect(count(runtime, "startsTurn(")).toBeGreaterThanOrEqual(2);      // this turn's artifacts, the prior-turn window
   });
