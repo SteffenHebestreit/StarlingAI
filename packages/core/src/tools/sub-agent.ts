@@ -319,6 +319,31 @@ function getTotalDelegationLimit(ctx: ToolContext): number {
 }
 
 export function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+  return raiseDelegationAllowance(ctx, agentNames, plannedDelegations, () => 0);
+}
+
+/**
+ * The allowance for a batch of a recorded plan's steps (execute_plan): each agent may run once more
+ * per step of the batch than it already has this turn. The repeat cap stops a model re-delegating
+ * the same work by hand; a plan scheduled its steps up front, and the executor charges every one to
+ * delegate_to_agent's own per-turn limit. The fan-out allowance (the batch's own count) left a
+ * sequence of three steps on one specialist refused at the third, and a retried step refused once
+ * its agent had run twice — the retry the executor itself asks for. The turn's counters are created
+ * on the caller's context first, so every batch's copy adds to the same tally.
+ */
+export function withScheduledDelegationAllowance(ctx: ToolContext, agentNames: Array<string | undefined>, plannedDelegations: number): ToolContext {
+  if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
+  const turnCounts = ctx._turnAgentCounts;
+  return raiseDelegationAllowance(ctx, agentNames, plannedDelegations, (agentName) => turnCounts.get(agentName) ?? 0);
+}
+
+function raiseDelegationAllowance(
+  ctx: ToolContext,
+  agentNames: Array<string | undefined>,
+  plannedDelegations: number,
+  alreadyRun: (agentName: string) => number,
+): ToolContext {
   const counts = new Map<string, number>();
   for (const agentName of agentNames) {
     const normalized = agentName?.trim();
@@ -332,8 +357,9 @@ export function withDelegationFanoutAllowance(ctx: ToolContext, agentNames: Arra
 
   let changed = false;
   for (const [agentName, count] of counts.entries()) {
-    if (count <= DEFAULT_MAX_AGENT_CALLS_PER_TURN) continue;
-    const nextLimit = Math.max(repeatOverrides[agentName] ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN, count);
+    const needed = alreadyRun(agentName) + count;
+    if (needed <= DEFAULT_MAX_AGENT_CALLS_PER_TURN) continue;
+    const nextLimit = Math.max(repeatOverrides[agentName] ?? DEFAULT_MAX_AGENT_CALLS_PER_TURN, needed);
     if (repeatOverrides[agentName] !== nextLimit) {
       repeatOverrides[agentName] = nextLimit;
       changed = true;

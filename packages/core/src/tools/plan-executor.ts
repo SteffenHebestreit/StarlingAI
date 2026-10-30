@@ -30,7 +30,7 @@ import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
-import { withDelegationFanoutAllowance, withTurnGatherRole, withoutProgressMilestones, batchEvidenceGatherPoint } from "./sub-agent.js";
+import { withScheduledDelegationAllowance, withTurnGatherRole, withoutProgressMilestones, batchEvidenceGatherPoint } from "./sub-agent.js";
 import { isWebReachingToolName } from "./agent-routing.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
@@ -664,11 +664,14 @@ registerTool({
       const stillOut = new Set(batch.map((step) => step.id));
       if (mayGather && gatherPointId === undefined) gatherPointId = batchGatherPoint(batch, ctx);
       // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
-      // specialist was refused at the third — every other fan-out tool raises the allowance for the
-      // batch it is about to issue, and this one did not.
-      const batchCtx = batch.length > 1
-        ? withDelegationFanoutAllowance(ctx, batch.map((step) => step.agent), batch.length)
-        : ctx;
+      // specialist was refused at the third. Raised for parallel batches only, the same three steps
+      // as a sequence still were (nightly lab 2026-10-30: one page per step, all content_writer).
+      // Every batch now gets room for its own steps on top of what each agent has already run.
+      const batchCtx = withScheduledDelegationAllowance(
+        ctx,
+        batch.map((step) => (step.kind === "delegate" ? step.agent : undefined)),
+        batch.length,
+      );
       const outcomes = await Promise.all(
         batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => {
           stillOut.delete(step.id);
