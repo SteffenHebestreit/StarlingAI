@@ -499,7 +499,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:994 | 23 |
 | `tags` | packages/core/src/config/schema.ts:641 | 81 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:78 | 5 |
-| `task` | packages/core/src/config/schema.ts:1373 | 179 |
+| `task` | packages/core/src/config/schema.ts:1373 | 180 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1969 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:510 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:726 | 1 |
