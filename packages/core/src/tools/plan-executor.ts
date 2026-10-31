@@ -143,6 +143,44 @@ export function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: Reado
   return parts.join(PLAN_STEP_SECTION_SEPARATOR);
 }
 
+/** How many of the plan's other steps a step is shown, and how much of each one's description. */
+const REST_OF_PLAN_MAX_STEPS = 8;
+const REST_OF_PLAN_DESCRIPTION_CHARS = 200;
+/** Opens the context a dispatched step is handed when the plan has other steps. Exported for tests. */
+export const PLAN_REST_OF_PLAN_LEAD =
+  "THE REST OF THE PLAN — each of these is a step of its own, done in its own run. Do only your STEP: "
+  + "do not start on any of these, and do not report them as missing.";
+
+/**
+ * The plan's other steps, handed to a dispatched step as its context, or undefined when it is the
+ * plan's only step.
+ *
+ * A step's task carries the turn's objective and acceptance criteria (buildStepTask), and they name
+ * every part of the turn. In the harness-lab task asking for an HTML chart and a .docx report (one
+ * step each), chart_designer took the report for its own work in all six runs, with the agent
+ * consultation and without: write_file on a .doc and a .docx (refused), generate_document, a
+ * create_docx.py, and a reply saying the report had failed. content_writer's step had made the
+ * .docx, and the QA verdict believed the failure. Shown the other steps, a step can see which part
+ * is someone else's.
+ *
+ * It is the context, not the task: delegate_to_agent routes a step that names no agent on its task,
+ * dedups a repeated one by it and runs its keyword tests over it, and none of them should read the
+ * other steps' words as this one's. Exported for tests.
+ */
+export function buildRestOfPlan(plan: TurnPlan, step: TurnPlanStep): string | undefined {
+  const others = plan.steps.filter((other) => other.id !== step.id);
+  if (others.length === 0) return undefined;
+  const lines = others.slice(0, REST_OF_PLAN_MAX_STEPS).map((other) => {
+    const description = other.description.replace(/\s+/g, " ").trim();
+    const clipped = description.length > REST_OF_PLAN_DESCRIPTION_CHARS
+      ? `${description.slice(0, REST_OF_PLAN_DESCRIPTION_CHARS)}…`
+      : description;
+    return `- ${other.id}${other.agent ? ` (${other.agent})` : ""}: ${defangFramingMarkers(clipped)}`;
+  });
+  if (others.length > REST_OF_PLAN_MAX_STEPS) lines.push(`- …and ${others.length - REST_OF_PLAN_MAX_STEPS} more`);
+  return [PLAN_REST_OF_PLAN_LEAD, ...lines].join("\n");
+}
+
 interface StepRun {
   status: TurnPlanStepStatus;
   /** The call this step actually made, for the turn to account for as its own. */
@@ -196,11 +234,13 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
     }
     return { tool: "run_workflow", args: { name: step.workflow, context: buildStepTask(plan, step, results) } };
   }
+  const restOfPlan = buildRestOfPlan(plan, step);
   return {
     tool: "delegate_to_agent",
     args: {
       ...(step.agent ? { agentName: step.agent } : {}),
       task: buildStepTask(plan, step, results),
+      ...(restOfPlan ? { context: restOfPlan } : {}),
       ...(step.deliverable ? { deliverable: step.deliverable } : {}),
     },
   };

@@ -36,6 +36,10 @@ registerTool({
   name: "generate_document",
   description:
     "Save a workspace document as Markdown, text, HTML, or JSON. " +
+    // Asked for a Word report, a run holding only this tool saved HTML and answered that a .docx
+    // could not be made, while another step had made it with generate_docx (harness-lab, the
+    // chart-and-report task); the QA verdict believed the answer.
+    "It does not make Word, PowerPoint or PDF files: generate_docx, generate_pptx and render_pdf do. " +
     "Use this for reports, handoff notes, briefs, and exportable artifacts. " +
     "You MUST supply the complete document text in `content` — this tool writes exactly what you pass, it does not author content itself.",
   embeddingDescription: "Generate, create, produce a document, report, brief, artifact. Dokument erstellen, Bericht generieren, Markdown speichern, Artefakt produzieren. Final deliverable, downloadable report.",

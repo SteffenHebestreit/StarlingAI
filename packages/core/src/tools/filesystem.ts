@@ -320,6 +320,35 @@ function countLines(text: string): number {
 export const MISSING_FILE_IS_NOT_A_CHANGE =
   "Creating this file is a different action from changing it: if your task is to change it, report it as missing instead of creating it.";
 
+/** The binary formats write_file refuses that another tool makes: the format it makes, and the tool. */
+const BINARY_FORMAT_MAKERS: Readonly<Record<string, { format: string; tool: string }>> = {
+  ".docx": { format: ".docx", tool: "generate_docx" },
+  ".doc": { format: ".docx", tool: "generate_docx" },
+  ".pptx": { format: ".pptx", tool: "generate_pptx" },
+  ".ppt": { format: ".pptx", tool: "generate_pptx" },
+  ".pdf": { format: ".pdf", tool: "render_pdf" },
+};
+
+/**
+ * The line write_file adds when it refuses a binary format another tool makes, or null for any
+ * other refused type.
+ *
+ * "File type .docx is not allowed for writing" read as ".docx cannot be made". In the harness-lab
+ * task asking for an HTML chart and a .docx report, chart_designer (which holds write_file and not
+ * generate_docx) tried write_file on a .docx in 9 of 18 runs, was refused, and answered that the
+ * report could not be made as a .docx, while content_writer's step had made it with generate_docx.
+ * The QA verdict believed the failure. The refusal now says which tool makes the format and that a
+ * run without it leaves the file to an agent that has it. It sits on its own line after the
+ * refusal, so the first line, which audit rows and failure lists keep, is unchanged. Exported for
+ * tests.
+ */
+export function binaryFormatMakerNote(ext: string): string | null {
+  const maker = BINARY_FORMAT_MAKERS[ext];
+  if (!maker) return null;
+  return `write_file writes text only; a ${maker.format} file is made with ${maker.tool}. Use it if it is among your tools; `
+    + `if it is not, the file is another agent's to make: leave it to that agent, and do not report the format as impossible.`;
+}
+
 /**
  * The files each run found missing (read_file, edit_file), and those its write_file already asked about.
  *
@@ -765,7 +794,8 @@ registerTool({
 
     const ext = extname(resolved).toLowerCase();
     if (!ALLOWED_EXTENSIONS.has(ext) && ext !== "") {
-      return { success: false, output: "", error: `File type ${ext} is not allowed for writing` };
+      const makerNote = binaryFormatMakerNote(ext);
+      return { success: false, output: "", error: `File type ${ext} is not allowed for writing${makerNote ? `\n${makerNote}` : ""}` };
     }
 
     if (firstCreateOfMissingFile(ctx, resolved)) {

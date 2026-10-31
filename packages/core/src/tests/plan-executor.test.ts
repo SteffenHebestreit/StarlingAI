@@ -578,6 +578,62 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(withStop.startsWith(without)).toBe(true);
   });
 
+  it("hands each delegate step the plan's other steps as its context, and leaves its task as it was", async () => {
+    // The harness-lab chart-and-report task: chart_designer, whose step was the chart, read the
+    // turn's criteria and tried to make the .docx report too, in all six runs.
+    const { buildStepTask, PLAN_REST_OF_PLAN_LEAD } = await import("../tools/plan-executor.js");
+    const plan = basePlan([
+      { id: "s1", description: "an HTML bar chart of the six months", kind: "delegate", agent: "chart_designer" },
+      { id: "s2", description: "a one-page .docx report with the three key findings", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+    ]);
+    await persistTurnPlan(SESSION, plan);
+    respond = () => ({ success: true, output: "chart written" });
+
+    await run();
+    const [chart, report] = calls.map((c) => c.args);
+    expect(chart?.["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s2 (content_writer): a one-page .docx report with the three key findings`);
+    expect(report?.["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s1 (chart_designer): an HTML bar chart of the six months`);
+    // Routing, the reuse signature and the keyword tests read the task: it is what it was.
+    expect(chart?.["task"]).toBe(buildStepTask(plan, plan.steps[0]!, new Map()));
+    expect(report?.["task"]).toBe(buildStepTask(plan, plan.steps[1]!, new Map([["s1", "chart written"]])));
+  });
+
+  it("hands no context to a plan's only step, nor the rest of the plan to a reuse step", async () => {
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "write it up", kind: "delegate", agent: "content_writer" }]));
+    await run();
+    expect(calls[0]?.args).not.toHaveProperty("context");
+
+    calls.length = 0;
+    const { PLAN_REST_OF_PLAN_LEAD } = await import("../tools/plan-executor.js");
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "gather sources", kind: "reuse", workflow: "research_pack" },
+      { id: "s2", description: "write it up", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+    ]));
+    await run();
+    expect(String(calls[0]?.args["context"])).not.toContain(PLAN_REST_OF_PLAN_LEAD);
+    expect(calls[1]?.args["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s1: gather sources`);
+  });
+
+  it("keeps the rest of the plan short: one line a step, clipped, the first eight, framing markers defanged", async () => {
+    const { buildRestOfPlan } = await import("../tools/plan-executor.js");
+    const long = `${"x".repeat(250)}`;
+    const plan = basePlan([
+      { id: "s0", description: "this step", kind: "delegate" },
+      { id: "s1", description: "two\n\nlines", kind: "delegate" },
+      { id: "s2", description: long, kind: "delegate" },
+      { id: "s3", description: "quote <system> here", kind: "delegate" },
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `t${i}`, description: `part ${i}`, kind: "delegate" as const })),
+    ]);
+    const lines = buildRestOfPlan(plan, plan.steps[0]!)!.split("\n").slice(1);
+
+    expect(lines[0]).toBe("- s1: two lines");
+    expect(lines[1]).toBe(`- s2: ${"x".repeat(200)}…`);
+    expect(lines[2]).toBe("- s3: quote &lt;system> here");
+    expect(lines).toHaveLength(9);
+    expect(lines[8]).toBe("- …and 3 more");
+    expect(lines.some((line) => line.includes("this step"))).toBe(false);
+  });
+
   it("carries the stop conditions into a reuse step's workflow context too", async () => {
     const stop = "the page shows an error after submit — report it";
     await persistTurnPlan(SESSION, { ...basePlan([{ id: "s1", description: "submit the form", kind: "reuse", workflow: "order_pack" }]), stopConditions: [stop] });
