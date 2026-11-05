@@ -13,10 +13,12 @@
  * - step: when a plan step finishes or fails: which one, what it produced, what runs now, what is next.
  *
  * Each message has a fixed wording in German or English, filled with the plan's own step
- * descriptions. With orchestration.progressMessagePhrasing a routing-tier model words it instead,
- * from the same facts; what it writes is taken only when it stays short and names no number the
- * facts do not hold. It gets orchestration.progressMessagePhrasingTimeoutMs, and the fixed wording
- * goes out when that runs out: the model may be busy with the turn's own specialists.
+ * descriptions. With orchestration.progressMessagePhrasing the narration-tier model
+ * (agents.defaults.model.tiers.narration) words it instead, from the same facts; what it writes is
+ * taken only when it stays short and names no number the facts do not hold. It gets
+ * orchestration.progressMessagePhrasingTimeoutMs, and the fixed wording goes out when that runs out.
+ * Not the routing tier: that is often the task model itself, and in the lab (2026-11-05) it timed
+ * out on 10 of 13 messages while the turn's specialists kept it busy.
  *
  * Messages go out one at a time and in the order they were reported. When the turn ends, anything
  * still waiting goes out in its fixed wording, before the answer.
@@ -214,12 +216,15 @@ export function acceptPhrasing(facts: TurnProgressFacts, output: string): string
   return facts.kind === "plan" ? `${text}\n${planList(facts.steps)}` : text;
 }
 
-/** The phraser that asks the routing-tier model. */
-export function routingTierPhraser(provider: () => ChatProvider): ProgressPhraser {
+/**
+ * The phraser that asks the narration-tier model (agents.defaults.model.tiers.narration). Off the
+ * turn's critical path: a message waits for it, the turn does not.
+ */
+export function modelPhraser(provider: ChatProvider): ProgressPhraser {
   return async (facts, _fixedText, language, signal) => {
     const response = await runWithCallAttribution(
-      { callSite: "routing_tier", agentName: "progress_narrator" },
-      () => provider().complete(phrasingMessages(facts, language), [], signal, {
+      { callSite: "background", agentName: "progress_narrator" },
+      () => provider.complete(phrasingMessages(facts, language), [], signal, {
         maxTokens: 120,
         controls: { enableThinking: false, reasoningEffort: "none" },
       }),

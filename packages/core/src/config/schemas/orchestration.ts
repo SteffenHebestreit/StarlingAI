@@ -69,8 +69,9 @@ export const OrchestrationSchema = z.object({
    *  transcript before the answer and spoken when voice is on; never part of what the model reads.
    *  Only for a turn whose surface takes them live (the web chat). Default: true. */
   progressMessages: z.boolean().default(true),
-  /** Progress messages worded by the routing-tier model from the same facts, instead of the fixed
-   *  German or English sentences. The fixed wording goes out when the model is slower than
+  /** Progress messages worded by the narration-tier model (agents.defaults.model.tiers.narration)
+   *  from the same facts, instead of the fixed German or English sentences. Without a narration
+   *  model they keep the fixed wording; so does a message whose model is slower than
    *  progressMessagePhrasingTimeoutMs or writes something that cannot be taken. Default: true. */
   progressMessagePhrasing: z.boolean().default(true),
   /** How long a progress message waits for its model wording. Default: 3000. */

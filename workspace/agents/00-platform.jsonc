@@ -144,7 +144,12 @@
         // model instead and make it cheap with reasoning_effort "none" (measured: 0
         // reasoning chars, the fastest configuration available).
         "tiers": {
-          "routing": "lmstudio/qwen"
+          "routing": "lmstudio/qwen",
+          // Narration tier — the short messages a turn posts while it works (its plan, a finished
+          // step). Not the task model: on lmstudio/qwen they timed out on 10 of 13 under load in the
+          // lab (2026-11-05). "translate" is Gemma 4 E4B on corsair (8 slots), already resident:
+          // 0.3-1.3 s per message, the same German as qwen's.
+          "narration": "lmstudio/translate"
         }
       }
     },

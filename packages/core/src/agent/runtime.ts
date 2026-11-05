@@ -162,7 +162,7 @@ import {
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, defaultReplyLanguage, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
-import { createTurnProgressReporter, progressBridgeTargets, routingTierPhraser, type TurnProgressFacts, type TurnProgressReporter } from "./turn-progress.js";
+import { createTurnProgressReporter, modelPhraser, progressBridgeTargets, type TurnProgressFacts, type TurnProgressReporter } from "./turn-progress.js";
 import { TURN_STATUS } from "./turn-status-text.js";
 import { executeVisibleTool } from "./visible-tool.js";
 
@@ -1273,6 +1273,10 @@ function startTurnProgress(opts: RunTurnOptions, language: string | undefined): 
   const orchestration = effectiveOrchestration();
   if (!opts.onProgressMessage || orchestration.progressMessages === false) return undefined;
   const onProgressMessage = opts.onProgressMessage;
+  // Worded by the narration tier only: the routing tier is often the task model itself, and under
+  // load it timed out on 10 of 13 messages. Without a narration model (or under a model preset,
+  // which drops the tiers) every message keeps its fixed wording.
+  const narrator = orchestration.progressMessagePhrasing !== false ? getChatProviderForTier("narration") : null;
   return createTurnProgressReporter({
     deliver: ({ kind, text }) => {
       const stored = opts.session.addProgressMessage({ kind, text });
@@ -1280,7 +1284,7 @@ function startTurnProgress(opts: RunTurnOptions, language: string | undefined): 
       return stored;
     },
     language: language ?? defaultReplyLanguage(),
-    ...(orchestration.progressMessagePhrasing !== false ? { phrase: routingTierPhraser(resolveRoutingTierProvider) } : {}),
+    ...(narrator ? { phrase: modelPhraser(narrator) } : {}),
     phrasingTimeoutMs: orchestration.progressMessagePhrasingTimeoutMs ?? 3_000,
     bridgeDelayMs: orchestration.progressBridgeDelayMs ?? 2_500,
     ...(opts.signal ? { signal: opts.signal } : {}),

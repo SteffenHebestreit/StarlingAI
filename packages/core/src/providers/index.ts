@@ -400,12 +400,14 @@ export function getChatProviderWithOverride(override: Partial<ModelConfig>): Cha
  * user's first token. A verdict call defaults to thinking-off, expressed both ways so it survives
  * a model swap; a caller that genuinely needs deliberation passes an override, which wins.
  */
-export function tierModelDefaults(tier: "routing" | "synthesis"): Partial<ModelConfig> {
-  return tier === "routing" ? { enableThinking: false, reasoningEffort: "none" } : {};
+export type ModelTier = "routing" | "synthesis" | "narration";
+
+export function tierModelDefaults(tier: ModelTier): Partial<ModelConfig> {
+  return tier === "routing" || tier === "narration" ? { enableThinking: false, reasoningEffort: "none" } : {};
 }
 
 export function getChatProviderForTier(
-  tier: "routing" | "synthesis",
+  tier: ModelTier,
   override: Partial<ModelConfig> = {},
 ): ChatProvider | null {
   const config = getConfig();
