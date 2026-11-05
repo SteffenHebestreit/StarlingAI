@@ -1560,6 +1560,12 @@ onBeforeUnmount(() => {
   color: #d6d0e6;
 }
 
+/* The plan's steps are numbered: a later message says "step 2 of 4". The base styles take every
+   list marker away, an answer's too. */
+.message-bubble--progress :deep(ol) {
+  list-style: decimal;
+}
+
 .progress-eyebrow {
   font-size: 0.68rem;
   letter-spacing: 0.08em;
