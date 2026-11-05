@@ -76,6 +76,13 @@ describe("what the model writes is taken only when it can be", () => {
       .toContain("27,600");
   });
 
+  it("takes a plan's first line only, so a model that writes the list out again does not show it twice", () => {
+    const repeated = "Ich arbeite gerade an deinem Auftrag:\n1. HTML bar chart of the six months (chart_designer)\n2. One-page Word report (.docx) with three findings (content_writer)";
+    const taken = acceptPhrasing(PLAN, repeated)!;
+    expect(taken.split("\n")[0]).toBe("Ich arbeite gerade an deinem Auftrag:");
+    expect(taken.match(/HTML bar chart/g)).toHaveLength(1);
+  });
+
   it("refuses a number the facts do not hold, markup, a reasoning block, a second paragraph or a long text", () => {
     expect(acceptPhrasing(STEP_DONE, "The chart is ready; sales grew 42% overall.")).toBeNull();
     expect(acceptPhrasing(BRIDGE, "<think>hm</think> Let me check.")).toBeNull();

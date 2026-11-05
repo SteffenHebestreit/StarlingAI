@@ -171,19 +171,22 @@ function factsText(facts: TurnProgressFacts): string {
   const lines = [
     `Step ${facts.position} of ${facts.total} ${facts.outcome === "done" ? "finished" : "failed"}: ${sentence(facts.step.description)}`,
   ];
-  if (facts.result) lines.push(`What it answered: ${facts.result.slice(0, RESULT_CHARS_FOR_MODEL)}`);
+  if (facts.result) lines.push(`Its report, for a key result of THIS step only: ${facts.result.slice(0, RESULT_CHARS_FOR_MODEL)}`);
   if (facts.files?.length) lines.push(`Files it produced: ${facts.files.join(", ")}`);
   if (facts.reason) lines.push(`Why it failed: ${facts.reason}`);
   if (facts.running.length) lines.push(`Still running: ${stepNames(facts.running)}`);
   if (facts.next) lines.push(`Next: ${sentence(facts.next.description)}`);
-  if (!facts.running.length && !facts.next) lines.push("Nothing else in the plan is left; the answer comes next.");
+  if (!facts.running.length && !facts.next) lines.push("That was the last step: what comes next is putting the answer together for the person.");
   return lines.join("\n");
 }
 
 const ASK: Record<TurnProgressKind, string> = {
   bridge: "Write ONE short sentence (at most 15 words) saying what you are checking first, like \"Let me check your calendar.\" Do not say what you will find.",
   plan: "Write ONE short sentence that introduces the plan; the steps are shown right after it as a numbered list, so do not repeat them.",
-  step: "Write one or two short sentences: what was just finished (with its key result, if it has one) and what happens now or next.",
+  // In the lab a coder's report on step 2 described step 1's file, and the message named that file as
+  // step 2's; after the last step the model said it would "proceed to the next step".
+  step: "Write one or two short sentences: that the step named above finished (call it what it is called there), its key result if "
+    + "its report gives one for that step, and what happens now or next — after the last step, that you are putting the answer together.",
 };
 
 /** The messages the routing-tier model is asked with. Exported for tests. */
@@ -206,7 +209,10 @@ export function phrasingMessages(facts: TurnProgressFacts, language: string): Ar
  * for tests.
  */
 export function acceptPhrasing(facts: TurnProgressFacts, output: string): string | null {
-  let text = output.trim().replace(/^["'„“”«»]+|["'„“”«»]+$/gu, "").trim();
+  // A plan's line is its first: the narration model wrote the list out again in 3 of 6 tries, and
+  // below it the list is added from the plan itself.
+  const own = facts.kind === "plan" ? output.trim().split(/\r?\n/)[0] ?? "" : output;
+  let text = own.trim().replace(/^["'„“”«»]+|["'„“”«»]+$/gu, "").trim();
   if (!text || /<\/?think|^[[{]|```|^#|\n\s*\n/iu.test(text)) return null;
   text = text.replace(/\s+/g, " ");
   if (text.length > MAX_WORDED_CHARS[facts.kind]) return null;
