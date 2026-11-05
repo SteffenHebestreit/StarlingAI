@@ -163,6 +163,7 @@ export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
 import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, defaultReplyLanguage, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
 import { createTurnProgressReporter, modelPhraser, progressBridgeTargets, type TurnProgressFacts, type TurnProgressReporter } from "./turn-progress.js";
+import { agentNameIsCoordinator } from "./coordinator-agents.js";
 import { TURN_STATUS } from "./turn-status-text.js";
 import { executeVisibleTool } from "./visible-tool.js";
 
@@ -1287,6 +1288,7 @@ function startTurnProgress(opts: RunTurnOptions, language: string | undefined): 
     ...(narrator ? { phrase: modelPhraser(narrator) } : {}),
     phrasingTimeoutMs: orchestration.progressMessagePhrasingTimeoutMs ?? 3_000,
     bridgeDelayMs: orchestration.progressBridgeDelayMs ?? 2_500,
+    isCoordinator: agentNameIsCoordinator,
     ...(opts.signal ? { signal: opts.signal } : {}),
     sessionId: opts.session.id,
   });
@@ -1349,6 +1351,8 @@ async function runTurnImpl(opts: RunTurnOptions, progress?: TurnProgressReporter
   let lastSubAgentProgressAt = 0;
   const noteSubAgentProgress: NonNullable<RunTurnOptions["onSubAgentProgress"]> = (event) => {
     lastSubAgentProgressAt = Date.now();
+    // Who is still working, at every depth, for the progress messages' milestones.
+    progress?.noteSpecialist(event);
     opts.onSubAgentProgress?.(event);
   };
   // THE ORCHESTRATOR IS A GENERATION TOO.

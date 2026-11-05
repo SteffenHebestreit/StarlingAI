@@ -2690,6 +2690,8 @@ export interface SubAgentRunOptions {
   signal?: AbortSignal;
   approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
   onProgress?: (event: SubAgentProgressEvent) => void;
+  /** The turn's progress reporter (agent/turn-progress.ts), for the run's own delegations: a coordinator's specialists tell their finishes. */
+  reportProgress?: ToolContext["reportProgress"];
   humanInLoopSteps?: string[];
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
@@ -3923,6 +3925,9 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       // The child's own delegations report to the same progress sink as the parent's, so a nested
       // specialist's start, finish and tool calls reach the dashboard instead of stopping one level down.
       onSubAgentProgress: opts.onProgress,
+      // So do their finishes, as milestones of the turn's progress messages: a coordinator records
+      // no plan, and its specialists coming back is what the person can be told of its work.
+      ...(opts.reportProgress ? { reportProgress: opts.reportProgress } : {}),
       onComputerAction: opts.onComputerAction,
       onComputerScreenshot: opts.onComputerScreenshot,
       onComputerSessionState: opts.onComputerSessionState,

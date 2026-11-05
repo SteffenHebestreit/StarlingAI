@@ -265,8 +265,8 @@ export function useVoice(options: UseVoiceOptions) {
     else say(cue.approval ? "approval" : "needsInput", turn.language);
   }
 
-  /** What a progress message tells of, for the narrator: its plan, or a step that came back. */
-  const PROGRESS_TELLS: Record<string, Milestone | undefined> = { plan: "planning", step: "delegating" };
+  /** What a progress message tells of, for the narrator: its plan, or a step or a specialist that came back. */
+  const PROGRESS_TELLS: Record<string, Milestone | undefined> = { plan: "planning", step: "delegating", milestone: "delegating" };
   let progressLines: Promise<unknown> = Promise.resolve();
 
   /**
