@@ -115,7 +115,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:591 | 13 |
 | `customInstructions` | packages/core/src/config/schema.ts:313 | 5 |
 | `dailyUsd` | packages/core/src/config/schema.ts:594 | 2 |
-| `default` | packages/core/src/config/schema.ts:1338 | 307 |
+| `default` | packages/core/src/config/schema.ts:1338 | 308 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1206 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1900 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1228 | 1 |
@@ -244,7 +244,7 @@ Every public schema field, where it is declared, and how many production files r
 | `label` | packages/core/src/config/schema.ts:290 | 165 |
 | `labeledAt` | packages/core/src/config/schema.ts:977 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:976 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:39 | 116 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:39 | 117 |
 | `layaFirstMs` | packages/core/src/config/schemas/decisions.ts:71 | 3 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1955 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:319 | 1 |
@@ -503,7 +503,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:994 | 23 |
 | `tags` | packages/core/src/config/schema.ts:641 | 81 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:78 | 5 |
-| `task` | packages/core/src/config/schema.ts:1373 | 180 |
+| `task` | packages/core/src/config/schema.ts:1373 | 181 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1969 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:525 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:726 | 1 |
