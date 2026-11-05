@@ -102,3 +102,20 @@ describe("tierModelDefaults — the controls the call sites lay over their OWN m
     expect(tierModelDefaults("synthesis")).toEqual({});
   });
 });
+
+describe("the narration tier — the short messages a turn posts while it works", () => {
+  it("is the configured small model with thinking off, none when unset, and none under a preset", () => {
+    // agent/turn-progress.ts words its messages on it; on the routing tier (the task model) they
+    // timed out on 10 of 13 under load. Unset, they keep their fixed wording.
+    expect(tierModelDefaults("narration")).toEqual({ enableThinking: false, reasoningEffort: "none" });
+    active = plainConfig;
+    expect(getChatProviderForTier("narration")).toBeNull();
+    active = configWith({ model: { primary: "lmstudio/qwen", enableThinking: true, tiers: { narration: "lmstudio/translate" } } });
+    const cfg = primaryModelConfig(getChatProviderForTier("narration"));
+    expect(cfg["primary"]).toBe("lmstudio/translate");
+    expect(cfg["enableThinking"]).toBe(false);
+    active = configWith({ activeModelPreset: "claude", model: { primary: "lmstudio/qwen", tiers: { narration: "lmstudio/translate" } } });
+    expect(getChatProviderForTier("narration")).toBeNull();
+    active = presetConfig;
+  });
+});

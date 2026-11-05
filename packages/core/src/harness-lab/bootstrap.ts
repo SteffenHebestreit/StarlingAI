@@ -63,6 +63,12 @@ export async function startLabProcess(outDir: string): Promise<LabProcess> {
     delete process.env[name];
   }
 
+  // The gateway loads the language detector at boot. Without it a turn's language is unknown at its
+  // start, and everything worded by it falls back to the configured default: an English lab task got
+  // German status lines and progress messages, and a reply-language instruction in that default.
+  const { warmTextLanguageDetector } = await import("../agent/text-language.js");
+  await warmTextLanguageDetector();
+
   const { loadConfig } = await import("../config/loader.js");
   const config = loadConfig({ skipCompiledWrite: true });
   const liveWorkspacePath = config.workspacePath;

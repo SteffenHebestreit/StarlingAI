@@ -34,6 +34,7 @@ import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherP
 import { isWebReachingToolName } from "./agent-routing.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+import { progressStepOf } from "../agent/turn-progress.js";
 // The labels of the turn context a step's task carries after its own line, shared with the readers
 // that measure what the step itself asks (taskOwnWordChars, delegationAsksForFile).
 import {
@@ -349,6 +350,47 @@ function batchGatherPoint(batch: readonly TurnPlanStep[], ctx: ToolContext): str
   return index >= 0 ? delegates[index]!.id : undefined;
 }
 
+/** The files a step's artifacts name, by their own name, each once. */
+function artifactNames(artifacts: readonly unknown[] | undefined): string[] {
+  const names = (artifacts ?? []).flatMap((artifact) => {
+    if (!artifact || typeof artifact !== "object") return [];
+    const record = artifact as Record<string, unknown>;
+    const path = [record["relativePath"], record["path"], record["filename"]].find((value) => typeof value === "string" && value.trim());
+    return typeof path === "string" ? [path.split(/[\\/]/).pop() ?? path] : [];
+  });
+  return [...new Set(names)];
+}
+
+/**
+ * The progress message for a step that came back (agent/turn-progress.ts): done or failed, what it
+ * produced, what runs beside it and the next step not yet started. A step handed back to the
+ * orchestrator (manual) did not run and posts nothing.
+ */
+function reportStepProgress(
+  plan: TurnPlan,
+  step: TurnPlanStep,
+  run: StepRun,
+  statuses: ReadonlyMap<string, TurnPlanStepStatus>,
+  stillOut: ReadonlySet<string>,
+  report: NonNullable<ToolContext["reportProgress"]>,
+): void {
+  if (run.status !== "done" && run.status !== "failed") return;
+  const next = plan.steps.find((other) => other.id !== step.id && !stillOut.has(other.id) && (statuses.get(other.id) ?? "pending") === "pending");
+  const files = artifactNames(run.artifacts);
+  report({
+    kind: "step",
+    step: progressStepOf(step),
+    position: plan.steps.findIndex((other) => other.id === step.id) + 1,
+    total: plan.steps.length,
+    outcome: run.status,
+    ...(run.status === "done" && run.result ? { result: run.result } : {}),
+    ...(files.length ? { files } : {}),
+    ...(run.status === "failed" && run.detail ? { reason: run.detail.slice(0, 160) } : {}),
+    running: plan.steps.filter((other) => stillOut.has(other.id)).map(progressStepOf),
+    ...(next ? { next: progressStepOf(next) } : {}),
+  });
+}
+
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
@@ -626,6 +668,9 @@ registerTool({
       if (round === maxRounds - 1) exitReason = "rounds";
 
       for (const step of batch) statuses.set(step.id, "running");
+      // Which of the batch are still out, for each finished step's progress message: statuses holds
+      // the whole batch as running until every one of them is back.
+      const stillOut = new Set(batch.map((step) => step.id));
       if (mayGather && gatherPointId === undefined) gatherPointId = batchGatherPoint(batch, ctx);
       // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
       // specialist was refused at the third — every other fan-out tool raises the allowance for the
@@ -634,7 +679,11 @@ registerTool({
         ? withDelegationFanoutAllowance(ctx, batch.map((step) => step.agent), batch.length)
         : ctx;
       const outcomes = await Promise.all(
-        batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => ({ step, run }))),
+        batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => {
+          stillOut.delete(step.id);
+          if (ctx.reportProgress) reportStepProgress(plan, step, run, statuses, stillOut, ctx.reportProgress);
+          return { step, run };
+        })),
       );
       for (const { step, run } of outcomes) {
         if (run.call) nestedCalls.push(run.call);

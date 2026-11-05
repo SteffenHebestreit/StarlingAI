@@ -95,6 +95,19 @@ export class TurnNarrator {
     this.options = { ...DEFAULT_NARRATOR_OPTIONS, ...options };
   }
 
+  /**
+   * The turn said something of its own just now — a progress message it posted (its plan, a step
+   * it finished). The silence counts from here, and the kind of work it told of is not announced
+   * again in a set phrase, which would cut it off mid-sentence at the same rank.
+   */
+  noteSpoken(now: number, told?: Milestone): void {
+    this.lastSpokenAt = now;
+    if (told) {
+      this.announced.add(told);
+      if (this.pending?.milestone === told) this.pending = null;
+    }
+  }
+
   /** The line to say now, if any. */
   observe(snapshot: NarratorSnapshot): NarratorCue | null {
     const { now } = snapshot;

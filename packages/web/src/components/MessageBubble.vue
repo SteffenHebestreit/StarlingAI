@@ -15,9 +15,12 @@
         : message.role === 'system'
           ? 'message-bubble--system'
           : 'message-bubble--ai',
-      message.blocked && !message.stopped && 'message-bubble--error'
+      message.blocked && !message.stopped && 'message-bubble--error',
+      message.progress && 'message-bubble--progress'
     ]">
 
+      <!-- A message the turn posted while it worked: its plan, a step it finished. Not its answer. -->
+      <div v-if="message.progress" class="progress-eyebrow">{{ turnText.progressLabel(bubbleLanguage) }}</div>
       <!-- A turn the user stopped: their choice, not an error. -->
       <div v-if="message.stopped" class="guardrail-badge guardrail-badge--stopped">{{ turnText.stoppedBadge(bubbleLanguage) }}</div>
       <!-- Guardrail / blocked badge -->
@@ -207,7 +210,7 @@
       <!-- Timestamp + usage row -->
       <div class="message-footer">
         <div class="message-time">{{ formatTime(message.timestamp) }}</div>
-        <div v-if="!isStreaming && mainContent" class="message-export-actions">
+        <div v-if="!isStreaming && mainContent && !message.progress" class="message-export-actions">
           <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
           <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
           <!-- Not on a message read mid-turn: restarting there would cut the turn it was read into
@@ -1546,6 +1549,29 @@ onBeforeUnmount(() => {
   box-shadow: 0 2px 20px rgba(0, 0, 0, 0.3);
   border-radius: 1.25rem 1.25rem 1.25rem 0.25rem;
   color: #e8e3f5;
+}
+
+/* A progress message: the assistant's own words while it works, quieter than its answer. */
+.message-bubble--progress {
+  background: rgba(30, 27, 46, 0.45);
+  border-color: rgba(168, 85, 247, 0.08);
+  box-shadow: none;
+  font-size: 0.92em;
+  color: #d6d0e6;
+}
+
+/* The plan's steps are numbered: a later message says "step 2 of 4". The base styles take every
+   list marker away, an answer's too. */
+.message-bubble--progress :deep(ol) {
+  list-style: decimal;
+}
+
+.progress-eyebrow {
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(196, 181, 253, 0.7);
+  margin-bottom: 0.25rem;
 }
 
 .message-bubble--system {

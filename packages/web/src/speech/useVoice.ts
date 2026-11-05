@@ -22,6 +22,7 @@ import { PhraseBook, phrasesFor, spokenPhraseLanguage, type PhraseKind } from ".
 import { SpeechPlayer, type SpeechActivity, type SpeechPriority } from "./speechPlayer";
 import { detectLanguage, isShortForSpeech, languageCode, leadSentences, toSpeakableText } from "./speechText";
 import { TurnNarrator } from "./turnNarrator";
+import type { Milestone } from "./speechPhrases";
 import { lastAssistantMessage, turnOutcome } from "./turnOutcome";
 import { VoiceCapture, type Utterance } from "./voiceCapture";
 
@@ -185,7 +186,7 @@ export function useVoice(options: UseVoiceOptions) {
   function latestAnswer(): ChatMessage | undefined {
     for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
       const message = gateway.messages[index];
-      if (message?.role === "assistant" && message.id !== "streaming" && !message.blocked && message.content.trim()) return message;
+      if (message?.role === "assistant" && message.id !== "streaming" && !message.blocked && !message.progress && message.content.trim()) return message;
     }
     return undefined;
   }
@@ -263,6 +264,33 @@ export function useVoice(options: UseVoiceOptions) {
     else if (cue.kind === "stillWorking") say(cue.long ? "stillWorkingLong" : "stillWorking", turn.language);
     else say(cue.approval ? "approval" : "needsInput", turn.language);
   }
+
+  /** What a progress message tells of, for the narrator: its plan, or a step that came back. */
+  const PROGRESS_TELLS: Record<string, Milestone | undefined> = { plan: "planning", step: "delegating" };
+  let progressLines: Promise<unknown> = Promise.resolve();
+
+  /**
+   * A progress message the running turn posted (stores/gateway.ts liveProgress), said in the turn's
+   * own words instead of a set phrase. One at a time: a step that finishes while the plan is still
+   * being read waits for it rather than cutting it off. Dropped once the turn has ended, and by the
+   * player while the answer is being read.
+   */
+  function sayProgress(progress: { text: string; kind: string }): void {
+    const current = turn;
+    if (!current || !audible() || speechUpdates.value !== "voice") return;
+    current.narrator.noteSpoken(Date.now(), PROGRESS_TELLS[progress.kind]);
+    const text = toSpeakableText(progress.text);
+    if (!text) return;
+    progressLines = progressLines.then(() => {
+      if (turn !== current) return undefined;
+      current.narrator.noteSpoken(Date.now(), PROGRESS_TELLS[progress.kind]);
+      return player.speak({ text, language: detectLanguage(progress.text) ?? current.language, priority: "progress", label: progress.text });
+    }).catch(() => undefined);
+  }
+
+  watch(() => gateway.liveProgress, (progress) => {
+    if (progress) sayProgress(progress);
+  });
 
   function onTurnStart(): void {
     const voiceLanguage = pendingVoiceLanguage;

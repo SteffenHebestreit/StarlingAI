@@ -60,6 +60,8 @@ export interface SegmentMessage {
   midTurn?: boolean;
   /** An assistant segment the turn continued past — it is not the turn's answer. */
   continued?: boolean;
+  /** A message the turn posted while it worked (its plan, a finished step) — not its answer either. */
+  progress?: boolean;
   steer?: SteerMark;
   steps?: TurnStep[];
   toolCalls?: SegmentToolCall[];
@@ -594,7 +596,8 @@ export function latestTurn<T extends SegmentMessage>(messages: T[]): { start: nu
       index -= 1;
       continue;
     }
-    if (message.role === "assistant" && message.continued) {
+    // The turn's progress messages are its own, posted before its answer: they stay in view with it.
+    if (message.role === "assistant" && (message.continued || message.progress)) {
       assistantIds.add(message.id);
       index -= 1;
       continue;
