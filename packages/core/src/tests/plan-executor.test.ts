@@ -353,6 +353,9 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(byStep.get("s2")).toMatchObject({ outcome: "failed", position: 2 });
     expect((byStep.get("s2") as { reason?: string }).reason).toContain("generate_docx was refused");
     expect(byStep.get("s3")).toMatchObject({ outcome: "done", running: [], next: { id: "s4" } });
+    // The steps tell their own progress: their delegations run without the reporter, so neither
+    // they nor anything inside them posts a milestone besides.
+    expect(calls.map((call) => call.ctx?.["reportProgress"])).toEqual([undefined, undefined, undefined]);
   });
 
   it("propagates the failed calls inside each step's specialist, a failed step's included", async () => {

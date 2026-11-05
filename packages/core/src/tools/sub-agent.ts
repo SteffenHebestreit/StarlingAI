@@ -7,6 +7,8 @@
 
 import { registerTool, getAllTools, searchToolsByEmbedding, executeTool, toolCallIdentity, type SwarmState, type SwarmTaskAttempt, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { runSubAgent, runSubAgentWithStats, type SubAgentLoopEnforced, type SubAgentToolFailure, type SubAgentWardenStop } from "../agent/sub-agent.js";
+import { delegationMilestone } from "../agent/turn-progress.js";
+import { agentNameIsCoordinator } from "../agent/coordinator-agents.js";
 import { capOutcomeForUnbackedFigures, createFanOutExecutionRecords, readExecutionRecord, readMaskedRuns, type DelegatedExecutionRecord, type MaskedDelegatedRun } from "../agent/delegated-run-record.js";
 import { buildPriorLoopNote } from "../agent/delegation-loop-notes.js";
 import { runAsWriteSibling, SiblingWriteGroup } from "../agent/sibling-write-ownership.js";
@@ -367,6 +369,20 @@ export function withTurnGatherRole(ctx: ToolContext, isGatherPoint: boolean): To
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
   if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
   return { ...ctx, _turnGatherExempt: true };
+}
+
+/**
+ * The context a plan step is dispatched with: without the turn's progress reporter, so its
+ * delegation, and whatever runs inside it, post no milestone (agent/turn-progress.ts) — the step
+ * posts its own message. The per-turn counters are created on the caller's context first, as
+ * withTurnGatherRole does, so the copy shares them. A context without a reporter comes back as it is.
+ */
+export function withoutProgressMilestones(ctx: ToolContext): ToolContext {
+  if (!ctx.reportProgress) return ctx;
+  if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
+  if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
+  const { reportProgress: _quiet, ...rest } = ctx;
+  return rest;
 }
 
 /** Index of a batch's evidence gather point among its members' agent names, in the order they run, or -1 (see agent-routing). */
@@ -1098,14 +1114,21 @@ async function routeAgentCandidates(
  * web_task_coordinator, …). Mirrors the inline check used during attempt dispatch:
  * the `_coordinator` name suffix or a `coordination` tag in the agent config.
  */
-function agentNameIsCoordinator(name: string): boolean {
-  if (!name) return false;
-  if (name.endsWith("_coordinator")) return true;
-  const cfg = getConfig().subAgents[name];
-  return Boolean(cfg && (cfg.tags ?? []).includes("coordination"));
+/**
+ * One delegation, from delegate_to_agent, a parallel slice or a graph node; and, when it came back
+ * from a specialist, a milestone for the turn's progress messages (agent/turn-progress.ts). A plan
+ * step's delegation runs on a context without the reporter and tells nothing here.
+ */
+async function executeDelegationWithFallback(request: DelegationRequest, ctx: ToolContext): Promise<ToolResult> {
+  const result = await runDelegationWithFallback(request, ctx);
+  if (ctx.reportProgress) {
+    const milestone = delegationMilestone(result);
+    if (milestone) ctx.reportProgress(milestone);
+  }
+  return result;
 }
 
-async function executeDelegationWithFallback(request: DelegationRequest, ctx: ToolContext): Promise<ToolResult> {
+async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolContext): Promise<ToolResult> {
   const title = request.taskTitle ?? summarizeText(request.task, 80);
   const signature = buildTaskSignature(title, request.task, request.dependsOn ?? []);
   const skillMatchThreshold = resolveSkillMatchThreshold(request.skillMatchThreshold);
@@ -2626,6 +2649,7 @@ async function executeDelegationWithFallback(request: DelegationRequest, ctx: To
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,
         onProgress: ctx.onSubAgentProgress,
+        ...(ctx.reportProgress ? { reportProgress: ctx.reportProgress } : {}),
         humanInLoopSteps: ctx.humanInLoopSteps,
         onComputerAction: ctx.onComputerAction,
         onComputerScreenshot: ctx.onComputerScreenshot,

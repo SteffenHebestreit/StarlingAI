@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   acceptPhrasing,
   createTurnProgressReporter,
+  delegationMilestone,
   fixedProgressText,
   phrasingMessages,
   progressBridgeTargets,
   type ProgressPhraser,
+  type TurnProgressKind,
   type TurnProgressFacts,
 } from "../agent/turn-progress.js";
 
@@ -110,7 +112,7 @@ describe("what the model writes is taken only when it can be", () => {
 
 describe("the reporter", () => {
   let delivered: Array<{ kind: string; text: string }>;
-  const deliver = (message: { kind: "bridge" | "plan" | "step"; text: string }) => {
+  const deliver = (message: { kind: TurnProgressKind; text: string }) => {
     delivered.push(message);
     return { id: `m${delivered.length}` };
   };
@@ -212,5 +214,160 @@ describe("the reporter", () => {
     reporter.report(STEP_DONE);
     await reporter.close();
     expect(delivered.map((m) => m.kind)).toEqual(["plan"]);
+  });
+});
+
+/**
+ * MILESTONES: a turn without a plan, or a coordinator that records none, tells where it is by its
+ * specialists coming back. Held back until the turn has run a while, gathered when they come back
+ * close together, with who is still working, and never after the turn's end.
+ */
+describe("milestones", () => {
+  let delivered: Array<{ kind: string; text: string }>;
+  const deliver = (message: { kind: TurnProgressKind; text: string }) => {
+    delivered.push(message);
+    return { id: `m${delivered.length}` };
+  };
+  const finish = (agent: string, extra: Record<string, unknown> = {}): TurnProgressFacts => ({ kind: "milestone", finished: [{ agent, outcome: "done", ...extra }] });
+  beforeEach(() => { delivered = []; vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("are worded with who finished, what it made, and who is still working", () => {
+    expect(fixedProgressText({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done", files: ["notes.md"] }], running: ["content_writer"] }, "English"))
+      .toBe("researcher is done (notes.md). Still working: content_writer.");
+    expect(fixedProgressText({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done" }, { agent: "browser_agent", outcome: "failed" }], running: [] }, "German"))
+      .toBe("researcher ist fertig; browser_agent kam nicht durch.");
+  });
+
+  it("come from a delegation a specialist answered, not one refused before any ran or served from the turn's own findings", () => {
+    expect(delegationMilestone({ success: true, output: "Found 3 sources.", metadata: { agentName: "researcher", artifacts: [{ path: "generated/notes.md" }] } }))
+      .toEqual({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done", result: "Found 3 sources.", files: ["notes.md"] }] });
+    expect(delegationMilestone({ success: false, error: "timed out", metadata: { agentName: "browser_agent" } }))
+      .toEqual({ kind: "milestone", finished: [{ agent: "browser_agent", outcome: "failed", result: "timed out" }] });
+    expect(delegationMilestone({ success: false, error: "budget exhausted", metadata: {} })).toBeNull();
+    expect(delegationMilestone({ success: true, output: "x", metadata: { agentName: "researcher", reusedFromSessionMemory: true } })).toBeNull();
+  });
+
+  it("wait until the turn has run a while, and gather the finishes that come close together", async () => {
+    const reporter = createTurnProgressReporter({ deliver, language: "English", phrasingTimeoutMs: 1_000, bridgeDelayMs: 0, milestoneAfterMs: 20_000, milestoneGapMs: 15_000 });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    reporter.noteSpecialist({ agentName: "image_creator", kind: "started" });
+    reporter.noteSpecialist({ agentName: "content_writer", kind: "started" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    reporter.noteSpecialist({ agentName: "researcher", kind: "completed" });
+    reporter.report(finish("researcher"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    // A quick lookup's turn would have ended by now: nothing was told before 20 s.
+    expect(delivered).toEqual([]);
+    reporter.noteSpecialist({ agentName: "image_creator", kind: "completed" });
+    reporter.report(finish("image_creator", { files: ["harbour.png"] }));
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(delivered.map((m) => m.text)).toEqual(["researcher is done; image_creator is done (harbour.png). Still working: content_writer."]);
+
+    // The next finish waits out the gap after that message.
+    reporter.noteSpecialist({ agentName: "content_writer", kind: "completed" });
+    reporter.report(finish("content_writer"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(delivered).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(delivered.at(-1)!.text).toBe("content_writer is done.");
+    await reporter.close();
+  });
+
+  it("tell a second run of the same specialist as still working when the first comes back", async () => {
+    const reporter = createTurnProgressReporter({ deliver, language: "English", phrasingTimeoutMs: 1_000, bridgeDelayMs: 0, milestoneAfterMs: 0, milestoneGapMs: 0 });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "completed" });
+    reporter.report(finish("researcher"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(delivered.map((m) => m.text)).toEqual(["researcher is done. Still working: researcher."]);
+    await reporter.close();
+  });
+
+  it("are not told once the turn ends: the answer comes next", async () => {
+    const reporter = createTurnProgressReporter({ deliver, language: "English", phrasingTimeoutMs: 1_000, bridgeDelayMs: 0, milestoneAfterMs: 20_000, milestoneGapMs: 15_000 });
+    reporter.report(finish("researcher"));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await reporter.close();
+    await vi.advanceTimersByTimeAsync(30_000);
+    reporter.report(finish("content_writer"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(delivered).toEqual([]);
+  });
+});
+
+/**
+ * STILL ON IT: a specialist working alone for minutes left the chat silent between the first line
+ * and the answer (two minutes in the lab). After a quiet minute the turn says who is working and
+ * what they just did, a few times at most.
+ */
+describe("still on it", () => {
+  let delivered: Array<{ kind: string; text: string }>;
+  const deliver = (message: { kind: TurnProgressKind; text: string }) => {
+    delivered.push(message);
+    return { id: `m${delivered.length}` };
+  };
+  beforeEach(() => { delivered = []; vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+  const make = () => createTurnProgressReporter({
+    deliver, language: "English", phrasingTimeoutMs: 1_000, bridgeDelayMs: 0,
+    workingAfterMs: 60_000, maxWorking: 2, isCoordinator: (agent) => agent.endsWith("_coordinator"),
+  });
+
+  it("says after a quiet minute who is working and their latest action, and stops at the most allowed", async () => {
+    const reporter = make();
+    reporter.noteSpecialist({ agentName: "mission_coordinator", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "tool_start", toolName: "web_fetch" });
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(delivered).toEqual([]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    // The coordinator hands out the work: the one doing it is named.
+    expect(delivered.map((m) => m.text)).toEqual(["Still on it: researcher is reading a web page."]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(delivered).toHaveLength(2);
+    await reporter.close();
+  });
+
+  it("counts the quiet from the last message, and says nothing while nobody works", async () => {
+    const reporter = make();
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    await vi.advanceTimersByTimeAsync(40_000);
+    reporter.report({ kind: "plan", revised: false, steps: STEPS });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(delivered.map((m) => m.kind)).toEqual(["plan"]);
+    reporter.noteSpecialist({ agentName: "researcher", kind: "completed" });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(delivered.map((m) => m.kind)).toEqual(["plan"]);
+    await reporter.close();
+  });
+
+  it("names the coordinator when it is the only one working", () => {
+    expect(fixedProgressText({ kind: "working", working: [{ agent: "mission_coordinator" }], elapsedSeconds: 70 }, "German"))
+      .toBe("Ich bin noch dran: mission_coordinator arbeitet.");
+    expect(fixedProgressText({ kind: "working", working: [{ agent: "researcher", doing: "web_fetch" }, { agent: "chart_designer", doing: "generate_chart_html" }, { agent: "coder", doing: "mcp__custom_tool" }], elapsedSeconds: 75 }, "German"))
+      .toBe("Ich bin noch dran: researcher liest eine Webseite; chart_designer zeichnet ein Diagramm; coder arbeitet.");
+  });
+});
+
+describe("a milestone under a coordinator", () => {
+  it("does not name the coordinator as still working while it hands out the work", async () => {
+    vi.useFakeTimers();
+    const delivered: string[] = [];
+    const reporter = createTurnProgressReporter({
+      deliver: (message) => { delivered.push(message.text); }, language: "English", phrasingTimeoutMs: 1_000, bridgeDelayMs: 0,
+      milestoneAfterMs: 0, milestoneGapMs: 0, isCoordinator: (agent) => agent.endsWith("_coordinator"),
+    });
+    reporter.noteSpecialist({ agentName: "mission_coordinator", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "started" });
+    reporter.noteSpecialist({ agentName: "chart_designer", kind: "started" });
+    reporter.noteSpecialist({ agentName: "researcher", kind: "completed" });
+    reporter.report({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done" }] });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(delivered).toEqual(["researcher is done. Still working: chart_designer."]);
+    await reporter.close();
+    vi.useRealTimers();
   });
 });

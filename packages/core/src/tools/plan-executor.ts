@@ -30,11 +30,11 @@ import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
-import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherPoint } from "./sub-agent.js";
+import { withDelegationFanoutAllowance, withTurnGatherRole, withoutProgressMilestones, batchEvidenceGatherPoint } from "./sub-agent.js";
 import { isWebReachingToolName } from "./agent-routing.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
-import { progressStepOf } from "../agent/turn-progress.js";
+import { progressFileNames, progressStepOf } from "../agent/turn-progress.js";
 // The labels of the turn context a step's task carries after its own line, shared with the readers
 // that measure what the step itself asks (taskOwnWordChars, delegationAsksForFile).
 import {
@@ -350,17 +350,6 @@ function batchGatherPoint(batch: readonly TurnPlanStep[], ctx: ToolContext): str
   return index >= 0 ? delegates[index]!.id : undefined;
 }
 
-/** The files a step's artifacts name, by their own name, each once. */
-function artifactNames(artifacts: readonly unknown[] | undefined): string[] {
-  const names = (artifacts ?? []).flatMap((artifact) => {
-    if (!artifact || typeof artifact !== "object") return [];
-    const record = artifact as Record<string, unknown>;
-    const path = [record["relativePath"], record["path"], record["filename"]].find((value) => typeof value === "string" && value.trim());
-    return typeof path === "string" ? [path.split(/[\\/]/).pop() ?? path] : [];
-  });
-  return [...new Set(names)];
-}
-
 /**
  * The progress message for a step that came back (agent/turn-progress.ts): done or failed, what it
  * produced, what runs beside it and the next step not yet started. A step handed back to the
@@ -376,7 +365,7 @@ function reportStepProgress(
 ): void {
   if (run.status !== "done" && run.status !== "failed") return;
   const next = plan.steps.find((other) => other.id !== step.id && !stillOut.has(other.id) && (statuses.get(other.id) ?? "pending") === "pending");
-  const files = artifactNames(run.artifacts);
+  const files = progressFileNames(run.artifacts);
   report({
     kind: "step",
     step: progressStepOf(step),
@@ -413,7 +402,9 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   }
 
   try {
-    const result = await executeTool(dispatch.tool, dispatch.args, ctx);
+    // The step tells its own progress (reportStepProgress): its delegation, and whatever runs inside
+    // it, post no milestone of their own.
+    const result = await executeTool(dispatch.tool, dispatch.args, withoutProgressMilestones(ctx));
     // Forwarded like the artifacts below, and from a failed step as well: which calls failed on the
     // way is what tells a recovery onto another path apart from the path the step asked for.
     const stepToolFailures = result.metadata?.["specialistToolFailures"];
