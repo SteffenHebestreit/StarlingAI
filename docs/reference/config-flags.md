@@ -371,7 +371,7 @@ Every public schema field, where it is declared, and how many production files r
 | `progressBridgeDelayMs` | packages/core/src/config/schemas/orchestration.ts:80 | 2 |
 | `progressMessagePhrasing` | packages/core/src/config/schemas/orchestration.ts:75 | 2 |
 | `progressMessagePhrasingTimeoutMs` | packages/core/src/config/schemas/orchestration.ts:77 | 2 |
-| `progressMessages` | packages/core/src/config/schemas/orchestration.ts:71 | 3 |
+| `progressMessages` | packages/core/src/config/schemas/orchestration.ts:71 | 4 |
 | `progressVerifierSemantic` | packages/core/src/config/schemas/orchestration.ts:713 | 2 |
 | `prometheus` | packages/core/src/config/schema.ts:1208 | 4 |
 | `promotionApprovalChannel` | packages/core/src/config/schema.ts:1496 | 1 |
