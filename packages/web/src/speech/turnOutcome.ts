@@ -13,6 +13,8 @@ export interface OutcomeMessage {
   blocked?: boolean;
   /** The note of a turn the user stopped. */
   stopped?: boolean;
+  /** A message the turn posted while it worked: never its answer. */
+  progress?: boolean;
 }
 
 export type TurnOutcome<M extends OutcomeMessage> =
@@ -23,11 +25,15 @@ export type TurnOutcome<M extends OutcomeMessage> =
 /** The live bubble of a running turn, which is not an answer yet. */
 const STREAMING_ID = "streaming";
 
-/** The newest assistant message, error notes included — what a turn's answer is compared with. */
+/**
+ * The newest assistant message, error notes included — what a turn's answer is compared with. Its
+ * progress messages are not: a turn stopped after posting its plan would have read the plan out
+ * as its answer.
+ */
 export function lastAssistantMessage<M extends OutcomeMessage>(messages: readonly M[]): M | undefined {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message?.role === "assistant" && message.id !== STREAMING_ID) return message;
+    if (message?.role === "assistant" && message.id !== STREAMING_ID && !message.progress) return message;
   }
   return undefined;
 }

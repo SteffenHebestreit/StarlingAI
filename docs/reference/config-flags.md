@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:760 | 1 |
 | `admin` | packages/core/src/config/schema.ts:443 | 54 |
-| `after` | packages/core/src/config/schema.ts:1576 | 302 |
+| `after` | packages/core/src/config/schema.ts:1576 | 303 |
 | `agents` | packages/core/src/config/schema.ts:1564 | 202 |
 | `alertmanager` | packages/core/src/config/schema.ts:1209 | 1 |
 | `all` | packages/core/src/config/schema.ts:1362 | 329 |
@@ -214,7 +214,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:781 | 134 |
 | `http` | packages/core/src/config/schema.ts:826 | 98 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1383 | 20 |
-| `id` | packages/core/src/config/schema.ts:412 | 360 |
+| `id` | packages/core/src/config/schema.ts:412 | 361 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1430 | 2 |
 | `image` | packages/core/src/config/schema.ts:754 | 110 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -302,7 +302,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxUploadBytes` | packages/core/src/config/schemas/multimodal.ts:281 | 5 |
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:885 | 5 |
-| `message` | packages/core/src/config/schema.ts:1584 | 361 |
+| `message` | packages/core/src/config/schema.ts:1584 | 363 |
 | `method` | packages/core/src/config/schema.ts:1097 | 92 |
 | `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:908 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1678 | 1 |
@@ -430,7 +430,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:623 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:992 | 161 |
+| `role` | packages/core/src/config/schema.ts:992 | 162 |
 | `roles` | packages/core/src/config/schema.ts:1529 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:468 | 1 |
 | `routing` | packages/core/src/config/schema.ts:277 | 121 |
@@ -524,7 +524,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 71 |
 | `toolPolicy` | packages/core/src/config/schema.ts:1540 | 1 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:694 | 2 |
-| `tools` | packages/core/src/config/schema.ts:995 | 267 |
+| `tools` | packages/core/src/config/schema.ts:995 | 268 |
 | `topK` | packages/core/src/config/schema.ts:175 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:164 | 7 |
 | `topP` | packages/core/src/config/schema.ts:174 | 4 |

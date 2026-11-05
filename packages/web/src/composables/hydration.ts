@@ -34,6 +34,8 @@ export interface HydrationMessage {
   stopped?: boolean;
   /** The turn a message belongs to — for a page-only note, the turn it reports on. */
   requestId?: string;
+  /** A message the turn posted while it worked — its plan, a finished step; never how it ended. */
+  progress?: boolean;
   toolCalls?: Array<{ name: string }>;
   attachments?: HydrationAttachment[];
 }
@@ -75,6 +77,7 @@ export function sameMessage(fetched: HydrationMessage, local: HydrationMessage):
   return fetched.role === local.role
     && Boolean(fetched.midTurn) === Boolean(local.midTurn)
     && Boolean(fetched.continued) === Boolean(local.continued)
+    && Boolean(fetched.progress) === Boolean(local.progress)
     && (fetched.requestId === undefined || local.requestId === undefined || fetched.requestId === local.requestId)
     && comparableText(fetched.content) === comparableText(local.content);
 }
@@ -155,7 +158,8 @@ function withoutRecordedNotes<T extends HydrationMessage>(list: T[]): T[] {
     while (start >= 0 && list[start]!.role !== "user") start -= 1;
     let end = index + 1;
     while (end < list.length && list[end]!.role !== "user") end += 1;
-    const entries = list.slice(start + 1, end).filter((other) => other.role === "assistant" && !other.pageOnly && !other.continued);
+    // A progress message has words and is never how the turn ended: it is no failure marker.
+    const entries = list.slice(start + 1, end).filter((other) => other.role === "assistant" && !other.pageOnly && !other.continued && !other.progress);
     const worded = (entry: T) => comparableText(entry.content) !== "";
     if (!note.stopped && entries.some(worded)) {
       dropped.add(note);
@@ -300,7 +304,7 @@ export function sameList<T>(left: readonly T[], right: readonly T[]): boolean {
  * segments it will continue past, not its answer — so they get no stand-in text, and they stay
  * open with the rest of the turn.
  */
-export function markRunningTail<T extends { role: string; midTurn?: boolean; continued?: boolean }>(transcript: T[]): T[] {
+export function markRunningTail<T extends { role: string; midTurn?: boolean; continued?: boolean; progress?: boolean }>(transcript: T[]): T[] {
   let opener = -1;
   for (let index = transcript.length - 1; index >= 0; index -= 1) {
     const entry = transcript[index]!;
@@ -309,7 +313,8 @@ export function markRunningTail<T extends { role: string; midTurn?: boolean; con
       break;
     }
   }
-  return transcript.map((entry, index) => index > opener && entry.role === "assistant" && !entry.continued
+  // A progress message is no segment either: it stays what it is.
+  return transcript.map((entry, index) => index > opener && entry.role === "assistant" && !entry.continued && !entry.progress
     ? { ...entry, continued: true }
     : entry);
 }
@@ -323,7 +328,7 @@ export function markRunningTail<T extends { role: string; midTurn?: boolean; con
  * Only once the server has the turn's opening message: before that, the newest entries are the
  * previous turn's — by name where the transcript names turns, else by `openerText`, its words.
  */
-export function dropRunningTail<T extends { role: string; content: string; midTurn?: boolean; requestId?: string }>(
+export function dropRunningTail<T extends { role: string; content: string; midTurn?: boolean; requestId?: string; progress?: boolean }>(
   transcript: T[],
   turn: TurnRef,
 ): T[] {
@@ -333,5 +338,7 @@ export function dropRunningTail<T extends { role: string; content: string; midTu
   if (opener < 0 || (!named && turn.openerText === undefined) || !opensTurn(transcript[opener]!, turn, named)) return transcript;
   let last = transcript.length - 1;
   while (last > opener && transcript[last]!.role === "assistant") last -= 1;
-  return last === transcript.length - 1 ? transcript : transcript.slice(0, last + 1);
+  // The turn's progress messages are not what the live bubble shows: they are messages of their
+  // own above it, and dropped here a reconnect or a reload while the turn ran erased them.
+  return last === transcript.length - 1 ? transcript : transcript.filter((entry, index) => index <= last || entry.progress);
 }
