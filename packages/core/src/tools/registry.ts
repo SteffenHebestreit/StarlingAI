@@ -3,6 +3,7 @@ import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.j
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import type { TurnUserWords } from "../agent/delegation-user-words.js";
 import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
+import type { TurnProgressFacts } from "../agent/turn-progress.js";
 import { computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runWithRequestContext, currentRequestContext } from "../runtime/request-context.js";
@@ -213,6 +214,12 @@ export interface ToolContext {
     activity?: "planning" | "composing" | "steering";
     chars?: number;
   }) => void;
+  /**
+   * Post a progress message to the person (agent/turn-progress.ts): the plan record_plan stored, a
+   * plan step that finished. Fire and forget. Set on the orchestrator's turn when progress
+   * messages are on; a sub-agent's own context has none.
+   */
+  reportProgress?: (facts: TurnProgressFacts) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;

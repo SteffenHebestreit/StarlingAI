@@ -63,6 +63,21 @@ export const OrchestrationSchema = z.object({
    *  planDrivenContinuation read the same outcomes. Off restores the two-round shape.
    *  Default: true. */
   planRoundFold: z.boolean().default(true),
+  /** Progress messages (agent/turn-progress.ts): a running turn posts short messages into the chat
+   *  while it works — a line when it reaches for its tools, the plan it recorded, and an update
+   *  when each plan step finishes (what it produced, what runs now, what is next). Shown in the
+   *  transcript before the answer and spoken when voice is on; never part of what the model reads.
+   *  Only for a turn whose surface takes them live (the web chat). Default: true. */
+  progressMessages: z.boolean().default(true),
+  /** Progress messages worded by the routing-tier model from the same facts, instead of the fixed
+   *  German or English sentences. The fixed wording goes out when the model is slower than
+   *  progressMessagePhrasingTimeoutMs or writes something that cannot be taken. Default: true. */
+  progressMessagePhrasing: z.boolean().default(true),
+  /** How long a progress message waits for its model wording. Default: 3000. */
+  progressMessagePhrasingTimeoutMs: z.number().int().min(500).max(15_000).default(3_000),
+  /** How long after the orchestrator reaches for its tools the bridge line waits: a turn that is
+   *  answered sooner, or posts its plan first, posts none. Default: 2500. */
+  progressBridgeDelayMs: z.number().int().min(0).max(30_000).default(2_500),
   /** Autonomous-mode anti-refusal (audit 763394da). `--auto` sets autoApprove
    *  (auto-approve tool calls) but does NOT tell the model "execute autonomously,
    *  don't ask" — so an --auto multi-step build was met with a clarifying question

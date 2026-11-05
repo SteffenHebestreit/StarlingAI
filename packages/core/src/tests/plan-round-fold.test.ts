@@ -279,3 +279,50 @@ describe("record_plan folds the plan round", () => {
     expect(result.metadata?.["planExecution"]).toBeUndefined();
   });
 });
+
+describe("record_plan posts the plan to the person", () => {
+  beforeEach(async () => {
+    dispatched.length = 0;
+    respond = () => ({ success: true, output: "step result" });
+    await clearTurnPlanForSession(SESSION);
+  });
+  afterEach(() => { vi.clearAllMocks(); });
+
+  it("as a progress message, each step by who or what does it; changed when the turn already had one", async () => {
+    // agent/turn-progress.ts: the plan was only ever the model's; the person now reads it.
+    const reported: Array<Record<string, unknown>> = [];
+    const turnStartedAt = Date.now() - 1_000;
+    const turn = ctx({ responseToolCalls: ["record_plan", "web_search"], turnStartedAt, reportProgress: (facts) => reported.push(facts as never) });
+    const record = getTool("record_plan")!;
+
+    await record.execute({
+      objective: "a site and its diagram",
+      steps: [
+        { id: "s1", description: "build the site", kind: "delegate", agent: "web_coder" },
+        { id: "s2", description: "draw the lending process", kind: "reuse", workflow: "diagram_pack" },
+        { id: "s3", description: "check the links", kind: "direct", tool: "verify_page" },
+        { id: "s4", description: "write the summary", kind: "direct" },
+      ],
+    }, turn);
+    await record.execute({ ...PLAN }, turn);
+
+    expect(reported).toEqual([
+      {
+        kind: "plan",
+        revised: false,
+        steps: [
+          { id: "s1", description: "build the site", agent: "web_coder" },
+          { id: "s2", description: "draw the lending process", agent: "diagram_pack" },
+          { id: "s3", description: "check the links", agent: "verify_page" },
+          { id: "s4", description: "write the summary" },
+        ],
+      },
+      expect.objectContaining({ kind: "plan", revised: true }),
+    ]);
+
+    // The next turn's plan is a new one, not a change.
+    reported.length = 0;
+    await record.execute({ ...PLAN }, ctx({ responseToolCalls: ["record_plan", "web_search"], turnStartedAt: Date.now() + 1_000, reportProgress: (facts) => reported.push(facts as never) }));
+    expect(reported).toEqual([expect.objectContaining({ kind: "plan", revised: false })]);
+  });
+});

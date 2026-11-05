@@ -161,7 +161,8 @@ import {
 // from runtime.js (runtime-delegation-loop.test.ts, runtime-guidance.test.ts) keep working.
 export { buildModelVisibleToolResult } from "./tool-result-format.js";
 import { executionRecordLine, readExecutionRecord, readMaskedRuns, stripDelegatedRunRecord, unbackedFiguresMasked } from "./delegated-run-record.js";
-import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
+import { IN_REPLY_LANGUAGE, buildReplyLanguageRule, buildTurnReplyLanguageInstruction, defaultReplyLanguage, detectTurnUserLanguage, isFirstUserTurn, localizedFixedText } from "./reply-language.js";
+import { createTurnProgressReporter, progressBridgeTargets, routingTierPhraser, type TurnProgressFacts, type TurnProgressReporter } from "./turn-progress.js";
 import { TURN_STATUS } from "./turn-status-text.js";
 import { executeVisibleTool } from "./visible-tool.js";
 
@@ -1245,7 +1246,16 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         // Inherited: a turn nested in an eval turn is eval traffic too.
         ...(opts.session.channel === "eval" || currentRequestContext()?.evalTraffic ? { evalTraffic: true as const } : {}),
       },
-      () => runWithPhaseTimings(() => runTurnImpl(opts)),
+      () => runWithPhaseTimings(async () => {
+        // Progress messages (agent/turn-progress.ts): only for a surface that shows them live, and
+        // closed before the turn returns, so every one is out before the answer.
+        const progress = startTurnProgress(opts, userMessageLanguage);
+        try {
+          return await runTurnImpl(opts, progress);
+        } finally {
+          await progress?.close();
+        }
+      }),
     );
     return delivered;
   } finally {
@@ -1254,7 +1264,31 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
   }
 }
 
-async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
+/**
+ * The turn's progress reporter, or undefined when the turn posts none: its surface did not ask for
+ * them live (onProgressMessage: a channel, a scene, a turn nested in a workflow), or
+ * orchestration.progressMessages is off.
+ */
+function startTurnProgress(opts: RunTurnOptions, language: string | undefined): TurnProgressReporter | undefined {
+  const orchestration = effectiveOrchestration();
+  if (!opts.onProgressMessage || orchestration.progressMessages === false) return undefined;
+  const onProgressMessage = opts.onProgressMessage;
+  return createTurnProgressReporter({
+    deliver: ({ kind, text }) => {
+      const stored = opts.session.addProgressMessage({ kind, text });
+      onProgressMessage(stored);
+      return stored;
+    },
+    language: language ?? defaultReplyLanguage(),
+    ...(orchestration.progressMessagePhrasing !== false ? { phrase: routingTierPhraser(resolveRoutingTierProvider) } : {}),
+    phrasingTimeoutMs: orchestration.progressMessagePhrasingTimeoutMs ?? 3_000,
+    bridgeDelayMs: orchestration.progressBridgeDelayMs ?? 2_500,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+    sessionId: opts.session.id,
+  });
+}
+
+async function runTurnImpl(opts: RunTurnOptions, progress?: TurnProgressReporter): Promise<TurnOutput> {
   const config = getConfig();
   // A PLAN BELONGS TO ONE TURN. The slot lives for the session TTL and nothing ever cleared it, so
   // every reader of it could be handed the PREVIOUS turn's plan: riskGatedQA judged this turn's
@@ -1498,7 +1532,7 @@ async function runTurnImpl(opts: RunTurnOptions): Promise<TurnOutput> {
         extendForDelegationWait: extendTurnDeadlineForDelegationWait,
         humanWaitCreditedMs: () => humanWaitCreditedMs,
         currentDeadlineMs: () => turnDeadlineMs,
-      }));
+      }, progress));
     // Steering that arrived after the last drain is handed back rather than folded in here: the
     // answer is written, and discarding it to make room would cost the user the whole synthesis.
     // Closing in the same step as reading keeps a message from slipping in between; the client
@@ -1819,6 +1853,8 @@ async function _runTurn(
     /** The deadline as it stands now, after every credit. */
     currentDeadlineMs?: () => number | undefined;
   },
+  /** The turn's progress messages (agent/turn-progress.ts); absent when it posts none. */
+  progress?: TurnProgressReporter,
 ): Promise<TurnOutput> {
   const { session, userMessage } = opts;
   const guardrailEvents: TurnOutput["guardrailEvents"] = [];
@@ -2323,6 +2359,7 @@ async function _runTurn(
     inputCallback: opts.inputCallback ?? (unattended ? unattendedInputCallback : undefined),
     requestUserInput: bindRequestUserInput({ requesterSessionId: session.id, signal }),
     onSubAgentProgress: opts.onSubAgentProgress,
+    ...(progress ? { reportProgress: (facts: TurnProgressFacts) => progress.report(facts) } : {}),
     onComputerAction: opts.onComputerAction,
     onComputerScreenshot: opts.onComputerScreenshot,
     onComputerSessionState: opts.onComputerSessionState,
@@ -4576,6 +4613,15 @@ async function _runTurn(
         function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
       })),
     });
+    // The turn reaches for its tools: the bridge line (agent/turn-progress.ts), held back for a
+    // moment so a quick lookup posts none. A response that records a plan posts the plan instead.
+    if (progress && !llmResponse.tool_calls.some((call) => call.name === "record_plan")) {
+      progress.scheduleBridge({
+        kind: "bridge",
+        request: opts.userWords ?? userMessage,
+        reachingFor: progressBridgeTargets(llmResponse.tool_calls),
+      });
+    }
 
     const toolResultMessages: Array<LLMMessage & { metadata?: Record<string, unknown> }> = [];
     let workflowExecutionCorrectionPending = false;

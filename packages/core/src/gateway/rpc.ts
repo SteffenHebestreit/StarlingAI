@@ -1345,6 +1345,15 @@ export class RpcConnection implements AccountConnection {
           onStatus: (status) => {
             this.sendEvent({ type: "status", data: { requestId, status: status.phase, message: status.message, iteration: status.iteration } });
           },
+          // A progress message the turn posted (agent/turn-progress.ts), already in the session. The
+          // id is the one the transcript gives it, so a page that later reads the transcript keeps
+          // one copy.
+          onProgressMessage: (message) => {
+            this.sendEvent({
+              type: "agent.progress",
+              data: { requestId, id: `${session.id}:p:${message.id}`, kind: message.kind, text: message.text, timestamp: message.timestamp },
+            });
+          },
           // The texts ride along so a tab that did not send them can still show them. The runtime
           // never throws away a written draft to fold a message in, hence discardedDraft is false.
           // segmentText is what the transcript keeps for the part before this cut, read from the

@@ -323,6 +323,38 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.metadata?.["artifacts"]).toEqual([{ path: "deck.html" }]);
   });
 
+  it("posts a progress message as each step comes back: what it made, what runs beside it, what is next", async () => {
+    // agent/turn-progress.ts: the person reads the plan's progress in the chat, not only in the step list.
+    const reported: unknown[] = [];
+    respond = (_name, args) => String(args["task"]).startsWith("STEP s1")
+      ? { success: true, output: "chart written", metadata: { artifacts: [{ path: "generated/sales-chart.html" }] } }
+      : String(args["task"]).startsWith("STEP s2") ? { success: false, output: "", error: "generate_docx was refused" }
+        : { success: true, output: "checked" };
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "chart", kind: "delegate", agent: "chart_designer", parallelGroup: 1 },
+      { id: "s2", description: "report", kind: "delegate", agent: "content_writer", parallelGroup: 1 },
+      { id: "s3", description: "check both", kind: "delegate", agent: "qa_guard", dependsOn: ["s1"] },
+      { id: "s4", description: "summarise", kind: "direct" },
+    ]));
+
+    await getTool("execute_plan")!.execute({}, { sessionId: SESSION, workspacePath: "/w", reportProgress: (facts: unknown) => reported.push(facts) } as never);
+
+    const byStep = new Map((reported as Array<{ step: { id: string } }>).map((facts) => [facts.step.id, facts]));
+    // s4 is the orchestrator's own and runs nowhere: it posts nothing.
+    expect([...byStep.keys()].sort()).toEqual(["s1", "s2", "s3"]);
+    expect(byStep.get("s1")).toMatchObject({
+      kind: "step", position: 1, total: 4, outcome: "done", result: "chart written", files: ["sales-chart.html"],
+      step: { id: "s1", description: "chart", agent: "chart_designer" },
+      next: { id: "s3" },
+    });
+    // The two of a parallel batch: the first back names the other as still running.
+    const first = reported[0] as { step: { id: string }; running: Array<{ id: string }> };
+    expect(first.running.map((step) => step.id)).toEqual([first.step.id === "s1" ? "s2" : "s1"]);
+    expect(byStep.get("s2")).toMatchObject({ outcome: "failed", position: 2 });
+    expect((byStep.get("s2") as { reason?: string }).reason).toContain("generate_docx was refused");
+    expect(byStep.get("s3")).toMatchObject({ outcome: "done", running: [], next: { id: "s4" } });
+  });
+
   it("propagates the failed calls inside each step's specialist, a failed step's included", async () => {
     // A step's result is its specialist's own account, which leaves out a call it recovered from.
     // In f4ebf47b the requested engine returned a 404, the fast tier drew the picture, and the

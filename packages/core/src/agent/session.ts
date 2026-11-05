@@ -165,7 +165,32 @@ export interface SessionTranscriptMessage {
    * recorded, which a client then tells apart the way it did before.
    */
   requestId?: string;
+  /** A progress message the turn posted while it worked (SessionProgressMessage), not its answer. */
+  progress?: true;
 }
+
+/**
+ * A message a turn posts to the person while it works: that it is looking for the right tools,
+ * the plan it recorded, a step that finished (agent/turn-progress.ts).
+ *
+ * Kept beside the history, never in it. The history is what the model reads, and a line written
+ * while a tool runs would land between the assistant's tool calls and their results: the results
+ * would be orphaned (getCollapsedHistory pairs them by position) and dropped from the very turn.
+ * It would also reach the digest of trimmed turns, the session preview and the timeout recovery's
+ * "best answer". Here it is shown in the transcript and nowhere else.
+ */
+export interface SessionProgressMessage {
+  id: string;
+  /** The chat.send request id of the turn that posted it, when a chat.send started that turn. */
+  requestId?: string;
+  timestamp: string;
+  /** What it reports: "bridge", "plan", "step" (agent/turn-progress.ts TurnProgressKind). */
+  kind: string;
+  text: string;
+}
+
+/** The most progress messages a session keeps; the oldest go first. */
+const MAX_PROGRESS_MESSAGES = 300;
 
 export interface SessionTranscriptAttachment {
   filename: string;
@@ -209,6 +234,8 @@ export interface PersistedSessionRecord {
   /** Per-session effort/time-limit settings; absent on records written before
    *  session settings shipped (→ inherits the configured default effort). */
   settings?: SessionSettings;
+  /** What the session's turns posted while they worked; absent when none did. */
+  progressMessages?: SessionProgressMessage[];
 }
 
 export class AgentSession {
@@ -221,6 +248,8 @@ export class AgentSession {
   readonly createdAt: Date;
 
   private history: SessionHistoryMessage[] = [];
+  /** What the turns posted while they worked: shown in the transcript, never read by the model. */
+  private progressMessages: SessionProgressMessage[] = [];
   private systemPrompt: string;
   private workspacePath: string;
   private turnCount = 0;
@@ -260,6 +289,7 @@ export class AgentSession {
     turnCount?: number;
     history?: SessionHistoryMessage[];
     earlierSummary?: string;
+    progressMessages?: SessionProgressMessage[];
     /** The working root as fromRecord settled it, taken as it is: a restore never derives. */
     restoredWorkspacePath?: string;
   }) {
@@ -286,6 +316,7 @@ export class AgentSession {
     this.turnCount = opts.turnCount ?? 0;
     this.history = opts.history ? [...opts.history] : [];
     this.earlierSummary = opts.earlierSummary ?? "";
+    this.progressMessages = opts.progressMessages ? [...opts.progressMessages] : [];
     this.settings = opts.settings ? { ...opts.settings } : {};
     this.endLogged = Boolean(this.archivedAt);
 
@@ -330,6 +361,7 @@ export class AgentSession {
       turnCount: record.turnCount,
       history: record.history,
       earlierSummary: record.earlierSummary,
+      ...(Array.isArray(record.progressMessages) ? { progressMessages: record.progressMessages } : {}),
       settings: record.settings,
     });
   }
@@ -563,6 +595,33 @@ export class AgentSession {
   }
 
   /**
+   * Keep a message the running turn posted to the person (SessionProgressMessage), stamped with
+   * the turn's request id, and return it as stored. Persisted at once: a reloaded page, or a second
+   * one, follows a running turn through the transcript.
+   */
+  addProgressMessage(input: { kind: string; text: string }): SessionProgressMessage {
+    const requestId = currentChatRequestId();
+    const message: SessionProgressMessage = {
+      id: randomUUID(),
+      ...(requestId ? { requestId } : {}),
+      timestamp: new Date().toISOString(),
+      kind: input.kind,
+      text: input.text,
+    };
+    this.progressMessages.push(message);
+    if (this.progressMessages.length > MAX_PROGRESS_MESSAGES) {
+      this.progressMessages.splice(0, this.progressMessages.length - MAX_PROGRESS_MESSAGES);
+    }
+    this.touch();
+    persistSessionStore(this);
+    return message;
+  }
+
+  getProgressMessages(): SessionProgressMessage[] {
+    return this.progressMessages.map((message) => ({ ...message }));
+  }
+
+  /**
    * Whether a transient system note with this prefix is already on the current turn (after the
    * last user message). The per-iteration guidance notes are meant to be stated once per turn;
    * appended after every tool round they compounded — five copies of the same ownership note in
@@ -667,6 +726,7 @@ export class AgentSession {
 
   reset(): void {
     this.history = [];
+    this.progressMessages = [];
     this.turnCount = 0;
     this.touch();
     logAudit("session_reset", { reason: "manual_reset" }, { sessionId: this.id });
@@ -682,6 +742,9 @@ export class AgentSession {
   rewindBeforeIndex(historyIndex: number): void {
     const clamped = Math.max(0, Math.min(historyIndex, this.history.length));
     if (clamped === this.history.length) return; // nothing to remove
+    // What the removed turns posted goes with them: everything from the first removed message on.
+    const removedFrom = this.history[clamped]?.timestamp;
+    if (removedFrom) this.progressMessages = this.progressMessages.filter((message) => message.timestamp < removedFrom);
     this.history = this.history.slice(0, clamped);
     this.touch();
     logAudit("session_rewound", { historyIndex: clamped, remaining: this.history.length }, { sessionId: this.id });
@@ -759,6 +822,7 @@ export class AgentSession {
       history: this.history.map((message) => ({ ...message })),
       ...(this.earlierSummary ? { earlierSummary: this.earlierSummary } : {}),
       ...(Object.keys(this.settings).length ? { settings: { ...this.settings } } : {}),
+      ...(this.progressMessages.length ? { progressMessages: this.getProgressMessages() } : {}),
     };
   }
 
@@ -930,7 +994,7 @@ export class AgentSession {
     }
 
     splitSteeredTurns(transcript);
-    return transcript;
+    return interleaveProgressMessages(transcript, this.progressMessages, this.id);
   }
 
   private maybeTrimHistory(): void {
@@ -981,6 +1045,9 @@ export class AgentSession {
     }
 
     if (droppedTotal > 0) {
+      // What the folded-away turns posted goes with them: everything before the oldest kept message.
+      const keptFrom = this.history[pinnedHead]?.timestamp;
+      if (keptFrom) this.progressMessages = this.progressMessages.filter((message) => message.timestamp >= keptFrom);
       this.touch();
       persistSessionStore(this);
       logAudit("history_compacted", {
@@ -1112,6 +1179,61 @@ function getTranscriptSwarmState(metadata?: Record<string, unknown>): SwarmState
  * Each part now gets the attempts that started inside it, and a later part drops the files an
  * earlier part's own tool calls made.
  */
+/**
+ * The transcript with the turns' progress messages in it, each where the live page showed it: just
+ * before the answer of its turn.
+ *
+ * A turn's assistant entry carries the time of its FIRST tool round (the entries of one turn merge
+ * into the first), and every progress message comes after that, so ordering by time alone would put
+ * them after the answer. A message goes before the assistant entry of its own turn (its request id)
+ * whose part began at or before it: after a steering cut each part's entry has its own start
+ * (segmentStartedAt), and the first part's has none. A message whose turn has no assistant entry
+ * yet, or with no request id, goes after the last entry not newer than it. Exported for tests.
+ */
+export function interleaveProgressMessages(
+  transcript: SessionTranscriptMessage[],
+  progress: readonly SessionProgressMessage[],
+  sessionId: string,
+): SessionTranscriptMessage[] {
+  if (progress.length === 0) return transcript;
+  const out = [...transcript];
+  const ordered = [...progress].sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+  for (const message of ordered) {
+    const entry: SessionTranscriptMessage = {
+      id: `${sessionId}:p:${message.id}`,
+      role: "assistant",
+      content: message.text,
+      timestamp: message.timestamp,
+      ...(message.requestId ? { requestId: message.requestId } : {}),
+      progress: true,
+    };
+    let before = -1;
+    if (message.requestId) {
+      out.forEach((candidate, index) => {
+        if (candidate.role !== "assistant" || candidate.progress || candidate.requestId !== message.requestId) return;
+        // The first entry of each part: the turn's first one, or one that opens a part after a cut.
+        const opensPart = candidate.segmentStartedAt !== undefined
+          || !out.slice(0, index).some((earlier) => earlier.role === "assistant" && !earlier.progress && earlier.requestId === message.requestId);
+        if (!opensPart) return;
+        if ((candidate.segmentStartedAt ?? "") <= message.timestamp) before = index;
+      });
+      // Posted after a mid-turn message whose part has no entry yet (the turn is still running):
+      // it belongs after that message, where the live page put it, not before the earlier part.
+      if (before >= 0 && out.slice(before + 1).some((later) => later.midTurn && later.requestId === message.requestId && later.timestamp <= message.timestamp)) {
+        before = -1;
+      }
+    }
+    if (before >= 0) {
+      out.splice(before, 0, entry);
+      continue;
+    }
+    let after = -1;
+    out.forEach((candidate, index) => { if (candidate.timestamp <= message.timestamp) after = index; });
+    out.splice(after + 1, 0, entry);
+  }
+  return out;
+}
+
 function splitSteeredTurns(transcript: SessionTranscriptMessage[]): void {
   let turnStart = 0;
   for (let index = 1; index <= transcript.length; index += 1) {
