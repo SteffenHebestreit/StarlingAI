@@ -16,7 +16,7 @@
  */
 import type { SwarmState } from "../tools/registry.js";
 import type { EffortTier } from "../config/schema.js";
-import type { AgentSession, SessionTranscriptAttachment } from "./session.js";
+import type { AgentSession, SessionProgressMessage, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
 import type { UserInputChannel } from "./user-input.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
@@ -48,6 +48,11 @@ export interface RunTurnOptions {
   onToolCall?: (toolCallId: string, name: string, args: Record<string, unknown>) => void;
   onToolResult?: (toolCallId: string, name: string, result: string, metadata?: Record<string, unknown>) => void;
   onSubAgentProgress?: (event: SubAgentProgressEvent) => void;
+  /**
+   * A progress message the turn posted (agent/turn-progress.ts), already kept in the session. Set
+   * by a surface that shows them live; a turn without it posts none (orchestration.progressMessages).
+   */
+  onProgressMessage?: (message: SessionProgressMessage) => void;
   onComputerAction?: (action: { computerSessionId: string; actionType: string; [key: string]: unknown }) => void;
   onComputerScreenshot?: (screenshot: { computerSessionId: string; dataUrl: string; width: number; height: number; [key: string]: unknown }) => void;
   onComputerSessionState?: (sessionState: { computerSessionId: string; state: string; [key: string]: unknown }) => void;

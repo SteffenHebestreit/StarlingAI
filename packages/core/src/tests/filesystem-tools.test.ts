@@ -691,4 +691,27 @@ describe("file tools at a shared root named workspace", () => {
     expect(r.success).toBe(true);
     expect(readFileSync(join(root, "generated", "WORKSPACE"), "utf8")).toBe("workspace(name = \"demo\")\n");
   });
+
+  it("refusing a binary format another tool makes, says which tool, on a line of its own", async () => {
+    // harness-lab chart-and-report: chart_designer, refused a .docx, answered that the report could
+    // not be made as a .docx, while content_writer's step had made it with generate_docx.
+    const { binaryFormatMakerNote } = await import("../tools/filesystem.js");
+    for (const [path, tool, format] of [
+      ["report.docx", "generate_docx", ".docx"],
+      ["report.doc", "generate_docx", ".docx"],
+      ["deck.pptx", "generate_pptx", ".pptx"],
+      ["brief.pdf", "render_pdf", ".pdf"],
+    ] as const) {
+      const r = await write(path, "content");
+      expect(r.success).toBe(false);
+      const ext = path.slice(path.lastIndexOf("."));
+      // The first line, which audit rows and failure lists keep, is what it always was.
+      expect(r.error).toBe(`File type ${ext} is not allowed for writing\n${binaryFormatMakerNote(ext)}`);
+      expect(r.error).toContain(`a ${format} file is made with ${tool}`);
+      expect(r.error).toContain("do not report the format as impossible");
+    }
+    // A type no tool makes is refused as it always was.
+    expect((await write("tool.exe", "content")).error).toBe("File type .exe is not allowed for writing");
+    expect(existsSync(join(root, "generated", "report.docx"))).toBe(false);
+  });
 });

@@ -30,10 +30,11 @@ import { planFrontier, planCycle } from "../agent/plan-frontier.js";
 import { BLOCKED_STEP_TOOLS } from "./tool-pipeline.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
 import { delegationAgentsOf, type NestedToolCall } from "../agent/turn-tool-contribution.js";
-import { withDelegationFanoutAllowance, withTurnGatherRole, batchEvidenceGatherPoint } from "./sub-agent.js";
+import { withScheduledDelegationAllowance, withTurnGatherRole, withoutProgressMilestones, batchEvidenceGatherPoint } from "./sub-agent.js";
 import { isWebReachingToolName } from "./agent-routing.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
+import { progressFileNames, progressStepOf } from "../agent/turn-progress.js";
 // The labels of the turn context a step's task carries after its own line, shared with the readers
 // that measure what the step itself asks (taskOwnWordChars, delegationAsksForFile).
 import {
@@ -143,6 +144,44 @@ export function buildStepTask(plan: TurnPlan, step: TurnPlanStep, results: Reado
   return parts.join(PLAN_STEP_SECTION_SEPARATOR);
 }
 
+/** How many of the plan's other steps a step is shown, and how much of each one's description. */
+const REST_OF_PLAN_MAX_STEPS = 8;
+const REST_OF_PLAN_DESCRIPTION_CHARS = 200;
+/** Opens the context a dispatched step is handed when the plan has other steps. Exported for tests. */
+export const PLAN_REST_OF_PLAN_LEAD =
+  "THE REST OF THE PLAN — each of these is a step of its own, done in its own run. Do only your STEP: "
+  + "do not start on any of these, and do not report them as missing.";
+
+/**
+ * The plan's other steps, handed to a dispatched step as its context, or undefined when it is the
+ * plan's only step.
+ *
+ * A step's task carries the turn's objective and acceptance criteria (buildStepTask), and they name
+ * every part of the turn. In the harness-lab task asking for an HTML chart and a .docx report (one
+ * step each), chart_designer took the report for its own work in all six runs, with the agent
+ * consultation and without: write_file on a .doc and a .docx (refused), generate_document, a
+ * create_docx.py, and a reply saying the report had failed. content_writer's step had made the
+ * .docx, and the QA verdict believed the failure. Shown the other steps, a step can see which part
+ * is someone else's.
+ *
+ * It is the context, not the task: delegate_to_agent routes a step that names no agent on its task,
+ * dedups a repeated one by it and runs its keyword tests over it, and none of them should read the
+ * other steps' words as this one's. Exported for tests.
+ */
+export function buildRestOfPlan(plan: TurnPlan, step: TurnPlanStep): string | undefined {
+  const others = plan.steps.filter((other) => other.id !== step.id);
+  if (others.length === 0) return undefined;
+  const lines = others.slice(0, REST_OF_PLAN_MAX_STEPS).map((other) => {
+    const description = other.description.replace(/\s+/g, " ").trim();
+    const clipped = description.length > REST_OF_PLAN_DESCRIPTION_CHARS
+      ? `${description.slice(0, REST_OF_PLAN_DESCRIPTION_CHARS)}…`
+      : description;
+    return `- ${other.id}${other.agent ? ` (${other.agent})` : ""}: ${defangFramingMarkers(clipped)}`;
+  });
+  if (others.length > REST_OF_PLAN_MAX_STEPS) lines.push(`- …and ${others.length - REST_OF_PLAN_MAX_STEPS} more`);
+  return [PLAN_REST_OF_PLAN_LEAD, ...lines].join("\n");
+}
+
 interface StepRun {
   status: TurnPlanStepStatus;
   /** The call this step actually made, for the turn to account for as its own. */
@@ -196,11 +235,13 @@ function dispatchFor(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<st
     }
     return { tool: "run_workflow", args: { name: step.workflow, context: buildStepTask(plan, step, results) } };
   }
+  const restOfPlan = buildRestOfPlan(plan, step);
   return {
     tool: "delegate_to_agent",
     args: {
       ...(step.agent ? { agentName: step.agent } : {}),
       task: buildStepTask(plan, step, results),
+      ...(restOfPlan ? { context: restOfPlan } : {}),
       ...(step.deliverable ? { deliverable: step.deliverable } : {}),
     },
   };
@@ -309,6 +350,36 @@ function batchGatherPoint(batch: readonly TurnPlanStep[], ctx: ToolContext): str
   return index >= 0 ? delegates[index]!.id : undefined;
 }
 
+/**
+ * The progress message for a step that came back (agent/turn-progress.ts): done or failed, what it
+ * produced, what runs beside it and the next step not yet started. A step handed back to the
+ * orchestrator (manual) did not run and posts nothing.
+ */
+function reportStepProgress(
+  plan: TurnPlan,
+  step: TurnPlanStep,
+  run: StepRun,
+  statuses: ReadonlyMap<string, TurnPlanStepStatus>,
+  stillOut: ReadonlySet<string>,
+  report: NonNullable<ToolContext["reportProgress"]>,
+): void {
+  if (run.status !== "done" && run.status !== "failed") return;
+  const next = plan.steps.find((other) => other.id !== step.id && !stillOut.has(other.id) && (statuses.get(other.id) ?? "pending") === "pending");
+  const files = progressFileNames(run.artifacts);
+  report({
+    kind: "step",
+    step: progressStepOf(step),
+    position: plan.steps.findIndex((other) => other.id === step.id) + 1,
+    total: plan.steps.length,
+    outcome: run.status,
+    ...(run.status === "done" && run.result ? { result: run.result } : {}),
+    ...(files.length ? { files } : {}),
+    ...(run.status === "failed" && run.detail ? { reason: run.detail.slice(0, 160) } : {}),
+    running: plan.steps.filter((other) => stillOut.has(other.id)).map(progressStepOf),
+    ...(next ? { next: progressStepOf(next) } : {}),
+  });
+}
+
 /** Dispatch one step to the tool that already knows how to run that kind of work. */
 async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<string, string>, ctx: ToolContext): Promise<StepRun> {
   const dispatch = dispatchFor(plan, step, results);
@@ -331,7 +402,9 @@ async function runStep(plan: TurnPlan, step: TurnPlanStep, results: ReadonlyMap<
   }
 
   try {
-    const result = await executeTool(dispatch.tool, dispatch.args, ctx);
+    // The step tells its own progress (reportStepProgress): its delegation, and whatever runs inside
+    // it, post no milestone of their own.
+    const result = await executeTool(dispatch.tool, dispatch.args, withoutProgressMilestones(ctx));
     // Forwarded like the artifacts below, and from a failed step as well: which calls failed on the
     // way is what tells a recovery onto another path apart from the path the step asked for.
     const stepToolFailures = result.metadata?.["specialistToolFailures"];
@@ -586,15 +659,25 @@ registerTool({
       if (round === maxRounds - 1) exitReason = "rounds";
 
       for (const step of batch) statuses.set(step.id, "running");
+      // Which of the batch are still out, for each finished step's progress message: statuses holds
+      // the whole batch as running until every one of them is back.
+      const stillOut = new Set(batch.map((step) => step.id));
       if (mayGather && gatherPointId === undefined) gatherPointId = batchGatherPoint(batch, ctx);
       // The per-agent repeat cap is 2 per turn, so a parallelGroup of three steps sharing one
-      // specialist was refused at the third — every other fan-out tool raises the allowance for the
-      // batch it is about to issue, and this one did not.
-      const batchCtx = batch.length > 1
-        ? withDelegationFanoutAllowance(ctx, batch.map((step) => step.agent), batch.length)
-        : ctx;
+      // specialist was refused at the third. Raised for parallel batches only, the same three steps
+      // as a sequence still were (nightly lab 2026-10-30: one page per step, all content_writer).
+      // Every batch now gets room for its own steps on top of what each agent has already run.
+      const batchCtx = withScheduledDelegationAllowance(
+        ctx,
+        batch.map((step) => (step.kind === "delegate" ? step.agent : undefined)),
+        batch.length,
+      );
       const outcomes = await Promise.all(
-        batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => ({ step, run }))),
+        batch.map((step) => runStep(plan, step, results, withTurnGatherRole(batchCtx, step.id === gatherPointId)).then((run) => {
+          stillOut.delete(step.id);
+          if (ctx.reportProgress) reportStepProgress(plan, step, run, statuses, stillOut, ctx.reportProgress);
+          return { step, run };
+        })),
       );
       for (const { step, run } of outcomes) {
         if (run.call) nestedCalls.push(run.call);

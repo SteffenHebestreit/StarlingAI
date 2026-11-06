@@ -1847,7 +1847,8 @@ const collapsedMessageCount = computed(() => Math.max(0, displayMessages.value.l
 const latestAssistantMessage = computed(() => {
   for (let index = gateway.messages.length - 1; index >= 0; index -= 1) {
     const message = gateway.messages[index];
-    if (message?.role === "assistant" && !message.blocked && message.content.trim()) {
+    // A progress message (its plan, a finished step) is not an answer.
+    if (message?.role === "assistant" && !message.blocked && !message.progress && message.content.trim()) {
       return message;
     }
   }

@@ -49,6 +49,8 @@ interface RecoveryEntry {
   midTurn?: boolean;
   /** The turn the entry belongs to, when the server names it. */
   requestId?: string;
+  /** A message the turn posted while it worked: it says nothing about how the turn ended. */
+  progress?: boolean;
   toolCalls?: Array<{ result?: unknown }>;
 }
 
@@ -125,7 +127,8 @@ export function savedEnding(transcript: RecoveryEntry[], turn: TurnRef): "answer
   let end = own + 1;
   while (end < transcript.length && !(transcript[end]!.role === "user" && !transcript[end]!.midTurn)) end += 1;
   const entries = namesTurns(transcript) ? transcript.filter((entry, index) => index > own && entry.requestId === turn.requestId) : transcript.slice(own + 1, end);
-  const last = entries.filter((entry) => entry.role === "assistant").pop();
+  // Its plan or a finished step has words, and the turn may have been stopped right after it.
+  const last = entries.filter((entry) => entry.role === "assistant" && !entry.progress).pop();
   if (!last) return "unclear";
   if (last.toolCalls?.some((call) => call.result === undefined)) return "cut";
   return normalize(last.content.replace(THINKING_BLOCK_RE, "")) ? "answer" : "unclear";
@@ -157,8 +160,9 @@ export function recoveryVerdict(input: {
   // An assistant entry of the turn after the user's message that opened it. The newest message
   // that opened a turn must be this one — otherwise the server never got it, and whatever answer
   // follows belongs to an earlier turn — and, where the entries are named, the entry this turn's.
+  // A progress message is no answer: the turn posted it while it was still working.
   const answered = own >= 0 && own === newest
-    && input.transcript.slice(own + 1).some((later) => later.role === "assistant" && (!named || later.requestId === input.requestId));
+    && input.transcript.slice(own + 1).some((later) => later.role === "assistant" && !later.progress && (!named || later.requestId === input.requestId));
   if (input.activeTurn !== undefined || input.stopped || another) {
     if (answered) return "landed";
     // A later message opened a turn. Seen running under another name, it replaced this one; with
@@ -173,6 +177,7 @@ export function recoveryVerdict(input: {
   return answered
     && input.totalMessages > input.baselineTotalMessages
     && last?.role === "assistant"
+    && !last.progress
     && !last.toolCalls?.length
     ? "landed"
     : "unknown";

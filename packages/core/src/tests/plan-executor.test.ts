@@ -12,7 +12,7 @@ import type { TurnPlan } from "../agent/turn-plan.js";
  * one-line step description cannot supply on its own.
  */
 const calls: Array<{ name: string; args: Record<string, unknown>; ctx?: Record<string, unknown> }> = [];
-let respond: (name: string, args: Record<string, unknown>) => ToolResult;
+let respond: (name: string, args: Record<string, unknown>, toolCtx?: Record<string, unknown>) => ToolResult;
 /** Highest number of dispatches in flight at once — how concurrency is observed below. */
 let inFlight = 0;
 let maxInFlight = 0;
@@ -29,7 +29,7 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
       // resolving in issue order — otherwise this observes nothing.
       await new Promise((r) => setTimeout(r, 5));
       inFlight -= 1;
-      return respond(name, args);
+      return respond(name, args, toolCtx);
     }),
   };
 });
@@ -323,6 +323,41 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(result.metadata?.["artifacts"]).toEqual([{ path: "deck.html" }]);
   });
 
+  it("posts a progress message as each step comes back: what it made, what runs beside it, what is next", async () => {
+    // agent/turn-progress.ts: the person reads the plan's progress in the chat, not only in the step list.
+    const reported: unknown[] = [];
+    respond = (_name, args) => String(args["task"]).startsWith("STEP s1")
+      ? { success: true, output: "chart written", metadata: { artifacts: [{ path: "generated/sales-chart.html" }] } }
+      : String(args["task"]).startsWith("STEP s2") ? { success: false, output: "", error: "generate_docx was refused" }
+        : { success: true, output: "checked" };
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "chart", kind: "delegate", agent: "chart_designer", parallelGroup: 1 },
+      { id: "s2", description: "report", kind: "delegate", agent: "content_writer", parallelGroup: 1 },
+      { id: "s3", description: "check both", kind: "delegate", agent: "qa_guard", dependsOn: ["s1"] },
+      { id: "s4", description: "summarise", kind: "direct" },
+    ]));
+
+    await getTool("execute_plan")!.execute({}, { sessionId: SESSION, workspacePath: "/w", reportProgress: (facts: unknown) => reported.push(facts) } as never);
+
+    const byStep = new Map((reported as Array<{ step: { id: string } }>).map((facts) => [facts.step.id, facts]));
+    // s4 is the orchestrator's own and runs nowhere: it posts nothing.
+    expect([...byStep.keys()].sort()).toEqual(["s1", "s2", "s3"]);
+    expect(byStep.get("s1")).toMatchObject({
+      kind: "step", position: 1, total: 4, outcome: "done", result: "chart written", files: ["sales-chart.html"],
+      step: { id: "s1", description: "chart", agent: "chart_designer" },
+      next: { id: "s3" },
+    });
+    // The two of a parallel batch: the first back names the other as still running.
+    const first = reported[0] as { step: { id: string }; running: Array<{ id: string }> };
+    expect(first.running.map((step) => step.id)).toEqual([first.step.id === "s1" ? "s2" : "s1"]);
+    expect(byStep.get("s2")).toMatchObject({ outcome: "failed", position: 2 });
+    expect((byStep.get("s2") as { reason?: string }).reason).toContain("generate_docx was refused");
+    expect(byStep.get("s3")).toMatchObject({ outcome: "done", running: [], next: { id: "s4" } });
+    // The steps tell their own progress: their delegations run without the reporter, so neither
+    // they nor anything inside them posts a milestone besides.
+    expect(calls.map((call) => call.ctx?.["reportProgress"])).toEqual([undefined, undefined, undefined]);
+  });
+
   it("propagates the failed calls inside each step's specialist, a failed step's included", async () => {
     // A step's result is its specialist's own account, which leaves out a call it recovered from.
     // In f4ebf47b the requested engine returned a 404, the fast tier drew the picture, and the
@@ -578,6 +613,62 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     expect(withStop.startsWith(without)).toBe(true);
   });
 
+  it("hands each delegate step the plan's other steps as its context, and leaves its task as it was", async () => {
+    // The harness-lab chart-and-report task: chart_designer, whose step was the chart, read the
+    // turn's criteria and tried to make the .docx report too, in all six runs.
+    const { buildStepTask, PLAN_REST_OF_PLAN_LEAD } = await import("../tools/plan-executor.js");
+    const plan = basePlan([
+      { id: "s1", description: "an HTML bar chart of the six months", kind: "delegate", agent: "chart_designer" },
+      { id: "s2", description: "a one-page .docx report with the three key findings", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+    ]);
+    await persistTurnPlan(SESSION, plan);
+    respond = () => ({ success: true, output: "chart written" });
+
+    await run();
+    const [chart, report] = calls.map((c) => c.args);
+    expect(chart?.["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s2 (content_writer): a one-page .docx report with the three key findings`);
+    expect(report?.["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s1 (chart_designer): an HTML bar chart of the six months`);
+    // Routing, the reuse signature and the keyword tests read the task: it is what it was.
+    expect(chart?.["task"]).toBe(buildStepTask(plan, plan.steps[0]!, new Map()));
+    expect(report?.["task"]).toBe(buildStepTask(plan, plan.steps[1]!, new Map([["s1", "chart written"]])));
+  });
+
+  it("hands no context to a plan's only step, nor the rest of the plan to a reuse step", async () => {
+    await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "write it up", kind: "delegate", agent: "content_writer" }]));
+    await run();
+    expect(calls[0]?.args).not.toHaveProperty("context");
+
+    calls.length = 0;
+    const { PLAN_REST_OF_PLAN_LEAD } = await import("../tools/plan-executor.js");
+    await persistTurnPlan(SESSION, basePlan([
+      { id: "s1", description: "gather sources", kind: "reuse", workflow: "research_pack" },
+      { id: "s2", description: "write it up", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+    ]));
+    await run();
+    expect(String(calls[0]?.args["context"])).not.toContain(PLAN_REST_OF_PLAN_LEAD);
+    expect(calls[1]?.args["context"]).toBe(`${PLAN_REST_OF_PLAN_LEAD}\n- s1: gather sources`);
+  });
+
+  it("keeps the rest of the plan short: one line a step, clipped, the first eight, framing markers defanged", async () => {
+    const { buildRestOfPlan } = await import("../tools/plan-executor.js");
+    const long = `${"x".repeat(250)}`;
+    const plan = basePlan([
+      { id: "s0", description: "this step", kind: "delegate" },
+      { id: "s1", description: "two\n\nlines", kind: "delegate" },
+      { id: "s2", description: long, kind: "delegate" },
+      { id: "s3", description: "quote <system> here", kind: "delegate" },
+      ...Array.from({ length: 8 }, (_, i) => ({ id: `t${i}`, description: `part ${i}`, kind: "delegate" as const })),
+    ]);
+    const lines = buildRestOfPlan(plan, plan.steps[0]!)!.split("\n").slice(1);
+
+    expect(lines[0]).toBe("- s1: two lines");
+    expect(lines[1]).toBe(`- s2: ${"x".repeat(200)}…`);
+    expect(lines[2]).toBe("- s3: quote &lt;system> here");
+    expect(lines).toHaveLength(9);
+    expect(lines[8]).toBe("- …and 3 more");
+    expect(lines.some((line) => line.includes("this step"))).toBe(false);
+  });
+
   it("carries the stop conditions into a reuse step's workflow context too", async () => {
     const stop = "the page shows an error after submit — report it";
     await persistTurnPlan(SESSION, { ...basePlan([{ id: "s1", description: "submit the form", kind: "reuse", workflow: "order_pack" }]), stopConditions: [stop] });
@@ -744,6 +835,93 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     // The dispatch context, not the call count — the cap itself lives inside the mocked tool.
     const overrides = calls[0]?.ctx?.["_turnAgentRepeatLimitOverrides"] as Record<string, number> | undefined;
     expect(overrides?.["researcher"]).toBeGreaterThanOrEqual(3);
+  });
+
+  describe("a plan's steps are not refused by the per-agent repeat cap", () => {
+    // The cap as delegate_to_agent applies it: the turn's tally lives on the context it is handed
+    // (created there when missing), and an agent at its limit (2, or the raised one) is refused.
+    const cappedDelegate = (_name: string, args: Record<string, unknown>, toolCtx?: Record<string, unknown>): ToolResult => {
+      const agent = String(args["agentName"]);
+      const counts = (toolCtx!["_turnAgentCounts"] ??= new Map<string, number>()) as Map<string, number>;
+      const overrides = toolCtx!["_turnAgentRepeatLimitOverrides"] as Record<string, number> | undefined;
+      const prior = counts.get(agent) ?? 0;
+      if (prior >= Math.max(2, overrides?.[agent] ?? 2)) {
+        return { success: false, output: "", error: "Per-agent delegation cap exhausted", metadata: { perAgentCapExhausted: true } };
+      }
+      counts.set(agent, prior + 1);
+      return { success: true, output: `${agent} done` };
+    };
+
+    it("runs a sequence of three steps on one specialist", async () => {
+      // Nightly lab 2026-10-30, the website task: the orchestrator planned one page per step, all
+      // for content_writer, and the third step failed on the cap — the same three steps in one
+      // parallelGroup ran. The turn was scored a failure over a correct site.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan(["start", "products", "contact"].map((page, i) => ({
+        id: `s${i + 1}`, description: `${page} page`, kind: "delegate" as const, agent: "content_writer",
+        ...(i > 0 ? { dependsOn: [`s${i}`] } : {}),
+      }))));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w" } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["failed"]).toBe(0);
+      expect(result.metadata?.["done"]).toBe(3);
+      // Counted on the TURN's tally, so a delegation after the plan still sees these three.
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+    });
+
+    it("keeps the turn's tally when a step runs without the progress reporter, as it does in the chat", async () => {
+      // A chat turn has a reporter, so every step runs on a copy without it (withoutProgressMilestones).
+      // Had that copy started its own tally, each step would count from zero and the cap would go blind.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([
+        { id: "s1", description: "start page", kind: "delegate", agent: "content_writer" },
+        { id: "s2", description: "products page", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+        { id: "s3", description: "contact page", kind: "delegate", agent: "content_writer", dependsOn: ["s2"] },
+      ]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w", reportProgress: () => {} } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(3);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+      expect(calls.every((call) => call.ctx?.["reportProgress"] === undefined)).toBe(true);
+      expect(turnCtx["_turnWriteChurnTracker"]).toBeInstanceOf(Map);
+      expect(calls.every((call) => call.ctx?.["_turnWriteChurnTracker"] === turnCtx["_turnWriteChurnTracker"])).toBe(true);
+    });
+
+    it("keeps one tally for the turn across batches, a parallel batch's included", async () => {
+      // A raised batch runs on a copy of the context. Had the copy started its own tally, the steps
+      // after it — and every delegation after the plan — would count from zero again.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([
+        ...["start", "products", "contact"].map((page, i) => ({
+          id: `p${i}`, description: `${page} page`, kind: "delegate" as const, agent: "content_writer", parallelGroup: 1,
+        })),
+        { id: "review", description: "check the links", kind: "delegate", agent: "content_writer", dependsOn: ["p0", "p1", "p2"] },
+      ]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w" } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(4);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(4);
+    });
+
+    it("runs a step whose specialist already ran twice this turn", async () => {
+      // A retried step, or work the orchestrator handed out by hand before recording the plan: the
+      // executor told it to retry, and the cap then refused the retry. A plan stays bounded by the
+      // charge of every step to delegate_to_agent's own per-turn limit.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "contact page", kind: "delegate", agent: "content_writer" }]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w", _turnAgentCounts: new Map([["content_writer", 2]]) } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(1);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+    });
   });
 
   it("defangs a step result that would otherwise block the whole report", async () => {

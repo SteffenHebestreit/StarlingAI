@@ -254,6 +254,8 @@ export const turnText = {
   specialistStarted: (lang: TurnLanguage, agent: string) => lang === "de" ? `${agentLabel(agent)} legt los …` : `${agentLabel(agent)} started…`,
   specialistFinished: (lang: TurnLanguage, agent: string) => lang === "de" ? `${agentLabel(agent)} ist fertig` : `${agentLabel(agent)} finished`,
 
+  // A message the turn posted while it worked: its plan, a step it finished.
+  progressLabel: (lang: TurnLanguage) => lang === "de" ? "Zwischenstand" : "Progress",
   // A turn the user stopped: their choice, not a failure.
   stoppedBadge: (lang: TurnLanguage) => lang === "de" ? "⏹ Von dir angehalten" : "⏹ Stopped by you",
   stoppedNote: (lang: TurnLanguage) => lang === "de"

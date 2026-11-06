@@ -12,7 +12,8 @@ import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import { currentEffortTier } from "../runtime/effort-context.js";
-import { normalizeTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
+import { normalizeTurnPlan, loadTurnPlan, persistTurnPlan, countParallelWidth, renderTurnPlan, type TurnPlan } from "../agent/turn-plan.js";
+import { progressStepOf } from "../agent/turn-progress.js";
 import { planHasDispatchableStep, stepToolReachable } from "./plan-executor.js";
 import { orchestratorTurnChangeState } from "../agent/turn-change-request.js";
 import { getPerTurnToolCallLimit } from "../agent/delegation-response-collapse.js";
@@ -121,7 +122,14 @@ registerTool({
           + "Make the step that reads or changes the file a \"delegate\" step for the specialist that can (leave `agent` unset to have it routed), and re-record the plan.",
       };
     }
+    // The plan, posted to the person (agent/turn-progress.ts); "changed" when this turn had one.
+    const earlier = ctx.reportProgress ? await loadTurnPlan(ctx.sessionId) : null;
     await persistTurnPlan(ctx.sessionId, plan);
+    if (ctx.reportProgress) {
+      const recordedAt = earlier ? Date.parse(earlier.createdAt) : Number.NaN;
+      const revised = ctx.turnStartedAt !== undefined && Number.isFinite(recordedAt) && recordedAt >= ctx.turnStartedAt;
+      ctx.reportProgress({ kind: "plan", revised, steps: plan.steps.map(progressStepOf) });
+    }
     const width = countParallelWidth(plan.steps);
     logAudit("flow_plan_recorded", {
       agentName: ctx.currentAgentName ?? "main",

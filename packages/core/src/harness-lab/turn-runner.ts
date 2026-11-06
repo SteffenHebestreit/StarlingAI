@@ -46,6 +46,8 @@ export interface LabTurnRecord {
   checkFailures: string[];
   /** The turn had checks to fail. */
   checked: boolean;
+  /** What the turn posted while it worked (agent/turn-progress.ts), as the web chat shows it. */
+  progressMessages?: Array<{ kind: string; text: string; timestamp: string }>;
 }
 
 export interface LabRunRecord {
@@ -108,6 +110,7 @@ export async function runLabAttempt(task: HarnessTask, arm: LabArm, opts: RunAtt
           if (event.sessionId && event.sessionId.includes(session.id)) events.push(event as unknown as AuditEventLike);
         });
         const toolCalls = new Map<string, LabToolCall>();
+        const progressMessages: NonNullable<LabTurnRecord["progressMessages"]> = [];
         const turnStarted = Date.now();
         let reply = "";
         let status: LabTurnRecord["status"] = "ok";
@@ -141,6 +144,10 @@ export async function runLabAttempt(task: HarnessTask, arm: LabArm, opts: RunAtt
               call.result = result.slice(0, TOOL_RESULT_CHARS);
               toolCalls.set(id, call);
             },
+            // The web chat takes a turn's progress messages live, so a lab turn does too: their
+            // wording calls go to the turn's own model server, and a turn without them is not the
+            // turn a person gets.
+            onProgressMessage: (message) => { progressMessages.push({ kind: message.kind, text: message.text, timestamp: message.timestamp }); },
           });
           reply = out.response;
           status = out.blocked ? "blocked" : "ok";
@@ -175,6 +182,7 @@ export async function runLabAttempt(task: HarnessTask, arm: LabArm, opts: RunAtt
           artifacts,
           checkFailures,
           checked: turn.expect !== undefined,
+          ...(progressMessages.length ? { progressMessages } : {}),
         });
         if (record.unscored) break;
       }

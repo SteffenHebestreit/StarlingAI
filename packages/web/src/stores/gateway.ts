@@ -7,6 +7,7 @@ import { useNotificationStore } from "./notifications";
 import { useShellStore } from "./shell";
 import { isDelegation, isFailedResult, isFanOut, stepsFromToolCalls, type TurnStep } from "../composables/turnSteps";
 import { agentLabel, languageOfTurn, turnLanguage, turnText, type TurnLanguage } from "../composables/turnText";
+import { placeProgressMessage, progressMessageFromEvent } from "../composables/progressMessage";
 import { mergeFinalAssistantContent, mergeSegmentAssistantContent, transcriptAssistantContent } from "../composables/assistantContent";
 import {
   appendUnread, landTurn, liveCallId, markUnread, newSteerMessage, progressSteps, readSteeringEntries, resteer, resumeTurnSegments,
@@ -104,6 +105,11 @@ export interface ChatMessage {
   stopped?: boolean;
   /** The language the turn is shown in, noted when it starts ("de" | "en"; composables/turnText.ts). */
   language?: TurnLanguage;
+  /**
+   * A message the turn posted while it worked — that it is looking for its tools, its plan, a step
+   * that finished — not its answer. Saved on the server beside the turn; never read by the model.
+   */
+  progress?: boolean;
 }
 
 export interface SwarmTaskAttempt {
@@ -183,6 +189,8 @@ export interface GatewaySessionTranscriptMessage {
    * started; the page then tells turns apart by their words.
    */
   requestId?: string;
+  /** A progress message the turn posted while it worked (ChatMessage.progress). */
+  progress?: true;
 }
 
 interface SendMessageOptions {
@@ -714,6 +722,11 @@ export const useGatewayStore = defineStore("gateway", () => {
   const currentSessionTimeLimitSec = ref<number | null>(null);
   const currentSessionImageSettingsPrompt = ref<ImageSettingsPrompt>("ask");
   const pendingRequestId = ref<string | null>(null);
+  /**
+   * The newest progress message that arrived live for the turn this page follows (agent.progress),
+   * for the voice to speak. Not set for one read back from the transcript, which was posted earlier.
+   */
+  const liveProgress = ref<{ id: string; text: string; kind: string } | null>(null);
   // The session the pending turn runs in. The page shows one session at a time, and a turn goes
   // on running on the server when the user switches away: its events must never land in the
   // session on screen, and nothing typed there may steer or stop it.
@@ -2673,8 +2686,9 @@ export const useGatewayStore = defineStore("gateway", () => {
       return {
         id: message.id,
         role: message.role,
-        // A segment the turn continued past is not its answer, so it gets no stand-in text.
-        content: message.role === "assistant" ? transcriptAssistantContent(message) : message.content,
+        // A segment the turn continued past is not its answer, so it gets no stand-in text. A
+        // progress message is the turn's own words as written.
+        content: message.role === "assistant" && !message.progress ? transcriptAssistantContent(message) : message.content,
         timestamp: new Date(message.timestamp),
         toolCalls: message.toolCalls,
         swarmState: normalizeSwarmState(message.swarmState) ?? undefined,
@@ -2687,6 +2701,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         // The turn it belongs to, so a message another tab sent in the same words is never taken
         // for this page's own (hydration, turnRecovery).
         ...(message.requestId ? { requestId: message.requestId } : {}),
+        ...(message.progress ? { progress: true } : {}),
       };
     });
     return normalizeHydratedMessages(mappedReversed.reverse());
@@ -3189,6 +3204,19 @@ export const useGatewayStore = defineStore("gateway", () => {
         const activity = typeof data["activity"] === "string" ? data["activity"] : "planning";
         const chars = typeof data["chars"] === "number" ? data["chars"] : undefined;
         recordDelegationProgress(agent, turnText.heartbeat(liveLanguage(), activity, chars));
+      }
+      return;
+    }
+
+    // A message the turn posted while it works: its plan, a finished step (agent/turn-progress.ts).
+    if (type === "agent.progress") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (isLiveTurnEvent(data)) {
+        notePendingTurnActivity();
+        const message = progressMessageFromEvent(data);
+        if (message && placeProgressMessage(messages.value, message)) {
+          liveProgress.value = { id: message.id, text: message.content, kind: String(data["kind"] ?? "") };
+        }
       }
       return;
     }
@@ -4638,6 +4666,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     isStreaming,
     isError,
     turnLikelyStalled,
+    liveProgress,
     pendingApproval,
     pendingInputRequest,
     pendingIntervention,

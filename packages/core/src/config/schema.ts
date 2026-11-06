@@ -276,6 +276,11 @@ export const ModelConfigSchema = z.object({
   tiers: z.object({
     routing: z.string().max(200).optional(),
     synthesis: z.string().max(200).optional(),
+    /** `narration`: a small, fast model for the short messages a turn posts to the person while
+     *  it works (agent/turn-progress.ts). Best on a model the turn's own work does not run on: the
+     *  routing tier is often the task model itself, and under load it timed out on 10 of 13. Unset,
+     *  those messages keep their fixed wording. */
+    narration: z.string().max(200).optional(),
   }).optional(),
 });
 
