@@ -186,6 +186,20 @@
                 :input-id="inputId"
               />
             </div>
+
+            <!-- Nothing here yet: a start for the user to finish. -->
+            <div v-if="showStarters" class="chat-starters">
+              <p class="chat-starters__lead">{{ starters.lead }}</p>
+              <div class="chat-starters__list">
+                <button
+                  v-for="starter in starters.items"
+                  :key="starter.label"
+                  type="button"
+                  class="chat-starters__item"
+                  @click="openComposer(starter.prompt)"
+                >{{ starter.label }}</button>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -1086,6 +1100,7 @@ import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import UserInputCard from "@/components/input/UserInputCard.vue";
 import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
+import { chatStarters, startersVisible } from "@/composables/chatStarters";
 import { readImageSettingsPayload } from "@/composables/imageSettings";
 import { formatCountdown, remainingMs } from "@/composables/userInputs";
 import { stepsFor } from "@/composables/turnSteps";
@@ -1176,6 +1191,16 @@ const pendingImageContexts = ref<Array<{ filename: string; file: File; previewUr
 const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([]);
 const composerHasContent = computed(() =>
   Boolean(inputText.value.trim()) || pendingImageContexts.value.length > 0 || pendingDocumentContexts.value.length > 0);
+const starters = chatStarters(navigator.language);
+const showStarters = computed(() => startersVisible({
+  connected: gateway.connected,
+  transcriptLoading: gateway.currentSessionTranscriptLoading,
+  turnRunning: gateway.isLoading,
+  questionOpen: gateway.hasOpenUserInput || Boolean(gateway.pendingInputRequest),
+  messageCount: gateway.messages.length,
+  composerOpen: composerOpen.value,
+  composerHasContent: composerHasContent.value,
+}));
 /** The Options <details> element, so attaching a file can close it. */
 const optionsDetailsEl = ref<HTMLDetailsElement | null>(null);
 const previewModalUrl = ref<string | null>(null);
@@ -3873,6 +3898,47 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+/* At the foot of the page, clear of the launcher: the entity owns its middle. */
+.chat-starters {
+  margin-top: auto;
+  padding-bottom: 5.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+  text-align: center;
+}
+
+.chat-starters__lead {
+  margin: 0;
+  color: rgb(186 230 253 / 0.8);
+  font-size: 0.9rem;
+}
+
+.chat-starters__list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  max-width: 46rem;
+}
+
+.chat-starters__item {
+  border-radius: 9999px;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  background: rgba(14, 32, 54, 0.72);
+  color: rgb(186 230 253);
+  padding: 0.42rem 0.9rem;
+  font-size: 0.82rem;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-starters__item:hover,
+.chat-starters__item:focus-visible {
+  border-color: rgba(125, 211, 252, 0.48);
+  color: white;
 }
 
 .chat-history-collapsed {
