@@ -147,6 +147,14 @@ export function toolAction(toolName: string | undefined, language: string): stri
   return words ? (isGerman(language) ? words.de : words.en) : undefined;
 }
 
+/**
+ * An agent, workflow or tool as a message names it: words, not an identifier. An agent made on the
+ * fly reached the chat as "ephemeral:http_semantics_rfc_finder"; it reads "http semantics rfc finder".
+ */
+export function agentLabel(name: string): string {
+  return name.replace(/^ephemeral:/i, "").replace(/[_-]+/g, " ").trim() || name;
+}
+
 /** A plan step as a progress message names it: what it does, and who or what does it. */
 export function progressStepOf(step: { id: string; description: string; agent?: string; workflow?: string; tool?: string }): ProgressStep {
   const by = step.agent ?? step.workflow ?? step.tool;
@@ -216,7 +224,7 @@ function stepNames(steps: readonly ProgressStep[]): string {
 
 /** The numbered list a plan message shows, whoever wrote the line above it. */
 export function planList(steps: readonly ProgressStep[]): string {
-  return steps.map((step, index) => `${index + 1}. ${sentence(step.description)}${step.agent ? ` (${step.agent})` : ""}`).join("\n");
+  return steps.map((step, index) => `${index + 1}. ${sentence(step.description)}${step.agent ? ` (${agentLabel(step.agent)})` : ""}`).join("\n");
 }
 
 export function fixedProgressText(facts: TurnProgressFacts, language: string): string {
@@ -234,16 +242,16 @@ export function fixedProgressText(facts: TurnProgressFacts, language: string): s
   }
   if (facts.kind === "milestone") {
     const told = facts.finished.map((finish) => finish.outcome === "done"
-      ? `${finish.agent} ${de ? "ist fertig" : "is done"}${finish.files?.length ? ` (${finish.files.join(", ")})` : ""}`
-      : `${finish.agent} ${de ? "kam nicht durch" : "did not get through"}`);
-    const running = facts.running ?? [];
+      ? `${agentLabel(finish.agent)} ${de ? "ist fertig" : "is done"}${finish.files?.length ? ` (${finish.files.join(", ")})` : ""}`
+      : `${agentLabel(finish.agent)} ${de ? "kam nicht durch" : "did not get through"}`);
+    const running = (facts.running ?? []).map(agentLabel);
     return `${told.join("; ")}.${running.length ? (de ? ` Gerade arbeiten noch: ${running.join(", ")}.` : ` Still working: ${running.join(", ")}.`) : ""}`;
   }
   if (facts.kind === "working") {
     const who = facts.working.map((entry) => {
       const doing = toolAction(entry.doing, language);
-      if (de) return `${entry.agent} ${doing ?? "arbeitet"}`;
-      return `${entry.agent} is ${doing ?? "working"}`;
+      if (de) return `${agentLabel(entry.agent)} ${doing ?? "arbeitet"}`;
+      return `${agentLabel(entry.agent)} is ${doing ?? "working"}`;
     });
     return de ? `Ich bin noch dran: ${who.join("; ")}.` : `Still on it: ${who.join("; ")}.`;
   }
@@ -285,11 +293,11 @@ function factsText(facts: TurnProgressFacts): string {
   if (facts.kind === "milestone") {
     const share = Math.floor(RESULT_CHARS_FOR_MODEL / Math.max(1, facts.finished.length));
     const lines = facts.finished.map((finish) => [
-      `${finish.agent} ${finish.outcome === "done" ? "finished" : "failed"}.`,
+      `${agentLabel(finish.agent)} ${finish.outcome === "done" ? "finished" : "failed"}.`,
       finish.result ? ` Its report, for its key result only: ${finish.result.slice(0, share)}` : "",
       finish.files?.length ? ` Files it produced: ${finish.files.join(", ")}` : "",
     ].join(""));
-    const running = facts.running ?? [];
+    const running = (facts.running ?? []).map(agentLabel);
     lines.push(running.length ? `Still working: ${running.join(", ")}` : "Nobody else is working on it any more: say no one is.");
     return lines.join("\n");
   }
@@ -298,7 +306,7 @@ function factsText(facts: TurnProgressFacts): string {
       `The work has been going on for ${facts.elapsedSeconds} seconds and you have not told the person anything for a while.`,
       ...facts.working.map((entry) => {
         const doing = toolAction(entry.doing, "English");
-        return `${entry.agent} is still working${doing ? `; right now it is ${doing}` : ""}.`;
+        return `${agentLabel(entry.agent)} is still working${doing ? `; right now it is ${doing}` : ""}.`;
       }),
     ].join("\n");
   }

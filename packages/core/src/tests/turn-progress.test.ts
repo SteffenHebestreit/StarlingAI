@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   acceptPhrasing,
+  agentLabel,
   createTurnProgressReporter,
   delegationMilestone,
   fixedProgressText,
@@ -38,7 +39,7 @@ const BRIDGE: TurnProgressFacts = { kind: "bridge", request: "What's on my calen
 describe("the fixed wording", () => {
   it("lists the plan and says, per step, what is done, what runs now and what is next", () => {
     expect(fixedProgressText(PLAN, "English")).toBe(
-      "Here's my plan:\n1. HTML bar chart of the six months (chart_designer)\n2. One-page Word report (.docx) with three findings (content_writer)",
+      "Here's my plan:\n1. HTML bar chart of the six months (chart designer)\n2. One-page Word report (.docx) with three findings (content writer)",
     );
     expect(fixedProgressText(STEP_DONE, "English")).toBe(
       "Step 1 of 2 is done: HTML bar chart of the six months. Result: sales-chart.html. Next: One-page Word report (.docx) with three findings.",
@@ -72,14 +73,14 @@ describe("what the model writes is taken only when it can be", () => {
   it("takes a short message, and puts the plan's list under the plan's line", () => {
     expect(acceptPhrasing(BRIDGE, "\"Let me check your calendar.\"")).toBe("Let me check your calendar.");
     expect(acceptPhrasing(PLAN, "Two steps, and here they are:")).toBe(
-      "Two steps, and here they are:\n1. HTML bar chart of the six months (chart_designer)\n2. One-page Word report (.docx) with three findings (content_writer)",
+      "Two steps, and here they are:\n1. HTML bar chart of the six months (chart designer)\n2. One-page Word report (.docx) with three findings (content writer)",
     );
     expect(acceptPhrasing(STEP_DONE, "The chart is ready (sales-chart.html), June peaks at 27,600 EUR. Now the Word report."))
       .toContain("27,600");
   });
 
   it("takes a plan's first line only, so a model that writes the list out again does not show it twice", () => {
-    const repeated = "Ich arbeite gerade an deinem Auftrag:\n1. HTML bar chart of the six months (chart_designer)\n2. One-page Word report (.docx) with three findings (content_writer)";
+    const repeated = "Ich arbeite gerade an deinem Auftrag:\n1. HTML bar chart of the six months (chart designer)\n2. One-page Word report (.docx) with three findings (content writer)";
     const taken = acceptPhrasing(PLAN, repeated)!;
     expect(taken.split("\n")[0]).toBe("Ich arbeite gerade an deinem Auftrag:");
     expect(taken.match(/HTML bar chart/g)).toHaveLength(1);
@@ -99,6 +100,14 @@ describe("what the model writes is taken only when it can be", () => {
     expect(system!.content).toContain("Write in German.");
     expect(user!.content).toContain("Step 1 of 2 finished: HTML bar chart of the six months");
     expect(user!.content).toContain("Next: One-page Word report");
+  });
+
+  it("names an agent in words, an agent made on the fly too", () => {
+    expect(agentLabel("ephemeral:http_semantics_rfc_finder")).toBe("http semantics rfc finder");
+    expect(agentLabel("chart_designer")).toBe("chart designer");
+    expect(agentLabel("researcher")).toBe("researcher");
+    expect(fixedProgressText({ kind: "milestone", finished: [{ agent: "ephemeral:rfc_finder", outcome: "done" }], running: ["web_coder"] }, "English"))
+      .toBe("rfc finder is done. Still working: web coder.");
   });
 
   it("names a delegation by its specialist, each target once", () => {
@@ -234,9 +243,9 @@ describe("milestones", () => {
 
   it("are worded with who finished, what it made, and who is still working", () => {
     expect(fixedProgressText({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done", files: ["notes.md"] }], running: ["content_writer"] }, "English"))
-      .toBe("researcher is done (notes.md). Still working: content_writer.");
+      .toBe("researcher is done (notes.md). Still working: content writer.");
     expect(fixedProgressText({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done" }, { agent: "browser_agent", outcome: "failed" }], running: [] }, "German"))
-      .toBe("researcher ist fertig; browser_agent kam nicht durch.");
+      .toBe("researcher ist fertig; browser agent kam nicht durch.");
   });
 
   it("come from a delegation a specialist answered, not one refused before any ran or served from the turn's own findings", () => {
@@ -262,7 +271,7 @@ describe("milestones", () => {
     reporter.noteSpecialist({ agentName: "image_creator", kind: "completed" });
     reporter.report(finish("image_creator", { files: ["harbour.png"] }));
     await vi.advanceTimersByTimeAsync(6_000);
-    expect(delivered.map((m) => m.text)).toEqual(["researcher is done; image_creator is done (harbour.png). Still working: content_writer."]);
+    expect(delivered.map((m) => m.text)).toEqual(["researcher is done; image creator is done (harbour.png). Still working: content writer."]);
 
     // The next finish waits out the gap after that message.
     reporter.noteSpecialist({ agentName: "content_writer", kind: "completed" });
@@ -270,7 +279,7 @@ describe("milestones", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(delivered).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(6_000);
-    expect(delivered.at(-1)!.text).toBe("content_writer is done.");
+    expect(delivered.at(-1)!.text).toBe("content writer is done.");
     await reporter.close();
   });
 
@@ -346,9 +355,9 @@ describe("still on it", () => {
 
   it("names the coordinator when it is the only one working", () => {
     expect(fixedProgressText({ kind: "working", working: [{ agent: "mission_coordinator" }], elapsedSeconds: 70 }, "German"))
-      .toBe("Ich bin noch dran: mission_coordinator arbeitet.");
+      .toBe("Ich bin noch dran: mission coordinator arbeitet.");
     expect(fixedProgressText({ kind: "working", working: [{ agent: "researcher", doing: "web_fetch" }, { agent: "chart_designer", doing: "generate_chart_html" }, { agent: "coder", doing: "mcp__custom_tool" }], elapsedSeconds: 75 }, "German"))
-      .toBe("Ich bin noch dran: researcher liest eine Webseite; chart_designer zeichnet ein Diagramm; coder arbeitet.");
+      .toBe("Ich bin noch dran: researcher liest eine Webseite; chart designer zeichnet ein Diagramm; coder arbeitet.");
   });
 });
 
@@ -366,7 +375,7 @@ describe("a milestone under a coordinator", () => {
     reporter.noteSpecialist({ agentName: "researcher", kind: "completed" });
     reporter.report({ kind: "milestone", finished: [{ agent: "researcher", outcome: "done" }] });
     await vi.advanceTimersByTimeAsync(10);
-    expect(delivered).toEqual(["researcher is done. Still working: chart_designer."]);
+    expect(delivered).toEqual(["researcher is done. Still working: chart designer."]);
     await reporter.close();
     vi.useRealTimers();
   });
