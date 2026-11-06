@@ -12,7 +12,7 @@ import type { TurnPlan } from "../agent/turn-plan.js";
  * one-line step description cannot supply on its own.
  */
 const calls: Array<{ name: string; args: Record<string, unknown>; ctx?: Record<string, unknown> }> = [];
-let respond: (name: string, args: Record<string, unknown>) => ToolResult;
+let respond: (name: string, args: Record<string, unknown>, toolCtx?: Record<string, unknown>) => ToolResult;
 /** Highest number of dispatches in flight at once — how concurrency is observed below. */
 let inFlight = 0;
 let maxInFlight = 0;
@@ -29,7 +29,7 @@ vi.mock("../tools/registry.js", async (importOriginal) => {
       // resolving in issue order — otherwise this observes nothing.
       await new Promise((r) => setTimeout(r, 5));
       inFlight -= 1;
-      return respond(name, args);
+      return respond(name, args, toolCtx);
     }),
   };
 });
@@ -835,6 +835,93 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
     // The dispatch context, not the call count — the cap itself lives inside the mocked tool.
     const overrides = calls[0]?.ctx?.["_turnAgentRepeatLimitOverrides"] as Record<string, number> | undefined;
     expect(overrides?.["researcher"]).toBeGreaterThanOrEqual(3);
+  });
+
+  describe("a plan's steps are not refused by the per-agent repeat cap", () => {
+    // The cap as delegate_to_agent applies it: the turn's tally lives on the context it is handed
+    // (created there when missing), and an agent at its limit (2, or the raised one) is refused.
+    const cappedDelegate = (_name: string, args: Record<string, unknown>, toolCtx?: Record<string, unknown>): ToolResult => {
+      const agent = String(args["agentName"]);
+      const counts = (toolCtx!["_turnAgentCounts"] ??= new Map<string, number>()) as Map<string, number>;
+      const overrides = toolCtx!["_turnAgentRepeatLimitOverrides"] as Record<string, number> | undefined;
+      const prior = counts.get(agent) ?? 0;
+      if (prior >= Math.max(2, overrides?.[agent] ?? 2)) {
+        return { success: false, output: "", error: "Per-agent delegation cap exhausted", metadata: { perAgentCapExhausted: true } };
+      }
+      counts.set(agent, prior + 1);
+      return { success: true, output: `${agent} done` };
+    };
+
+    it("runs a sequence of three steps on one specialist", async () => {
+      // Nightly lab 2026-10-30, the website task: the orchestrator planned one page per step, all
+      // for content_writer, and the third step failed on the cap — the same three steps in one
+      // parallelGroup ran. The turn was scored a failure over a correct site.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan(["start", "products", "contact"].map((page, i) => ({
+        id: `s${i + 1}`, description: `${page} page`, kind: "delegate" as const, agent: "content_writer",
+        ...(i > 0 ? { dependsOn: [`s${i}`] } : {}),
+      }))));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w" } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["failed"]).toBe(0);
+      expect(result.metadata?.["done"]).toBe(3);
+      // Counted on the TURN's tally, so a delegation after the plan still sees these three.
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+    });
+
+    it("keeps the turn's tally when a step runs without the progress reporter, as it does in the chat", async () => {
+      // A chat turn has a reporter, so every step runs on a copy without it (withoutProgressMilestones).
+      // Had that copy started its own tally, each step would count from zero and the cap would go blind.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([
+        { id: "s1", description: "start page", kind: "delegate", agent: "content_writer" },
+        { id: "s2", description: "products page", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+        { id: "s3", description: "contact page", kind: "delegate", agent: "content_writer", dependsOn: ["s2"] },
+      ]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w", reportProgress: () => {} } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(3);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+      expect(calls.every((call) => call.ctx?.["reportProgress"] === undefined)).toBe(true);
+      expect(turnCtx["_turnWriteChurnTracker"]).toBeInstanceOf(Map);
+      expect(calls.every((call) => call.ctx?.["_turnWriteChurnTracker"] === turnCtx["_turnWriteChurnTracker"])).toBe(true);
+    });
+
+    it("keeps one tally for the turn across batches, a parallel batch's included", async () => {
+      // A raised batch runs on a copy of the context. Had the copy started its own tally, the steps
+      // after it — and every delegation after the plan — would count from zero again.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([
+        ...["start", "products", "contact"].map((page, i) => ({
+          id: `p${i}`, description: `${page} page`, kind: "delegate" as const, agent: "content_writer", parallelGroup: 1,
+        })),
+        { id: "review", description: "check the links", kind: "delegate", agent: "content_writer", dependsOn: ["p0", "p1", "p2"] },
+      ]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w" } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(4);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(4);
+    });
+
+    it("runs a step whose specialist already ran twice this turn", async () => {
+      // A retried step, or work the orchestrator handed out by hand before recording the plan: the
+      // executor told it to retry, and the cap then refused the retry. A plan stays bounded by the
+      // charge of every step to delegate_to_agent's own per-turn limit.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([{ id: "s1", description: "contact page", kind: "delegate", agent: "content_writer" }]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w", _turnAgentCounts: new Map([["content_writer", 2]]) } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(1);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+    });
   });
 
   it("defangs a step result that would otherwise block the whole report", async () => {
