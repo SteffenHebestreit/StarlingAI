@@ -407,6 +407,7 @@ export function withoutProgressMilestones(ctx: ToolContext): ToolContext {
   if (!ctx.reportProgress) return ctx;
   if (!ctx._turnAgentCounts) ctx._turnAgentCounts = new Map();
   if (!ctx._turnLoopRuns) ctx._turnLoopRuns = [];
+  if (!ctx._turnWriteChurnTracker) ctx._turnWriteChurnTracker = new Map();
   const { reportProgress: _quiet, ...rest } = ctx;
   return rest;
 }

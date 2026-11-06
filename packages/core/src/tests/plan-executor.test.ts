@@ -871,6 +871,26 @@ describe("execute_plan dispatches each step to the tool that runs that kind", ()
       expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
     });
 
+    it("keeps the turn's tally when a step runs without the progress reporter, as it does in the chat", async () => {
+      // A chat turn has a reporter, so every step runs on a copy without it (withoutProgressMilestones).
+      // Had that copy started its own tally, each step would count from zero and the cap would go blind.
+      respond = cappedDelegate;
+      await persistTurnPlan(SESSION, basePlan([
+        { id: "s1", description: "start page", kind: "delegate", agent: "content_writer" },
+        { id: "s2", description: "products page", kind: "delegate", agent: "content_writer", dependsOn: ["s1"] },
+        { id: "s3", description: "contact page", kind: "delegate", agent: "content_writer", dependsOn: ["s2"] },
+      ]));
+      const turnCtx = { sessionId: SESSION, workspacePath: "/w", reportProgress: () => {} } as Record<string, unknown>;
+
+      const result = await getTool("execute_plan")!.execute({}, turnCtx as never);
+
+      expect(result.metadata?.["done"]).toBe(3);
+      expect((turnCtx["_turnAgentCounts"] as Map<string, number>).get("content_writer")).toBe(3);
+      expect(calls.every((call) => call.ctx?.["reportProgress"] === undefined)).toBe(true);
+      expect(turnCtx["_turnWriteChurnTracker"]).toBeInstanceOf(Map);
+      expect(calls.every((call) => call.ctx?.["_turnWriteChurnTracker"] === turnCtx["_turnWriteChurnTracker"])).toBe(true);
+    });
+
     it("keeps one tally for the turn across batches, a parallel batch's included", async () => {
       // A raised batch runs on a copy of the context. Had the copy started its own tally, the steps
       // after it — and every delegation after the plan — would count from zero again.
