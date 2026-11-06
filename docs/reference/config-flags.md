@@ -212,7 +212,7 @@ Every public schema field, where it is declared, and how many production files r
 | `holdoutRate` | packages/core/src/config/schema.ts:1640 | 2 |
 | `honestSynthesisOnPartialEvidence` | packages/core/src/config/schemas/orchestration.ts:640 | 1 |
 | `host` | packages/core/src/config/schema.ts:786 | 134 |
-| `http` | packages/core/src/config/schema.ts:831 | 98 |
+| `http` | packages/core/src/config/schema.ts:831 | 99 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1388 | 20 |
 | `id` | packages/core/src/config/schema.ts:417 | 361 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1435 | 2 |
