@@ -13,6 +13,7 @@ import type { Hono } from "hono";
 import { verifyToken, extractBearerToken } from "./auth.js";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { getActiveModelPreset, listModelPresets } from "../providers/index.js";
+import { MODEL_PRESET_SCOPES, changeModelPreset, type ModelPresetScope } from "../providers/model-preset-change.js";
 import {
   generatePkce,
   generateOAuthState,
@@ -137,40 +138,22 @@ export function registerModelPresetRoutes(app: Hono): void {
     if (hasPreset && requested !== null && typeof requested !== "string") {
       return c.json({ error: "'preset' must be a string or null" }, 400);
     }
-    const PRESET_SCOPES = ["all", "unspecified", "coordinator_qa"] as const;
     const requestedScope = (body as { scope?: unknown }).scope;
-    if (hasScope && (typeof requestedScope !== "string" || !PRESET_SCOPES.includes(requestedScope as typeof PRESET_SCOPES[number]))) {
-      return c.json({ error: `'scope' must be one of ${PRESET_SCOPES.join(", ")}` }, 400);
+    if (hasScope && (typeof requestedScope !== "string" || !MODEL_PRESET_SCOPES.includes(requestedScope as ModelPresetScope))) {
+      return c.json({ error: `'scope' must be one of ${MODEL_PRESET_SCOPES.join(", ")}` }, 400);
     }
 
-    const config = getConfig();
-    const previous = config.agents.defaults.activeModelPreset ?? null;
-    const previousScope = config.agents.defaults.modelPresetScope ?? "all";
-    if (hasPreset && typeof requested === "string" && !listModelPresets(config).some((p) => p.name === requested)) {
+    if (hasPreset && typeof requested === "string" && !listModelPresets(getConfig()).some((p) => p.name === requested)) {
       return c.json({ error: `Unknown model preset '${requested}'` }, 400);
     }
 
-    const updated = updateConfig((raw) => {
-      const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
-      const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
-      const nextDefaults = { ...defaults };
-      // "" (falsy → no active preset) instead of delete: the runtime overlay is
-      // a diff against the base config, so a deletion could not switch the
-      // preset off if the base config ever sets one.
-      if (hasPreset) nextDefaults["activeModelPreset"] = requested ?? "";
-      if (hasScope) nextDefaults["modelPresetScope"] = requestedScope;
-      raw["agents"] = { ...agents, defaults: nextDefaults };
+    const updated = changeModelPreset({
+      ...(hasPreset ? { preset: (requested as string | null) } : {}),
+      ...(hasScope ? { scope: requestedScope as ModelPresetScope } : {}),
+      via: "dashboard",
     });
 
     const active = getActiveModelPreset(updated);
-    logAudit("model_preset_switched", {
-      from: previous,
-      to: active?.name ?? null,
-      primary: active?.preset.primary ?? updated.agents.defaults.model.primary,
-      scopeFrom: previousScope,
-      scopeTo: updated.agents.defaults.modelPresetScope ?? "all",
-    });
-
     return c.json({
       active: active?.name ?? null,
       activePrimary: active?.preset.primary ?? null,

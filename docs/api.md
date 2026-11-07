@@ -90,7 +90,12 @@ While a preset is active the whole swarm — orchestrator and every sub-agent,
 including agents with their own model override — runs on the preset model, the
 previous primary becomes the failover fallback, the routing/synthesis tier
 ladder is bypassed, and embeddings stay on the local provider. The choice
-persists in the runtime overlay and is audit-logged as `model_preset_switched`.
+persists in the runtime overlay and is audit-logged as `model_preset_switched`,
+with `via` saying whether it came from here or from the chat.
+
+The chat can do the same: "switch to Claude", typed or spoken, reaches the
+orchestrator's `switch_model` tool. It asks for approval on every call and, under
+multi-user auth, takes the `admin` role. A turn nobody can approve in is refused.
 
 | Method | Path | Notes |
 | --- | --- | --- |

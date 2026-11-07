@@ -654,6 +654,11 @@ watch(() => gateway.connected, (now) => {
     void modelPreset.fetchOAuthStatus();
   }
 });
+
+// A turn can switch the model too ("schalte auf Claude um"): the switch above then shows it.
+watch(() => gateway.isLoading, (running) => {
+  if (!running) void modelPreset.fetch();
+});
 </script>
 
 <style>
