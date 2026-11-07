@@ -97,6 +97,16 @@ describe("receptionist — fork policy hook", () => {
   });
 });
 
+// On the routing model "switch to Claude" and "change your voice" were answered "I cannot" and "stop
+// using the cloud" "Understood" 12 times in 64; with this line 0 in 64, and greetings stayed with
+// the desk as often as before (63 of 64, 2026-11-06).
+describe("receptionist — what it cannot do is not for it to say", () => {
+  it.each([false, true])("leaves declining to the full assistant (confidence attempt: %s)", (confidenceAttempt) => {
+    const content = String(buildReceptionistMessages("Switch to Claude please.", { confidenceAttempt })[0]!.content);
+    expect(content).toContain(`Never say you cannot do something: only the full assistant knows what it can do. A request you would decline gets exactly ${ESCALATE_SENTINEL}`);
+  });
+});
+
 // Regression (session a75e1c26): the fast lane answered "wie funktioniert das Pfandsystem in
 // Dänemark?" from the tiny routing model — a source-sensitive real-world question that bypasses
 // ALL the orchestrator's honesty guards. The smalltalk-only prompt licensed "simple general-

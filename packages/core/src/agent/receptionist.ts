@@ -311,6 +311,9 @@ export function buildReceptionistMessages(
     // 15: the model took the mirror clause and dropped the exception.
     : "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.";
   const common = [
+    // The desk sees none of the assistant's tools, so what it declines is its guess: "switch to
+    // Claude" was answered "I cannot switch models" by a swarm that can.
+    `Never say you cannot do something: only the full assistant knows what it can do. A request you would decline gets exactly ${ESCALATE_SENTINEL} and nothing else.`,
     ...(opts.personaLines ?? []),
     opts.assistantName ? `If asked your name, you are "${opts.assistantName}".` : "Do not invent a name for yourself.",
     opts.memoryCapsule ? `Known context (use only if directly relevant):\n${opts.memoryCapsule}` : "",
