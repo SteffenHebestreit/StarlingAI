@@ -11,13 +11,13 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:478 | 18 |
 | `accessKeyId` | packages/core/src/config/schema.ts:538 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 159 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 160 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1848 | 1 |
 | `action` | packages/core/src/config/schema.ts:1578 | 93 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1879 | 3 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:765 | 1 |
-| `admin` | packages/core/src/config/schema.ts:448 | 56 |
+| `admin` | packages/core/src/config/schema.ts:448 | 59 |
 | `after` | packages/core/src/config/schema.ts:1581 | 303 |
 | `agents` | packages/core/src/config/schema.ts:1569 | 205 |
 | `alertmanager` | packages/core/src/config/schema.ts:1214 | 1 |
@@ -33,7 +33,7 @@ Every public schema field, where it is declared, and how many production files r
 | `anonymizer` | packages/core/src/config/schema.ts:1540 | 3 |
 | `ansibleBinary` | packages/core/src/config/schema.ts:1144 | 1 |
 | `ansiblePlaybookBinary` | packages/core/src/config/schema.ts:1145 | 1 |
-| `api` | packages/core/src/config/schema.ts:84 | 146 |
+| `api` | packages/core/src/config/schema.ts:84 | 147 |
 | `apiKey` | packages/core/src/config/schema.ts:70 | 39 |
 | `apiUrl` | packages/core/src/config/schema.ts:1120 | 1 |
 | `approvalChannel` | packages/core/src/config/schema.ts:1396 | 10 |
@@ -318,7 +318,7 @@ Every public schema field, where it is declared, and how many production files r
 | `modelModeration` | packages/core/src/config/schema.ts:1309 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1876 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1891 | 5 |
-| `models` | packages/core/src/config/schema.ts:597 | 68 |
+| `models` | packages/core/src/config/schema.ts:597 | 69 |
 | `moderateInputs` | packages/core/src/config/schema.ts:1315 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1316 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:600 | 2 |
@@ -332,7 +332,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:869 | 68 |
 | `oneLiner` | packages/core/src/config/schema.ts:978 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:107 | 2 |
-| `operator` | packages/core/src/config/schema.ts:449 | 135 |
+| `operator` | packages/core/src/config/schema.ts:449 | 136 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1928 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1204 | 1 |
@@ -431,7 +431,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:624 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:997 | 163 |
+| `role` | packages/core/src/config/schema.ts:997 | 165 |
 | `roles` | packages/core/src/config/schema.ts:1534 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:473 | 1 |
 | `routing` | packages/core/src/config/schema.ts:277 | 121 |
@@ -555,7 +555,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:407 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:404 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 22 |
-| `viewer` | packages/core/src/config/schema.ts:450 | 25 |
+| `viewer` | packages/core/src/config/schema.ts:450 | 26 |
 | `virtualization` | packages/core/src/config/schema.ts:1166 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |

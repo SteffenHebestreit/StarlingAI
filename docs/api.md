@@ -97,9 +97,15 @@ The chat can do the same: "switch to Claude", typed or spoken, reaches the
 orchestrator's `switch_model` tool. It asks for approval on every call and, under
 multi-user auth, takes the `admin` role. A turn nobody can approve in is refused.
 
+The model setup is one setting for every user, so under multi-user auth every
+`POST` on this page answers `403` to anyone below `admin`: the switch, the
+Claude login and logout, the Claude model and its refresh. Without auth there is
+one operator and no role to ask for. The `GET` says which applies as
+`canChange`, and the dashboard shows the switch only when it is true.
+
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/models/preset` | active preset, default model, and the switchable preset list |
+| `GET` | `/api/models/preset` | active preset, default model, the switchable preset list, and `canChange` for this caller |
 | `POST` | `/api/models/preset` | body `{ "preset": "claude" }` to activate, `{ "preset": null }` to return to the local default |
 
 ### Anthropic Subscription OAuth

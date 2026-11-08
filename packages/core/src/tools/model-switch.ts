@@ -6,7 +6,7 @@
  */
 import { getConfig } from "../config/loader.js";
 import { getActiveModelPreset, listModelPresets } from "../providers/index.js";
-import { changeModelPreset } from "../providers/model-preset-change.js";
+import { changeModelPreset, mayChangeModelSetup } from "../providers/model-preset-change.js";
 import { registerTool, type ToolContext, type ToolResult } from "./registry.js";
 
 /** The name for "no preset": the models the configuration sets. */
@@ -15,14 +15,11 @@ const CONFIGURED_MODELS = "default";
 const fail = (error: string): ToolResult => ({ success: false, output: "", error });
 
 /**
- * Admin only under multi-user auth, and no role means no: a channel turn threads none, and this is
- * not the place to assume one. roleRank is resolved lazily, as in knowledge-bases.ts, to keep this
- * leaf module off the gateway's import graph at load time.
+ * The dashboard's rule (mayChangeModelSetup): admin only under multi-user auth, and no role means
+ * no, since a channel turn threads none and this is not the place to assume one.
  */
 async function adminRefusal(ctx: ToolContext): Promise<ToolResult | null> {
-  if (getConfig().auth?.enabled !== true) return null;
-  const { roleRank } = await import("../gateway/auth.js");
-  if (ctx.userRole && roleRank(ctx.userRole) >= roleRank("admin")) return null;
+  if (await mayChangeModelSetup(ctx.userRole)) return null;
   return fail(`Switching the model changes it for everyone, so it takes the admin role. The role of this conversation is ${ctx.userRole ? `"${ctx.userRole}"` : "unknown"}. Nothing was switched. Tell the user, and do not try again or look for another way: an admin has to do it.`);
 }
 

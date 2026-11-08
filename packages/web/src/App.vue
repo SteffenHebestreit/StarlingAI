@@ -91,10 +91,11 @@
 
           <!-- Model switch: Local ⇄ presets (e.g. Claude via the Anthropic
                provider). Appears once the gateway reports at least one
-               switchable preset; hidden for read-only viewers. The gear opens
-               the Claude subscription connect/manage modal. -->
+               switchable preset; shown only to an account the gateway lets
+               change it (admin under multi-user auth). The gear opens the
+               Claude subscription connect/manage modal. -->
           <div
-            v-if="modelPreset.available && !auth.isViewer"
+            v-if="modelPreset.available && modelPreset.canChange"
             class="flex shrink-0 items-center gap-0.5 rounded-full border border-white/10 bg-white/5 p-0.5"
             role="group"
             aria-label="Model switch"
@@ -142,7 +143,7 @@
 
           <!-- No Claude connected yet → entry point to the browser login. -->
           <button
-            v-if="!modelPreset.oauthConnected && !auth.isViewer && gateway.connected"
+            v-if="!modelPreset.oauthConnected && modelPreset.canChange && gateway.connected"
             type="button"
             class="hidden shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15 sm:inline-flex"
             @click="showModelConnect = true"

@@ -19,6 +19,20 @@ export interface ModelPresetChange {
   via: "dashboard" | "chat";
 }
 
+/**
+ * Who may change the model setup: the preset, the Claude account behind the "claude" one, and the
+ * Claude model it runs. That is one setting for every user, and the model may be a paid one, so
+ * under multi-user auth it is an admin's, and no role means no. Without auth there is one operator
+ * and nobody else to ask. The chat's switch_model and every writing /api/models route ask here.
+ * roleRank is resolved lazily to keep this module off the gateway's import graph at load time.
+ */
+export async function mayChangeModelSetup(role: string | undefined): Promise<boolean> {
+  if (getConfig().auth?.enabled !== true) return true;
+  if (!role) return false;
+  const { roleRank } = await import("../gateway/auth.js");
+  return roleRank(role) >= roleRank("admin");
+}
+
 export function changeModelPreset(change: ModelPresetChange): Config {
   const config = getConfig();
   const previous = config.agents.defaults.activeModelPreset ?? null;

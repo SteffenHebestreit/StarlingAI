@@ -29,6 +29,8 @@ let configApiKey: string | null = "sk-ant-api03-test";
 vi.mock("../gateway/auth.js", () => ({
   verifyToken: vi.fn(async () => true),
   extractBearerToken: (header: string | undefined) => header?.replace(/^Bearer /, "") ?? null,
+  // Who may change the setup is switch-model-tool.test.ts's subject; here, with auth off, anyone may.
+  authenticatedUser: vi.fn(async () => ({ username: "operator", role: "operator" })),
 }));
 
 const storedToken: { value: { accessToken: string; refreshToken: string; expiresAt: number } | null } = { value: null };

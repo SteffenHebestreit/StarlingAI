@@ -14,6 +14,10 @@ const state = vi.hoisted(() => ({
   raw: {} as Record<string, unknown>,
   writes: 0,
   audit: [] as Array<Record<string, unknown>>,
+  /** The role the dashboard's caller resolves to; null = a token whose account the store no longer holds. */
+  caller: "operator" as string | null,
+  /** Calls that would touch the stored Claude credential or spend it. */
+  credentialCalls: [] as string[],
 }));
 
 vi.mock("../config/loader.js", async (importOriginal) => {
@@ -41,6 +45,25 @@ vi.mock("../audit/logger.js", async (importOriginal) => ({
 vi.mock("../gateway/auth.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../gateway/auth.js")>(),
   verifyToken: vi.fn(async () => true),
+  authenticatedUser: vi.fn(async () => (state.caller ? { username: "someone", role: state.caller } : null)),
+}));
+
+vi.mock("../providers/anthropic-oauth.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../providers/anthropic-oauth.js")>(),
+  exchangeAuthorizationCode: vi.fn(async () => {
+    state.credentialCalls.push("exchange");
+    return { accessToken: "a", refreshToken: "r", expiresAt: Date.now() + 60_000 };
+  }),
+  storeTokenSet: vi.fn(() => { state.credentialCalls.push("store"); }),
+  clearStoredTokenSet: vi.fn(() => { state.credentialCalls.push("clear"); }),
+}));
+
+vi.mock("../providers/anthropic.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../providers/anthropic.js")>(),
+  fetchAnthropicModelChoices: vi.fn(async () => {
+    state.credentialCalls.push("list");
+    return [];
+  }),
 }));
 
 await import("../tools/model-switch.js");
@@ -65,6 +88,8 @@ function configure(options: {
   };
   state.writes = 0;
   state.audit = [];
+  state.caller = "operator";
+  state.credentialCalls = [];
 }
 
 const activePreset = (): unknown => (state.raw["agents"] as { defaults: Record<string, unknown> }).defaults["activeModelPreset"];
@@ -222,5 +247,59 @@ describe("the dashboard's switch, on the same code", () => {
     expect((await post({ scope: "some" })).status).toBe(400);
     expect((await post({})).status).toBe(400);
     expect(state.writes).toBe(0);
+  });
+});
+
+describe("who may change the model setup from the dashboard", () => {
+  const app = new Hono();
+  registerModelPresetRoutes(app);
+  const call = (method: "GET" | "POST", path: string, body?: unknown) => app.request(path, {
+    method,
+    headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const canChange = async (): Promise<unknown> => ((await (await call("GET", "/api/models/preset")).json()) as { canChange?: unknown }).canChange;
+
+  // Every route that writes the setup, or spends the Claude credential behind it.
+  const WRITES: Array<[string, unknown]> = [
+    ["/api/models/preset", { preset: "claude" }],
+    ["/api/models/anthropic/oauth/start", {}],
+    ["/api/models/anthropic/oauth/complete", { code: "c", verifier: "v", state: "s" }],
+    ["/api/models/anthropic/oauth/disconnect", {}],
+    ["/api/models/anthropic/model", { model: "claude-other" }],
+    ["/api/models/anthropic/model/refresh", {}],
+  ];
+
+  it.each([
+    ["an operator, every account's default role", "operator"],
+    ["a viewer", "viewer"],
+    ["a token whose account is gone", null],
+  ])("under multi-user auth %s is refused on every write, and nothing is touched", async (_who, role) => {
+    for (const [path, body] of WRITES) {
+      configure({ authEnabled: true, active: "claude" });
+      state.caller = role;
+      const res = await call("POST", path, body);
+      expect(res.status, path).toBe(403);
+      expect(((await res.json()) as { error: string }).error, path).toContain("admin");
+      expect(state.writes, path).toBe(0);
+      expect(state.credentialCalls, path).toEqual([]);
+    }
+    expect(await canChange()).toBe(false);
+  });
+
+  it("under multi-user auth an admin may, and the dashboard is told so", async () => {
+    for (const [path, body] of WRITES) {
+      configure({ authEnabled: true });
+      state.caller = "admin";
+      expect((await call("POST", path, body)).status, path).toBe(200);
+    }
+    expect(await canChange()).toBe(true);
+  });
+
+  it("without auth the one operator may, and the dashboard is told so", async () => {
+    expect(state.caller).toBe("operator");
+    expect((await call("POST", "/api/models/preset", { preset: "claude" })).status).toBe(200);
+    expect(activePreset()).toBe("claude");
+    expect(await canChange()).toBe(true);
   });
 });
