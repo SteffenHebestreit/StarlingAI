@@ -97,6 +97,25 @@ describe("receptionist — fork policy hook", () => {
   });
 });
 
+// On the routing model "switch to Claude" and "change your voice" were answered "I cannot" and "stop
+// using the cloud" "Understood" 12 times in 64; with this line 0 in 64, and greetings stayed with
+// the desk as often as before (63 of 64, 2026-11-06).
+describe("receptionist — what it cannot do is not for it to say", () => {
+  it.each([false, true])("leaves declining to the full assistant (confidence attempt: %s)", (confidenceAttempt) => {
+    const content = String(buildReceptionistMessages("Switch to Claude please.", { confidenceAttempt })[0]!.content);
+    expect(content).toContain(`Never say you cannot do something, and never say what you can do: only the full assistant knows what it can do. A request you would decline, or a question about what you can do, gets exactly ${ESCALATE_SENTINEL}`);
+  });
+
+  // "Was kannst du so?" was answered by the desk with its own job, small talk. The licence to answer
+  // "what you can broadly help with" itself has to be gone, or it outweighs the line above. On the
+  // routing model 8 such questions x 8 reached the full assistant 33 times in 64 before, 63 after;
+  // greetings stayed with the desk 62 times in 64 (64 before, 2026-11-08).
+  it.each([false, true])("does not describe what the assistant can do (confidence attempt: %s)", (confidenceAttempt) => {
+    const content = String(buildReceptionistMessages("Was kannst du so?", { confidenceAttempt })[0]!.content);
+    expect(content).not.toContain("what you can broadly help with");
+  });
+});
+
 // Regression (session a75e1c26): the fast lane answered "wie funktioniert das Pfandsystem in
 // Dänemark?" from the tiny routing model — a source-sensitive real-world question that bypasses
 // ALL the orchestrator's honesty guards. The smalltalk-only prompt licensed "simple general-

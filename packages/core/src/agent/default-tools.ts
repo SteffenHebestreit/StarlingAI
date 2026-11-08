@@ -71,6 +71,9 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // you have / what can they do" without a semantic query (search_agents and
   // list_agents both require one and never dump the catalog).
   "agent_catalog",
+  // "Schalte auf Claude um": a platform action of the conversation itself, which no specialist can
+  // do. Tier 3 with approval on every call, and admin only (tools/model-switch.ts).
+  "switch_model",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [

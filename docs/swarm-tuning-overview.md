@@ -99,7 +99,7 @@ There is **no `Workflow` type** — `run_workflow` is a uniform verb over `Workf
 | Lever | Default | How to adjust |
 |---|---|---|
 | **Personality profile** (identity/voice/collaboration/growth) | built-in default persona | **Memory page** (Personality tab, inline edit) or the personality store; the swarm can revise it too |
-| **Model preset** (Local ⇄ Claude) | unset = pure local | `agents.defaults.activeModelPreset` + header switch in App.vue; `agents.defaults.modelPresetScope`(`all`) controls breadth |
+| **Model preset** (Local ⇄ Claude) | unset = pure local | `agents.defaults.activeModelPreset` + header switch in App.vue, or the `switch_model` tool from the chat (admin + approval); `agents.defaults.modelPresetScope`(`all`) controls breadth |
 | **Per-agent provider/model mixing** | agents inherit `agents.defaults.model` | override `model` on `subAgents.<name>` (e.g. OpenRouter for `coder`) |
 | **Effort tier** (low/med/high/max) | `effort.default`=`medium` | per-session dial (Chat composer) or `effort.default`; `effort.profiles` to override what a tier bundles (timeout/iters/depth/reasoning) |
 | **Thinking toggle** (extended reasoning) | `enableThinking`=**false** | per-model-family `enableThinking`; `reasoningEffort`(low/med/high) for graded thinking; per-session toggle in composer |

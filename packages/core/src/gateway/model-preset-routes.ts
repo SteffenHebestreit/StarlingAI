@@ -9,10 +9,11 @@
  * helpers are module-level imports. The Anthropic OAuth token is the user's own
  * credential: encrypted at rest, only ever sent to Anthropic as the auth header.
  */
-import type { Hono } from "hono";
-import { verifyToken, extractBearerToken } from "./auth.js";
+import type { Context, Hono } from "hono";
+import { verifyToken, extractBearerToken, authenticatedUser } from "./auth.js";
 import { getConfig, updateConfig } from "../config/loader.js";
 import { getActiveModelPreset, listModelPresets } from "../providers/index.js";
+import { MODEL_PRESET_SCOPES, changeModelPreset, mayChangeModelSetup, type ModelPresetScope } from "../providers/model-preset-change.js";
 import {
   generatePkce,
   generateOAuthState,
@@ -93,6 +94,21 @@ async function resolveAnthropicListingCredential(): Promise<{ credential: string
   return { credential, baseUrl: endpoint.baseUrl, oauthMode };
 }
 
+/**
+ * Every route below that writes, or spends the connected Claude credential, asks this first: the
+ * model setup is one setting for every user (mayChangeModelSetup holds the rule). A signed-in
+ * viewer could POST the switch before, the dashboard only hid it. The GET tells the dashboard the
+ * same answer as `canChange`, so the dashboard keeps no copy of the rule.
+ */
+async function callerMayChangeModels(c: Context): Promise<boolean> {
+  return mayChangeModelSetup((await authenticatedUser(c.req.header("Authorization")))?.role);
+}
+
+async function modelChangeRefusal(c: Context): Promise<Response | null> {
+  if (await callerMayChangeModels(c)) return null;
+  return c.json({ error: "The model setup is shared by every user: changing it takes the admin role" }, 403);
+}
+
 export function registerModelPresetRoutes(app: Hono): void {
   // ── Model presets: the dashboard "Local ⇄ Claude" switch ───────────────────
   // GET returns the configured default model, the switchable presets (incl.
@@ -111,12 +127,15 @@ export function registerModelPresetRoutes(app: Hono): void {
       defaultPrimary: config.agents.defaults.model.primary,
       scope: config.agents.defaults.modelPresetScope ?? "all",
       presets: listModelPresets(config),
+      canChange: await callerMayChangeModels(c),
     });
   });
 
   app.post("/api/models/preset", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
 
     let body: unknown;
     try {
@@ -137,40 +156,22 @@ export function registerModelPresetRoutes(app: Hono): void {
     if (hasPreset && requested !== null && typeof requested !== "string") {
       return c.json({ error: "'preset' must be a string or null" }, 400);
     }
-    const PRESET_SCOPES = ["all", "unspecified", "coordinator_qa"] as const;
     const requestedScope = (body as { scope?: unknown }).scope;
-    if (hasScope && (typeof requestedScope !== "string" || !PRESET_SCOPES.includes(requestedScope as typeof PRESET_SCOPES[number]))) {
-      return c.json({ error: `'scope' must be one of ${PRESET_SCOPES.join(", ")}` }, 400);
+    if (hasScope && (typeof requestedScope !== "string" || !MODEL_PRESET_SCOPES.includes(requestedScope as ModelPresetScope))) {
+      return c.json({ error: `'scope' must be one of ${MODEL_PRESET_SCOPES.join(", ")}` }, 400);
     }
 
-    const config = getConfig();
-    const previous = config.agents.defaults.activeModelPreset ?? null;
-    const previousScope = config.agents.defaults.modelPresetScope ?? "all";
-    if (hasPreset && typeof requested === "string" && !listModelPresets(config).some((p) => p.name === requested)) {
+    if (hasPreset && typeof requested === "string" && !listModelPresets(getConfig()).some((p) => p.name === requested)) {
       return c.json({ error: `Unknown model preset '${requested}'` }, 400);
     }
 
-    const updated = updateConfig((raw) => {
-      const agents = (raw["agents"] as Record<string, unknown> | undefined) ?? {};
-      const defaults = (agents["defaults"] as Record<string, unknown> | undefined) ?? {};
-      const nextDefaults = { ...defaults };
-      // "" (falsy → no active preset) instead of delete: the runtime overlay is
-      // a diff against the base config, so a deletion could not switch the
-      // preset off if the base config ever sets one.
-      if (hasPreset) nextDefaults["activeModelPreset"] = requested ?? "";
-      if (hasScope) nextDefaults["modelPresetScope"] = requestedScope;
-      raw["agents"] = { ...agents, defaults: nextDefaults };
+    const updated = changeModelPreset({
+      ...(hasPreset ? { preset: (requested as string | null) } : {}),
+      ...(hasScope ? { scope: requestedScope as ModelPresetScope } : {}),
+      via: "dashboard",
     });
 
     const active = getActiveModelPreset(updated);
-    logAudit("model_preset_switched", {
-      from: previous,
-      to: active?.name ?? null,
-      primary: active?.preset.primary ?? updated.agents.defaults.model.primary,
-      scopeFrom: previousScope,
-      scopeTo: updated.agents.defaults.modelPresetScope ?? "all",
-    });
-
     return c.json({
       active: active?.name ?? null,
       activePrimary: active?.preset.primary ?? null,
@@ -199,6 +200,9 @@ export function registerModelPresetRoutes(app: Hono): void {
   app.post("/api/models/anthropic/oauth/start", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    // Refused here too, not only at `complete`: before the user signs in at Anthropic for nothing.
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
     const { verifier, challenge } = generatePkce();
     const state = generateOAuthState();
     return c.json({
@@ -211,6 +215,8 @@ export function registerModelPresetRoutes(app: Hono): void {
   app.post("/api/models/anthropic/oauth/complete", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
 
     let body: { code?: unknown; verifier?: unknown; state?: unknown };
     try {
@@ -274,6 +280,8 @@ export function registerModelPresetRoutes(app: Hono): void {
   app.post("/api/models/anthropic/model/refresh", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
 
     const resolved = await resolveAnthropicListingCredential();
     if (!resolved) {
@@ -319,6 +327,8 @@ export function registerModelPresetRoutes(app: Hono): void {
   app.post("/api/models/anthropic/model", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
 
     let body: { model?: unknown };
     try {
@@ -355,6 +365,8 @@ export function registerModelPresetRoutes(app: Hono): void {
   app.post("/api/models/anthropic/oauth/disconnect", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    const refused = await modelChangeRefusal(c);
+    if (refused) return refused;
     // If the active preset is the implicit Claude one, fall back to local so the
     // swarm doesn't strand on an unauthenticated cloud model.
     const wasActive = getActiveModelPreset(getConfig());
