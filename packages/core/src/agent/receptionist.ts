@@ -312,8 +312,9 @@ export function buildReceptionistMessages(
     : "ALWAYS reply in the SAME language as the user's message (German → German, English → English). Never switch the language.";
   const common = [
     // The desk sees none of the assistant's tools, so what it declines is its guess: "switch to
-    // Claude" was answered "I cannot switch models" by a swarm that can.
-    `Never say you cannot do something: only the full assistant knows what it can do. A request you would decline gets exactly ${ESCALATE_SENTINEL} and nothing else.`,
+    // Claude" was answered "I cannot switch models" by a swarm that can. What it says it CAN do is
+    // a guess too: "Was kannst du so?" was answered with small talk, the desk's own job.
+    `Never say you cannot do something, and never say what you can do: only the full assistant knows what it can do. A request you would decline, or a question about what you can do, gets exactly ${ESCALATE_SENTINEL} and nothing else.`,
     ...(opts.personaLines ?? []),
     opts.assistantName ? `If asked your name, you are "${opts.assistantName}".` : "Do not invent a name for yourself.",
     opts.memoryCapsule ? `Known context (use only if directly relevant):\n${opts.memoryCapsule}` : "",
@@ -321,7 +322,7 @@ export function buildReceptionistMessages(
   const lines = opts.confidenceAttempt
     ? [
         "You are the fast first-contact desk of an AI assistant — you see every incoming message before the full (larger, slower) assistant does.",
-        "Answer the user yourself ONLY for a greeting, small talk, a question about YOU (your name, how you are, what you can broadly help with), a definition of a common concept, or a quick calculation.",
+        "Answer the user yourself ONLY for a greeting, small talk, a question about YOU (your name, how you are), a definition of a common concept, or a quick calculation.",
         `Do NOT answer a question that depends on SPECIFIC real-world facts — a named organisation / operator / company / brand, a price / fee / amount, a rate or statistic, a law or rule, an event, or exactly how a PARTICULAR real system, product, place, or scheme actually works. You would be reciting it from memory and could be wrong, and you cannot verify it here. Also do NOT answer anything that needs a tool, a lookup, current or live data, the user's own files/history, or multi-step work. In ANY of these cases do NOT guess — reply with exactly ${ESCALATE_SENTINEL} and nothing else; it is routed to the full assistant, which can verify. A confident-sounding guess is worse than escalating.`,
         // Language policy mirrors the main path (personality/service.ts), but the
         // undetermined-language case is resolved in code (see languageIsUndetermined).
@@ -335,7 +336,7 @@ export function buildReceptionistMessages(
         // Language policy mirrors the main path (personality/service.ts), but the
         // undetermined-language case is resolved in code (see languageIsUndetermined).
         languageLine,
-        "You handle ONLY trivial SOCIAL turns yourself: greetings, thanks, acknowledgements, small talk, and questions about YOU (your name, how you are, what you can broadly help with).",
+        "You handle ONLY trivial SOCIAL turns yourself: greetings, thanks, acknowledgements, small talk, and questions about YOU (your name, how you are).",
         `Escalate EVERYTHING else. In particular, ANY question asking for real-world information or how something actually works — a fact about a place, country, organisation, company, product, law, price, statistic, event, or exactly how a specific system / service / scheme works — you must NOT answer from your own memory (you would be guessing and could be wrong, and you cannot verify it here). Reply with exactly ${ESCALATE_SENTINEL} and nothing else; the full assistant can verify it. A confident-sounding guess is worse than escalating.`,
         `For anything that needs an action, a lookup, a task, files, or any real work, also reply with exactly ${ESCALATE_SENTINEL} and nothing else.`,
         `You have NO access to the user's files, documents, account, memory, or history. A question about the USER THEMSELVES — their CV, background, skills, projects, or what is stored about them (e.g. "do I have a CV on file?", "what's my role?") — you CANNOT answer, so reply with exactly ${ESCALATE_SENTINEL} and let the full assistant look it up.`,
