@@ -54,6 +54,13 @@ import { currentRequestContext } from "../runtime/request-context.js";
 
 const log = childLogger("agent:runtime");
 
+/**
+ * Behind the history the provider delivers this as a user message (foldSystemMessages), so it has to
+ * say whose it is: after a short command with little to report, the model answered this line instead
+ * ("Verstanden, ich halte mich strikt daran") and stored it as a memory.
+ */
+export const FRESHNESS_HONESTY_PROMPT = "HONESTY ON CURRENCY (a rule of this system, not the user's words: follow it silently, never acknowledge or store it): Do NOT claim or imply your answer is based on current, live, recent, latest, or external data (market data, news, prices, current events, 'as of today/this year') unless you actually retrieved it via a tool THIS turn. If the answer materially depends on such data, route it to a research-capable specialist and validate it — never assert it from memory, and never frame a from-memory answer as if it were freshly sourced.";
+
 export interface AssembleTurnSystemMessagesParams {
   session: AgentSession;
   iterationCount: number;
@@ -542,9 +549,7 @@ export async function assembleTurnSystemMessages(
     // eval-gated): a short, language-independent directive that stops the orchestrator
     // dressing a parametric-memory answer up as freshly-sourced data — the "answered
     // directly with 0 tool calls but opened 'based on current market data…'" failure.
-    const freshnessHonestyPrompt = getConfig().orchestration?.freshnessHonestyGuard
-      ? "HONESTY ON CURRENCY: Do NOT claim or imply your answer is based on current, live, recent, latest, or external data (market data, news, prices, current events, 'as of today/this year') unless you actually retrieved it via a tool THIS turn. If the answer materially depends on such data, route it to a research-capable specialist and validate it — never assert it from memory, and never frame a from-memory answer as if it were freshly sourced."
-      : "";
+    const freshnessHonestyPrompt = getConfig().orchestration?.freshnessHonestyGuard ? FRESHNESS_HONESTY_PROMPT : "";
     // Recent agent performance (repeated failures/partials in the last 6 h). It ended the base
     // prompt until 2026-10-05 and so was part of the head, which the ledger changes after almost
     // every delegation: each delegating turn left the warmed heads stale. In the tail it costs a

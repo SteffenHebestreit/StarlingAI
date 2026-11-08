@@ -1039,6 +1039,12 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: true,
     requiresSandbox: false,
   },
+  switch_model: {
+    tier: ToolTier.THREE_PRIVILEGED,
+    description: "Switch the whole swarm, for every user, to another model setup",
+    requiresPerCallApproval: true,
+    requiresSandbox: false,
+  },
   schedule_task: {
     tier: ToolTier.THREE_PRIVILEGED,
     description: "Schedule a recurring task that runs as a real autonomous turn (standing agent)",

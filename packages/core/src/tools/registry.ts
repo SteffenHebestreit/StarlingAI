@@ -830,6 +830,14 @@ export function _resetUnknownEffectsForTests(): void {
   _unknownEffects.clear();
 }
 
+/**
+ * What the model reads after the user said no, behind the "denied by user" that interventions.ts,
+ * sub-agent.ts and workflow-catalog.ts recognise a decline by. Without it, of 32 lab runs with a
+ * declined switch_model 3 asked again (a second approval card, then the loop brake) and 7 told the
+ * user "I cannot switch models"; with it 0 and 0 (2026-11-08).
+ */
+const USER_DECLINED = "It was not done. Do not ask for it again in this turn or look for another way to do it: tell the user it was not done.";
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -934,14 +942,15 @@ export async function executeTool(
         //   1. Timeout (no user response within the window) — message includes "timed out"
         //   2. Explicit user denial — message includes "denied by user"
         // Propagate the rejection message directly so interventions.ts can classify it.
+        const message = err instanceof Error ? err.message : `Tool '${name}' approval failed`;
         return {
           success: false,
           output: "",
-          error: err instanceof Error ? err.message : `Tool '${name}' approval failed`,
+          error: /denied by user/i.test(message) ? `${message}. ${USER_DECLINED}` : message,
         };
       }
       if (!approved) {
-        return { success: false, output: "", error: `Tool '${name}' execution denied by user` };
+        return { success: false, output: "", error: `Tool '${name}' execution denied by user. ${USER_DECLINED}` };
       }
     } else {
       // No approval channel available — block the call rather than silently skip the gate

@@ -27,6 +27,9 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   const presets = ref<ModelPresetDescriptor[]>([]);
   // How widely the active preset applies: all | unspecified | coordinator_qa.
   const scope = ref<PresetScope>("all");
+  // Whether this account may change the setup: the gateway's answer (admin under multi-user auth,
+  // anyone without), so the page keeps no copy of the rule. Unknown until the first read: hidden.
+  const canChange = ref(false);
   const loaded = ref(false);
   const switching = ref(false);
   const error = ref("");
@@ -56,12 +59,14 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
     return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
   }
 
-  function applyState(state: { active: string | null; activePrimary: string | null; defaultPrimary: string; presets: ModelPresetDescriptor[]; scope?: PresetScope }): void {
+  function applyState(state: { active: string | null; activePrimary: string | null; defaultPrimary: string; presets: ModelPresetDescriptor[]; scope?: PresetScope; canChange?: boolean }): void {
     active.value = state.active;
     activePrimary.value = state.activePrimary;
     defaultPrimary.value = state.defaultPrimary;
     presets.value = state.presets;
     if (state.scope) scope.value = state.scope;
+    // Only the GET carries it; a write's answer leaves the last one standing.
+    if (state.canChange !== undefined) canChange.value = state.canChange;
     loaded.value = true;
   }
 
@@ -304,7 +309,7 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   }
 
   return {
-    active, activePrimary, defaultPrimary, presets, scope, loaded, switching, error, available,
+    active, activePrimary, defaultPrimary, presets, scope, canChange, loaded, switching, error, available,
     oauthConnected, oauthExpiresAt, oauthBusy, oauthError,
     anthropicModel, anthropicModelChoices, modelSaving, modelError,
     anthropicModelSource, anthropicModelsRefreshedAt, anthropicModelsRefreshing,

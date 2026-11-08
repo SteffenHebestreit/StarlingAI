@@ -304,6 +304,7 @@ Privileged operations; admin approval plus audit entry.
 | `ssh_download` | per-call | — | Download files or directories from a remote system into the workspace over SCP |
 | `ssh_exec` | per-call | — | Execute commands on a remote system over SSH |
 | `ssh_upload` | per-call | — | Upload workspace files or directories to a remote system over SCP |
+| `switch_model` | per-call | — | Switch the whole swarm, for every user, to another model setup |
 | `terraform_exec` | per-call | — | Run Terraform for infrastructure provisioning and stateful changes |
 | `tool_dev_submit` | — | — | Submit a tested tool for human approval and deployment |
 | `vm_manage` | per-call | — | Manage virtual machines through configured infrastructure backends |
