@@ -38,8 +38,26 @@ describe("tool registry approval enforcement", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe("Tool 'http_request' execution denied by user");
+    expect(result.error).toMatch(/^Tool 'http_request' execution denied by user\. /);
     expect(approvalCallback).toHaveBeenCalledWith("http_request", { url: "https://example.com/healthz" });
+  });
+
+  // A declined switch_model was asked for again in 3 lab runs of 32 (a second approval card, then the
+  // loop brake), and 7 replies told the user it cannot switch models at all; 0 and 0 with the text.
+  // It has to come on both paths: the web chat rejects with "explicitly denied", others answer false.
+  it.each([
+    ["answers false", async () => false],
+    ["rejects, as the web chat does", () => Promise.reject(new Error("Tool approval explicitly denied by user"))],
+  ])("tells the model not to ask again when the approval %s", async (_how, decide) => {
+    const { executeTool } = await import("../tools/registry.js");
+    const result = await executeTool("http_request", { url: "https://example.com/healthz" }, {
+      sessionId: "approval-declined-final",
+      workspacePath: "/workspace",
+      approvalCallback: vi.fn(decide),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("denied by user");
+    expect(result.error).toContain("Do not ask for it again in this turn or look for another way to do it: tell the user it was not done.");
   });
 
   it("enforces scene human-in-the-loop approval even for a read-only tool", async () => {
@@ -56,7 +74,7 @@ describe("tool registry approval enforcement", () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe("Tool 'git_status' execution denied by user");
+    expect(result.error).toMatch(/^Tool 'git_status' execution denied by user\. /);
     expect(approvalCallback).toHaveBeenCalledWith("git_status", { path: "packages/core" });
   });
 
@@ -80,6 +98,8 @@ describe("tool registry approval enforcement", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("timed out");
     expect(result.error).not.toContain("denied by user");
+    // Nobody said no, so nothing says not to ask again.
+    expect(result.error).not.toContain("Do not ask for it again");
   });
 
   // Regression: audit session 5b7a67ba (May 2026).  run_workflow called
