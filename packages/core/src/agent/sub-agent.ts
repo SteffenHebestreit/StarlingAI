@@ -1465,6 +1465,9 @@ const GATEWAY_BOUND_SERVICE_TOOL_PREFIXES = [
  */
 const GATEWAY_BOUND_SERVICE_TOOL_NAMES = new Set<string>([
   "generate_image",
+  "comfyui_catalog",
+  "comfyui_workflow",
+  "comfyui_run",
   "analyze_image",
   "synthesize_speech",
   "transcribe_audio",
@@ -1540,7 +1543,9 @@ export const IDEMPOTENT_TOOLS = new Set<string>([
 // Tools whose every call is new work, so even the consecutive-duplicate cache below never answers
 // one: a repeated generate_image is "make another one", and in a chat the person may choose
 // different settings for it. The turn loop exempts the same tool (STATE_DEPENDENT_TOOL_NAMES).
-export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image"]);
+// comfyui_run names its workflow by file, and comfyui_workflow changes that file between two
+// identical calls: a replay would hand back the picture of the workflow before the change.
+export const NEVER_REPLAYED_TOOLS = new Set<string>(["generate_image", "comfyui_run"]);
 
 // The tools a run publishes a fact to the session's shared memory with (tools/memory.ts), and the
 // arguments of theirs that identify the fact and its source instead of stating anything. See the

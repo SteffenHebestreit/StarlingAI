@@ -593,6 +593,24 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
     requiresPerCallApproval: false,
     requiresSandbox: false,
   },
+  comfyui_catalog: {
+    tier: ToolTier.ZERO_READ_ONLY,
+    description: "Look up the ComfyUI server's node types, model files, templates and saved editor workflows",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  comfyui_workflow: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Create or change a ComfyUI workflow file in the workspace, or save it to the ComfyUI editor's library",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
+  comfyui_run: {
+    tier: ToolTier.ONE_WRITE,
+    description: "Run a ComfyUI workflow and save what it produces inside the workspace",
+    requiresPerCallApproval: false,
+    requiresSandbox: false,
+  },
   generate_chart_html: {
     tier: ToolTier.ONE_WRITE,
     description: "Generate an HTML chart report and save it inside the workspace",

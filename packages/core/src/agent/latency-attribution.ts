@@ -152,7 +152,7 @@ export const DEFAULT_LATENCY_PARAMS: Readonly<LatencyParams> = Object.freeze({
   orchestratorWarmTtftMs: 2_500,
   agentSearchWarmMs: 3_700,
   visionStructuredTokens: 64,
-  renderTools: Object.freeze(["generate_image", "transform_image"]),
+  renderTools: Object.freeze(["generate_image", "transform_image", "comfyui_run"]),
   thinDataTurns: 30,
 });
 

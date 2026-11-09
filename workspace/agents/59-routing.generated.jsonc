@@ -483,10 +483,10 @@
         "surface": [
           "workspace"
         ],
-        "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
-        "sourceHash": "04d84c4c3b7cc478",
-        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
-        "labeledAt": "2026-09-19"
+        "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, ComfyUI workflows, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
+        "sourceHash": "c3b07dac01cbd249",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated); re-labelled 2026-11-08 for the ComfyUI tools, verdict unchanged",
+        "labeledAt": "2026-11-08"
       }
     },
     "image_sourcer": {

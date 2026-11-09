@@ -166,6 +166,7 @@ async function cmdStart() {
       "computer-desktop":{ type: "boolean", default: false },
       rag:               { type: "boolean", default: false },
       laya:              { type: "boolean", default: false },
+      comfyui:           { type: "boolean", default: false },
       "harness-lab":     { type: "boolean", default: false },
       companions:        { type: "boolean", default: false },
       all:               { type: "boolean", default: false },
@@ -241,11 +242,25 @@ async function cmdStart() {
   // SAI_ENABLE_HARNESS_LAB=1 in .env; it also needs selfImprovement.harnessLab.enabled.
   const wantLab = labFlag || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_HARNESS_LAB || "");
   if (wantLab) profileArgs.push("--profile", "harness-lab");
-  // The reranker and the Laya sidecar only get the GPU when a host NVIDIA GPU is present
+  // The reranker, the Laya sidecar and ComfyUI only get the GPU when a host NVIDIA GPU is present
   // (or forced via SAI_GPU=1). Otherwise they run on CPU. SAI_GPU=0 forces CPU.
   const gpuForced = /^(1|true|yes|on)$/i.test(process.env.SAI_GPU || "");
   const gpuOff = /^(0|false|no|off)$/i.test(process.env.SAI_GPU || "");
-  const useGpu = (wantRag || wantLaya) && (gpuForced || (!gpuOff && hasNvidiaGpu()));
+  let gpuPresent;
+  const gpuAvailable = () => (gpuPresent ??= gpuForced || (!gpuOff && hasNvidiaGpu()));
+  // ComfyUI (docker/comfyui) behind the `comfyui` profile, OFF by default: it is of use only on an
+  // NVIDIA GPU and downloads ~18 GB of models at its first start. Opt in with `sai start --comfyui`
+  // or SAI_ENABLE_COMFYUI=1 in .env; --all takes it only where there is a GPU. Running it is what
+  // hands the gateway its address, so the comfyui_* tools are off exactly when it is not there.
+  const wantComfy = values.comfyui
+    || /^(1|true|yes|on)$/i.test(process.env.SAI_ENABLE_COMFYUI || "")
+    || (values.all && gpuAvailable());
+  if (wantComfy) {
+    process.env.SAI_COMFYUI_URL = process.env.SAI_COMFYUI_URL || "http://comfyui:8188";
+    process.env.SAI_COMFYUI_EDITOR_URL = process.env.SAI_COMFYUI_EDITOR_URL || `http://localhost:${process.env.SAI_COMFYUI_PORT || "8188"}`;
+    profileArgs.push("--profile", "comfyui");
+  }
+  const useGpu = (wantRag || wantLaya || wantComfy) && gpuAvailable();
   if (useGpu) composeFiles.push("-f", "docker-compose.gpu.yml");
   if (wantRag) {
     profileArgs.push("--profile", "rag");
@@ -260,6 +275,10 @@ async function cmdStart() {
     ok(useGpu
       ? "Laya decision sidecar enabled — GPU detected, decisions in milliseconds"
       : "Laya decision sidecar enabled — no GPU, it runs on CPU (tens to hundreds of ms per decision)");
+  }
+  if (wantComfy) {
+    if (useGpu) ok(`ComfyUI enabled — GPU detected; editor at ${process.env.SAI_COMFYUI_EDITOR_URL}`);
+    else warn("ComfyUI enabled without an NVIDIA GPU — it runs on the CPU, far too slow for real work");
   }
 
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
@@ -456,7 +475,7 @@ async function cmdStop() {
   });
 
   const composeFiles = ["-f", "docker-compose.yml"];
-  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya", "--profile", "harness-lab"];
+  const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya", "--profile", "comfyui", "--profile", "harness-lab"];
   // The e2e test services (`pnpm e2e:env up`) run in this project on the stack's networks;
   // `down` has to remove them too, or it cannot remove those networks.
   if (existsSync("docker-compose.e2e.yml")) {

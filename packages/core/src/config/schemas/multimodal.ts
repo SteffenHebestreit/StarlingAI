@@ -277,6 +277,19 @@ export const MultimodalWakeWordSchema = z.object({
   silenceTimeoutMs: z.number().int().min(1000).max(15000).default(4000),
 });
 
+/** A ComfyUI server the comfyui_* tools build, change and run node workflows on. */
+export const MultimodalComfyUiSchema = z.object({
+  /** Where the gateway reaches ComfyUI's API. Empty turns the comfyui_* tools off.
+   *  `sai start --comfyui` runs the bundled server and sets SAI_COMFYUI_URL. */
+  baseUrl: OptionalEndpointUrlSchema.default(""),
+  /** The address a person opens the ComfyUI editor at, which the gateway's address for the
+   *  same server usually is not (http://comfyui:8188 means nothing in a browser). Given to the
+   *  user with a workflow saved to the editor; empty leaves the link out. */
+  editorUrl: OptionalEndpointUrlSchema.default(""),
+  /** How long one run may take from submission to its last output file, queue included. */
+  runTimeoutMs: z.number().int().min(10_000).max(3_600_000).default(900_000),
+});
+
 export const MultimodalSchema = z.object({
   maxUploadBytes: z.number().int().min(1024).max(104_857_600).default(20_971_520),
   files: MultimodalFileServiceSchema.prefault({}),
@@ -284,9 +297,11 @@ export const MultimodalSchema = z.object({
   tts: MultimodalTextToSpeechSchema.prefault({}),
   wakeWord: MultimodalWakeWordSchema.prefault({}),
   imageGeneration: MultimodalImageGenerationSchema.optional(),
+  comfyui: MultimodalComfyUiSchema.prefault({}),
 });
 
 export type MultimodalFileConfig = z.infer<typeof MultimodalFileServiceSchema>;
 export type MultimodalSpeechToTextConfig = z.infer<typeof MultimodalSpeechToTextSchema>;
 export type MultimodalTextToSpeechConfig = z.infer<typeof MultimodalTextToSpeechSchema>;
 export type MultimodalImageGenerationConfig = z.infer<typeof MultimodalImageGenerationSchema>;
+export type MultimodalComfyUiConfig = z.infer<typeof MultimodalComfyUiSchema>;

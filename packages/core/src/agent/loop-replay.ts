@@ -47,7 +47,7 @@ import { truncateToolAuditText } from "./sub-agent-interruption.js";
 
 /** Tools the brake never answers from a cache, as in agent/sub-agent.ts (isLiveStateTool, NEVER_REPLAYED_TOOLS). */
 function neverReplayed(tool: string): boolean {
-  return tool.startsWith("browser_") || tool.startsWith("computer_") || tool === "generate_image";
+  return tool.startsWith("browser_") || tool.startsWith("computer_") || tool === "generate_image" || tool === "comfyui_run";
 }
 
 /** agent/sub-agent.ts IDEMPOTENT_TOOLS: the tools the A→B→A cache answers. A copy, because this module

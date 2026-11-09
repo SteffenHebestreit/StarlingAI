@@ -15,6 +15,7 @@ An index of the `docs/` folder. **Reference** docs are evergreen and kept curren
 | [swarm-tuning-overview.md](swarm-tuning-overview.md) | **Control panel:** every lever to extend/adjust the swarm + its self-learning loops |
 | [memory-context-overview.md](memory-context-overview.md) | **Data plane:** memory stores, knowledge/RAG, and context assembly across session/workspace/user scopes |
 | [knowledge-bases.md](knowledge-bases.md) | Knowledge Bases — crawl a docs site into a queryable corpus |
+| [comfyui.md](comfyui.md) | ComfyUI workflows — the GPU container, its models, and the tools that build, run and export node workflows |
 | [channels.md](channels.md) | Inbound messaging channels overview |
 | [mail-service.md](mail-service.md) | Mail/calendar/contacts service |
 

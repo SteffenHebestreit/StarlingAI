@@ -670,6 +670,17 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
       raw["decisions"] = { ...decisions, baseUrl: env["SAI_LAYA_URL"].trim() };
     }
   }
+  // The ComfyUI server: `sai start --comfyui` runs it and sets both, so the comfyui_* tools find
+  // it exactly when it runs. An address written in config wins over each.
+  for (const [variable, key] of [["SAI_COMFYUI_URL", "baseUrl"], ["SAI_COMFYUI_EDITOR_URL", "editorUrl"]] as const) {
+    const value = env[variable]?.trim();
+    if (!value) continue;
+    const mm = (raw["multimodal"] as Record<string, unknown> | undefined) ?? {};
+    const comfy = (mm["comfyui"] as Record<string, unknown> | undefined) ?? {};
+    const configured = comfy[key];
+    if (typeof configured === "string" && configured.trim()) continue;
+    raw["multimodal"] = { ...mm, comfyui: { ...comfy, [key]: value } };
+  }
   // Primary model provider endpoint — provider-NEUTRAL. The primary provider may be LM Studio,
   // Ollama, vLLM, llama.cpp, LocalAI, OpenRouter, or ANY OpenAI-compatible server; it just
   // happens to be wired through the `lmstudio` provider slot (an OpenAI-compatible adapter).

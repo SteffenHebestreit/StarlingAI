@@ -437,7 +437,7 @@ function stripFileExtension(value: string): string {
  * Best-effort by construction: a memory backend that is down must never fail a generation
  * that already succeeded and is already on disk.
  */
-async function publishImageArtifact(sessionId: string | undefined, relativePath: string): Promise<void> {
+export async function publishImageArtifact(sessionId: string | undefined, relativePath: string): Promise<void> {
   if (!sessionId) return;
   try {
     const shared = deriveSharedSessionId(sessionId);
@@ -1446,7 +1446,7 @@ registerBrowserTool({
   mcpToolName: "browser_screenshot",
 });
 
-interface WorkspaceBinaryFile {
+export interface WorkspaceBinaryFile {
   resolvedPath: string;
   /** The guard-approved workspace-relative form of the path. */
   relativePath: string;
@@ -1555,7 +1555,7 @@ async function withInlineSnapshot(output: string): Promise<{ output: string; sna
   return { output: output.replace(SNAPSHOT_FILE_LINK, "### Snapshot\n(not available here: call browser_snapshot to see the page)"), snapshot };
 }
 
-async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
+export async function readWorkspaceBinaryFile(path: string, workspacePath: string): Promise<WorkspaceBinaryFile> {
   const resolved = resolveWorkspacePath(path, workspacePath);
   const describe = (bytes: Buffer): WorkspaceBinaryFile => ({
     resolvedPath: resolved.resolved,
