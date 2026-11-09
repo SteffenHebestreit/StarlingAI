@@ -1,0 +1,76 @@
+# ComfyUI workflows
+
+The swarm can build, change, run and export [ComfyUI](https://github.com/Comfy-Org/ComfyUI) node workflows. ComfyUI runs as its own container on an NVIDIA GPU. Three tools drive it, and a person can open the same workflows in ComfyUI's editor and keep working there.
+
+This sits beside `generate_image`, which renders one picture on the configured image backend. Use ComfyUI for what one render cannot do: upscaling, LoRAs, edits with several reference images, chains of steps, and any workflow you want to keep and edit.
+
+## Turning it on
+
+```bash
+node scripts/sai.mjs start --comfyui      # or SAI_ENABLE_COMFYUI=1 in .env
+```
+
+`--all` includes ComfyUI only on a machine with an NVIDIA GPU (detected with `nvidia-smi`, or forced with `SAI_GPU=1`). Without a GPU it starts on the CPU, which works but is far too slow for real use.
+
+Starting it also hands the gateway its address. `SAI_COMFYUI_URL` (default `http://comfyui:8188`) fills `multimodal.comfyui.baseUrl`, and `SAI_COMFYUI_EDITOR_URL` (default `http://localhost:8188`) fills `multimodal.comfyui.editorUrl`. When `baseUrl` is empty the tools say ComfyUI is not set up, and nothing else changes. To use a ComfyUI that runs elsewhere, set `multimodal.comfyui.baseUrl` in config instead.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `multimodal.comfyui.baseUrl` | `""` | Where the gateway reaches ComfyUI's API. Empty turns the tools off. |
+| `multimodal.comfyui.editorUrl` | `""` | The address a person's browser opens the editor at. It is given to the user with an exported workflow. |
+| `multimodal.comfyui.runTimeoutMs` | `900000` | How long one run may take, from submission to its last file, queue included. |
+
+## The container (`docker/comfyui`)
+
+- ComfyUI is pinned to a release tag (`COMFYUI_REF`, currently `v0.44.0`) and uses PyTorch cu130.
+- One custom node is baked in: [workflow-to-api-converter-endpoint](https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint), pinned to a reviewed commit. It turns a workflow saved in the editor into the API format that `/prompt` runs. ComfyUI has no server-side converter of its own. The node is a pure data transform with no file, network or process access.
+- ComfyUI-Manager is not installed, so nothing installs nodes or pulls code at run time.
+- The server runs with `--offline`. Paid partner (API) nodes are off, and the editor fetches nothing from the internet.
+- The editor is published on the host's loopback only (`127.0.0.1:${SAI_COMFYUI_PORT:-8188}`), because ComfyUI has no login of its own. The gateway reaches it over the internal network.
+- Two volumes hold its data: `gc-comfyui-models` for the model files and `gc-comfyui-data` for outputs, inputs and the editor's saved workflows.
+
+### Models
+
+`docker/comfyui/fetch_models.py` downloads the files listed in `docker/comfyui/models.json` at each start. Files already in place are skipped. Each file lands under a temporary name and is renamed only when complete, so ComfyUI never lists half a model. The downloads run in the background, so the server answers at once.
+
+| Set | Files | Size | Licence |
+|---|---|---|---|
+| `qwen-image-2.1` | Qwen-Image 2.1 int8 DiT, Qwen3-VL-8B int8 text encoder, VAE (Comfy-Org) | ~17 GB | Qwen licence |
+| `flux-3-klein` | FLUX 3 Image Klein int8 distilled DiT + Qwen3-VL-4B int8 (black-forest-labs), FLUX.2 VAE | ~11 GB | FLUX Kommunity License, **gated** |
+| `upscale` | Real-ESRGAN x4plus | 67 MB | BSD-3-Clause |
+
+The file names match ComfyUI's official templates, so those templates run unchanged.
+
+- `COMFYUI_MODEL_SETS` picks sets by name, comma separated. Empty means all, `none` means nothing.
+- `COMFYUI_FETCH_MODELS=0` turns the download off.
+- The gated FLUX files need `HF_TOKEN` from a Hugging Face account that has accepted the model's licence. Without a token they are skipped with a note and the other sets still load.
+
+## The tools
+
+| Tool | Tier | What it does |
+|---|---|---|
+| `comfyui_catalog` | 0 | Looks up node types (search, or one type's inputs, choices and outputs), model files, the official templates this server can run, and the editor's saved workflows. |
+| `comfyui_workflow` | 1 | Creates or changes a workflow kept as an API-format JSON file in the workspace. It starts from a template, an editor workflow or a PNG ComfyUI made, applies `add` / `set` / `remove` / `title` operations, and checks the result against the server's nodes and model files. It can also save the workflow to the editor's library (`save_to_editor`) or write an editor-format file (`editor_file`). |
+| `comfyui_run` | 1 | Runs a workflow file, `editor:<name>` or `template:<name>`. `set` overrides inputs for this run only, and `images` uploads workspace pictures to LoadImage inputs. The outputs are saved under `generated/comfyui/`. |
+
+`image_creator` holds all three, and they are grantable to ephemeral agents. Because they reach a configured service, an agent holding them runs in-process. `comfyui_run` is never answered from a turn's replay cache, since the workflow file it names can change between two identical calls.
+
+### What happens to a workflow on the way
+
+- **Templates and editor workflows** are converted to the API format by the converter node. The converter leaves out the values typed on a subgraph's own node: the official templates show prompt, seed, steps and model files there. Those values are written into the flattened inner nodes afterwards (`applySubgraphWidgetValues`). There is one value per widget input of the subgraph, and socket inputs have none.
+- **Before a run**, a switch set to a fixed value is replaced by the branch it picks, and nodes no output needs are left out (`runnableGraph`). ComfyUI checks every reachable node, a switched-off branch included. The Qwen-Image 2.1 template keeps a 9 GB prompt enhancer behind a switch that is off, and without this step the whole run was refused for that missing file. An editor-drawn required input with no saved value, such as ImageCompare's view, gets an empty value.
+- **ComfyUI's check is the final word.** A refused part is reported per node and input, together with the closest valid choice (for example the right model file name). When ComfyUI refuses some outputs but runs others (HTTP 200 with `node_errors`), the run fails only if nothing was saved. Otherwise the result carries a note.
+- **Export to the editor** writes the workflow as it runs, with switches resolved and unused branches left out. The editor resolves no switch, so the full template opened with its switched-off enhancer flagged for a missing model, and Run would have been refused. The export is laid out left to right, with seeds set to `fixed` so that pressing Run reproduces the result. The copy is then read back through the converter and compared with the workflow, and any difference is reported. Checked in a real browser: for the exported Qwen template, what the editor would send on Run is identical to the workflow.
+- **Every saved PNG carries its workflow as it ran.** Dragged onto the ComfyUI page, it opens the workflow behind it.
+
+Node ids change on the way through the editor: flattened subgraph ids such as `459:458` become plain numbers. Operations, links and `set` keys therefore also take a node type or title that only one node has (`"KSampler.steps"`, `["VAEDecode", 0]`). Each `comfyui_workflow` answer starts with where the prompt, seed, settings, model files and picture inputs of the running nodes are. If an operation names no node, nothing is applied, but a workflow loaded with `start_from` is still saved, so the next call can change it without loading it again.
+
+### Measured on an RTX 4080 (16 GB), ComfyUI 0.44.0
+
+- Official Qwen-Image 2.1 text-to-image template, 1 MP, 25 steps: 25 s cold (model load included), 12–14 s warm.
+- Official Qwen-Image 2.1 image-edit template with two uploaded references: 26–35 s.
+- Export round trip (template → editor format → converter → compare), over 127 sampled official templates: 104 come back identical, including every Qwen-Image 2.1 and FLUX 3 Klein template. Most of the rest are video templates. The tool's comparison skips the hidden `codec` input of SaveVideo, and for the remainder its read-back check reports the difference.
+
+## Multi-user
+
+The ComfyUI server, its GPU queue, its output folder and its editor library are shared by every account. Results are copied into each caller's own workspace. Exports go to `starlingai/<account segment>/` in the editor library, and uploaded inputs to the same subfolder of ComfyUI's input folder. The editor itself has no accounts: anyone who can open its page sees every saved workflow.

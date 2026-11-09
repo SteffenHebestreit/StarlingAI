@@ -244,6 +244,7 @@ export const ARTIFACT_PRODUCING_TOOLS = new Set([
   // tool put a deliverable on disk?" — rather than from which generators happened to exist
   // when it was written.
   "generate_image", "transform_image", "generate_svg", "generate_qr_code",
+  "comfyui_run", "comfyui_workflow",
   "synthesize_speech",
   "generate_chart_html", "generate_mermaid_diagram",
   "spreadsheet_write", "pdf_fill", "pentest_report", "export_evidence_ledger",

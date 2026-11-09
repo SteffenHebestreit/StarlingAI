@@ -394,7 +394,7 @@ describe("the loop brake in the sub-agent loop", () => {
       const { REPLAY_IDEMPOTENT_TOOLS } = await import("../agent/loop-replay.js");
       expect([...REPLAY_IDEMPOTENT_TOOLS].sort()).toEqual([...subAgent.IDEMPOTENT_TOOLS].sort());
       // loop-replay.ts neverReplayed(): the live-state prefixes plus exactly these.
-      expect([...subAgent.NEVER_REPLAYED_TOOLS]).toEqual(["generate_image"]);
+      expect([...subAgent.NEVER_REPLAYED_TOOLS]).toEqual(["generate_image", "comfyui_run"]);
       expect(["browser_snapshot", "computer_click", "read_file"].map(subAgent.isLiveStateTool)).toEqual([true, true, false]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
