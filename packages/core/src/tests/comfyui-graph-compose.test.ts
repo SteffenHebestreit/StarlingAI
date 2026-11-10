@@ -148,7 +148,7 @@ describe("insert", () => {
     const graph = workflow();
     graph["10"] = { class_type: "SaveImageAdvanced", inputs: { images: ["459:8", 0], filename_prefix: "small" } };
     expect(() => applyOperations(graph, [{ op: "insert", class_type: "ImageScale" }], catalog))
-      .toThrow(/could go before several outputs \(9 SaveImageAdvanced, 10 SaveImageAdvanced\): name one in before/);
+      .toThrow('could go before several outputs: before: "9" (SaveImageAdvanced) or before: "10" (SaveImageAdvanced)');
   });
 
   it("says before is needed for a stage no output can take", () => {
@@ -683,6 +683,37 @@ describe("naming a node", () => {
     expect(resolveInputRef(workflow(), "459:7.format.bit_depth", "x")).toEqual({ id: "459:7", input: "format.bit_depth" });
     expect(resolveInputRef(workflow(), "459:7", "x")).toEqual({ id: "459:7" });
     expect(resolveInputRef(workflow(), "KSampler.seed", "x")).toEqual({ id: "459:7", input: "seed" });
+  });
+
+  it("takes a node written the way the tool lists it", () => {
+    // The lab: `before: "5 SaveImage"`, copied from the tool's own list of nodes.
+    const graph = workflow();
+    expect(resolveNodeRef(graph, "9 SaveImageAdvanced", "x")).toBe("9");
+    expect(resolveNodeRef(graph, '9 SaveImageAdvanced "Save Image (Advanced)"', "x")).toBe("9");
+    expect(resolveNodeRef(graph, '9 "Save Image (Advanced)"', "x")).toBe("9");
+    expect(resolveNodeRef(graph, "9 save image (advanced)", "x")).toBe("9");
+    expect(resolveNodeRef(graph, "459:7 KSampler", "x")).toBe("459:7");
+    expect(resolveInputRef(graph, "9 SaveImageAdvanced.images", "x")).toEqual({ id: "9", input: "images" });
+    expect(resolveInputRef(graph, "9.SaveImageAdvanced", "x")).toEqual({ id: "9" });
+    expect(resolveInputRef(graph, "9.Save Image (Advanced)", "x")).toEqual({ id: "9" });
+  });
+
+  it("does not take a listed node whose name is another node's", () => {
+    expect(() => resolveNodeRef(workflow(), "9 KSampler", "x")).toThrow(/there is no node 9 KSampler/);
+    expect(() => resolveNodeRef(workflow(), "77 SaveImageAdvanced", "x")).toThrow(/there is no node 77 SaveImageAdvanced/);
+    expect(() => resolveNodeRef(workflow(), "9 SaveImageAdvanced extra", "x")).toThrow(/there is no node/);
+  });
+
+  it("keeps an input that is named like the node", () => {
+    const graph: ApiGraph = { "1": { class_type: "Probe", inputs: { probe: 1 } } };
+    expect(resolveInputRef(graph, "1.probe", "x")).toEqual({ id: "1", input: "probe" });
+  });
+
+  it("puts a stage before a node written the way the tool lists it", () => {
+    const { graph } = applyOperations(workflow(), [{ op: "insert", class_type: "ImageScale", node: "up", before: "9 SaveImageAdvanced" }], catalog);
+    expect(graph["9"]!.inputs["images"]).toEqual(["up", 0]);
+    const dotted = applyOperations(workflow(), [{ op: "insert", class_type: "ImageScale", node: "up", before: "9.SaveImageAdvanced" }], catalog).graph;
+    expect(dotted["9"]!.inputs["images"]).toEqual(["up", 0]);
   });
 
   it("takes part of a name only when one node has it", () => {

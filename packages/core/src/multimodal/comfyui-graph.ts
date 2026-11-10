@@ -495,10 +495,28 @@ function defaultsFor(def: NodeDef): Record<string, unknown> {
  */
 export function resolveNodeRef(graph: ApiGraph, ref: string, where: string): string {
   if (graph[ref]) return ref;
+  const listed = listedNode(graph, ref);
+  if (listed) return listed;
   const matches = nodesNamed(graph, ref);
   if (matches.length === 1) return matches[0]!;
   if (matches.length > 1) throw new GraphOperationError(`${where}: "${ref}" fits ${matches.length} nodes (${matches.join(", ")}); use the id`);
   throw new GraphOperationError(`${where}: there is no node ${ref}`);
+}
+
+/**
+ * A node written the way this tool lists one: `5 SaveImage`, or `5 SaveImage "Save Image"` with its
+ * title. The lab's image_creator copied that from a refusal into `before` and was told there was
+ * no node "5 SaveImage". Taken only when the id is there and the rest names that very node.
+ */
+function listedNode(graph: ApiGraph, ref: string): string | undefined {
+  const match = /^(\S+)\s+(.+)$/.exec(ref.trim());
+  const node = match ? graph[match[1]!] : undefined;
+  if (!match || !node) return undefined;
+  const rest = match[2]!.trim().toLowerCase();
+  const type = node.class_type.toLowerCase();
+  const title = (node._meta?.title ?? "").toLowerCase();
+  const names = [type, ...(title ? [title, `"${title}"`, `${type} "${title}"`] : [])];
+  return names.includes(rest) ? match[1] : undefined;
 }
 
 /**
@@ -523,10 +541,17 @@ function nodesNamed(graph: ApiGraph, ref: string): string[] {
 export function resolveInputRef(graph: ApiGraph, ref: string, where: string): { id: string; input?: string } {
   if (graph[ref]) return { id: ref };
   const owner = Object.keys(graph).sort((a, b) => b.length - a.length).find((id) => ref.startsWith(`${id}.`) && ref.length > id.length + 1);
-  if (owner) return { id: owner, input: ref.slice(owner.length + 1) };
+  if (owner) {
+    const input = ref.slice(owner.length + 1);
+    // "5.SaveImage": the node's own type or title after the dot, not one of its inputs.
+    const node = graph[owner]!;
+    const lower = input.toLowerCase();
+    if (!(input in node.inputs) && (lower === node.class_type.toLowerCase() || lower === (node._meta?.title ?? "").toLowerCase())) return { id: owner };
+    return { id: owner, input };
+  }
   for (let dot = ref.indexOf("."); dot > 0; dot = ref.indexOf(".", dot + 1)) {
     const prefix = ref.slice(0, dot);
-    if (nodesNamed(graph, prefix).length > 0) return { id: resolveNodeRef(graph, prefix, where), input: ref.slice(dot + 1) };
+    if (listedNode(graph, prefix) || nodesNamed(graph, prefix).length > 0) return { id: resolveNodeRef(graph, prefix, where), input: ref.slice(dot + 1) };
   }
   return { id: resolveNodeRef(graph, ref, where) };
 }
@@ -708,7 +733,7 @@ function outputNodeFor(graph: ApiGraph, classType: string, def: NodeDef, given: 
   const present = orderedIds(graph).filter((id) => graph[id]!.class_type === classType);
   throw new GraphOperationError(
     chosen.length > 1
-      ? `${where}: ${classType} could go before several outputs (${chosen.map((candidate) => `${candidate.id} ${graph[candidate.id]!.class_type}`).join(", ")}): name one in before`
+      ? `${where}: ${classType} could go before several outputs: ${chosen.map((candidate) => `before: "${candidate.id}" (${graph[candidate.id]!.class_type})`).join(" or ")}`
       : `${where}: ${classType} fits in front of no output of this workflow${present.length ? `, which has ${classType} ${present.slice(0, 3).join(", ")} already` : ""}: before must name the node that should receive its output, or "<node>.<input>"`,
   );
 }
