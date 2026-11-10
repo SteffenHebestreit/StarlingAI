@@ -674,6 +674,11 @@ function spliceCandidates(graph: ApiGraph, target: ApiNode, def: NodeDef, given:
     const carried = sourceDef ? nodeOutputs(sourceDef)[value[1]]?.type ?? wanted : wanted;
     // An output of any type (a V3 switch's) says nothing: what the input wants is what it carries.
     const type = carried === "*" ? wanted : carried;
+    // Where neither side says, nothing is known of what flows there, and anything would "fit". The
+    // official Qwen-Image template passes its prompt text through a switch into a preview of any
+    // type; a VAEDecode the lab's image_creator inserted without a place landed there, cut the
+    // prompt off from its encoder, and the next stage found two outputs to go before.
+    if (type === "*") continue;
     const receive = free.find((socket) => socket.type === type) ?? free.find((socket) => typesFit(type, socket.type));
     // Nothing free for it, but the caller wired that socket itself ({image: ["VAEDecode", 0]}): the
     // new node is fed already and only the output has to be moved. The lab's image_creator wrote
@@ -699,10 +704,12 @@ function outputNodeFor(graph: ApiGraph, classType: string, def: NodeDef, given: 
   const typed = fitting.filter((candidate) => candidate.splices.some((splice) => splice.typed));
   const chosen = typed.length ? typed : fitting;
   if (chosen.length === 1) return chosen[0]!.id;
+  // A stage the workflow has already (the lab's image_creator inserted a VAEDecode into a template that decodes).
+  const present = orderedIds(graph).filter((id) => graph[id]!.class_type === classType);
   throw new GraphOperationError(
     chosen.length > 1
       ? `${where}: ${classType} could go before several outputs (${chosen.map((candidate) => `${candidate.id} ${graph[candidate.id]!.class_type}`).join(", ")}): name one in before`
-      : `${where}: ${classType} fits in front of no output of this workflow: before must name the node that should receive its output, or "<node>.<input>"`,
+      : `${where}: ${classType} fits in front of no output of this workflow${present.length ? `, which has ${classType} ${present.slice(0, 3).join(", ")} already` : ""}: before must name the node that should receive its output, or "<node>.<input>"`,
   );
 }
 

@@ -131,6 +131,19 @@ describe("insert", () => {
     expect(next["p"]!.inputs["source"]).toEqual(["2b", 0]);
   });
 
+  it("is never put on a connection where neither side says what flows", () => {
+    // As in the official Qwen-Image template: the prompt text goes through a switch into a preview of any type.
+    const graph = workflow();
+    graph["sw"] = { class_type: "ComfySwitchNode", inputs: { switch: false, on_false: "a fox" } };
+    graph["p"] = { class_type: "PreviewAny", inputs: { source: ["sw", 0] } };
+    expect(() => applyOperations(graph, [{ op: "insert", class_type: "VAEDecode" }], catalog)).toThrow(/VAEDecode fits in front of no output of this workflow, which has VAEDecode 459:8 already: before must name/);
+    expect(() => applyOperations(graph, [{ op: "insert", class_type: "ImageScale", before: "p" }], catalog))
+      .toThrow("ImageScale fits no link into p (PreviewAny). Its links: source. It fits before 9.images");
+    const { graph: next } = applyOperations(graph, [{ op: "insert", class_type: "ImageScale", node: "up" }], catalog);
+    expect(next["p"]!.inputs["source"]).toEqual(["sw", 0]);
+    expect(next["9"]!.inputs["images"]).toEqual(["up", 0]);
+  });
+
   it("asks which output when two fit", () => {
     const graph = workflow();
     graph["10"] = { class_type: "SaveImageAdvanced", inputs: { images: ["459:8", 0], filename_prefix: "small" } };
