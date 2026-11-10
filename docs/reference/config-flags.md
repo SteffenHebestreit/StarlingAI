@@ -59,7 +59,7 @@ Every public schema field, where it is declared, and how many production files r
 | `balancedDefaults` | packages/core/src/config/schemas/multimodal.ts:113 | 1 |
 | `balancedModel` | packages/core/src/config/schemas/multimodal.ts:109 | 1 |
 | `balancedTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:111 | 1 |
-| `baseUrl` | packages/core/src/config/schema.ts:69 | 61 |
+| `baseUrl` | packages/core/src/config/schema.ts:69 | 60 |
 | `bearerToken` | packages/core/src/config/schema.ts:716 | 4 |
 | `bestOfTwoDeliverables` | packages/core/src/config/schemas/orchestration.ts:688 | 1 |
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
@@ -147,7 +147,7 @@ Every public schema field, where it is declared, and how many production files r
 | `description` | packages/core/src/config/schema.ts:644 | 199 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:461 | 2 |
 | `deviceGroups` | packages/core/src/config/schemas/multimodal.ts:130 | 1 |
-| `digest` | packages/core/src/config/schema.ts:2150 | 69 |
+| `digest` | packages/core/src/config/schema.ts:2150 | 70 |
 | `dir` | packages/core/src/config/schema.ts:2139 | 73 |
 | `disabled` | packages/core/src/config/schema.ts:888 | 117 |
 | `disabledGroups` | packages/core/src/config/schema.ts:2168 | 3 |
@@ -187,7 +187,7 @@ Every public schema field, where it is declared, and how many production files r
 | `exposeAgents` | packages/core/src/config/schema.ts:666 | 7 |
 | `exposeScenes` | packages/core/src/config/schema.ts:827 | 1 |
 | `exposeTools` | packages/core/src/config/schema.ts:823 | 1 |
-| `expression` | packages/core/src/config/schema.ts:1423 | 22 |
+| `expression` | packages/core/src/config/schema.ts:1423 | 23 |
 | `extensions` | packages/core/src/config/schema.ts:2178 | 21 |
 | `failedResearchHonestyBackstop` | packages/core/src/config/schemas/orchestration.ts:154 | 1 |
 | `fallback` | packages/core/src/config/schema.ts:118 | 119 |
@@ -216,7 +216,7 @@ Every public schema field, where it is declared, and how many production files r
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1388 | 20 |
 | `id` | packages/core/src/config/schema.ts:417 | 364 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1435 | 2 |
-| `image` | packages/core/src/config/schema.ts:759 | 114 |
+| `image` | packages/core/src/config/schema.ts:759 | 115 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
 | `imapPassword` | packages/core/src/config/schemas/channels.ts:60 | 7 |
 | `imapPort` | packages/core/src/config/schemas/channels.ts:58 | 4 |
@@ -318,7 +318,7 @@ Every public schema field, where it is declared, and how many production files r
 | `modelModeration` | packages/core/src/config/schema.ts:1309 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1876 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1891 | 5 |
-| `models` | packages/core/src/config/schema.ts:597 | 72 |
+| `models` | packages/core/src/config/schema.ts:597 | 71 |
 | `moderateInputs` | packages/core/src/config/schema.ts:1315 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1316 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:600 | 2 |
@@ -349,8 +349,8 @@ Every public schema field, where it is declared, and how many production files r
 | `passwordHash` | packages/core/src/config/schema.ts:406 | 5 |
 | `passwordSelector` | packages/core/src/config/schema.ts:867 | 5 |
 | `path` | packages/core/src/config/schemas/decisions.ts:130 | 347 |
-| `pattern` | packages/core/src/config/schema.ts:1433 | 67 |
-| `patterns` | packages/core/src/config/schema.ts:1370 | 27 |
+| `pattern` | packages/core/src/config/schema.ts:1433 | 68 |
+| `patterns` | packages/core/src/config/schema.ts:1370 | 28 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 32 |
 | `peers` | packages/core/src/config/schema.ts:664 | 16 |
 | `performance` | packages/core/src/config/schema.ts:1926 | 50 |
@@ -551,7 +551,7 @@ Every public schema field, where it is declared, and how many production files r
 | `usernameClaim` | packages/core/src/config/schema.ts:471 | 1 |
 | `usernameSelector` | packages/core/src/config/schema.ts:866 | 5 |
 | `userProfilePrefetch` | packages/core/src/config/schemas/orchestration.ts:662 | 4 |
-| `users` | packages/core/src/config/schema.ts:512 | 61 |
+| `users` | packages/core/src/config/schema.ts:512 | 62 |
 | `verifyArtifacts` | packages/core/src/config/schemas/orchestration.ts:399 | 2 |
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:407 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:404 | 1 |

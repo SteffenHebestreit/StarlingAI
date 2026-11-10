@@ -29,6 +29,9 @@ export class ComfyUiRejectedError extends ComfyUiError {
   }
 }
 
+/** No answer in time: says the server is busy, nothing about the job it is running. */
+class ComfyUiSlowAnswerError extends ComfyUiError {}
+
 export interface ComfyUiEndpoint {
   baseUrl: string;
   editorUrl: string;
@@ -58,7 +61,7 @@ async function request(endpoint: ComfyUiEndpoint, path: string, init: RequestIni
   try {
     return await fetch(target, { ...init, signal: controller.signal, dispatcher: comfyDispatcher } as RequestInit);
   } catch (error) {
-    if (controller.signal.aborted) throw new ComfyUiError(`ComfyUI did not answer ${path} within ${Math.round(timeoutMs / 1000)} s`);
+    if (controller.signal.aborted) throw new ComfyUiSlowAnswerError(`ComfyUI did not answer ${path} within ${Math.round(timeoutMs / 1000)} s`);
     const code = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
     const unreachable = typeof code === "string" && UNREACHABLE_CODES.has(code);
     throw new ComfyUiError(
@@ -393,13 +396,27 @@ function executionError(entry: Record<string, unknown>): string | null {
  * proxies). On our timeout the run is taken out of ComfyUI's queue, or interrupted if it is
  * the one running, so a dead request does not hold the GPU.
  */
-export async function waitForRun(endpoint: ComfyUiEndpoint, promptId: string, timeoutMs = endpoint.runTimeoutMs, pollMs = 1000): Promise<RunOutcome> {
+/** Polls in a row ComfyUI may leave unanswered before the run counts as lost (two minutes at 15 s each). */
+const MAX_UNANSWERED_POLLS = 8;
+
+export async function waitForRun(endpoint: ComfyUiEndpoint, promptId: string, timeoutMs = endpoint.runTimeoutMs, pollMs = 1000, pollTimeoutMs = 15_000): Promise<RunOutcome> {
   const deadline = Date.now() + timeoutMs;
+  let unanswered = 0;
   while (Date.now() < deadline) {
-    const history = await json<Record<string, unknown>>(
-      await request(endpoint, `/history/${encodeURIComponent(promptId)}`, {}, 15_000),
-      "Reading the run from ComfyUI failed",
-    );
+    let history: Record<string, unknown>;
+    try {
+      history = await json<Record<string, unknown>>(
+        await request(endpoint, `/history/${encodeURIComponent(promptId)}`, {}, pollTimeoutMs),
+        "Reading the run from ComfyUI failed",
+      );
+    } catch (error) {
+      // A heavy job starves ComfyUI's HTTP side: the lab's image_creator was told a run had failed
+      // because one poll took over 15 s, while its 4096x4096 picture was being written.
+      unanswered += 1;
+      if (!(error instanceof ComfyUiSlowAnswerError) || unanswered >= MAX_UNANSWERED_POLLS) throw error;
+      continue;
+    }
+    unanswered = 0;
     const entry = history[promptId] as Record<string, unknown> | undefined;
     if (entry) {
       const error = executionError(entry);

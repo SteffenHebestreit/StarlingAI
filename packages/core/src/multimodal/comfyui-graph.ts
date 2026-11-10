@@ -8,7 +8,7 @@
  * ComfyUI page saves: `{ nodes: [...], links: [...] }`, with positions and widget values in
  * display order. The workspace keeps the API format; the editor format is made on export.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export type InputSpec = [unknown, Record<string, unknown>?];
 
@@ -32,7 +32,11 @@ export type Link = [string, number];
 export interface ApiNode {
   class_type: string;
   inputs: Record<string, unknown>;
-  _meta?: { title?: string };
+  /**
+   * `added`: put there by an operation, not by whoever made the workflow (see danglingNodes).
+   * `sample`: per input, the mark of the prompt text a template arrived with (see markSamplePrompts).
+   */
+  _meta?: { title?: string; added?: boolean; sample?: Record<string, string> };
 }
 
 export type ApiGraph = Record<string, ApiNode>;
@@ -175,21 +179,50 @@ export function describeNodeDef(className: string, def: NodeDef): string {
   return lines.join("\n");
 }
 
-/** Node types whose name, title, category or description contain every word asked for. */
+/** A node type in one line: what it needs and what it gives, enough to wire it without looking it up. */
+function nodeSignature(def: NodeDef): string {
+  const inputs = nodeInputs(def);
+  const needed = inputs.filter((input) => input.required && !input.grown).map((input) => {
+    if (!input.options) return `${input.name}: ${input.type}`;
+    return `${input.name}: ${input.options.length > 0 && input.options.length <= 4 ? input.options.join(" | ") : `${input.options.length} choices`}`;
+  });
+  const optional = inputs.filter((input) => !input.required).length;
+  const outputs = nodeOutputs(def).map((output) => output.type).join(", ") || "nothing";
+  return `(${[...needed, ...(optional ? [`+${optional} optional`] : [])].join(", ")}) -> ${outputs}`;
+}
+
+/** How many search hits carry their signature: the best ones, without a page of every near match. */
+const SIGNATURES_SHOWN = 12;
+
+/**
+ * Node types matching a search, best first. Every word has to match if any type has them all;
+ * otherwise the types matching the most words. A name written the way node types are
+ * ("UpscaleImage") counts as its words: the lab's image_creator guessed that name and got
+ * "no match" although ComfyUI has an "Upscale Image" node.
+ */
 export function searchNodes(catalog: NodeCatalog, query: string, limit = 30): string[] {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const hits: Array<{ name: string; score: number; line: string }> = [];
-  for (const [name, def] of Object.entries(catalog)) {
-    const haystack = `${name} ${def.display_name ?? ""} ${def.category ?? ""} ${def.description ?? ""}`.toLowerCase();
-    if (!words.every((w) => haystack.includes(w))) continue;
-    const exactName = words.every((w) => name.toLowerCase().includes(w) || (def.display_name ?? "").toLowerCase().includes(w));
-    hits.push({
-      name,
-      score: (exactName ? 0 : 1) + (def.deprecated ? 2 : 0),
-      line: `${name}${def.display_name && def.display_name !== name ? ` ("${def.display_name}")` : ""} — ${def.category ?? "?"}`,
+  const words = [...new Set(query.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[\s_-]+/).filter(Boolean))];
+  const scan = (fits: (matched: number) => boolean, rank: (matched: number) => number): Array<{ name: string; score: number; def: NodeDef }> => {
+    const hits: Array<{ name: string; score: number; def: NodeDef }> = [];
+    for (const [name, def] of Object.entries(catalog)) {
+      const title = `${name} ${def.display_name ?? ""}`.toLowerCase();
+      const haystack = `${title} ${def.category ?? ""} ${def.description ?? ""}`.toLowerCase();
+      const matched = words.filter((word) => haystack.includes(word)).length;
+      if (!fits(matched)) continue;
+      const inTitle = words.every((word) => title.includes(word));
+      hits.push({ name, def, score: rank(matched) + (inTitle ? 0 : 1) + (def.deprecated ? 2 : 0) });
+    }
+    return hits;
+  };
+  let hits = scan((matched) => matched === words.length, () => 0);
+  if (hits.length === 0 && words.length > 1) hits = scan((matched) => matched > 0, (matched) => words.length - matched);
+  return hits
+    .sort((a, b) => a.score - b.score || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map(({ name, def }, index) => {
+      const line = `${name}${def.display_name && def.display_name !== name ? ` ("${def.display_name}")` : ""} — ${def.category ?? "?"}`;
+      return index < SIGNATURES_SHOWN ? `${line} ${nodeSignature(def)}` : line;
     });
-  }
-  return hits.sort((a, b) => a.score - b.score || a.name.localeCompare(b.name)).slice(0, limit).map((h) => h.line);
 }
 
 /** The graph in one line per node, links written as `<-id.output`. */
@@ -273,7 +306,7 @@ export function checkGraph(graph: ApiGraph, catalog: NodeCatalog): GraphProblems
     const byName = new Map(inputs.map((input) => [input.name, input]));
     for (const input of inputs) {
       if (input.required && !(input.name in (node.inputs ?? {}))) {
-        errors.push(`node ${id} (${node.class_type}): required input "${input.name}" is missing`);
+        errors.push(`node ${id} (${node.class_type}): required input "${input.name}" is missing${input.widget ? "" : supplierHint(input.type, id, graph, catalog)}`);
       }
     }
     for (const [name, value] of Object.entries(node.inputs ?? {})) {
@@ -314,6 +347,43 @@ export function checkGraph(graph: ApiGraph, catalog: NodeCatalog): GraphProblems
     errors.push("the workflow has no output node (e.g. SaveImage), so ComfyUI would run nothing");
   }
   return { errors, warnings };
+}
+
+/**
+ * What can fill an empty socket of this type: a node already in the workflow that gives it, else
+ * the few loaders that do. Nothing for a type many nodes give (IMAGE), where a list would not help.
+ */
+function supplierHint(type: string, forNode: string, graph: ApiGraph, catalog: NodeCatalog): string {
+  if (type === "*") return "";
+  const inGraph: string[] = [];
+  for (const id of orderedIds(graph)) {
+    if (id === forNode) continue;
+    const def = catalog[graph[id]!.class_type];
+    const index = def ? nodeOutputs(def).findIndex((output) => output.type === type) : -1;
+    if (index >= 0) inGraph.push(`["${id}", ${index}]`);
+  }
+  if (inGraph.length) return ` (${type}; in this workflow ${inGraph.slice(0, 3).join(" or ")} gives one)`;
+  const loaders = Object.entries(catalog)
+    .filter(([, def]) => nodeOutputs(def).some((output) => output.type === type) && !nodeInputs(def).some((input) => input.required && !input.widget))
+    .map(([name]) => name);
+  return loaders.length >= 1 && loaders.length <= 3 ? ` (${type}; ${loaders.join(" or ")} gives one)` : ` (${type})`;
+}
+
+/**
+ * Added nodes whose output nothing takes and that save nothing themselves: ComfyUI never runs
+ * them. Such a node looks finished in the file; the lab's image_creator added an upscaler nothing
+ * read from, was told the workflow checked out, and would have got the old size. Only added
+ * ones: 22 of ComfyUI's 265 official templates carry an unused node of their own.
+ */
+export function danglingNodes(graph: ApiGraph, catalog: NodeCatalog): string[] {
+  const read = new Set<string>();
+  for (const node of Object.values(graph)) {
+    for (const value of Object.values(node.inputs ?? {})) if (isLink(value)) read.add(value[0]);
+  }
+  return orderedIds(graph).filter((id) => {
+    const def = catalog[graph[id]!.class_type];
+    return !!def && graph[id]!._meta?.added === true && !def.output_node && !read.has(id) && nodeOutputs(def).length > 0;
+  });
 }
 
 const choiceIndexes = new WeakMap<NodeCatalog, Map<string, string[]>>();
@@ -381,6 +451,7 @@ function checkValue(id: string, classType: string, input: InputInfo, value: unkn
 
 export type GraphOperation =
   | { op: "add"; node?: string; class_type: string; inputs?: Record<string, unknown>; title?: string }
+  | { op: "insert"; before?: string; node?: string; class_type: string; inputs?: Record<string, unknown>; title?: string }
   | { op: "set"; node: string; inputs: Record<string, unknown> }
   | { op: "remove"; node: string }
   | { op: "title"; node: string; title: string };
@@ -411,23 +482,157 @@ function defaultsFor(def: NodeDef): Record<string, unknown> {
  */
 export function resolveNodeRef(graph: ApiGraph, ref: string, where: string): string {
   if (graph[ref]) return ref;
-  const lower = ref.toLowerCase();
-  const matches = Object.entries(graph).filter(([, node]) => node.class_type.toLowerCase() === lower || (node._meta?.title ?? "").toLowerCase() === lower);
-  if (matches.length === 1) return matches[0]![0];
-  if (matches.length > 1) {
-    throw new GraphOperationError(`${where}: "${ref}" fits ${matches.length} nodes (${matches.map(([id]) => id).join(", ")}); use the id`);
-  }
+  const matches = nodesNamed(graph, ref);
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) throw new GraphOperationError(`${where}: "${ref}" fits ${matches.length} nodes (${matches.join(", ")}); use the id`);
   throw new GraphOperationError(`${where}: there is no node ${ref}`);
 }
 
-function resolveLinks(graph: ApiGraph, inputs: Record<string, unknown>, where: string): Record<string, unknown> {
+/**
+ * Nodes with this type or title, else (a word of four letters or more) with it inside their type
+ * or title: a model writes "SaveImage", and the official Qwen-Image template saves with
+ * SaveImageAdvanced. A wrong guess is no risk: more than one match is refused.
+ */
+function nodesNamed(graph: ApiGraph, ref: string): string[] {
+  const lower = ref.toLowerCase();
+  const entries = Object.entries(graph).map(([id, node]) => ({ id, type: node.class_type.toLowerCase(), title: (node._meta?.title ?? "").toLowerCase() }));
+  const exact = entries.filter((node) => node.type === lower || node.title === lower);
+  const found = exact.length || lower.length < 4 || /^\d+$/.test(lower) ? exact : entries.filter((node) => node.type.includes(lower) || node.title.includes(lower));
+  return found.map((node) => node.id);
+}
+
+/**
+ * "<node>" or "<node>.<input>", the node by id, type or title. Node ids may hold a colon (a
+ * flattened subgraph, "459:458") and inputs a dot (a V3 sub-input, "format.bit_depth"), so the
+ * split is after the longest node id the graph has, and failing that at the first dot that
+ * leaves a type or title.
+ */
+export function resolveInputRef(graph: ApiGraph, ref: string, where: string): { id: string; input?: string } {
+  if (graph[ref]) return { id: ref };
+  const owner = Object.keys(graph).sort((a, b) => b.length - a.length).find((id) => ref.startsWith(`${id}.`) && ref.length > id.length + 1);
+  if (owner) return { id: owner, input: ref.slice(owner.length + 1) };
+  for (let dot = ref.indexOf("."); dot > 0; dot = ref.indexOf(".", dot + 1)) {
+    const prefix = ref.slice(0, dot);
+    if (nodesNamed(graph, prefix).length > 0) return { id: resolveNodeRef(graph, prefix, where), input: ref.slice(dot + 1) };
+  }
+  return { id: resolveNodeRef(graph, ref, where) };
+}
+
+/**
+ * A link as a model writes it after reading this tool's own node listing, which prints links as
+ * `<-459:457.0`: ["459:457.0"] anywhere, and "459:457.0" on an input that takes a link. On a text
+ * input the same string stays text. A set with such a value used to replace the save node's
+ * connection with junk, and every later insert found nothing to sit on.
+ */
+function asLink(value: unknown, isSocket: boolean): unknown {
+  const written = Array.isArray(value) && value.length === 1 && typeof value[0] === "string" ? value[0] : isSocket && typeof value === "string" ? value : undefined;
+  if (written === undefined) return value;
+  const match = /^(?:<-)?(.+)\.(\d+)$/.exec(written.trim());
+  return match ? [match[1]!, Number(match[2])] : value;
+}
+
+function resolveLinks(graph: ApiGraph, inputs: Record<string, unknown>, where: string, def?: NodeDef): Record<string, unknown> {
+  const sockets = new Set(def ? nodeInputs(def).filter((input) => !input.widget && !input.socketless).map((input) => input.name) : []);
   const out: Record<string, unknown> = {};
-  for (const [name, value] of Object.entries(inputs)) {
+  for (const [name, raw] of Object.entries(inputs)) {
+    const value = asLink(raw, sockets.has(name));
     out[name] = Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && Number.isInteger(value[1])
       ? [resolveNodeRef(graph, value[0], `${where}, input ${name}`), value[1]]
       : value;
   }
   return out;
+}
+
+function addNode(graph: ApiGraph, operation: { node?: string; class_type: string; inputs?: Record<string, unknown>; title?: string }, def: NodeDef, where: string): string {
+  const id = operation.node ? String(operation.node) : nextId(graph);
+  if (graph[id]) throw new GraphOperationError(`${where}: node ${id} already exists`);
+  const filled = defaultsFor(def);
+  const given = resolveLinks(graph, operation.inputs ?? {}, where, def);
+  const defaulted = Object.keys(filled).filter((name) => !(name in given));
+  graph[id] = { class_type: operation.class_type, inputs: { ...filled, ...given }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+  return `added ${id} ${operation.class_type}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`;
+}
+
+/**
+ * Why a value just written to `name` goes nowhere, null when the node takes it. ComfyUI ignores an
+ * input a node type does not have, so such a set changes nothing and nothing says so: the lab's
+ * image_creator wrote the prompt to `text` on a node whose input is `prompt`, was told the set
+ * was done, and got the template's sample picture. Checked against the node as it is after the
+ * change, so a choice and the sub-inputs it brings can be set together.
+ */
+export function unknownInput(id: string, node: ApiNode, def: NodeDef | undefined, name: string): string | null {
+  if (!def || !(name in node.inputs)) return null;
+  const inputs = nodeInputs(def, node.inputs);
+  if (inputs.some((input) => input.name === name || (input.openPrefix !== undefined && name.startsWith(input.openPrefix)))) return null;
+  const listed = inputs.filter((input) => !input.grown).map((input) => (input.widget ? input.name : `${input.name} (link)`));
+  return `${id} (${node.class_type}) has no input "${name}". Its inputs: ${listed.slice(0, 16).join(", ")}${listed.length > 16 ? ", …" : ""}`;
+}
+
+interface Splice {
+  input: string;
+  link: Link;
+  /** The new node's socket that takes the old connection; none when `inputs` already wires it. */
+  receive?: string;
+  output: number;
+  /** What the link carries is known and the new node's socket takes exactly that. */
+  typed: boolean;
+}
+
+/**
+ * The links into `target` a new node of type `def` can sit on: it has to take what the link
+ * carries and give what the input wants. Exact types win over a socket that takes anything.
+ */
+function spliceCandidates(graph: ApiGraph, target: ApiNode, def: NodeDef, given: Record<string, unknown>, catalog: NodeCatalog, only: string | undefined): Splice[] {
+  const targetDef = catalog[target.class_type];
+  const declared = targetDef ? nodeInputs(targetDef, target.inputs) : [];
+  const sockets = nodeInputs(def).filter((input) => !input.widget && !input.socketless && !input.grown);
+  const free = sockets.filter((socket) => !(socket.name in given));
+  const outputs = nodeOutputs(def).map((output, index) => ({ ...output, index }));
+  const found: Splice[] = [];
+  for (const [name, value] of Object.entries(target.inputs)) {
+    if (!isLink(value) || (only !== undefined && name !== only)) continue;
+    const wanted = declared.find((input) => input.name === name)?.type ?? "*";
+    const sourceDef = catalog[graph[value[0]]?.class_type ?? ""];
+    const carried = sourceDef ? nodeOutputs(sourceDef)[value[1]]?.type ?? wanted : wanted;
+    // An output of any type (a V3 switch's) says nothing: what the input wants is what it carries.
+    const type = carried === "*" ? wanted : carried;
+    const receive = free.find((socket) => socket.type === type) ?? free.find((socket) => typesFit(type, socket.type));
+    // Nothing free for it, but the caller wired that socket itself ({image: ["VAEDecode", 0]}): the
+    // new node is fed already and only the output has to be moved. The lab's image_creator wrote
+    // it this way in most insert calls and was told the node fitted nowhere.
+    const wired = receive ? undefined : sockets.find((socket) => isLink(given[socket.name]) && typesFit(type, socket.type));
+    const output = outputs.find((candidate) => candidate.type === wanted) ?? outputs.find((candidate) => typesFit(candidate.type, wanted));
+    const taking = receive ?? wired;
+    if (taking && output) found.push({ input: name, link: value, ...(receive ? { receive: receive.name } : {}), output: output.index, typed: type !== "*" && taking.type === type });
+  }
+  return found.some((splice) => splice.typed) ? found.filter((splice) => splice.typed) : found;
+}
+
+/**
+ * The output node a stage goes in front of when the operation names none. The lab's
+ * image_creator left `before` out in most insert calls and fell back to editing the JSON by hand;
+ * "in front of the output" is what it meant, and only a single fitting output settles it.
+ */
+function outputNodeFor(graph: ApiGraph, classType: string, def: NodeDef, given: Record<string, unknown>, catalog: NodeCatalog, where: string): string {
+  const fitting = Object.keys(graph)
+    .filter((id) => catalog[graph[id]!.class_type]?.output_node)
+    .map((id) => ({ id, splices: spliceCandidates(graph, graph[id]!, def, given, catalog, undefined) }))
+    .filter((candidate) => candidate.splices.length > 0);
+  const typed = fitting.filter((candidate) => candidate.splices.some((splice) => splice.typed));
+  const chosen = typed.length ? typed : fitting;
+  if (chosen.length === 1) return chosen[0]!.id;
+  throw new GraphOperationError(
+    chosen.length > 1
+      ? `${where}: ${classType} could go before several outputs (${chosen.map((candidate) => `${candidate.id} ${graph[candidate.id]!.class_type}`).join(", ")}): name one in before`
+      : `${where}: ${classType} fits in front of no output of this workflow: before must name the node that should receive its output, or "<node>.<input>"`,
+  );
+}
+
+function requireNodeType(catalog: NodeCatalog, classType: unknown, where: string): NodeDef {
+  const def = catalog[String(classType)];
+  if (def) return def;
+  const near = closest(Object.keys(catalog), String(classType), 3);
+  throw new GraphOperationError(`${where}: this ComfyUI has no node type "${String(classType)}"${near.length ? ` (closest: ${near.join(", ")})` : ""}`);
 }
 
 /**
@@ -442,29 +647,55 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
     const where = `operation ${index + 1} (${operation?.op ?? "?"})`;
     if (!operation || typeof operation !== "object") throw new GraphOperationError(`${where}: not an object`);
     switch (operation.op) {
-      case "add": {
-        const def = catalog[operation.class_type];
-        if (!def) {
-          const near = closest(Object.keys(catalog), String(operation.class_type), 3);
-          throw new GraphOperationError(`${where}: this ComfyUI has no node type "${operation.class_type}"${near.length ? ` (closest: ${near.join(", ")})` : ""}`);
+      case "insert": {
+        const def = requireNodeType(catalog, operation.class_type, where);
+        // A loader takes no connection, so there is nothing to put it on: it is an add.
+        if (!nodeInputs(def).some((input) => !input.widget && !input.socketless)) {
+          notes.push(addNode(next, operation, def, where));
+          break;
         }
         const id = operation.node ? String(operation.node) : nextId(next);
         if (next[id]) throw new GraphOperationError(`${where}: node ${id} already exists`);
+        const given = resolveLinks(next, operation.inputs ?? {}, where, def);
+        const target = operation.before ? resolveInputRef(next, String(operation.before), where) : { id: outputNodeFor(next, operation.class_type, def, given, catalog, where), input: undefined };
+        const node = next[target.id]!;
+        const candidates = spliceCandidates(next, node, def, given, catalog, target.input);
+        if (candidates.length > 1) {
+          throw new GraphOperationError(`${where}: ${operation.class_type} fits several inputs of ${target.id} (${node.class_type}): ${candidates.map((c) => c.input).join(", ")}. Write before as "${target.id}.<input>"`);
+        }
+        const splice = candidates[0];
+        if (!splice) {
+          const linked = Object.entries(node.inputs).filter(([, value]) => isLink(value)).map(([name]) => name).join(", ") || "none";
+          throw new GraphOperationError(`${where}: ${operation.class_type} fits no link into ${target.input ? `${target.id}.${target.input}` : target.id} (${node.class_type}). Its links: ${linked}`);
+        }
         const filled = defaultsFor(def);
-        const given = resolveLinks(next, operation.inputs ?? {}, where);
         const defaulted = Object.keys(filled).filter((name) => !(name in given));
-        next[id] = { class_type: operation.class_type, inputs: { ...filled, ...given }, ...(operation.title ? { _meta: { title: operation.title } } : {}) };
-        notes.push(`added ${id} ${operation.class_type}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`);
+        next[id] = { class_type: operation.class_type, inputs: { ...filled, ...given, ...(splice.receive ? { [splice.receive]: splice.link } : {}) }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+        node.inputs[splice.input] = [id, splice.output];
+        notes.push(`inserted ${id} ${operation.class_type} before ${target.id}.${splice.input}${splice.receive ? ` (${splice.receive}<-${splice.link[0]}.${splice.link[1]})` : ""}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`);
+        break;
+      }
+      case "add": {
+        notes.push(addNode(next, operation, requireNodeType(catalog, operation.class_type, where), where));
         break;
       }
       case "set": {
-        const id = resolveNodeRef(next, String(operation.node), where);
+        // "459:474.on_false" is how this tool names an input ("Where to change it"), so a model
+        // writes it here too; with one value given, the input named there is the one it means.
+        const { id, input } = resolveInputRef(next, String(operation.node), where);
         const node = next[id]!;
-        for (const [name, value] of Object.entries(resolveLinks(next, operation.inputs ?? {}, where))) {
+        const given = Object.entries(operation.inputs ?? {});
+        const values = input && given.length === 1 ? { [input]: given[0]![1] } : (operation.inputs ?? {});
+        const had = new Set(Object.keys(node.inputs));
+        for (const [name, value] of Object.entries(resolveLinks(next, values, where, catalog[node.class_type]))) {
           if (value === null) delete node.inputs[name];
           else node.inputs[name] = value;
         }
-        notes.push(`set ${id}: ${Object.keys(operation.inputs ?? {}).join(", ")}`);
+        for (const name of Object.keys(values)) {
+          const problem = had.has(name) ? null : unknownInput(id, node, catalog[node.class_type], name);
+          if (problem) throw new GraphOperationError(`${where}: ${problem}`);
+        }
+        notes.push(`set ${id}: ${Object.keys(values).join(", ")}`);
         break;
       }
       case "remove": {
@@ -489,7 +720,7 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
         break;
       }
       default:
-        throw new GraphOperationError(`${where}: unknown op; use add, set, remove or title`);
+        throw new GraphOperationError(`${where}: unknown op; use add, insert, set, remove or title`);
     }
   });
   return { graph: next, notes };
@@ -858,13 +1089,77 @@ const MODEL_FILE = /\.(safetensors|gguf|ckpt|pt|pth|bin|sft)$/i;
  * image_creator edited the JSON by hand to find it.
  */
 export function keyInputs(graph: ApiGraph, catalog: NodeCatalog): string {
-  const running = new Set(Object.keys(runnableGraph(graph, catalog).graph));
   const groups = new Map<string, string[]>();
-  const add = (group: string, address: string): void => {
+  // Texts that become conditioning first: a template with a row of expressions and patterns
+  // would otherwise fill the few places shown before its prompt comes.
+  const entries = classifiedInputs(graph, catalog);
+  for (const { group, id, input } of [...entries.filter((entry) => entry.conditioning), ...entries.filter((entry) => !entry.conditioning)]) {
     const list = groups.get(group) ?? [];
-    if (list.length < 4) list.push(address);
+    if (list.length < 4) list.push(`${id}.${input}`);
     groups.set(group, list);
+  }
+  const order = ["prompt", "negative prompt", "seed", "settings", "model files", "pictures (comfyui_run images)"];
+  return order.filter((g) => groups.has(g)).map((g) => `${g}: ${groups.get(g)!.join(", ")}`).join("; ");
+}
+
+/**
+ * Where the text a node holds or passes on ends up: in conditioning at all, and if so on which
+ * side. Followed along text links only, to the first node that gives CONDITIONING (a text
+ * encoder). Of ComfyUI's 265 official templates 125 hold a math expression in a multiline text
+ * box, others a regular expression or shader code: none of that is a prompt. And the classic
+ * templates' negative prompt sits in the same `text` input as the positive one; what tells them
+ * apart is the input its conditioning goes to.
+ */
+function conditioningSides(graph: ApiGraph, catalog: NodeCatalog): (id: string) => "prompt" | "negative" | null {
+  const consumers = new Map<string, Array<{ id: string; input: string; output: number }>>();
+  for (const [id, node] of Object.entries(graph)) {
+    for (const [input, value] of Object.entries(node.inputs ?? {})) {
+      if (!isLink(value)) continue;
+      const list = consumers.get(value[0]) ?? [];
+      list.push({ id, input, output: value[1] });
+      consumers.set(value[0], list);
+    }
+  }
+  const outputs = (id: string): Array<{ name: string; type: string }> => {
+    const def = catalog[graph[id]?.class_type ?? ""];
+    return def ? nodeOutputs(def) : [];
   };
+  const taken = (id: string, types: readonly string[]): Array<{ id: string; input: string }> =>
+    (consumers.get(id) ?? []).filter((consumer) => types.includes(outputs(id)[consumer.output]?.type ?? ""));
+  return (start) => {
+    const encoders: string[] = [];
+    const seen = new Set<string>();
+    const stack = [start];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (outputs(id).some((output) => output.type === "CONDITIONING")) encoders.push(id);
+      else for (const consumer of taken(id, ["STRING", "*"])) stack.push(consumer.id);
+    }
+    if (encoders.length === 0) return null;
+    const negative = encoders.every((id) => {
+      const users = taken(id, ["CONDITIONING"]);
+      return users.length > 0 && users.every((user) => /neg/i.test(user.input));
+    });
+    return negative ? "negative" : "prompt";
+  };
+}
+
+interface ClassifiedInput {
+  group: string;
+  id: string;
+  input: string;
+  value: unknown;
+  /** A text that becomes conditioning: what the picture is made from, not a pattern or an expression. */
+  conditioning: boolean;
+}
+
+/** The plain-valued inputs of the nodes that run (and of the switches' chosen branches), by what they are for. */
+function classifiedInputs(graph: ApiGraph, catalog: NodeCatalog): ClassifiedInput[] {
+  const running = new Set(Object.keys(runnableGraph(graph, catalog).graph));
+  const sideOf = conditioningSides(graph, catalog);
+  const found: ClassifiedInput[] = [];
   for (const id of orderedIds(graph)) {
     const node = graph[id]!;
     const def = catalog[node.class_type];
@@ -874,20 +1169,59 @@ export function keyInputs(graph: ApiGraph, catalog: NodeCatalog): string {
     for (const input of nodeInputs(def, node.inputs)) {
       const value = node.inputs[input.name];
       if (value === undefined || isLink(value)) continue;
-      const address = `${id}.${input.name}`;
+      const add = (group: string): number => found.push({ group, id, input: input.name, value, conditioning: false });
+      const addText = (): void => {
+        const side = sideOf(id);
+        found.push({ group: /neg/i.test(input.name) || side === "negative" ? "negative prompt" : "prompt", id, input: input.name, value, conditioning: side !== null });
+      };
       if (isSwitch) {
-        if (input.name === (node.inputs["switch"] ? "on_true" : "on_false") && typeof value === "string") add("prompt", address);
+        if (input.name === (node.inputs["switch"] ? "on_true" : "on_false") && typeof value === "string") addText();
         continue;
       }
-      if (input.config["control_after_generate"]) add("seed", address);
-      else if (input.config["image_upload"]) add("pictures (comfyui_run images)", address);
-      else if (typeof value === "string" && MODEL_FILE.test(value)) add("model files", address);
-      else if (input.type === "STRING" && input.config["multiline"]) add(/neg/i.test(input.name) ? "negative prompt" : "prompt", address);
-      else if (SETTING_NAMES.has(input.name)) add("settings", address);
+      if (input.config["control_after_generate"]) add("seed");
+      else if (input.config["image_upload"]) add("pictures (comfyui_run images)");
+      else if (typeof value === "string" && MODEL_FILE.test(value)) add("model files");
+      else if (input.type === "STRING" && input.config["multiline"]) addText();
+      else if (SETTING_NAMES.has(input.name)) add("settings");
     }
   }
-  const order = ["prompt", "negative prompt", "seed", "settings", "model files", "pictures (comfyui_run images)"];
-  return order.filter((g) => groups.has(g)).map((g) => `${g}: ${groups.get(g)!.join(", ")}`).join("; ");
+  return found;
+}
+
+function textMark(value: string): string {
+  return createHash("sha1").update(value).digest("hex").slice(0, 12);
+}
+
+/**
+ * Marks the prompt texts a template arrives with. A template renders its authors' example until
+ * its prompt is changed, and ComfyUI reports that run as a success like any other: the lab's
+ * image_creator asked for a cat on a sofa, never reached the prompt, and handed over the official
+ * template's fashion portrait as the result. The mark is a hash on the node, so it holds however
+ * the text is changed later: by an operation, for one run, or by editing the file.
+ */
+export function markSamplePrompts(graph: ApiGraph, catalog: NodeCatalog): void {
+  for (const { group, id, input, value, conditioning } of classifiedInputs(graph, catalog)) {
+    if (group !== "prompt" || !conditioning || typeof value !== "string" || !value.trim()) continue;
+    const node = graph[id]!;
+    node._meta = { ...(node._meta ?? {}), sample: { ...(node._meta?.sample ?? {}), [input]: textMark(value) } };
+  }
+}
+
+/**
+ * The prompt inputs still holding a template's sample text, when no prompt of the workflow says
+ * anything else. A prompt here is a text that becomes positive conditioning (conditioningSides).
+ * One such text that is not a sample means the prompt was dealt with: a template may keep a text
+ * of its own beside it (a system prompt, a style suffix), and a prompt written straight onto the
+ * text encoder leaves the template's switch holding a sample nothing reads any more.
+ */
+export function unchangedSamplePrompts(graph: ApiGraph, catalog: NodeCatalog): Array<{ address: string; text: string }> {
+  const samples: Array<{ address: string; text: string }> = [];
+  for (const { group, id, input, value, conditioning } of classifiedInputs(graph, catalog)) {
+    if (group !== "prompt" || !conditioning || typeof value !== "string" || !value.trim()) continue;
+    if (graph[id]!._meta?.sample?.[input] !== textMark(value)) return [];
+    samples.push({ address: `${id}.${input}`, text: value });
+  }
+  return samples;
 }
 
 /** Every seed-like input that the editor would re-roll on each run (control_after_generate). */

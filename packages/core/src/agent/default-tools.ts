@@ -74,21 +74,7 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // "Schalte auf Claude um": a platform action of the conversation itself, which no specialist can
   // do. Tier 3 with approval on every call, and admin only (tools/model-switch.ts).
   "switch_model",
-  // What the ComfyUI server has (models, templates, saved workflows): a lookup, answered here in
-  // one call. Without it the orchestrator read "welche Modelle hat ComfyUI installiert?" as a
-  // filesystem question and sent computer_use_agent into a terminal, twice in two lab runs.
-  // Offered only where ComfyUI is set up (SERVICE_GATED_MAIN_TOOLS).
-  "comfyui_catalog",
 ] as const;
-
-/** Always-available tools that exist only while the service behind them is configured. */
-const SERVICE_GATED_MAIN_TOOLS: Readonly<Record<string, () => boolean>> = {
-  comfyui_catalog: () => Boolean(getConfig().multimodal?.comfyui?.baseUrl?.trim()),
-};
-
-function serviceConfigured(name: string): boolean {
-  return SERVICE_GATED_MAIN_TOOLS[name]?.() ?? true;
-}
 
 export const DIRECT_MAIN_TOOL_NAMES = [
   "read_file",
@@ -179,7 +165,7 @@ function resolveToolMode(mode?: MainAssistantToolMode): MainAssistantToolMode {
 
 export function getAvailableDirectMainToolNames(mode?: MainAssistantToolMode): string[] {
   const available = getAvailableToolNames();
-  const alwaysAvailable = ALWAYS_AVAILABLE_MAIN_TOOL_NAMES.filter(name => available.has(name) && serviceConfigured(name));
+  const alwaysAvailable = ALWAYS_AVAILABLE_MAIN_TOOL_NAMES.filter(name => available.has(name));
   if (resolveToolMode(mode) !== "hybrid") return alwaysAvailable;
   // Lean catalog (B37): withhold the direct capability tools from iteration 0 and
   // let the model pull the one it needs with load_tool. Orchestration tools are
