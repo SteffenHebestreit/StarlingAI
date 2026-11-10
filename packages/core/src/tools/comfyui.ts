@@ -39,18 +39,22 @@ import {
   applyOperations,
   applySubgraphWidgetValues,
   checkGraph,
+  danglingNodes,
   describeGraph,
   describeNodeDef,
   graphDifferences,
   isApiGraph,
   isEditorWorkflow,
   keyInputs,
+  markSamplePrompts,
   readPngWorkflow,
-  resolveNodeRef,
+  resolveInputRef,
   runnableGraph,
   searchNodes,
   seedInputs,
   toEditorWorkflow,
+  unchangedSamplePrompts,
+  unknownInput,
   type ApiGraph,
   type GraphOperation,
   type NodeCatalog,
@@ -113,7 +117,9 @@ async function asApiGraph(endpoint: ComfyUiEndpoint, value: unknown, from: strin
 async function loadWorkflow(endpoint: ComfyUiEndpoint, source: string, ctx: ToolContext): Promise<LoadedWorkflow> {
   if (source.startsWith("template:")) {
     const name = source.slice("template:".length).trim();
-    return asApiGraph(endpoint, await readTemplate(endpoint, name), `template ${name}`);
+    const loaded = await asApiGraph(endpoint, await readTemplate(endpoint, name), `template ${name}`);
+    markSamplePrompts(loaded.graph, await getNodeCatalog(endpoint));
+    return loaded;
   }
   if (source.startsWith("editor:")) {
     const name = source.slice("editor:".length).trim().replace(/^workflows\//, "");
@@ -150,11 +156,12 @@ async function loadWorkflow(endpoint: ComfyUiEndpoint, source: string, ctx: Tool
 }
 
 /**
- * Said first when a workflow starts from a template whose models are not installed: the lab's
- * image_creator picked FLUX 3 Klein for a fox picture, built on it for nine calls, and only
- * then found the model files missing. Names what is missing and what runs here instead.
+ * Why a template cannot run here, null when it can: what is missing and what runs here instead.
+ * Starting from such a template is refused unless asked for: said as a note, the lab's
+ * image_creator went on with FLUX 3 Klein in 6 of 8 runs and then swapped Qwen model files into
+ * the FLUX graph.
  */
-async function unreadyTemplateNote(endpoint: ComfyUiEndpoint, startFrom: string | undefined, catalog: NodeCatalog): Promise<string | null> {
+async function unreadyTemplate(endpoint: ComfyUiEndpoint, startFrom: string | undefined, catalog: NodeCatalog): Promise<string | null> {
   if (!startFrom?.startsWith("template:")) return null;
   const name = startFrom.slice("template:".length).trim();
   const templates = await listTemplates(endpoint);
@@ -169,8 +176,27 @@ async function unreadyTemplateNote(endpoint: ComfyUiEndpoint, startFrom: string 
     .slice(0, 5)
     .map((t) => `template:${t.name}`);
   const missing = [...own.missingModels, ...own.missingNodes.map((n) => `node ${n}`)];
-  return `NOTE: template ${name} cannot run here: it needs ${missing.slice(0, 4).join(", ")}, not installed.`
+  return `template ${name} cannot run here: it needs ${missing.slice(0, 4).join(", ")}, not installed.`
     + (ready.length ? ` Templates that run here: ${ready.join(", ")}.` : "");
+}
+
+/**
+ * Said when the prompt is still the one the template came with. Worded as what is the case, not
+ * as a fault: for a text-to-image template that text is its authors' example picture, for an
+ * editing template ("Remove the background") it is what the template is for.
+ */
+function samplePromptNotice(graph: ApiGraph, catalog: NodeCatalog): { where: string; text: string } | null {
+  const [first, ...more] = unchangedSamplePrompts(graph, catalog);
+  if (!first) return null;
+  const text = first.text.replace(/\s+/g, " ").trim();
+  return { where: [first, ...more].map((sample) => sample.address).join(", "), text: text.length > 80 ? `${text.slice(0, 79)}…` : text };
+}
+
+function danglingNotice(graph: ApiGraph, catalog: NodeCatalog): string | null {
+  const ids = danglingNodes(graph, catalog);
+  if (ids.length === 0) return null;
+  const named = ids.slice(0, 6).map((id) => `${id} ${graph[id]!.class_type}`).join(", ");
+  return `NOT CONNECTED, will not run: nothing takes the output of ${named}. Link it to the input that should use it, or put it in place with insert.`;
 }
 
 function problemsText(problems: { errors: string[]; warnings: string[] }): string {
@@ -210,20 +236,30 @@ async function lookUp(endpoint: ComfyUiEndpoint, what: (typeof LOOKUPS)[number],
       return describeNodeDef(def.name ?? query, def);
     }
     case "models": {
-      if (!query) {
-        // Every file at once while that is short: one folder per call spent the lab's
-        // image_creator four of its twelve steps before it built anything.
-        const folders = await listModelFolders(endpoint);
-        const listed = (await Promise.all(folders.map(async (folder) => [folder, await listModels(endpoint, folder).catch(() => [] as string[])] as const)))
-          .filter(([folder, files]) => files.length > 0 && folder !== "custom_nodes" && folder !== "configs");
+      // Every file at once while that is short: one folder per call spent the lab's
+      // image_creator four of its twelve steps before it built anything.
+      const folders = await listModelFolders(endpoint);
+      const listed = (await Promise.all(folders.map(async (folder) => [folder, await listModels(endpoint, folder).catch(() => [] as string[])] as const)))
+        .filter(([folder, files]) => files.length > 0 && folder !== "custom_nodes" && folder !== "configs");
+      const total = listed.reduce((n, [, files]) => n + files.length, 0);
+      const everything = (): string => {
         if (listed.length === 0) return "ComfyUI has no model files yet.";
-        const total = listed.reduce((n, [, files]) => n + files.length, 0);
         return total <= 60
           ? listed.map(([folder, files]) => `${folder}: ${files.join(", ")}`).join("\n")
           : `Model folders with files: ${listed.map(([f, files]) => `${f} (${files.length})`).join(", ")}. List one with query.`;
+      };
+      if (!query) return everything();
+      const folder = folders.find((name) => name.toLowerCase() === query.toLowerCase());
+      if (folder) {
+        const files = listed.find(([name]) => name === folder)?.[1] ?? [];
+        const others = listed.filter(([name]) => name !== folder);
+        if (files.length === 0) return `No files in ${folder}.\nInstalled:\n${everything()}`;
+        return files.join("\n") + (others.length ? `\n(Other folders with files: ${others.map(([f, n]) => `${f} (${n.length})`).join(", ")}.)` : "");
       }
-      const files = await listModels(endpoint, query);
-      return files.length ? files.join("\n") : `No files in ${query}.`;
+      // Not a folder: a word out of a file or folder name ("upscale", "qwen").
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = listed.flatMap(([name, files]) => files.filter((file) => words.every((word) => `${name}/${file}`.toLowerCase().includes(word))).map((file) => `${name}: ${file}`));
+      return hits.length ? hits.slice(0, 60).join("\n") : `No model file matches "${query}".\nInstalled:\n${everything()}`;
     }
     case "templates": {
       const templates = await listTemplates(endpoint);
@@ -261,20 +297,21 @@ async function lookUp(endpoint: ComfyUiEndpoint, what: (typeof LOOKUPS)[number],
 registerTool({
   name: "comfyui_catalog",
   description:
-    "Look things up on the ComfyUI server before building or changing a workflow: node types (search them,"
-    + " or read one type's inputs, choices and outputs), the model files it has, its official workflow templates,"
-    + " and the workflows saved in its editor. Model file names in a workflow must be ones listed here.",
+    "What this installation's ComfyUI server has: its installed model files, its node types (search them, or read"
+    + " one type's inputs, choices and outputs), its official workflow templates and the workflows saved in its editor."
+    + " Use it to answer what ComfyUI has installed, which no web or file search can see, and before building or"
+    + " changing a workflow. Model file names in a workflow must be ones listed here.",
   parameters: {
     type: "object",
     properties: {
       look_up: {
         type: "string",
         enum: [...LOOKUPS],
-        description: "nodes: search node types; node: one type in full; models: model folders, or the files in one; templates: official workflows to start from; workflows: the editor's saved workflows",
+        description: "nodes: search node types, the best hits with their inputs and outputs; node: one type in full; models: the installed model files; templates: official workflows to start from; workflows: the editor's saved workflows",
       },
       query: {
         type: "string",
-        description: "Search words for nodes/templates, the node type for node (e.g. KSampler), a model folder for models (e.g. diffusion_models, loras)",
+        description: "Search words for nodes/templates (templates without a query lists the ones that run here), the node type for node (e.g. KSampler), a model folder or a word from a file name for models",
       },
     },
     required: ["look_up"],
@@ -320,14 +357,16 @@ registerTool({
         type: "string",
         description: "template:<name>, editor:<name>, or a workspace .json or .png; replaces what is at path",
       },
+      allow_unready: { type: "boolean", description: "Start from a template whose models are not installed, which cannot run here: only when the user wants that template anyway, to keep or for later (default false)" },
       operations: {
         type: "array",
-        description: "Changes, applied in order: add {op, class_type, node?, inputs?, title?} (missing values get defaults; give node an id of your own, e.g. \"upscale\", to link to it in later operations), set {op, node, inputs} (null removes an input), remove {op, node}, title {op, node, title}. A node is named by id, or by a type or title only one node has, in links too: [\"VAEDecode\", 0]",
+        description: "Changes, applied in order: insert {op, class_type, before?, node?, inputs?, title?} puts a new node on a connection that exists: before names the node that should receive its output (\"KSampler\", or \"<node>.<input>\" when several inputs fit; left out, the workflow's output), the old connection feeds the new node and inputs supplies only what else it needs. add {op, class_type, node?, inputs?, title?} adds a node nothing is connected to yet (missing values get defaults; give node an id of your own, e.g. \"upscale\", to link to it in later operations), set {op, node, inputs} (null removes an input), remove {op, node}, title {op, node, title}. A node is named by id, or by a type or title only one node has, in links too: [\"VAEDecode\", 0]",
         items: {
           type: "object",
           properties: {
-            op: { type: "string", enum: ["add", "set", "remove", "title"] },
+            op: { type: "string", enum: ["insert", "add", "set", "remove", "title"] },
             node: { type: "string", description: "Node id" },
+            before: { type: "string", description: "insert only: the node, or \"<node>.<input>\", that receives the new node's output; left out, the workflow's output node" },
             class_type: { type: "string" },
             inputs: { type: "object", description: "Input name to value, or to a link [\"<node id>\", <output index>]" },
             title: { type: "string" },
@@ -348,7 +387,7 @@ registerTool({
     if (!path || extname(path).toLowerCase() !== ".json") return fail("path must name a .json file in the workspace", { rejectedBeforeEffect: true });
     const startFrom = text(args["start_from"]);
     const operations = Array.isArray(args["operations"]) ? (args["operations"] as GraphOperation[]) : [];
-    const editorName = text(args["save_to_editor"])?.replace(/\.json$/i, "");
+    const editorName = text(args["save_to_editor"])?.split(/[\\/]/).pop()?.replace(/\.json$/i, "");
     if (editorName && !LIBRARY_NAME.test(editorName)) {
       return fail("save_to_editor takes a plain name: letters, digits, spaces, dots, dashes, underscores", { rejectedBeforeEffect: true });
     }
@@ -357,6 +396,10 @@ registerTool({
 
     try {
       const catalog: NodeCatalog = await getNodeCatalog(endpoint);
+      const unready = await unreadyTemplate(endpoint, startFrom, catalog).catch(() => null);
+      if (unready && args["allow_unready"] !== true) {
+        return fail(`${unready} Start from one that runs here. Only if the user wants this one anyway, to keep or for later, repeat with allow_unready: true.`, { rejectedBeforeEffect: true });
+      }
       let graph: ApiGraph;
       let origin: string;
       if (startFrom) {
@@ -394,13 +437,17 @@ registerTool({
       const problems = checkGraph(runnableGraph(changed, catalog).graph, catalog);
       // What happened first, the graph last: a long graph cut short must not cut the news.
       const lines = [`${saved}: ${Object.keys(changed).length} nodes, from ${origin}.${notes.length ? ` ${notes.join("; ")}.` : ""}`];
-      const unready = await unreadyTemplateNote(endpoint, startFrom, catalog).catch(() => null);
-      if (unready) lines.unshift(unready);
+      if (unready) lines.unshift(`NOTE: ${unready}`);
       const keys = keyInputs(changed, catalog);
       if (keys) lines.push(`Where to change it: ${keys}.`);
+      const sample = samplePromptNotice(changed, catalog);
+      if (sample) lines.push(`PROMPT UNCHANGED: ${sample.where} still holds the template's own text ("${sample.text}"). A run renders that text: set it to what the picture should show.`);
       const report = problemsText(problems);
       if (report) lines.push(report);
-      else lines.push("Checks out against this ComfyUI's nodes and model files.");
+      // Checked as it runs, so a node nothing reads was not checked at all: say so.
+      const dangling = danglingNotice(changed, catalog);
+      if (dangling) lines.push(dangling);
+      if (!report && !dangling) lines.push("Checks out against this ComfyUI's nodes and model files.");
 
       const artifacts: Array<Record<string, unknown>> = [];
       if (editorFile || editorName) {
@@ -456,29 +503,19 @@ registerTool({
 
 // ── comfyui_run ──────────────────────────────────────────────────────────
 
-/**
- * "<node id>.<input>" against this graph. Node ids may hold a colon (a flattened subgraph,
- * "459:458") and inputs a dot (a V3 sub-input, "format.bit_depth"), so the split is at the
- * first dot after the longest node id the graph has.
- */
+/** "<node>.<input>" against this graph, the node by id or by a type or title only one node has. */
 function splitKey(key: string, graph: ApiGraph): [string, string] | null {
-  const ids = Object.keys(graph).sort((a, b) => b.length - a.length);
-  const id = ids.find((candidate) => key.startsWith(`${candidate}.`) && key.length > candidate.length + 1);
-  if (id) return [id, key.slice(id.length + 1)];
-  // "KSampler.steps": a node type or title only one node has, as operations accept it.
-  for (let dot = key.indexOf("."); dot > 0; dot = key.indexOf(".", dot + 1)) {
-    try {
-      return [resolveNodeRef(graph, key.slice(0, dot), "set"), key.slice(dot + 1)];
-    } catch {
-      // not a unique type or title up to this dot
-    }
+  try {
+    const { id, input } = resolveInputRef(graph, key, "set");
+    return input ? [id, input] : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** A checkGraph line that names the fix, worth adding to ComfyUI's own refusal. */
 function isFixHint(hint: string): boolean {
-  return hint.includes("closest") || hint.includes("load it with") || hint.includes("comfyui_run's images");
+  return hint.includes("closest") || hint.includes("load it with") || hint.includes("comfyui_run's images") || hint.includes("gives one");
 }
 
 /** "<node>.<input>" a checkGraph line is about ("node 470 (LoadImage).image: ..."). */
@@ -501,6 +538,13 @@ function outputName(raw: string | undefined): string {
   return cleaned || `comfyui-${Date.now()}`;
 }
 
+/** A PNG's pixel size from its header; null for anything else. */
+function pngSize(bytes: Uint8Array): { width: number; height: number } | null {
+  const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.length < 24 || view.toString("latin1", 1, 4) !== "PNG" || view.toString("latin1", 12, 16) !== "IHDR") return null;
+  return { width: view.readUInt32BE(16), height: view.readUInt32BE(20) };
+}
+
 async function saveOutputs(endpoint: ComfyUiEndpoint, outputs: OutputRef[], base: string, ctx: ToolContext): Promise<Array<Record<string, unknown>>> {
   // Saved results first; previews only when a workflow saves nothing.
   const kept = outputs.some((o) => o.type === "output") ? outputs.filter((o) => o.type === "output") : outputs;
@@ -512,7 +556,7 @@ async function saveOutputs(endpoint: ComfyUiEndpoint, outputs: OutputRef[], base
     const { resolved, relativePath } = resolveWorkspaceWritePath(name, ctx.workspacePath);
     await mkdir(dirname(resolved), { recursive: true });
     await writeFile(resolved, bytes);
-    saved.push({ outputPath: relativePath, filename: basename(relativePath), contentType, bytes: bytes.byteLength, node: ref.nodeId });
+    saved.push({ outputPath: relativePath, filename: basename(relativePath), contentType, bytes: bytes.byteLength, node: ref.nodeId, ...(pngSize(bytes) ?? {}) });
   }
   return saved;
 }
@@ -552,11 +596,18 @@ registerTool({
       graph = structuredClone(loaded.graph);
       const changes: string[] = [];
 
+      const written: Array<[string, string]> = [];
       for (const [key, value] of Object.entries((args["set"] as Record<string, unknown> | undefined) ?? {})) {
         const target = splitKey(key, graph);
         if (!target) return unknownKey("set", key, graph);
+        if (!(target[1] in graph[target[0]]!.inputs)) written.push(target);
         graph[target[0]]!.inputs[target[1]] = value;
         changes.push(key);
+      }
+      // Checked once every value is in, so a choice and the sub-inputs it brings can come in any order.
+      for (const [id, name] of written) {
+        const problem = unknownInput(id, graph[id]!, catalog[graph[id]!.class_type], name);
+        if (problem) return fail(`set: ${problem}`, { rejectedBeforeEffect: true });
       }
       const uploadFolder = libraryFolder(ctx);
       for (const [key, path] of Object.entries((args["images"] as Record<string, unknown> | undefined) ?? {})) {
@@ -592,12 +643,18 @@ registerTool({
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
       const textLines = Object.entries(outcome.texts).map(([node, values]) => `node ${node} says: ${values.join(" ").slice(0, 500)}`);
       const allCached = saved.length > 0 && outcome.cached.length >= Object.keys(runnable.graph).length;
+      const sample = samplePromptNotice(graph, catalog);
       const lines = [
+        // First: a picture of the wrong thing is the news, and the lines below read as a success.
+        ...(sample ? [`NOTE: the prompt was the template's own text, unchanged (${sample.where}: "${sample.text}"). If the picture should show something else, set that input and run again.`] : []),
         saved.length
-          ? `Ran ${loaded.from} in ${seconds} s. Saved: ${saved.map((s) => String(s["outputPath"])).join(", ")}.`
+          // The size is how a stage shows it ran: the lab's image_creator got a 4992x3328 picture
+          // it had itself named "original", and reported the upscale as failed.
+          ? `Ran ${loaded.from} in ${seconds} s. Saved: ${saved.map((s) => `${String(s["outputPath"])}${s["width"] ? ` (${String(s["width"])}x${String(s["height"])})` : ""}`).join(", ")}.`
           : `Ran ${loaded.from} in ${seconds} s; it saved no files (it has no SaveImage or similar output).`,
         ...(changes.length ? [`For this run: ${changes.join(", ")}.`] : []),
         ...(refused.length ? [`NOTE: ComfyUI skipped parts it refused (the files above were made without them):\n- ${refused.join("\n- ")}`] : []),
+        ...(danglingNotice(graph, catalog) ? [danglingNotice(graph, catalog)!.replace("will not run", "did not run")] : []),
         ...(allCached ? ["NOTE: nothing changed since the last run, so ComfyUI returned the earlier result. For a new picture use new_seed or change an input."] : []),
         ...textLines,
         "Each saved PNG carries its workflow: dragged onto the ComfyUI page it opens the workflow behind it.",

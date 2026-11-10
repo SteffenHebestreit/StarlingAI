@@ -31,6 +31,8 @@ const CATALOG = {
   LoadImage: { input: { required: { image: [[], { image_upload: true }] } }, output: ["IMAGE", "MASK"] },
   ComfySwitchNode: { input: { required: { switch: ["BOOLEAN", {}] }, optional: { on_false: ["COMFY_MATCHTYPE_V3", {}], on_true: ["COMFY_MATCHTYPE_V3", {}] } }, output: ["*"] },
   PrimitiveStringMultiline: { input: { required: { value: ["STRING", { multiline: true }] } }, output: ["STRING"] },
+  UpscaleModelLoader: { input: { required: { model_name: [["RealESRGAN_x4plus.pth"], {}] } }, output: ["UPSCALE_MODEL"] },
+  ImageUpscaleWithModel: { input: { required: { upscale_model: ["UPSCALE_MODEL", {}], image: ["IMAGE", {}] } }, output: ["IMAGE"] },
 };
 
 /** The official template after conversion: the prompt comes through a switch that is off. */
@@ -199,14 +201,124 @@ describe("comfyui tools", () => {
     expect(again.output).toContain('NOT saved to the editor: "starlingai/fox.json" exists there');
   });
 
-  it("says first when a template cannot run here, and which ones can", async () => {
-    // The lab's image_creator picked FLUX 3 Klein for a fox and found its models missing nine calls later.
+  it("refuses a template that cannot run here, naming the ones that can", async () => {
+    // Told in a note, the lab's image_creator went on with FLUX 3 Klein and swapped Qwen files into it.
     const result = await call("comfyui_workflow", { path: "comfyui/flux.json", start_from: "template:image_flux3_klein_t2i" });
+    expect(result.success).toBe(false);
+    expect(result.rejectedBeforeEffect).toBe(true);
+    expect(result.error).toContain("template image_flux3_klein_t2i cannot run here: it needs flux3-image-klein-int8-convrot.safetensors, not installed. Templates that run here: template:image_qwen_image_2_1_t2i.");
+    expect(result.error).toContain("allow_unready: true");
+    expect(existsSync(join(tempDir, "generated/comfyui/flux.json"))).toBe(false);
+    const ready = await call("comfyui_workflow", { path: "comfyui/qwen.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    expect(ready.success).toBe(true);
+    expect(ready.output).not.toContain("cannot run here");
+  });
+
+  it("starts from such a template when told to, and still says so first", async () => {
+    const result = await call("comfyui_workflow", { path: "comfyui/later.json", start_from: "template:image_flux3_klein_t2i", allow_unready: true });
+    expect(result.success).toBe(true);
     expect(result.output.split("\n")[0]).toBe(
       "NOTE: template image_flux3_klein_t2i cannot run here: it needs flux3-image-klein-int8-convrot.safetensors, not installed. Templates that run here: template:image_qwen_image_2_1_t2i.",
     );
-    const ready = await call("comfyui_workflow", { path: "comfyui/qwen.json", start_from: "template:image_qwen_image_2_1_t2i" });
-    expect(ready.output).not.toContain("cannot run here");
+    expect(existsSync(join(tempDir, "generated/comfyui/later.json"))).toBe(true);
+  });
+
+  it("adds a stage to a template with insert, and what runs has it", async () => {
+    const built = await call("comfyui_workflow", {
+      path: "comfyui/big.json",
+      start_from: "template:image_qwen_image_2_1_t2i",
+      operations: [
+        { op: "add", class_type: "UpscaleModelLoader" },
+        { op: "insert", class_type: "ImageUpscaleWithModel", before: "SaveImage", inputs: { upscale_model: ["UpscaleModelLoader", 0] } },
+      ],
+    });
+    expect(built.success).toBe(true);
+    expect(built.output).toContain("inserted 14 ImageUpscaleWithModel before 10.images (image<-9.0)");
+    expect(built.output).toContain("Checks out against this ComfyUI's nodes and model files.");
+    const ran = await call("comfyui_run", { workflow: "comfyui/big.json", output_name: "big" });
+    expect(ran.output).toContain("Saved: generated/comfyui/big.png (1x1).");
+    expect(ran.metadata?.["width"]).toBe(1);
+    const prompt = (server.prompts[0] as { prompt: Record<string, { class_type: string; inputs: Record<string, unknown> }> }).prompt;
+    expect(prompt["10"]!.inputs["images"]).toEqual(["14", 0]);
+    expect(prompt["14"]!.inputs["image"]).toEqual(["9", 0]);
+    expect(prompt["14"]!.inputs["upscale_model"]).toEqual(["13", 0]);
+  });
+
+  it("says an added node is connected to nothing instead of that the workflow checks out", async () => {
+    // The lab's upscaler went in with nothing reading it: checked as it runs, it was not checked at all.
+    const built = await call("comfyui_workflow", {
+      path: "comfyui/loose.json",
+      start_from: "template:image_qwen_image_2_1_t2i",
+      operations: [{ op: "add", class_type: "ImageUpscaleWithModel", node: "up" }],
+    });
+    expect(built.success).toBe(true);
+    expect(built.output).toContain("NOT CONNECTED, will not run: nothing takes the output of up ImageUpscaleWithModel.");
+    expect(built.output).not.toContain("Checks out");
+    const run = await call("comfyui_run", { workflow: "comfyui/loose.json" });
+    expect(run.success).toBe(true);
+    expect(run.output).toContain("NOT CONNECTED, did not run: nothing takes the output of up ImageUpscaleWithModel.");
+    const fixed = await call("comfyui_workflow", { path: "comfyui/loose.json", operations: [{ op: "set", node: "SaveImage", inputs: { images: ["up", 0] } }] });
+    expect(fixed.output).not.toContain("NOT CONNECTED");
+    expect(fixed.output).toContain('node up (ImageUpscaleWithModel): required input "upscale_model" is missing (UPSCALE_MODEL; UpscaleModelLoader gives one)');
+  });
+
+  it("takes a path for the editor's name and uses the file's name", async () => {
+    const saved = await call("comfyui_workflow", { path: "comfyui/named.json", start_from: "template:image_qwen_image_2_1_t2i", save_to_editor: "comfyui/named.json" });
+    expect(saved.success).toBe(true);
+    expect(saved.output).toContain("Workflows → starlingai/named.json");
+  });
+
+  it("says the prompt is unchanged while it is the template's, and stops once it is not", async () => {
+    // The lab: a cat on a sofa was asked for, the prompt never reached, and the template's fashion portrait handed over.
+    const built = await call("comfyui_workflow", { path: "comfyui/sample.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    expect(built.output).toContain('PROMPT UNCHANGED: 3.on_false still holds the template\'s own text ("a red fox in snow"). A run renders that text');
+    const changed = await call("comfyui_workflow", { path: "comfyui/sample.json", operations: [{ op: "set", node: "3.on_false", inputs: { text: "a cat on a sofa" } }] });
+    expect(changed.success).toBe(true);
+    expect(changed.output).not.toContain("PROMPT UNCHANGED");
+  });
+
+  it("opens a run of the template's own prompt with a note, and a run of another prompt without", async () => {
+    await call("comfyui_workflow", { path: "comfyui/sample.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    const sample = await call("comfyui_run", { workflow: "comfyui/sample.json" });
+    expect(sample.success).toBe(true);
+    expect(sample.output.split("\n")[0]).toBe(
+      'NOTE: the prompt was the template\'s own text, unchanged (3.on_false: "a red fox in snow"). If the picture should show something else, set that input and run again.',
+    );
+    const own = await call("comfyui_run", { workflow: "comfyui/sample.json", set: { "3.on_false": "a cat on a sofa" } });
+    expect(own.output).not.toContain("template's own text");
+    expect(own.output.split("\n")[0]).toMatch(/^Ran /);
+    const direct = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i" });
+    expect(direct.output).toContain("NOTE: the prompt was the template's own text, unchanged");
+    const directOwn = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i", set: { "3.on_false": "a cat on a sofa" } });
+    expect(directOwn.output).not.toContain("template's own text");
+  });
+
+  it("refuses a set on an input the node does not have, in an operation and for a run", async () => {
+    await call("comfyui_workflow", { path: "comfyui/sample.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    const operation = await call("comfyui_workflow", { path: "comfyui/sample.json", operations: [{ op: "set", node: "4", inputs: { prompt: "a cat" } }] });
+    expect(operation.success).toBe(false);
+    expect(operation.rejectedBeforeEffect).toBe(true);
+    expect(operation.error).toContain('4 (CLIPTextEncode) has no input "prompt". Its inputs: text, clip (link)');
+    expect(operation.error).toContain("Where to change it: prompt: 3.on_false");
+    const run = await call("comfyui_run", { workflow: "comfyui/sample.json", set: { "4.prompt": "a cat" } });
+    expect(run.success).toBe(false);
+    expect(run.rejectedBeforeEffect).toBe(true);
+    expect(run.error).toContain('set: 4 (CLIPTextEncode) has no input "prompt". Its inputs: text, clip (link)');
+    expect(server.prompts).toHaveLength(0);
+  });
+
+  it("does not call a template's own unused node unconnected", async () => {
+    const built = await call("comfyui_workflow", { path: "comfyui/plain.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    expect(built.output).not.toContain("NOT CONNECTED");
+  });
+
+  it("finds model files by a word, and always says what is installed when it finds none", async () => {
+    expect((await call("comfyui_catalog", { look_up: "models", query: "qwen" })).output).toBe("diffusion_models: qwen_image_2.1_int8_convrot.safetensors");
+    expect((await call("comfyui_catalog", { look_up: "models", query: "diffusion_models" })).output).toBe("qwen_image_2.1_int8_convrot.safetensors");
+    const none = await call("comfyui_catalog", { look_up: "models", query: "upscale" });
+    expect(none.success).toBe(true);
+    expect(none.output).toBe('No model file matches "upscale".\nInstalled:\ndiffusion_models: qwen_image_2.1_int8_convrot.safetensors');
+    expect((await call("comfyui_catalog", { look_up: "models", query: "loras" })).output).toBe("No files in loras.\nInstalled:\ndiffusion_models: qwen_image_2.1_int8_convrot.safetensors");
   });
 
   it("names the closest model file when a workflow asks for one this server lacks", async () => {
@@ -220,7 +332,7 @@ describe("comfyui tools", () => {
     await call("comfyui_workflow", { path: "comfyui/fox.json", start_from: "template:image_qwen_image_2_1_t2i" });
     const result = await call("comfyui_run", { workflow: "comfyui/fox.json", set: { "7.steps": 30 }, output_name: "fox" });
     expect(result.success).toBe(true);
-    expect(result.output).toContain("Saved: generated/comfyui/fox.png.");
+    expect(result.output).toContain("Saved: generated/comfyui/fox.png (1x1).");
     expect(readFileSync(join(tempDir, "generated", "comfyui", "fox.png"))).toEqual(PNG_1X1);
     const sent = server.prompts[0]!;
     const graph = sent["prompt"] as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
@@ -248,7 +360,7 @@ describe("comfyui tools", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("operation 2 (set): there is no node 99. No operation was applied.");
     expect(result.error).toContain("generated/comfyui/guess.json now holds template image_qwen_image_2_1_t2i");
-    expect(result.error).toContain("Where to change it: prompt: 3.on_false, 5.text; seed: 7.seed");
+    expect(result.error).toContain("Where to change it: prompt: 3.on_false; negative prompt: 5.text; seed: 7.seed");
     expect(existsSync(join(tempDir, "generated", "comfyui", "guess.json"))).toBe(true);
     const run = await call("comfyui_run", { workflow: "comfyui/guess.json", set: { "KSampler.steps": 9 } });
     expect(run.success).toBe(true);
@@ -297,6 +409,22 @@ describe("comfyui tools", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("node 1 (UNETLoader).unet_name: Value not in list");
     expect(result.error).toContain("closest: qwen_image_2.1_int8_convrot.safetensors");
+  });
+
+  it("adds what supplies a missing input to ComfyUI's refusal", async () => {
+    await call("comfyui_workflow", {
+      path: "comfyui/gap.json",
+      start_from: "template:image_qwen_image_2_1_t2i",
+      operations: [{ op: "insert", class_type: "ImageUpscaleWithModel", node: "up", before: "SaveImage" }],
+    });
+    server.promptReply = () => new Response(JSON.stringify({
+      error: { message: "Prompt outputs failed validation" },
+      node_errors: { up: { class_type: "ImageUpscaleWithModel", errors: [{ message: "Required input is missing", details: "upscale_model", extra_info: { input_name: "upscale_model" } }] } },
+    }), { status: 400 });
+    const result = await call("comfyui_run", { workflow: "comfyui/gap.json" });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Hints:");
+    expect(result.error).toContain("UpscaleModelLoader gives one");
   });
 
   it("a refusal ComfyUI answers with 200 fails the run when nothing was saved, and is a note when something was", async () => {

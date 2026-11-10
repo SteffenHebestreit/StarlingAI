@@ -165,7 +165,7 @@ describe("applyOperations", () => {
       { op: "add", class_type: "SaveImage", inputs: { images: ["8", 0] }, title: "Second copy" },
       { op: "set", node: "7", inputs: { steps: 30, seed: 7 } },
     ], catalog);
-    expect(graph["10"]).toEqual({ class_type: "SaveImage", inputs: { filename_prefix: "ComfyUI", images: ["8", 0] }, _meta: { title: "Second copy" } });
+    expect(graph["10"]).toEqual({ class_type: "SaveImage", inputs: { filename_prefix: "ComfyUI", images: ["8", 0] }, _meta: { title: "Second copy", added: true } });
     expect(graph["7"]!.inputs["steps"]).toBe(30);
     expect(original["7"]!.inputs["steps"]).toBe(20);
     expect(notes[0]).toBe("added 10 SaveImage (defaults for filename_prefix)");
@@ -176,7 +176,7 @@ describe("applyOperations", () => {
     const { graph, notes } = applyOperations(txt2img(), [{ op: "remove", node: "2" }], catalog);
     expect(graph["2"]).toBeUndefined();
     expect(notes[0]).toBe("removed 2; now unconnected: 4.clip, 5.clip");
-    expect(checkGraph(graph, catalog).errors).toContain('node 4 (CLIPTextEncode): required input "clip" is missing');
+    expect(checkGraph(graph, catalog).errors).toContain('node 4 (CLIPTextEncode): required input "clip" is missing (CLIP; CLIPLoader gives one)');
   });
 
   it("names nodes by a type or title only one node has, in links too", () => {
@@ -263,7 +263,8 @@ describe("toEditorWorkflow", () => {
 describe("keyInputs", () => {
   it("points at the prompt, seed, settings and model files of the nodes that run", () => {
     expect(keyInputs(txt2img(), catalog)).toBe(
-      "prompt: 4.text, 5.text; seed: 7.seed; settings: 6.width, 6.height, 6.batch_size, 7.steps; model files: 1.unet_name, 2.clip_name, 3.vae_name",
+      // 5.text is the same input as 4.text; it is the negative prompt because the sampler takes it as one.
+      "prompt: 4.text; negative prompt: 5.text; seed: 7.seed; settings: 6.width, 6.height, 6.batch_size, 7.steps; model files: 1.unet_name, 2.clip_name, 3.vae_name",
     );
   });
 });
