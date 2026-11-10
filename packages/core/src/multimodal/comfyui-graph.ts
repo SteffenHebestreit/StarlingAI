@@ -147,8 +147,14 @@ export function nodeInputs(def: NodeDef, values?: Record<string, unknown>): Inpu
   return out;
 }
 
+/**
+ * A node's outputs. An output that takes the type of what is linked in (a V3 switch gives
+ * whichever branch it picks) is declared COMFY_MATCHTYPE_V3 and read as "*", as an input of that
+ * kind is: taken as a type of its own it matched nothing, and the official Qwen-Image template,
+ * whose prompt passes through such a switch, looked as if it had no prompt at all.
+ */
 export function nodeOutputs(def: NodeDef): Array<{ name: string; type: string }> {
-  const types = (def.output ?? []).map((t) => (Array.isArray(t) ? "COMBO" : String(t)));
+  const types = (def.output ?? []).map((t) => (Array.isArray(t) ? "COMBO" : t === "COMFY_MATCHTYPE_V3" ? "*" : String(t)));
   return types.map((type, index) => ({ name: def.output_name?.[index] ?? type, type }));
 }
 
@@ -349,19 +355,26 @@ export function checkGraph(graph: ApiGraph, catalog: NodeCatalog): GraphProblems
   return { errors, warnings };
 }
 
+/** The nodes of the workflow that give this type, as the links to them. */
+function suppliersOf(type: string, graph: ApiGraph, catalog: NodeCatalog, exclude?: string): Link[] {
+  if (type === "*") return [];
+  const found: Link[] = [];
+  for (const id of orderedIds(graph)) {
+    if (id === exclude) continue;
+    const def = catalog[graph[id]!.class_type];
+    const index = def ? nodeOutputs(def).findIndex((output) => output.type === type) : -1;
+    if (index >= 0) found.push([id, index]);
+  }
+  return found;
+}
+
 /**
  * What can fill an empty socket of this type: a node already in the workflow that gives it, else
  * the few loaders that do. Nothing for a type many nodes give (IMAGE), where a list would not help.
  */
 function supplierHint(type: string, forNode: string, graph: ApiGraph, catalog: NodeCatalog): string {
   if (type === "*") return "";
-  const inGraph: string[] = [];
-  for (const id of orderedIds(graph)) {
-    if (id === forNode) continue;
-    const def = catalog[graph[id]!.class_type];
-    const index = def ? nodeOutputs(def).findIndex((output) => output.type === type) : -1;
-    if (index >= 0) inGraph.push(`["${id}", ${index}]`);
-  }
+  const inGraph = suppliersOf(type, graph, catalog, forNode).map(([id, index]) => `["${id}", ${index}]`);
   if (inGraph.length) return ` (${type}; in this workflow ${inGraph.slice(0, 3).join(" or ")} gives one)`;
   const loaders = Object.entries(catalog)
     .filter(([, def]) => nodeOutputs(def).some((output) => output.type === type) && !nodeInputs(def).some((input) => input.required && !input.widget))
@@ -531,26 +544,91 @@ function asLink(value: unknown, isSocket: boolean): unknown {
   return match ? [match[1]!, Number(match[2])] : value;
 }
 
-function resolveLinks(graph: ApiGraph, inputs: Record<string, unknown>, where: string, def?: NodeDef): Record<string, unknown> {
-  const sockets = new Set(def ? nodeInputs(def).filter((input) => !input.widget && !input.socketless).map((input) => input.name) : []);
+interface LinkContext {
+  /** The node type the inputs belong to: it says which of them take a link, and of what type. */
+  def?: NodeDef | undefined;
+  catalog?: NodeCatalog;
+  /** The node being changed: it cannot feed its own input. */
+  self?: string;
+  /**
+   * For a node being put on a connection: a link that cannot be made out is left to that
+   * connection, which is what feeds the node, instead of stopping the operation.
+   */
+  spliced?: boolean;
+  notes?: string[];
+}
+
+function resolveLinks(graph: ApiGraph, inputs: Record<string, unknown>, where: string, context: LinkContext = {}): Record<string, unknown> {
+  const sockets = new Map((context.def ? nodeInputs(context.def) : []).filter((input) => !input.widget && !input.socketless).map((input) => [input.name, input]));
   const out: Record<string, unknown> = {};
   for (const [name, raw] of Object.entries(inputs)) {
     const value = asLink(raw, sockets.has(name));
-    out[name] = Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && Number.isInteger(value[1])
-      ? [resolveNodeRef(graph, value[0], `${where}, input ${name}`), value[1]]
-      : value;
+    if (!(Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && Number.isInteger(value[1]))) {
+      out[name] = value;
+      continue;
+    }
+    try {
+      out[name] = [resolveNodeRef(graph, value[0], `${where}, input ${name}`), value[1]];
+    } catch (error) {
+      const socket = sockets.get(name);
+      if (!(error instanceof GraphOperationError) || !socket || !context.catalog) throw error;
+      // A link to a node that is not there, on an input one node of the workflow can feed: that
+      // node is the only thing the link can mean. The lab's image_creator wrote ["459:801", 0]
+      // for the loader it had just added and ["KSampler.outputs", 0] for the decoded picture.
+      const suppliers = suppliersOf(socket.type, graph, context.catalog, context.self);
+      const [only] = suppliers;
+      if (suppliers.length !== 1 || !only) {
+        if (!context.spliced) throw new GraphOperationError(`${error.message}${supplierHint(socket.type, context.self ?? "", graph, context.catalog)}`);
+        // Several nodes give a picture (the official template's save node passes its own on), and
+        // for a stage being inserted the one meant is the connection it goes on.
+        context.notes?.push(`${name}: there is no node ${String(value[0])}; left to the connection the node is put on`);
+        continue;
+      }
+      out[name] = only;
+      context.notes?.push(`${name}<-${only[0]}.${only[1]} (there is no node ${String(value[0])}; ${only[0]} is the one node giving ${socket.type})`);
+    }
   }
   return out;
 }
 
-function addNode(graph: ApiGraph, operation: { node?: string; class_type: string; inputs?: Record<string, unknown>; title?: string }, def: NodeDef, where: string): string {
+/**
+ * A choice written as part of exactly one of the input's choices is that choice. "3:2" for
+ * "3:2 (Photo)" cost the lab's image_creator a refused run each of the three times it wrote it,
+ * "y-axis" for "y-axis: horizontally" a hand edit of the workflow file. The whole value first,
+ * then its start, then anywhere in a choice; where more than one choice fits, nothing is guessed.
+ */
+export function completeChoices(id: string, node: ApiNode, def: NodeDef | undefined, names: readonly string[]): string[] {
+  if (!def) return [];
+  const inputs = new Map(nodeInputs(def, node.inputs).map((input) => [input.name, input]));
+  const notes: string[] = [];
+  for (const name of names) {
+    const options = inputs.get(name)?.options;
+    const value = node.inputs[name];
+    if (!options || typeof value !== "string" || !value.trim() || options.includes(value)) continue;
+    const written = value.trim().toLowerCase();
+    const tiers = [
+      options.filter((option) => option.toLowerCase() === written),
+      options.filter((option) => option.toLowerCase().startsWith(written)),
+      written.length >= 3 ? options.filter((option) => option.toLowerCase().includes(written)) : [],
+    ];
+    const fitting = tiers.find((tier) => tier.length > 0);
+    const [choice] = fitting ?? [];
+    if (fitting?.length !== 1 || choice === undefined) continue;
+    node.inputs[name] = choice;
+    notes.push(`${id}.${name}: "${value}" taken as "${choice}"`);
+  }
+  return notes;
+}
+
+function addNode(graph: ApiGraph, operation: { node?: string; class_type: string; inputs?: Record<string, unknown>; title?: string }, def: NodeDef, where: string, catalog: NodeCatalog, notes: string[]): void {
   const id = operation.node ? String(operation.node) : nextId(graph);
   if (graph[id]) throw new GraphOperationError(`${where}: node ${id} already exists`);
   const filled = defaultsFor(def);
-  const given = resolveLinks(graph, operation.inputs ?? {}, where, def);
+  const given = resolveLinks(graph, operation.inputs ?? {}, where, { def, catalog, notes });
   const defaulted = Object.keys(filled).filter((name) => !(name in given));
-  graph[id] = { class_type: operation.class_type, inputs: { ...filled, ...given }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
-  return `added ${id} ${operation.class_type}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`;
+  const node: ApiNode = { class_type: operation.class_type, inputs: { ...filled, ...given }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+  graph[id] = node;
+  notes.push(`added ${id} ${operation.class_type}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`, ...completeChoices(id, node, def, Object.keys(given)));
 }
 
 /**
@@ -596,6 +674,11 @@ function spliceCandidates(graph: ApiGraph, target: ApiNode, def: NodeDef, given:
     const carried = sourceDef ? nodeOutputs(sourceDef)[value[1]]?.type ?? wanted : wanted;
     // An output of any type (a V3 switch's) says nothing: what the input wants is what it carries.
     const type = carried === "*" ? wanted : carried;
+    // Where neither side says, nothing is known of what flows there, and anything would "fit". The
+    // official Qwen-Image template passes its prompt text through a switch into a preview of any
+    // type; a VAEDecode the lab's image_creator inserted without a place landed there, cut the
+    // prompt off from its encoder, and the next stage found two outputs to go before.
+    if (type === "*") continue;
     const receive = free.find((socket) => socket.type === type) ?? free.find((socket) => typesFit(type, socket.type));
     // Nothing free for it, but the caller wired that socket itself ({image: ["VAEDecode", 0]}): the
     // new node is fed already and only the output has to be moved. The lab's image_creator wrote
@@ -621,10 +704,12 @@ function outputNodeFor(graph: ApiGraph, classType: string, def: NodeDef, given: 
   const typed = fitting.filter((candidate) => candidate.splices.some((splice) => splice.typed));
   const chosen = typed.length ? typed : fitting;
   if (chosen.length === 1) return chosen[0]!.id;
+  // A stage the workflow has already (the lab's image_creator inserted a VAEDecode into a template that decodes).
+  const present = orderedIds(graph).filter((id) => graph[id]!.class_type === classType);
   throw new GraphOperationError(
     chosen.length > 1
       ? `${where}: ${classType} could go before several outputs (${chosen.map((candidate) => `${candidate.id} ${graph[candidate.id]!.class_type}`).join(", ")}): name one in before`
-      : `${where}: ${classType} fits in front of no output of this workflow: before must name the node that should receive its output, or "<node>.<input>"`,
+      : `${where}: ${classType} fits in front of no output of this workflow${present.length ? `, which has ${classType} ${present.slice(0, 3).join(", ")} already` : ""}: before must name the node that should receive its output, or "<node>.<input>"`,
   );
 }
 
@@ -651,12 +736,12 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
         const def = requireNodeType(catalog, operation.class_type, where);
         // A loader takes no connection, so there is nothing to put it on: it is an add.
         if (!nodeInputs(def).some((input) => !input.widget && !input.socketless)) {
-          notes.push(addNode(next, operation, def, where));
+          addNode(next, operation, def, where, catalog, notes);
           break;
         }
         const id = operation.node ? String(operation.node) : nextId(next);
         if (next[id]) throw new GraphOperationError(`${where}: node ${id} already exists`);
-        const given = resolveLinks(next, operation.inputs ?? {}, where, def);
+        const given = resolveLinks(next, operation.inputs ?? {}, where, { def, catalog, notes, spliced: true });
         const target = operation.before ? resolveInputRef(next, String(operation.before), where) : { id: outputNodeFor(next, operation.class_type, def, given, catalog, where), input: undefined };
         const node = next[target.id]!;
         const candidates = spliceCandidates(next, node, def, given, catalog, target.input);
@@ -666,17 +751,26 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
         const splice = candidates[0];
         if (!splice) {
           const linked = Object.entries(node.inputs).filter(([, value]) => isLink(value)).map(([name]) => name).join(", ") || "none";
-          throw new GraphOperationError(`${where}: ${operation.class_type} fits no link into ${target.input ? `${target.id}.${target.input}` : target.id} (${node.class_type}). Its links: ${linked}`);
+          // Where it would fit, by type: a place named wrongly is a dead end without it.
+          const fits = Object.keys(next).flatMap((other) => spliceCandidates(next, next[other]!, def, given, catalog, undefined).filter((candidate) => candidate.typed).map((candidate) => `${other}.${candidate.input}`));
+          throw new GraphOperationError(
+            `${where}: ${operation.class_type} fits no link into ${target.input ? `${target.id}.${target.input}` : target.id} (${node.class_type}). Its links: ${linked}`
+              + (fits.length ? `. It fits before ${fits.slice(0, 4).join(", ")}` : ""),
+          );
         }
         const filled = defaultsFor(def);
         const defaulted = Object.keys(filled).filter((name) => !(name in given));
-        next[id] = { class_type: operation.class_type, inputs: { ...filled, ...given, ...(splice.receive ? { [splice.receive]: splice.link } : {}) }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+        const inserted: ApiNode = { class_type: operation.class_type, inputs: { ...filled, ...given, ...(splice.receive ? { [splice.receive]: splice.link } : {}) }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+        next[id] = inserted;
         node.inputs[splice.input] = [id, splice.output];
-        notes.push(`inserted ${id} ${operation.class_type} before ${target.id}.${splice.input}${splice.receive ? ` (${splice.receive}<-${splice.link[0]}.${splice.link[1]})` : ""}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`);
+        notes.push(
+          `inserted ${id} ${operation.class_type} before ${target.id}.${splice.input}${splice.receive ? ` (${splice.receive}<-${splice.link[0]}.${splice.link[1]})` : ""}${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`,
+          ...completeChoices(id, inserted, def, Object.keys(given)),
+        );
         break;
       }
       case "add": {
-        notes.push(addNode(next, operation, requireNodeType(catalog, operation.class_type, where), where));
+        addNode(next, operation, requireNodeType(catalog, operation.class_type, where), where, catalog, notes);
         break;
       }
       case "set": {
@@ -687,7 +781,7 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
         const given = Object.entries(operation.inputs ?? {});
         const values = input && given.length === 1 ? { [input]: given[0]![1] } : (operation.inputs ?? {});
         const had = new Set(Object.keys(node.inputs));
-        for (const [name, value] of Object.entries(resolveLinks(next, values, where, catalog[node.class_type]))) {
+        for (const [name, value] of Object.entries(resolveLinks(next, values, where, { def: catalog[node.class_type], catalog, self: id, notes }))) {
           if (value === null) delete node.inputs[name];
           else node.inputs[name] = value;
         }
@@ -695,7 +789,7 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
           const problem = had.has(name) ? null : unknownInput(id, node, catalog[node.class_type], name);
           if (problem) throw new GraphOperationError(`${where}: ${problem}`);
         }
-        notes.push(`set ${id}: ${Object.keys(values).join(", ")}`);
+        notes.push(`set ${id}: ${Object.keys(values).join(", ")}`, ...completeChoices(id, node, catalog[node.class_type], Object.keys(values)));
         break;
       }
       case "remove": {
@@ -1186,6 +1280,24 @@ function classifiedInputs(graph: ApiGraph, catalog: NodeCatalog): ClassifiedInpu
     }
   }
   return found;
+}
+
+/**
+ * Writes the picture's prompt where the workflow keeps it: its one text that becomes positive
+ * conditioning. A template's prompt sits wherever its authors put it, and a model that has not
+ * read the template cannot know where. In 7 of 17 lab runs the image_creator went on to place
+ * the prompt by editing the workflow file, guessing at the text to replace, and most of those
+ * runs ended without a picture. Returns the address written.
+ */
+export function setPrompt(graph: ApiGraph, catalog: NodeCatalog, text: string): string {
+  const places = classifiedInputs(graph, catalog).filter((entry) => entry.group === "prompt" && entry.conditioning);
+  const [place] = places;
+  if (!place) throw new GraphOperationError("prompt: this workflow has no prompt to set: none of its texts becomes conditioning");
+  if (places.length > 1) {
+    throw new GraphOperationError(`prompt: this workflow has several prompt texts (${places.map((entry) => `${entry.id}.${entry.input}`).join(", ")}): write the ones meant with set`);
+  }
+  graph[place.id]!.inputs[place.input] = text;
+  return `${place.id}.${place.input}`;
 }
 
 function textMark(value: string): string {

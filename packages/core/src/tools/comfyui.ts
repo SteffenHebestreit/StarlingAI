@@ -39,6 +39,7 @@ import {
   applyOperations,
   applySubgraphWidgetValues,
   checkGraph,
+  completeChoices,
   danglingNodes,
   describeGraph,
   describeNodeDef,
@@ -52,6 +53,7 @@ import {
   runnableGraph,
   searchNodes,
   seedInputs,
+  setPrompt,
   toEditorWorkflow,
   unchangedSamplePrompts,
   unknownInput,
@@ -346,6 +348,7 @@ registerTool({
     + " start_from begins it from an official template, a workflow saved in the ComfyUI editor, or a PNG ComfyUI made."
     + " Start a new workflow from a template that is ready here (comfyui_catalog templates): it has the loaders and"
     + " settings its model needs, which a workflow written node by node from memory usually gets wrong."
+    + " prompt writes what the picture should show to the place the template keeps its prompt."
     + " operations change it; after every change it is checked against the server's nodes and model files."
     + " save_to_editor puts it into the ComfyUI editor's library, where the user can open and edit it;"
     + " editor_file writes it in the editor's format for download.",
@@ -357,6 +360,7 @@ registerTool({
         type: "string",
         description: "template:<name>, editor:<name>, or a workspace .json or .png; replaces what is at path",
       },
+      prompt: { type: "string", description: "What the picture should show: written to the workflow's prompt input, wherever the template keeps it" },
       allow_unready: { type: "boolean", description: "Start from a template whose models are not installed, which cannot run here: only when the user wants that template anyway, to keep or for later (default false)" },
       operations: {
         type: "array",
@@ -393,6 +397,11 @@ registerTool({
     }
     const editorFile = text(args["editor_file"]);
     if (editorFile && extname(editorFile).toLowerCase() !== ".json") return fail("editor_file must name a .json file", { rejectedBeforeEffect: true });
+    // The editor's format in the workflow's own file would replace what runs with its export.
+    if (editorFile && resolveWorkspaceWritePath(editorFile, ctx.workspacePath).resolved === resolveWorkspaceWritePath(path, ctx.workspacePath).resolved) {
+      return fail(`editor_file would overwrite the workflow itself: give it another name, e.g. ${path.replace(/\.json$/i, ".editor.json")}`, { rejectedBeforeEffect: true });
+    }
+    const promptText = text(args["prompt"]);
 
     try {
       const catalog: NodeCatalog = await getNodeCatalog(endpoint);
@@ -416,8 +425,12 @@ registerTool({
       }
       let changed: ApiGraph;
       let notes: string[];
+      let promptAt: string | null = null;
       try {
+        // The prompt first, onto what was loaded: it stays when an operation after it misses.
+        if (promptText) promptAt = setPrompt(graph, catalog, promptText);
         ({ graph: changed, notes } = applyOperations(graph, operations, catalog));
+        if (promptAt) notes.unshift(`prompt written to ${promptAt}`);
       } catch (error) {
         if (!(error instanceof GraphOperationError)) throw error;
         // Keep what was loaded: the next call changes it instead of loading it again, and now
@@ -426,7 +439,7 @@ registerTool({
         const keys = keyInputs(graph, catalog);
         return fail(
           `${error.message}. No operation was applied.`
-            + (kept ? ` ${kept} now holds ${origin} as loaded: change it with another call (operations only, no start_from).` : "")
+            + (kept ? ` ${kept} now holds ${origin} as loaded${promptAt ? `, with the prompt written to ${promptAt}` : ""}: change it with another call (operations only, no start_from).` : promptAt ? " The prompt was not written either." : "")
             + (keys ? ` Where to change it: ${keys}.` : "")
             + ` Its nodes: ${nodeListing(graph)}`,
           { rejectedBeforeEffect: true },
@@ -441,7 +454,7 @@ registerTool({
       const keys = keyInputs(changed, catalog);
       if (keys) lines.push(`Where to change it: ${keys}.`);
       const sample = samplePromptNotice(changed, catalog);
-      if (sample) lines.push(`PROMPT UNCHANGED: ${sample.where} still holds the template's own text ("${sample.text}"). A run renders that text: set it to what the picture should show.`);
+      if (sample) lines.push(`PROMPT UNCHANGED: ${sample.where} still holds the template's own text ("${sample.text}"). A run renders that text: give prompt to say what the picture should show.`);
       const report = problemsText(problems);
       if (report) lines.push(report);
       // Checked as it runs, so a node nothing reads was not checked at all: say so.
@@ -529,8 +542,14 @@ function nodeListing(graph: ApiGraph, limit = 40): string {
   return entries.slice(0, limit).join(", ") + (entries.length > limit ? `, … ${entries.length - limit} more` : "");
 }
 
-function unknownKey(what: string, key: string, graph: ApiGraph): ToolResult {
-  return fail(`${what}: "${key}" names no node of this workflow (write "<node id>.<input>"). Its nodes: ${nodeListing(graph)}`, { rejectedBeforeEffect: true });
+/** Where a workflow's prompt, seed and settings are, for a refusal: a run of a template is often the first the model sees of it. */
+function whereToChange(graph: ApiGraph, catalog: NodeCatalog): string {
+  const keys = keyInputs(graph, catalog);
+  return keys ? ` Where to change it: ${keys}.` : "";
+}
+
+function unknownKey(what: string, key: string, graph: ApiGraph, catalog: NodeCatalog): ToolResult {
+  return fail(`${what}: "${key}" names no node of this workflow (write "<node id>.<input>").${whereToChange(graph, catalog)} Its nodes: ${nodeListing(graph)}`, { rejectedBeforeEffect: true });
 }
 
 function outputName(raw: string | undefined): string {
@@ -565,13 +584,15 @@ registerTool({
   name: "comfyui_run",
   description:
     "Run a ComfyUI workflow and save what it produces (images, video) into the workspace. workflow is a workspace"
-    + " workflow file, editor:<name> or template:<name>. set changes inputs for this run only; images sends workspace"
+    + " workflow file, editor:<name> or template:<name>. prompt says what the picture should show, without naming"
+    + " where the workflow keeps its prompt; set changes inputs for this run only; images sends workspace"
     + " pictures to LoadImage inputs. The same workflow with the same seed gives the same picture again: new_seed"
     + " rolls every seed.",
   parameters: {
     type: "object",
     properties: {
       workflow: { type: "string", description: "A workspace .json/.png workflow, editor:<name>, or template:<name>" },
+      prompt: { type: "string", description: "What the picture should show, for this run: written to the workflow's prompt input, wherever it is" },
       set: { type: "object", description: "\"<node>.<input>\": value for this run, the node by id or by a type only one node has, e.g. {\"6.text\": \"a red fox\", \"KSampler.steps\": 30}" },
       images: { type: "object", description: "\"<node id>.<input>\": workspace image path, for LoadImage nodes" },
       new_seed: { type: "boolean", description: "Give every seed a new random value (default false)" },
@@ -596,23 +617,36 @@ registerTool({
       graph = structuredClone(loaded.graph);
       const changes: string[] = [];
 
+      const promptText = text(args["prompt"]);
+      if (promptText) {
+        try {
+          changes.push(`prompt (${setPrompt(graph, catalog, promptText)})`);
+        } catch (error) {
+          if (!(error instanceof GraphOperationError)) throw error;
+          return fail(`${error.message}.${whereToChange(graph, catalog)}`, { rejectedBeforeEffect: true });
+        }
+      }
+      const targets: Array<[string, string]> = [];
       const written: Array<[string, string]> = [];
       for (const [key, value] of Object.entries((args["set"] as Record<string, unknown> | undefined) ?? {})) {
         const target = splitKey(key, graph);
-        if (!target) return unknownKey("set", key, graph);
+        if (!target) return unknownKey("set", key, graph, catalog);
         if (!(target[1] in graph[target[0]]!.inputs)) written.push(target);
         graph[target[0]]!.inputs[target[1]] = value;
+        targets.push(target);
         changes.push(key);
       }
       // Checked once every value is in, so a choice and the sub-inputs it brings can come in any order.
       for (const [id, name] of written) {
         const problem = unknownInput(id, graph[id]!, catalog[graph[id]!.class_type], name);
-        if (problem) return fail(`set: ${problem}`, { rejectedBeforeEffect: true });
+        if (problem) return fail(`set: ${problem}.${whereToChange(graph, catalog)}`, { rejectedBeforeEffect: true });
       }
+      const completed: string[] = [];
+      for (const [id, name] of targets) completed.push(...completeChoices(id, graph[id]!, catalog[graph[id]!.class_type], [name]));
       const uploadFolder = libraryFolder(ctx);
       for (const [key, path] of Object.entries((args["images"] as Record<string, unknown> | undefined) ?? {})) {
         const target = splitKey(key, graph);
-        if (!target) return unknownKey("images", key, graph);
+        if (!target) return unknownKey("images", key, graph, catalog);
         if (typeof path !== "string") return fail(`images: "${key}" takes a workspace image path`, { rejectedBeforeEffect: true });
         const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
         graph[target[0]]!.inputs[target[1]] = await uploadInputImage(endpoint, Buffer.from(file.bytes), file.filename, uploadFolder);
@@ -646,13 +680,14 @@ registerTool({
       const sample = samplePromptNotice(graph, catalog);
       const lines = [
         // First: a picture of the wrong thing is the news, and the lines below read as a success.
-        ...(sample ? [`NOTE: the prompt was the template's own text, unchanged (${sample.where}: "${sample.text}"). If the picture should show something else, set that input and run again.`] : []),
+        ...(sample ? [`NOTE: the prompt was the template's own text, unchanged (${sample.where}: "${sample.text}"). If the picture should show something else, run again with prompt.`] : []),
         saved.length
           // The size is how a stage shows it ran: the lab's image_creator got a 4992x3328 picture
           // it had itself named "original", and reported the upscale as failed.
           ? `Ran ${loaded.from} in ${seconds} s. Saved: ${saved.map((s) => `${String(s["outputPath"])}${s["width"] ? ` (${String(s["width"])}x${String(s["height"])})` : ""}`).join(", ")}.`
           : `Ran ${loaded.from} in ${seconds} s; it saved no files (it has no SaveImage or similar output).`,
         ...(changes.length ? [`For this run: ${changes.join(", ")}.`] : []),
+        ...(completed.length ? [`${completed.join("; ")}.`] : []),
         ...(refused.length ? [`NOTE: ComfyUI skipped parts it refused (the files above were made without them):\n- ${refused.join("\n- ")}`] : []),
         ...(danglingNotice(graph, catalog) ? [danglingNotice(graph, catalog)!.replace("will not run", "did not run")] : []),
         ...(allCached ? ["NOTE: nothing changed since the last run, so ComfyUI returned the earlier result. For a new picture use new_seed or change an input."] : []),

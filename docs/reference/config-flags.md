@@ -302,7 +302,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxUploadBytes` | packages/core/src/config/schemas/multimodal.ts:294 | 5 |
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:890 | 5 |
-| `message` | packages/core/src/config/schema.ts:1589 | 366 |
+| `message` | packages/core/src/config/schema.ts:1589 | 367 |
 | `method` | packages/core/src/config/schema.ts:1102 | 94 |
 | `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:909 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1683 | 1 |
@@ -514,7 +514,7 @@ Every public schema field, where it is declared, and how many production files r
 | `terraformBinary` | packages/core/src/config/schema.ts:1143 | 1 |
 | `threshold` | packages/core/src/config/schemas/decisions.ts:24 | 48 |
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:253 | 1 |
-| `tiers` | packages/core/src/config/schema.ts:276 | 43 |
+| `tiers` | packages/core/src/config/schema.ts:276 | 44 |
 | `timeoutMs` | packages/core/src/config/schema.ts:71 | 114 |
 | `token` | packages/core/src/config/schema.ts:1225 | 202 |
 | `tokenId` | packages/core/src/config/schema.ts:1124 | 1 |

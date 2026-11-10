@@ -62,15 +62,19 @@ The file names match ComfyUI's official templates, so those templates run unchan
 - **ComfyUI's check is the final word.** A refused part is reported per node and input, together with the closest valid choice (for example the right model file name). When ComfyUI refuses some outputs but runs others (HTTP 200 with `node_errors`), the run fails only if nothing was saved. Otherwise the result carries a note.
 - **Export to the editor** writes the workflow as it runs, with switches resolved and unused branches left out. The editor resolves no switch, so the full template opened with its switched-off enhancer flagged for a missing model, and Run would have been refused. The export is laid out left to right, with seeds set to `fixed` so that pressing Run reproduces the result. The copy is then read back through the converter and compared with the workflow, and any difference is reported. Checked in a real browser: for the exported Qwen template, what the editor would send on Run is identical to the workflow.
 - **Every saved PNG carries its workflow as it ran.** Dragged onto the ComfyUI page, it opens the workflow behind it. The tool's answer gives each PNG's pixel size, which is how an added stage shows that it ran.
-- **While a run is in progress** a poll ComfyUI does not answer within 15 s is repeated. A heavy job can starve its HTTP side. Eight unanswered polls in a row end the wait.
+- **While a run is in progress** a poll ComfyUI does not answer within 15 s is repeated. A heavy job can starve its HTTP side for minutes, and the job goes on: only the run's own time limit (`runTimeoutMs`) ends the wait.
 
 Node ids change on the way through the editor: flattened subgraph ids such as `459:458` become plain numbers. Operations, links and `set` keys therefore also take a node type or title that only one node has (`"KSampler.steps"`, `["VAEDecode", 0]`), or part of one (`"SaveImage"` for `SaveImageAdvanced`). Each `comfyui_workflow` answer starts with where the prompt, seed, settings, model files and picture inputs of the running nodes are. If an operation names no node, nothing is applied, but a workflow loaded with `start_from` is still saved, so the next call can change it without loading it again.
 
 ### Adding a stage to a workflow
 
+A value written as part of exactly one of an input's choices is taken as that choice (`3:2` for `3:2 (Photo)`), and a link to a node that is not there, on an input only one node of the workflow can feed, is taken as the link to that node. Both are named in the answer.
+
 `insert` puts a new node on a connection that exists. `before` names the node that should receive its output (`"KSampler"`, or `"<node>.<input>"` when several inputs fit). Left out, the stage goes in front of the workflow's output, if only one output fits. The old connection then feeds the new node, matched by type, and `inputs` supplies only what else it needs. An upscaler, a LoRA or a filter goes in this way without looking up ids.
 
 A node added by an operation that nothing reads from is reported as not connected, by `comfyui_workflow` and again by `comfyui_run`, because ComfyUI never runs it. Unused nodes a template brought along are not reported: 22 of the 265 official templates have some.
+
+`prompt`, on `comfyui_workflow` and on `comfyui_run`, writes what the picture should show to the place the workflow keeps its prompt, so a template can be run without knowing its node ids: `comfyui_run` with `workflow: "template:image_qwen_image_2_1_t2i"` and `prompt: "a red fox in snow"`. Where a workflow has several prompt texts, the answer lists them and `set` writes the ones meant.
 
 A template renders its authors' example until its prompt is changed. The prompt texts a template arrives with are marked, and while none of the workflow's prompts says anything else, `comfyui_workflow` reports the prompt as unchanged and `comfyui_run` opens its answer with a note naming that text. A prompt here is a text that becomes positive conditioning: of the 265 official templates 189 arrive with one, while the math expressions, patterns and shader code many keep in the same kind of text box are left alone. A `set` that names an input the node type does not have is refused with the node's inputs: ComfyUI would ignore it, and the change would silently go nowhere.
 
@@ -81,6 +85,7 @@ A template whose models are not installed is refused as a starting point, and th
 - Official Qwen-Image 2.1 text-to-image template, 1 MP, 25 steps: 25 s cold (model load included), 12–14 s warm.
 - Official Qwen-Image 2.1 image-edit template with two uploaded references: 26–35 s.
 - The text-to-image template with a Real-ESRGAN x4 stage inserted, 4096×4096 output: 20 s warm.
+- The same at 4992×3328 while the reranker and the Laya sidecar also hold the GPU (15.8 of 16.4 GB in use): 371 s, with no answer to a status poll for over two minutes of it.
 - Export round trip (template → editor format → converter → compare), over 127 sampled official templates: 104 come back identical, including every Qwen-Image 2.1 and FLUX 3 Klein template. Most of the rest are video templates. The tool's comparison skips the hidden `codec` input of SaveVideo, and for the remainder its read-back check reports the difference.
 
 ## Multi-user
