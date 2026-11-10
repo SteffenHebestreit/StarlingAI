@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -29,7 +29,7 @@ const CATALOG = {
   VAEDecode: { input: { required: { samples: ["LATENT", {}], vae: ["VAE", {}] } }, output: ["IMAGE"] },
   SaveImage: { output_node: true, input: { required: { images: ["IMAGE", {}], filename_prefix: ["STRING", { default: "ComfyUI" }] } }, output: [] },
   LoadImage: { input: { required: { image: [[], { image_upload: true }] } }, output: ["IMAGE", "MASK"] },
-  ComfySwitchNode: { input: { required: { switch: ["BOOLEAN", {}] }, optional: { on_false: ["COMFY_MATCHTYPE_V3", {}], on_true: ["COMFY_MATCHTYPE_V3", {}] } }, output: ["*"] },
+  ComfySwitchNode: { input: { required: { switch: ["BOOLEAN", {}] }, optional: { on_false: ["COMFY_MATCHTYPE_V3", {}], on_true: ["COMFY_MATCHTYPE_V3", {}] } }, output: ["COMFY_MATCHTYPE_V3"] },
   PrimitiveStringMultiline: { input: { required: { value: ["STRING", { multiline: true }] } }, output: ["STRING"] },
   UpscaleModelLoader: { input: { required: { model_name: [["RealESRGAN_x4plus.pth"], {}] } }, output: ["UPSCALE_MODEL"] },
   ImageUpscaleWithModel: { input: { required: { upscale_model: ["UPSCALE_MODEL", {}], image: ["IMAGE", {}] } }, output: ["IMAGE"] },
@@ -271,7 +271,7 @@ describe("comfyui tools", () => {
   it("says the prompt is unchanged while it is the template's, and stops once it is not", async () => {
     // The lab: a cat on a sofa was asked for, the prompt never reached, and the template's fashion portrait handed over.
     const built = await call("comfyui_workflow", { path: "comfyui/sample.json", start_from: "template:image_qwen_image_2_1_t2i" });
-    expect(built.output).toContain('PROMPT UNCHANGED: 3.on_false still holds the template\'s own text ("a red fox in snow"). A run renders that text');
+    expect(built.output).toContain('PROMPT UNCHANGED: 3.on_false still holds the template\'s own text ("a red fox in snow"). A run renders that text: give prompt to say what the picture should show.');
     const changed = await call("comfyui_workflow", { path: "comfyui/sample.json", operations: [{ op: "set", node: "3.on_false", inputs: { text: "a cat on a sofa" } }] });
     expect(changed.success).toBe(true);
     expect(changed.output).not.toContain("PROMPT UNCHANGED");
@@ -282,7 +282,7 @@ describe("comfyui tools", () => {
     const sample = await call("comfyui_run", { workflow: "comfyui/sample.json" });
     expect(sample.success).toBe(true);
     expect(sample.output.split("\n")[0]).toBe(
-      'NOTE: the prompt was the template\'s own text, unchanged (3.on_false: "a red fox in snow"). If the picture should show something else, set that input and run again.',
+      'NOTE: the prompt was the template\'s own text, unchanged (3.on_false: "a red fox in snow"). If the picture should show something else, run again with prompt.',
     );
     const own = await call("comfyui_run", { workflow: "comfyui/sample.json", set: { "3.on_false": "a cat on a sofa" } });
     expect(own.output).not.toContain("template's own text");
@@ -305,6 +305,76 @@ describe("comfyui tools", () => {
     expect(run.rejectedBeforeEffect).toBe(true);
     expect(run.error).toContain('set: 4 (CLIPTextEncode) has no input "prompt". Its inputs: text, clip (link)');
     expect(server.prompts).toHaveLength(0);
+  });
+
+  it("writes the prompt where the template keeps it, for a workflow and for one run", async () => {
+    // The lab: in 7 of 17 runs the prompt was placed by editing the workflow file, guessing at the text to replace.
+    const built = await call("comfyui_workflow", { path: "comfyui/prompted.json", start_from: "template:image_qwen_image_2_1_t2i", prompt: "a cat on a sofa" });
+    expect(built.success).toBe(true);
+    expect(built.output).toContain("prompt written to 3.on_false");
+    expect(built.output).not.toContain("PROMPT UNCHANGED");
+    const file = JSON.parse(readFileSync(join(tempDir, "generated/comfyui/prompted.json"), "utf8")) as Record<string, { inputs: Record<string, unknown> }>;
+    expect(file["3"]!.inputs["on_false"]).toBe("a cat on a sofa");
+
+    const run = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i", prompt: "a dog in a park" });
+    expect(run.success).toBe(true);
+    expect(run.output).toContain("For this run: prompt (3.on_false).");
+    expect(run.output).not.toContain("template's own text");
+    const sent = (server.prompts[0] as { prompt: Record<string, { inputs: Record<string, unknown> }> }).prompt;
+    expect(sent["4"]!.inputs["text"]).toBe("a dog in a park");
+  });
+
+  it("keeps the prompt when an operation beside it misses, and says so", async () => {
+    const missed = await call("comfyui_workflow", { path: "comfyui/kept.json", start_from: "template:image_qwen_image_2_1_t2i", prompt: "a cat on a sofa", operations: [{ op: "set", node: "99", inputs: { steps: 30 } }] });
+    expect(missed.success).toBe(false);
+    expect(missed.error).toContain("now holds template image_qwen_image_2_1_t2i (converted from the editor format) as loaded, with the prompt written to 3.on_false");
+    const file = JSON.parse(readFileSync(join(tempDir, "generated/comfyui/kept.json"), "utf8")) as Record<string, { inputs: Record<string, unknown> }>;
+    expect(file["3"]!.inputs["on_false"]).toBe("a cat on a sofa");
+    // Without start_from nothing is written, the prompt included.
+    const again = await call("comfyui_workflow", { path: "comfyui/kept.json", prompt: "a dog", operations: [{ op: "set", node: "99", inputs: { steps: 30 } }] });
+    expect(again.error).toContain("No operation was applied. The prompt was not written either.");
+    expect((JSON.parse(readFileSync(join(tempDir, "generated/comfyui/kept.json"), "utf8")) as typeof file)["3"]!.inputs["on_false"]).toBe("a cat on a sofa");
+  });
+
+  it("does not guess among several prompt texts", async () => {
+    const two = templateGraph();
+    two["13"] = { class_type: "CLIPTextEncode", inputs: { text: "second", clip: ["2", 0] } };
+    two["7"]!.inputs["positive"] = ["13", 0];
+    mkdirSync(join(tempDir, "generated/comfyui"), { recursive: true });
+    writeFileSync(join(tempDir, "generated/comfyui/two.json"), JSON.stringify(two), "utf8");
+    const run = await call("comfyui_run", { workflow: "comfyui/two.json", prompt: "a cat" });
+    expect(run.success).toBe(false);
+    expect(run.rejectedBeforeEffect).toBe(true);
+    expect(run.error).toContain("prompt: this workflow has several prompt texts (3.on_false, 13.text): write the ones meant with set. Where to change it: prompt: 3.on_false, 13.text;");
+    expect(server.prompts).toHaveLength(0);
+  });
+
+  it("says where a workflow's inputs are when a run names one that is not there", async () => {
+    // A run of a template is often the first the model sees of it: it guessed "5.text", then a loader, then the encoder.
+    const noNode = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i", set: { "99.text": "a cat" } });
+    expect(noNode.error).toContain('"99.text" names no node of this workflow (write "<node id>.<input>"). Where to change it: prompt: 3.on_false;');
+    const noInput = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i", set: { "4.prompt": "a cat" } });
+    expect(noInput.error).toContain('has no input "prompt". Its inputs: text, clip (link). Where to change it: prompt: 3.on_false;');
+  });
+
+  it("takes a choice written in part for a run, and says which it took", async () => {
+    const run = await call("comfyui_run", { workflow: "template:image_qwen_image_2_1_t2i", prompt: "a cat", set: { "7.sampler_name": "eul" } });
+    expect(run.success).toBe(true);
+    expect(run.output).toContain('7.sampler_name: "eul" taken as "euler".');
+    const sent = (server.prompts[0] as { prompt: Record<string, { inputs: Record<string, unknown> }> }).prompt;
+    expect(sent["7"]!.inputs["sampler_name"]).toBe("euler");
+  });
+
+  it("does not write the editor's format over the workflow itself", async () => {
+    await call("comfyui_workflow", { path: "comfyui/own.json", start_from: "template:image_qwen_image_2_1_t2i" });
+    const before = readFileSync(join(tempDir, "generated/comfyui/own.json"), "utf8");
+    const same = await call("comfyui_workflow", { path: "comfyui/own.json", editor_file: "comfyui/own.json" });
+    expect(same.success).toBe(false);
+    expect(same.rejectedBeforeEffect).toBe(true);
+    expect(same.error).toBe("editor_file would overwrite the workflow itself: give it another name, e.g. comfyui/own.editor.json");
+    expect(readFileSync(join(tempDir, "generated/comfyui/own.json"), "utf8")).toBe(before);
+    const other = await call("comfyui_workflow", { path: "comfyui/own.json", editor_file: "comfyui/own.editor.json" });
+    expect(other.success).toBe(true);
   });
 
   it("does not call a template's own unused node unconnected", async () => {

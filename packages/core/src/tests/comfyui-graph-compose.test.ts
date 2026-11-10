@@ -9,6 +9,7 @@ import {
   resolveInputRef,
   resolveNodeRef,
   searchNodes,
+  setPrompt,
   unchangedSamplePrompts,
   type ApiGraph,
   type NodeCatalog,
@@ -28,7 +29,7 @@ const catalog: NodeCatalog = {
   VAEDecode: { input: { required: { samples: ["LATENT", {}] } }, output: ["IMAGE"] },
   SaveImageAdvanced: { output_node: true, input: { required: { images: ["IMAGE", {}], filename_prefix: ["STRING", { default: "x" }] } }, output: [] },
   PreviewAny: { output_node: true, input: { required: { source: ["COMFY_MATCHTYPE_V3", {}] } }, output: [] },
-  ComfySwitchNode: { input: { required: { switch: ["BOOLEAN", {}] }, optional: { on_false: ["COMFY_MATCHTYPE_V3", {}], on_true: ["COMFY_MATCHTYPE_V3", {}] } }, output: ["*"] },
+  ComfySwitchNode: { input: { required: { switch: ["BOOLEAN", {}] }, optional: { on_false: ["COMFY_MATCHTYPE_V3", {}], on_true: ["COMFY_MATCHTYPE_V3", {}] } }, output: ["COMFY_MATCHTYPE_V3"] },
   Merge: { output_node: true, input: { required: { images: ["IMAGE", {}], extra: ["COMFY_MATCHTYPE_V3", {}] } }, output: [] },
   UpscaleModelLoader: { category: "loaders", input: { required: { model_name: [["RealESRGAN_x4plus.pth"], {}] } }, output: ["UPSCALE_MODEL"] },
   ImageUpscaleWithModel: { display_name: "Upscale Image (using Model)", category: "image/upscaling", input: { required: { upscale_model: ["UPSCALE_MODEL", {}], image: ["IMAGE", {}] } }, output: ["IMAGE"] },
@@ -336,6 +337,122 @@ describe("a missing input says what supplies it", () => {
   });
 });
 
+describe("a link to a node that is not there", () => {
+  it("is the link to the one node that gives what the input takes", () => {
+    // The lab: ["KSampler.outputs", 0] for the decoded picture, ["459:801", 0] for the loader just added.
+    const { graph, notes } = applyOperations(workflow(), [{ op: "add", class_type: "ImageScale", node: "s", inputs: { image: ["KSampler.outputs", 0] } }], catalog);
+    expect(graph["s"]!.inputs["image"]).toEqual(["459:8", 0]);
+    expect(notes[0]).toBe("image<-459:8.0 (there is no node KSampler.outputs; 459:8 is the one node giving IMAGE)");
+    const loader = applyOperations(workflow(), [
+      { op: "add", class_type: "UpscaleModelLoader" },
+      { op: "insert", class_type: "ImageUpscaleWithModel", node: "up", inputs: { upscale_model: ["459:801", 0] } },
+    ], catalog).graph;
+    expect(loader["up"]!.inputs["upscale_model"]).toEqual(["10", 0]);
+  });
+
+  it("is left to the connection a stage is inserted on, when several nodes could be meant", () => {
+    // The official template's save node gives its picture on, so two nodes give IMAGE there.
+    const graph = workflow();
+    graph["5"] = { class_type: "VAEDecode", inputs: { samples: ["459:7", 0] } };
+    const { graph: next, notes } = applyOperations(graph, [{ op: "insert", class_type: "ImageScale", node: "s", inputs: { image: ["KSampler.outputs", 0] } }], catalog);
+    expect(next["s"]!.inputs["image"]).toEqual(["459:8", 0]);
+    expect(next["9"]!.inputs["images"]).toEqual(["s", 0]);
+    expect(notes[0]).toBe("image: there is no node KSampler.outputs; left to the connection the node is put on");
+    // Added, not inserted, there is no connection to leave it to.
+    expect(() => applyOperations(graph, [{ op: "add", class_type: "ImageScale", inputs: { image: ["KSampler.outputs", 0] } }], catalog))
+      .toThrow('there is no node KSampler.outputs (IMAGE; in this workflow ["459:8", 0] or ["5", 0] gives one)');
+  });
+
+  it("names the nodes that could be meant when there are several, and what would give it when there is none", () => {
+    expect(() => applyOperations(workflow(), [{ op: "set", node: "KSampler", inputs: { positive: ["nope", 0] } }], catalog))
+      .toThrow('input positive: there is no node nope (CONDITIONING; in this workflow ["2", 0] or ["3", 0] gives one)');
+    expect(() => applyOperations(workflow(), [{ op: "add", class_type: "ImageUpscaleWithModel", inputs: { upscale_model: ["459:801", 0] } }], catalog))
+      .toThrow("input upscale_model: there is no node 459:801 (UPSCALE_MODEL; UpscaleModelLoader gives one)");
+  });
+
+  it("is never the node's own output", () => {
+    const graph = applyOperations(workflow(), [{ op: "add", class_type: "ImageScale", node: "s", inputs: { image: ["459:8", 0] } }], catalog).graph;
+    const { graph: next } = applyOperations(graph, [{ op: "set", node: "s", inputs: { image: ["nope", 0] } }], catalog);
+    expect(next["s"]!.inputs["image"]).toEqual(["459:8", 0]);
+  });
+
+  it("stays an error on an input that takes a plain value", () => {
+    expect(() => applyOperations(workflow(), [{ op: "set", node: "9", inputs: { filename_prefix: ["nope", 0] } }], catalog)).toThrow(/there is no node nope$/);
+  });
+});
+
+describe("a stage that fits nowhere it was put", () => {
+  it("is told where it fits", () => {
+    expect(() => applyOperations(workflow(), [{ op: "insert", class_type: "ImageScale", before: "KSampler" }], catalog))
+      .toThrow("ImageScale fits no link into 459:7 (KSampler). Its links: model, positive, negative. It fits before 9.images");
+  });
+
+  it("is told only the places whose type it takes, not one that shows anything", () => {
+    const graph = workflow();
+    graph["sw"] = { class_type: "ComfySwitchNode", inputs: { switch: true, on_true: "x" } };
+    graph["p"] = { class_type: "PreviewAny", inputs: { source: ["sw", 0] } };
+    expect(() => applyOperations(graph, [{ op: "insert", class_type: "ImageScale", before: "KSampler" }], catalog))
+      .toThrow(/\. It fits before 9\.images$/);
+  });
+
+  it("is told nothing more where it fits nowhere", () => {
+    const graph: ApiGraph = { "1": { class_type: "UNETLoader", inputs: { unet_name: "qwen.safetensors" } }, "2": { class_type: "KSampler", inputs: { model: ["1", 0] } } };
+    expect(() => applyOperations(graph, [{ op: "insert", class_type: "ImageScale", before: "2" }], catalog)).toThrow(/Its links: model$/);
+  });
+});
+
+describe("a choice written in part", () => {
+  const choices: NodeCatalog = {
+    ...catalog,
+    Ratio: { input: { required: { aspect_ratio: [["1:1 (Square)", "3:2 (Photo)", "2:3 (Portrait Photo)"], {}], flip: [["x-axis: vertically", "y-axis: horizontally"], {}] } }, output: ["FLOAT"] },
+    Flip: { input: { required: { image: ["IMAGE", {}], flip_method: [["x-axis: vertically", "y-axis: horizontally"], {}] } }, output: ["IMAGE"] },
+    Sampler2: { input: { required: { sampler: [["Euler", "euler_ancestral"], {}] } }, output: ["FLOAT"] },
+  };
+  const ratio = (inputs: Record<string, unknown>) => applyOperations(workflow(), [{ op: "add", class_type: "Ratio", node: "r", inputs }], choices);
+
+  it("is the one choice it starts, equals but for case, or is found in", () => {
+    // The lab: "3:2" for "3:2 (Photo)" cost a refused run three times, "y-axis" a hand edit of the file.
+    const { graph, notes } = ratio({ aspect_ratio: "3:2", flip: "horizontal" });
+    expect(graph["r"]!.inputs).toEqual({ aspect_ratio: "3:2 (Photo)", flip: "y-axis: horizontally" });
+    expect(notes).toEqual(["added r Ratio", 'r.aspect_ratio: "3:2" taken as "3:2 (Photo)"', 'r.flip: "horizontal" taken as "y-axis: horizontally"']);
+    expect(ratio({ aspect_ratio: "3:2 (photo)", flip: "y-axis" }).graph["r"]!.inputs).toEqual({ aspect_ratio: "3:2 (Photo)", flip: "y-axis: horizontally" });
+  });
+
+  it("is the choice it equals but for case, even where another choice starts with it", () => {
+    const { graph } = applyOperations(workflow(), [{ op: "add", class_type: "Sampler2", node: "s", inputs: { sampler: "euler" } }], choices);
+    expect(graph["s"]!.inputs["sampler"]).toBe("Euler");
+  });
+
+  it("is left alone where more than one choice fits, or none", () => {
+    const { graph, notes } = ratio({ aspect_ratio: "16:9", flip: "axis" });
+    expect(graph["r"]!.inputs).toEqual({ aspect_ratio: "16:9", flip: "axis" });
+    expect(notes).toEqual(["added r Ratio"]);
+  });
+
+  it("is not looked for inside a choice when it is two letters", () => {
+    expect(ratio({ aspect_ratio: "1:1 (Square)", flip: "ho" }).graph["r"]!.inputs["flip"]).toBe("ho");
+  });
+
+  it("does not turn the start of several into the one that holds it elsewhere", () => {
+    // "2" starts "2:3 (Portrait Photo)" alone; "3" starts "3:2 (Photo)" alone although "2:3" holds a 3.
+    expect(ratio({ aspect_ratio: "3", flip: "x" }).graph["r"]!.inputs).toEqual({ aspect_ratio: "3:2 (Photo)", flip: "x-axis: vertically" });
+  });
+
+  it("says nothing about a choice written in full", () => {
+    expect(ratio({ aspect_ratio: "2:3 (Portrait Photo)", flip: "x-axis: vertically" }).notes).toEqual(["added r Ratio"]);
+  });
+
+  it("is taken in set and insert as in add", () => {
+    const added = ratio({ aspect_ratio: "1:1 (Square)", flip: "x-axis: vertically" }).graph;
+    const set = applyOperations(added, [{ op: "set", node: "r", inputs: { aspect_ratio: "2:3" } }], choices);
+    expect(set.graph["r"]!.inputs["aspect_ratio"]).toBe("2:3 (Portrait Photo)");
+    expect(set.notes).toEqual(["set r: aspect_ratio", 'r.aspect_ratio: "2:3" taken as "2:3 (Portrait Photo)"']);
+    const inserted = applyOperations(workflow(), [{ op: "insert", class_type: "Flip", node: "f", inputs: { flip_method: "y-axis" } }], choices);
+    expect(inserted.graph["f"]!.inputs["flip_method"]).toBe("y-axis: horizontally");
+    expect(inserted.notes[1]).toBe('f.flip_method: "y-axis" taken as "y-axis: horizontally"');
+  });
+});
+
 describe("set on an input the node does not have", () => {
   const v3: NodeCatalog = {
     ...catalog,
@@ -512,6 +629,30 @@ describe("a template's sample prompt", () => {
   it("does not call a text negative when nothing takes its conditioning", () => {
     const probe: NodeCatalog = { ...classic, Probe: { output_node: true, input: { required: { text: ["STRING", { multiline: true }] } }, output: ["CONDITIONING"] } };
     expect(keyInputs({ p: { class_type: "Probe", inputs: { text: "a castle" } } }, probe)).toBe("prompt: p.text");
+  });
+
+  it("is written by setPrompt where the workflow keeps it, and nowhere else", () => {
+    const graph = marked();
+    // The second encoder's prompt box is empty, and still a place a prompt could go: it is taken out here.
+    delete graph["5"];
+    delete graph["6"];
+    expect(setPrompt(graph, texts, "a cat on a sofa")).toBe("1.on_false");
+    expect(graph["1"]!.inputs["on_false"]).toBe("a cat on a sofa");
+    expect(graph["2"]!.inputs["negative_prompt"]).toBe("blurry");
+    expect(unchangedSamplePrompts(graph, texts)).toEqual([]);
+    const classicGraph = classicTemplate();
+    expect(setPrompt(classicGraph, classic, "a tower")).toBe("1.text");
+    expect(classicGraph["2"]!.inputs["text"]).toBe("blurry, low quality");
+    expect(classicGraph["3"]!.inputs["expression"]).toBe("a * 2");
+  });
+
+  it("is not guessed by setPrompt among several, or where there is none", () => {
+    const several = template();
+    expect(() => setPrompt(several, texts, "a cat")).toThrow("prompt: this workflow has several prompt texts (1.on_false, 5.prompt): write the ones meant with set");
+    expect(several["1"]!.inputs["on_false"]).toBe("Greyscale fashion portrait");
+    const none: ApiGraph = { "7": { class_type: "Shader", inputs: { code: "void main() {}" } } };
+    expect(() => setPrompt(none, classic, "a cat")).toThrow("prompt: this workflow has no prompt to set");
+    expect(none["7"]!.inputs["code"]).toBe("void main() {}");
   });
 
   it("is not reported when one of several sample texts was changed", () => {

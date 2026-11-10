@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { waitForRun, type ComfyUiEndpoint } from "../multimodal/comfyui-client.js";
 
 /**
- * Polling a run while ComfyUI works. A heavy upscale starves its HTTP side: in the lab one /history
- * poll took over 15 s, the tool reported the run as failed, and the 4096x4096 picture was already
- * being written.
+ * Polling a run while ComfyUI works. A heavy job starves its HTTP side: a 4992x3328 upscale on a
+ * full GPU answered no /history poll for over two minutes, the tool reported the run as failed,
+ * and the picture was done four minutes later.
  */
 
 const endpoint: ComfyUiEndpoint = { baseUrl: "http://comfyui:8188", editorUrl: "", runTimeoutMs: 20_000 };
@@ -37,18 +37,21 @@ describe("waitForRun", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("gives up when ComfyUI stays silent", async () => {
-    const fetchMock = stub(["hang"]);
-    await expect(wait()).rejects.toThrow(/did not answer/);
-    expect(fetchMock).toHaveBeenCalledTimes(8);
-  });
-
-  it("counts only silence in a row", async () => {
-    const steps = [...Array.from({ length: 7 }, () => "hang" as const), "running" as const, ...Array.from({ length: 7 }, () => "hang" as const), "done" as const];
-    const fetchMock = stub(steps);
+  it("waits through silence however long, while the run's own time allows", async () => {
+    const fetchMock = stub([...Array.from({ length: 30 }, () => "hang" as const), "done" as const]);
     const outcome = await wait();
     expect(outcome.outputs).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledTimes(16);
+    expect(fetchMock).toHaveBeenCalledTimes(31);
+  });
+
+  it("ends with the run's time limit, not before, when ComfyUI stays silent", async () => {
+    const fetchMock = stub(["hang"]);
+    const started = Date.now();
+    await expect(waitForRun(endpoint, "p1", 600, 1, 5)).rejects.toThrow("The workflow did not finish within 1 s and was cancelled in ComfyUI");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(600);
+    // Past the eight unanswered polls that used to end the wait (timers here are coarse, so only a floor).
+    const polls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/history/")).length;
+    expect(polls).toBeGreaterThan(8);
   });
 
   it("stops at once when ComfyUI is gone", async () => {
@@ -57,7 +60,7 @@ describe("waitForRun", () => {
       throw refused;
     });
     vi.stubGlobal("fetch", fetchMock);
-    await expect(wait()).rejects.toThrow(/cannot be reached/);
+    await expect(waitForRun(endpoint, "p1", 300, 1, 5)).rejects.toThrow(/cannot be reached/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

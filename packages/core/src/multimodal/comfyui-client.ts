@@ -396,12 +396,8 @@ function executionError(entry: Record<string, unknown>): string | null {
  * proxies). On our timeout the run is taken out of ComfyUI's queue, or interrupted if it is
  * the one running, so a dead request does not hold the GPU.
  */
-/** Polls in a row ComfyUI may leave unanswered before the run counts as lost (two minutes at 15 s each). */
-const MAX_UNANSWERED_POLLS = 8;
-
 export async function waitForRun(endpoint: ComfyUiEndpoint, promptId: string, timeoutMs = endpoint.runTimeoutMs, pollMs = 1000, pollTimeoutMs = 15_000): Promise<RunOutcome> {
   const deadline = Date.now() + timeoutMs;
-  let unanswered = 0;
   while (Date.now() < deadline) {
     let history: Record<string, unknown>;
     try {
@@ -410,13 +406,13 @@ export async function waitForRun(endpoint: ComfyUiEndpoint, promptId: string, ti
         "Reading the run from ComfyUI failed",
       );
     } catch (error) {
-      // A heavy job starves ComfyUI's HTTP side: the lab's image_creator was told a run had failed
-      // because one poll took over 15 s, while its 4096x4096 picture was being written.
-      unanswered += 1;
-      if (!(error instanceof ComfyUiSlowAnswerError) || unanswered >= MAX_UNANSWERED_POLLS) throw error;
+      // A heavy job starves ComfyUI's HTTP side, and silence says nothing about the job: a
+      // 4992x3328 upscale on a full GPU answered no poll for over two minutes and was done after
+      // six. A run reported as failed while it goes on gets run again on top. Only the run's own
+      // time limit ends the wait; a server that is gone refuses the connection and ends it at once.
+      if (!(error instanceof ComfyUiSlowAnswerError)) throw error;
       continue;
     }
-    unanswered = 0;
     const entry = history[promptId] as Record<string, unknown> | undefined;
     if (entry) {
       const error = executionError(entry);
@@ -428,13 +424,13 @@ export async function waitForRun(endpoint: ComfyUiEndpoint, promptId: string, ti
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
-  await cancelRun(endpoint, promptId).catch(() => undefined);
+  await cancelRun(endpoint, promptId, pollTimeoutMs).catch(() => undefined);
   throw new ComfyUiError(`The workflow did not finish within ${Math.round(timeoutMs / 1000)} s and was cancelled in ComfyUI`);
 }
 
-export async function cancelRun(endpoint: ComfyUiEndpoint, promptId: string): Promise<void> {
-  await request(endpoint, "/queue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
-  await request(endpoint, "/interrupt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: promptId }) });
+export async function cancelRun(endpoint: ComfyUiEndpoint, promptId: string, timeoutMs = 30_000): Promise<void> {
+  await request(endpoint, "/queue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) }, timeoutMs);
+  await request(endpoint, "/interrupt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: promptId }) }, timeoutMs);
 }
 
 export async function fetchOutput(endpoint: ComfyUiEndpoint, ref: OutputRef): Promise<{ bytes: Buffer; contentType: string }> {
