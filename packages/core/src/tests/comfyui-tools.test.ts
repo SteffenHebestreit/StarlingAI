@@ -460,6 +460,41 @@ describe("comfyui tools", () => {
     expect((server.prompts[0]!["prompt"] as Record<string, { inputs: Record<string, unknown> }>)["20"]!.inputs["image"]).toBe("starlingai/photo.png");
   });
 
+  it("finds a picture this tool saved by the name the agent gives it", async () => {
+    // comfyui_run names "generated/comfyui/base.png"; the lab's image_creator handed the next run "base.png".
+    mkdirSync(join(tempDir, "generated", "comfyui"), { recursive: true });
+    writeFileSync(join(tempDir, "generated", "comfyui", "base.png"), PNG_1X1);
+    await call("comfyui_workflow", {
+      path: "comfyui/edit.json",
+      start_from: "template:image_qwen_image_2_1_t2i",
+      operations: [{ op: "add", node: "20", class_type: "LoadImage", inputs: { image: "placeholder.png" } }, { op: "add", node: "21", class_type: "SaveImage", inputs: { images: ["20", 0] } }],
+    });
+    for (const name of ["base.png", "comfyui/base.png", "generated/comfyui/base.png"]) {
+      const result = await call("comfyui_run", { workflow: "comfyui/edit.json", images: { "20.image": name } });
+      expect(result.success, name).toBe(true);
+      expect(result.output).toContain("20.image=generated/comfyui/base.png");
+    }
+    expect(server.uploads).toEqual(["starlingai/base.png", "starlingai/base.png", "starlingai/base.png"]);
+  });
+
+  it("says where pictures are when the one named is not there, and runs nothing", async () => {
+    await call("comfyui_workflow", {
+      path: "comfyui/edit.json",
+      start_from: "template:image_qwen_image_2_1_t2i",
+      operations: [{ op: "add", node: "20", class_type: "LoadImage", inputs: { image: "placeholder.png" } }, { op: "add", node: "21", class_type: "SaveImage", inputs: { images: ["20", 0] } }],
+    });
+    const result = await call("comfyui_run", { workflow: "comfyui/edit.json", images: { "20.image": "missing.png" } });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('images: "20.image": there is no picture missing.png in the workspace. comfyui_run saves its pictures under generated/comfyui/ and names each one in its answer');
+    expect(server.uploads).toEqual([]);
+    expect(server.prompts).toHaveLength(0);
+    // A path outside the workspace is refused as that, not reported as a missing picture.
+    const outside = await call("comfyui_run", { workflow: "comfyui/edit.json", images: { "20.image": "../../outside.png" } });
+    expect(outside.success).toBe(false);
+    expect(outside.error).not.toContain("there is no picture");
+    expect(outside.error).toMatch(/escapes workspace/i);
+  });
+
   it("refuses a key that names no node, listing the nodes there are", async () => {
     await call("comfyui_workflow", { path: "comfyui/fox.json", start_from: "template:image_qwen_image_2_1_t2i" });
     const result = await call("comfyui_run", { workflow: "comfyui/fox.json", set: { "99.steps": 5 } });

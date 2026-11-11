@@ -548,6 +548,30 @@ function whereToChange(graph: ApiGraph, catalog: NodeCatalog): string {
   return keys ? ` Where to change it: ${keys}.` : "";
 }
 
+/**
+ * A workspace picture for a LoadImage input, found the way the agent names it. comfyui_run's answer
+ * names a picture by its place ("generated/comfyui/fox_snow_base.png"), and the lab's image_creator
+ * gave the next run "fox_snow_base.png": the run failed with ENOENT and the workspace's internal
+ * path, the agent tried to repair the workflow by hand, and the upscale it was for never ran.
+ * Tried in order: the path as written, the same path where a write puts it, and the same path in the
+ * folder this tool saves its pictures in. Null when none of them is there.
+ */
+async function readInputPicture(path: string, ctx: ToolContext): Promise<Awaited<ReturnType<typeof readWorkspaceBinaryFile>> | null> {
+  const names = [
+    () => path,
+    () => resolveWorkspaceWritePath(path, ctx.workspacePath).relativePath,
+    () => resolveWorkspaceWritePath(`comfyui/${path}`, ctx.workspacePath).relativePath,
+  ];
+  for (const name of names) {
+    try {
+      return await readWorkspaceBinaryFile(name(), ctx.workspacePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+  }
+  return null;
+}
+
 function unknownKey(what: string, key: string, graph: ApiGraph, catalog: NodeCatalog): ToolResult {
   return fail(`${what}: "${key}" names no node of this workflow (write "<node id>.<input>").${whereToChange(graph, catalog)} Its nodes: ${nodeListing(graph)}`, { rejectedBeforeEffect: true });
 }
@@ -648,7 +672,8 @@ registerTool({
         const target = splitKey(key, graph);
         if (!target) return unknownKey("images", key, graph, catalog);
         if (typeof path !== "string") return fail(`images: "${key}" takes a workspace image path`, { rejectedBeforeEffect: true });
-        const file = await readWorkspaceBinaryFile(path, ctx.workspacePath);
+        const file = await readInputPicture(path, ctx);
+        if (!file) return fail(`images: "${key}": there is no picture ${path} in the workspace. comfyui_run saves its pictures under generated/comfyui/ and names each one in its answer`, { rejectedBeforeEffect: true });
         graph[target[0]]!.inputs[target[1]] = await uploadInputImage(endpoint, Buffer.from(file.bytes), file.filename, uploadFolder);
         uploaded.add(`${target[0]}.${target[1]}`);
         changes.push(`${key}=${file.relativePath}`);
