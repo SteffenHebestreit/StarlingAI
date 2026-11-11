@@ -66,6 +66,7 @@ const AGENTS = {
   vision_browser_analyst: { tools: ["browser_snapshot", "browser_screenshot", "read_shared_facts", "share_finding", "write_file", "edit_file"], routingGenerated: label("GATHER", "browser", "image") },
   data_analyst: { tools: ["read_file", "spreadsheet_read", "json_query", "read_shared_facts", "share_finding", "write_file"], routingGenerated: label("GATHER", "workspace", "structured_data") },
   document_intake: { tools: ["extract_file_content", "read_file", "spreadsheet_read", "read_shared_facts", "share_finding", "write_file"], routingGenerated: label("GATHER", "workspace", "file_upload") },
+  computer_use_agent: { tools: ["computer_snapshot", "computer_click", "vscode_run_terminal_command", "http_request", "share_finding"], routingGenerated: label("ACT", "desktop_host", "live_system") },
 } as const;
 
 /** The live 2f31f387 plan, verbatim. */
@@ -809,6 +810,75 @@ describe("the research gate's turn trigger", () => {
     await getTool("delegate_to_agent")!.execute({ task: GERMAN_ROUTED_STEP }, ctx);
 
     expect(ran()).toEqual(["browser_agent", "researcher"]);
+  }, 30_000);
+
+  /** The deployed stack's step of 2026-11-11, which named no agent. */
+  const COMFY_STEP = "Ermittle, welche Modelle aktuell auf dem ComfyUI-Server installiert sind. Liste sie nach Kategorie sortiert auf.";
+
+  it("sends a step to research first when the router's pick cannot gather and nothing left reads the web", async () => {
+    // Routed [image_creator, computer_use_agent, …]: the generator was dropped, and computer_use_agent
+    // searched a desktop for a server's models. Here a writer stands in for the generator.
+    routeAs([{ name: "content_writer", score: 0.84 }, { name: "computer_use_agent", score: 0.83 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: COMFY_STEP }, turnCtx("s-routed-neighbour"));
+
+    expect(ran()).toEqual(["researcher"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["content_writer"], redirectedTo: "researcher", keptBehind: ["computer_use_agent"], trigger: "turn_evidence" }),
+    ]);
+  }, 30_000);
+
+  it("judges by the candidate that would take the step, not by one further down that reads the web", async () => {
+    // The "which open image model is best" step: image_sourcer, which searches the web, ranked behind
+    // swarm_maintainer, which answered from memory. A browser agent stands in for image_sourcer here.
+    routeAs([{ name: "content_writer", score: 0.84 }, { name: "computer_use_agent", score: 0.83 }, { name: "browser_agent", score: 0.82 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: "Ermittle das aktuell beste offene Bildmodell für ComfyUI und vergleiche die führenden Modelle." }, turnCtx("s-routed-next"));
+
+    expect(ran()).toEqual(["researcher"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ redirectedTo: "researcher", keptBehind: ["computer_use_agent", "browser_agent"] }),
+    ]);
+  }, 30_000);
+
+  it("keeps the neighbour behind research: it runs when research fails", async () => {
+    runner.mockImplementation(async (args: SubAgentRunOptions): Promise<SubAgentRunResult> => {
+      const failed = args.agentName === "researcher";
+      return {
+        output: failed ? "researcher: nothing found." : `${args.agentName}: done`,
+        stats: { ...statsFor(args), ...(failed ? { outcome: "failure" as const } : {}) },
+      };
+    });
+    routeAs([{ name: "content_writer", score: 0.84 }, { name: "computer_use_agent", score: 0.83 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: COMFY_STEP }, turnCtx("s-routed-neighbour-behind"));
+
+    expect(ran()).toEqual(["researcher", "computer_use_agent"]);
+  }, 30_000);
+
+  it("leaves the step to what is left when the router put it first, or when something left reads the web", async () => {
+    // A mailbox agent the router put first keeps a step whose writer was dropped behind it.
+    routeAs([{ name: "mail_agent", score: 0.86 }, { name: "content_writer", score: 0.84 }]);
+    const { getTool } = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await getTool("delegate_to_agent")!.execute({ task: "Die Rechnung von Nordlicht im Postfach suchen und den Betrag nennen." }, turnCtx("s-routed-mail-first"));
+    vi.doUnmock("../tools/agent-routing.js");
+    vi.resetModules();
+    // A dropped top pick with a browser agent left, which reads the web itself: the ranking stands,
+    // and a step about a workspace table stays with the agent that reads it.
+    routeAs([{ name: "content_writer", score: 0.84 }, { name: "data_analyst", score: 0.83 }, { name: "browser_agent", score: 0.82 }]);
+    const registry = await import("../tools/registry.js");
+    await import("../tools/sub-agent.js");
+    await registry.getTool("delegate_to_agent")!.execute({ task: "Die Tabelle lager.csv im Arbeitsbereich auswerten und den Lagerbestand zusammenzählen." }, turnCtx("s-routed-gatherer-left"));
+
+    expect(ran()).toEqual(["mail_agent", "data_analyst"]);
+    expect(rows("delegation_routing_filtered_research_incapable")).toEqual([
+      expect.objectContaining({ droppedAgents: ["content_writer"], redirectedTo: null }),
+      expect.objectContaining({ droppedAgents: ["content_writer"], redirectedTo: null }),
+    ]);
   }, 30_000);
 
   it("leaves the router's pick alone with no verdict, and for an agent with a source of its own", async () => {
