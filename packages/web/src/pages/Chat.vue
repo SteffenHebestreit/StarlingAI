@@ -12,6 +12,10 @@
       <OrbCanvas :ai-state="orbAiState" class="w-full h-full" />
     </div>
 
+    <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
+         chat keeps the question and the answer. -->
+    <OrbActivity :activity="orbActivity" :language="orbLanguage" @open="openLiveSteps" />
+
     <!-- Drag-drop overlay: visible while a file drag is hovering the chat surface -->
     <div
       v-if="dropActive"
@@ -171,6 +175,7 @@
               :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
               :fold-steps="msg.role === 'assistant' && msg.id !== 'streaming'"
               :allow-rewind="!gateway.isLoading"
+              :live-at-orb="true"
               @rewind="handleRewind"
               @resend="handleResendSteer"
               @show-step="showStep"
@@ -1098,6 +1103,9 @@ import { marked } from "marked";
 import { useVoice, type RecordingOutcome } from "@/speech/useVoice";
 import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
+import OrbActivity from "@/components/OrbActivity.vue";
+import { liveActivity } from "@/composables/orbActivity";
+import { turnLanguage } from "@/composables/turnText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
 import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
 import { chatStarters, startersVisible } from "@/composables/chatStarters";
@@ -1653,7 +1661,25 @@ const orbAiState = computed(() => {
   return "default";
 });
 
-const displayMessages = computed(() => gateway.messages);
+// A progress message (its plan, a finished step) is said at the orb while the turn runs, and
+// spoken in voice mode; it is not a message of the conversation.
+const displayMessages = computed(() => gateway.messages.filter((message) => !message.progress));
+
+// The live turn's clock: durations at the orb tick while a turn runs, and only then.
+const liveClock = ref(Date.now());
+let liveClockTimer: ReturnType<typeof setInterval> | undefined;
+watch(() => Boolean(activeStreamingMessage.value), (running) => {
+  if (running && !liveClockTimer) {
+    liveClock.value = Date.now();
+    liveClockTimer = setInterval(() => { liveClock.value = Date.now(); }, 1000);
+  } else if (!running && liveClockTimer) {
+    clearInterval(liveClockTimer);
+    liveClockTimer = undefined;
+  }
+}, { immediate: true });
+onBeforeUnmount(() => { if (liveClockTimer) clearInterval(liveClockTimer); });
+const orbLanguage = computed(() => turnLanguage(activeStreamingMessage.value?.language ?? null));
+const orbActivity = computed(() => liveActivity(gateway.messages, liveClock.value, orbLanguage.value));
 const sceneJobs = computed(() => scenesStore.recentJobs);
 const configuredJobs = computed(() => jobsStore.jobs);
 const activeSessions = computed(() => gateway.activeSessions);
@@ -1719,6 +1745,16 @@ watch(() => gateway.currentSessionId, () => {
   stepDetailMessageId.value = null;
   focusedStepId.value = null;
 });
+
+/** The live turn's steps in the side panel, at this step when the orb's click named one. */
+function openLiveSteps(stepId: string | undefined): void {
+  stepDetailMessageId.value = "streaming";
+  focusedStepId.value = stepId ?? null;
+  focusRequest.value += 1;
+  requestedPanelTab.value = "steps";
+  sidePanelOpen.value = true;
+  void nextTick(() => { requestedPanelTab.value = null; });
+}
 
 function showStep(messageId: string, stepId: string): void {
   stepDetailMessageId.value = messageId;
@@ -3602,12 +3638,11 @@ onUnmounted(() => {
 }
 
 /* ── Orbit corridor ─────────────────────────────────────────────────────
-   On wide screens the entity owns the center of the viewport. Both flanks
-   hug the protected central corridor — assistant bubbles right-align
-   against its left boundary, user bubbles left-align against its right —
-   so the conversation clusters around the entity like panels around a HUD
-   core. The whole band is width-capped and centered so nothing drifts to
-   the far corners of ultrawide windows. */
+   On wide screens the entity owns the center of the viewport. The
+   conversation sits on the flanks, each side at its OUTER edge — the
+   assistant on the left, the user on the right — and every bubble ends
+   before the orb's zone, so the orb and the steps orbiting it
+   (OrbActivity.vue) stay in view. */
 /* ── 3D depth on scroll ─────────────────────────────────────────────────
    Messages arrive from deep space at the bottom of the scroller, hold full
    presence through the middle band, and recede back into space as they
@@ -3629,32 +3664,22 @@ onUnmounted(() => {
 }
 
 @media (min-width: 1100px) {
-  /* Half the corridor width; flanks end at 50% ± this, so the protected
-     zone stays centered on the orb whatever the column width is. The gap
-     is deliberately small and the bubble cap generous: readable content
-     beats orb visibility, so wide content (tables, code) may partially
-     cover the entity — accepted trade-off. */
-  .chat-message-scroll { --orbit-gap: clamp(2.5rem, 4vw, 6rem); }
-  /* No max-width on the rows: the 50% in the flank padding resolves against
-     the scroller (the rows' containing block), so a row cap would make the
-     flanks SHRINK as the viewport grows past the cap (the padding kept
-     growing while the row stopped). Uncapped, the corridor always centers
-     on the viewport-centered orb; the bubble max-width below keeps content
-     out of the far corners on ultrawide screens. */
+  /* The orb's zone, measured from the center: its particle torus reaches
+     about 14% of the viewport height (OrbCanvas.vue frames it by height),
+     the ring of steps around it about 17%, and a margin. A bubble ends
+     there, but never narrower than a readable 28rem: on a small window wide
+     content may still cover part of the orb — readable content wins. */
+  .chat-message-scroll { --orb-clear: calc(24vh + 1.5rem); }
   .chat-message-scroll :deep(.message-row--ai),
   .chat-message-scroll :deep(.message-row--user) {
     width: 100%;
   }
-  .chat-message-scroll :deep(.message-row--ai) {
-    justify-content: flex-end;
-    padding-right: calc(50% + var(--orbit-gap));
-  }
-  .chat-message-scroll :deep(.message-row--user) {
-    justify-content: flex-start;
-    padding-left: calc(50% + var(--orbit-gap));
-  }
+  .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; }
+  .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; }
   .chat-message-scroll :deep(.message-bubble--ai),
-  .chat-message-scroll :deep(.message-bubble--user) { max-width: min(100%, 52rem); }
+  .chat-message-scroll :deep(.message-bubble--user) {
+    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear))));
+  }
 }
 
 /* ── Fly-out input bay ──────────────────────────────────────────────────

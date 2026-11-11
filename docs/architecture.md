@@ -579,6 +579,8 @@ packages/
       components/           (15) MessageBubble.vue — chat message renderer
                             LoginModal.vue — JWT login
                             OrbCanvas.vue — Three.js swarm visualizer
+                            OrbActivity.vue — the running turn at the orb: steps on a
+                              tilted ring, its newest words in a status line
                             SwarmStatusPanel.vue — live agent and bus status
                             BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
                               ShellSessionPanel.vue — live operator docks
