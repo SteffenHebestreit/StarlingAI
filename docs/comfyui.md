@@ -72,6 +72,8 @@ A value written as part of exactly one of an input's choices is taken as that ch
 
 `insert` puts a new node on a connection that exists. `before` names the node that should receive its output (`"KSampler"`, or `"<node>.<input>"` when several inputs fit). Left out, the stage goes in front of the workflow's output, if only one output fits. The old connection then feeds the new node, matched by type, and `inputs` supplies only what else it needs. An upscaler, a LoRA or a filter goes in this way without looking up ids.
 
+`remove` takes a stage out of its chain the way ComfyUI's bypass does: what the stage was given goes on to the inputs it fed, where exactly one of its inputs carries that type. A loader, a decoder or a node blending two pictures leaves its inputs unconnected instead, and the answer names them. An `insert` without `before` in the same call takes the removed stage's place and feeds everything it fed: removing the official upscale template's `ImageScaleBy` and inserting `ImageUpscaleWithModel` keeps both the saved picture and the comparison on the new stage.
+
 A node added by an operation that nothing reads from is reported as not connected, by `comfyui_workflow` and again by `comfyui_run`, because ComfyUI never runs it. Unused nodes a template brought along are not reported: 22 of the 265 official templates have some.
 
 `prompt`, on `comfyui_workflow` and on `comfyui_run`, writes what the picture should show to the place the workflow keeps its prompt, so a template can be run without knowing its node ids: `comfyui_run` with `workflow: "template:image_qwen_image_2_1_t2i"` and `prompt: "a red fox in snow"`. Where a workflow has several prompt texts, the answer lists them and `set` writes the ones meant.

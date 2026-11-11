@@ -738,6 +738,79 @@ function outputNodeFor(graph: ApiGraph, classType: string, def: NodeDef, given: 
   );
 }
 
+/**
+ * Where a removed node passed something through: what it was given, and the inputs it gave that
+ * to. The lab's image_creator took the official upscale template (LoadImage -> ImageScaleBy ->
+ * SaveImage and the "after" side of an ImageCompare) and wrote, in one call, remove the
+ * ImageScaleBy, insert ImageUpscaleWithModel. The removal cut both inputs off, so the insert found
+ * only the comparison's untouched "before" side to sit on; three calls went into undoing that, and
+ * the run never happened.
+ */
+interface Gap {
+  removed: string;
+  type: string;
+  source: Link;
+  consumers: Array<{ id: string; input: string }>;
+}
+
+/**
+ * Takes a node out of the chain it sat in: an input it fed gets what the node itself was given of
+ * that type, as ComfyUI's own "bypass" does. Only where exactly one of its inputs carries the type
+ * the output gave; anything else (a loader, a decoder, two pictures blended) is cut and reported.
+ */
+function removeNode(graph: ApiGraph, removed: string, catalog: NodeCatalog): { gaps: Gap[]; cut: string[] } {
+  const gone = graph[removed]!;
+  delete graph[removed];
+  const def = catalog[gone.class_type];
+  const given = new Map<string, Link[]>();
+  for (const input of def ? nodeInputs(def, gone.inputs) : []) {
+    const value = gone.inputs[input.name];
+    if (input.widget || input.type === "*" || !isLink(value)) continue;
+    given.set(input.type, [...(given.get(input.type) ?? []), value]);
+  }
+  const outputs = def ? nodeOutputs(def) : [];
+  const gaps = new Map<string, Gap>();
+  const cut: string[] = [];
+  for (const [id, node] of Object.entries(graph)) {
+    for (const [name, value] of Object.entries(node.inputs)) {
+      if (!isLink(value) || value[0] !== removed) continue;
+      const type = outputs[value[1]]?.type;
+      const sources = type ? given.get(type) : undefined;
+      if (!type || sources?.length !== 1) {
+        delete node.inputs[name];
+        cut.push(`${id}.${name}`);
+        continue;
+      }
+      const source = sources[0]!;
+      node.inputs[name] = [...source];
+      const gap = gaps.get(type) ?? { removed, type, source, consumers: [] };
+      gap.consumers.push({ id, input: name });
+      gaps.set(type, gap);
+    }
+  }
+  return { gaps: [...gaps.values()], cut };
+}
+
+/** The one gap left this call that a node of type `def` takes and gives; several are not guessed between. */
+function gapFor(graph: ApiGraph, gaps: Gap[], def: NodeDef, given: Record<string, unknown>): { gap: Gap; receive?: string; output: number } | undefined {
+  const sockets = nodeInputs(def).filter((input) => !input.widget && !input.socketless && !input.grown);
+  const outputs = nodeOutputs(def).map((output, index) => ({ ...output, index }));
+  const fitting = gaps.flatMap((gap) => {
+    // Only the inputs that still get what the removal gave them: a later set may have rewired one.
+    const consumers = gap.consumers.filter(({ id, input }) => {
+      const value = graph[id]?.inputs[input];
+      return isLink(value) && value[0] === gap.source[0] && value[1] === gap.source[1];
+    });
+    const takers = sockets.filter((socket) => socket.type === gap.type);
+    const receive = takers.find((socket) => !(socket.name in given));
+    // A taker the caller wired itself feeds the node already: only the outputs move.
+    const wired = takers.some((socket) => isLink(given[socket.name]));
+    const output = outputs.find((candidate) => candidate.type === gap.type);
+    return consumers.length && (receive || wired) && output ? [{ gap: { ...gap, consumers }, ...(receive ? { receive: receive.name } : {}), output: output.index }] : [];
+  });
+  return fitting.length === 1 ? fitting[0] : undefined;
+}
+
 function requireNodeType(catalog: NodeCatalog, classType: unknown, where: string): NodeDef {
   const def = catalog[String(classType)];
   if (def) return def;
@@ -753,6 +826,7 @@ function requireNodeType(catalog: NodeCatalog, classType: unknown, where: string
 export function applyOperations(graph: ApiGraph, operations: GraphOperation[], catalog: NodeCatalog): { graph: ApiGraph; notes: string[] } {
   const next: ApiGraph = structuredClone(graph);
   const notes: string[] = [];
+  const gaps: Gap[] = [];
   operations.forEach((operation, index) => {
     const where = `operation ${index + 1} (${operation?.op ?? "?"})`;
     if (!operation || typeof operation !== "object") throw new GraphOperationError(`${where}: not an object`);
@@ -767,6 +841,22 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
         const id = operation.node ? String(operation.node) : nextId(next);
         if (next[id]) throw new GraphOperationError(`${where}: node ${id} already exists`);
         const given = resolveLinks(next, operation.inputs ?? {}, where, { def, catalog, notes, spliced: true });
+        // Removed and inserted in one call, with no place named: the new node takes the removed one's place.
+        const filling = operation.before ? undefined : gapFor(next, gaps, def, given);
+        if (filling) {
+          const { gap, receive, output } = filling;
+          const filled = defaultsFor(def);
+          const defaulted = Object.keys(filled).filter((name) => !(name in given));
+          const inserted: ApiNode = { class_type: operation.class_type, inputs: { ...filled, ...given, ...(receive ? { [receive]: [...gap.source] } : {}) }, _meta: { ...(operation.title ? { title: operation.title } : {}), added: true } };
+          next[id] = inserted;
+          // Its inputs now get the new node, so the place is no longer open for a later insert.
+          for (const consumer of gap.consumers) next[consumer.id]!.inputs[consumer.input] = [id, output];
+          notes.push(
+            `inserted ${id} ${operation.class_type} where ${gap.removed} was (${receive ? `${receive}<-${gap.source[0]}.${gap.source[1]}; ` : ""}gives ${gap.consumers.map((consumer) => `${consumer.id}.${consumer.input}`).join(", ")})${defaulted.length ? ` (defaults for ${defaulted.join(", ")})` : ""}`,
+            ...completeChoices(id, inserted, def, Object.keys(given)),
+          );
+          break;
+        }
         const target = operation.before ? resolveInputRef(next, String(operation.before), where) : { id: outputNodeFor(next, operation.class_type, def, given, catalog, where), input: undefined };
         const node = next[target.id]!;
         const candidates = spliceCandidates(next, node, def, given, catalog, target.input);
@@ -819,17 +909,10 @@ export function applyOperations(graph: ApiGraph, operations: GraphOperation[], c
       }
       case "remove": {
         const removed = resolveNodeRef(next, String(operation.node), where);
-        delete next[removed];
-        const cut: string[] = [];
-        for (const [id, node] of Object.entries(next)) {
-          for (const [name, value] of Object.entries(node.inputs)) {
-            if (isLink(value) && value[0] === removed) {
-              delete node.inputs[name];
-              cut.push(`${id}.${name}`);
-            }
-          }
-        }
-        notes.push(`removed ${removed}${cut.length ? `; now unconnected: ${cut.join(", ")}` : ""}`);
+        const { gaps: left, cut } = removeNode(next, removed, catalog);
+        gaps.push(...left);
+        const passed = left.map((gap) => `${gap.consumers.map((consumer) => `${consumer.id}.${consumer.input}`).join(", ")} now get ${gap.source[0]}.${gap.source[1]}, which went into ${removed}`);
+        notes.push(`removed ${removed}${passed.length ? `; ${passed.join("; ")}` : ""}${cut.length ? `; now unconnected: ${cut.join(", ")}` : ""}`);
         break;
       }
       case "title": {
