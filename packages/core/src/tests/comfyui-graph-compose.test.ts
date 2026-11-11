@@ -734,3 +734,184 @@ describe("naming a node", () => {
     expect(() => resolveNodeRef(graph, "wen", "x")).toThrow(/there is no node wen/);
   });
 });
+
+describe("removing a stage and putting another in its place", () => {
+  // The official "Image Upscale: Traditional Interpolation" template: the scaled picture is saved and shown against the original.
+  const upscaleCatalog: NodeCatalog = {
+    ...catalog,
+    LoadImage: { input: { required: { image: [["pray.png"], {}] } }, output: ["IMAGE", "MASK"] },
+    ImageScaleBy: { input: { required: { image: ["IMAGE", {}], upscale_method: [["lanczos", "bicubic"], {}], scale_by: ["FLOAT", { default: 2 }] } }, output: ["IMAGE"] },
+    SaveImage: { output_node: true, input: { required: { images: ["IMAGE", {}], filename_prefix: ["STRING", { default: "ComfyUI" }] } }, output: [] },
+    ImageCompare: { output_node: true, input: { required: { image_a: ["IMAGE", {}], image_b: ["IMAGE", {}] } }, output: [] },
+  };
+  function upscaleTemplate(): ApiGraph {
+    return {
+      "2": { class_type: "LoadImage", inputs: { image: "pray.png" } },
+      "3": { class_type: "ImageScaleBy", inputs: { image: ["2", 0], upscale_method: "lanczos", scale_by: 2 } },
+      "5": { class_type: "SaveImage", inputs: { images: ["3", 0], filename_prefix: "ComfyUI" } },
+      "7": { class_type: "ImageCompare", inputs: { image_a: ["2", 0], image_b: ["3", 0] } },
+    };
+  }
+
+  it("puts the new stage where the removed one was, with everything it fed", () => {
+    // The operations as the lab's image_creator wrote them, invented loader id included.
+    const { graph, notes } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "add", class_type: "UpscaleModelLoader", inputs: { model_name: "RealESRGAN_x4plus.pth" } },
+      { op: "insert", class_type: "ImageUpscaleWithModel", inputs: { upscale_model: ["13", 0] } },
+    ], upscaleCatalog);
+    expect(graph["9"]!.inputs).toEqual({ upscale_model: ["8", 0], image: ["2", 0] });
+    expect(graph["5"]!.inputs["images"]).toEqual(["9", 0]);
+    expect(graph["7"]!.inputs).toEqual({ image_a: ["2", 0], image_b: ["9", 0] });
+    expect(notes).toContain("inserted 9 ImageUpscaleWithModel where 3 was (image<-2.0; gives 5.images, 7.image_b)");
+    expect(checkGraph(graph, upscaleCatalog).errors).toEqual([]);
+    expect(danglingNodes(graph, upscaleCatalog)).toEqual([]);
+  });
+
+  it("keeps the chain connected when only a node is removed", () => {
+    const { graph, notes } = applyOperations(upscaleTemplate(), [{ op: "remove", node: "ImageScaleBy" }], upscaleCatalog);
+    expect(graph["5"]!.inputs["images"]).toEqual(["2", 0]);
+    expect(graph["7"]!.inputs).toEqual({ image_a: ["2", 0], image_b: ["2", 0] });
+    expect(notes[0]).toBe("removed 3; 5.images, 7.image_b now get 2.0, which went into 3");
+    expect(checkGraph(graph, upscaleCatalog).errors).toEqual([]);
+  });
+
+  it("cuts what it cannot pass on: a different type, or two inputs of the type", () => {
+    const decoded = applyOperations(workflow(), [{ op: "remove", node: "VAEDecode" }], catalog);
+    expect(decoded.notes[0]).toBe("removed 459:8; now unconnected: 9.images");
+    const graph = upscaleTemplate();
+    graph["4"] = { class_type: "ImageBlend", inputs: { image1: ["2", 0], image2: ["3", 0] } };
+    graph["5"]!.inputs["images"] = ["4", 0];
+    const blended = applyOperations(graph, [{ op: "remove", node: "4" }], upscaleCatalog);
+    expect(blended.graph["5"]!.inputs["images"]).toBeUndefined();
+    expect(blended.notes[0]).toBe("removed 4; now unconnected: 5.images");
+  });
+
+  it("follows a chain removed stage by stage to the place that is left", () => {
+    const graph = upscaleTemplate();
+    graph["4"] = { class_type: "ImageScaleBy", inputs: { image: ["3", 0], upscale_method: "bicubic", scale_by: 2 } };
+    graph["5"]!.inputs["images"] = ["4", 0];
+    delete graph["7"];
+    const { graph: next } = applyOperations(graph, [
+      { op: "remove", node: "3" },
+      { op: "remove", node: "4" },
+      { op: "insert", class_type: "ImageScale", node: "up" },
+    ], upscaleCatalog);
+    expect(next["up"]!.inputs["image"]).toEqual(["2", 0]);
+    expect(next["5"]!.inputs["images"]).toEqual(["up", 0]);
+  });
+
+  it("feeds only what is still there and still waiting", () => {
+    const { graph } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "remove", node: "7" },
+      { op: "insert", class_type: "ImageScale", node: "up" },
+    ], upscaleCatalog);
+    expect(graph["5"]!.inputs["images"]).toEqual(["up", 0]);
+    expect(graph["7"]).toBeUndefined();
+  });
+
+  it("takes a stage whose input the caller wired, and moves the outputs to it", () => {
+    const { graph, notes } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageScale", node: "up", inputs: { image: ["LoadImage", 0] } },
+    ], upscaleCatalog);
+    expect(graph["up"]!.inputs["image"]).toEqual(["2", 0]);
+    expect(graph["5"]!.inputs["images"]).toEqual(["up", 0]);
+    expect(graph["7"]!.inputs["image_b"]).toEqual(["up", 0]);
+    expect(notes[1]).toBe("inserted up ImageScale where 3 was (gives 5.images, 7.image_b) (defaults for width)");
+  });
+
+  it("gives the removed node's input to the socket of its type, not to the first one free", () => {
+    const { graph } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageUpscaleWithModel", node: "up" },
+    ], upscaleCatalog);
+    expect(graph["up"]!.inputs).toEqual({ image: ["2", 0] });
+    expect(graph["5"]!.inputs["images"]).toEqual(["up", 0]);
+  });
+
+  it("does not fill a place with a stage that gives something else", () => {
+    expect(() => applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageStats" },
+    ], upscaleCatalog)).toThrow(/ImageStats fits in front of no output of this workflow/);
+  });
+
+  it("leaves an input that was given something else since", () => {
+    const { graph } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "set", node: "5", inputs: { images: ["2", 1] } },
+      { op: "insert", class_type: "ImageScale", node: "up" },
+    ], upscaleCatalog);
+    expect(graph["5"]!.inputs["images"]).toEqual(["2", 1]);
+    expect(graph["7"]!.inputs["image_b"]).toEqual(["up", 0]);
+  });
+
+  it("cuts what a switch passed on: which of its inputs was meant is not known", () => {
+    const graph: ApiGraph = {
+      "1": { class_type: "VAEDecode", inputs: { samples: ["2", 0] } },
+      "2": { class_type: "KSampler", inputs: {} },
+      "3": { class_type: "ComfySwitchNode", inputs: { switch: true, on_false: ["1", 0], on_true: "x" } },
+      "4": { class_type: "SaveImageAdvanced", inputs: { images: ["3", 0], filename_prefix: "x" } },
+    };
+    expect(applyOperations(graph, [{ op: "remove", node: "3" }], catalog).notes[0]).toBe("removed 3; now unconnected: 4.images");
+  });
+
+  it("fills a place once", () => {
+    expect(() => applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageScale" },
+      { op: "insert", class_type: "ImageScale" },
+    ], upscaleCatalog)).toThrow(/operation 3 \(insert\): ImageScale could go before several outputs/);
+  });
+
+  it("does not count a plain value in the socket as wiring it", () => {
+    expect(() => applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageScale", inputs: { image: "photo.png" } },
+    ], upscaleCatalog)).toThrow(/ImageScale fits in front of no output of this workflow/);
+  });
+
+  it("does not guess between two places left open", () => {
+    const graph = upscaleTemplate();
+    graph["6"] = { class_type: "ImageScaleBy", inputs: { image: ["2", 0], upscale_method: "bicubic", scale_by: 2 } };
+    graph["7"]!.inputs["image_b"] = ["6", 0];
+    expect(() => applyOperations(graph, [
+      { op: "remove", node: "3" },
+      { op: "remove", node: "6" },
+      { op: "insert", class_type: "ImageScale" },
+    ], upscaleCatalog)).toThrow(/could go before several outputs/);
+  });
+
+  it("takes the place named in before over the one left open", () => {
+    const { graph } = applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "ImageScale", node: "up", before: "5" },
+    ], upscaleCatalog);
+    expect(graph["5"]!.inputs["images"]).toEqual(["up", 0]);
+    expect(graph["7"]!.inputs["image_b"]).toEqual(["2", 0]);
+  });
+
+  it("fills a place only with a stage of the type that flowed there", () => {
+    const graph = workflow();
+    graph["lora"] = { class_type: "LoraLoaderModelOnly", inputs: { model: ["1", 0], lora_name: "a.safetensors", strength_model: 1 } };
+    graph["459:7"]!.inputs["model"] = ["lora", 0];
+    const swapped = applyOperations(graph, [
+      { op: "remove", node: "lora" },
+      { op: "insert", class_type: "LoraLoaderModelOnly", node: "other", inputs: { lora_name: "b.safetensors" } },
+    ], catalog);
+    expect(swapped.graph["459:7"]!.inputs["model"]).toEqual(["other", 0]);
+    expect(swapped.graph["other"]!.inputs["model"]).toEqual(["1", 0]);
+    expect(() => applyOperations(upscaleTemplate(), [
+      { op: "remove", node: "3" },
+      { op: "insert", class_type: "LoraLoaderModelOnly" },
+    ], upscaleCatalog)).toThrow(/LoraLoaderModelOnly fits in front of no output of this workflow/);
+  });
+
+  it("forgets the place once the call is over", () => {
+    const { graph } = applyOperations(upscaleTemplate(), [{ op: "remove", node: "3" }], upscaleCatalog);
+    expect(() => applyOperations(graph, [{ op: "insert", class_type: "ImageScale" }], upscaleCatalog))
+      .toThrow('could go before several outputs: before: "5" (SaveImage) or before: "7" (ImageCompare)');
+  });
+});

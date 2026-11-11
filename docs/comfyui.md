@@ -53,7 +53,7 @@ The file names match ComfyUI's official templates, so those templates run unchan
 | `comfyui_workflow` | 1 | Creates or changes a workflow kept as an API-format JSON file in the workspace. It starts from a template, an editor workflow or a PNG ComfyUI made, applies `insert` / `add` / `set` / `remove` / `title` operations, and checks the result against the server's nodes and model files. It can also save the workflow to the editor's library (`save_to_editor`) or write an editor-format file (`editor_file`). |
 | `comfyui_run` | 1 | Runs a workflow file, `editor:<name>` or `template:<name>`. `set` overrides inputs for this run only, and `images` uploads workspace pictures to LoadImage inputs. The outputs are saved under `generated/comfyui/`. |
 
-`image_creator` holds all three, and they are grantable to ephemeral agents. Because they reach a configured service, an agent holding them runs in-process. `comfyui_run` is never answered from a turn's replay cache, since the workflow file it names can change between two identical calls.
+`image_creator` holds all three, and they are grantable to ephemeral agents. `researcher` also holds `comfyui_catalog`. A question about what the server has installed is usually flagged as needing outside facts, and a step on such a turn that names an agent working only from the text it is handed is redirected to `researcher`. The installed models are on the ComfyUI server, so the researcher reads them from there. Because they reach a configured service, an agent holding them runs in-process. `comfyui_run` is never answered from a turn's replay cache, since the workflow file it names can change between two identical calls.
 
 ### What happens to a workflow on the way
 
@@ -72,6 +72,8 @@ A value written as part of exactly one of an input's choices is taken as that ch
 
 `insert` puts a new node on a connection that exists. `before` names the node that should receive its output (`"KSampler"`, or `"<node>.<input>"` when several inputs fit). Left out, the stage goes in front of the workflow's output, if only one output fits. The old connection then feeds the new node, matched by type, and `inputs` supplies only what else it needs. An upscaler, a LoRA or a filter goes in this way without looking up ids.
 
+`remove` takes a stage out of its chain the way ComfyUI's bypass does: what the stage was given goes on to the inputs it fed, where exactly one of its inputs carries that type. A loader, a decoder or a node blending two pictures leaves its inputs unconnected instead, and the answer names them. An `insert` without `before` in the same call takes the removed stage's place and feeds everything it fed: removing the official upscale template's `ImageScaleBy` and inserting `ImageUpscaleWithModel` keeps both the saved picture and the comparison on the new stage.
+
 A node added by an operation that nothing reads from is reported as not connected, by `comfyui_workflow` and again by `comfyui_run`, because ComfyUI never runs it. Unused nodes a template brought along are not reported: 22 of the 265 official templates have some.
 
 `prompt`, on `comfyui_workflow` and on `comfyui_run`, writes what the picture should show to the place the workflow keeps its prompt, so a template can be run without knowing its node ids: `comfyui_run` with `workflow: "template:image_qwen_image_2_1_t2i"` and `prompt: "a red fox in snow"`. Where a workflow has several prompt texts, the answer lists them and `set` writes the ones meant.
@@ -86,6 +88,7 @@ A template whose models are not installed is refused as a starting point, and th
 - Official Qwen-Image 2.1 image-edit template with two uploaded references: 26–35 s.
 - The text-to-image template with a Real-ESRGAN x4 stage inserted, 4096×4096 output: 20 s warm.
 - The same at 4992×3328 while the reranker and the Laya sidecar also hold the GPU (15.8 of 16.4 GB in use): 371 s, with no answer to a status poll for over two minutes of it.
+- "Welche Modelle hat ComfyUI gerade installiert?" through the whole swarm, with the local Qwen model as orchestrator: 4 of 5 answered with the server's own file list in 26–40 s. Before `image_creator`'s description opened with ComfyUI and `researcher` held `comfyui_catalog`, it was 0 of 10: the question went to agents that searched a filesystem. The miss left the agent open, and routing picked `computer_use_agent`.
 - Export round trip (template → editor format → converter → compare), over 127 sampled official templates: 104 come back identical, including every Qwen-Image 2.1 and FLUX 3 Klein template. Most of the rest are video templates. The tool's comparison skips the hidden `codec` input of SaveVideo, and for the remainder its read-back check reports the difference.
 
 ## Multi-user
