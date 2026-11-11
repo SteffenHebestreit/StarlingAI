@@ -1011,6 +1011,16 @@ export function agentCfgReachesOutsideWorkspace(cfg: CapabilityBearing): boolean
 }
 
 /**
+ * Whether an agent gathers what it reports: it reads the web itself (agentCfgGathersDirectly), or
+ * its routing taxonomy's mode is GATHER — it reads a source of its own (a data table, a codebase,
+ * an upload) in order to report on it. An agent that ACTs on a desktop, on infrastructure or on the
+ * swarm's own configuration does neither, whatever outside surface it reaches.
+ */
+export function agentCfgGathers(cfg: CapabilityBearing): boolean {
+  return agentCfgGathersDirectly(cfg) || resolveRoutingTaxonomy(cfg)?.mode === "GATHER";
+}
+
+/**
  * Whether an agent works only from the text it is handed: confined to the workspace, and its
  * taxonomy's input is text alone. A builder, writer or generator (web_coder, content_writer,
  * image_creator). An agent that reads a codebase, an uploaded file or a data table has a source of
