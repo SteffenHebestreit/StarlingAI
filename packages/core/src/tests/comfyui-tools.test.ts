@@ -169,7 +169,8 @@ describe("comfyui tools", () => {
 
   it("lists the templates that run here with their models, and every installed model file", async () => {
     const templates = await call("comfyui_catalog", { look_up: "templates" });
-    expect(templates.output).toContain("template:image_qwen_image_2_1_t2i — Qwen Image 2.1: Text to Image [ready, its models are installed]");
+    // The category, which says what a template takes (a video template once got an image to upscale).
+    expect(templates.output).toContain("template:image_qwen_image_2_1_t2i — Qwen Image 2.1: Text to Image (Image) [ready, its models are installed]");
     expect(templates.output).not.toContain("api_partner_t2i");
     const models = await call("comfyui_catalog", { look_up: "models" });
     expect(models.output).toBe("diffusion_models: qwen_image_2.1_int8_convrot.safetensors");
