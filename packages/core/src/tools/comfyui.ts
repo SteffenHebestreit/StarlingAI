@@ -276,6 +276,8 @@ async function lookUp(endpoint: ComfyUiEndpoint, what: (typeof LOOKUPS)[number],
       // thirty of it held no template for any installed model.
       const hits = (query ? matching : matching.filter((t) => ready(t.name))).sort((a, b) => Number(ready(b.name)) - Number(ready(a.name)));
       if (hits.length === 0) return query ? `No template matches "${query}".` : "No template runs here with the installed models.";
+      // The category says what a template takes: the lab's image_creator, upscaling a picture, started
+      // from utility-gan_upscaler, a template of "Video Tools" that loads a video.
       const line = (t: (typeof templates)[number]): string => {
         const r = readiness.get(t.name);
         const state = ready(t.name)
@@ -283,7 +285,7 @@ async function lookUp(endpoint: ComfyUiEndpoint, what: (typeof LOOKUPS)[number],
           : r
             ? `needs ${[...r.missingModels, ...r.missingNodes.map((n) => `node ${n}`)].slice(0, 3).join(", ")}${r.missingModels.length + r.missingNodes.length > 3 ? ", …" : ""}`
             : "not checked";
-        return `template:${t.name} — ${t.title} [${state}]${t.description ? `: ${t.description.slice(0, 120)}` : ""}`;
+        return `template:${t.name} — ${t.title}${t.category ? ` (${t.category})` : ""} [${state}]${t.description ? `: ${t.description.slice(0, 120)}` : ""}`;
       };
       const more = hits.length > 30 ? `\n… ${hits.length - 30} more; narrow the query.` : "";
       const others = query ? "" : `\n(${templates.length - hits.length} more templates need models that are not installed; search with query to see them.)`;
