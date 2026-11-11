@@ -53,7 +53,7 @@ The file names match ComfyUI's official templates, so those templates run unchan
 | `comfyui_workflow` | 1 | Creates or changes a workflow kept as an API-format JSON file in the workspace. It starts from a template, an editor workflow or a PNG ComfyUI made, applies `insert` / `add` / `set` / `remove` / `title` operations, and checks the result against the server's nodes and model files. It can also save the workflow to the editor's library (`save_to_editor`) or write an editor-format file (`editor_file`). |
 | `comfyui_run` | 1 | Runs a workflow file, `editor:<name>` or `template:<name>`. `set` overrides inputs for this run only, and `images` uploads workspace pictures to LoadImage inputs. The outputs are saved under `generated/comfyui/`. |
 
-`image_creator` holds all three, and they are grantable to ephemeral agents. Because they reach a configured service, an agent holding them runs in-process. `comfyui_run` is never answered from a turn's replay cache, since the workflow file it names can change between two identical calls.
+`image_creator` holds all three, and they are grantable to ephemeral agents. `researcher` also holds `comfyui_catalog`. A question about what the server has installed is usually flagged as needing outside facts, and a step on such a turn that names an agent working only from the text it is handed is redirected to `researcher`. The installed models are on the ComfyUI server, so the researcher reads them from there. Because they reach a configured service, an agent holding them runs in-process. `comfyui_run` is never answered from a turn's replay cache, since the workflow file it names can change between two identical calls.
 
 ### What happens to a workflow on the way
 
@@ -88,6 +88,7 @@ A template whose models are not installed is refused as a starting point, and th
 - Official Qwen-Image 2.1 image-edit template with two uploaded references: 26–35 s.
 - The text-to-image template with a Real-ESRGAN x4 stage inserted, 4096×4096 output: 20 s warm.
 - The same at 4992×3328 while the reranker and the Laya sidecar also hold the GPU (15.8 of 16.4 GB in use): 371 s, with no answer to a status poll for over two minutes of it.
+- "Welche Modelle hat ComfyUI gerade installiert?" through the whole swarm, with the local Qwen model as orchestrator: 4 of 5 answered with the server's own file list in 26–40 s. Before `image_creator`'s description opened with ComfyUI and `researcher` held `comfyui_catalog`, it was 0 of 10: the question went to agents that searched a filesystem. The miss left the agent open, and routing picked `computer_use_agent`.
 - Export round trip (template → editor format → converter → compare), over 127 sampled official templates: 104 come back identical, including every Qwen-Image 2.1 and FLUX 3 Klein template. Most of the rest are video templates. The tool's comparison skips the hidden `codec` input of SaveVideo, and for the remainder its read-back check reports the difference.
 
 ## Multi-user
