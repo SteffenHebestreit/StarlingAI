@@ -1,5 +1,5 @@
 <template>
-  <div :class="[
+  <div v-if="!quietLiveBubble" :class="[
     'message-row',
     message.role === 'user'
       ? 'message-row--user'
@@ -95,6 +95,7 @@
         :start-collapsed="stepsStartCollapsed"
         :awaiting="awaitingSteps"
         :language="bubbleLanguage"
+        :at-orb="liveAtOrb"
         @select="(stepId) => emit('show-step', message.id, stepId)"
       >
         <!-- A question a step is waiting on sits under that step, so it moves with the step
@@ -406,6 +407,8 @@ const props = defineProps<{
   foldSteps?: boolean;
   /** False while a turn runs: a Restart then would cut the history under it. */
   allowRewind?: boolean;
+  /** The orb shows the running turn's steps and words (OrbActivity.vue), so the live bubble does not. */
+  liveAtOrb?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -447,6 +450,20 @@ const awaitingSteps = computed(() => {
   }
   return awaiting;
 });
+
+/**
+ * The live bubble with nothing of its own to show yet: no answer text, no thinking, no question
+ * waiting on the user. Its steps are at the orb, so an empty frame here would only say "working"
+ * a second time.
+ */
+const quietLiveBubble = computed(() => Boolean(props.liveAtOrb)
+  && isStreamingMessage.value
+  && !props.message.blocked
+  && !mainStreamingText.value.trim()
+  && !displayThinkingContent.value
+  && subAgentReasoning.value.length === 0
+  && Object.keys(awaitingSteps.value).length === 0
+  && imageAttachments.value.length === 0);
 
 const steerBadge = computed((): { label: string; tone: "pending" | "error" | "read"; title?: string } | null => {
   if (props.message.role !== "user") return null;

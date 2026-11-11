@@ -1,5 +1,7 @@
 <template>
-  <div v-if="rows.length || (isStreaming && liveText)" class="tss">
+  <!-- While the turn runs its steps are at the orb (OrbActivity.vue) when `atOrb` is set; only a
+       step waiting on the user stays here, since its question is under it. -->
+  <div v-if="(rows.length || (isStreaming && liveText)) && !(isStreaming && atOrb && !hasAwaiting)" class="tss">
     <!-- Finished turns get a one-line header that folds the stream away. Older answers start
          folded so scrolling back through a session is not scrolling past every step ever taken. -->
     <button
@@ -96,6 +98,8 @@ const props = defineProps<{
   awaiting?: Record<string, { kind: string; expiresAt: string }>;
   /** The language the turn is shown in: the user's (composables/turnText.ts). */
   language?: TurnLanguage;
+  /** The orb shows the running turn's steps: none here while it runs, unless one waits on the user. */
+  atOrb?: boolean;
 }>();
 
 const lang = computed<TurnLanguage>(() => props.language ?? "en");
