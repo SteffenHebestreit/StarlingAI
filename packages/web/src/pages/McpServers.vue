@@ -16,7 +16,7 @@
       </div>
     </header>
 
-    <p v-if="errorMessage" class="mcp-page__error">{{ errorMessage }}</p>
+    <div v-if="errorMessage" class="notice notice--error mcp-page__notice" role="alert">{{ errorMessage }}</div>
 
     <!-- ── Outbound: this product as an MCP server ────────────────────────── -->
     <section class="mcp-section">
@@ -170,10 +170,12 @@
         <h3 class="mcp-section__title">Add MCP server</h3>
       </header>
 
-      <form class="mcp-form" @submit.prevent="submitAdd">
+      <!-- novalidate: a refused submit is answered in the line under the form, not by the
+           browser's own bubble. -->
+      <form ref="addFormEl" class="mcp-form" novalidate @submit.prevent="submitAdd">
         <label class="mcp-form__field">
-          <span>ID</span>
-          <input v-model="addForm.id" placeholder="e.g. playwright" autocomplete="off" />
+          <span>ID <span class="text-red-400" aria-hidden="true">*</span></span>
+          <input id="mcp-add-id" v-model="addForm.id" required aria-required="true" placeholder="e.g. playwright" autocomplete="off" />
         </label>
 
         <label class="mcp-form__field">
@@ -189,8 +191,8 @@
 
         <template v-if="addForm.transport === 'stdio'">
           <label class="mcp-form__field">
-            <span>Command</span>
-            <input v-model="addForm.command" placeholder="npx" />
+            <span>Command <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-command" v-model="addForm.command" required aria-required="true" placeholder="npx" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line)</span>
@@ -200,8 +202,8 @@
 
         <template v-if="addForm.transport === 'docker'">
           <label class="mcp-form__field">
-            <span>Image</span>
-            <input v-model="addForm.image" placeholder="mcp/playwright" />
+            <span>Image <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-image" v-model="addForm.image" required aria-required="true" placeholder="mcp/playwright" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line, optional)</span>
@@ -215,8 +217,8 @@
 
         <template v-if="addForm.transport === 'docker-exec'">
           <label class="mcp-form__field">
-            <span>Container name or id</span>
-            <input v-model="addForm.container" placeholder="my-running-container" />
+            <span>Container name or id <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-container" v-model="addForm.container" required aria-required="true" placeholder="my-running-container" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line)</span>
@@ -226,8 +228,8 @@
 
         <template v-if="addForm.transport === 'http'">
           <label class="mcp-form__field">
-            <span>URL</span>
-            <input v-model="addForm.url" placeholder="https://example.com/mcp" />
+            <span>URL <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-url" v-model="addForm.url" required aria-required="true" placeholder="https://example.com/mcp" />
           </label>
           <label class="mcp-form__field">
             <span>Protocol</span>
@@ -244,8 +246,8 @@
             <input v-model="addForm.host" placeholder="host.docker.internal" />
           </label>
           <label class="mcp-form__field">
-            <span>Port</span>
-            <input v-model.number="addForm.port" type="number" min="1" max="65535" />
+            <span>Port <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-port" v-model.number="addForm.port" type="number" min="1" max="65535" required aria-required="true" />
           </label>
         </template>
 
@@ -258,7 +260,7 @@
           {{ adding ? "Connecting…" : "Add and connect" }}
         </button>
 
-        <p v-if="addError" class="mcp-page__error">{{ addError }}</p>
+        <p v-if="addError" class="mcp-page__error" role="alert">{{ addError }}</p>
       </form>
     </section>
   </div>
@@ -312,6 +314,7 @@ const adding = ref(false);
 const errorMessage = ref<string | null>(null);
 const addError = ref<string | null>(null);
 const busyId = ref<string | null>(null);
+const addFormEl = ref<HTMLFormElement | null>(null);
 
 const addForm = reactive({
   id: "",
@@ -524,10 +527,35 @@ function buildAddPayload(): Record<string, unknown> | null {
   }
 }
 
+/** The fields the chosen transport cannot do without, in the order the form shows them. */
+function requiredAddFields(): Array<{ id: string; label: string; filled: boolean }> {
+  const fields = [{ id: "mcp-add-id", label: "ID", filled: addForm.id.trim() !== "" }];
+  switch (addForm.transport) {
+    case "stdio": fields.push({ id: "mcp-add-command", label: "Command", filled: addForm.command.trim() !== "" }); break;
+    case "docker": fields.push({ id: "mcp-add-image", label: "Image", filled: addForm.image.trim() !== "" }); break;
+    case "docker-exec": fields.push({ id: "mcp-add-container", label: "Container name or id", filled: addForm.container.trim() !== "" }); break;
+    case "http": fields.push({ id: "mcp-add-url", label: "URL", filled: addForm.url.trim() !== "" }); break;
+    case "tcp": fields.push({ id: "mcp-add-port", label: "Port", filled: Boolean(addForm.port) }); break;
+  }
+  return fields;
+}
+
+function focusAddField(id: string): void {
+  addFormEl.value?.querySelector<HTMLElement>(`#${id}`)?.focus();
+}
+
 async function submitAdd(): Promise<void> {
   addError.value = null;
-  if (!addForm.id || !/^[a-z0-9_-]+$/i.test(addForm.id)) {
-    addError.value = "ID is required and must match /^[a-z0-9_-]+$/i";
+  // The first required field left empty is named under the form and gets the cursor.
+  const missing = requiredAddFields().find((field) => !field.filled);
+  if (missing) {
+    addError.value = `${missing.label} is required.`;
+    focusAddField(missing.id);
+    return;
+  }
+  if (!/^[a-z0-9_-]+$/i.test(addForm.id)) {
+    addError.value = "ID must match /^[a-z0-9_-]+$/i";
+    focusAddField("mcp-add-id");
     return;
   }
   const config = buildAddPayload();
@@ -581,7 +609,7 @@ useLoadWhenConnected(refresh);
 
 <style scoped>
 /* The sections keep their 1.5rem rhythm; the shared header brings its own margin. */
-.mcp-page > .mcp-page__error { margin-bottom: 1.5rem; }
+.mcp-page > .mcp-page__notice { margin-bottom: 1.5rem; }
 .mcp-section + .mcp-section { margin-top: 1.5rem; }
 .mcp-page__error {
   color: rgb(248 113 113);

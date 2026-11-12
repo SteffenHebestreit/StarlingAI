@@ -423,5 +423,19 @@ onBeforeUnmount(() => {
   .orb-status__spinner {
     animation: none;
   }
+  /* The status line fades in where it stands: its enter and leave states keep the resting
+     transform (centred, or none on a narrow window) instead of sliding and growing into it. */
+  .orb-status-enter-active,
+  .orb-status-leave-active {
+    transition: opacity 120ms linear;
+  }
+  .orb-status-enter-from,
+  .orb-status-leave-to {
+    transform: translateX(-50%);
+  }
+  .orb-activity--narrow .orb-status-enter-from,
+  .orb-activity--narrow .orb-status-leave-to {
+    transform: none;
+  }
 }
 </style>

@@ -99,7 +99,7 @@
           <Teleport to="body">
           <div v-if="navOpen" class="fixed inset-0 z-[225]" @click="navOpen = false" />
           <Transition name="hud-pop">
-          <div v-if="navOpen" ref="navPanelRef" class="app-nav-panel">
+          <div v-if="navOpen" ref="navPanelRef" class="app-nav-panel" :style="navPanelStyle">
             <div class="app-nav-panel__meta">
               <span>v{{ appVersion }}</span>
               <span>{{ gateway.connected ? 'Online' : 'Offline' }}</span>
@@ -304,6 +304,16 @@
                   <div class="mt-0.5 text-[10px] text-gray-500">Token / single-operator mode</div>
                 </template>
               </div>
+              <!-- Palette and typeface are kept in this browser, so they are everyone's to set:
+                   the Settings page that also shows them is for operators only. -->
+              <button
+                type="button"
+                role="menuitem"
+                class="block w-full px-3 py-2 text-left text-sm text-gray-300 transition hover:bg-white/5 hover:text-white"
+                @click="openTheme"
+              >
+                Theme
+              </button>
               <button
                 type="button"
                 role="menuitem"
@@ -400,6 +410,35 @@
       @choose="runPaletteCommand"
     />
 
+    <!-- Theme: the appearance picker in a dialog, opened from the account menu. -->
+    <Teleport to="body">
+      <div
+        v-if="themeOpen"
+        class="fixed inset-0 z-modal flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+        @click.self="closeTheme"
+      >
+        <div
+          class="glass-card modal-pop flex max-h-full w-full max-w-2xl flex-col"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="theme-dialog-title"
+        >
+          <div class="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+            <div class="min-w-0">
+              <h2 id="theme-dialog-title" class="heading-md">Theme</h2>
+              <p class="mt-0.5 text-xs text-gray-400">Palette and typeface. Kept in this browser.</p>
+            </div>
+            <button ref="themeCloseRef" type="button" class="btn-ghost shrink-0 rounded-xl px-3 py-1.5 text-xs" @click="closeTheme">
+              Close
+            </button>
+          </div>
+          <div class="min-h-0 overflow-y-auto px-5 py-4">
+            <AppearanceSettings />
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- Claude subscription connect / manage (browser OAuth verification). -->
     <ModelConnectModal
       v-if="showModelConnect"
@@ -425,7 +464,7 @@ import { useNotificationStore, type NotificationLevel } from "@/stores/notificat
 import LoginModal from "@/components/LoginModal.vue";
 import { readSsoReturn } from "@/composables/ssoReturn";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
-import { type NavGroupItem } from "@/components/NavGroup.vue";
+import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
@@ -485,11 +524,28 @@ const navLevel = ref<string | null>(null);
 const burgerRef = ref<HTMLElement | null>(null);
 const navPanelRef = ref<HTMLElement | null>(null);
 watch(() => $route.path, () => { navOpen.value = false; });
+// The panel hangs under the burger, wherever the header has put it. Its top used to be a fixed
+// 4.4rem, so it lay over the header whenever the "model unreachable" banner above pushed the
+// header down, or the header wrapped onto a second row.
+const navPanelStyle = ref<Record<string, string>>({});
+function positionNavPanel(): void {
+  const el = burgerRef.value;
+  if (!el) return;
+  // Under the burger, and under the whole header where it has wrapped onto rows below the burger.
+  const headerBottom = el.closest("header")?.getBoundingClientRect().bottom ?? 0;
+  const top = Math.round(Math.max(el.getBoundingClientRect().bottom + 12, headerBottom)) + 10;
+  navPanelStyle.value = { top: `${top}px`, maxHeight: `calc(100dvh - ${top}px - 1rem)` };
+}
+// The banner comes and goes without a resize.
+watch(() => gateway.modelUnreachable, () => {
+  if (navOpen.value) void nextTick(positionNavPanel);
+});
 // Opening puts the keyboard inside the panel (it is teleported to the end of the page, far from
 // the burger in tab order); closing hands it back to the burger, unless something else took it.
 watch(navOpen, (open) => {
   if (open) {
     navLevel.value = null;
+    positionNavPanel();
     void nextTick(() => navPanelRef.value?.querySelector<HTMLElement>(".app-nav a, .app-nav button")?.focus({ preventScroll: true }));
   } else if (!document.activeElement || document.activeElement === document.body || navPanelRef.value?.contains(document.activeElement)) {
     burgerRef.value?.focus({ preventScroll: true });
@@ -564,12 +620,36 @@ useEscapeToClose(() => accountMenuOpen.value, () => {
   accountBtnRef.value?.focus({ preventScroll: true });
 });
 
+// ── Theme dialog ────────────────────────────────────────────────────────────────────────────
+// Palette and typeface are a preference of this browser (stores/theme.ts), not of an account or
+// the gateway, yet their only home was the operator-only Settings page: a viewer could not reach
+// them at all. The account menu, which everyone has, opens the same picker in a dialog.
+const themeOpen = ref(false);
+const themeCloseRef = ref<HTMLButtonElement | null>(null);
+function openTheme(): void {
+  accountMenuOpen.value = false;
+  themeOpen.value = true;
+  void nextTick(() => themeCloseRef.value?.focus({ preventScroll: true }));
+}
+function closeTheme(): void {
+  themeOpen.value = false;
+  // The menu entry that opened it is gone with its menu; the menu's button takes the focus back.
+  accountBtnRef.value?.focus({ preventScroll: true });
+}
+useEscapeToClose(() => themeOpen.value, closeTheme);
+
 /**
- * The top-level nav is small (5 entries) and either renders as a single
- * RouterLink leaf or a popover NavGroup with sub-items.  Operator-only
+ * The top-level nav is small and each entry is either a single RouterLink
+ * leaf or a group that drills down into its items.  Operator-only
  * groups disappear entirely for viewers; mixed groups (some items
  * operator-only) filter their children.
  */
+interface NavGroupItem {
+  to: string;
+  label: string;
+  /** A few words on what the page holds, beside its name in the group's list. */
+  hint?: string;
+}
 interface NavLeaf {
   kind: "leaf";
   to: string;
@@ -735,6 +815,7 @@ function onPaletteShortcut(event: KeyboardEvent): void {
   event.preventDefault();
   navOpen.value = false;
   accountMenuOpen.value = false;
+  themeOpen.value = false;
   paletteOpen.value = !paletteOpen.value;
 }
 onMounted(() => window.addEventListener("keydown", onPaletteShortcut));
@@ -800,9 +881,10 @@ onMounted(() => {
     void modelPreset.fetchOAuthStatus();
   }
   void auth.refreshCurrentUser();
-  // Keep the teleported account menu anchored to its button on resize.
+  // Keep the teleported account menu and nav panel anchored to their buttons on resize.
   window.addEventListener("resize", () => {
     if (accountMenuOpen.value) positionAccountMenu();
+    if (navOpen.value) positionNavPanel();
   });
 });
 
@@ -922,6 +1004,8 @@ watch(() => gateway.isLoading, (running) => {
 .app-nav-panel {
   position: fixed;
   right: 0.75rem;
+  /* Where the header's lower edge usually is; the real top and height are set from the burger's
+     place on screen (positionNavPanel), which moves with the banner and a wrapped header. */
   top: 4.4rem;
   /* above the floating HUD pods (z 220) — the summoned menu always wins */
   z-index: 230;

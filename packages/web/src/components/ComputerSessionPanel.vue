@@ -579,6 +579,13 @@ async function copyClickCommand() {
   }
 }
 
+/* Reduced motion: a marker is simply there, without shrinking onto its spot. */
+@media (prefers-reduced-motion: reduce) {
+  .agent-action-marker {
+    animation: none;
+  }
+}
+
 .screenshot-meta {
   display: flex;
   flex-wrap: wrap;

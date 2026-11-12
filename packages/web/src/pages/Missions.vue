@@ -15,15 +15,40 @@
 
     <p v-if="errorMessage" class="notice notice--error missions-page__error" role="alert">{{ errorMessage }}</p>
 
-    <!-- "No missions" is only true after a load that worked. -->
+    <div v-if="missions.length > 0" class="missions-filters">
+      <input
+        v-model="searchQuery"
+        type="search"
+        class="missions-filters__search"
+        placeholder="Search by objective, mission or session id, or owner"
+        aria-label="Search missions"
+      >
+      <select v-model="statusFilter" class="missions-filters__select" aria-label="Filter missions by status">
+        <option value="">All statuses</option>
+        <option v-for="status in statusOptions" :key="status" :value="status">{{ status }}</option>
+      </select>
+    </div>
+
+    <!-- "No missions" is only true after a load that worked, and is a different thing from a
+         search or status that hides the ones there are. -->
     <div v-if="loading && !loaded && missions.length === 0" class="missions-page__empty">Loading missions…</div>
-    <div v-else-if="loaded && missions.length === 0" class="missions-page__empty">
+    <div v-else-if="loaded && missions.length === 0" class="empty-state">
       No missions recorded yet. Missions appear once the swarm delegates work with the mission store enabled
       (<code>mission.store: "shadow"</code> or beyond).
     </div>
+    <div v-else-if="missions.length > 0 && filteredMissions.length === 0" class="empty-state">
+      <p>{{ noMatchLine("missions", searchQuery, statusFilter !== "") }}</p>
+      <p v-if="mayHaveOlder" class="mt-1 text-xs">Only the {{ loadedLimit }} most recently updated were looked through — older ones are not loaded.</p>
+      <div class="mt-3 flex flex-wrap justify-center gap-2">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
+        <button v-if="canLoadMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="loadMoreFromGateway">
+          {{ loading ? "Loading…" : "Load more from the gateway" }}
+        </button>
+      </div>
+    </div>
 
     <div class="missions-grid">
-      <article v-for="mission in missions" :key="mission.id" :class="['mission-card', `mission-card--${mission.status}`]">
+      <article v-for="mission in missionWindow.visible" :key="mission.id" :class="['mission-card', `mission-card--${mission.status}`]">
         <div class="mission-card__top">
           <div>
             <div class="mission-card__title-row">
@@ -48,7 +73,8 @@
                 @click="copyId('Session', mission.rootSessionId)"
               >{{ shortId(mission.rootSessionId) }}</button>
               · {{ mission.eventCount }} events · {{ formatTokens(mission.budgetTokensSpent) }} tokens ·
-              updated {{ formatTime(mission.updatedAt) }}
+              updated
+              <time :datetime="isoTimestamp(mission.updatedAt)" :title="isoTimestamp(mission.updatedAt)">{{ formatDateTime(mission.updatedAt) }}</time>
             </div>
           </div>
           <div class="mission-card__actions">
@@ -85,7 +111,7 @@
                 <span class="mission-event__seq">#{{ event.sequence }}</span>
                 <span :class="['mission-event__type', eventTone(event.type)]">{{ event.type }}</span>
                 <span class="mission-event__actor">{{ event.actor }}</span>
-                <span class="mission-event__ts">{{ formatTime(event.ts) }}</span>
+                <time class="mission-event__ts" :datetime="isoTimestamp(event.ts)" :title="isoTimestamp(event.ts)">{{ formatDateTime(event.ts) }}</time>
                 <code v-if="payloadPreview(event.payload)" class="mission-event__payload">{{ payloadPreview(event.payload) }}</code>
               </li>
             </ol>
@@ -93,14 +119,30 @@
         </div>
       </article>
     </div>
+
+    <div v-if="filteredMissions.length > 0 && (missionWindow.paged || loadCapNote)" class="mt-4 flex flex-col items-center gap-2 text-center">
+      <div v-if="missionWindow.hasMore || canLoadMore" class="flex flex-wrap justify-center gap-2">
+        <button v-if="missionWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="missionWindow.showMore()">
+          Show {{ missionWindow.nextStep }} more
+        </button>
+        <button v-if="canLoadMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="loadMoreFromGateway">
+          {{ loading ? "Loading…" : "Load more from the gateway" }}
+        </button>
+      </div>
+      <p class="text-xs text-gray-400" aria-live="polite">
+        {{ missionWindow.summary }} missions<template v-if="loadCapNote"> · {{ loadCapNote }}</template>
+      </p>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { writeClipboard } from "@/composables/clipboard";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -113,6 +155,8 @@ interface MissionSummary {
   eventCount: number;
   updatedAt: string;
   budgetTokensSpent: number;
+  /** Who the mission runs for, when the gateway knows. */
+  userId?: string;
 }
 
 interface MissionEventRow { sequence: number; type: string; actor: string; ts: string; payload: Record<string, unknown> }
@@ -139,6 +183,61 @@ const timeline = ref<FlightRecord | null>(null);
 const timelineLoading = ref(false);
 const cancelling = ref<string | null>(null);
 
+// ── Search, status and the part of the list on screen ───────────────────────
+const searchQuery = ref("");
+const statusFilter = ref("");
+
+// The statuses are whatever the loaded missions carry, plus the one picked: a refresh that
+// leaves no mission in that status must not blank the select.
+const statusOptions = computed(() => {
+  const seen = new Set(missions.value.map((mission) => mission.status));
+  if (statusFilter.value) seen.add(statusFilter.value);
+  return [...seen].sort();
+});
+
+const filteredMissions = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  return missions.value.filter((mission) => {
+    if (statusFilter.value && mission.status !== statusFilter.value) return false;
+    if (!query) return true;
+    return [mission.objective, mission.id, mission.rootSessionId, mission.userId ?? ""]
+      .some((value) => value.toLowerCase().includes(query));
+  });
+});
+
+function clearFilters(): void {
+  searchQuery.value = "";
+  statusFilter.value = "";
+}
+
+// The cards are drawn a page at a time; a new search or status starts again at the first page.
+const missionWindow = useListWindow(() => filteredMissions.value, {
+  resetKey: () => `${statusFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
+// The gateway sends the most recently updated missions, as many as it is asked for and 500 at
+// most (MAX_LIST in core's gateway/mission-routes.ts). It takes no offset, so there is no way
+// to the ones before those 500 — the count line says so instead of passing the list off as whole.
+const FIRST_LOAD_LIMIT = 200;
+const GATEWAY_MAX_LIMIT = 500;
+const requestLimit = ref(FIRST_LOAD_LIMIT);
+// What the list on screen was asked for. A full answer means there may be older missions.
+const loadedLimit = ref(0);
+const mayHaveOlder = computed(() => loadedLimit.value > 0 && missions.value.length >= loadedLimit.value);
+const canLoadMore = computed(() => mayHaveOlder.value && loadedLimit.value < GATEWAY_MAX_LIMIT);
+const loadCapNote = computed(() => {
+  if (!mayHaveOlder.value) return "";
+  const held = `the ${loadedLimit.value} most recently updated — older ones are not loaded`;
+  return canLoadMore.value
+    ? `${held}; search and status look only at these`
+    : `${held}, and the gateway sends no more than ${GATEWAY_MAX_LIMIT}`;
+});
+
+async function loadMoreFromGateway(): Promise<void> {
+  requestLimit.value = GATEWAY_MAX_LIMIT;
+  await refresh();
+}
+
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
 }
@@ -146,13 +245,15 @@ function apiBase(): string {
 async function refresh(): Promise<void> {
   loading.value = true;
   errorMessage.value = null;
+  const limit = requestLimit.value;
   try {
-    const res = await fetch(`${apiBase()}/api/missions?limit=200`, {
+    const res = await fetch(`${apiBase()}/api/missions?limit=${limit}`, {
       headers: { Authorization: `Bearer ${gateway.token}` },
     });
     if (!res.ok) { loaded.value = false; errorMessage.value = `Failed to load missions (${res.status})`; return; }
     const body = await res.json() as { missions: MissionSummary[] };
     missions.value = body.missions;
+    loadedLimit.value = limit;
     loaded.value = true;
   } catch (err) {
     loaded.value = false;
@@ -232,7 +333,6 @@ async function copyId(what: string, id: string): Promise<void> {
   }
 }
 function formatTokens(n: number): string { return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n); }
-function formatTime(ts: string): string { try { return new Date(ts).toLocaleString(); } catch { return ts; } }
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
@@ -256,6 +356,12 @@ useLoadWhenConnected(refresh);
 <style scoped>
 .missions-page__error { margin-bottom: 0.75rem; }
 .missions-page__empty { color: rgb(156 163 175); padding: 2rem 0; font-size: 0.9rem; }
+/* The same search row as the Jobs and Sessions pages. */
+.missions-filters { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem; }
+.missions-filters__search,
+.missions-filters__select { border-radius: 0.85rem; border: 1px solid rgba(196, 181, 253, 0.18); background: rgba(17, 24, 39, 0.82); color: #f5ecff; padding: 0.65rem 0.8rem; font-size: 0.85rem; }
+.missions-filters__search { flex: 1 1 320px; }
+.missions-filters__select { min-width: 180px; }
 .missions-grid { display: flex; flex-direction: column; gap: 0.75rem; }
 .mission-card { border: 1px solid var(--hairline); border-radius: 10px; padding: 0.9rem 1.1rem; }
 .mission-card--cancelled, .mission-card--failed { opacity: 0.75; }

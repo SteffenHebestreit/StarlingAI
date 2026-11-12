@@ -12,6 +12,8 @@
 
     <!-- Toggle handle — always visible on the right edge -->
     <button
+      ref="handleEl"
+      type="button"
       class="sp-handle"
       :class="{
         'sp-handle--open': modelValue,
@@ -43,6 +45,7 @@
          tabs, step rows and previews in the tab order and in front of screen readers: inert
          takes all of it out until the panel is open again. -->
     <div
+      ref="panelEl"
       class="sp-panel"
       :class="{ 'sp-panel--open': modelValue }"
       role="complementary"
@@ -51,34 +54,46 @@
     >
       <!-- Header with tabs + close -->
       <div class="sp-header">
-        <div class="sp-tabs" role="tablist">
+        <div ref="tablistEl" class="sp-tabs" role="tablist" @keydown="onTabKeydown">
           <button
+            :id="`${uid}-tab-live`"
+            type="button"
             class="sp-tab"
             :class="{ 'sp-tab--active': activeTab === 'live' }"
             role="tab"
+            data-tab="live"
             :aria-selected="activeTab === 'live'"
+            :aria-controls="`${uid}-pane-live`"
             @click="activeTab = 'live'"
           >
             {{ chatText.tabLive(lang) }}
             <span v-if="hasLiveContent" class="sp-tab__dot" aria-hidden="true" />
           </button>
           <button
+            :id="`${uid}-tab-steps`"
+            type="button"
             class="sp-tab"
             :class="{ 'sp-tab--active': activeTab === 'steps' }"
             :disabled="(stepCount ?? 0) === 0"
             role="tab"
+            data-tab="steps"
             :aria-selected="activeTab === 'steps'"
+            :aria-controls="`${uid}-pane-steps`"
             @click="activeTab = 'steps'"
           >
             {{ chatText.tabSteps(lang) }}
             <span v-if="(stepCount ?? 0) > 0" class="sp-tab__badge">{{ stepCount }}</span>
           </button>
           <button
+            :id="`${uid}-tab-artifacts`"
+            type="button"
             class="sp-tab"
             :class="{ 'sp-tab--active': activeTab === 'artifacts' }"
             :disabled="(artifactCount ?? 0) === 0"
             role="tab"
+            data-tab="artifacts"
             :aria-selected="activeTab === 'artifacts'"
+            :aria-controls="`${uid}-pane-artifacts`"
             @click="activeTab = 'artifacts'"
           >
             {{ chatText.tabArtifacts(lang) }}
@@ -87,6 +102,7 @@
         </div>
 
         <button
+          type="button"
           class="sp-close-btn"
           :aria-label="chatText.closePanel(lang)"
           @click="$emit('update:modelValue', false)"
@@ -100,7 +116,7 @@
       <!-- Scrollable body -->
       <div class="sp-body">
         <!-- Live context tab -->
-        <div v-show="activeTab === 'live'" class="sp-tab-pane">
+        <div v-show="activeTab === 'live'" :id="`${uid}-pane-live`" class="sp-tab-pane" role="tabpanel" :aria-labelledby="`${uid}-tab-live`">
           <slot name="live">
             <div class="sp-empty">
               <div class="sp-empty__icon" aria-hidden="true">◎</div>
@@ -111,7 +127,7 @@
         </div>
 
         <!-- Steps tab — the execution detail for ONE message, handed in by the chat page -->
-        <div v-show="activeTab === 'steps'" class="sp-tab-pane">
+        <div v-show="activeTab === 'steps'" :id="`${uid}-pane-steps`" class="sp-tab-pane" role="tabpanel" :aria-labelledby="`${uid}-tab-steps`">
           <slot name="steps">
             <div class="sp-empty">
               <div class="sp-empty__icon" aria-hidden="true">≡</div>
@@ -122,7 +138,7 @@
         </div>
 
         <!-- Artifacts tab -->
-        <div v-show="activeTab === 'artifacts'" class="sp-tab-pane">
+        <div v-show="activeTab === 'artifacts'" :id="`${uid}-pane-artifacts`" class="sp-tab-pane" role="tabpanel" :aria-labelledby="`${uid}-tab-artifacts`">
           <slot name="artifacts">
             <div class="sp-empty">
               <div class="sp-empty__icon" aria-hidden="true">⬡</div>
@@ -139,7 +155,7 @@
 <script setup lang="ts">
 import { chatText } from "@/composables/chatText";
 import type { TurnLanguage } from "@/composables/turnText";
-import { ref, computed, watch } from "vue";
+import { ref, computed, nextTick, useId, watch } from "vue";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
 
 type PanelTab = "live" | "steps" | "artifacts";
@@ -172,8 +188,32 @@ const emit = defineEmits<{
 }>();
 
 const activeTab = ref<PanelTab>("live");
+const uid = useId();
+const handleEl = ref<HTMLButtonElement | null>(null);
+const panelEl = ref<HTMLElement | null>(null);
+const tablistEl = ref<HTMLElement | null>(null);
 
 useEscapeToClose(() => props.modelValue, () => emit("update:modelValue", false));
+
+// A closed panel is inert, so the focus that was inside it (on its close button, say) would fall
+// to <body>: the handle that opens it again takes it instead. Focus anywhere else stays put.
+watch(() => props.modelValue, (open) => {
+  if (!open && panelEl.value?.contains(document.activeElement)) handleEl.value?.focus({ preventScroll: true });
+});
+
+/** Left and Right move between the tabs that have something in them, like any tab list. */
+function onTabKeydown(event: KeyboardEvent): void {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const enabled: PanelTab[] = ["live"];
+  if ((props.stepCount ?? 0) > 0) enabled.push("steps");
+  if ((props.artifactCount ?? 0) > 0) enabled.push("artifacts");
+  const at = Math.max(enabled.indexOf(activeTab.value), 0);
+  const next = enabled[(at + (event.key === "ArrowRight" ? 1 : enabled.length - 1)) % enabled.length]!;
+  event.preventDefault();
+  activeTab.value = next;
+  void nextTick(() => tablistEl.value?.querySelector<HTMLElement>(`[data-tab="${next}"]`)?.focus());
+}
 
 watch(() => props.requestedTab, (tab) => { if (tab) activeTab.value = tab; });
 
@@ -223,6 +263,24 @@ const hasContent = computed(() =>
     border-color 0.15s,
     color 0.15s,
     right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 26px is narrow for a finger: the handle takes presses from 40px, at its visible size. Not
+   while it is disabled, where the wider strip would only swallow clicks meant for the page. */
+.sp-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  /* measured from inside the 1px border */
+  left: calc(-0.875rem - 1px);
+}
+.sp-handle:disabled::before { display: none; }
+/* It takes the focus when the panel closes, so it shows it. */
+.sp-handle:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.75);
+  outline-offset: 2px;
 }
 
 .sp-handle:disabled {
@@ -374,6 +432,7 @@ const hasContent = computed(() =>
 
 /* Close button */
 .sp-close-btn {
+  position: relative;
   flex-shrink: 0;
   width: 1.75rem;
   height: 1.75rem;
@@ -384,6 +443,13 @@ const hasContent = computed(() =>
   color: rgb(100 116 139);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
+}
+
+/* 28px to look at, 40px to hit. */
+.sp-close-btn::before {
+  content: "";
+  position: absolute;
+  inset: -0.375rem;
 }
 
 .sp-close-btn:hover {
@@ -470,5 +536,12 @@ const hasContent = computed(() =>
 .sp-scrim-enter-from,
 .sp-scrim-leave-to {
   opacity: 0;
+}
+
+/* Reduced motion: the drawer and its handle are simply there or not, and the live dot holds still. */
+@media (prefers-reduced-motion: reduce) {
+  .sp-panel { transition: none; }
+  .sp-handle { transition: background 0.15s, border-color 0.15s, color 0.15s; }
+  .sp-handle__dot { animation: none; }
 }
 </style>

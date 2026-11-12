@@ -46,7 +46,7 @@ export const useSitesStore = defineStore("sites", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       sites.value = await res.json() as SiteSummary[];
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }
@@ -64,7 +64,7 @@ export const useSitesStore = defineStore("sites", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }
@@ -80,7 +80,7 @@ export const useSitesStore = defineStore("sites", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }

@@ -3747,9 +3747,18 @@ export const useGatewayStore = defineStore("gateway", () => {
     clearPendingTurnRecovery();
   }
 
+  /**
+   * Delete a session on the gateway, then here. A refusal or a lost connection throws and leaves
+   * the list alone: it used to be swallowed, the row vanished, and the session was back on the
+   * next refresh. Only "it is already gone" counts as done.
+   */
   async function deleteSession(sessionId: string): Promise<void> {
-    if (ws?.readyState === WebSocket.OPEN) {
-      try { await rpc("session.delete", { sessionId }); } catch { /* already deleted */ }
+    if (ws?.readyState !== WebSocket.OPEN) throw new Error("Not connected to the gateway");
+    try {
+      await rpc("session.delete", { sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/not found|no such session|unknown session|does not exist/i.test(message)) throw error;
     }
     const next = { ...swarmRunsBySession.value };
     delete next[sessionId];

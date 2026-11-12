@@ -40,7 +40,7 @@
     </div>
 
     <div class="mp__footer">
-      <button type="button" class="btn-ghost mp__action" @click="emit('cancel')">Cancel</button>
+      <button type="button" class="btn-ghost mp__action" @click="cancel">Cancel</button>
       <button type="button" class="btn-grad mp__action" :disabled="!exportable" :title="exportTitle" @click="apply">Use this mask</button>
     </div>
   </div>
@@ -70,6 +70,7 @@ import {
   type MaskImage,
   type Point,
 } from "@/composables/maskPainter";
+import { answerConfirm, confirmAction } from "@/composables/useConfirm";
 
 const props = defineProps<{
   /** The base picture's natural size — the mask is exactly this size. */
@@ -210,6 +211,36 @@ function undo(): void {
   recount();
 }
 
+// What was painted and its undo history live only in this component, and go with it when the
+// dialog steps back to the form. One stray Escape or Cancel used to lose all of it, so leaving
+// with strokes that were not applied asks first.
+let asking = false;
+
+/** Whether the painter may be left: at once when nothing was painted, else by the user's answer. */
+async function confirmLeave(): Promise<boolean> {
+  if (undoDepth.value === 0) return true;
+  if (asking) return false;
+  asking = true;
+  try {
+    return await confirmAction({
+      title: "Discard what you painted?",
+      message: "The region you painted has not been applied yet. Leaving the painter loses it, and its undo history.",
+      confirmLabel: "Discard",
+      cancelLabel: "Keep painting",
+      danger: true,
+    });
+  } finally {
+    asking = false;
+  }
+}
+
+async function cancel(): Promise<void> {
+  if (await confirmLeave()) emit("cancel");
+}
+
+// The dialog around the painter asks the same before Escape or its own close button leaves it.
+defineExpose({ confirmLeave });
+
 function apply(): void {
   if (!exportable.value) return;
   const canvas = document.createElement("canvas");
@@ -224,6 +255,8 @@ function apply(): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  // While the question above is up, a key is an answer to it, not a brush command.
+  if (asking) return;
   const target = event.target as HTMLElement | null;
   if (target && (target.tagName === "TEXTAREA" || (target.tagName === "INPUT" && (target as HTMLInputElement).type !== "range"))) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
@@ -270,6 +303,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
+  // A question about a painter that is gone has nothing left to decide.
+  if (asking) answerConfirm(false);
 });
 </script>
 

@@ -40,7 +40,7 @@
                 : 'bg-yellow-900/20 border-yellow-500/30 text-yellow-200']">
               <div class="flex justify-between items-start mb-1">
                 <span class="font-mono font-bold">{{ alert.type }}</span>
-                <span class="text-gray-400 text-[10px]">{{ formatTime(alert.ts) }}</span>
+                <time class="text-gray-400 text-[10px]" :datetime="isoTimestamp(alert.ts)" :title="isoTimestamp(alert.ts)">{{ formatDateTime(alert.ts) }}</time>
               </div>
               <div class="text-gray-300">{{ alert.detail }}</div>
               <div class="mt-1 text-gray-400">Subject: {{ alert.subject }} · Action: {{ alert.action }}</div>
@@ -140,18 +140,36 @@
         <!-- ── Dynamic Tool Stats ────────────────────────────────────────── -->
         <div class="glass-card p-5">
           <h3 class="section-title mb-3">Dynamic Tools (selfdev__)</h3>
+          <!-- What the marks at the end of each row stand for. Hidden from a screen reader, which
+               is read the same thing in words on every row. -->
+          <p v-if="health.dynamicToolStats.length" class="-mt-2 mb-3 text-[11px] leading-relaxed text-gray-500" aria-hidden="true">
+            <span class="text-gray-400">Nc</span> = N calls made
+            · <span class="text-green-400">%</span> = how many of them succeeded (<span class="text-yellow-400">yellow</span> under 80%)
+            · <span class="text-green-300">●</span> = waiting in the promotion queue
+            · <span class="text-blue-300">✓</span> = promoted
+          </p>
           <div v-if="!health.dynamicToolStats.length" class="text-sm text-gray-500">{{ emptyCopy(healthLoaded, "No self-developed tools deployed.") }}</div>
           <div v-else class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
             <div v-for="tool in health.dynamicToolStats" :key="tool.fullName"
               class="flex items-center justify-between text-xs p-2 rounded bg-white/5">
               <span class="font-mono text-purple-300 truncate max-w-[55%]">{{ tool.fullName }}</span>
               <div class="flex items-center gap-2 text-gray-400 shrink-0">
-                <span>{{ tool.calls }}c</span>
-                <span :class="tool.successRate >= 0.8 ? 'text-green-400' : 'text-yellow-400'">
-                  {{ tool.calls > 0 ? (tool.successRate * 100).toFixed(0) + '%' : '–' }}
+                <span :title="callsText(tool)">
+                  <span aria-hidden="true">{{ tool.calls }}c</span>
+                  <span class="sr-only">{{ callsText(tool) }}</span>
                 </span>
-                <span v-if="tool.promotionStatus === 'pending'" class="text-green-300">●</span>
-                <span v-else-if="tool.promotionStatus === 'approved'" class="text-blue-300">✓</span>
+                <span :class="tool.successRate >= 0.8 ? 'text-green-400' : 'text-yellow-400'" :title="successText(tool)">
+                  <span aria-hidden="true">{{ tool.calls > 0 ? (tool.successRate * 100).toFixed(0) + '%' : '–' }}</span>
+                  <span class="sr-only">{{ successText(tool) }}</span>
+                </span>
+                <span v-if="tool.promotionStatus === 'pending'" class="text-green-300" title="Nominated for promotion — waiting for a decision in the Promotion Queue">
+                  <span aria-hidden="true">●</span>
+                  <span class="sr-only">Promotion pending</span>
+                </span>
+                <span v-else-if="tool.promotionStatus === 'approved'" class="text-blue-300" :title="`Promoted — also registered as ${tool.toolName}`">
+                  <span aria-hidden="true">✓</span>
+                  <span class="sr-only">Promoted, also registered as {{ tool.toolName }}</span>
+                </span>
               </div>
             </div>
           </div>
@@ -165,6 +183,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -373,12 +392,15 @@ async function resumeTask(cp: TaskCheckpoint) {
   }
 }
 
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString();
-  } catch {
-    return iso;
-  }
+// What the short marks on a Dynamic Tools row say, in words: for the hover title and for a
+// screen reader, which gets nothing from "12c" or a bare dot.
+function callsText(tool: DynamicToolStat): string {
+  return `${tool.calls} call${tool.calls === 1 ? "" : "s"} made`;
+}
+
+function successText(tool: DynamicToolStat): string {
+  if (tool.calls === 0) return "Not called yet — no success rate";
+  return `${tool.successes} of ${tool.calls} call${tool.calls === 1 ? "" : "s"} succeeded (${(tool.successRate * 100).toFixed(0)}%)`;
 }
 
 function gapStatusClass(status: string): string {

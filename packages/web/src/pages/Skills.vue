@@ -42,14 +42,20 @@
       </div>
 
       <div v-if="error" class="skills-page__notice skills-page__notice--error">{{ error }}</div>
-      <div v-else-if="skills.length === 0 && !loading" class="skills-page__notice">
+      <!-- An empty list after a load that worked is one of two things: the search or status
+           hides every skill, or the library has none. -->
+      <div v-else-if="skillsLoaded && skills.length === 0 && !loading && (skillsLoaded.query || skillsLoaded.status)" class="empty-state">
+        <p>{{ noMatchLine("skills", skillsLoaded.query, skillsLoaded.status !== "") }}</p>
+        <button type="button" class="skills-controls__refresh mt-3" @click="clearFilters()">Clear filters</button>
+      </div>
+      <div v-else-if="skillsLoaded && skills.length === 0 && !loading" class="empty-state">
         No skills yet. The swarm authors them automatically after successful multi-step turns (when
         <code>skillLibrary.autoAuthor</code> is on), an agent can author one with <code>record_skill</code>,
         or you can write one now with <strong>+ New skill</strong>.
       </div>
 
       <div class="skills-list">
-        <article v-for="skill in skills" :key="skill.slug" class="skill-card">
+        <article v-for="skill in skillWindow.visible" :key="skill.slug" class="skill-card">
           <header class="skill-card__header">
             <span :class="['skill-card__status', `skill-card__status--${skill.status}`]">{{ skill.status }}</span>
             <span class="skill-card__version">v{{ skill.version }}</span>
@@ -58,7 +64,7 @@
               class="skill-card__rate"
               :title="`${skill.successes} ok / ${skill.failures} fail`"
             >{{ skill.uses > 0 ? Math.round(skill.successRate * 100) + '% over ' + skill.uses : 'untested' }}</span>
-            <span class="skill-card__date">{{ formatDate(skill.updatedAt) }}</span>
+            <time class="skill-card__date" :datetime="isoTimestamp(skill.updatedAt)" :title="isoTimestamp(skill.updatedAt)">{{ formatDateTime(skill.updatedAt) }}</time>
           </header>
           <h3 class="skill-card__name">{{ skill.name }}</h3>
           <p class="skill-card__when"><span class="skill-card__when-label">When:</span> {{ skill.whenToUse }}</p>
@@ -89,6 +95,14 @@
           </footer>
         </article>
       </div>
+
+      <!-- Under the list, which scrolls by itself. -->
+      <div v-if="skills.length > 0 && skillWindow.paged" class="mt-3 flex shrink-0 flex-col items-center gap-2 text-center">
+        <button v-if="skillWindow.hasMore" type="button" class="skills-controls__refresh" @click="skillWindow.showMore()">
+          Show {{ skillWindow.nextStep }} more
+        </button>
+        <p class="text-xs text-gray-400" aria-live="polite">{{ skillWindow.summary }} skills</p>
+      </div>
     </section>
 
     <!-- Create / edit modal -->
@@ -98,8 +112,8 @@
         <div v-if="modalError" class="skills-page__notice skills-page__notice--error" role="alert">{{ modalError }}</div>
         <div class="skill-modal__grid">
           <label class="skill-modal__field">
-            <span>Name</span>
-            <input v-model="form.name" type="text" placeholder="Build a reveal.js deck from research" />
+            <span>Name <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input ref="nameField" v-model="form.name" type="text" required aria-required="true" placeholder="Build a reveal.js deck from research" />
           </label>
           <label class="skill-modal__field">
             <span>Status</span>
@@ -113,12 +127,12 @@
             <input v-model="form.whenToUse" type="text" placeholder="When the user asks for a slide deck backed by sources" />
           </label>
           <label class="skill-modal__field skill-modal__field--full">
-            <span>Description <em>— one-line summary</em></span>
-            <input v-model="form.description" type="text" placeholder="What this procedure accomplishes" />
+            <span>Description <span class="text-red-400" aria-hidden="true">*</span> <em>— one-line summary</em></span>
+            <input ref="descriptionField" v-model="form.description" type="text" required aria-required="true" placeholder="What this procedure accomplishes" />
           </label>
           <label class="skill-modal__field skill-modal__field--full">
-            <span>Procedure <em>— Markdown: the steps &amp; pitfalls</em></span>
-            <textarea v-model="form.procedure" rows="10" placeholder="1. …&#10;2. …"></textarea>
+            <span>Procedure <span class="text-red-400" aria-hidden="true">*</span> <em>— Markdown: the steps &amp; pitfalls</em></span>
+            <textarea ref="procedureField" v-model="form.procedure" rows="10" required aria-required="true" placeholder="1. …&#10;2. …"></textarea>
           </label>
           <label class="skill-modal__field">
             <span>Tags <em>— comma-separated</em></span>
@@ -136,6 +150,7 @@
         <p class="skill-modal__hint">
           Guidance only — a skill never runs code or grants tools; the agents/tools you list are advisory hints for retrieval.
         </p>
+        <p v-if="requiredError" class="mt-2 text-sm text-red-400" role="alert">{{ requiredError }}</p>
         <div class="skill-modal__actions">
           <button type="button" class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
           <button type="button" class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
@@ -150,6 +165,8 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -183,6 +200,16 @@ const query = ref<string>("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
+// The status and search the list on screen was loaded with (the gateway applies both); null
+// until a load has worked.
+const skillsLoaded = ref<{ status: string; query: string } | null>(null);
+// Counts loads, so a slow answer to an earlier search cannot land under a newer one.
+let loadRun = 0;
+
+// The cards are drawn a page at a time; another status or search starts again at the first page.
+const skillWindow = useListWindow(() => skills.value, {
+  resetKey: () => `${skillsLoaded.value?.status ?? ""}|${skillsLoaded.value?.query ?? ""}`,
+});
 // The card whose archive or delete request is in flight.
 const rowBusy = ref<{ slug: string; action: "archive" | "delete" } | null>(null);
 
@@ -206,6 +233,11 @@ const editingSlug = ref<string | null>(null);
 const saving = ref(false);
 const modalError = ref<string | null>(null);
 const form = ref<SkillForm>(emptyForm());
+// Which required field a refused save found empty; shown under the form.
+const requiredError = ref<string | null>(null);
+const nameField = ref<HTMLInputElement | null>(null);
+const descriptionField = ref<HTMLInputElement | null>(null);
+const procedureField = ref<HTMLTextAreaElement | null>(null);
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -216,24 +248,35 @@ function authHeaders(): Record<string, string> {
 }
 
 async function loadSkills(): Promise<void> {
+  const run = ++loadRun;
+  const request = { status: statusFilter.value, query: query.value.trim() };
   loading.value = true;
   error.value = null;
   try {
     const params = new URLSearchParams({ includeArchived: "true" });
-    if (statusFilter.value) params.set("status", statusFilter.value);
-    if (query.value.trim()) params.set("query", query.value.trim());
+    if (request.status) params.set("status", request.status);
+    if (request.query) params.set("query", request.query);
     const res = await fetch(`${apiBase()}/api/skills?${params}`, { headers: authHeaders() });
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
     }
     const data = await res.json() as { records: SkillRecord[] };
+    if (run !== loadRun) return; // a newer load owns the list now
     skills.value = data.records ?? [];
+    skillsLoaded.value = request;
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    if (run === loadRun) error.value = err instanceof Error ? err.message : String(err);
   } finally {
-    loading.value = false;
+    if (run === loadRun) loading.value = false;
   }
+}
+
+function clearFilters(): void {
+  if (queryTimer) clearTimeout(queryTimer);
+  query.value = "";
+  statusFilter.value = "";
+  void loadSkills();
 }
 
 /** The gateway's own reason when it sent one ("Skill is pinned…"), else the status. */
@@ -302,6 +345,7 @@ function splitList(v: string): string[] {
 function openCreate(): void {
   editingSlug.value = null;
   modalError.value = null;
+  requiredError.value = null;
   form.value = emptyForm();
   showModal.value = true;
 }
@@ -309,6 +353,7 @@ function openCreate(): void {
 function openEdit(skill: SkillRecord): void {
   editingSlug.value = skill.slug;
   modalError.value = null;
+  requiredError.value = null;
   form.value = {
     name: skill.name,
     whenToUse: skill.whenToUse ?? "",
@@ -328,10 +373,18 @@ function closeModal(): void {
 
 async function saveSkill(): Promise<void> {
   const f = form.value;
-  if (!f.name.trim() || !f.description.trim() || !f.procedure.trim()) {
-    modalError.value = "Name, description, and procedure are required.";
+  // The first required field left empty is named under the form and gets the cursor.
+  const missing = [
+    { label: "Name", value: f.name, field: nameField.value },
+    { label: "Description", value: f.description, field: descriptionField.value },
+    { label: "Procedure", value: f.procedure, field: procedureField.value },
+  ].find((entry) => !entry.value.trim());
+  if (missing) {
+    requiredError.value = `${missing.label} is required.`;
+    missing.field?.focus();
     return;
   }
+  requiredError.value = null;
   saving.value = true;
   modalError.value = null;
   try {
@@ -367,11 +420,6 @@ async function saveSkill(): Promise<void> {
   } finally {
     saving.value = false;
   }
-}
-
-function formatDate(iso: string): string {
-  if (!iso) return "—";
-  try { return new Date(iso).toLocaleString(); } catch { return iso; }
 }
 
 // Also when the gateway comes up after the page did (opened by URL, or signed in to here).

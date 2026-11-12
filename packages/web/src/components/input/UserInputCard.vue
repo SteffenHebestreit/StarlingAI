@@ -3,6 +3,7 @@
     v-if="request && request.kind === 'image_settings' && imagePayload"
     :request="request"
     :payload="imagePayload"
+    :language="lang"
   />
 
   <!-- A kind this page cannot draw, or a payload it cannot read: never a dead end — the agent's
@@ -10,18 +11,18 @@
   <div v-else-if="request" class="uic" role="group" :aria-label="request.title">
     <div class="uic__head">
       <span class="uic__title">{{ request.title }}</span>
-      <span v-if="countdown" class="uic__timer">Auto in {{ countdown }}</span>
+      <span v-if="countdown" class="uic__timer">{{ chatText.autoIn(lang, countdown) }}</span>
     </div>
-    <p class="uic__copy">This page cannot show the full question. The agent can go on with its own choice.</p>
+    <p class="uic__copy">{{ chatText.cannotShowQuestion(lang) }}</p>
     <div class="uic__actions">
-      <button type="button" class="btn-grad uic__button" :disabled="busy" @click="answer('auto')">Continue with defaults</button>
+      <button type="button" class="btn-grad uic__button" :disabled="busy" @click="answer('auto')">{{ chatText.continueWithDefaults(lang) }}</button>
       <button
         v-if="request.kind === 'image_settings'"
         type="button"
         class="btn-ghost uic__button"
         :disabled="busy"
         @click="answer('skip')"
-      >Skip</button>
+      >{{ chatText.skip(lang) }}</button>
     </div>
     <p v-if="formError" class="uic__error" role="alert">{{ formError }}</p>
   </div>
@@ -33,9 +34,16 @@ import { useGatewayStore } from "@/stores/gateway";
 import { readImageSettingsPayload } from "@/composables/imageSettings";
 import { fieldErrorMap, formatCountdown, localExpiresAt, remainingMs } from "@/composables/userInputs";
 import { useNow } from "@/composables/useNow";
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 import ImageSettingsCard from "@/components/input/ImageSettingsCard.vue";
 
-const props = defineProps<{ inputId: string }>();
+const props = defineProps<{
+  inputId: string;
+  /** The language of the card's own labels: the conversation's, like the step row it sits under. */
+  language?: TurnLanguage;
+}>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 const gateway = useGatewayStore();
 const now = useNow();

@@ -60,6 +60,11 @@
       <div v-else-if="!graphAvailable" class="memory-page__notice">
         {{ graphUnavailableNote || "MemGraph is not reachable." }}
       </div>
+      <!-- Nothing under one label is not the same as an empty graph. -->
+      <div v-else-if="graphData.nodes.length === 0 && !graphLoading && graphLabelFilter" class="memory-page__notice">
+        No graph nodes carry the label “{{ graphLabelFilter }}”.
+        <button type="button" class="memory-card__btn ml-2" @click="clearGraphLabel()">Clear filters</button>
+      </div>
       <div v-else-if="graphData.nodes.length === 0 && !graphLoading" class="memory-page__notice">
         No graph nodes yet. This view is populated by MemGraph-backed memory write-through,
         FACT promotion, and explicit graph entity tools such as <code>graph_upsert_entity</code>
@@ -164,14 +169,20 @@
         {{ curationReport.nudge }}
       </div>
       <div v-if="memoryError" class="memory-page__notice memory-page__notice--error">{{ memoryError }}</div>
-      <div v-else-if="memoryRecords.length === 0 && !memoryLoading" class="memory-page__notice">
-        No memory entries match. Workspace memory is written by <code>memory_store</code>,
+      <!-- An empty list after a load that worked is one of two things: the search hides every
+           entry, or the store has none. -->
+      <div v-else-if="memoryLoaded && memoryRecords.length === 0 && !memoryLoading && memoryLoaded.query" class="empty-state">
+        <p>{{ noMatchLine("memory entries", memoryLoaded.query) }}</p>
+        <button type="button" class="memory-controls__refresh mt-3" @click="clearMemorySearch()">Clear filters</button>
+      </div>
+      <div v-else-if="memoryLoaded && memoryRecords.length === 0 && !memoryLoading" class="empty-state">
+        No memory entries yet. Workspace memory is written by <code>memory_store</code>,
         <code>record_lesson</code>, and durable promotions from session memory. Session shared facts,
         trajectory cache entries, and arbitrary workspace files are not shown in this tab.
       </div>
       <div class="memory-list">
         <article
-          v-for="record in memoryRecords"
+          v-for="record in memoryWindow.visible"
           :key="record.id"
           class="memory-card"
         >
@@ -179,7 +190,7 @@
             <span class="memory-card__kind">{{ record.kind }}</span>
             <span class="memory-card__scope">{{ record.scope }}</span>
             <span class="memory-card__owner">{{ record.ownerType }}:{{ record.ownerId }}</span>
-            <span class="memory-card__date">{{ formatDate(record.updatedAt) }}</span>
+            <time class="memory-card__date" :datetime="isoTimestamp(record.updatedAt)" :title="isoTimestamp(record.updatedAt)">{{ formatDateTime(record.updatedAt) }}</time>
           </header>
 
           <!-- Inline editor -->
@@ -248,8 +259,20 @@
           </template>
         </article>
       </div>
-      <div v-if="memoryTotal > memoryRecords.length" class="memory-page__notice memory-page__notice--info">
-        Showing {{ memoryRecords.length }} of {{ memoryTotal }} matching entries.
+      <!-- Under the list, which scrolls by itself: how much of it is drawn, and how much of what
+           the gateway holds has been loaded at all. -->
+      <div v-if="memoryRecords.length > 0 && (memoryWindow.paged || memoryCapNote)" class="mt-3 flex shrink-0 flex-col items-center gap-2 text-center">
+        <div v-if="memoryWindow.hasMore || canLoadMoreMemory" class="flex flex-wrap justify-center gap-2">
+          <button v-if="memoryWindow.hasMore" type="button" class="memory-controls__refresh" @click="memoryWindow.showMore()">
+            Show {{ memoryWindow.nextStep }} more
+          </button>
+          <button v-if="canLoadMoreMemory" type="button" class="memory-controls__refresh" :disabled="memoryLoading" @click="loadMoreMemory()">
+            {{ memoryLoading ? "Loading…" : "Load more from the gateway" }}
+          </button>
+        </div>
+        <p class="text-xs text-gray-400" aria-live="polite">
+          {{ memoryWindow.summary }} entries<template v-if="memoryCapNote"> · {{ memoryCapNote }}</template>
+        </p>
       </div>
     </section>
 
@@ -323,7 +346,7 @@
             <span class="memory-card__scope">assistant</span>
             <span class="memory-card__owner">rev {{ personality.profile.revision }}</span>
             <span class="memory-card__owner">by {{ personality.profile.updatedBy }}</span>
-            <span class="memory-card__date">{{ formatDate(personality.profile.updatedAt) }}</span>
+            <time class="memory-card__date" :datetime="isoTimestamp(personality.profile.updatedAt)" :title="isoTimestamp(personality.profile.updatedAt)">{{ formatDateTime(personality.profile.updatedAt) }}</time>
           </header>
           <h3 class="memory-card__subject">{{ personality.profile.identity.name || "Unnamed assistant" }}</h3>
           <p class="memory-card__content">{{ personality.profile.identity.core }}</p>
@@ -352,6 +375,8 @@ import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { useGatewayStore } from "@/stores/gateway";
 import { usePersonalityStore } from "@/stores/personality";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -430,6 +455,37 @@ const memoryError = ref<string | null>(null);
 const memoryRecords = ref<MemoryRecord[]>([]);
 const memoryTotal = ref<number>(0);
 let memoryQueryTimer: ReturnType<typeof setTimeout> | null = null;
+
+// The gateway sends the first `limit` entries that match — 500 at most — and says how many match
+// in all (core's gateway/memory-graph-routes.ts). It takes no offset, so past 500 the way to an
+// entry is the search, which the gateway applies to the whole store before it cuts.
+const MEMORY_FIRST_LIMIT = 200;
+const MEMORY_MAX_LIMIT = 500;
+const memoryLimit = ref(MEMORY_FIRST_LIMIT);
+// What the list on screen was asked for; null until a load has worked.
+const memoryLoaded = ref<{ scope: "workspace" | "user"; query: string; limit: number } | null>(null);
+// Counts loads, so a slow answer to an earlier search cannot land under a newer one.
+let memoryLoadRun = 0;
+
+// The cards are drawn a page at a time; another scope or search starts again at the first page.
+const memoryWindow = useListWindow(() => memoryRecords.value, {
+  resetKey: () => `${memoryLoaded.value?.scope ?? ""}|${memoryLoaded.value?.query ?? ""}`,
+});
+
+const canLoadMoreMemory = computed(() =>
+  memoryTotal.value > memoryRecords.value.length && (memoryLoaded.value?.limit ?? 0) < MEMORY_MAX_LIMIT);
+
+// Said in the count line whenever the gateway holds more than was loaded, so that a cut list is
+// not taken for the whole store.
+const memoryCapNote = computed(() => {
+  const loaded = memoryRecords.value.length;
+  if (memoryTotal.value <= loaded) return "";
+  const what = memoryLoaded.value?.query ? "matching entries" : "entries";
+  const held = `the gateway has ${memoryTotal.value} ${what}; the first ${loaded} are loaded`;
+  return canLoadMoreMemory.value
+    ? held
+    : `${held}, and it sends no more than ${MEMORY_MAX_LIMIT} — search to reach the rest`;
+});
 
 // ── Per-entry edit / delete state ─────────────────────────────────────────
 const editingKey = ref<string | null>(null);
@@ -693,27 +749,47 @@ function formatPropValue(value: unknown): string {
 // ── Memory loaders ────────────────────────────────────────────────────────
 
 async function loadMemory(): Promise<void> {
+  const run = ++memoryLoadRun;
+  const request = { scope: memoryScope.value, query: memoryQuery.value.trim(), limit: memoryLimit.value };
   memoryLoading.value = true;
   memoryError.value = null;
   try {
     const params = new URLSearchParams({
-      scope: memoryScope.value,
-      limit: "200",
+      scope: request.scope,
+      limit: String(request.limit),
     });
-    if (memoryQuery.value.trim()) params.set("query", memoryQuery.value.trim());
+    if (request.query) params.set("query", request.query);
     const res = await fetch(`${apiBase()}/api/memory/entries?${params}`, { headers: authHeaders() });
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
     }
     const data = await res.json() as { records: MemoryRecord[]; total: number };
+    if (run !== memoryLoadRun) return; // a newer load owns the list now
     memoryRecords.value = data.records ?? [];
     memoryTotal.value = data.total ?? memoryRecords.value.length;
+    memoryLoaded.value = request;
   } catch (err) {
-    memoryError.value = err instanceof Error ? err.message : String(err);
+    if (run === memoryLoadRun) memoryError.value = err instanceof Error ? err.message : String(err);
   } finally {
-    memoryLoading.value = false;
+    if (run === memoryLoadRun) memoryLoading.value = false;
   }
+}
+
+async function loadMoreMemory(): Promise<void> {
+  memoryLimit.value = MEMORY_MAX_LIMIT;
+  await loadMemory();
+}
+
+function clearMemorySearch(): void {
+  if (memoryQueryTimer) clearTimeout(memoryQueryTimer);
+  memoryQuery.value = "";
+  void loadMemory();
+}
+
+function clearGraphLabel(): void {
+  graphLabelFilter.value = "";
+  void loadGraph();
 }
 
 async function loadCuration(): Promise<void> {
@@ -848,15 +924,6 @@ async function deleteRecord(record: MemoryRecord): Promise<void> {
     toast.error("Couldn't delete the memory entry", errorText(err));
   } finally {
     deletingKey.value = null;
-  }
-}
-
-function formatDate(iso: string): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
   }
 }
 

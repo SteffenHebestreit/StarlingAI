@@ -24,17 +24,20 @@
           />
         </div>
         <span class="agents-count">{{ filtered.length }} / {{ store.agents.length }}</span>
-        <button type="button" class="agents-controls__refresh" @click="store.fetch()" :disabled="store.loading">
+        <button type="button" class="agents-controls__refresh" @click="load()" :disabled="store.loading">
           {{ store.loading ? "Loading…" : "Refresh" }}
         </button>
       </div>
 
       <div v-if="store.error" class="agents-page__notice agents-page__notice--error">{{ store.error }}</div>
-      <div v-else-if="!store.agents.length && !store.loading" class="agents-page__notice">
+      <!-- "None configured" is only true after a load that worked, and is a different thing from
+           a search that hides the ones there are. -->
+      <div v-else-if="!store.agents.length && loaded && !store.loading" class="empty-state">
         No specialist agents are configured.
       </div>
-      <div v-else-if="!filtered.length && query" class="agents-page__notice">
-        No agents match “{{ query }}”.
+      <div v-else-if="store.agents.length && !filtered.length" class="empty-state">
+        <p>{{ noMatchLine("agents", query) }}</p>
+        <button type="button" class="agents-controls__refresh mt-3" @click="query = ''">Clear filters</button>
       </div>
 
       <div class="agents-list">
@@ -57,10 +60,18 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useAgentsStore } from "@/stores/agents";
+import { noMatchLine } from "@/composables/listWindow";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 
 const store = useAgentsStore();
 const query = ref("");
+// True once a load from this page has worked: only then does an empty catalog mean "none".
+const loaded = ref(false);
+
+async function load(): Promise<void> {
+  await store.fetch();
+  loaded.value = store.error === null;
+}
 
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -73,7 +84,7 @@ const filtered = computed(() => {
 
 // Also when the gateway comes up after the page did. A catalog that is already loaded stays as
 // it is: the store is shared with the Agent tuning page.
-useLoadWhenConnected(() => { if (!store.agents.length) void store.fetch(); });
+useLoadWhenConnected(() => { if (!store.agents.length) void load(); });
 </script>
 
 <style scoped>

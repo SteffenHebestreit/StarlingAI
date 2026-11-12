@@ -88,7 +88,7 @@
             </button>
           </div>
         </div>
-        <p v-if="user.createdAt" class="user-card__meta">Created {{ formatTimestamp(user.createdAt) }}</p>
+        <p v-if="user.createdAt" class="user-card__meta" :title="isoTimestamp(user.createdAt)">Created {{ formatDateTime(user.createdAt) }}</p>
       </li>
     </ul>
 
@@ -184,6 +184,7 @@
 import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
@@ -415,12 +416,6 @@ async function deleteUser(user: User): Promise<void> {
   } finally {
     deleting.value = null;
   }
-}
-
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 // Also when the gateway comes up after the page did (opened by URL, or signed in to here).

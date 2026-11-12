@@ -27,6 +27,14 @@
       <div v-else-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
         {{ blockLabel }}
       </div>
+      <!-- An answer that failed left the user to type the question again: one press asks it again. -->
+      <button
+        v-if="message.blocked && !message.stopped && message.role === 'assistant' && !isStreaming && allowRewind !== false"
+        type="button"
+        class="export-btn retry-btn"
+        :title="chatText.retryTitle(bubbleLanguage)"
+        @click="emit('retry', message.id)"
+      >{{ chatText.retry(bubbleLanguage) }}</button>
       <div v-if="visibleGuardrailEvents.length" class="guardrail-events">
         <div v-for="(label, i) in visibleGuardrailEvents" :key="i" class="guardrail-badge guardrail-badge--warn">
           {{ label }}
@@ -105,6 +113,7 @@
             v-for="inputId in gateway.userInputPlacement.byStep[placementKey(message.id, stepId)] ?? []"
             :key="inputId"
             :input-id="inputId"
+            :language="bubbleLanguage"
           />
         </template>
       </TurnStepStream>
@@ -302,7 +311,17 @@
             <div class="artifact-preview-modal__eyebrow">Artifact Preview</div>
             <div class="artifact-preview-modal__title">{{ artifactPreview.title }}</div>
           </div>
-          <button @click="closeArtifactPreview" class="artifact-preview-modal__close" aria-label="Close preview">✕</button>
+          <div class="artifact-preview-modal__actions">
+            <!-- A file that can be previewed could not be saved from here: the click on its link
+                 previews it, and the way to the download was the side panel. -->
+            <button
+              v-if="artifactPreviewSource && !artifactPreviewSource.externalUrl"
+              type="button"
+              class="artifact-action"
+              @click="downloadAttachment(artifactPreviewSource, Boolean(artifactPreviewSource.isDirectory))"
+            >⬇ {{ chatText.download(bubbleLanguage) }}</button>
+            <button type="button" @click="closeArtifactPreview" class="artifact-preview-modal__close" aria-label="Close preview">✕</button>
+          </div>
         </div>
 
         <div class="artifact-preview-modal__body">
@@ -426,6 +445,8 @@ const emit = defineEmits<{
   rewind: [messageId: string];
   /** Try again to deliver a message sent into a running turn that never reached it. */
   resend: [messageId: string];
+  /** Ask the question this (failed) answer belongs to once more. */
+  retry: [messageId: string];
   /** Ask the page to show ONE step of this message in the side panel. */
   "show-step": [messageId: string, stepId: string];
 }>();
@@ -437,6 +458,8 @@ const COLLAPSE_CHAR_THRESHOLD = 400;
 const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
+/** The attachment the open preview shows, so the preview can offer its download. */
+const artifactPreviewSource = ref<ChatAttachment | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
 const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
@@ -924,6 +947,7 @@ async function ensureMermaidPreview(attachment: ChatAttachment): Promise<void> {
 }
 
 function closeArtifactPreview(): void {
+  artifactPreviewSource.value = null;
   if (artifactPreview.value?.url?.startsWith("blob:")) {
     URL.revokeObjectURL(artifactPreview.value.url);
   }
@@ -941,6 +965,7 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
 
   artifactPreviewLoading.value = attachment.filename;
   closeArtifactPreview();
+  artifactPreviewSource.value = attachment;
 
   try {
     if (attachment.externalUrl) {
@@ -1453,9 +1478,15 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.artifact-preview-modal__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: none;
+}
 .artifact-preview-modal__close {
-  width: 2rem;
-  height: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: #d6c8ff;
@@ -2093,4 +2124,5 @@ onBeforeUnmount(() => {
   outline: 2px solid rgba(var(--logo-cyan), 0.8);
   outline-offset: 2px;
 }
+.retry-btn { margin: 0.1rem 0 0.4rem; font-size: 0.72rem; padding: 0.3rem 0.7rem; opacity: 1; }
 </style>

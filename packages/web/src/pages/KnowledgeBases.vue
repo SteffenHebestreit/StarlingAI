@@ -44,8 +44,8 @@
         <div v-if="showCreate" class="knowledge-page__form">
           <div class="knowledge-page__form-grid">
             <label class="knowledge-page__field">
-              <span class="knowledge-page__label">Name</span>
-              <input v-model="form.name" class="input-box" placeholder="e.g. Vue 3 Docs" />
+              <span class="knowledge-page__label">Name <span class="text-red-400" aria-hidden="true">*</span></span>
+              <input ref="nameField" v-model="form.name" class="input-box" required aria-required="true" placeholder="e.g. Vue 3 Docs" />
             </label>
             <label class="knowledge-page__field">
               <span class="knowledge-page__label">Description <span class="knowledge-page__hint">(optional)</span></span>
@@ -61,8 +61,8 @@
             </select>
           </label>
           <label class="knowledge-page__field">
-            <span class="knowledge-page__label">Seed URLs <span class="knowledge-page__hint">(one per line)</span></span>
-            <textarea v-model="form.seedUrlsText" rows="3" class="input-box knowledge-page__textarea" placeholder="https://vuejs.org/guide/" />
+            <span class="knowledge-page__label">Seed URLs <span class="text-red-400" aria-hidden="true">*</span> <span class="knowledge-page__hint">(one per line)</span></span>
+            <textarea ref="seedUrlsField" v-model="form.seedUrlsText" rows="3" class="input-box knowledge-page__textarea" required aria-required="true" placeholder="https://vuejs.org/guide/" />
           </label>
           <div class="knowledge-page__form-grid">
             <label class="knowledge-page__field">
@@ -190,7 +190,8 @@
 
         <div class="knowledge-page__meta">
           {{ kb.pageCount }} page{{ kb.pageCount === 1 ? "" : "s" }} · {{ kb.chunkCount }} chunk{{ kb.chunkCount === 1 ? "" : "s" }}
-          · bounds {{ kb.maxPages }} pages / depth {{ kb.maxDepth }} · updated {{ formatDate(kb.updatedAt) }}
+          · bounds {{ kb.maxPages }} pages / depth {{ kb.maxDepth }} · updated
+          <time :datetime="isoTimestamp(kb.updatedAt)" :title="isoTimestamp(kb.updatedAt)">{{ formatDateTime(kb.updatedAt) }}</time>
         </div>
 
         <ul class="knowledge-page__seeds">
@@ -204,7 +205,9 @@
             Crawling — {{ liveCrawlLine(kb.lastCrawl) }}
           </span>
           <span v-else>
-            Last crawl {{ formatDate(kb.lastCrawl.startedAt) }} — {{ finishedCrawlLine(kb.lastCrawl) }}
+            Last crawl
+            <time :datetime="isoTimestamp(kb.lastCrawl.startedAt)" :title="isoTimestamp(kb.lastCrawl.startedAt)">{{ formatDateTime(kb.lastCrawl.startedAt) }}</time>
+            — {{ finishedCrawlLine(kb.lastCrawl) }}
             <span v-if="kb.lastCrawl.stopReason"> · stopped: {{ kb.lastCrawl.stopReason }}</span>
           </span>
         </div>
@@ -297,7 +300,10 @@
                   <span class="knowledge-page__page-chunks">{{ page.chunkCount }} chunk{{ page.chunkCount === 1 ? "" : "s" }}</span>
                 </li>
               </ul>
-              <div v-if="filteredPages.length === 0" class="text-sm text-gray-500">No pages match the filter.</div>
+              <div v-if="filteredPages.length === 0" class="empty-state">
+                <p>{{ noMatchLine("pages", pageFilter) }}</p>
+                <button type="button" class="btn-ghost mt-3 px-3 py-1 rounded-lg text-xs" @click="pageFilter = ''">Clear filters</button>
+              </div>
             </template>
             <div v-else-if="!detail.crawling" class="text-sm text-gray-500">No pages ingested yet — run a crawl.</div>
           </template>
@@ -310,6 +316,8 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -438,6 +446,9 @@ const showAdvanced = ref(false);
 const creating = ref(false);
 const createError = ref("");
 const createNote = ref("");
+// The two required fields: a refused submit puts the cursor in the first one left empty.
+const nameField = ref<HTMLInputElement | null>(null);
+const seedUrlsField = ref<HTMLTextAreaElement | null>(null);
 
 function emptyForm() {
   return {
@@ -481,8 +492,8 @@ async function submitCreate(): Promise<void> {
   createNote.value = "";
   const name = form.value.name.trim();
   const seedUrls = linesToList(form.value.seedUrlsText);
-  if (!name) { createError.value = "Name is required."; return; }
-  if (seedUrls.length === 0) { createError.value = "At least one seed URL is required."; return; }
+  if (!name) { createError.value = "Name is required."; nameField.value?.focus(); return; }
+  if (seedUrls.length === 0) { createError.value = "At least one seed URL is required."; seedUrlsField.value?.focus(); return; }
   if (form.value.scope === "session" && !currentSessionId.value) {
     createError.value = "Open a chat first to create a session-scoped knowledge base.";
     return;
@@ -804,11 +815,6 @@ function finishedCrawlLine(c: KbCrawlStats): string {
   ];
   if (typeof c.pagesRemoved === "number" && c.pagesRemoved > 0) parts.push(`${c.pagesRemoved} removed`);
   return parts.join(" · ");
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
 // On mount, and whenever the gateway comes up after the page did or reconnects.

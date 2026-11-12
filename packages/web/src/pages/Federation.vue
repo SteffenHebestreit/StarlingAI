@@ -107,7 +107,7 @@
           <li v-for="event in activity" :key="event.id" :class="['federation-activity__item', activityToneClass(event.severity)]">
             <div class="federation-activity__item-head">
               <code class="federation-activity__type">{{ event.type }}</code>
-              <span class="federation-activity__time">{{ formatActivityTime(event.timestamp) }}</span>
+              <span class="federation-activity__time" :title="isoTimestamp(event.timestamp)">{{ formatActivityTime(event.timestamp) }}</span>
             </div>
             <div class="federation-activity__body">{{ describeActivity(event) }}</div>
           </li>
@@ -121,6 +121,7 @@
 import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { errorText } from "@/composables/useToast";
 
@@ -305,7 +306,7 @@ function formatActivityTime(iso: string): string {
   if (diffMs < 60_000) return "just now";
   if (diffMs < 3_600_000) return `${Math.round(diffMs / 60_000)}m ago`;
   if (diffMs < 86_400_000) return `${Math.round(diffMs / 3_600_000)}h ago`;
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(parsed);
 }
 
 // On mount, and again when the gateway comes up after the page did or reconnects (e.g. after a

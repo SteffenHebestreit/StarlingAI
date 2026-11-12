@@ -54,7 +54,9 @@
           </ul>
         </details>
         <p class="plugin-card__meta">
-          Loaded {{ formatTimestamp(plugin.loadedAt) }} · source <code>{{ plugin.source }}</code>
+          Loaded
+          <time :datetime="isoTimestamp(plugin.loadedAt)" :title="isoTimestamp(plugin.loadedAt)">{{ formatDateTime(plugin.loadedAt) }}</time>
+          · source <code>{{ plugin.source }}</code>
         </p>
       </li>
     </ul>
@@ -75,7 +77,7 @@
         >
           <div class="plugins-activity__item-head">
             <code class="plugins-activity__type">{{ event.type }}</code>
-            <span class="plugins-activity__time">{{ formatActivityTime(event.timestamp) }}</span>
+            <span class="plugins-activity__time" :title="isoTimestamp(event.timestamp)">{{ formatActivityTime(event.timestamp) }}</span>
           </div>
           <div class="plugins-activity__body">{{ describeActivity(event) }}</div>
         </li>
@@ -88,6 +90,7 @@
 import { computed, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 
 interface PluginRecord {
@@ -191,12 +194,6 @@ function describeActivity(event: ActivityEvent): string {
   }
 }
 
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
-
 function formatActivityTime(iso: string): string {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
@@ -204,7 +201,7 @@ function formatActivityTime(iso: string): string {
   if (diffMs < 60_000) return "just now";
   if (diffMs < 3_600_000) return `${Math.round(diffMs / 60_000)}m ago`;
   if (diffMs < 86_400_000) return `${Math.round(diffMs / 3_600_000)}h ago`;
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(parsed);
 }
 
 // Also when the gateway comes up after the page did (opened by URL, or signed in to here).

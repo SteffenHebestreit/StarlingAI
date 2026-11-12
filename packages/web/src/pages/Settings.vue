@@ -40,14 +40,15 @@
       <ul ref="chipRowEl" class="settings-index__chips">
         <li v-for="card in pageCards" :key="card.id">
           <!-- A real link, so a chip can be copied or opened in a new tab; a plain click
-               scrolls instead of navigating. -->
+               scrolls instead of navigating. A card with unsaved changes carries a dot. -->
           <a
             :href="`#${card.id}`"
             class="settings-index__chip"
             :class="{ 'settings-index__chip--dim': !isCardShown(card.id) }"
             :aria-current="currentCardId === card.id ? 'true' : undefined"
+            :title="isCardDirty(card.id) ? 'Unsaved changes' : undefined"
             @click.exact.prevent="goToCard(card.id)"
-          >{{ card.label }}</a>
+          >{{ card.label }}<template v-if="isCardDirty(card.id)"><span class="settings-index__dot" aria-hidden="true"></span><span class="sr-only"> (unsaved changes)</span></template></a>
         </li>
       </ul>
     </nav>
@@ -67,26 +68,37 @@
 
         <!-- ── Appearance ─────────────────────────────────────────────────── -->
         <div id="appearance" v-if="isSettingsPage" v-show="isCardShown('appearance')" class="glass-card settings-card p-5">
-          <h3 class="section-title mb-1" tabindex="-1">Appearance</h3>
+          <div class="flex items-baseline gap-3 flex-wrap mb-1">
+            <h3 class="section-title mb-0" tabindex="-1">Appearance</h3>
+            <span class="eyebrow applies-now" title="A preset, palette or typeface is used, and stored in this browser, as soon as you pick it.">Applies immediately</span>
+          </div>
           <div class="text-xs text-gray-500 mb-4">Palette, typeface, and curated presets. Saved in this browser.</div>
           <AppearanceSettings />
         </div>
 
         <!-- ── Gateway Connection ─────────────────────────────────────────── -->
         <div id="gateway-connection" v-if="isSettingsPage" v-show="isCardShown('gateway-connection')" class="glass-card settings-card p-5">
-          <h3 class="section-title" tabindex="-1">Gateway Connection</h3>
+          <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+            <h3 class="section-title mb-0" tabindex="-1">Gateway Connection</h3>
+            <span v-if="isCardDirty('gateway-connection')" class="unsaved-chip">Unsaved</span>
+          </div>
+          <!-- Both fields edit a draft: the stored URL and token, which every page's requests
+               read, change only when Reconnect is pressed. -->
           <div class="space-y-4">
             <div>
-              <label class="field-label">WebSocket URL</label>
-              <input v-model="gateway.wsUrl" type="text" class="input-box" />
+              <label for="gateway-ws-url" class="field-label">WebSocket URL</label>
+              <input id="gateway-ws-url" v-model="gatewayDraft.wsUrl" type="text" class="input-box" autocomplete="off" spellcheck="false" />
             </div>
             <div>
-              <label class="field-label">Token</label>
-              <input v-model="gateway.token" type="password" class="input-box" autocomplete="current-password" />
+              <label for="gateway-token" class="field-label">Token</label>
+              <input id="gateway-token" v-model="gatewayDraft.token" type="password" class="input-box" autocomplete="current-password" />
             </div>
-            <div class="flex gap-2 pt-1">
-              <button type="button" @click="gateway.connect()" class="btn-grad px-4 py-2 rounded-xl text-sm">Reconnect</button>
+            <div class="text-xs text-gray-500">A changed URL or token is used from the moment you press Reconnect.</div>
+            <div v-if="gatewayDraft.error" class="text-sm text-red-400" role="alert">{{ gatewayDraft.error }}</div>
+            <div class="flex gap-2 pt-1 flex-wrap">
+              <button type="button" @click="applyGatewayConnection" class="btn-grad px-4 py-2 rounded-xl text-sm">Reconnect</button>
               <button type="button" @click="gateway.disconnect()" class="btn-ghost px-4 py-2 rounded-xl text-sm">Disconnect</button>
+              <button type="button" @click="revertGatewayDraft" :disabled="!isCardDirty('gateway-connection')" class="btn-ghost px-4 py-2 rounded-xl text-sm">Revert</button>
             </div>
           </div>
         </div>
@@ -122,7 +134,7 @@
               </div>
             </div>
             <div v-if="runtime.loading" class="text-xs text-gray-500">Loading runtime status…</div>
-            <div v-else-if="runtime.error" class="text-xs text-red-400">{{ runtime.error }}</div>
+            <div v-else-if="runtime.error" class="text-xs text-red-400">{{ shownError(runtime.error) }}</div>
             <div v-else-if="runtime.snapshot" class="space-y-1.5 pt-1">
               <div v-for="component in runtime.snapshot.components" :key="component.name" class="flex items-start justify-between gap-3 text-xs">
                 <div class="min-w-0">
@@ -141,9 +153,10 @@
               <h3 class="section-title mb-0" tabindex="-1">Main AI Personality</h3>
               <div class="text-xs text-gray-500 mt-1">Persistent voice guidance injected into the main assistant prompt and shared with the assistant’s self-profile tools.</div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span v-if="isCardDirty('personality')" class="unsaved-chip">Unsaved</span>
               <button type="button" v-if="gateway.connected" @click="personalityStore.fetch()" :disabled="personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button type="button" @click="resetPersonalityForm" :disabled="!personalityStore.lastLoaded || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
+              <button type="button" @click="revertCard('personality')" :disabled="!isCardDirty('personality') || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
               <button type="button" @click="restoreDefaultPersonality" :disabled="!gateway.connected || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Defaults</button>
             </div>
           </div>
@@ -172,8 +185,8 @@
             </div>
 
             <div>
-              <label class="field-label">Identity</label>
-              <textarea v-model="personalityForm.identity" rows="3" class="input-box min-h-[96px]" placeholder="Core identity and overall vibe for the main assistant." />
+              <label for="personality-identity" class="field-label">Identity <span class="field-required" aria-hidden="true">*</span></label>
+              <textarea id="personality-identity" v-model="personalityForm.identity" rows="3" required aria-required="true" class="input-box min-h-[96px]" placeholder="Core identity and overall vibe for the main assistant." />
             </div>
 
             <div class="multimodal-grid">
@@ -208,7 +221,7 @@
               <input v-model="personalityForm.reason" type="text" class="input-box" placeholder="Why this durable personality change matters." />
             </div>
 
-            <div v-if="personalityForm.error || personalityStore.error" class="text-sm text-red-400">{{ personalityForm.error || personalityStore.error }}</div>
+            <div v-if="personalityForm.error || personalityStore.error" class="text-sm text-red-400">{{ shownError(personalityForm.error || personalityStore.error) }}</div>
 
             <div class="flex justify-end">
               <button type="button" @click="submitPersonalityForm" :disabled="personalityStore.loading || personalityStore.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
@@ -230,7 +243,7 @@
                 </span>
               </div>
             </div>
-            <div v-if="runtime.modelEndpointError" class="text-xs text-red-400">{{ runtime.modelEndpointError }}</div>
+            <div v-if="runtime.modelEndpointError" class="text-xs text-red-400">{{ shownError(runtime.modelEndpointError) }}</div>
             <div v-else-if="runtime.modelEndpoints?.endpoints?.length" class="space-y-2 pt-1">
               <div v-for="endpoint in runtime.modelEndpoints.endpoints" :key="`${endpoint.role}-${endpoint.baseUrl}-${endpoint.model}`" class="model-endpoint-row">
                 <div class="min-w-0">
@@ -255,23 +268,28 @@
                 <h3 class="section-title mb-0" tabindex="-1">Orchestration Tuning</h3>
                 <div class="text-xs text-gray-500 mt-1">Adjust limits to match your hardware. Leave a field at its default to use the built-in value.</div>
               </div>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span v-if="isCardDirty('orchestration-tuning')" class="unsaved-chip">Unsaved</span>
                 <button type="button" v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-                <button type="button" @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+                <button type="button" @click="revertCard('orchestration-tuning')" :disabled="!isCardDirty('orchestration-tuning') || orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
               </div>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to configure orchestration limits.</div>
             <div v-else class="space-y-4">
               <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required.
+                The limits wait for Save Limits; once saved they take effect without a restart.
               </div>
 
-              <!-- Default effort tier (seeds new sessions; per-session override in chat) -->
+              <!-- Default effort tier (seeds new sessions; per-session override in chat). The one
+                   field of this card that does not wait for Save, so it says so. -->
               <div class="multimodal-grid">
                 <div>
-                  <label class="field-label">Default Effort <span class="text-gray-600 font-normal">new sessions inherit this</span></label>
-                  <select v-model="effortDefaultForm" @change="saveEffortDefaultUI" class="input-box">
+                  <div class="flex items-baseline justify-between gap-2 flex-wrap">
+                    <label for="default-effort" class="field-label">Default Effort <span class="text-gray-600 font-normal">new sessions inherit this</span></label>
+                    <span class="eyebrow applies-now" title="Saved as soon as you pick a tier; it does not wait for Save Limits.">Applies immediately</span>
+                  </div>
+                  <select id="default-effort" v-model="effortDefaultForm" @change="saveEffortDefaultUI" class="input-box">
                     <option value="low">Low — fast &amp; tight</option>
                     <option value="medium">Medium — balanced (default)</option>
                     <option value="high">High — thorough, quality gates kept</option>
@@ -368,35 +386,38 @@
                 <h3 class="section-title mb-0" tabindex="-1">Skill Library &amp; Automation</h3>
                 <div class="text-xs text-gray-500 mt-1">Self-authoring procedural memory and batched tool execution. Browse authored skills on the <RouterLink to="/skills" class="text-indigo-300 hover:underline">Skills</RouterLink> page.</div>
               </div>
-              <button type="button" v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span v-if="isCardDirty('skill-library')" class="unsaved-chip">Unsaved</span>
+                <button type="button" v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              </div>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to configure the Skill Library.</div>
             <div v-else class="space-y-4">
               <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required.
+                Changes wait for Save; once saved they take effect without a restart.
               </div>
 
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Enable Skill Library</div>
+                  <label for="skill-enabled" class="field-label field-label--switch">Enable Skill Library</label>
                   <div class="text-xs text-gray-500">Retrieve and inject learned procedures at planning time.</div>
                 </div>
-                <ToggleSwitch :value="skillForm.enabled" @change="skillForm.enabled = $event" />
+                <ToggleSwitch id="skill-enabled" label="Enable Skill Library" :value="skillForm.enabled" @change="skillForm.enabled = $event" />
               </div>
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Autonomous authoring</div>
+                  <label for="skill-auto-author" class="field-label field-label--switch">Autonomous authoring</label>
                   <div class="text-xs text-gray-500">Distill skill drafts from successful multi-step turns.</div>
                 </div>
-                <ToggleSwitch :value="skillForm.autoAuthor" :disabled="!skillForm.enabled" @change="skillForm.autoAuthor = $event" />
+                <ToggleSwitch id="skill-auto-author" label="Autonomous authoring" :value="skillForm.autoAuthor" :disabled="!skillForm.enabled" @change="skillForm.autoAuthor = $event" />
               </div>
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Auto-promote to scenes</div>
+                  <label for="skill-auto-promote" class="field-label field-label--switch">Auto-promote to scenes</label>
                   <div class="text-xs text-gray-500">Graduate consistently reliable skills into reusable workflow scenes.</div>
                 </div>
-                <ToggleSwitch :value="skillForm.autoPromoteToScene" :disabled="!skillForm.enabled" @change="skillForm.autoPromoteToScene = $event" />
+                <ToggleSwitch id="skill-auto-promote" label="Auto-promote to scenes" :value="skillForm.autoPromoteToScene" :disabled="!skillForm.enabled" @change="skillForm.autoPromoteToScene = $event" />
               </div>
               <div class="multimodal-grid">
                 <div>
@@ -409,10 +430,10 @@
                 <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Tool Pipeline</div>
                 <div class="flex items-center justify-between gap-4">
                   <div>
-                    <div class="field-label">Enable run_tool_pipeline</div>
+                    <label for="tool-pipeline-enabled" class="field-label field-label--switch">Enable run_tool_pipeline</label>
                     <div class="text-xs text-gray-500">Let granted agents batch several tool calls in one turn. Each step still passes tier + approval + the agent's own allowlist.</div>
                   </div>
-                  <ToggleSwitch :value="pipelineForm.enabled" @change="pipelineForm.enabled = $event" />
+                  <ToggleSwitch id="tool-pipeline-enabled" label="Enable run_tool_pipeline" :value="pipelineForm.enabled" @change="pipelineForm.enabled = $event" />
                 </div>
               </div>
 
@@ -433,35 +454,38 @@
                 <h3 class="section-title mb-0" tabindex="-1">Document RAG</h3>
                 <div class="text-xs text-gray-500 mt-1">Retrieval-augmented context from attached/uploaded documents (engram graph-RAG). Files are extracted to text and indexed; relevant excerpts are injected into the conversation.</div>
               </div>
-              <button type="button" v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span v-if="isCardDirty('document-rag')" class="unsaved-chip">Unsaved</span>
+                <button type="button" v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              </div>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to configure Document RAG.</div>
             <div v-else class="space-y-4">
               <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required. Requires the engram + reranker services to be running.
+                Changes wait for Save; once saved they take effect without a restart. Requires the engram + reranker services to be running.
               </div>
 
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Enable Document RAG</div>
+                  <label for="docrag-enabled" class="field-label field-label--switch">Enable Document RAG</label>
                   <div class="text-xs text-gray-500">Master switch for indexing and retrieving from attached documents.</div>
                 </div>
-                <ToggleSwitch :value="docRagForm.enabled" @change="docRagForm.enabled = $event" />
+                <ToggleSwitch id="docrag-enabled" label="Enable Document RAG" :value="docRagForm.enabled" @change="docRagForm.enabled = $event" />
               </div>
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Auto-ingest attachments</div>
+                  <label for="docrag-auto-ingest" class="field-label field-label--switch">Auto-ingest attachments</label>
                   <div class="text-xs text-gray-500">Index files attached to a message into that conversation's document library automatically.</div>
                 </div>
-                <ToggleSwitch :value="docRagForm.autoIngestAttachments" :disabled="!docRagForm.enabled" @change="docRagForm.autoIngestAttachments = $event" />
+                <ToggleSwitch id="docrag-auto-ingest" label="Auto-ingest attachments" :value="docRagForm.autoIngestAttachments" :disabled="!docRagForm.enabled" @change="docRagForm.autoIngestAttachments = $event" />
               </div>
               <div class="flex items-center justify-between gap-4">
                 <div>
-                  <div class="field-label">Inject context automatically</div>
+                  <label for="docrag-inject-context" class="field-label field-label--switch">Inject context automatically</label>
                   <div class="text-xs text-gray-500">Before answering, retrieve relevant excerpts and add them to the prompt.</div>
                 </div>
-                <ToggleSwitch :value="docRagForm.injectContext" :disabled="!docRagForm.enabled" @change="docRagForm.injectContext = $event" />
+                <ToggleSwitch id="docrag-inject-context" label="Inject context automatically" :value="docRagForm.injectContext" :disabled="!docRagForm.enabled" @change="docRagForm.injectContext = $event" />
               </div>
 
               <div class="border-t border-purple-500/10 pt-3 space-y-3">
@@ -469,17 +493,17 @@
                 <div class="text-xs text-gray-500 -mt-1">Documents are always searchable within the conversation they were attached to. Extend retrieval to shared libraries:</div>
                 <div class="flex items-center justify-between gap-4">
                   <div>
-                    <div class="field-label">Include the user's personal library</div>
+                    <label for="docrag-user-docs" class="field-label field-label--switch">Include the user's personal library</label>
                     <div class="text-xs text-gray-500">Also search documents scoped to the signed-in user (user:&lt;id&gt;).</div>
                   </div>
-                  <ToggleSwitch :value="docRagForm.includeUserDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeUserDocs = $event" />
+                  <ToggleSwitch id="docrag-user-docs" label="Include the user's personal library" :value="docRagForm.includeUserDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeUserDocs = $event" />
                 </div>
                 <div class="flex items-center justify-between gap-4">
                   <div>
-                    <div class="field-label">Include the workspace library</div>
+                    <label for="docrag-workspace-docs" class="field-label field-label--switch">Include the workspace library</label>
                     <div class="text-xs text-gray-500">Also search documents shared across the whole workspace.</div>
                   </div>
-                  <ToggleSwitch :value="docRagForm.includeWorkspaceDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeWorkspaceDocs = $event" />
+                  <ToggleSwitch id="docrag-workspace-docs" label="Include the workspace library" :value="docRagForm.includeWorkspaceDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeWorkspaceDocs = $event" />
                 </div>
               </div>
 
@@ -505,14 +529,15 @@
           </div>
 
         <div id="multimodal" v-if="isSettingsPage" v-show="isCardShown('multimodal')" class="glass-card settings-card p-5">
-          <div class="flex items-center justify-between mb-4 gap-3">
+          <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <div>
               <h3 class="section-title mb-0" tabindex="-1">Multimodal</h3>
               <div class="text-xs text-gray-500 mt-1">Set file ingestion, STT, TTS, and wake-word defaults.</div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span v-if="isCardDirty('multimodal')" class="unsaved-chip">Unsaved</span>
               <button type="button" v-if="gateway.connected" @click="multimodalStore.fetch()" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button type="button" @click="resetMultimodalForm" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              <button type="button" @click="revertCard('multimodal')" :disabled="!isCardDirty('multimodal') || multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
             </div>
           </div>
 
@@ -615,8 +640,8 @@
               <div class="text-xs uppercase tracking-[0.18em] text-gray-500">File Conversion</div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">Files Endpoint</label>
-                  <input v-model="multimodalForm.filesBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:8010" />
+                  <label for="multimodal-files-endpoint" class="field-label">Files Endpoint <span class="field-required" aria-hidden="true">*</span></label>
+                  <input id="multimodal-files-endpoint" v-model="multimodalForm.filesBaseUrl" type="text" required aria-required="true" class="input-box font-mono" placeholder="http://host.docker.internal:8010" />
                 </div>
                 <div>
                   <label class="field-label">Tool Name</label>
@@ -757,16 +782,16 @@
                 </div>
                 <div class="multimodal-grid">
                   <div>
-                    <label class="field-label">Voice Name</label>
-                    <input v-model="savedVoiceForm.name" type="text" class="input-box" placeholder="e.g. Steffen Voice" />
+                    <label for="saved-voice-name" class="field-label">Voice Name <span class="field-required" aria-hidden="true">*</span></label>
+                    <input id="saved-voice-name" v-model="savedVoiceForm.name" type="text" required aria-required="true" class="input-box" placeholder="e.g. Steffen Voice" />
                   </div>
                   <div>
                     <label class="field-label">Language</label>
                     <input v-model="savedVoiceForm.language" type="text" class="input-box font-mono" placeholder="English" />
                   </div>
                   <div class="md:col-span-2">
-                    <label class="field-label">Voice Sample File</label>
-                    <input type="file" accept="audio/*" class="input-box" @change="onSavedVoiceFileSelected" />
+                    <label for="saved-voice-file" class="field-label">Voice Sample File <span class="field-required" aria-hidden="true">*</span></label>
+                    <input id="saved-voice-file" type="file" accept="audio/*" required aria-required="true" class="input-box" @change="onSavedVoiceFileSelected" />
                     <div v-if="savedVoiceForm.fileName" class="mt-2 text-[11px] text-gray-500">Selected: {{ savedVoiceForm.fileName }}</div>
                   </div>
                 </div>
@@ -898,7 +923,7 @@
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Wake Word</div>
                   <div class="text-xs text-gray-500 mt-1">Browser-side wake listening defaults.</div>
                 </div>
-                <toggle-switch :value="multimodalForm.wakeEnabled" @change="multimodalForm.wakeEnabled = $event" />
+                <toggle-switch label="Wake word" :value="multimodalForm.wakeEnabled" @change="multimodalForm.wakeEnabled = $event" />
               </div>
               <div class="multimodal-grid">
                 <div>
@@ -906,17 +931,17 @@
                   <input v-model.number="multimodalForm.wakeSilenceTimeoutMs" type="number" min="1000" max="15000" class="input-box" />
                 </div>
                 <div>
-                  <label class="field-label">Wake Keywords <span class="text-gray-600 font-normal">comma-separated</span></label>
-                  <input v-model="multimodalForm.wakeKeywordsText" type="text" class="input-box" placeholder="Hey Guarded, Okay Guarded, Luna" />
+                  <label for="multimodal-wake-keywords" class="field-label">Wake Keywords <span class="field-required" aria-hidden="true">*</span> <span class="text-gray-600 font-normal">comma-separated</span></label>
+                  <input id="multimodal-wake-keywords" v-model="multimodalForm.wakeKeywordsText" type="text" required aria-required="true" class="input-box" placeholder="Hey Guarded, Okay Guarded, Luna" />
                 </div>
                 <div class="md:col-span-2">
-                  <label class="field-label">Stop Phrases <span class="text-gray-600 font-normal">comma-separated</span></label>
-                  <input v-model="multimodalForm.wakeStopPhrasesText" type="text" class="input-box" placeholder="stop recording, end recording, stop listening" />
+                  <label for="multimodal-stop-phrases" class="field-label">Stop Phrases <span class="field-required" aria-hidden="true">*</span> <span class="text-gray-600 font-normal">comma-separated</span></label>
+                  <input id="multimodal-stop-phrases" v-model="multimodalForm.wakeStopPhrasesText" type="text" required aria-required="true" class="input-box" placeholder="stop recording, end recording, stop listening" />
                 </div>
               </div>
             </div>
 
-            <div v-if="multimodalStore.error || multimodalForm.error" class="text-sm text-red-400">{{ multimodalForm.error || multimodalStore.error }}</div>
+            <div v-if="multimodalStore.error || multimodalForm.error" class="text-sm text-red-400">{{ shownError(multimodalForm.error || multimodalStore.error) }}</div>
 
             <div class="flex justify-end">
               <button type="button" @click="submitMultimodalForm" :disabled="multimodalStore.saving || multimodalStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
@@ -943,8 +968,11 @@
 
         <!-- ── Guardrails ──────────────────────────────────────────────────── -->
         <div id="guardrails" v-if="isSettingsPage" v-show="isCardShown('guardrails')" class="glass-card settings-card p-5">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0" tabindex="-1">Guardrails</h3>
+          <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+            <div class="flex items-baseline gap-3 flex-wrap">
+              <h3 class="section-title mb-0" tabindex="-1">Guardrails</h3>
+              <span class="eyebrow applies-now" title="Each switch and the slider are saved the moment you change them; there is no Save button.">Applies immediately</span>
+            </div>
             <div class="flex items-center gap-2">
               <button type="button" v-if="guardrails.state" @click="resetGuardrails" :disabled="guardrails.loading"
                 class="text-xs text-gray-500 hover:text-purple-400 transition-colors">Reset defaults</button>
@@ -955,7 +983,7 @@
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage guardrails.</div>
           <div v-else-if="guardrails.loading && !guardrails.state" class="empty-state">Loading…</div>
-          <div v-else-if="guardrails.error" class="text-sm text-red-400">{{ guardrails.error }}</div>
+          <div v-else-if="guardrails.error" class="text-sm text-red-400">{{ shownError(guardrails.error) }}</div>
 
           <div v-else-if="guardrails.state" class="space-y-4">
             <div class="flex items-start justify-between gap-4">
@@ -963,7 +991,7 @@
                 <p class="text-sm text-gray-200">Prompt Injection Protection</p>
                 <p class="text-xs text-gray-500 mt-0.5">Scan incoming messages for jailbreak and injection patterns.</p>
               </div>
-              <toggle-switch :value="guardrails.state.promptInjectionBlock"
+              <toggle-switch label="Prompt Injection Protection" :value="guardrails.state.promptInjectionBlock"
                 @change="updateGuardrails({ promptInjectionBlock: $event })" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
@@ -972,7 +1000,7 @@
                 <p class="text-sm text-gray-200">Output Secret Scanning</p>
                 <p class="text-xs text-gray-500 mt-0.5">Redact API keys, tokens, and credentials from LLM responses.</p>
               </div>
-              <toggle-switch :value="guardrails.state.outputSecretScan"
+              <toggle-switch label="Output Secret Scanning" :value="guardrails.state.outputSecretScan"
                 @change="updateGuardrails({ outputSecretScan: $event })" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
@@ -984,7 +1012,7 @@
                 </div>
                 <span class="text-sm font-mono text-purple-300 tabular-nums">{{ guardrails.state.maxInputLength.toLocaleString() }}</span>
               </div>
-              <input type="range" min="1000" max="100000" step="1000" :value="guardrails.state.maxInputLength"
+              <input type="range" aria-label="Max Input Length" min="1000" max="100000" step="1000" :value="guardrails.state.maxInputLength"
                 @change="updateGuardrails({ maxInputLength: Number(($event.target as HTMLInputElement).value) })"
                 :disabled="guardrails.loading" class="w-full accent-purple-500" />
               <div class="flex justify-between text-xs text-gray-600"><span>1 000</span><span>100 000</span></div>
@@ -995,7 +1023,7 @@
                 <p class="text-sm text-gray-200">Shell Sandbox <span class="ml-1 text-xs text-amber-500">locked</span></p>
                 <p class="text-xs text-gray-500 mt-0.5">Commands run inside an isolated Docker container. Cannot be disabled.</p>
               </div>
-              <toggle-switch :value="true" :disabled="true" />
+              <toggle-switch label="Shell Sandbox" :value="true" :disabled="true" />
             </div>
           </div>
 
@@ -1016,7 +1044,7 @@
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage site credentials.</div>
           <div v-else-if="sites.loading && !sites.sites.length" class="empty-state">Loading…</div>
-          <div v-else-if="sites.error" class="text-sm text-red-400">{{ sites.error }}</div>
+          <div v-else-if="sites.error" class="text-sm text-red-400">{{ shownError(sites.error) }}</div>
 
           <div v-else-if="sites.sites.length" class="space-y-2">
             <div v-for="site in sites.sites" :key="site.hostname"
@@ -1060,7 +1088,7 @@
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage scenes.</div>
           <div v-else-if="scenesStore.loading && !scenesStore.scenes.length" class="empty-state">Loading…</div>
-          <div v-else-if="scenesStore.error" class="text-sm text-red-400">{{ scenesStore.error }}</div>
+          <div v-else-if="scenesStore.error" class="text-sm text-red-400">{{ shownError(scenesStore.error) }}</div>
 
           <div v-else-if="scenesStore.scenes.length" class="space-y-2">
             <div v-for="scene in scenesStore.scenes" :key="scene.name"
@@ -1101,7 +1129,7 @@
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage jobs.</div>
           <div v-else-if="jobsStore.loading && !jobsStore.jobs.length" class="empty-state">Loading…</div>
-          <div v-else-if="jobsStore.error" class="text-sm text-red-400">{{ jobsStore.error }}</div>
+          <div v-else-if="jobsStore.error" class="text-sm text-red-400">{{ shownError(jobsStore.error) }}</div>
 
           <div v-else-if="jobsStore.jobs.length" class="space-y-2">
             <div v-for="job in jobsStore.jobs" :key="job.name" class="scene-row">
@@ -1138,7 +1166,8 @@
                 <h3 class="section-title mb-0" tabindex="-1">User Model</h3>
                 <div class="text-xs text-gray-500 mt-1">The swarm's evolving understanding of you — one item per line. The agent also refines this automatically as it learns; this is distinct from durable memory facts and the assistant's own personality.</div>
               </div>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span v-if="isCardDirty('user-model')" class="unsaved-chip">Unsaved</span>
                 <button type="button" v-if="gateway.connected" @click="reloadUserModel" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
                 <button type="button" @click="resetUserModelUI" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
               </div>
@@ -1184,13 +1213,16 @@
                 <h3 class="section-title mb-0" tabindex="-1">Config Assistant</h3>
                 <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. {{ product.name }} drafts the changes, you review them, and nothing applies until you approve it.</div>
               </div>
-              <button
-                type="button"
-                v-if="gateway.connected"
-                @click="reloadConfigAssistant"
-                :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
-                class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
-              >Reload</button>
+              <div class="flex items-center gap-2 flex-wrap justify-end">
+                <span v-if="isCardDirty('config-assistant')" class="unsaved-chip">Not sent</span>
+                <button
+                  type="button"
+                  v-if="gateway.connected"
+                  @click="reloadConfigAssistant"
+                  :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
+                  class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
+                >Reload</button>
+              </div>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to generate conversational configuration proposals.</div>
@@ -1227,26 +1259,29 @@
                 </div>
 
                 <div>
-                  <label class="field-label">Request</label>
+                  <label for="config-assistant-request" class="field-label">Request <span class="field-required" aria-hidden="true">*</span></label>
                   <textarea
+                    id="config-assistant-request"
                     v-model="configAssistantForm.request"
                     rows="5"
+                    required
+                    aria-required="true"
                     class="input-box config-assistant-textarea"
                     placeholder="Example: Improve browser_agent so it stops looping on stable pages, hands visible evidence to vision_browser_analyst, and records the lesson if the handoff works."
                   />
                 </div>
 
-                <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ configAssistant.proposeError }}</div>
+                <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ shownError(configAssistant.proposeError) }}</div>
 
                 <div class="flex justify-end gap-2">
-                  <button type="button" @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
+                  <button type="button" @click="resetConfigAssistantForm" :disabled="configAssistant.proposing || configAssistantFormBlank" class="btn-ghost px-4 py-2 rounded-xl text-xs">Clear</button>
                   <button type="button" @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
                     {{ configAssistant.proposing ? 'Drafting…' : 'Generate Proposal' }}
                   </button>
                 </div>
               </div>
 
-              <div v-if="configAssistant.flowError" class="text-sm text-red-400">{{ configAssistant.flowError }}</div>
+              <div v-if="configAssistant.flowError" class="text-sm text-red-400">{{ shownError(configAssistant.flowError) }}</div>
               <div v-else-if="configAssistant.recentLearnings.length" class="space-y-2">
                 <div class="text-[11px] uppercase tracking-[0.18em] text-gray-500">Recent Learnings</div>
                 <div class="space-y-2">
@@ -1268,8 +1303,8 @@
                 </div>
               </div>
 
-              <div v-if="configAssistant.mutationError" class="text-sm text-red-400">{{ configAssistant.mutationError }}</div>
-              <div v-if="configAssistant.error" class="text-sm text-red-400">{{ configAssistant.error }}</div>
+              <div v-if="configAssistant.mutationError" class="text-sm text-red-400">{{ shownError(configAssistant.mutationError) }}</div>
+              <div v-if="configAssistant.error" class="text-sm text-red-400">{{ shownError(configAssistant.error) }}</div>
 
               <div v-if="configAssistant.loading && !configAssistant.proposals.length" class="empty-state">Loading proposals…</div>
               <div v-else-if="configAssistant.proposals.length" class="space-y-3">
@@ -1332,7 +1367,30 @@
                       </div>
                     </div>
 
-                    <div class="flex flex-wrap justify-end gap-2 pt-1">
+                    <form
+                      v-if="proposalNote.proposalId === proposal.id"
+                      class="proposal-note"
+                      @submit.prevent="sendProposalNote"
+                      @keydown.esc="onProposalNoteEscape"
+                    >
+                      <div class="eyebrow">{{ PROPOSAL_NOTE_TEXT[proposalNote.outcome].heading }}</div>
+                      <div>
+                        <label for="proposal-note-lesson" class="field-label">{{ PROPOSAL_NOTE_TEXT[proposalNote.outcome].question }} <span class="text-gray-600 font-normal">optional</span></label>
+                        <textarea id="proposal-note-lesson" v-model="proposalNote.lesson" rows="3" maxlength="400" class="input-box proposal-note__box" />
+                      </div>
+                      <div v-if="proposalNote.outcome === 'rejected'">
+                        <label for="proposal-note-extra" class="field-label">Extra notes for the rejection <span class="text-gray-600 font-normal">optional</span></label>
+                        <textarea id="proposal-note-extra" v-model="proposalNote.notes" rows="2" maxlength="600" class="input-box proposal-note__box" />
+                      </div>
+                      <div class="flex flex-wrap justify-end gap-2">
+                        <button type="button" @click="cancelProposalNote" :disabled="configAssistant.activeProposalId === proposal.id" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Cancel</button>
+                        <button type="submit" :disabled="configAssistant.activeProposalId === proposal.id" class="btn-grad px-3 py-1.5 rounded-lg text-xs">
+                          {{ configAssistant.activeProposalId === proposal.id ? 'Sending…' : 'Send' }}
+                        </button>
+                      </div>
+                    </form>
+
+                    <div v-else class="flex flex-wrap justify-end gap-2 pt-1">
                       <button
                         type="button"
                         v-if="proposal.status === 'pending'"
@@ -1343,29 +1401,33 @@
                       <button
                         type="button"
                         v-if="proposal.status === 'pending'"
-                        @click="sendProposalFeedback(proposal.id, 'rejected')"
-                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        :data-proposal-verdict="`${proposal.id}:rejected`"
+                        @click="openProposalNote(proposal.id, 'rejected')"
+                        :disabled="configAssistant.activeProposalId === proposal.id || proposalNote.proposalId !== ''"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Reject</button>
                       <button
                         type="button"
                         v-if="proposal.status === 'applied'"
-                        @click="sendProposalFeedback(proposal.id, 'success')"
-                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        :data-proposal-verdict="`${proposal.id}:success`"
+                        @click="openProposalNote(proposal.id, 'success')"
+                        :disabled="configAssistant.activeProposalId === proposal.id || proposalNote.proposalId !== ''"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Worked</button>
                       <button
                         type="button"
                         v-if="proposal.status === 'applied'"
-                        @click="sendProposalFeedback(proposal.id, 'partial')"
-                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        :data-proposal-verdict="`${proposal.id}:partial`"
+                        @click="openProposalNote(proposal.id, 'partial')"
+                        :disabled="configAssistant.activeProposalId === proposal.id || proposalNote.proposalId !== ''"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Partial</button>
                       <button
                         type="button"
                         v-if="proposal.status === 'applied'"
-                        @click="sendProposalFeedback(proposal.id, 'failure')"
-                        :disabled="configAssistant.activeProposalId === proposal.id"
+                        :data-proposal-verdict="`${proposal.id}:failure`"
+                        @click="openProposalNote(proposal.id, 'failure')"
+                        :disabled="configAssistant.activeProposalId === proposal.id || proposalNote.proposalId !== ''"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Did Not Work</button>
                     </div>
@@ -1382,9 +1444,10 @@
               <h3 class="section-title mb-0" tabindex="-1">Model Routing</h3>
               <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex items-center gap-2 flex-wrap justify-end">
+              <span v-if="isCardDirty('model-routing')" class="unsaved-chip">Unsaved</span>
               <button type="button" v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button type="button" @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              <button type="button" @click="revertCard('model-routing')" :disabled="!isCardDirty('model-routing') || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
             </div>
           </div>
 
@@ -1404,8 +1467,8 @@
               </div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">Primary Model</label>
-                  <input v-model="modelEndpointForm.orchestratorModel" type="text" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.6-35b-a3b" />
+                  <label for="model-routing-primary" class="field-label">Primary Model <span class="field-required" aria-hidden="true">*</span></label>
+                  <input id="model-routing-primary" v-model="modelEndpointForm.orchestratorModel" type="text" required aria-required="true" class="input-box font-mono" placeholder="lmstudio/qwen/qwen3.6-35b-a3b" />
                 </div>
                 <div class="md:col-span-2">
                   <label class="field-label">Endpoint Override <span class="text-gray-600 font-normal">optional</span></label>
@@ -1453,17 +1516,17 @@
                   <span v-if="getModelEndpointStatus('reranker')" :class="getModelEndpointStatus('reranker')?.ok ? 'badge-running' : 'badge-health-bad'">
                     {{ getModelEndpointStatus('reranker')?.ok ? 'healthy' : 'mismatch' }}
                   </span>
-                  <toggle-switch :value="modelEndpointForm.rerankerEnabled" @change="modelEndpointForm.rerankerEnabled = $event" />
+                  <toggle-switch label="Reranker" :value="modelEndpointForm.rerankerEnabled" @change="modelEndpointForm.rerankerEnabled = $event" />
                 </div>
               </div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">Reranker Model</label>
-                  <input v-model="modelEndpointForm.rerankerModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3-Reranker-4B" />
+                  <label for="model-routing-reranker-model" class="field-label">Reranker Model <span v-if="modelEndpointForm.rerankerEnabled" class="field-required" aria-hidden="true">*</span></label>
+                  <input id="model-routing-reranker-model" v-model="modelEndpointForm.rerankerModel" type="text" :required="modelEndpointForm.rerankerEnabled" :aria-required="modelEndpointForm.rerankerEnabled ? 'true' : undefined" class="input-box font-mono" placeholder="Qwen/Qwen3-Reranker-4B" />
                 </div>
                 <div class="md:col-span-2">
-                  <label class="field-label">Reranker Endpoint</label>
-                  <input v-model="modelEndpointForm.rerankerBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                  <label for="model-routing-reranker-base-url" class="field-label">Reranker Endpoint <span v-if="modelEndpointForm.rerankerEnabled" class="field-required" aria-hidden="true">*</span></label>
+                  <input id="model-routing-reranker-base-url" v-model="modelEndpointForm.rerankerBaseUrl" type="text" :required="modelEndpointForm.rerankerEnabled" :aria-required="modelEndpointForm.rerankerEnabled ? 'true' : undefined" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
                 </div>
                 <div class="md:col-span-2">
                   <label class="field-label">Reranker API Key</label>
@@ -1483,17 +1546,17 @@
                   <span v-if="getModelEndpointStatus('guard')" :class="getModelEndpointStatus('guard')?.ok ? 'badge-running' : 'badge-health-bad'">
                     {{ getModelEndpointStatus('guard')?.ok ? 'healthy' : 'mismatch' }}
                   </span>
-                  <toggle-switch :value="modelEndpointForm.guardEnabled" @change="modelEndpointForm.guardEnabled = $event" />
+                  <toggle-switch label="Guard Moderation" :value="modelEndpointForm.guardEnabled" @change="modelEndpointForm.guardEnabled = $event" />
                 </div>
               </div>
               <div class="multimodal-grid">
                 <div class="md:col-span-2">
-                  <label class="field-label">Guard Model</label>
-                  <input v-model="modelEndpointForm.guardModel" type="text" class="input-box font-mono" placeholder="Qwen/Qwen3Guard-Gen-4B" />
+                  <label for="model-routing-guard-model" class="field-label">Guard Model <span v-if="modelEndpointForm.guardEnabled" class="field-required" aria-hidden="true">*</span></label>
+                  <input id="model-routing-guard-model" v-model="modelEndpointForm.guardModel" type="text" :required="modelEndpointForm.guardEnabled" :aria-required="modelEndpointForm.guardEnabled ? 'true' : undefined" class="input-box font-mono" placeholder="Qwen/Qwen3Guard-Gen-4B" />
                 </div>
                 <div class="md:col-span-2">
-                  <label class="field-label">Guard Endpoint</label>
-                  <input v-model="modelEndpointForm.guardBaseUrl" type="text" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
+                  <label for="model-routing-guard-base-url" class="field-label">Guard Endpoint <span v-if="modelEndpointForm.guardEnabled" class="field-required" aria-hidden="true">*</span></label>
+                  <input id="model-routing-guard-base-url" v-model="modelEndpointForm.guardBaseUrl" type="text" :required="modelEndpointForm.guardEnabled" :aria-required="modelEndpointForm.guardEnabled ? 'true' : undefined" class="input-box font-mono" placeholder="http://host.docker.internal:1234/v1" />
                 </div>
                 <div class="md:col-span-2">
                   <label class="field-label">Guard API Key</label>
@@ -1503,7 +1566,7 @@
               <div v-if="getModelEndpointStatus('guard')?.error" class="text-[11px] text-red-300">{{ getModelEndpointStatus('guard')?.error }}</div>
             </div>
 
-            <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ modelEndpointForm.error }}</div>
+            <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ shownError(modelEndpointForm.error) }}</div>
 
             <div class="flex justify-end">
               <button type="button" @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
@@ -1515,14 +1578,17 @@
 
         <!-- ── Sub-Agents ─────────────────────────────────────────────────── -->
         <div id="sub-agents" v-if="isAgentsPage" v-show="isCardShown('sub-agents')" class="glass-card settings-card p-5">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0" tabindex="-1">Sub-Agents</h3>
+          <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+            <div class="flex items-baseline gap-3 flex-wrap">
+              <h3 class="section-title mb-0" tabindex="-1">Sub-Agents</h3>
+              <span class="eyebrow applies-now" title="Each agent field is saved as soon as you change it and leave the field; there is no Save button.">Applies immediately</span>
+            </div>
             <button type="button" v-if="gateway.connected" @click="agentsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
           </div>
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage agents.</div>
           <div v-else-if="agentsStore.loading && !agentsStore.agents.length" class="empty-state">Loading…</div>
-          <div v-else-if="agentsStore.error" class="text-sm text-red-400">{{ agentsStore.error }}</div>
+          <div v-else-if="agentsStore.error" class="text-sm text-red-400">{{ shownError(agentsStore.error) }}</div>
 
           <div v-else-if="agentsStore.agents.length" class="space-y-4">
             <div class="routing-lab">
@@ -1555,7 +1621,7 @@
                 <button type="button" @click="clearRoutingLab" :disabled="agentsStore.routingLoading" class="btn-ghost px-3 py-2 rounded-xl text-xs">Clear</button>
               </div>
 
-              <div v-if="agentsStore.routingError" class="text-xs text-red-400 mt-3">{{ agentsStore.routingError }}</div>
+              <div v-if="agentsStore.routingError" class="text-xs text-red-400 mt-3">{{ shownError(agentsStore.routingError) }}</div>
 
               <div v-else-if="agentsStore.routingResult" class="space-y-3 mt-3">
                 <div v-if="!agentsStore.routingResult.results.length && !agentsStore.routingResult.weakCandidates.length" class="empty-state !py-4">
@@ -1743,7 +1809,7 @@
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage channels.</div>
           <div v-else-if="channelsStore.loading && !channelsStore.channels.length" class="empty-state">Loading…</div>
-          <div v-else-if="channelsStore.error" class="text-sm text-red-400">{{ channelsStore.error }}</div>
+          <div v-else-if="channelsStore.error" class="text-sm text-red-400">{{ shownError(channelsStore.error) }}</div>
 
           <div v-else class="space-y-2">
             <div v-if="channelsStore.deadLetters.length" class="channel-incident-panel">
@@ -1825,18 +1891,18 @@
 
       <div class="space-y-4 p-5">
         <div>
-          <label class="field-label">Hostname <span class="text-red-400">*</span></label>
-          <input v-model="siteForm.hostname" type="text" class="input-box"
+          <label for="site-hostname" class="field-label">Hostname <span class="field-required" aria-hidden="true">*</span></label>
+          <input id="site-hostname" v-model="siteForm.hostname" type="text" required aria-required="true" class="input-box"
             placeholder="e.g. github.com" :disabled="!!siteForm.editing" />
         </div>
         <div>
-          <label class="field-label">Username <span class="text-red-400">*</span></label>
-          <input v-model="siteForm.username" type="text" class="input-box" placeholder="Email or username" />
+          <label for="site-username" class="field-label">Username <span class="field-required" aria-hidden="true">*</span></label>
+          <input id="site-username" v-model="siteForm.username" type="text" required aria-required="true" class="input-box" placeholder="Email or username" />
         </div>
         <div>
-          <label class="field-label">Password <span class="text-red-400">*</span>
-            <span class="ml-1 text-gray-600 font-normal text-xs">(use $ENV_VAR or secret:key)</span></label>
-          <input v-model="siteForm.password" type="password" class="input-box" autocomplete="new-password" placeholder="$MY_PASSWORD or secret:mykey" />
+          <label for="site-password" class="field-label">Password <span v-if="!siteForm.editing" class="field-required" aria-hidden="true">*</span>
+            <span class="ml-1 text-gray-600 font-normal text-xs">(use $ENV_VAR or secret:key<template v-if="siteForm.editing">; leave empty to keep the stored one</template>)</span></label>
+          <input id="site-password" v-model="siteForm.password" type="password" :required="!siteForm.editing" :aria-required="siteForm.editing ? undefined : 'true'" class="input-box" autocomplete="new-password" placeholder="$MY_PASSWORD or secret:mykey" />
         </div>
         <div>
           <label class="field-label">Login URL</label>
@@ -1893,32 +1959,46 @@
 
       <div class="space-y-4 p-5">
         <div>
-          <label class="field-label">Name <span class="text-red-400">*</span></label>
-          <input v-model="jobForm.name" type="text" class="input-box font-mono" placeholder="e.g. morning_ops" :disabled="!!jobForm.editing" />
+          <label for="job-name" class="field-label">Name <span class="field-required" aria-hidden="true">*</span></label>
+          <input id="job-name" v-model="jobForm.name" type="text" required aria-required="true" class="input-box font-mono" placeholder="e.g. morning_ops" :disabled="!!jobForm.editing" />
         </div>
         <div>
-          <label class="field-label">Description <span class="text-red-400">*</span></label>
-          <input v-model="jobForm.description" type="text" class="input-box" placeholder="One-line summary of the workflow" />
+          <label for="job-description" class="field-label">Description <span class="field-required" aria-hidden="true">*</span></label>
+          <input id="job-description" v-model="jobForm.description" type="text" required aria-required="true" class="input-box" placeholder="One-line summary of the workflow" />
         </div>
-        <div>
-          <label class="field-label">Params JSON</label>
-          <textarea v-model="jobForm.paramsJson" class="input-box font-mono text-xs resize-none" rows="4" placeholder='{"audience":{"default":"ops team"}}' />
-        </div>
-        <div>
-          <label class="field-label">Steps JSON <span class="text-red-400">*</span></label>
-          <textarea v-model="jobForm.stepsJson" class="input-box font-mono text-xs resize-none" rows="8" placeholder='[{"scene":"verified_research_brief","label":"Research"},{"scene":"multi_channel_broadcast","params":{"channels":"slack,email"}}]' />
-        </div>
-        <div>
-          <label class="field-label">Triggers JSON</label>
-          <textarea v-model="jobForm.triggersJson" class="input-box font-mono text-xs resize-none" rows="5" placeholder='[{"type":"api","webhookKey":"replace-with-secret"},{"type":"cron","expression":"0 8 * * 1-5","enabled":true},{"type":"channel","channels":["slack"],"pattern":"/ops-brief","mode":"prefix","captureRemainderAs":"topic","parseParams":false,"replyText":"Queued {{jobName}} for {{topic|status}} as {{jobId}}"}]' />
+        <!-- Params, steps and triggers are written as JSON. Each box is checked a moment after
+             the last keystroke and says what it found on the line beneath it. -->
+        <div v-for="box in JOB_JSON_BOXES" :key="box.key">
+          <label :for="`job-${box.key}-json`" class="field-label">{{ box.label }} <span v-if="box.required" class="field-required" aria-hidden="true">*</span></label>
+          <textarea
+            :id="`job-${box.key}-json`"
+            v-model="jobForm[box.field]"
+            class="input-box font-mono text-xs json-box"
+            :rows="box.rows"
+            :placeholder="box.placeholder"
+            spellcheck="false"
+            :required="box.required"
+            :aria-required="box.required ? 'true' : undefined"
+            :aria-invalid="jobJson[box.key].state === 'error' ? 'true' : undefined"
+            :aria-describedby="`job-${box.key}-json-status`"
+          />
+          <p
+            :id="`job-${box.key}-json-status`"
+            class="json-status"
+            :class="`json-status--${jobJson[box.key].state}`"
+            :role="jobJson[box.key].state === 'error' ? 'alert' : 'status'"
+          >{{ jobJson[box.key].message }}</p>
         </div>
       </div>
 
+      <div v-if="jobJsonBroken.length" class="px-5 pb-2 text-sm text-amber-300" role="status">
+        Can't save yet: {{ listInWords(jobJsonBroken) }} {{ jobJsonBroken.length === 1 ? 'needs' : 'need' }} fixing.
+      </div>
       <div v-if="jobForm.error" class="px-5 pb-2 text-sm text-red-400">{{ jobForm.error }}</div>
 
       <div class="modal-footer">
         <button type="button" @click="jobForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
-        <button type="button" @click="submitJobForm" :disabled="jobsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+        <button type="button" @click="submitJobForm" :disabled="jobsStore.loading || jobJsonBroken.length > 0" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ jobsStore.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
@@ -1997,7 +2077,7 @@
             <p class="text-sm text-gray-200">Enabled</p>
             <p class="text-xs text-gray-500 mt-0.5">Activate this channel integration.</p>
           </div>
-          <toggle-switch :value="!!channelForm.config.enabled"
+          <toggle-switch :label="`${channelForm.label} channel`" :value="!!channelForm.config.enabled"
             @change="channelForm.config.enabled = $event" />
         </div>
         <div class="border-t border-purple-500/10" />
@@ -2161,18 +2241,18 @@
 
       <div class="space-y-4 p-5">
         <div>
-          <label class="field-label">Name <span class="text-red-400">*</span>
+          <label for="scene-name" class="field-label">Name <span class="field-required" aria-hidden="true">*</span>
             <span class="ml-1 text-gray-600 font-normal text-xs">(letters, numbers, underscores)</span></label>
-          <input v-model="sceneForm.name" type="text" class="input-box font-mono"
+          <input id="scene-name" v-model="sceneForm.name" type="text" required aria-required="true" class="input-box font-mono"
             placeholder="e.g. apply_jobs" :disabled="!!sceneForm.editing" />
         </div>
         <div>
-          <label class="field-label">Description <span class="text-red-400">*</span></label>
-          <input v-model="sceneForm.description" type="text" class="input-box" placeholder="One-line description shown in the UI" />
+          <label for="scene-description" class="field-label">Description <span class="field-required" aria-hidden="true">*</span></label>
+          <input id="scene-description" v-model="sceneForm.description" type="text" required aria-required="true" class="input-box" placeholder="One-line description shown in the UI" />
         </div>
         <div>
-          <label class="field-label">Task Prompt <span class="text-red-400">*</span></label>
-          <textarea v-model="sceneForm.task" class="input-box font-mono text-xs resize-none" rows="9"
+          <label for="scene-task" class="field-label">Task Prompt <span class="field-required" aria-hidden="true">*</span></label>
+          <textarea id="scene-task" v-model="sceneForm.task" required aria-required="true" class="input-box font-mono text-xs resize-none" rows="9"
             placeholder="The full prompt sent to the orchestrator when this scene is triggered." />
         </div>
         <div>
@@ -2196,8 +2276,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter, type RouteLocationNormalized } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
 import { usePersonalityStore, type AssistantPersonalityProfile } from "@/stores/personality";
@@ -2218,7 +2298,7 @@ import { appVersion } from "@/appVersion";
 import { useProductStore } from "@/stores/product";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
-import { useToast } from "@/composables/useToast";
+import { errorText, useToast } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -2237,6 +2317,17 @@ const agentsStore = useAgentsStore();
 const multimodalStore = useMultimodalStore();
 const configAssistant = useConfigAssistantStore();
 const toast = useToast();
+
+// The stores keep a failure as String(error), which reads "Error: HTTP 503". Shown to a person,
+// the class name in front says nothing: it is dropped here, where the text is displayed.
+function shownError(text: string | null | undefined): string {
+  return (text ?? "").replace(/^(?:[A-Za-z]*Error:\s*)+/, "");
+}
+
+/** "A", "A and B", "A, B, and C". */
+function listInWords(items: readonly string[]): string {
+  return new Intl.ListFormat("en", { style: "long", type: "conjunction" }).format(items);
+}
 
 const pageMode = computed<"settings" | "agents">(() => {
   if (route.path === "/agents") return "agents";
@@ -2470,10 +2561,7 @@ function syncModelEndpointForm(config: ModelEndpointEditorConfig) {
   modelEndpointForm.guardBaseUrl = config.guard.baseUrl;
   modelEndpointForm.guardApiKey = config.guard.apiKey;
   modelEndpointForm.error = "";
-}
-
-function resetModelEndpointConfig() {
-  if (modelEndpointForm.lastLoaded) syncModelEndpointForm(modelEndpointForm.lastLoaded);
+  markSaved("model-routing");
 }
 
 function getModelEndpointStatus(role: string) {
@@ -2509,12 +2597,26 @@ async function submitModelEndpointConfig() {
     modelEndpointForm.error = "Orchestrator primary model is required";
     return;
   }
-  if (!modelEndpointForm.rerankerModel.trim() || !modelEndpointForm.rerankerBaseUrl.trim()) {
-    modelEndpointForm.error = "Reranker model and endpoint are required";
+  // The reranker and the guard need a model and an endpoint only while they are switched on.
+  // The gateway wants both fields filled even for a section that is off, so one left empty
+  // behind a switched-off toggle goes back as it was loaded.
+  const stored = modelEndpointForm.lastLoaded;
+  const reranker = modelEndpointForm.rerankerEnabled ? undefined : stored?.reranker;
+  const rerankerModel = modelEndpointForm.rerankerModel.trim() || reranker?.model || "";
+  const rerankerBaseUrl = modelEndpointForm.rerankerBaseUrl.trim() || reranker?.baseUrl || "";
+  if (!rerankerModel || !rerankerBaseUrl) {
+    modelEndpointForm.error = modelEndpointForm.rerankerEnabled
+      ? "Reranker model and endpoint are required while the reranker is on"
+      : "Reranker model and endpoint are required";
     return;
   }
-  if (!modelEndpointForm.guardModel.trim() || !modelEndpointForm.guardBaseUrl.trim()) {
-    modelEndpointForm.error = "Guard model and endpoint are required";
+  const guard = modelEndpointForm.guardEnabled ? undefined : stored?.guard;
+  const guardModel = modelEndpointForm.guardModel.trim() || guard?.model || "";
+  const guardBaseUrl = modelEndpointForm.guardBaseUrl.trim() || guard?.baseUrl || "";
+  if (!guardModel || !guardBaseUrl) {
+    modelEndpointForm.error = modelEndpointForm.guardEnabled
+      ? "Guard model and endpoint are required while guard moderation is on"
+      : "Guard model and endpoint are required";
     return;
   }
 
@@ -2539,14 +2641,14 @@ async function submitModelEndpointConfig() {
       },
       reranker: {
         enabled: modelEndpointForm.rerankerEnabled,
-        model: modelEndpointForm.rerankerModel.trim(),
-        baseUrl: modelEndpointForm.rerankerBaseUrl.trim(),
+        model: rerankerModel,
+        baseUrl: rerankerBaseUrl,
         apiKey: modelEndpointForm.rerankerApiKey.trim() || "lm-studio",
       },
       guard: {
         enabled: modelEndpointForm.guardEnabled,
-        model: modelEndpointForm.guardModel.trim(),
-        baseUrl: modelEndpointForm.guardBaseUrl.trim(),
+        model: guardModel,
+        baseUrl: guardBaseUrl,
         apiKey: modelEndpointForm.guardApiKey.trim() || "lm-studio",
       },
     };
@@ -2650,6 +2752,7 @@ function syncPersonalityForm(profile: AssistantPersonalityProfile | null) {
   personalityForm.growthNotesText = linesFromList(profile?.growth.notes ?? []);
   personalityForm.reason = "";
   personalityForm.error = "";
+  markSaved("personality");
 }
 
 function resetPersonalityForm() {
@@ -2748,6 +2851,7 @@ function syncMultimodalForm(config: MultimodalConfig) {
   multimodalForm.wakeKeywordsText = config.wakeWord.keywords.join(", ");
   multimodalForm.wakeStopPhrasesText = config.wakeWord.stopPhrases.join(", ");
   multimodalForm.error = "";
+  markSaved("multimodal");
 }
 
 function resetMultimodalForm() {
@@ -2817,7 +2921,7 @@ async function saveVoiceSampleToLibrary() {
     }
     await multimodalStore.save(nextConfig);
     if (multimodalStore.error) {
-      throw new Error(`Saved voice '${result.name}' as '${result.voice_id}', but failed to persist it as Default Voice ID: ${multimodalStore.error}`);
+      throw new Error(`Saved voice '${result.name}' as '${result.voice_id}', but failed to persist it as Default Voice ID: ${shownError(multimodalStore.error)}`);
     }
 
     savedVoiceForm.error = false;
@@ -2919,7 +3023,7 @@ async function submitMultimodalForm() {
     syncMultimodalForm(multimodalStore.config);
     toast.success("Multimodal settings saved", "File, speech and image services use the new settings, and the chat's wake-word settings are in sync.");
   } else {
-    multimodalForm.error = multimodalStore.error;
+    multimodalForm.error = shownError(multimodalStore.error);
   }
 }
 
@@ -2940,7 +3044,7 @@ async function updateGuardrails(patch: GuardrailPatch) {
   const state = guardrails.state;
   const applied = state !== null && (Object.keys(patch) as Array<keyof GuardrailPatch>).every((key) => state[key] === patch[key]);
   if (applied) toast.success("Guardrails updated", describeGuardrails(patch));
-  else toast.error("Guardrail not changed", guardrails.error || "The gateway did not take this value. The control shows what is in effect.");
+  else toast.error("Guardrail not changed", shownError(guardrails.error) || "The gateway did not take this value. The control shows what is in effect.");
 }
 
 async function resetGuardrails() {
@@ -2952,7 +3056,7 @@ async function resetGuardrails() {
   });
   if (!confirmed) return;
   await guardrails.reset();
-  if (guardrails.error) toast.error("Couldn't reset the guardrails", guardrails.error);
+  if (guardrails.error) toast.error("Couldn't reset the guardrails", shownError(guardrails.error));
   else toast.success("Guardrails reset", "The defaults from the configuration are in effect again.");
 }
 
@@ -3037,7 +3141,7 @@ async function submitSiteForm() {
   });
 
   if (sites.error) {
-    siteForm.error = sites.error;
+    siteForm.error = shownError(sites.error);
     return;
   }
   siteForm.open = false;
@@ -3053,7 +3157,7 @@ async function confirmDeleteSite(hostname: string) {
   });
   if (!confirmed) return;
   await sites.remove(hostname);
-  if (sites.error) toast.error("Couldn't delete the credentials", sites.error);
+  if (sites.error) toast.error("Couldn't delete the credentials", shownError(sites.error));
   else toast.success("Credentials deleted", `The login for ${hostname} is no longer stored.`);
 }
 
@@ -3101,7 +3205,7 @@ async function submitSceneForm() {
   });
 
   if (scenesStore.error) {
-    sceneForm.error = scenesStore.error;
+    sceneForm.error = shownError(scenesStore.error);
     return;
   }
   sceneForm.open = false;
@@ -3117,7 +3221,7 @@ async function confirmDeleteScene(name: string) {
   });
   if (!confirmed) return;
   await scenesStore.remove(name);
-  if (scenesStore.error) toast.error("Couldn't delete the scene", scenesStore.error);
+  if (scenesStore.error) toast.error("Couldn't delete the scene", shownError(scenesStore.error));
   else toast.success("Scene deleted", `"${name}" is gone from the scene list.`);
 }
 
@@ -3138,6 +3242,210 @@ function dismissJobForm() {
   if (dialogUntouched("job", jobForm)) jobForm.open = false;
 }
 
+// ── Job dialog: the JSON boxes ───────────────────────────────────────────────
+// Params, steps and triggers are typed as JSON. Each box is checked a moment after the last
+// keystroke and says what it found on the line beneath it; Save waits while one is broken.
+
+const JOB_JSON_BOXES = [
+  {
+    key: "params", field: "paramsJson", label: "Params JSON", shape: "object", required: false, rows: 4,
+    placeholder: '{"audience":{"default":"ops team"}}',
+  },
+  {
+    key: "steps", field: "stepsJson", label: "Steps JSON", shape: "array", required: true, rows: 8,
+    placeholder: '[{"scene":"verified_research_brief","label":"Research"},{"scene":"multi_channel_broadcast","params":{"channels":"slack,email"}}]',
+  },
+  {
+    key: "triggers", field: "triggersJson", label: "Triggers JSON", shape: "array", required: false, rows: 5,
+    placeholder: '[{"type":"api","webhookKey":"replace-with-secret"},{"type":"cron","expression":"0 8 * * 1-5","enabled":true},{"type":"channel","channels":["slack"],"pattern":"/ops-brief","mode":"prefix","captureRemainderAs":"topic","parseParams":false,"replyText":"Queued {{jobName}} for {{topic|status}} as {{jobId}}"}]',
+  },
+] as const;
+
+type JobJsonBox = typeof JOB_JSON_BOXES[number];
+
+interface JsonCheck {
+  /** "hint": the text is fine as JSON, but there is something to say about it. */
+  state: "ok" | "hint" | "error";
+  message: string;
+}
+
+/**
+ * Where a text stops being JSON: the offset of the first character that cannot stand there, and
+ * what could. JSON.parse decides whether the text is valid; it does not say where it is not in
+ * every browser, and never as a line and a column.
+ */
+function locateJsonError(text: string): { offset: number; expected: string } | null {
+  let at = 0;
+  const fail = (expected: string) => ({ offset: at, expected });
+  const skipSpace = () => {
+    while (at < text.length && " \t\n\r".includes(text.charAt(at))) at++;
+  };
+  const isDigit = (ch: string) => ch >= "0" && ch <= "9";
+  const skipDigits = () => {
+    while (isDigit(text.charAt(at))) at++;
+  };
+
+  function readString(): ReturnType<typeof fail> | null {
+    at++;
+    while (at < text.length) {
+      const ch = text.charAt(at);
+      if (ch === '"') {
+        at++;
+        return null;
+      }
+      if (ch < " ") return fail("the string to close first (a line break inside a string is written \\n)");
+      if (ch === "\\") {
+        at++;
+        const escaped = text.charAt(at);
+        if (escaped === "u") {
+          for (let digits = 0; digits < 4; digits++) {
+            at++;
+            if (!/^[0-9a-fA-F]$/.test(text.charAt(at))) return fail("four hex digits after \\u");
+          }
+        } else if (escaped === "" || !'"\\/bfnrt'.includes(escaped)) {
+          return fail("one of \\\" \\\\ \\/ \\b \\f \\n \\r \\t \\u after the backslash");
+        }
+      }
+      at++;
+    }
+    return fail("a closing double quote");
+  }
+
+  function readValue(): ReturnType<typeof fail> | null {
+    skipSpace();
+    const ch = text.charAt(at);
+    if (ch === '"') return readString();
+    if (ch === "{" || ch === "[") {
+      const close = ch === "{" ? "}" : "]";
+      at++;
+      skipSpace();
+      if (text.charAt(at) === close) {
+        at++;
+        return null;
+      }
+      for (;;) {
+        if (ch === "{") {
+          skipSpace();
+          if (text.charAt(at) !== '"') return fail("a property name in double quotes");
+          const name = readString();
+          if (name) return name;
+          skipSpace();
+          if (text.charAt(at) !== ":") return fail("“:” after the property name");
+          at++;
+        }
+        const inner = readValue();
+        if (inner) return inner;
+        skipSpace();
+        const next = text.charAt(at);
+        at++;
+        if (next === close) return null;
+        if (next !== ",") {
+          at--;
+          return fail(`“,” or “${close}”`);
+        }
+      }
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (ch !== word.charAt(0)) continue;
+      for (const letter of word) {
+        if (text.charAt(at) !== letter) return fail(`“${word}”`);
+        at++;
+      }
+      return null;
+    }
+    return readNumber();
+  }
+
+  function readNumber(): ReturnType<typeof fail> | null {
+    const start = at;
+    if (text.charAt(at) === "-") at++;
+    if (!isDigit(text.charAt(at))) return fail(at === start ? "a value" : "a digit");
+    // A number has no superfluous zero in front: "01" ends after the 0.
+    if (text.charAt(at) === "0") at++;
+    else skipDigits();
+    if (text.charAt(at) === ".") {
+      at++;
+      if (!isDigit(text.charAt(at))) return fail("a digit after the decimal point");
+      skipDigits();
+    }
+    if (text.charAt(at) === "e" || text.charAt(at) === "E") {
+      at++;
+      if (text.charAt(at) === "+" || text.charAt(at) === "-") at++;
+      if (!isDigit(text.charAt(at))) return fail("a digit in the exponent");
+      skipDigits();
+    }
+    return null;
+  }
+
+  const broken = readValue();
+  if (broken) return broken;
+  skipSpace();
+  return at < text.length ? fail("the JSON to end here") : null;
+}
+
+function describeJsonError(text: string, error: unknown): string {
+  let found: ReturnType<typeof locateJsonError> = null;
+  try {
+    found = locateJsonError(text);
+  } catch {
+    // Nested too deeply to walk: the parser's own words will do.
+  }
+  if (!found) return `Not valid JSON: ${errorText(error)}`;
+  const before = text.slice(0, found.offset);
+  const line = before.split("\n").length;
+  const column = found.offset - before.lastIndexOf("\n");
+  const ch = text.charAt(found.offset);
+  const got = ch === "" ? "the end of the text" : ch === "\n" ? "a line break" : ch === "\t" ? "a tab" : `“${ch}”`;
+  return `Line ${line}, column ${column}: expected ${found.expected}, found ${got}.`;
+}
+
+function checkJobJson(box: JobJsonBox, text: string): JsonCheck {
+  const what = box.label.replace(" JSON", "");
+  if (!text.trim()) {
+    return box.required
+      ? { state: "hint", message: "Empty. A job needs at least one step." }
+      : { state: "ok", message: "Empty: counts as none." };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { state: "error", message: describeJsonError(text, error) };
+  }
+  const fits = box.shape === "array"
+    ? Array.isArray(parsed)
+    : typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
+  if (!fits) {
+    return { state: "error", message: `Valid JSON, but ${what} must be ${box.shape === "array" ? "an array: [ … ]" : "an object: { … }"}` };
+  }
+  if (box.required && (parsed as unknown[]).length === 0) {
+    return { state: "hint", message: "Valid JSON. A job needs at least one step." };
+  }
+  return { state: "ok", message: "Valid JSON" };
+}
+
+const jobJson = reactive<Record<JobJsonBox["key"], JsonCheck>>({
+  params: { state: "ok", message: "" },
+  steps: { state: "ok", message: "" },
+  triggers: { state: "ok", message: "" },
+});
+
+function checkJobJsonNow() {
+  for (const box of JOB_JSON_BOXES) jobJson[box.key] = checkJobJson(box, jobForm[box.field]);
+}
+
+/** The boxes Save is waiting for, by label. */
+const jobJsonBroken = computed(() => JOB_JSON_BOXES.filter((box) => jobJson[box.key].state === "error").map((box) => box.label));
+
+// Looked at once the typing pauses, not on every keystroke: half a word is always invalid.
+const JSON_CHECK_DELAY_MS = 300;
+let jobJsonTimer: ReturnType<typeof setTimeout> | undefined;
+
+watch(() => [jobForm.paramsJson, jobForm.stepsJson, jobForm.triggersJson], () => {
+  clearTimeout(jobJsonTimer);
+  jobJsonTimer = setTimeout(checkJobJsonNow, JSON_CHECK_DELAY_MS);
+});
+
 function openJobForm(job: JobDetail | null) {
   jobForm.error = "";
   if (job) {
@@ -3155,6 +3463,7 @@ function openJobForm(job: JobDetail | null) {
     jobForm.stepsJson = "[]";
     jobForm.triggersJson = "[]";
   }
+  checkJobJsonNow();
   jobForm.open = true;
   rememberDialog("job", jobForm);
 }
@@ -3164,35 +3473,18 @@ async function submitJobForm() {
   if (!jobForm.name.trim()) { jobForm.error = "Name is required"; return; }
   if (!jobForm.description.trim()) { jobForm.error = "Description is required"; return; }
 
-  let params: Record<string, { description?: string; default?: string }> | undefined;
-  let steps: JobStepInput[];
-  let triggers: JobTriggerInput[] | undefined;
+  // Save can be pressed inside the pause the checker waits for: look now. A broken box is
+  // named beside the button, which stays disabled until it is fixed.
+  clearTimeout(jobJsonTimer);
+  checkJobJsonNow();
+  if (jobJsonBroken.value.length > 0) return;
 
-  try {
-    const parsed = JSON.parse(jobForm.paramsJson || "{}");
-    params = parsed && Object.keys(parsed).length > 0 ? parsed : undefined;
-  } catch {
-    jobForm.error = "Params JSON is invalid";
-    return;
-  }
-
-  try {
-    const parsed = JSON.parse(jobForm.stepsJson || "[]");
-    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error();
-    steps = parsed as JobStepInput[];
-  } catch {
-    jobForm.error = "Steps JSON must be a non-empty array";
-    return;
-  }
-
-  try {
-    const parsed = JSON.parse(jobForm.triggersJson || "[]");
-    if (!Array.isArray(parsed)) throw new Error();
-    triggers = parsed.length > 0 ? parsed as JobTriggerInput[] : undefined;
-  } catch {
-    jobForm.error = "Triggers JSON must be an array";
-    return;
-  }
+  const steps = JSON.parse(jobForm.stepsJson.trim() || "[]") as JobStepInput[];
+  if (steps.length === 0) { jobForm.error = "Steps JSON must be a non-empty array"; return; }
+  const allParams = JSON.parse(jobForm.paramsJson.trim() || "{}") as Record<string, { description?: string; default?: string }>;
+  const params = Object.keys(allParams).length > 0 ? allParams : undefined;
+  const allTriggers = JSON.parse(jobForm.triggersJson.trim() || "[]") as JobTriggerInput[];
+  const triggers = allTriggers.length > 0 ? allTriggers : undefined;
 
   await jobsStore.save(jobForm.name.trim(), {
     description: jobForm.description.trim(),
@@ -3202,7 +3494,7 @@ async function submitJobForm() {
   });
 
   if (jobsStore.error) {
-    jobForm.error = jobsStore.error;
+    jobForm.error = shownError(jobsStore.error);
     return;
   }
   jobForm.open = false;
@@ -3218,7 +3510,7 @@ async function confirmDeleteJob(name: string) {
   });
   if (!confirmed) return;
   await jobsStore.remove(name);
-  if (jobsStore.error) toast.error("Couldn't delete the job", jobsStore.error);
+  if (jobsStore.error) toast.error("Couldn't delete the job", shownError(jobsStore.error));
   else toast.success("Job deleted", `"${name}" is gone from the job list.`);
 }
 
@@ -3346,7 +3638,7 @@ async function submitChannelForm() {
   await channelsStore.fetchDeadLetterCount();
   await runtime.fetch();
   if (channelsStore.error) {
-    channelForm.error = channelsStore.error;
+    channelForm.error = shownError(channelsStore.error);
     return;
   }
   toast.success(`${channelForm.label} channel saved`, channelForm.config.enabled
@@ -3465,6 +3757,7 @@ function applyOrchestrationConfigToForm(config: any) {
   orchestrationForm.perTurnDelegate = config.perTurnCaps?.delegate_to_agent ?? null;
   orchestrationForm.perTurnComputerClick = config.perTurnCaps?.computer_click ?? null;
   orchestrationForm.perTurnComputerType = config.perTurnCaps?.computer_type ?? null;
+  markSaved("orchestration-tuning");
 }
 
 async function reloadOrchestrationConfig() {
@@ -3476,10 +3769,6 @@ async function reloadOrchestrationConfig() {
   } catch (e) {
     orchestrationError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
   }
-}
-
-async function resetOrchestrationConfig() {
-  applyOrchestrationConfigToForm({});
 }
 
 async function saveOrchestrationConfigUI() {
@@ -3501,6 +3790,7 @@ async function saveOrchestrationConfigUI() {
     if (orchestrationForm.perTurnComputerClick) payload.perTurnCaps.computer_click = orchestrationForm.perTurnComputerClick;
     if (orchestrationForm.perTurnComputerType) payload.perTurnCaps.computer_type = orchestrationForm.perTurnComputerType;
     await gateway.saveOrchestrationConfig(payload);
+    markSaved("orchestration-tuning");
     toast.success("Orchestration limits saved", "They apply immediately, without a restart.");
   } catch (e) {
     orchestrationError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
@@ -3541,6 +3831,7 @@ async function reloadDocumentRagConfig() {
     docRagForm.retrievalTopK = cfg.retrievalTopK;
     docRagForm.maxContextChars = cfg.maxContextChars;
     docRagError.value = "";
+    markSaved("document-rag");
   } catch (e) {
     docRagError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -3559,6 +3850,7 @@ async function saveDocumentRagConfigUI() {
       retrievalTopK: docRagForm.retrievalTopK,
       maxContextChars: docRagForm.maxContextChars,
     });
+    markSaved("document-rag");
     toast.success("Document RAG saved", docRagForm.enabled
       ? "Document retrieval is on; the settings apply immediately."
       : "Document retrieval is off.");
@@ -3589,6 +3881,7 @@ async function reloadSkillConfig() {
     skillForm.maxInjected = skillLibrary.maxInjected;
     pipelineForm.enabled = toolPipeline.enabled;
     skillConfigError.value = "";
+    markSaved("skill-library");
   } catch (e) {
     skillConfigError.value = `Failed to load: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -3612,6 +3905,7 @@ async function saveSkillConfigUI() {
         enabled: pipelineForm.enabled,
       },
     });
+    markSaved("skill-library");
     toast.success("Skill Library saved", "The skill library and tool pipeline settings apply immediately.");
   } catch (e) {
     skillConfigError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
@@ -3645,6 +3939,7 @@ function applyUserModel(p: import("@/stores/gateway").UserModelProfile) {
   userModelForm.openQuestions = p.openQuestions.join("\n");
   userModelRevision.value = p.revision;
   userModelUpdatedBy.value = p.updatedBy;
+  markSaved("user-model");
 }
 
 async function reloadUserModel() {
@@ -3709,29 +4004,83 @@ async function applyConfigProposal(id: string) {
   if (applied) toast.success("Proposal applied", applied.summary || "Its changes are applied.");
 }
 
-async function sendProposalFeedback(id: string, outcome: ConfigAssistantFeedbackOutcome) {
-  const lessonPrompt = outcome === "success"
-    ? "What worked? This note becomes reusable flow memory."
-    : outcome === "partial"
-      ? "What partly worked and what still needs adjustment?"
-      : outcome === "rejected"
-        ? "Why are you rejecting this proposal?"
-        : "What failed? This note becomes reusable flow memory.";
-  // Cancel on the question means "not now": it used to send the feedback anyway, so backing
-  // out of "Reject" still rejected the proposal.
-  const answer = window.prompt(lessonPrompt, "");
-  if (answer === null) return;
-  const lesson = answer.trim() || undefined;
-  const notes = outcome === "rejected"
-    ? (window.prompt("Optional extra notes for the rejection", "")?.trim() || undefined)
-    : undefined;
-  const updated = await configAssistant.submitFeedback(id, { outcome, lesson, notes });
-  if (updated) {
-    toast.success(outcome === "rejected" ? "Proposal rejected" : "Feedback recorded", lesson
-      ? "Your note is kept as flow memory for later proposals."
-      : "The outcome is kept as flow memory for later proposals.");
-  }
+// ── Config assistant: a note with the verdict ────────────────────────────────
+// A verdict on a proposal (worked, partly, failed, rejected) may carry a note. The note is
+// written in a form that opens under the proposal, in place of its verdict buttons; one form
+// is open at a time. Nothing is sent until "Send": Cancel and Escape send nothing.
+
+const PROPOSAL_NOTE_TEXT: Record<ConfigAssistantFeedbackOutcome, { heading: string; question: string }> = {
+  success: { heading: "Marking as worked", question: "What worked? This note becomes reusable flow memory." },
+  partial: { heading: "Marking as partly worked", question: "What partly worked and what still needs adjustment?" },
+  failure: { heading: "Marking as failed", question: "What failed? This note becomes reusable flow memory." },
+  rejected: { heading: "Rejecting this proposal", question: "Why are you rejecting this proposal?" },
+};
+
+const proposalNote = reactive({
+  /** The proposal the form is open under; empty while it is closed. */
+  proposalId: "",
+  outcome: "success" as ConfigAssistantFeedbackOutcome,
+  lesson: "",
+  /** Extra notes: a rejection only. */
+  notes: "",
+});
+
+function openProposalNote(id: string, outcome: ConfigAssistantFeedbackOutcome) {
+  proposalNote.proposalId = id;
+  proposalNote.outcome = outcome;
+  proposalNote.lesson = "";
+  proposalNote.notes = "";
+  void nextTick(() => document.getElementById("proposal-note-lesson")?.focus());
 }
+
+function closeProposalNote() {
+  proposalNote.proposalId = "";
+  proposalNote.lesson = "";
+  proposalNote.notes = "";
+}
+
+function cancelProposalNote() {
+  const verdict = `${proposalNote.proposalId}:${proposalNote.outcome}`;
+  closeProposalNote();
+  // The verdict buttons come back in the form's place: return to the one that was pressed.
+  void nextTick(() => {
+    for (const button of document.querySelectorAll<HTMLElement>("[data-proposal-verdict]")) {
+      if (button.dataset.proposalVerdict === verdict) button.focus();
+    }
+  });
+}
+
+function onProposalNoteEscape(event: KeyboardEvent) {
+  // Escape that ends an IME composition is not a cancel; nor is one pressed while the note is on its way.
+  if (event.isComposing || configAssistant.activeProposalId === proposalNote.proposalId) return;
+  // Taken here, so an open dialog's own Escape handling does not act on it as well.
+  event.preventDefault();
+  cancelProposalNote();
+}
+
+async function sendProposalNote() {
+  const { proposalId, outcome } = proposalNote;
+  if (!proposalId) return;
+  const lesson = proposalNote.lesson.trim() || undefined;
+  const notes = outcome === "rejected" ? proposalNote.notes.trim() || undefined : undefined;
+  const updated = await configAssistant.submitFeedback(proposalId, { outcome, lesson, notes });
+  // A refused send keeps the form, and what was typed, for another try; the reason shows above the list.
+  if (!updated) return;
+  closeProposalNote();
+  toast.success(outcome === "rejected" ? "Proposal rejected" : "Feedback recorded", lesson
+    ? "Your note is kept as flow memory for later proposals."
+    : "The outcome is kept as flow memory for later proposals.");
+}
+
+// A reload may drop the proposal the form stands under: the form goes with it.
+watch(() => configAssistant.proposals, (proposals) => {
+  if (proposalNote.proposalId && !proposals.some((proposal) => proposal.id === proposalNote.proposalId)) closeProposalNote();
+});
+
+/** The request form as it starts: nothing to clear. */
+const configAssistantFormBlank = computed(() => configAssistantForm.request === ""
+  && configAssistantForm.mode === "enhancement"
+  && configAssistantForm.targetAgent === "");
 
 function stringifyPreview(value: unknown): string {
   if (typeof value === "string") return value;
@@ -3776,7 +4125,231 @@ function flowBadgeClass(outcome: FlowMemoryOutcome): string {
   return "badge-config";
 }
 
-function loadRuntimeSettingsData() {
+// ── Gateway connection: a draft, applied on Reconnect ────────────────────────
+// The store keeps the URL and the token in the browser's storage, and every page's requests
+// read them from there. Bound straight to the two fields, each keystroke was stored and used
+// at once: a half-typed URL broke the app before Reconnect was pressed. The fields edit this
+// draft instead, and Reconnect stores it.
+
+const gatewayDraft = reactive({
+  wsUrl: gateway.wsUrl ?? "",
+  token: gateway.token ?? "",
+  error: "",
+});
+
+function gatewayDraftDiffers(): boolean {
+  return gatewayDraft.wsUrl !== gateway.wsUrl || gatewayDraft.token !== gateway.token;
+}
+
+function revertGatewayDraft() {
+  gatewayDraft.wsUrl = gateway.wsUrl ?? "";
+  gatewayDraft.token = gateway.token ?? "";
+  gatewayDraft.error = "";
+}
+
+// The stored values also change from outside this card: a refused token is cleared, another
+// tab may store new ones. A field the user has not touched follows them.
+watch(() => [gateway.wsUrl, gateway.token] as const, ([wsUrl, token], [oldWsUrl, oldToken]) => {
+  if (gatewayDraft.wsUrl === oldWsUrl) gatewayDraft.wsUrl = wsUrl;
+  if (gatewayDraft.token === oldToken) gatewayDraft.token = token;
+});
+
+/** What the store can connect to: a ws(s) URL, or an http(s) one, which it turns into ws(s). */
+function isGatewayUrl(value: string): boolean {
+  try {
+    return ["ws:", "wss:", "http:", "https:"].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function applyGatewayConnection() {
+  gatewayDraft.error = "";
+  if (!gatewayDraftDiffers()) {
+    gateway.connect();
+    return;
+  }
+  // Left empty, the URL falls back to the default one. Anything else has to be a URL: the
+  // store would replace a mistyped one with the default without a word, or fail to connect.
+  const wsUrl = gatewayDraft.wsUrl.trim();
+  if (wsUrl && !isGatewayUrl(wsUrl)) {
+    gatewayDraft.error = "Enter a WebSocket URL, such as ws://localhost:8765/ws.";
+    return;
+  }
+  gateway.wsUrl = wsUrl;
+  gateway.token = gatewayDraft.token;
+  // connect() leaves an open socket alone: the one opened with the old values goes first.
+  gateway.disconnect();
+  gateway.connect();
+  // Connecting tidies the URL (http becomes ws, a missing /ws is added): show what is stored.
+  revertGatewayDraft();
+}
+
+// ── Unsaved changes ──────────────────────────────────────────────────────────
+// A card with a Save button edits a form that nothing stores until Save is pressed, and what
+// was typed used to vanish without a word on the way out. Each such card is tracked here:
+// while its form differs from what was last loaded or saved the card says "Unsaved", its chip
+// in the section index carries a dot, and leaving the page asks first.
+
+interface TrackedCard {
+  /** True while the card holds something that is not stored. */
+  dirty: () => boolean;
+  /** Puts the card back to what is stored. */
+  revert: () => void;
+  /** Takes the form as it stands for the stored one. Cards that keep a snapshot only. */
+  markSaved?: () => void;
+}
+
+/** A form's fields without the listed ones: its own state (loading, error…) is not an edit. */
+function fieldsOf<T extends object, K extends keyof T>(form: T, skip: readonly K[]): Omit<T, K> {
+  const fields: Partial<T> = { ...form };
+  for (const key of skip) delete fields[key];
+  return fields as Omit<T, K>;
+}
+
+/**
+ * Tracks a form against a snapshot of its fields. The snapshot is taken now, and again on
+ * every markSaved(): when the card's data loads, after a save, after a revert.
+ */
+function trackForm<T extends object>(read: () => T, write: (fields: T) => void): TrackedCard {
+  // An emptied number box holds "", one that never held a number null: the same to the user.
+  const keyOf = (fields: T) => JSON.stringify(fields, (_name, value) => (value === "" ? null : value));
+  const first = read();
+  const saved = shallowRef({ fields: first, key: keyOf(first) });
+  return {
+    dirty: () => saved.value.key !== keyOf(read()),
+    revert: () => write(saved.value.fields),
+    markSaved: () => {
+      const fields = read();
+      saved.value = { fields, key: keyOf(fields) };
+    },
+  };
+}
+
+/** By card id (SETTINGS_CARDS). The other cards save on change, or have nothing to save. */
+const trackedCards: Record<string, TrackedCard> = {
+  "gateway-connection": { dirty: gatewayDraftDiffers, revert: revertGatewayDraft },
+  multimodal: trackForm(() => fieldsOf(multimodalForm, ["error"]), resetMultimodalForm),
+  personality: trackForm(() => fieldsOf(personalityForm, ["error"]), resetPersonalityForm),
+  "orchestration-tuning": trackForm(() => ({ ...orchestrationForm }), (fields) => {
+    Object.assign(orchestrationForm, fields);
+    orchestrationError.value = "";
+  }),
+  "skill-library": trackForm(() => ({ ...skillForm, pipelineEnabled: pipelineForm.enabled }), ({ pipelineEnabled, ...skill }) => {
+    Object.assign(skillForm, skill);
+    pipelineForm.enabled = pipelineEnabled;
+  }),
+  "document-rag": trackForm(() => ({ ...docRagForm }), (fields) => {
+    Object.assign(docRagForm, fields);
+  }),
+  "user-model": trackForm(() => ({ ...userModelForm }), (fields) => {
+    Object.assign(userModelForm, fields);
+  }),
+  // Nothing here is "saved": a request that was typed and not sent, or a note on a proposal.
+  "config-assistant": {
+    dirty: () => configAssistantForm.request.trim() !== "" || proposalNote.lesson.trim() !== "" || proposalNote.notes.trim() !== "",
+    revert: () => {
+      resetConfigAssistantForm();
+      closeProposalNote();
+    },
+  },
+  "model-routing": trackForm(
+    () => fieldsOf(modelEndpointForm, ["loaded", "loading", "saving", "error", "refusedField", "lastLoaded"]),
+    (fields) => {
+      Object.assign(modelEndpointForm, fields);
+      modelEndpointForm.error = "";
+    },
+  ),
+};
+
+/** A card's form is as the gateway has it: called when its data loads and after each save. */
+function markSaved(cardId: string) {
+  trackedCards[cardId]?.markSaved?.();
+}
+
+/** The "Revert" buttons: the form goes back to what was loaded; nothing is sent. */
+function revertCard(cardId: string) {
+  trackedCards[cardId]?.revert();
+}
+
+const dirtyCardIds = computed(() => new Set(Object.keys(trackedCards).filter((cardId) => trackedCards[cardId]?.dirty())));
+
+function isCardDirty(cardId: string): boolean {
+  return dirtyCardIds.value.has(cardId);
+}
+
+// A dialog that is open with something typed into it is unsaved work too. It stands over the
+// page, so it gets no chip; the question on the way out names it.
+const dialogsWithEdits = computed(() => {
+  const names: string[] = [];
+  if (siteForm.open && !dialogUntouched("site", siteForm)) names.push("the site credentials dialog");
+  if (sceneForm.open && !dialogUntouched("scene", sceneForm)) names.push("the scene dialog");
+  if (jobForm.open && !dialogUntouched("job", jobForm)) names.push("the job dialog");
+  if (channelForm.open && !dialogUntouched("channel", channelForm.config)) names.push(`the ${channelForm.label} channel dialog`);
+  return names;
+});
+
+const hasUnsaved = computed(() => dirtyCardIds.value.size > 0 || dialogsWithEdits.value.length > 0);
+
+// Asked before the route changes. /settings and /agents are two routes served by this one
+// component instance: going from one to the other leaves a route, so the leave guard asks
+// there too (the router hands a reused instance's guards on to the route it now serves). The
+// update guard is for a routing table that would serve both paths from one route.
+async function confirmLeaving(to: RouteLocationNormalized, from: RouteLocationNormalized): Promise<boolean> {
+  // A new hash or query stays on the page: nothing is left behind.
+  if (to.path === from.path || !hasUnsaved.value) return true;
+  // The cards in page order, then any dialog.
+  const names = [
+    ...SETTINGS_CARDS.filter((card) => isCardDirty(card.id)).map((card) => card.label),
+    ...dialogsWithEdits.value,
+  ];
+  const subject = listInWords(names);
+  return confirmAction({
+    title: "Leave without saving?",
+    message: `${subject.charAt(0).toUpperCase()}${subject.slice(1)} ${names.length === 1 ? "has" : "have"} unsaved changes. Leaving discards them.`,
+    confirmLabel: "Leave",
+    cancelLabel: "Stay",
+    danger: true,
+    eyebrow: "Unsaved changes",
+  });
+}
+
+onBeforeRouteLeave(confirmLeaving);
+onBeforeRouteUpdate(confirmLeaving);
+
+// "Leave" towards the sibling route keeps this instance, and its forms, alive. What was given
+// up is put back, so that it does not wait out of sight to be stored by a later Save.
+watch(pageMode, () => {
+  for (const card of Object.values(trackedCards)) {
+    if (card.dirty()) card.revert();
+  }
+  siteForm.open = false;
+  sceneForm.open = false;
+  jobForm.open = false;
+  if (channelForm.open) closeChannelForm();
+});
+
+// Closing or reloading the tab cannot be asked about in the page's own dialog. The browser
+// shows its own while this listener is there — so it is there only while something is unsaved.
+function warnBeforeUnload(event: BeforeUnloadEvent) {
+  event.preventDefault();
+  // Older browsers look at this instead of preventDefault().
+  event.returnValue = true;
+}
+
+watch(hasUnsaved, (unsaved) => {
+  if (unsaved) window.addEventListener("beforeunload", warnBeforeUnload);
+  else window.removeEventListener("beforeunload", warnBeforeUnload);
+}, { immediate: true });
+
+onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", warnBeforeUnload);
+  clearTimeout(jobJsonTimer);
+});
+
+// When the gateway comes back while the page is open, the page's data loads again. A card
+// with unsaved edits is left as the user has it (`keepEdits`): the reload would overwrite them.
+function loadRuntimeSettingsData(keepEdits = false) {
   if (!guardrails.state) void guardrails.fetch();
   void sites.fetch();
   void scenesStore.fetch();
@@ -3784,32 +4357,36 @@ function loadRuntimeSettingsData() {
   void channelsStore.fetch();
   void channelsStore.fetchDeadLetterCount();
   void runtime.fetch();
-  void multimodalStore.fetch();
+  if (keepEdits && isCardDirty("multimodal")) void multimodalStore.fetchStatus();
+  else void multimodalStore.fetch();
 }
 
-function loadDefinitionsData() {
-  void personalityStore.fetch();
+function loadDefinitionsData(keepEdits = false) {
+  const kept = (cardId: string) => keepEdits && isCardDirty(cardId);
+  if (!kept("personality")) void personalityStore.fetch();
   void agentsStore.fetch();
-  void fetchModelEndpointConfig();
+  if (!kept("model-routing")) void fetchModelEndpointConfig();
   void configAssistant.fetchProposals();
   void configAssistant.fetchFlowMemory();
   void runtime.fetch();
-  void reloadOrchestrationConfig();
+  if (!kept("orchestration-tuning")) void reloadOrchestrationConfig();
   void reloadEffortConfig();
-  void reloadSkillConfig();
-  void reloadDocumentRagConfig();
-  void reloadUserModel();
+  if (!kept("skill-library")) void reloadSkillConfig();
+  if (!kept("document-rag")) void reloadDocumentRagConfig();
+  if (!kept("user-model")) void reloadUserModel();
 }
 
 // ── Auto-load when connected ─────────────────────────────────────────────────
 
-watch([() => gateway.connected, () => pageMode.value], ([connected, mode]) => {
+watch([() => gateway.connected, () => pageMode.value], ([connected, mode], previous) => {
   if (!connected) return;
+  // The same page as before, so the gateway reconnected: edits in progress are kept.
+  const keepEdits = previous?.[1] === mode;
   if (mode === "agents") {
-    loadDefinitionsData();
+    loadDefinitionsData(keepEdits);
     return;
   }
-  loadRuntimeSettingsData();
+  loadRuntimeSettingsData(keepEdits);
 }, { immediate: true });
 
 watch(() => personalityStore.profile, (profile) => {
@@ -4191,6 +4768,52 @@ onBeforeUnmount(() => {
   opacity: 0.35;
 }
 
+/* On the chip of a card with unsaved changes. */
+.settings-index__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: 0.45rem;
+  border-radius: 9999px;
+  background: #fbbf24;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.7);
+}
+
+/* "Unsaved", in the header of a card whose form differs from what is stored. */
+.unsaved-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.55rem;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 0.25rem;
+  background: rgba(251, 191, 36, 0.08);
+  font-family: var(--font-label);
+  font-size: 0.62rem;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: #fcd34d;
+}
+
+.unsaved-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: #fbbf24;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.7);
+}
+
+/* "Applies immediately", on a card or a field that saves the moment it is changed. */
+.applies-now {
+  white-space: nowrap;
+  color: rgba(var(--logo-cyan), 0.85);
+  cursor: help;
+}
+
 .settings-no-match {
   max-width: 1400px;
   margin: 0 auto;
@@ -4348,6 +4971,53 @@ onBeforeUnmount(() => {
 
 .field-label {
   @apply block text-xs text-gray-400 mb-1.5 font-medium;
+}
+
+/* The label of a switch: as wide as its text, so a click beside it does not flip the switch. */
+.field-label--switch {
+  display: inline-block;
+  cursor: pointer;
+}
+
+/* The * after the label of a field that has to be filled in. */
+.field-required {
+  color: #f87171;
+}
+
+/* A JSON box in the job dialog, and the line under it that says what the check found. */
+.json-box {
+  min-height: 4rem;
+  resize: vertical;
+}
+
+.json-status {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: rgb(110, 231, 183);
+}
+
+.json-status--hint {
+  color: rgb(156, 163, 175);
+}
+
+.json-status--error {
+  color: rgb(252, 165, 165);
+}
+
+/* The note that goes with a verdict on a proposal. */
+.proposal-note {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(var(--logo-cyan), 0.22);
+  background: rgba(2, 6, 23, 0.5);
+}
+
+.proposal-note__box {
+  resize: vertical;
 }
 
 .multimodal-grid {

@@ -204,6 +204,7 @@
               :allow-rewind="!gateway.isLoading"
               :live-at-orb="orbHasRoomForSteps"
               @rewind="handleRewind"
+              @retry="handleRetry"
               @resend="handleResendSteer"
               @show-step="showStep"
             />
@@ -216,6 +217,7 @@
                 v-for="inputId in gateway.userInputPlacement.floating"
                 :key="inputId"
                 :input-id="inputId"
+                :language="orbLanguage"
               />
             </div>
 
@@ -703,12 +705,12 @@
           <div class="chat-composer__menus">
             <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown" @toggle="onComposerMenuToggle">
               <summary class="chat-dropdown__summary">
-                <span>Options</span>
+                <span>{{ chatText.options(uiLanguage) }}</span>
                 <span class="chat-dropdown__chevron">▾</span>
               </summary>
               <div class="chat-dropdown__menu">
                 <div class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Attachments & Voice</div>
+                  <div class="chat-dropdown__label">{{ chatText.attachmentsAndVoice(uiLanguage) }}</div>
                   <div class="chat-dropdown__actions">
                     <button
                       v-if="showFileInput"
@@ -833,18 +835,18 @@
                       </select>
                     </label>
                     <label v-if="showSpeechPlayback" class="chat-dropdown__voice-setting">
-                      <span>While a turn runs</span>
+                      <span>{{ chatText.whileTurnRuns(uiLanguage) }}</span>
                       <select v-model="speechUpdates" class="chat-dropdown__select" title="What you hear while the assistant works, with speech on">
-                        <option value="voice">Spoken updates + tones</option>
-                        <option value="tones">Tones only</option>
-                        <option value="off">Silent until the answer</option>
+                        <option value="voice">{{ chatText.spokenUpdates(uiLanguage) }}</option>
+                        <option value="tones">{{ chatText.tonesOnly(uiLanguage) }}</option>
+                        <option value="off">{{ chatText.silentUntilAnswer(uiLanguage) }}</option>
                       </select>
                     </label>
                   </div>
                 </div>
 
                 <div v-if="gateway.scenes.length > 0" class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Scenes</div>
+                  <div class="chat-dropdown__label">{{ chatText.scenes(uiLanguage) }}</div>
                   <div class="chat-dropdown__scene-grid">
                     <button
                       v-for="scene in gateway.scenes"
@@ -861,7 +863,7 @@
                 </div>
 
                 <div v-if="configuredJobs.length > 0" class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Jobs</div>
+                  <div class="chat-dropdown__label">{{ chatText.jobs(uiLanguage) }}</div>
                   <div class="chat-dropdown__scene-grid">
                     <button
                       v-for="job in configuredJobs"
@@ -973,21 +975,43 @@
               </div>
             </details>
 
-            <!-- Effort selector: cycles low → medium → high → max for this session.
-                 Higher tiers relax timeouts/iteration & size caps and push reasoning
-                 (high keeps quality gates; max removes them for unbounded runs). -->
-            <button
-              @click="cycleEffort"
-              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
-              :class="effortButtonClass"
-              :title="effortTitle"
-              :aria-label="`Effort: ${currentEffort}`"
-            >
-              <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
-              </svg>
-              <span class="capitalize">{{ currentEffort }}</span>
-            </button>
+            <!-- Effort: the four tiers as a list with what each one does. It used to be one button
+                 that stepped through them — one click past "high" landed on "max", which relaxes
+                 the quality gates, with no warning, and going back to "low" took three more. -->
+            <details ref="effortDetailsEl" class="chat-dropdown chat-dropdown--effort" @toggle="onComposerMenuToggle">
+              <summary
+                class="chat-dropdown__summary chat-dropdown__summary--effort"
+                :class="effortButtonClass"
+                :title="effortTitle"
+                :aria-label="`Effort: ${currentEffort}`"
+              >
+                <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+                </svg>
+                <span class="capitalize">{{ currentEffort }}</span>
+                <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
+              </summary>
+              <div class="chat-dropdown__menu chat-dropdown__menu--effort" role="radiogroup" :aria-label="chatText.effortForSession(uiLanguage)">
+                <div class="chat-dropdown__label">{{ chatText.effortForSession(uiLanguage) }}</div>
+                <button
+                  v-for="tier in EFFORT_TIERS"
+                  :key="tier"
+                  type="button"
+                  role="radio"
+                  class="effort-option"
+                  :class="[tier === currentEffort ? 'effort-option--current' : '', tier === 'max' ? 'effort-option--caution' : '']"
+                  :aria-checked="tier === currentEffort"
+                  @click="chooseEffort(tier)"
+                >
+                  <span class="effort-option__name">
+                    <span class="capitalize">{{ tier }}</span>
+                    <span v-if="tier === 'max'" class="effort-option__flag">{{ chatText.relaxesGates(uiLanguage) }}</span>
+                    <span v-if="tier === currentEffort" class="effort-option__check" aria-hidden="true">✓</span>
+                  </span>
+                  <span class="effort-option__text">{{ EFFORT_DESCRIPTIONS[tier] }}</span>
+                </button>
+              </div>
+            </details>
 
             <!-- Whether a render in this chat stops for the user's settings first. The same
                  session setting as the card's "Always Auto in this chat". -->
@@ -1009,12 +1033,12 @@
               <span>Images: {{ gateway.currentSessionImageSettingsPrompt }}</span>
             </button>
 
-            <!-- Thinking toggle lives beside the dropdowns; its state is
-                 carried by color/glow alone (active = cyan glow, off =
-                 dashed + dim, auto = dim). -->
+            <!-- Thinking: its state in words, like the Images button beside it. Glow alone carried
+                 it before, and "auto" and "off" were two shades of dim. -->
             <button
+              type="button"
               @click="cycleThinkingMode"
-              class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
+              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="thinkingMode === true
                 ? 'multimodal-action-active thinking-toggle--on'
                 : thinkingMode === false
@@ -1032,6 +1056,7 @@
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
                 <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
               </svg>
+              <span>Thinking: {{ thinkingMode === undefined ? "auto" : thinkingMode ? "on" : "off" }}</span>
             </button>
           </div>
 
@@ -1326,14 +1351,23 @@ function formatApprovalCountdown(value: number): string {
 }
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
+/** "… attached — click Send" stands only while something is attached. */
+function clearAttachedNotice(): void {
+  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && /attached — click Send$/.test(wakeStatus.value)) {
+    wakeStatus.value = "Voice idle";
+  }
+}
+
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
   if (img) URL.revokeObjectURL(img.previewUrl);
   pendingImageContexts.value.splice(idx, 1);
+  clearAttachedNotice();
 }
 
 function removeDocument(idx: number) {
   pendingDocumentContexts.value.splice(idx, 1);
+  clearAttachedNotice();
 }
 
 // Stop says it is stopping. The request takes a moment, and the button used to sit there
@@ -1404,7 +1438,7 @@ const EFFORT_DESCRIPTIONS: Record<EffortTier, string> = {
   max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
 };
 const currentEffort = computed<EffortTier>(() => gateway.currentSessionEffort);
-const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to cycle.`);
+const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to choose.`);
 const effortButtonClass = computed(() => {
   switch (currentEffort.value) {
     case "max": return "multimodal-action-active thinking-toggle--on ring-1 ring-amber-400/60";
@@ -1413,10 +1447,10 @@ const effortButtonClass = computed(() => {
     default: return "opacity-70 hover:opacity-100"; // medium
   }
 });
-function cycleEffort() {
-  const idx = EFFORT_TIERS.indexOf(currentEffort.value);
-  const next = EFFORT_TIERS[(idx + 1) % EFFORT_TIERS.length]!;
-  void gateway.updateSessionSettings({ effort: next });
+const effortDetailsEl = ref<HTMLDetailsElement | null>(null);
+function chooseEffort(tier: EffortTier): void {
+  if (effortDetailsEl.value) effortDetailsEl.value.open = false;
+  if (tier !== currentEffort.value) void gateway.updateSessionSettings({ effort: tier });
 }
 
 interface SpeechRecognitionResultItem {
@@ -2926,6 +2960,23 @@ async function handleRewind(messageId: string) {
   }
 }
 
+/** A failed answer's question, sent once more as a new turn; the failed answer stays in the record. */
+async function handleRetry(messageId: string) {
+  if (gateway.isLoading || analysing.value) return;
+  const at = gateway.messages.findIndex((message) => message.id === messageId);
+  if (at < 0) return;
+  const question = gateway.messages.slice(0, at).reverse().find((message) => message.role === "user" && !message.midTurn && !message.steer);
+  if (!question?.content?.trim()) return;
+  // Whatever is being drafted is not overwritten: the question goes out only from an empty input.
+  if (inputText.value.trim()) {
+    showSteeringNote("Send or clear what you are writing first — asking again would replace it.", "error");
+    return;
+  }
+  inputText.value = question.content;
+  await nextTick();
+  await sendMessage();
+}
+
 async function handleResendSteer(messageId: string) {
   await gateway.resendSteer(messageId);
 }
@@ -3215,7 +3266,11 @@ async function exportPDF(): Promise<void> {
 </html>`;
 
     const win = window.open("", "_blank");
-    if (!win) return;
+    if (!win) {
+      composerOpen.value = true;
+      showSteeringNote("The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.", "error");
+      return;
+    }
     win.document.write(html);
     win.document.close();
     win.focus();
@@ -4963,5 +5018,55 @@ onUnmounted(() => {
   z-index: var(--z-popover);
   max-width: 48rem;
   margin: 0 auto;
+}
+
+/* The Effort menu: one row per tier, the current one marked, "max" flagged. */
+.chat-dropdown__summary--effort { min-width: 0; font-size: 0.75rem; font-weight: 600; }
+.chat-dropdown__menu--effort { width: min(26rem, calc(100vw - 2.5rem)); gap: 0.35rem; }
+.effort-option {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.7rem;
+  border: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.effort-option:hover, .effort-option:focus-visible {
+  background: rgba(var(--logo-cyan), 0.07);
+  border-color: rgba(var(--logo-cyan), 0.28);
+  outline: none;
+}
+.effort-option--current { border-color: rgba(var(--logo-cyan), 0.45); background: rgba(var(--logo-cyan), 0.06); }
+.effort-option__name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgb(226, 232, 240);
+}
+.effort-option__check { margin-left: auto; color: rgb(var(--logo-cyan)); }
+.effort-option__flag {
+  font-family: var(--font-label);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: rgb(252, 211, 77);
+}
+.effort-option__text { font-size: 0.72rem; line-height: 1.4; color: rgb(148, 163, 184); }
+
+/* Small controls get a finger-sized target on touch screens; a mouse keeps the compact look. */
+@media (pointer: coarse) {
+  .voice-bar__button,
+  .voice-bar__close { min-height: 2.5rem; min-width: 2.5rem; }
+  .chat-job-strip__item button,
+  .session-pod button { min-height: 2.25rem; }
+  .actions-pod__item { min-height: 3rem; }
 }
 </style>

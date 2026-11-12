@@ -79,7 +79,7 @@
               <div class="doc-row__meta">
                 {{ row.doc.chunkCount }} chunk{{ row.doc.chunkCount === 1 ? "" : "s" }}
                 <span v-if="row.entry.size"> · {{ formatBytes(row.entry.size) }}</span>
-                <span v-if="row.doc.createdAt"> · {{ formatDate(row.doc.createdAt) }}</span>
+                <span v-if="row.doc.createdAt" :title="isoTimestamp(row.doc.createdAt)"> · {{ formatDateTime(row.doc.createdAt) }}</span>
                 <span v-if="otherScopes(row).length" class="doc-row__alsoin"> · also in {{ otherScopes(row).join(", ") }}</span>
               </div>
             </div>
@@ -108,6 +108,7 @@
 import { ref, computed } from "vue";
 import { useGatewayStore, type ManagedDocument, type ManagedDocumentScope } from "@/stores/gateway";
 import { ownUserSourceMatcher } from "@/composables/documentSources";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -289,10 +290,6 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
 // The page can be open before the gateway is reachable (a reload of this URL): the lists load

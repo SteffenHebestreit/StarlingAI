@@ -45,6 +45,16 @@
       </div>
     </header>
 
+    <div class="mb-4">
+      <input
+        v-model="searchQuery"
+        type="search"
+        class="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm"
+        placeholder="Search events by type, agent, tool, session or summary text"
+        aria-label="Search audit events"
+      >
+    </div>
+
     <div v-if="performanceSummary" class="mb-4 grid gap-3 md:grid-cols-4">
       <div :class="['rounded-xl px-4 py-3', performanceCardClass(performanceSummary.reliabilityState)]">
         <div class="flex items-center justify-between gap-3">
@@ -177,11 +187,18 @@
     <!-- The list scrolls by itself. Its floor keeps it tall enough to read when the summary
          cards stack on a phone; the page then scrolls to reach it. -->
     <div class="flex-1 min-h-[60vh] md:min-h-[16rem] overflow-y-auto space-y-1 font-mono text-xs">
-      <div v-if="!filteredEvents.length" class="text-gray-600 text-center py-8">
+      <!-- An empty list is one of two things: nothing has happened yet, or the search and the
+           filters hide every event there is. -->
+      <div v-if="!audit.events.length" class="empty-state font-sans">
         No audit events yet. Start chatting to see events here.
       </div>
+      <div v-else-if="!filteredEvents.length" class="empty-state font-sans">
+        <p>{{ noMatchLine("events", searchQuery, Boolean(typeFilter || severityFilter)) }}</p>
+        <p v-if="bufferNote" class="mt-1 text-xs">The live buffer keeps only the newest {{ MAX_AUDIT_EVENTS }} events — older ones have been dropped.</p>
+        <button type="button" class="btn-ghost mt-3 px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
+      </div>
       <div
-        v-for="ev in filteredEvents"
+        v-for="ev in eventWindow.visible"
         :key="ev.id"
         :class="[
           'px-3 py-3 rounded border space-y-2',
@@ -191,7 +208,7 @@
         ]"
       >
         <div class="flex gap-3 items-start">
-          <span class="text-gray-600 flex-shrink-0">{{ formatTs(ev.timestamp) }}</span>
+          <time class="text-gray-600 flex-shrink-0" :datetime="isoTimestamp(ev.timestamp)" :title="isoTimestamp(ev.timestamp)">{{ formatTs(ev.timestamp) }}</time>
           <span :class="[
             'flex-shrink-0 w-40',
             ev.severity === 'error' ? 'text-red-400' :
@@ -315,15 +332,27 @@
           </details>
         </div>
       </div>
+
+      <!-- No live region here: the counts change with every event that arrives. -->
+      <div v-if="filteredEvents.length && (eventWindow.paged || bufferNote)" class="flex flex-col items-center gap-2 py-3 text-center font-sans">
+        <button v-if="eventWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="eventWindow.showMore()">
+          Show {{ eventWindow.nextStep }} more
+        </button>
+        <p class="text-xs text-gray-400">
+          {{ eventWindow.summary }} events<template v-if="bufferNote"> · {{ bufferNote }}</template>
+        </p>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { useAuditStore, type AuditEvent } from "@/stores/audit";
+import { MAX_AUDIT_EVENTS, useAuditStore, type AuditEvent } from "@/stores/audit";
 import { useProductStore } from "@/stores/product";
 import { ITERATION_STOP_FINISH_REASONS } from "@/composables/finishReasons";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useToast } from "@/composables/useToast";
 
@@ -347,6 +376,7 @@ const audit = useAuditStore();
 const toast = useToast();
 const severityFilter = ref("");
 const typeFilter = ref("");
+const searchQuery = ref("");
 const auditExporting = ref(false);
 
 // The buffer is one store that other pages read too, and nothing can load it again: it only
@@ -512,12 +542,51 @@ const performanceSummary = computed(() => {
   };
 });
 
-const filteredEvents = computed(() => audit.events.filter((event) => {
-  if (severityFilter.value && event.severity !== severityFilter.value) return false;
-  if (typeFilter.value && event.type !== typeFilter.value) return false;
-  return true;
-}));
+// What the search box looks through: the event's type, its agent and tool, the session and
+// channel on its row, and the sentence the row shows for it.
+function eventSearchText(event: AuditEvent): string {
+  const text = (value: unknown) => (typeof value === "string" ? value : "");
+  const agents = Array.isArray(event.data.agents) ? event.data.agents.map((agent) => String(agent)) : [];
+  return [
+    event.type,
+    event.sessionId ?? "",
+    event.channel ?? "",
+    text(event.data.agentName),
+    text(event.data.agent),
+    ...agents,
+    text(event.data.tool),
+    summarizeEvent(event),
+  ].join("\n").toLowerCase();
+}
 
+const filteredEvents = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+  return audit.events.filter((event) => {
+    if (severityFilter.value && event.severity !== severityFilter.value) return false;
+    if (typeFilter.value && event.type !== typeFilter.value) return false;
+    return !query || eventSearchText(event).includes(query);
+  });
+});
+
+function clearFilters(): void {
+  searchQuery.value = "";
+  typeFilter.value = "";
+  severityFilter.value = "";
+}
+
+// The rows are drawn a page at a time; a new search or filter starts again at the first page.
+// Export Markdown still takes every event the filters let through, not only the ones drawn.
+const eventWindow = useListWindow(() => filteredEvents.value, {
+  resetKey: () => `${typeFilter.value}|${severityFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
+// The buffer holds live events only, the newest MAX_AUDIT_EVENTS of them; the gateway has no
+// request for older ones. Once it is full the count line says that earlier events are gone.
+const bufferNote = computed(() => (audit.events.length >= MAX_AUDIT_EVENTS
+  ? `the live buffer keeps the newest ${MAX_AUDIT_EVENTS} — older events have been dropped and cannot be loaded`
+  : ""));
+
+// Rows show the time of day only (they are a live feed); the whole timestamp is in the title.
 function formatTs(ts: string): string {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
@@ -758,7 +827,7 @@ function formatEventData(data: Record<string, unknown>): string {
 }
 
 function buildAuditMarkdownExport(events: AuditEvent[]): string {
-  const exportedAt = new Date().toLocaleString();
+  const exportedAt = formatDateTime(new Date());
   const lines: string[] = [
     `# ${product.name} Audit Log`,
     "",
@@ -766,6 +835,7 @@ function buildAuditMarkdownExport(events: AuditEvent[]): string {
     `- Event count: ${events.length}`,
     `- Type filter: ${typeFilter.value || "(all)"}`,
     `- Severity filter: ${severityFilter.value || "(all)"}`,
+    `- Search: ${searchQuery.value.trim() || "(none)"}`,
     "",
     "---",
     "",

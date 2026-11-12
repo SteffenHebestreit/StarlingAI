@@ -40,6 +40,9 @@ export const chatText = {
   download: (l: TurnLanguage) => pick(l, "Download", "Herunterladen"),
   renderingDiagram: (l: TurnLanguage) => pick(l, "Rendering diagram…", "Diagramm wird gezeichnet…"),
 
+  retry: (l: TurnLanguage) => pick(l, "↻ Ask again", "↻ Nochmal fragen"),
+  retryTitle: (l: TurnLanguage) => pick(l, "Send the question this answer failed on once more", "Die Frage, an der diese Antwort gescheitert ist, noch einmal senden"),
+
   // ── The step detail panel ─────────────────────────────────────────────────────────────────
   ranInside: (l: TurnLanguage) => pick(l, "Ran inside", "Lief in"),
   tool: (l: TurnLanguage) => pick(l, "Tool", "Werkzeug"),
@@ -68,9 +71,10 @@ export const chatText = {
   steerPlaceholder: (l: TurnLanguage) => pick(l,
     "Steer the running turn — your message is queued and read at its next step…",
     "Laufende Aufgabe lenken — deine Nachricht wird beim nächsten Schritt gelesen…"),
+  // Names the card's button by the label it has in this language (configure, below).
   cardPlaceholder: (l: TurnLanguage) => pick(l,
     "Waiting on the card above — use its Configure to change the engine or prompt…",
-    "Wartet auf die Karte oben — über „Configure“ dort änderst du Engine oder Prompt…"),
+    "Wartet auf die Karte oben — über „Anpassen“ dort änderst du Engine oder Prompt…"),
   send: (l: TurnLanguage) => pick(l, "Send", "Senden"),
   steer: (l: TurnLanguage) => pick(l, "Steer", "Lenken"),
   stop: (l: TurnLanguage) => pick(l, "Stop", "Stopp"),
@@ -105,6 +109,24 @@ export const chatText = {
   operatorAction: (l: TurnLanguage) => pick(l, "Operator Action Suggested", "Eingreifen empfohlen"),
   dismiss: (l: TurnLanguage) => pick(l, "Dismiss", "Schließen"),
 
+  // ── A question a step waits on: the card under its row ───────────────────────────────────
+  // The countdown reads like the row above it (turnText.waitingForYou): "Auto in" / "automatisch in".
+  autoIn: (l: TurnLanguage, countdown: string) => pick(l, `Auto in ${countdown}`, `Automatisch in ${countdown}`),
+  imageSettings: (l: TurnLanguage) => pick(l, "Image settings", "Bildeinstellungen"),
+  auto: (l: TurnLanguage) => pick(l, "Auto", "Automatisch"),
+  autoTitle: (l: TurnLanguage) => pick(l, "Render with the agent's settings", "Mit den Einstellungen des Agenten erzeugen"),
+  configure: (l: TurnLanguage) => pick(l, "Configure…", "Anpassen…"),
+  skip: (l: TurnLanguage) => pick(l, "Skip", "Überspringen"),
+  skipTitle: (l: TurnLanguage) => pick(l, "Do not render this picture", "Dieses Bild nicht erzeugen"),
+  alwaysAuto: (l: TurnLanguage) => pick(l, "Always Auto in this chat", "In diesem Chat immer automatisch"),
+  alwaysAutoTitle: (l: TurnLanguage) => pick(l,
+    "Renders in this chat stop asking and use the agent's settings",
+    "In diesem Chat wird nicht mehr gefragt; es gelten die Einstellungen des Agenten"),
+  cannotShowQuestion: (l: TurnLanguage) => pick(l,
+    "This page cannot show the full question. The agent can go on with its own choice.",
+    "Diese Seite kann die Frage nicht vollständig anzeigen. Der Agent kann mit seiner eigenen Wahl weitermachen."),
+  continueWithDefaults: (l: TurnLanguage) => pick(l, "Continue with defaults", "Mit Standardwerten fortfahren"),
+
   // ── The voice bar ─────────────────────────────────────────────────────────────────────────
   voiceStop: (l: TurnLanguage) => pick(l, "Stop", "Stopp"),
   voiceDone: (l: TurnLanguage) => pick(l, "Done", "Fertig"),
@@ -121,6 +143,18 @@ export const chatText = {
   openPanel: (l: TurnLanguage) => pick(l, "Open side panel", "Seitenleiste öffnen"),
   closePanel: (l: TurnLanguage) => pick(l, "Close side panel", "Seitenleiste schließen"),
   panelEmpty: (l: TurnLanguage) => pick(l, "Nothing to show here yet", "Hier gibt es noch nichts zu sehen"),
+
+  // ── The composer's Options menu ───────────────────────────────────────────────────────────
+  options: (l: TurnLanguage) => pick(l, "Options", "Optionen"),
+  attachmentsAndVoice: (l: TurnLanguage) => pick(l, "Attachments & Voice", "Anhänge & Sprache"),
+  whileTurnRuns: (l: TurnLanguage) => pick(l, "While a turn runs", "Während eine Aufgabe läuft"),
+  spokenUpdates: (l: TurnLanguage) => pick(l, "Spoken updates + tones", "Gesprochene Updates + Töne"),
+  tonesOnly: (l: TurnLanguage) => pick(l, "Tones only", "Nur Töne"),
+  silentUntilAnswer: (l: TurnLanguage) => pick(l, "Silent until the answer", "Still bis zur Antwort"),
+  scenes: (l: TurnLanguage) => pick(l, "Scenes", "Szenen"),
+  jobs: (l: TurnLanguage) => pick(l, "Jobs", "Jobs"),
+  effortForSession: (l: TurnLanguage) => pick(l, "Effort for this session", "Aufwand für diese Sitzung"),
+  relaxesGates: (l: TurnLanguage) => pick(l, "relaxes quality gates", "lockert die Qualitätsprüfungen"),
 
   // ── Asking first ──────────────────────────────────────────────────────────────────────────
   restartConfirmTitle: (l: TurnLanguage) => pick(l, "Restart from this message?", "Ab dieser Nachricht neu starten?"),

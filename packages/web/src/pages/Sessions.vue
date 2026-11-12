@@ -37,12 +37,24 @@
 
     <div class="sessions-layout">
       <section class="sessions-list">
-        <div v-if="!filteredSessionCards.length" class="sessions-list__empty">
-          No sessions match the current filters.
+        <!-- "No sessions" is only true after a load that worked, and is a different thing from a
+             search or filter that hides the ones there are. -->
+        <div v-if="sessionsError" class="notice notice--error" role="alert">
+          The sessions could not be loaded: {{ sessionsError }}
+        </div>
+        <div v-if="!sessionCards.length && sessionsLoaded" class="empty-state">
+          No sessions yet. Start a conversation in the chat and it is listed here.
+        </div>
+        <div v-else-if="!sessionCards.length && !sessionsError" class="sessions-list__empty">
+          {{ gateway.connected && gateway.token ? "Loading sessions…" : "Not connected to the gateway — the sessions load once it is." }}
+        </div>
+        <div v-else-if="sessionCards.length && !filteredSessionCards.length" class="empty-state">
+          <p>{{ noMatchLine("sessions", searchQuery, statusFilter !== "all") }}</p>
+          <button type="button" class="btn-ghost mt-3 px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
         </div>
 
         <div
-          v-for="session in filteredSessionCards"
+          v-for="session in sessionWindow.visible"
           :key="session.id"
           :class="['session-card', selectedSessionId === session.id && 'session-card--active']"
           role="button"
@@ -89,16 +101,23 @@
           </div>
           <div class="session-card__meta">
             <span v-if="session.channel">{{ session.channel }}</span>
-            <span v-if="session.createdAt">Created {{ formatDate(session.createdAt) }}</span>
+            <span v-if="session.createdAt" :title="isoTimestamp(session.createdAt)">Created {{ formatDateTime(session.createdAt) }}</span>
             <span v-if="session.turns !== null">{{ session.turns }} turns</span>
           </div>
           <div v-if="session.runCount > 0" class="session-card__history">
             <span :class="['session-card__status', `session-card__status--${session.lastStatus}`]">{{ session.lastStatus }}</span>
             <span>{{ session.runCount }} swarm run{{ session.runCount === 1 ? '' : 's' }}</span>
-            <span>{{ session.lastRecordedAt ? formatDate(session.lastRecordedAt) : 'unknown' }}</span>
+            <span :title="isoTimestamp(session.lastRecordedAt)">{{ session.lastRecordedAt ? formatDateTime(session.lastRecordedAt) : 'unknown' }}</span>
           </div>
           <div v-if="session.preview" class="session-card__preview">{{ session.preview }}</div>
           <div v-else-if="session.lastObjective" class="session-card__objective">{{ session.lastObjective }}</div>
+        </div>
+
+        <div v-if="filteredSessionCards.length && sessionWindow.paged" class="flex flex-col items-center gap-2 text-center">
+          <button v-if="sessionWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="sessionWindow.showMore()">
+            Show {{ sessionWindow.nextStep }} more
+          </button>
+          <p class="text-xs text-gray-400" aria-live="polite">{{ sessionWindow.summary }} sessions</p>
         </div>
       </section>
 
@@ -121,7 +140,7 @@
                 <h3 class="transcript-panel__title">Transcript</h3>
                 <p v-if="selectedTranscript?.session" class="transcript-panel__meta">
                   {{ selectedTranscript.session.messageCount }} messages
-                  <span v-if="selectedTranscript.session.lastMessageAt"> · Last activity {{ formatDate(selectedTranscript.session.lastMessageAt) }}</span>
+                  <span v-if="selectedTranscript.session.lastMessageAt" :title="isoTimestamp(selectedTranscript.session.lastMessageAt)"> · Last activity {{ formatDateTime(selectedTranscript.session.lastMessageAt) }}</span>
                 </p>
               </div>
               <div v-if="selectedTranscript?.session" class="transcript-panel__header-actions">
@@ -159,7 +178,7 @@
               >
                 <div class="transcript-message__top">
                   <span :class="['transcript-message__role', `transcript-message__role--${message.role}`]">{{ message.role }}</span>
-                  <span class="transcript-message__time">{{ formatDate(message.timestamp) }}</span>
+                  <time class="transcript-message__time" :datetime="isoTimestamp(message.timestamp)" :title="isoTimestamp(message.timestamp)">{{ formatDateTime(message.timestamp) }}</time>
                 </div>
                 <p class="transcript-message__content">{{ message.content || 'No text content' }}</p>
 
@@ -194,9 +213,11 @@ import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
 import { writeClipboard } from "@/composables/clipboard";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
-import { useToast } from "@/composables/useToast";
+import { useToast, errorText } from "@/composables/useToast";
 import { useProductStore } from "@/stores/product";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -226,6 +247,10 @@ const selectedSessionId = ref<string | null>(null);
 const selectedRunId = ref<string | null>(null);
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | "archived" | "has-runs" | "ok" | "blocked" | "error">("all");
+// True while the list on screen comes from a load that succeeded: only then does an empty list
+// mean "no sessions".
+const sessionsLoaded = ref(false);
+const sessionsError = ref<string | null>(null);
 const selectedTranscript = ref<GatewaySessionTranscript | null>(null);
 const transcriptLoading = ref(false);
 const transcriptError = ref<string | null>(null);
@@ -299,6 +324,16 @@ const filteredSessionCards = computed(() => {
   });
 });
 
+function clearFilters() {
+  searchQuery.value = "";
+  statusFilter.value = "all";
+}
+
+// The cards are drawn a page at a time; a new search or filter starts again at the first page.
+const sessionWindow = useListWindow(() => filteredSessionCards.value, {
+  resetKey: () => `${statusFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
 const selectedRuns = computed(() => gateway.getSwarmRuns(selectedSessionId.value));
 const selectedRun = computed(() => {
   if (!selectedRuns.value.length) return null;
@@ -342,7 +377,14 @@ function ensureSelection() {
 }
 
 async function refresh() {
-  await gateway.refreshSessions();
+  sessionsError.value = null;
+  try {
+    await gateway.refreshSessions();
+    sessionsLoaded.value = true;
+  } catch (error) {
+    sessionsLoaded.value = false;
+    sessionsError.value = errorText(error);
+  }
   ensureSelection();
 }
 
@@ -418,7 +460,14 @@ async function removeSession(sessionId: string) {
     confirmLabel: "Delete session",
     danger: true,
   }))) return;
-  await gateway.deleteSession(sessionId);
+  // A refusal or a lost connection throws now (it used to be swallowed and the row came back on
+  // the next refresh): say so and leave the list as it is.
+  try {
+    await gateway.deleteSession(sessionId);
+  } catch (err) {
+    toast.error("Couldn't delete the session", errorText(err));
+    return;
+  }
   if (selectedSessionId.value === sessionId) {
     selectedSessionId.value = null;
     selectedRunId.value = null;
@@ -436,7 +485,12 @@ async function clearArchivedSessions() {
     danger: true,
   }))) return;
   for (const s of archived) {
-    await gateway.deleteSession(s.id);
+    try {
+      await gateway.deleteSession(s.id);
+    } catch (err) {
+      toast.error("Couldn't delete all archived sessions", `${errorText(err)} — the remaining ones were left alone.`);
+      break;
+    }
   }
   ensureSelection();
 }
@@ -481,12 +535,6 @@ function syncRouteSelection() {
   });
 }
 
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
 function formatToolArgs(args: TranscriptToolCall["args"]): string {
   try {
     return JSON.stringify(args, null, 2);
@@ -508,8 +556,8 @@ function buildTranscriptMarkdownExport(transcriptPage: GatewaySessionTranscript)
     ``,
     `- Session: ${session.id}`,
     `- Channel: ${session.channel}`,
-    `- Created: ${new Date(session.createdAt).toLocaleString()}`,
-    `- Updated: ${new Date(session.updatedAt).toLocaleString()}`,
+    `- Created: ${formatDateTime(session.createdAt)}`,
+    `- Updated: ${formatDateTime(session.updatedAt)}`,
     `- Status: ${session.archivedAt ? "Archived" : "Active"}`,
     `- Messages: ${session.messageCount}`,
     ``,
@@ -582,7 +630,7 @@ async function exportTranscriptPDF(): Promise<void> {
   if (!transcriptPage) return;
 
   const session = transcriptPage.session;
-  const exportedAt = new Date().toLocaleString();
+  const exportedAt = formatDateTime(new Date());
   const messageHtml = transcriptPage.transcript.map((message) => {
     const role = transcriptRoleLabel(message.role);
     const roleClass = `role-${message.role}`;
@@ -682,6 +730,9 @@ watch(() => route.query, ensureSelection, { deep: true });
 watch([selectedSessionId, selectedRunId], syncRouteSelection);
 watch(selectedSessionId, (sessionId) => {
   void loadTranscript(sessionId);
+  // A session picked from outside the list (a link from Jobs or Cost, the one open in the chat)
+  // can sit beyond the cards on screen: draw the list as far as its card.
+  if (sessionId) sessionWindow.reveal(filteredSessionCards.value.findIndex((session) => session.id === sessionId));
 }, { immediate: true });
 
 // Also when the gateway comes up after the page did (opened by URL, or signed in to here).

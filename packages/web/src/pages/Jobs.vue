@@ -44,8 +44,8 @@
           <h4 class="trigger-card__label">{{ trigger.label }}</h4>
           <p class="trigger-card__action">{{ trigger.action }}</p>
           <div class="trigger-card__times">
-            <span>Next: {{ formatTriggerTime(trigger.nextFireAt) }}</span>
-            <span>Last: {{ trigger.lastFiredAt ? formatTriggerTime(trigger.lastFiredAt) : "never" }}</span>
+            <span :title="isoTimestamp(trigger.nextFireAt)">Next: {{ formatTriggerTime(trigger.nextFireAt) }}</span>
+            <span :title="isoTimestamp(trigger.lastFiredAt)">Last: {{ trigger.lastFiredAt ? formatTriggerTime(trigger.lastFiredAt) : "never" }}</span>
           </div>
         </article>
       </div>
@@ -72,10 +72,19 @@
     <!-- "No jobs" is only true after a load that worked: before that the list is still loading,
          and after a failed one the notice above says so. -->
     <div v-if="!filteredJobs.length && refreshing && !jobsLoaded" class="jobs-page__empty">Loading jobs…</div>
-    <div v-else-if="!filteredJobs.length && jobsLoaded" class="jobs-page__empty">No jobs match the current filters.</div>
+    <!-- An empty list is one of two things: the filter hides every run, or nothing has run. -->
+    <div v-else-if="!filteredJobs.length && jobsLoaded && filtersActive" class="empty-state">
+      <p>{{ noMatchLine("jobs", searchQuery, statusFilter !== "all") }}</p>
+      <p v-if="loadedSpan" class="mt-1 text-xs">Only {{ loadedSpan }} were looked through — older ones are not loaded.</p>
+      <button type="button" class="btn-ghost mt-3 px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
+    </div>
+    <div v-else-if="!filteredJobs.length && jobsLoaded" class="empty-state">
+      No runs yet. One is listed here each time a scene or job is started — from the chat, on a schedule,
+      by a webhook or by a channel trigger.
+    </div>
 
     <div v-else-if="filteredJobs.length" class="jobs-grid">
-      <article v-for="job in filteredJobs" :key="job.id" :class="['job-card', jobToneClass(job.status)]">
+      <article v-for="job in jobWindow.visible" :key="job.id" :class="['job-card', jobToneClass(job.status)]">
         <div class="job-card__top">
           <div>
             <div class="job-card__title-row">
@@ -127,8 +136,8 @@
         </div>
 
         <div class="job-card__timeline">
-          <span>{{ lifecycleLabel(job) }}</span>
-          <span v-if="job.completedAt">Finished {{ formatTimestamp(job.completedAt) }}</span>
+          <span :title="isoTimestamp(job.startedAt ?? job.createdAt)">{{ lifecycleLabel(job) }}</span>
+          <span v-if="job.completedAt" :title="isoTimestamp(job.completedAt)">Finished {{ formatDateTime(job.completedAt) }}</span>
           <span>{{ Math.round(job.progress.percent ?? 0) }}%</span>
         </div>
 
@@ -171,6 +180,15 @@
         <p v-else-if="job.response" class="job-card__response">{{ job.response }}</p>
       </article>
     </div>
+
+    <div v-if="filteredJobs.length && (jobWindow.paged || loadCapNote)" class="mt-4 flex flex-col items-center gap-2 text-center">
+      <button v-if="jobWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="jobWindow.showMore()">
+        Show {{ jobWindow.nextStep }} more
+      </button>
+      <p class="text-xs text-gray-400" aria-live="polite">
+        {{ jobWindow.summary }} jobs<template v-if="loadCapNote"> · {{ loadCapNote }}</template>
+      </p>
+    </div>
   </div>
 </template>
 
@@ -180,6 +198,8 @@ import { useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
 import { writeClipboard } from "@/composables/clipboard";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast } from "@/composables/useToast";
@@ -198,9 +218,10 @@ const clearingFinished = ref(false);
 const refreshing = ref(false);
 // True while the list on screen comes from a load that succeeded.
 const jobsLoaded = ref(false);
+// What the load on screen asked the gateway for.
+const loadedQuery = ref<{ limit: number; status: "all" | "active" | SceneJob["status"] } | null>(null);
 
-// The store keeps errors as String(error): drop the "Error: " that adds.
-const runErrorText = computed(() => (scenesStore.runError ?? "").replace(/^Error: /, ""));
+const runErrorText = computed(() => scenesStore.runError ?? "");
 
 // ── Scheduled cron triggers ──────────────────────────────────────────────────
 interface CronTrigger {
@@ -258,7 +279,7 @@ function formatTriggerTime(value: string | null | undefined): string {
     const hours = Math.round(absMs / 3_600_000);
     return diffMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
   }
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(parsed);
 }
 
 const serverStatusFilter = computed<SceneJob["status"] | undefined>(() => {
@@ -284,17 +305,48 @@ const filteredJobs = computed(() => {
   });
 });
 
+const filtersActive = computed(() => searchQuery.value.trim() !== "" || statusFilter.value !== "all");
+
+function clearFilters() {
+  searchQuery.value = "";
+  // The watcher below loads the unfiltered list.
+  statusFilter.value = "all";
+}
+
+// The cards are drawn a page at a time; a new search or status starts again at the first page.
+const jobWindow = useListWindow(() => filteredJobs.value, {
+  resetKey: () => `${statusFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
+// The gateway sends the newest runs up to the limit it is asked for, 200 at most, and cannot be
+// asked for the ones before them. A full answer therefore means "there may be older runs", and
+// the count line says so. The status is applied by the gateway before the limit, so a status
+// reaches further back than "All jobs" does.
+// What a full answer covers ("the newest 200 failed runs"); empty when the answer was not full.
+const loadedSpan = computed(() => {
+  const loaded = loadedQuery.value;
+  if (!loaded || scenesStore.recentJobs.length < loaded.limit) return "";
+  const kind = loaded.status === "all" || loaded.status === "active" ? "" : `${loaded.status} `;
+  return `the newest ${loaded.limit} ${kind}runs`;
+});
+const loadCapNote = computed(() => {
+  if (!loadedSpan.value) return "";
+  const note = `${loadedSpan.value} — older ones are not loaded`;
+  if (loadedQuery.value?.status === "active") return `from ${note}`;
+  return loadedQuery.value?.status === "all" ? `${note}; pick a status to reach further back` : note;
+});
+
 async function refreshJobs() {
   refreshing.value = true;
-  // The store reports a failed load here and nowhere else, and clears it only before a
-  // mutation: without this a failure would stay on screen after a load that worked.
-  scenesStore.runError = null;
+  const status = statusFilter.value;
+  const limit = status === "active" ? 100 : 200;
   try {
     await scenesStore.fetchJobs({
-      limit: statusFilter.value === "active" ? 100 : 200,
+      limit,
       status: serverStatusFilter.value,
     });
     jobsLoaded.value = scenesStore.runError === null;
+    if (jobsLoaded.value) loadedQuery.value = { limit, status };
   } finally {
     refreshing.value = false;
   }
@@ -412,15 +464,9 @@ async function copyId(what: string, id: string): Promise<void> {
   }
 }
 
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
 function lifecycleLabel(job: SceneJob): string {
-  if (job.startedAt) return `Started ${formatTimestamp(job.startedAt)}`;
-  if (job.createdAt) return `Queued ${formatTimestamp(job.createdAt)}`;
+  if (job.startedAt) return `Started ${formatDateTime(job.startedAt)}`;
+  if (job.createdAt) return `Queued ${formatDateTime(job.createdAt)}`;
   return "Waiting for worker";
 }
 

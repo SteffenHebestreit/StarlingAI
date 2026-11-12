@@ -16,7 +16,7 @@
       </div>
     </header>
 
-    <p v-if="errorMessage" class="a2a-page__error">{{ errorMessage }}</p>
+    <div v-if="errorMessage" class="notice notice--error a2a-page__notice" role="alert">{{ errorMessage }}</div>
 
     <section class="a2a-section" v-if="status">
       <header class="a2a-section__header">
@@ -78,7 +78,10 @@
               </li>
             </ul>
           </details>
-          <p class="a2a-peer-card__meta">Last polled: {{ formatTime(peer.lastPolledAt) }}</p>
+          <p class="a2a-peer-card__meta">
+            Last polled:
+            <time :datetime="isoTimestamp(peer.lastPolledAt)" :title="isoTimestamp(peer.lastPolledAt)">{{ formatDateTime(peer.lastPolledAt) }}</time>
+          </p>
           <div class="a2a-peer-card__actions">
             <button type="button" class="btn-danger px-3 py-1.5 rounded-lg text-sm" :disabled="busyId === peer.id" @click="confirmRemove(peer.id)">
               Remove
@@ -92,14 +95,16 @@
       <header class="a2a-section__header">
         <h3 class="a2a-section__title">Add A2A peer</h3>
       </header>
-      <form class="a2a-form" @submit.prevent="submitAdd">
+      <!-- novalidate: a refused submit is answered in the line under the form, not by the
+           browser's own bubble. -->
+      <form class="a2a-form" novalidate @submit.prevent="submitAdd">
         <label class="a2a-form__field">
-          <span>ID</span>
-          <input v-model="addForm.id" placeholder="e.g. langgraph-prod" autocomplete="off" />
+          <span>ID <span class="text-red-400" aria-hidden="true">*</span></span>
+          <input ref="idField" v-model="addForm.id" required aria-required="true" placeholder="e.g. langgraph-prod" autocomplete="off" />
         </label>
         <label class="a2a-form__field">
-          <span>Base URL</span>
-          <input v-model="addForm.url" placeholder="https://peer.example.com" autocomplete="off" />
+          <span>Base URL <span class="text-red-400" aria-hidden="true">*</span></span>
+          <input ref="urlField" v-model="addForm.url" required aria-required="true" placeholder="https://peer.example.com" autocomplete="off" />
         </label>
         <label class="a2a-form__field">
           <span>Description (optional)</span>
@@ -116,7 +121,7 @@
         <button class="btn-grad px-4 py-2 rounded-xl text-sm" type="submit" :disabled="adding">
           {{ adding ? "Adding…" : "Add peer" }}
         </button>
-        <p v-if="addError" class="a2a-page__error">{{ addError }}</p>
+        <p v-if="addError" class="a2a-page__error" role="alert">{{ addError }}</p>
       </form>
     </section>
   </div>
@@ -125,6 +130,7 @@
 <script setup lang="ts">
 import { reactive, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
@@ -158,6 +164,9 @@ const adding = ref(false);
 const errorMessage = ref<string | null>(null);
 const addError = ref<string | null>(null);
 const busyId = ref<string | null>(null);
+// The two required fields: a refused submit puts the cursor in the first one left empty.
+const idField = ref<HTMLInputElement | null>(null);
+const urlField = ref<HTMLInputElement | null>(null);
 
 const addForm = reactive({
   id: "",
@@ -201,12 +210,20 @@ async function refresh(): Promise<void> {
 
 async function submitAdd(): Promise<void> {
   addError.value = null;
-  if (!/^[a-z0-9_-]+$/i.test(addForm.id)) {
-    addError.value = "ID must match /^[a-z0-9_-]+$/i";
+  // The first required field left empty is named under the form and gets the cursor.
+  if (!addForm.id.trim()) {
+    addError.value = "ID is required.";
+    idField.value?.focus();
     return;
   }
-  if (!addForm.url) {
-    addError.value = "URL is required";
+  if (!addForm.url.trim()) {
+    addError.value = "Base URL is required.";
+    urlField.value?.focus();
+    return;
+  }
+  if (!/^[a-z0-9_-]+$/i.test(addForm.id)) {
+    addError.value = "ID must match /^[a-z0-9_-]+$/i";
+    idField.value?.focus();
     return;
   }
   adding.value = true;
@@ -285,19 +302,13 @@ async function confirmRemove(id: string): Promise<void> {
   }
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
-}
-
 // Also when the gateway comes up after the page did (opened by URL, or signed in to here).
 useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
 /* The sections keep their 1.5rem rhythm; the shared header brings its own margin. */
-.a2a-page > .a2a-page__error { margin-bottom: 1.5rem; }
+.a2a-page > .a2a-page__notice { margin-bottom: 1.5rem; }
 .a2a-section + .a2a-section { margin-top: 1.5rem; }
 .a2a-page__error { color: rgb(248 113 113); font-size: 0.9rem; }
 .a2a-page__empty { color: rgb(156 163 175); padding: 1rem 0; }
