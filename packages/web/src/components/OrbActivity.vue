@@ -1,7 +1,7 @@
 <template>
   <!-- The running turn at the orb: its steps as satellites on the step ring, its newest words in a
        status line under it (composables/orbActivity.ts). The ring itself is the orb canvas's: a
-       strip of lit panels round the orb, which this layer's points ride on through the same camera. Only
+       track of light round the orb, which this layer's points ride on through the same camera. Only
        the satellites and the status line take clicks; the layer itself lets everything through. -->
   <div class="orb-activity" :class="{ 'orb-activity--narrow': narrow }">
     <div v-if="!narrow" class="orb-activity__ring">
@@ -49,7 +49,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { activityRing, freeHalfWidth, labelFits, orbitPoint, placeLabels, torusPixels, type LiveActivity } from "@/composables/orbActivity";
+import { activityRing, freeHalfWidth, labelFits, orbitPoint, placeLabels, orbPixels, type LiveActivity } from "@/composables/orbActivity";
 import type { StepDisplayStatus } from "@/composables/turnSteps";
 import { turnText, type TurnLanguage } from "@/composables/turnText";
 
@@ -90,13 +90,13 @@ const view = computed(() => ({
   ring: activityRing(width.value, height.value, freeHalf.value),
   width: width.value,
   height: height.value,
-  coreRadius: torusPixels(width.value, height.value) * 0.55,
+  coreRadius: orbPixels(width.value, height.value) * 0.55,
 }));
-/** Under the orb's torus and the front of the ring with its labels. */
+/** Under the orb and the front of the ring with its labels. */
 const statusStyle = computed(() => {
   if (narrow.value) return {};
   const front = orbitPoint(0, 1, view.value).y;
-  return { top: `calc(50% + ${Math.round(Math.max(torusPixels(width.value, height.value) * 1.08, front + 52))}px)` };
+  return { top: `calc(50% + ${Math.round(Math.max(orbPixels(width.value, height.value) * 1.08, front + 52))}px)` };
 });
 
 const reducedMotion = typeof window !== "undefined"

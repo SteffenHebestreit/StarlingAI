@@ -157,26 +157,26 @@ const MIN_SLOTS = 7;
 const CAMERA_Z = 5;
 const ORB_SCALE = 0.42;
 const BASE_HALF_TAN = Math.tan(Math.PI / 6);
-/** The orb's particle torus reaches this radius, in the orb's own units. */
-const TORUS_RADIUS = 1.9;
+/** How far the orb's body reaches, in the orb's own units: out to its orbits (the middle one runs at 1.85). */
+const ORB_REACH = 1.9;
 /** The step ring is tipped this far from edge-on: seen from the front it is about 0.28 as tall as wide. */
 const RING_TILT = Math.asin(0.28);
 
-/** How far the particle torus reaches on the page, as a share of the window's height (≈ 0.138). */
-export const TORUS_SCREEN_SHARE = TORUS_RADIUS * ORB_SCALE / CAMERA_Z / BASE_HALF_TAN / 2;
+/** How far the orb's body reaches on the page, as a share of the window's height (≈ 0.138). */
+export const ORB_SCREEN_SHARE = ORB_REACH * ORB_SCALE / CAMERA_Z / BASE_HALF_TAN / 2;
 
-/** The torus's reach in pixels for a window: below an aspect of 0.4 the canvas widens its view and the orb shrinks. */
-export function torusPixels(width: number, height: number): number {
-  return TORUS_SCREEN_SHARE * height * Math.min(1, width / height / 0.4);
+/** The orb's reach in pixels for a window: below an aspect of 0.4 the canvas widens its view and the orb shrinks. */
+export function orbPixels(width: number, height: number): number {
+  return ORB_SCREEN_SHARE * height * Math.min(1, width / height / 0.4);
 }
 
 /**
- * The step ring as the orb canvas draws it: a strip of lit panels round the whole orb, in the
+ * The step ring as the orb canvas draws it: a track of light round the whole orb, in the
  * orb's own units. The page puts the steps on it with the same camera (projectOrbPoint), so they
  * sit on the strip and not beside it.
  */
 export interface ActivityRing {
-  /** Radius in orb units: the particle torus reaches 1.9. */
+  /** Radius in orb units: the orb's body reaches 1.9. */
   radius: number;
   /** How far the ring is tipped towards the viewer from edge-on, in radians; its front is below the orb. */
   tilt: number;
@@ -184,7 +184,7 @@ export interface ActivityRing {
 
 /** The step ring for a viewport: as wide on screen as orbitGeometry's ring, in orb units. */
 export function activityRing(width: number, height: number, freeHalf = Infinity): ActivityRing {
-  return { radius: orbitGeometry(width, height, freeHalf).rx / torusPixels(width, height) * TORUS_RADIUS, tilt: RING_TILT };
+  return { radius: orbitGeometry(width, height, freeHalf).rx / orbPixels(width, height) * ORB_REACH, tilt: RING_TILT };
 }
 
 /** Where the ring passes at `angle`, in orb units: π/2 is its front, nearest the viewer and below the orb. */
@@ -244,15 +244,15 @@ export function orbitPoint(index: number, count: number, view: OrbitView, turn =
 /**
  * The ring's size for a viewport, matched to the orb (components/OrbCanvas.vue): its camera sees
  * the canvas height at a 60° field of view from distance 5, the orb group is scaled 0.42, and its
- * particle torus reaches radius 1.9 — TORUS_SCREEN_SHARE of the height. Below an aspect of 0.4 the field
+ * body reaches radius 1.9 — ORB_SCREEN_SHARE of the height. Below an aspect of 0.4 the field
  * of view widens, and the orb shrinks with it.
  */
 export function orbitGeometry(width: number, height: number, freeHalf = Infinity): OrbitGeometry {
-  const torus = torusPixels(width, height);
+  const orb = orbPixels(width, height);
   // Outside the particle field, but inside the band the messages leave free (a label is about
-  // LABEL_HALF wide either side of its point), and never inside the torus itself.
-  const rx = Math.max(torus * 1.05, Math.min(torus * 1.5, freeHalf - LABEL_HALF));
-  return { rx, ry: rx * 0.28, coreRadius: torus * 0.55 };
+  // LABEL_HALF wide either side of its point), and never inside the orb itself.
+  const rx = Math.max(orb * 1.05, Math.min(orb * 1.5, freeHalf - LABEL_HALF));
+  return { rx, ry: rx * 0.28, coreRadius: orb * 0.55 };
 }
 
 /** Half a satellite label's width, for fitting the ring between the messages. */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LABEL_HALF, MAX_SATELLITES, TORUS_SCREEN_SHARE, activityRing, freeHalfWidth, labelFits, liveActivity, placeLabels, projectOrbPoint, ringPosition, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
+import { LABEL_HALF, MAX_SATELLITES, ORB_SCREEN_SHARE, activityRing, freeHalfWidth, labelFits, liveActivity, placeLabels, projectOrbPoint, ringPosition, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
 import type { TurnStep } from "./turnSteps";
 
 /**
@@ -142,10 +142,10 @@ describe("orbitPoint", () => {
 });
 
 describe("the step ring, drawn by the canvas and the page alike", () => {
-  it("projects the orb's torus edge where the canvas draws it", () => {
-    // OrbCanvas frames the torus (radius 1.9) at TORUS_SCREEN_SHARE (≈ 0.138) of the window's height.
-    expect(projectOrbPoint([1.9, 0, 0], 2000, 1500).x).toBeCloseTo(TORUS_SCREEN_SHARE * 1500, 0);
-    expect(projectOrbPoint([1.9, 0, 0], 2000, 750).x).toBeCloseTo(TORUS_SCREEN_SHARE * 750, 0);
+  it("projects the edge of the orb's body where the canvas draws it", () => {
+    // OrbCanvas frames the orb's body (radius 1.9) at ORB_SCREEN_SHARE (≈ 0.138) of the window's height.
+    expect(projectOrbPoint([1.9, 0, 0], 2000, 1500).x).toBeCloseTo(ORB_SCREEN_SHARE * 1500, 0);
+    expect(projectOrbPoint([1.9, 0, 0], 2000, 750).x).toBeCloseTo(ORB_SCREEN_SHARE * 750, 0);
     // A window far narrower than tall widens the canvas's field of view, and shrinks the orb.
     expect(projectOrbPoint([1.9, 0, 0], 200, 1000).x).toBeCloseTo(projectOrbPoint([1.9, 0, 0], 400, 1000).x / 2, 1);
   });
@@ -176,7 +176,7 @@ describe("orbitGeometry", () => {
     const tall = orbitGeometry(2000, 1500);
     const short = orbitGeometry(2000, 750);
     expect(tall.rx).toBeCloseTo(2 * short.rx);
-    expect(tall.rx).toBeGreaterThan(TORUS_SCREEN_SHARE * 1500);
+    expect(tall.rx).toBeGreaterThan(ORB_SCREEN_SHARE * 1500);
     expect(tall.ry).toBeLessThan(tall.rx / 2);
   });
 
@@ -211,15 +211,15 @@ describe("the ring between the messages", () => {
     expect(freeHalfWidth(3440, 1440)).toBeCloseTo(3440 / 2 - 20 - 832);
   });
 
-  it("keeps the ring and its labels inside that band, but never inside the orb's torus", () => {
+  it("keeps the ring and its labels inside that band, but never inside the orb", () => {
     const roomy = orbitGeometry(2000, 1500, 2000);
-    expect(roomy.rx).toBeCloseTo(TORUS_SCREEN_SHARE * 1500 * 1.5);
-    // Room for a ring between the torus and its widest: it reaches as far as its labels allow.
+    expect(roomy.rx).toBeCloseTo(ORB_SCREEN_SHARE * 1500 * 1.5);
+    // Room for a ring between the orb and its widest: it reaches as far as its labels allow.
     const fits = orbitGeometry(1800, 1000, 300);
     expect(fits.rx + LABEL_HALF).toBeCloseTo(300);
-    // 1280 × 800 leaves too little: the ring keeps clear of the torus, and its sides go without labels.
+    // 1280 × 800 leaves too little: the ring keeps clear of the orb, and its sides go without labels.
     const tight = orbitGeometry(1280, 800, freeHalfWidth(1280, 800));
-    expect(tight.rx).toBeCloseTo(TORUS_SCREEN_SHARE * 800 * 1.05);
+    expect(tight.rx).toBeCloseTo(ORB_SCREEN_SHARE * 800 * 1.05);
   });
 
   it("shows a label only where it stays out of the messages", () => {

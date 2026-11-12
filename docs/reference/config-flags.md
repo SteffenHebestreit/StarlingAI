@@ -18,10 +18,10 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:765 | 1 |
 | `admin` | packages/core/src/config/schema.ts:448 | 59 |
-| `after` | packages/core/src/config/schema.ts:1581 | 308 |
+| `after` | packages/core/src/config/schema.ts:1581 | 309 |
 | `agents` | packages/core/src/config/schema.ts:1569 | 205 |
 | `alertmanager` | packages/core/src/config/schema.ts:1214 | 1 |
-| `all` | packages/core/src/config/schema.ts:1367 | 335 |
+| `all` | packages/core/src/config/schema.ts:1367 | 338 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1387 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1330 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -214,7 +214,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:786 | 135 |
 | `http` | packages/core/src/config/schema.ts:831 | 100 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1388 | 20 |
-| `id` | packages/core/src/config/schema.ts:417 | 366 |
+| `id` | packages/core/src/config/schema.ts:417 | 367 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1435 | 2 |
 | `image` | packages/core/src/config/schema.ts:759 | 115 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -327,7 +327,7 @@ Every public schema field, where it is declared, and how many production files r
 | `narration` | packages/core/src/config/schema.ts:283 | 14 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:116 | 7 |
 | `network` | packages/core/src/config/schema.ts:763 | 60 |
-| `node` | packages/core/src/config/schema.ts:1121 | 285 |
+| `node` | packages/core/src/config/schema.ts:1121 | 287 |
 | `normalizeDelegationToEnglish` | packages/core/src/config/schemas/orchestration.ts:611 | 3 |
 | `notes` | packages/core/src/config/schema.ts:869 | 70 |
 | `oneLiner` | packages/core/src/config/schema.ts:978 | 3 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:2137 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:75 | 68 |
+| `points` | packages/core/src/config/schemas/decisions.ts:75 | 71 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:355 | 42 |
 | `primary` | packages/core/src/config/schema.ts:117 | 75 |
@@ -447,7 +447,7 @@ Every public schema field, where it is declared, and how many production files r
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
 | `secret` | packages/core/src/config/schema.ts:1062 | 56 |
 | `secretAccessKey` | packages/core/src/config/schema.ts:539 | 4 |
-| `seed` | packages/core/src/config/schema.ts:178 | 29 |
+| `seed` | packages/core/src/config/schema.ts:178 | 30 |
 | `selector` | packages/core/src/config/schema.ts:1537 | 25 |
 | `semanticUngroundedFactualGuard` | packages/core/src/config/schemas/orchestration.ts:182 | 1 |
 | `servers` | packages/core/src/config/schema.ts:841 | 26 |
@@ -537,7 +537,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:331 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:520 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:365 | 23 |
-| `type` | packages/core/src/config/schema.ts:1043 | 550 |
+| `type` | packages/core/src/config/schema.ts:1043 | 551 |
 | `unbackedActionClaims` | packages/core/src/config/schemas/orchestration.ts:951 | 1 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:199 | 4 |
