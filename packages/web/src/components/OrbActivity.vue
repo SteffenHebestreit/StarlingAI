@@ -1,7 +1,7 @@
 <template>
   <!-- The running turn at the orb: its steps as satellites on the step ring, its newest words in a
        status line under it (composables/orbActivity.ts). The ring itself is the orb canvas's: a
-       strip of its Dyson shell, which this layer's points ride on through the same camera. Only
+       strip of lit panels round the orb, which this layer's points ride on through the same camera. Only
        the satellites and the status line take clicks; the layer itself lets everything through. -->
   <div class="orb-activity" :class="{ 'orb-activity--narrow': narrow }">
     <div v-if="!narrow" class="orb-activity__ring">

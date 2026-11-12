@@ -190,8 +190,8 @@ export const coreGlowFragmentShader = `
     float spikeV = exp(-abs(c.x) * 26.0) * exp(-abs(c.y) * 3.2);
     float star  = (spikeH + spikeV) * 0.35;
 
-    // The arc-reactor bezel and the reticle arcs are rings in the orb's 3D space now
-    // (shaders/hudRings.ts): painted here they stayed flat circles facing the viewer.
+    // No bezel or reticle arcs here: painted on this plane they stayed flat circles facing the
+    // viewer. The core wears a Dyson sphere in the orb's 3D space instead (shaders/hudRings.ts).
 
     // hologram character: faint scanlines + slow instability shimmer
     float scan    = 1.0 + 0.05 * sin(c.y * 70.0 - uGlowPhase * 3.0);

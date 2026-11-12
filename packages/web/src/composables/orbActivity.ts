@@ -171,7 +171,7 @@ export function torusPixels(width: number, height: number): number {
 }
 
 /**
- * The step ring as the orb canvas draws it: one strip of the Dyson shell around the orb, in the
+ * The step ring as the orb canvas draws it: a strip of lit panels round the whole orb, in the
  * orb's own units. The page puts the steps on it with the same camera (projectOrbPoint), so they
  * sit on the strip and not beside it.
  */
