@@ -161,8 +161,9 @@ export const orbitalFragmentShader = `${POINT_SCALE_FRAGMENT}
 `;
 
 // Central energy core: white-hot nucleus, soft halo, and a 4-point
-// diffraction star — the "artificial lens" signature of the entity.
-// Rendered on a camera-facing plane at the origin with additive blending.
+// diffraction star — the "artificial lens" signature of the entity. These stay on a
+// camera-facing plane at the origin on purpose, with additive blending: a lens flare belongs
+// to the viewer, not to the scene.
 export const coreGlowVertexShader = `
   varying vec2 vUv;
   void main() {
@@ -181,8 +182,6 @@ export const coreGlowFragmentShader = `
   void main() {
     vec2  c = (vUv - 0.5) * 2.0;
     float r = length(c);
-    float angC = atan(c.y, c.x);
-    const float TAU = 6.28318;
 
     float pulse = 0.88 + 0.12 * sin(uGlowPhase);
     float core  = exp(-r * 8.5) * 1.45;
@@ -191,44 +190,16 @@ export const coreGlowFragmentShader = `
     float spikeV = exp(-abs(c.x) * 26.0) * exp(-abs(c.y) * 3.2);
     float star  = (spikeH + spikeV) * 0.35;
 
-    // ── Arc-reactor bezel ────────────────────────────────────────────────
-    // ten coil segments ringing the nucleus, rotating very slowly; the
-    // radius alternates per tooth so the ring reads as a notched gear
-    float segPos  = fract((angC / TAU) * 10.0 - uGlowPhase * 0.05);
-    float segMask = smoothstep(0.08, 0.18, segPos) * (1.0 - smoothstep(0.82, 0.92, segPos));
-    float toothSel = step(0.5, fract((angC / TAU) * 20.0 - uGlowPhase * 0.05));
-    float gearR   = mix(0.235, 0.255, toothSel);
-    float coil    = exp(-pow((r - gearR) / 0.018, 2.0)) * segMask * 1.5;
-    // fine dash ring + two crisp circles framing the coil
-    float dashPos  = fract((angC / TAU) * 24.0 + uGlowPhase * 0.04);
-    float dashMask = smoothstep(0.18, 0.32, dashPos) * (1.0 - smoothstep(0.68, 0.82, dashPos));
-    float dashes   = exp(-pow((r - 0.315) / 0.010, 2.0)) * dashMask * 0.9;
-    float ringA    = exp(-pow((r - 0.275) / 0.006, 2.0)) * 0.7;
-    float ringB    = exp(-pow((r - 0.360) / 0.006, 2.0)) * 0.5;
-
-    // chunky arc blocks (HUD style: thick low-alpha segments between the
-    // fine rings), drifting opposite the reticle
-    float blkPos  = fract((angC - uGlowPhase * 0.08) / TAU * 4.0);
-    float blkMask = smoothstep(0.10, 0.16, blkPos) * (1.0 - smoothstep(0.58, 0.64, blkPos));
-    float blocks  = exp(-pow((r - 0.41) / 0.020, 2.0)) * blkMask * 0.55;
-
-    // ── Reticle: rotating arc segments around the whole core body ───────
-    float retPos   = fract((angC + uGlowPhase * 0.22) / TAU * 3.0);
-    float retMask  = smoothstep(0.05, 0.12, retPos) * (1.0 - smoothstep(0.55, 0.62, retPos));
-    float reticle  = exp(-pow((r - 0.47) / 0.008, 2.0)) * retMask * 0.85;
-    float ret2Pos  = fract((angC - uGlowPhase * 0.13) / TAU * 2.0);
-    float ret2Mask = smoothstep(0.04, 0.10, ret2Pos) * (1.0 - smoothstep(0.40, 0.46, ret2Pos));
-    float reticle2 = exp(-pow((r - 0.53) / 0.007, 2.0)) * ret2Mask * 0.6;
+    // The arc-reactor bezel and the reticle arcs are rings in the orb's 3D space now
+    // (shaders/hudRings.ts): painted here they stayed flat circles facing the viewer.
 
     // hologram character: faint scanlines + slow instability shimmer
     float scan    = 1.0 + 0.05 * sin(c.y * 70.0 - uGlowPhase * 3.0);
     float flicker = 1.0 + 0.05 * sin(uGlowPhase * 9.7) * sin(uGlowPhase * 23.3);
 
-    float lum = (core + halo + star + coil + dashes + ringA + ringB + blocks + reticle + reticle2)
-      * uIntensity * pulse * scan * flicker;
+    float lum = (core + halo + star) * uIntensity * pulse * scan * flicker;
     vec3  hot = mix(uCoreColor, vec3(1.0), 0.55);
-    vec3  col = uCoreColor * lum
-      + hot * (core * 0.35 + (coil + reticle) * 0.3) * uIntensity;
+    vec3  col = uCoreColor * lum + hot * core * 0.35 * uIntensity;
     gl_FragColor = vec4(col, clamp(lum, 0.0, 1.0));
   }
 `;

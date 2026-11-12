@@ -153,19 +153,85 @@ export interface OrbitPoint {
 /** Slots on the ring: at least this many, so a few steps do not spread round the whole orb. */
 const MIN_SLOTS = 7;
 
+/** OrbCanvas.vue's camera: 60° vertical field of view from distance 5, the orb group scaled 0.42. */
+const CAMERA_Z = 5;
+const ORB_SCALE = 0.42;
+const BASE_HALF_TAN = Math.tan(Math.PI / 6);
+/** The orb's particle torus reaches this radius, in the orb's own units. */
+const TORUS_RADIUS = 1.9;
+/** The step ring is tipped this far from edge-on: seen from the front it is about 0.28 as tall as wide. */
+const RING_TILT = Math.asin(0.28);
+
+/** How far the particle torus reaches on the page, as a share of the window's height (≈ 0.138). */
+export const TORUS_SCREEN_SHARE = TORUS_RADIUS * ORB_SCALE / CAMERA_Z / BASE_HALF_TAN / 2;
+
+/** The torus's reach in pixels for a window: below an aspect of 0.4 the canvas widens its view and the orb shrinks. */
+export function torusPixels(width: number, height: number): number {
+  return TORUS_SCREEN_SHARE * height * Math.min(1, width / height / 0.4);
+}
+
 /**
- * Where satellite `index` of `count` (0 the oldest) sits on the tilted ring, seen from the front:
- * the newest nearest the viewer, below the orb, and each older one a slot further round, away and
- * up behind it. `turn` adds a small sway (radians) so the ring is not frozen.
+ * The step ring as the orb canvas draws it: one strip of the Dyson shell around the orb, in the
+ * orb's own units. The page puts the steps on it with the same camera (projectOrbPoint), so they
+ * sit on the strip and not beside it.
  */
-export function orbitPoint(index: number, count: number, geometry: OrbitGeometry, turn = 0): OrbitPoint {
+export interface ActivityRing {
+  /** Radius in orb units: the particle torus reaches 1.9. */
+  radius: number;
+  /** How far the ring is tipped towards the viewer from edge-on, in radians; its front is below the orb. */
+  tilt: number;
+}
+
+/** The step ring for a viewport: as wide on screen as orbitGeometry's ring, in orb units. */
+export function activityRing(width: number, height: number, freeHalf = Infinity): ActivityRing {
+  return { radius: orbitGeometry(width, height, freeHalf).rx / torusPixels(width, height) * TORUS_RADIUS, tilt: RING_TILT };
+}
+
+/** Where the ring passes at `angle`, in orb units: π/2 is its front, nearest the viewer and below the orb. */
+export function ringPosition(angle: number, ring: ActivityRing): [number, number, number] {
+  return [
+    ring.radius * Math.cos(angle),
+    -ring.radius * Math.sin(angle) * Math.sin(ring.tilt),
+    ring.radius * Math.sin(angle) * Math.cos(ring.tilt),
+  ];
+}
+
+/**
+ * A point of the orb's space on the page, as OrbCanvas's camera sees it: pixels from the viewport's
+ * centre, y downwards, and how much nearer than the orb's centre it is (1 at the centre's depth).
+ * Below an aspect of 0.4 the canvas widens its field of view, as here.
+ */
+export function projectOrbPoint(point: readonly [number, number, number], width: number, height: number): { x: number; y: number; scale: number } {
+  const halfTan = BASE_HALF_TAN * Math.max(1, 0.4 / (width / height));
+  const distance = CAMERA_Z - point[2] * ORB_SCALE;
+  const focal = height / 2 / halfTan;
+  return {
+    x: point[0] * ORB_SCALE / distance * focal,
+    y: -point[1] * ORB_SCALE / distance * focal,
+    scale: CAMERA_Z / distance,
+  };
+}
+
+export interface OrbitView {
+  ring: ActivityRing;
+  width: number;
+  height: number;
+  /** The orb's bright core on the page, in pixels: a satellite behind it is mostly hidden. */
+  coreRadius: number;
+}
+
+/**
+ * Where satellite `index` of `count` (0 the oldest) sits on the step ring: the newest nearest the
+ * viewer, below the orb, and each older one a slot further round, away and up behind it. `turn`
+ * adds a small sway (radians) so the ring is not frozen.
+ */
+export function orbitPoint(index: number, count: number, view: OrbitView, turn = 0): OrbitPoint {
   const age = count - 1 - index;
   const angle = Math.PI / 2 + age * (2 * Math.PI / Math.max(count, MIN_SLOTS)) + turn;
   const depth = Math.sin(angle);
-  const x = geometry.rx * Math.cos(angle);
-  const y = geometry.ry * depth;
+  const { x, y } = projectOrbPoint(ringPosition(angle, view.ring), view.width, view.height);
   const near = (depth + 1) / 2;
-  const behindCore = depth < 0 && Math.abs(x) < geometry.coreRadius;
+  const behindCore = depth < 0 && Math.abs(x) < view.coreRadius;
   return {
     x,
     y,
@@ -178,12 +244,11 @@ export function orbitPoint(index: number, count: number, geometry: OrbitGeometry
 /**
  * The ring's size for a viewport, matched to the orb (components/OrbCanvas.vue): its camera sees
  * the canvas height at a 60° field of view from distance 5, the orb group is scaled 0.42, and its
- * particle torus reaches radius 1.9 — about 0.1385 of the height. Below an aspect of 0.4 the field
+ * particle torus reaches radius 1.9 — TORUS_SCREEN_SHARE of the height. Below an aspect of 0.4 the field
  * of view widens, and the orb shrinks with it.
  */
 export function orbitGeometry(width: number, height: number, freeHalf = Infinity): OrbitGeometry {
-  const frame = Math.min(1, width / height / 0.4);
-  const torus = 0.1385 * height * frame;
+  const torus = torusPixels(width, height);
   // Outside the particle field, but inside the band the messages leave free (a label is about
   // LABEL_HALF wide either side of its point), and never inside the torus itself.
   const rx = Math.max(torus * 1.05, Math.min(torus * 1.5, freeHalf - LABEL_HALF));
@@ -200,6 +265,35 @@ export const LABEL_HALF = 105;
  */
 export function labelFits(x: number, freeHalf: number): boolean {
   return Math.abs(x) + LABEL_HALF <= freeHalf;
+}
+
+/** A label as drawn: centred under its point, its width from its text, all of it scaled with depth. */
+export interface LabelCandidate {
+  id: string;
+  x: number;
+  y: number;
+  scale: number;
+  text: string;
+}
+
+/**
+ * Which of the candidates show their label, nearest first: one that would cover a label already
+ * placed stays a point. On a small window the ring is tight, and the front step's label lay across
+ * the one beside it ("Read a web page · arxiv.org" over "Looked for the right specialist").
+ */
+export function placeLabels(candidates: readonly LabelCandidate[]): Set<string> {
+  const placed: Array<{ left: number; right: number; top: number; bottom: number }> = [];
+  const shown = new Set<string>();
+  for (const label of candidates) {
+    const width = Math.min(2 * LABEL_HALF, label.text.length * 6.5 + 18) * label.scale;
+    const top = label.y + 11 * label.scale;
+    const box = { left: label.x - width / 2, right: label.x + width / 2, top, bottom: top + 20 * label.scale };
+    const covers = placed.some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top);
+    if (covers) continue;
+    placed.push(box);
+    shown.add(label.id);
+  }
+  return shown;
 }
 
 /**
