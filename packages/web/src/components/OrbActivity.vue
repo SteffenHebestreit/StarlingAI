@@ -1,24 +1,10 @@
 <template>
-  <!-- The running turn at the orb: its steps as satellites on a tilted ring around it, its newest
-       words in a status line under it (composables/orbActivity.ts). Only the satellites and the
-       status line take clicks; the layer itself lets everything through. -->
+  <!-- The running turn at the orb: its steps as satellites on the step ring, its newest words in a
+       status line under it (composables/orbActivity.ts). The ring itself is the orb canvas's: a
+       strip of its Dyson shell, which this layer's points ride on through the same camera. Only
+       the satellites and the status line take clicks; the layer itself lets everything through. -->
   <div class="orb-activity" :class="{ 'orb-activity--narrow': narrow }">
     <div v-if="!narrow" class="orb-activity__ring">
-      <!-- The orbit itself, tilted like the ring the steps sit on: faint behind the orb, brighter
-           in front of it. -->
-      <Transition name="orb-orbit">
-        <svg
-          v-if="activity"
-          class="orb-orbit"
-          :width="geometry.rx * 2 + 8"
-          :height="geometry.ry * 2 + 8"
-          :viewBox="`${-geometry.rx - 4} ${-geometry.ry - 4} ${geometry.rx * 2 + 8} ${geometry.ry * 2 + 8}`"
-          aria-hidden="true"
-        >
-          <ellipse class="orb-orbit__back" cx="0" cy="0" :rx="geometry.rx" :ry="geometry.ry" />
-          <path class="orb-orbit__front" :d="`M ${-geometry.rx} 0 A ${geometry.rx} ${geometry.ry} 0 0 0 ${geometry.rx} 0`" />
-        </svg>
-      </Transition>
       <button
         v-for="body in drawn"
         :key="body.id"
@@ -63,7 +49,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { freeHalfWidth, labelFits, orbitGeometry, orbitPoint, type LiveActivity } from "@/composables/orbActivity";
+import { activityRing, freeHalfWidth, labelFits, orbitPoint, placeLabels, torusPixels, type LiveActivity } from "@/composables/orbActivity";
 import type { StepDisplayStatus } from "@/composables/turnSteps";
 import { turnText, type TurnLanguage } from "@/composables/turnText";
 
@@ -99,12 +85,18 @@ function onResize(): void {
 const narrow = computed(() => width.value < 1100);
 /** The band the messages leave free around the orb (Chat.vue lays them out at the outer edges). */
 const freeHalf = computed(() => freeHalfWidth(width.value, height.value));
-const geometry = computed(() => orbitGeometry(width.value, height.value, freeHalf.value));
+/** The step ring as the canvas draws it, and the page seen through the canvas's camera. */
+const view = computed(() => ({
+  ring: activityRing(width.value, height.value, freeHalf.value),
+  width: width.value,
+  height: height.value,
+  coreRadius: torusPixels(width.value, height.value) * 0.55,
+}));
 /** Under the orb's torus and the front of the ring with its labels. */
 const statusStyle = computed(() => {
   if (narrow.value) return {};
-  const torus = 0.1385 * height.value * Math.min(1, width.value / height.value / 0.4);
-  return { top: `calc(50% + ${Math.round(Math.max(torus * 1.08, geometry.value.ry + 52))}px)` };
+  const front = orbitPoint(0, 1, view.value).y;
+  return { top: `calc(50% + ${Math.round(Math.max(torusPixels(width.value, height.value) * 1.08, front + 52))}px)` };
 });
 
 const reducedMotion = typeof window !== "undefined"
@@ -144,12 +136,7 @@ function step(time: number): void {
 
   satellites.forEach((satellite, index) => {
     present.add(satellite.id);
-    const shrink = satellite.nested ? 0.86 : 1;
-    const target = orbitPoint(index, satellites.length, {
-      rx: geometry.value.rx * shrink,
-      ry: geometry.value.ry * shrink,
-      coreRadius: geometry.value.coreRadius,
-    }, sway);
+    const target = orbitPoint(index, satellites.length, view.value, sway);
     // A new satellite is launched from the orb's core.
     const body = bodies.get(satellite.id) ?? {
       id: satellite.id, x: 0, y: 0, scale: 0.2, opacity: 0, depth: 1,
@@ -174,11 +161,16 @@ function step(time: number): void {
     if (body.opacity < 0.02 || reducedMotion) bodies.delete(body.id);
   }
 
+  // Labels in front of the orb's centre line, where they keep out of the messages and off each
+  // other: the nearest one first.
+  const labelled = placeLabels([...bodies.values()]
+    .filter((body) => !body.leaving && body.depth > -0.2 && labelFits(body.x, freeHalf.value))
+    .sort((a, b) => b.depth - a.depth)
+    .map((body) => ({ id: body.id, x: body.x, y: body.y, scale: body.scale, text: body.short })));
   drawn.value = [...bodies.values()].map((body) => ({
     ...body,
     front: body.id === newest,
-    // In front of the orb's centre line, and where the label keeps out of the messages.
-    labelled: !body.leaving && body.depth > -0.2 && labelFits(body.x, freeHalf.value),
+    labelled: labelled.has(body.id),
     style: {
       transform: `translate(-50%, -50%) translate3d(${body.x.toFixed(1)}px, ${body.y.toFixed(1)}px, 0) scale(${body.scale.toFixed(3)})`,
       opacity: Math.max(0, Math.min(1, body.opacity)).toFixed(3),
@@ -333,35 +325,6 @@ onBeforeUnmount(() => {
 .orb-sat:hover,
 .orb-sat:focus-visible {
   z-index: 40 !important;
-}
-
-/* ── The orbit ─────────────────────────────────────────────────────────────────────────────── */
-.orb-orbit {
-  position: absolute;
-  left: 0;
-  top: 0;
-  transform: translate(-50%, -50%);
-  overflow: visible;
-  pointer-events: none;
-}
-.orb-orbit__back {
-  fill: none;
-  stroke: rgba(var(--accent-purple), 0.18);
-  stroke-width: 1;
-  stroke-dasharray: 2 7;
-}
-.orb-orbit__front {
-  fill: none;
-  stroke: rgba(var(--accent-purple), 0.42);
-  stroke-width: 1.2;
-}
-.orb-orbit-enter-active,
-.orb-orbit-leave-active {
-  transition: opacity 500ms var(--ease-out);
-}
-.orb-orbit-enter-from,
-.orb-orbit-leave-to {
-  opacity: 0;
 }
 
 .orb-sat:focus-visible {

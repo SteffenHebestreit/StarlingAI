@@ -9,7 +9,7 @@
     <!-- Orb background canvas: fixed to the viewport so layout changes
          (input bay, panels) can never move or resize the entity. -->
     <div class="fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
-      <OrbCanvas :ai-state="orbAiState" class="w-full h-full" />
+      <OrbCanvas :ai-state="orbAiState" :ring="orbRing" class="w-full h-full" />
     </div>
 
     <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
@@ -1104,7 +1104,7 @@ import { useVoice, type RecordingOutcome } from "@/speech/useVoice";
 import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import OrbActivity from "@/components/OrbActivity.vue";
-import { liveActivity } from "@/composables/orbActivity";
+import { activityRing, freeHalfWidth, liveActivity } from "@/composables/orbActivity";
 import { turnLanguage } from "@/composables/turnText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
 import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
@@ -1680,6 +1680,21 @@ watch(() => Boolean(activeStreamingMessage.value), (running) => {
 onBeforeUnmount(() => { if (liveClockTimer) clearInterval(liveClockTimer); });
 const orbLanguage = computed(() => turnLanguage(activeStreamingMessage.value?.language ?? null));
 const orbActivity = computed(() => liveActivity(gateway.messages, liveClock.value, orbLanguage.value));
+
+// The step ring for the orb canvas: the same ring OrbActivity puts the steps on (one strip of the
+// Dyson shell), built while a turn runs and the window is wide enough to show the ring.
+const viewportWidth = ref(typeof window === "undefined" ? 1600 : window.innerWidth);
+const viewportHeight = ref(typeof window === "undefined" ? 900 : window.innerHeight);
+function onViewportResize(): void {
+  viewportWidth.value = window.innerWidth;
+  viewportHeight.value = window.innerHeight;
+}
+onMounted(() => window.addEventListener("resize", onViewportResize, { passive: true }));
+onBeforeUnmount(() => window.removeEventListener("resize", onViewportResize));
+const orbRing = computed(() => ({
+  ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value)),
+  active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
+}));
 const sceneJobs = computed(() => scenesStore.recentJobs);
 const configuredJobs = computed(() => jobsStore.jobs);
 const activeSessions = computed(() => gateway.activeSessions);

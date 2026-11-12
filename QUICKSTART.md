@@ -43,6 +43,7 @@ pnpm sai start        # build config, build images, start core services, print l
 | `--fresh` | Wipe all volumes + rebuild + start (clean slate) |
 | `--pentest` | Also start the Kali Linux pentest service |
 | `--computer-desktop` | Also start the bundled VNC desktop for computer-use workflows |
+| `--comfyui` | Also start ComfyUI for node workflows: NVIDIA GPU only, fetches ~18 GB of models on its first start. `--all` takes it only where a GPU is present ([docs/comfyui.md](docs/comfyui.md)) |
 | `--all` | Start all remaining optional services |
 
 Stopping the stack:

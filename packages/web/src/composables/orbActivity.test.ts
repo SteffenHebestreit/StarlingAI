@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LABEL_HALF, MAX_SATELLITES, freeHalfWidth, labelFits, liveActivity, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
+import { LABEL_HALF, MAX_SATELLITES, TORUS_SCREEN_SHARE, activityRing, freeHalfWidth, labelFits, liveActivity, placeLabels, projectOrbPoint, ringPosition, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
 import type { TurnStep } from "./turnSteps";
 
 /**
@@ -102,18 +102,19 @@ describe("liveActivity", () => {
 });
 
 describe("orbitPoint", () => {
-  const geometry = { rx: 250, ry: 75, coreRadius: 110 };
+  // The step ring on a 2000 × 1500 window, as the orb canvas draws it.
+  const view = { ring: activityRing(2000, 1500), width: 2000, height: 1500, coreRadius: 110 };
 
   it("puts the newest step nearest the viewer, below the orb", () => {
-    const newest = orbitPoint(4, 5, geometry);
+    const newest = orbitPoint(4, 5, view);
     expect(newest.depth).toBeCloseTo(1);
     expect(newest.x).toBeCloseTo(0);
-    expect(newest.y).toBeCloseTo(geometry.ry);
+    expect(newest.y).toBeGreaterThan(40);
     expect(newest.scale).toBeCloseTo(1);
   });
 
   it("moves each older step further round and away, dimmer and smaller", () => {
-    const points = [4, 3, 2].map((index) => orbitPoint(index, 5, geometry));
+    const points = [4, 3, 2].map((index) => orbitPoint(index, 5, view));
     expect(points[1]!.depth).toBeLessThan(points[0]!.depth);
     expect(points[2]!.depth).toBeLessThan(points[1]!.depth);
     expect(points[2]!.scale).toBeLessThan(points[1]!.scale);
@@ -122,15 +123,51 @@ describe("orbitPoint", () => {
 
   it("all but hides a step that passes behind the orb's core", () => {
     // Seven slots: the fourth oldest of seven sits straight behind the orb.
-    const behind = orbitPoint(3, 7, { ...geometry, coreRadius: 400 });
-    const visible = orbitPoint(3, 7, { ...geometry, coreRadius: 10 });
+    const behind = orbitPoint(3, 7, { ...view, coreRadius: 400 });
+    const visible = orbitPoint(3, 7, { ...view, coreRadius: 10 });
     expect(behind.depth).toBeLessThan(0);
     expect(behind.opacity).toBeCloseTo(visible.opacity * 0.35);
   });
 
   it("spreads a few steps over part of the ring, not round all of it", () => {
-    const second = orbitPoint(0, 2, geometry);
+    const second = orbitPoint(0, 2, view);
     expect(second.depth).toBeGreaterThan(0.5);
+  });
+
+  it("sees the ring in perspective, as the canvas does: its near side lower and wider than its far side is high", () => {
+    const front = orbitPoint(0, 1, view);
+    const back = projectOrbPoint(ringPosition(-Math.PI / 2, view.ring), 2000, 1500);
+    expect(front.y).toBeGreaterThan(-back.y);
+  });
+});
+
+describe("the step ring, drawn by the canvas and the page alike", () => {
+  it("projects the orb's torus edge where the canvas draws it", () => {
+    // OrbCanvas frames the torus (radius 1.9) at TORUS_SCREEN_SHARE (≈ 0.138) of the window's height.
+    expect(projectOrbPoint([1.9, 0, 0], 2000, 1500).x).toBeCloseTo(TORUS_SCREEN_SHARE * 1500, 0);
+    expect(projectOrbPoint([1.9, 0, 0], 2000, 750).x).toBeCloseTo(TORUS_SCREEN_SHARE * 750, 0);
+    // A window far narrower than tall widens the canvas's field of view, and shrinks the orb.
+    expect(projectOrbPoint([1.9, 0, 0], 200, 1000).x).toBeCloseTo(projectOrbPoint([1.9, 0, 0], 400, 1000).x / 2, 1);
+  });
+
+  it("draws y downwards, and a point nearer the viewer larger", () => {
+    expect(projectOrbPoint([0, 1, 0], 2000, 1500).y).toBeLessThan(0);
+    expect(projectOrbPoint([1, 0, 1], 2000, 1500).x).toBeGreaterThan(projectOrbPoint([1, 0, 0], 2000, 1500).x);
+    expect(projectOrbPoint([1, 0, 1], 2000, 1500).scale).toBeGreaterThan(1);
+  });
+
+  it("is as wide at its sides as the page's ring, in the orb's units", () => {
+    const geometry = orbitGeometry(1800, 1000, 300);
+    const ring = activityRing(1800, 1000, 300);
+    expect(projectOrbPoint(ringPosition(0, ring), 1800, 1000).x).toBeCloseTo(geometry.rx, 1);
+    expect(activityRing(2000, 1500).radius).toBeCloseTo(1.9 * 1.5);
+  });
+
+  it("tips its front towards the viewer and below the orb, about 0.28 as tall as wide", () => {
+    const [, y, z] = ringPosition(Math.PI / 2, activityRing(2000, 1500));
+    expect(y).toBeLessThan(0);
+    expect(z).toBeGreaterThan(0);
+    expect(Math.sin(activityRing(2000, 1500).tilt)).toBeCloseTo(0.28);
   });
 });
 
@@ -139,7 +176,7 @@ describe("orbitGeometry", () => {
     const tall = orbitGeometry(2000, 1500);
     const short = orbitGeometry(2000, 750);
     expect(tall.rx).toBeCloseTo(2 * short.rx);
-    expect(tall.rx).toBeGreaterThan(0.1385 * 1500);
+    expect(tall.rx).toBeGreaterThan(TORUS_SCREEN_SHARE * 1500);
     expect(tall.ry).toBeLessThan(tall.rx / 2);
   });
 
@@ -176,13 +213,13 @@ describe("the ring between the messages", () => {
 
   it("keeps the ring and its labels inside that band, but never inside the orb's torus", () => {
     const roomy = orbitGeometry(2000, 1500, 2000);
-    expect(roomy.rx).toBeCloseTo(0.1385 * 1500 * 1.5);
+    expect(roomy.rx).toBeCloseTo(TORUS_SCREEN_SHARE * 1500 * 1.5);
     // Room for a ring between the torus and its widest: it reaches as far as its labels allow.
     const fits = orbitGeometry(1800, 1000, 300);
     expect(fits.rx + LABEL_HALF).toBeCloseTo(300);
     // 1280 × 800 leaves too little: the ring keeps clear of the torus, and its sides go without labels.
     const tight = orbitGeometry(1280, 800, freeHalfWidth(1280, 800));
-    expect(tight.rx).toBeCloseTo(0.1385 * 800 * 1.05);
+    expect(tight.rx).toBeCloseTo(TORUS_SCREEN_SHARE * 800 * 1.05);
   });
 
   it("shows a label only where it stays out of the messages", () => {
@@ -190,5 +227,40 @@ describe("the ring between the messages", () => {
     expect(labelFits(0, free)).toBe(true);
     expect(labelFits(free - LABEL_HALF, free)).toBe(true);
     expect(labelFits(-(free - LABEL_HALF + 1), free)).toBe(false);
+  });
+});
+
+describe("placeLabels", () => {
+  it("keeps the nearer label and leaves the one it would cover a point", () => {
+    // The 1600 × 900 ring: the front step's label lay across the step beside it.
+    const shown = placeLabels([
+      { id: "front", x: 0, y: 38, scale: 1, text: "Read a web page · arxiv.org" },
+      { id: "side", x: 95, y: 30, scale: 0.9, text: "Looked for the right specialist" },
+    ]);
+    expect([...shown]).toEqual(["front"]);
+  });
+
+  it("shows every label that has room", () => {
+    const shown = placeLabels([
+      { id: "front", x: 0, y: 38, scale: 1, text: "Read a web page · arxiv.org" },
+      { id: "left", x: -260, y: 10, scale: 0.8, text: "Searched the web" },
+      { id: "right", x: 260, y: 10, scale: 0.8, text: "Delegated to Researcher" },
+    ]);
+    expect(shown.size).toBe(3);
+  });
+
+  it("measures a label by its text and its depth", () => {
+    // Side by side at 150 px: two short labels fit, two long ones touch.
+    const short = placeLabels([{ id: "a", x: 0, y: 0, scale: 1, text: "Websuche" }, { id: "b", x: 150, y: 0, scale: 1, text: "Websuche" }]);
+    expect(short.size).toBe(2);
+    const long = placeLabels([{ id: "a", x: 0, y: 0, scale: 1, text: "Read a web page · techtarget.com" }, { id: "b", x: 150, y: 0, scale: 1, text: "Read a web page · techtarget.com" }]);
+    expect(long.size).toBe(1);
+    const far = placeLabels([{ id: "a", x: 0, y: 0, scale: 0.5, text: "Read a web page · techtarget.com" }, { id: "b", x: 150, y: 0, scale: 0.5, text: "Read a web page · techtarget.com" }]);
+    expect(far.size).toBe(2);
+  });
+
+  it("does not count labels on different rows as covering", () => {
+    const shown = placeLabels([{ id: "a", x: 0, y: 0, scale: 1, text: "Read a web page · arxiv.org" }, { id: "b", x: 10, y: 40, scale: 1, text: "Read a web page · arxiv.org" }]);
+    expect(shown.size).toBe(2);
   });
 });
