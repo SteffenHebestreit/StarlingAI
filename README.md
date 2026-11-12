@@ -170,6 +170,18 @@ pnpm sai dev web               # start web UI in dev mode
 - **ComfyUI workflows** — with the bundled ComfyUI container on an NVIDIA GPU, `image_creator` builds node workflows from the official templates your installed models can run, adds a stage (an upscaler, a LoRA, a filter) onto the connection it belongs on, runs the result, and hands it to the ComfyUI editor. Every picture carries the workflow that made it. Ask what the server has installed and the answer comes from the server, not from memory. ([docs](docs/comfyui.md))
 - **Documents and sites** — decks, Word documents, PDFs, charts, diagrams and small web apps are written to the workspace as files you can open, preview and download from the answer.
 
+### It follows up
+
+<div align="center">
+<img src="assets/screenshots/chat-follow-up.png" alt="A conversation in which the user asked to be told when a release is out: the assistant's confirmation that it checks every weekday at nine, and below it, two weeks later, a message labelled Scheduled, Release watch, watch finished, saying that the full release is out, with licence, variants and sources" width="90%" />
+<br/><sub><em>Asked once to say when it is out: nine silent checks later, the answer arrives in the same conversation.</em></sub>
+</div>
+
+- **Watches** — "tell me when it is out": the assistant checks on a schedule and says nothing until what you are waiting for has happened. That run is posted and the watch ends; so does a watch that has used up its runs.
+- **Reminders and briefings** — "remind me tomorrow at nine", "in two hours", "brief me every weekday at eight", on your clock, not the server's. Each run is a turn of its own with the whole swarm behind it.
+- **In the conversation you asked in** — what a run finds is posted there as a message of the assistant, marked as scheduled, with a notification for you alone. A run that fails says so instead of going quiet.
+- **Yours to approve and to stop** — every schedule asks for your approval when it is made, and all of them are listed on the Jobs page with what each is waiting for, its next and last run, and a Remove. A scheduled run cannot schedule more.
+
 ### It stays guarded
 
 <div align="center">
@@ -180,7 +192,6 @@ pnpm sai dev web               # start web UI in dev mode
 - **Sandboxed by default** — sub-agents run containerized with `--cap-drop ALL`, a read-only root filesystem, bounded resources, and `network: none` unless the role requires approved access. Shell, script, test, and dynamic-tool execution get dedicated Docker sandboxes.
 - **Every tool call gated** — guardrail → tier → approval → audit → output-redaction, on every registered invocation. No exceptions, including for the swarm's own self-improvement. ([tool tiers](docs/tool-tiers.md))
 - **Credentials never enter the model** — agents inspect login metadata with `get_site_credentials`, but secrets are injected only through `site_fill_credentials` or `computer_type_credential`, under approval and audit.
-- **It follows up** — "tell me when it is out", "remind me tomorrow at nine", "brief me every weekday at eight": the assistant schedules the task (you approve it), the run happens as a turn of its own, and what it finds is posted into the conversation you asked in. A watch stays silent until what you are waiting for has happened, then reports and ends; every schedule is listed, with a Remove, on the Jobs page.
 - **Human-in-the-loop** — approval gates via Slack, outbound webhook, or sync webhook with one-click HTTP callbacks before sensitive actions proceed.
 - **A warden on watch** — background monitoring detects tool storms, escape attempts, failure spikes, and SLO breaches in real time. (Its control state is process-local today; distributed observation and cancellation are planned before multi-worker scaling is treated as a hard guarantee.)
 
