@@ -1681,8 +1681,8 @@ onBeforeUnmount(() => { if (liveClockTimer) clearInterval(liveClockTimer); });
 const orbLanguage = computed(() => turnLanguage(activeStreamingMessage.value?.language ?? null));
 const orbActivity = computed(() => liveActivity(gateway.messages, liveClock.value, orbLanguage.value));
 
-// The step ring for the orb canvas: the same ring OrbActivity puts the steps on (one strip of the
-// Dyson shell), built while a turn runs and the window is wide enough to show the ring.
+// The step ring for the orb canvas: the same ring OrbActivity puts the steps on (a strip of lit
+// panels round the orb), built while a turn runs and the window is wide enough to show the ring.
 const viewportWidth = ref(typeof window === "undefined" ? 1600 : window.innerWidth);
 const viewportHeight = ref(typeof window === "undefined" ? 900 : window.innerHeight);
 function onViewportResize(): void {
