@@ -233,7 +233,7 @@ const hasContent = computed(() =>
 /* When the panel is open, the handle moves to the panel's left edge and
    rises with it (closed it stays at 201, under the HUD pods). */
 .sp-handle--open {
-  right: 22rem; /* matches panel width */
+  right: min(22rem, calc(100vw - 1.75rem)); /* matches panel width */
   z-index: 223;
 }
 
@@ -271,7 +271,8 @@ const hasContent = computed(() =>
   /* above the floating HUD pods (220), below the nav scrim/panel (225/230) —
      the open drawer always covers the draggable toggles */
   z-index: 222;
-  width: 22rem;
+  /* never wider than the screen less the handle: at 22rem flat it overflowed a small phone */
+  width: min(22rem, calc(100vw - 1.75rem));
   display: flex;
   flex-direction: column;
   background: rgba(9, 6, 20, 0.98);

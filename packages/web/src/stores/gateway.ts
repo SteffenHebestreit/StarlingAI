@@ -881,6 +881,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
+  // True from a lost connection until it is back or given up on. Between two attempts neither
+  // `connected` nor `connecting` is set, and the shell took that for "signed out": a login screen
+  // covered the app for the whole wait of every reconnect.
+  const reconnecting = ref(false);
   const pendingIntervention = ref<InterventionNotice | null>(null);
 
   interface PendingRpc {
@@ -1054,17 +1058,24 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function scheduleReconnect(delayMs?: number): void {
-    if (reconnectTimer || !token.value || authFailed.value) return;
-    if (consecutiveReconnects >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn(`[gateway] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    if (reconnectTimer) return;
+    if (!token.value || authFailed.value) {
+      reconnecting.value = false;
       return;
     }
+    if (consecutiveReconnects >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[gateway] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+      reconnecting.value = false;
+      return;
+    }
+    reconnecting.value = true;
     const backoff = delayMs ?? Math.min(
       RECONNECT_DELAY_MS * Math.pow(1.5, consecutiveReconnects),
       MAX_RECONNECT_DELAY_MS,
     );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      if (!token.value || authFailed.value) reconnecting.value = false;
       if (!token.value || authFailed.value || connected.value || connecting.value) return;
       consecutiveReconnects++;
       connect();
@@ -3010,6 +3021,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         stopHeartbeat();
         rejectPendingRpcs("Connection closed");
         clearReconnectTimer();
+        reconnecting.value = false;
         authFailed.value = true;
         token.value = "";
         return;
@@ -3058,6 +3070,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function disconnect() {
     clearReconnectTimer();
+    reconnecting.value = false;
     clearConnectTimeout();
     stopHeartbeat();
     rejectPendingRpcs("Disconnected");
@@ -3093,6 +3106,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "hello-ok") {
       clearConnectTimeout();
       connected.value = true;
+      reconnecting.value = false;
       connecting.value = false;
       consecutiveReconnects = 0;
       connectionEpoch += 1;
@@ -4641,6 +4655,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     wsUrl,
     connected,
     connecting,
+    reconnecting,
     modelUnreachable,
     authFailed,
     currentSessionId,

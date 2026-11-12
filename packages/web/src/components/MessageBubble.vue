@@ -212,13 +212,21 @@
       <div class="message-footer">
         <div class="message-time">{{ formatTime(message.timestamp) }}</div>
         <div v-if="!isStreaming && mainContent && !message.progress" class="message-export-actions">
-          <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
-          <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
+          <button
+            type="button"
+            class="export-btn"
+            :class="copyState === 'copied' ? 'export-btn--done' : copyState === 'failed' ? 'export-btn--failed' : ''"
+            title="Copy this message's text"
+            @click="copyMessageText"
+          >{{ copyState === "copied" ? "✓ Copied" : copyState === "failed" ? "Copy failed" : "⧉ Copy" }}</button>
+          <button type="button" @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
+          <button type="button" @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
           <!-- Not on a message read mid-turn: restarting there would cut the turn it was read into
                in half, on the server as well as here. Nor while any turn runs: the rewind would
                cut the history under a runtime that is still appending to it. -->
           <button
             v-if="message.role === 'user' && !message.midTurn && !message.steer && allowRewind !== false"
+            type="button"
             @click="emit('rewind', message.id)"
             title="Restart the conversation from this message"
             class="export-btn"
@@ -1056,9 +1064,52 @@ async function onArtifactLinkClick(attachment: ChatAttachment): Promise<void> {
  * a temporary <textarea> selectAll-and-copy when navigator.clipboard is
  * unavailable (older browsers, insecure context, etc.).
  */
+/** Text to the clipboard: the async API where there is one, a hidden textarea otherwise. Rejects when neither works. */
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    if (!copied) throw new Error("copy refused");
+  }
+}
+
+/** The whole message as it was written (its Markdown), with a word of confirmation on the button. */
+const copyState = ref<"idle" | "copied" | "failed">("idle");
+let copyStateTimer: number | null = null;
+function copyMessageText(): void {
+  const flash = (state: "copied" | "failed"): void => {
+    copyState.value = state;
+    if (copyStateTimer !== null) window.clearTimeout(copyStateTimer);
+    copyStateTimer = window.setTimeout(() => { copyState.value = "idle"; copyStateTimer = null; }, 1800);
+  };
+  writeClipboard(mainContent.value).then(() => flash("copied"), () => flash("failed"));
+}
+
 function onMessageContentClick(event: MouseEvent): void {
   const target = event.target as HTMLElement | null;
   if (!target) return;
+  // A link in an answer leaves by a new tab. The sanitiser strips `target`, so a click used to
+  // navigate the dashboard's own tab away — out of the chat, and out of a running turn's view.
+  // A link to a place on this page (#…) stays a jump.
+  const link = target.closest("a[href]") as HTMLAnchorElement | null;
+  if (link && !target.closest("[data-copy-code], [data-svg-mode-button]")) {
+    const href = link.getAttribute("href") ?? "";
+    if (href && !href.startsWith("#") && !/^javascript:/i.test(href)) {
+      event.preventDefault();
+      window.open(link.href, "_blank", "noopener,noreferrer");
+    }
+    return;
+  }
   const toggleButton = target.closest("[data-svg-mode-button]") as HTMLButtonElement | null;
   if (toggleButton) {
     const wrapper = toggleButton.closest(".code-block--svg") as HTMLElement | null;
@@ -1090,28 +1141,10 @@ function onMessageContentClick(event: MouseEvent): void {
       button.classList.remove(modifier);
     }, 1800);
   };
-  const writePromise = (navigator.clipboard?.writeText
-    ? navigator.clipboard.writeText(text)
-    : Promise.reject(new Error("clipboard unavailable"))
+  writeClipboard(text).then(
+    () => flash("Copied", "code-block__copy--copied"),
+    () => flash("Failed", "code-block__copy--failed"),
   );
-  writePromise
-    .then(() => flash("Copied", "code-block__copy--copied"))
-    .catch(() => {
-      try {
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-        flash("Copied", "code-block__copy--copied");
-      } catch {
-        flash("Failed", "code-block__copy--failed");
-      }
-    });
 }
 
 async function downloadAttachment(attachment: ChatAttachment, archive = false): Promise<void> {
@@ -1726,6 +1759,19 @@ onBeforeUnmount(() => {
 /* ── Message content ──────────────────────────────────────────────────────────── */
 .message-content { white-space: pre-wrap; }
 .message-content.prose-content { white-space: normal; }
+/* A long URL, path or hash has no place to break: on a phone it ran past the bubble's edge and
+   made the chat scroll sideways. */
+.message-content { overflow-wrap: anywhere; }
+.message-bubble { min-width: 0; }
+/* A link in an answer opens in a new tab (onMessageContentClick): it says so. */
+.prose-content :deep(a[href^="http"])::after {
+  content: "↗";
+  display: inline-block;
+  margin-left: 0.15em;
+  font-size: 0.75em;
+  opacity: 0.6;
+  text-decoration: none;
+}
 
 .prose-content :deep(p)           { margin: 0 0 0.5rem; }
 .prose-content :deep(p:last-child){ margin-bottom: 0; }
@@ -1868,6 +1914,12 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 .prose-content :deep(ul), .prose-content :deep(ol) { padding-left: 1.25rem; margin: 0.25rem 0; }
+/* The CSS reset takes every list's markers: a numbered list in an answer came out without its
+   numbers, a bulleted one without bullets. */
+.prose-content :deep(ul) { list-style: disc; }
+.prose-content :deep(ol) { list-style: decimal; }
+.prose-content :deep(ul ul) { list-style: circle; }
+.prose-content :deep(li)::marker { color: rgba(var(--logo-cyan), 0.7); }
 .prose-content :deep(li)          { margin: 0.15rem 0; }
 .prose-content :deep(a)           { color: #a78bfa; text-decoration: underline; }
 .prose-content :deep(a:hover)     { color: #c4b5fd; }
@@ -1940,7 +1992,16 @@ onBeforeUnmount(() => {
   opacity: 0;
   transition: opacity 0.15s;
 }
-.message-bubble:hover .message-export-actions { opacity: 1; }
+.message-bubble:hover .message-export-actions,
+/* The keyboard gets them too: Tab used to land on buttons nobody could see. */
+.message-bubble:focus-within .message-export-actions { opacity: 1; }
+/* A touch screen has no hover: there the actions simply stand, at a size a finger can hit. */
+@media (hover: none) {
+  .message-export-actions { opacity: 0.85; gap: 0.4rem; }
+  .message-export-actions .export-btn { min-height: 2rem; padding-inline: 0.6rem; }
+}
+.export-btn--done { color: rgb(110 231 183) !important; border-color: rgba(110, 231, 183, 0.4) !important; }
+.export-btn--failed { color: rgb(252 165 165) !important; border-color: rgba(252, 165, 165, 0.4) !important; }
 
 .export-btn {
   font-size: 0.62rem;
@@ -2021,5 +2082,19 @@ onBeforeUnmount(() => {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.2; }
+}
+.export-btn:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.75);
+  outline-offset: 1px;
+}
+
+/* Motion on request only: the thinking dots and the streaming cursor stand still. */
+@media (prefers-reduced-motion: reduce) {
+  .message-bubble *,
+  .message-bubble *::before,
+  .message-bubble *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 </style>

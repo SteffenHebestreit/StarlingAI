@@ -8,7 +8,10 @@
 
     <!-- Orb background canvas: fixed to the viewport so layout changes
          (input bay, panels) can never move or resize the entity. -->
-    <div class="fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
+    <div
+      class="chat-orb-layer fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden"
+      :class="orbBehindText ? 'chat-orb-layer--behind-text' : ''"
+    >
       <OrbCanvas :ai-state="orbAiState" :ring="orbRing" class="w-full h-full" />
     </div>
 
@@ -25,7 +28,7 @@
       <div class="chat-drop-overlay__panel">
         <div class="chat-drop-overlay__icon" aria-hidden="true">📎</div>
         <div class="chat-drop-overlay__title">Drop to attach</div>
-        <div class="chat-drop-overlay__hint">Images queue for analysis · audio gets transcribed · documents convert to Markdown context</div>
+        <div class="chat-drop-overlay__hint">Images queue for analysis · audio gets transcribed · documents go to your library and into this conversation</div>
       </div>
     </div>
 
@@ -35,27 +38,19 @@
     <Teleport to="body">
     <div v-if="(actionsOpen || sessionOpen) && gateway.connected" class="fixed inset-0 z-[210]" @click="actionsOpen = false; sessionOpen = false" />
 
-    <!-- Session-actions pod: tools fan out on a full circle around it.
+    <!-- Session-actions pod: its tools open as a labelled list beside it, on the side with room.
+         They used to fan out on a full circle as bare glyphs (MD, DBG, AUD, ARC, RST): near a
+         screen edge half of them left the screen, one landed on the header, and what a glyph
+         did was told by a hover tooltip only.
          The pods are chat controls — they only exist while connected, so
          they can never float above the login modal. -->
     <div v-if="gateway.connected" class="hud-orb" :style="actionsOrbStyle">
       <div class="radial-menu" :class="actionsOpen ? 'radial-menu--open' : ''">
         <button
-          v-for="(action, i) in sessionActions"
-          :key="action.key"
-          type="button"
-          class="radial-menu__item"
-          :class="action.danger ? 'radial-menu__item--danger' : ''"
-          :style="radialItemStyle(i, sessionActions.length)"
-          :disabled="action.disabled"
-          :title="action.title"
-          :tabindex="actionsOpen ? 0 : -1"
-          @click="action.run(); actionsOpen = false;"
-        >{{ action.glyph }}</button>
-        <button
           type="button"
           class="radial-menu__toggle"
           :aria-expanded="actionsOpen"
+          aria-haspopup="menu"
           aria-label="Session actions"
           title="Session actions (drag to move)"
           @pointerdown="actionsOrbDown"
@@ -71,6 +66,37 @@
           </svg>
         </button>
       </div>
+      <Transition name="hud-pop">
+        <div
+          v-if="actionsOpen"
+          ref="actionsMenuEl"
+          class="actions-pod"
+          :class="[actionsPodLeft ? 'session-pod--left' : 'session-pod--right', actionsPodUp ? 'actions-pod--up' : '']"
+          role="menu"
+          aria-label="Session actions"
+          @keydown="onActionsMenuKeydown"
+        >
+          <template v-for="(action, i) in sessionActions" :key="action.key">
+            <div v-if="action.danger" class="actions-pod__rule" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-pod__item"
+              :class="action.danger ? 'actions-pod__item--danger' : ''"
+              :style="{ '--delay': `${i * 26}ms` }"
+              :disabled="action.disabled"
+              :title="action.disabled ? action.disabledReason : undefined"
+              @click="action.run(); actionsOpen = false;"
+            >
+              <span class="actions-pod__glyph" aria-hidden="true">{{ action.glyph }}</span>
+              <span class="actions-pod__text">
+                <span class="actions-pod__label">{{ action.label }}</span>
+                <span class="actions-pod__hint">{{ action.disabled ? action.disabledReason : action.hint }}</span>
+              </span>
+            </button>
+          </template>
+        </div>
+      </Transition>
     </div>
 
     <!-- Session pod: indicator + picker behind its own toggle. -->
@@ -137,6 +163,7 @@
               v-if="!isAtBottom && hasNewBelow"
               type="button"
               class="chat-scroll-resume"
+              :class="composerOpen ? 'chat-scroll-resume--above-bay' : ''"
               @click="jumpToBottom"
               aria-label="Jump to latest messages"
             >
@@ -175,7 +202,7 @@
               :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
               :fold-steps="msg.role === 'assistant' && msg.id !== 'streaming'"
               :allow-rewind="!gateway.isLoading"
-              :live-at-orb="true"
+              :live-at-orb="orbHasRoomForSteps"
               @rewind="handleRewind"
               @resend="handleResendSteer"
               @show-step="showStep"
@@ -204,6 +231,7 @@
                   @click="openComposer(starter.prompt)"
                 >{{ starter.label }}</button>
               </div>
+              <p class="chat-starters__hint">{{ starters.typeHint }}</p>
             </div>
           </div>
         </section>
@@ -451,6 +479,7 @@
     <div
       class="chat-input-bay relative bg-gray-900/85 backdrop-blur-xl border border-purple-500/25 rounded-2xl px-5 py-4 shadow-2xl shadow-black/50"
       :class="bayOpen ? '' : 'chat-input-bay--hidden'"
+      :inert="!bayOpen"
       @focusin="composerFocused = true"
       @focusout="onComposerFocusOut"
     >
@@ -504,16 +533,18 @@
           v-for="flag in activeFlags"
           :key="flag.label"
           @click="removeFlag(flag.pattern)"
-          :class="['flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
+          type="button"
+          :class="['flex items-center gap-1 px-2.5 py-1 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
           title="Click to remove flag"
+          :aria-label="`Remove ${flag.label}`"
         >
           {{ flag.label }}
           <span class="opacity-50 ml-0.5">✕</span>
         </button>
       </div>
 
-      <div v-if="showMultimodalStatus" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
-        <span class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
+      <div v-if="showMultimodalStatus && (voiceStatusWorthShowing || (showWakeMode && wakeListening))" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
+        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide" role="status">
           {{ voiceStatus }}
         </span>
         <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
@@ -643,10 +674,15 @@
             :style="composerTextareaStyle"
             :placeholder="gateway.hasOpenUserInput
               ? 'Waiting on the card above — use its Configure to change the engine or prompt…'
-              : gateway.isLoading ? 'Steer the running turn — your message is queued and read at its next step…' : `Message ${product.name}… (Enter to send, Shift+Enter for newline, / for commands)`"
+              : gateway.isLoading ? 'Steer the running turn — your message is queued and read at its next step…' : composerPlaceholder"
             rows="3"
           />
-          <div v-if="steeringNote" class="chat-composer__steering-note">{{ steeringNote }}</div>
+          <div
+            v-if="steeringNote"
+            class="chat-composer__steering-note"
+            :class="steeringNoteTone === 'error' ? 'chat-composer__steering-note--error' : ''"
+            :role="steeringNoteTone === 'error' ? 'alert' : 'status'"
+          >{{ steeringNote }}</div>
         </div>
 
         <div class="chat-composer__controls">
@@ -1017,7 +1053,7 @@
         </div>
       </div>
 
-      <div class="text-xs text-gray-700 mt-1 px-1">
+      <div class="text-xs text-gray-500 mt-1 px-1">
         Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code> <code class="font-mono">--effort TIER</code>
       </div>
     </div>
@@ -1032,7 +1068,7 @@
         type="button"
         class="chat-composer-launcher"
         :style="launcherOrbStyle"
-        :title="`Message ${product.name} (press / · drag to move)`"
+        :title="`Message ${product.name} (just start typing · drag to move)`"
         aria-label="Open message input"
         @pointerdown="launcherOrbDown"
         @pointermove="launcherOrbMove"
@@ -1114,6 +1150,7 @@ import { formatCountdown, remainingMs } from "@/composables/userInputs";
 import { stepsFor } from "@/composables/turnSteps";
 import { followFocusedStep, latestTurn } from "@/composables/turnSegments";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { confirmAction } from "@/composables/useConfirm";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
@@ -1138,15 +1175,19 @@ const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
 const steeringNote = ref("");   // transient note shown after a mid-turn steering message is sent
+// A note that something did NOT happen is not a green one, and it stays longer: it used to wear
+// the colour of success and vanish after six seconds like the rest.
+const steeringNoteTone = ref<"ok" | "error">("ok");
 let steeringNoteTimer: number | null = null;
-function showSteeringNote(text: string): void {
+function showSteeringNote(text: string, tone: "ok" | "error" = "ok"): void {
   // One timer for the note, so an earlier note's timeout cannot clear a later one early.
   if (steeringNoteTimer !== null) window.clearTimeout(steeringNoteTimer);
   steeringNote.value = text;
+  steeringNoteTone.value = tone;
   steeringNoteTimer = window.setTimeout(() => {
     steeringNote.value = "";
     steeringNoteTimer = null;
-  }, 6000);
+  }, tone === "error" ? 15_000 : 6000);
 }
 const sessionIdCopied = ref(false); // transient "Copied!" feedback for the session-id click-to-copy
 
@@ -1200,6 +1241,11 @@ const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([])
 const composerHasContent = computed(() =>
   Boolean(inputText.value.trim()) || pendingImageContexts.value.length > 0 || pendingDocumentContexts.value.length > 0);
 const starters = chatStarters(navigator.language);
+// "/ for commands" only where there are commands: scenes or jobs to run by name.
+const composerPlaceholder = computed(() => {
+  const commands = gateway.scenes.length > 0 || configuredJobs.value.length > 0;
+  return `Message ${product.name}… (Enter to send, Shift+Enter for a new line${commands ? ", / for commands" : ""})`;
+});
 const showStarters = computed(() => startersVisible({
   connected: gateway.connected,
   transcriptLoading: gateway.currentSessionTranscriptLoading,
@@ -1451,7 +1497,7 @@ function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: numb
 }
 
 const {
-  x: actionsOrbX, style: actionsOrbStyle,
+  x: actionsOrbX, y: actionsOrbY, style: actionsOrbStyle,
   down: actionsOrbDown, move: actionsOrbMove, up: actionsOrbUp,
   wasDragged: actionsOrbDragged,
 } = useDraggableOrb("starlingai.hud.actionsOrb", { fx: 0.955, fy: 0.09 });
@@ -1470,6 +1516,9 @@ const {
 
 const sessionOpen = ref(false);
 const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
+// The actions list opens towards the middle of the screen, whichever corner the pod was dragged to.
+const actionsPodLeft = computed(() => actionsOrbX.value > hudWin.value.w / 2);
+const actionsPodUp = computed(() => actionsOrbY.value > hudWin.value.h / 2);
 
 // Disconnecting unmounts the pods; make sure their menus don't reopen in a
 // stale-open state when the connection returns.
@@ -1493,43 +1542,49 @@ function onLauncherClick() {
 // Radial session-action menu: tools sit behind the toggle and fan out on a
 // circle around it when opened.
 const actionsOpen = ref(false);
+const actionsMenuEl = ref<HTMLElement | null>(null);
+useEscapeToClose(() => actionsOpen.value, () => { actionsOpen.value = false; });
+useEscapeToClose(() => sessionOpen.value, () => { sessionOpen.value = false; });
+// The list takes the keyboard when it opens, and the arrow keys walk it.
+watch(actionsOpen, (open) => {
+  if (open) void nextTick(() => actionsMenuEl.value?.querySelector<HTMLElement>("button:not(:disabled)")?.focus({ preventScroll: true }));
+});
+function onActionsMenuKeydown(event: KeyboardEvent): void {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+  const items = [...(actionsMenuEl.value?.querySelectorAll<HTMLElement>("button:not(:disabled)") ?? [])];
+  if (items.length === 0) return;
+  event.preventDefault();
+  const at = items.indexOf(document.activeElement as HTMLElement);
+  const next = event.key === "Home" ? 0
+    : event.key === "End" ? items.length - 1
+    : (at + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+  items[next]!.focus();
+}
 
 interface SessionAction {
-  key: string; glyph: string; title: string;
-  disabled?: boolean; danger?: boolean; run: () => void;
+  key: string; glyph: string; label: string; hint: string;
+  disabled?: boolean; disabledReason?: string; danger?: boolean; run: () => void;
 }
 
 const sessionActions = computed((): SessionAction[] => {
   const actions: SessionAction[] = [
-    { key: "new", glyph: "＋", title: "New Session", run: () => { void gateway.createSession(); } },
+    { key: "new", glyph: "＋", label: "New session", hint: "Start a fresh conversation", run: () => { void gateway.createSession(); } },
   ];
   if (gateway.currentSessionId) {
-    const noMessages = gateway.messages.length === 0 || exportingTranscript.value;
-    const noSession = !gateway.currentSessionId || exportingTranscript.value;
+    const busy = exportingTranscript.value;
+    const noMessages = gateway.messages.length === 0;
+    const whyNot = busy ? "An export is still running" : "Nothing to export yet";
     actions.push(
-      { key: "md",    glyph: "MD",  title: "Download conversation as Markdown",          disabled: noMessages, run: () => { void exportMarkdown(); } },
-      { key: "debug", glyph: "DBG", title: "Download debug markdown (transcript + audit)", disabled: noSession,  run: () => { void exportDebugMarkdown(); } },
-      { key: "audit", glyph: "AUD", title: "Download the session audit log",              disabled: noSession,  run: () => { void exportAuditMarkdown(); } },
-      { key: "pdf",   glyph: "PDF", title: "Export conversation as PDF",                  disabled: noMessages, run: () => { void exportPDF(); } },
-      { key: "arch",  glyph: "ARC", title: "Archive this session",                        run: () => { void archiveCurrentSession(); } },
-      { key: "reset", glyph: "RST", title: "Reset this session", danger: true,            run: () => { void resetSession(); } },
+      { key: "md",    glyph: "MD",  label: "Download as Markdown", hint: "The conversation as a .md file",      disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportMarkdown(); } },
+      { key: "pdf",   glyph: "PDF", label: "Export as PDF",        hint: "Opens the print view in a new tab",   disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportPDF(); } },
+      { key: "debug", glyph: "DBG", label: "Debug bundle",         hint: "Transcript and audit log in one file", disabled: busy, disabledReason: whyNot, run: () => { void exportDebugMarkdown(); } },
+      { key: "audit", glyph: "AUD", label: "Audit log",            hint: "What the swarm did in this session",  disabled: busy, disabledReason: whyNot, run: () => { void exportAuditMarkdown(); } },
+      { key: "arch",  glyph: "ARC", label: "Archive session",      hint: "Moves it to Sessions, out of the way", run: () => { void archiveCurrentSession(); } },
+      { key: "reset", glyph: "RST", label: "Reset session…",       hint: "Clears this conversation", danger: true, run: () => { void resetSession(); } },
     );
   }
   return actions;
 });
-
-// Fan the items around the full circle (starting at 12 o'clock) so every
-// tool gets breathing room regardless of where the pod has been dragged.
-function radialItemStyle(index: number, total: number): Record<string, string> {
-  const angle = -90 + (index * 360) / total;
-  const rad = (angle * Math.PI) / 180;
-  const radius = 4.6;
-  return {
-    "--tx": `${(Math.cos(rad) * radius).toFixed(3)}rem`,
-    "--ty": `${(Math.sin(rad) * radius).toFixed(3)}rem`,
-    "--delay": `${index * 28}ms`,
-  };
-}
 
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
 
@@ -1565,10 +1620,19 @@ function maybeCloseComposer() {
     && !analysing.value
     && pendingImageContexts.value.length === 0
     && pendingDocumentContexts.value.length === 0
+    // The voice bar lives in the bay: while the microphone is open or an answer is read aloud,
+    // folding the bay away would take Stop with it.
+    && !showVoiceBar.value
   ) {
     composerOpen.value = false;
   }
 }
+
+// Text can arrive in the input without a keystroke: a restart hands the old question back, a
+// dropped audio file or a wake word is transcribed into it. It must not sit there unseen.
+watch(inputText, (text) => {
+  if (text.trim() !== "" && !composerOpen.value) openComposer();
+});
 
 function onComposerFocusOut(event: FocusEvent) {
   const root = event.currentTarget as HTMLElement | null;
@@ -1591,13 +1655,21 @@ watch(() => gateway.isLoading, (loading) => {
   else if (!composerFocused.value) maybeCloseComposer();
 });
 
-// "/" anywhere outside a form control summons the bay ready for a command.
+// Typing anywhere on the page starts a message: the bay comes up with the key already in it. A
+// "/" therefore still starts a command. It used to be "/" alone, announced only in the launcher's
+// tooltip — every other key did nothing, on a page whose one purpose is to be typed into.
 function onGlobalComposerKey(event: KeyboardEvent) {
-  if (composerOpen.value || event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (composerOpen.value || event.defaultPrevented || event.isComposing) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // One printable character; a space scrolls the page and stays that.
+  if (event.key.length !== 1 || event.key === " ") return;
+  if (!gateway.connected || gateway.pendingInputRequest) return;
   const target = event.target as HTMLElement | null;
   if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+  // A dialog or a menu that is up owns the keyboard.
+  if (document.querySelector("[role='dialog'], [role='alertdialog'], [role='menu'], .app-nav-panel")) return;
   event.preventDefault();
-  openComposer("/");
+  openComposer(event.key);
 }
 onMounted(() => window.addEventListener("keydown", onGlobalComposerKey));
 onUnmounted(() => window.removeEventListener("keydown", onGlobalComposerKey));
@@ -1695,6 +1767,12 @@ const orbRing = computed(() => ({
   ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
+// Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
+// list there, or a running turn's steps would be shown nowhere.
+const orbHasRoomForSteps = computed(() => viewportWidth.value >= 1100);
+// There the messages also lie over the orb, not beside it, and its bright rings came through
+// the bubbles' glass: with a conversation on the page it steps back.
+const orbBehindText = computed(() => viewportWidth.value < 1100 && gateway.messages.length > 0);
 const sceneJobs = computed(() => scenesStore.recentJobs);
 const configuredJobs = computed(() => jobsStore.jobs);
 const activeSessions = computed(() => gateway.activeSessions);
@@ -1989,6 +2067,7 @@ const voiceStatus = computed(() => {
   if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return "Wake-word detection is unavailable in this browser";
   return wakeStatus.value;
 });
+const voiceStatusWorthShowing = computed(() => voiceStatus.value.trim() !== "" && voiceStatus.value !== "Voice idle");
 const showWakeFeedbackCard = computed(() => showWakeMode.value && wakeFeedbackState.value !== "idle");
 const wakeFeedbackTone = computed(() => {
   if (wakeFeedbackState.value === "error") return "error";
@@ -2325,6 +2404,8 @@ const voiceBarListening = computed(() =>
   voicePhase.value === "listening" || voicePhase.value === "hearing" || recordingState.value === "recording");
 const showVoiceBar = computed(() => Boolean(
   voiceBarBusy.value || voiceConversationMode.value || lastReply.value || recordingState.value !== "idle" || voiceNotice.value));
+// The voice bar is in the bay: it comes up with it (see maybeCloseComposer for the other half).
+watch(showVoiceBar, (showing) => { if (showing) composerOpen.value = true; });
 
 /** What the voice bar says is happening. */
 const voiceBarLabel = computed(() => {
@@ -2441,8 +2522,8 @@ function onComposerKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
       // Close the popup without dropping the leading '/' in case the user
-      // wants to continue typing — they can press Esc again to cancel input
-      // entirely. Force-close by appending a sentinel space then re-trim.
+      // wants to continue typing — Esc again drops the unfinished command (below).
+      // Force-close by appending a sentinel space then re-trim.
       inputText.value = `${inputText.value} `;
       return;
     }
@@ -2455,6 +2536,17 @@ function onComposerKeydown(event: KeyboardEvent) {
       acceptSlashSuggestion(slashIndex.value);
       return;
     }
+  }
+
+  // Escape puts the composer away: an unfinished command is dropped, an empty bay folds, a
+  // drafted message stays where it is and only loses the focus.
+  if (event.key === "Escape" && !event.isComposing) {
+    event.preventDefault();
+    if (/^\/\S*\s*$/.test(inputText.value)) inputText.value = "";
+    composerTextareaEl.value?.blur();
+    composerFocused.value = false;
+    maybeCloseComposer();
+    return;
   }
 
   if (event.key !== "Enter") return;
@@ -2473,13 +2565,16 @@ async function sendMessage() {
   const hasImages = pendingImageContexts.value.length > 0;
   const hasDocs = pendingDocumentContexts.value.length > 0;
   if (!trimmedText && !hasImages && !hasDocs) return;
+  // Whoever sends wants to see it land: scrolled up, both the message and its answer used to
+  // arrive out of view.
+  jumpToBottom();
   // Mid-turn steering: a turn is already running → fold this text into it. Never a new turn,
   // which would cancel the running one: a message that cannot be delivered stays in the chat
   // marked as such, with a resend.
   if (gateway.isLoading) {
     if (hasImages || hasDocs) {
       // Text-only — attachments cannot join a running turn. Say so rather than ignore Enter.
-      showSteeringNote("Attachments can't join a running turn — send them once it finishes.");
+      showSteeringNote("Attachments can't join a running turn — send them once it finishes.", "error");
       return;
     }
     inputText.value = "";
@@ -2499,13 +2594,13 @@ async function sendMessage() {
           // does not finish until the card is answered.
           : gateway.hasOpenUserInput
             ? "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card."
-            : "Queued — folded into the running turn at its next step.");
+            : "Queued — folded into the running turn at its next step.", state === "undelivered" ? "error" : "ok");
     return;
   }
   // The previous message's attachments are still being read, and its turn has not started. Sent
   // now, this one would start first — and the analysed one would then replace it. It waits.
   if (analysing.value) {
-    showSteeringNote("Still reading your attachments — send this once they're done.");
+    showSteeringNote("Still reading your attachments — send this once they're done.", "error");
     return;
   }
   const jobMatch = !hasImages && !hasDocs
@@ -2627,7 +2722,7 @@ async function sendMessage() {
  */
 function giveBackUnsentText(text: string, error: unknown): void {
   if (text && !inputText.value.trim()) inputText.value = text;
-  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`);
+  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`, "error");
 }
 
 async function triggerScene(name: string) {
@@ -2698,6 +2793,13 @@ async function resetSession() {
     await gateway.createSession();
     return;
   }
+  const count = gateway.messages.length;
+  if (count > 0 && !(await confirmAction({
+    title: "Reset this session?",
+    message: `This clears the conversation here and on the gateway — ${count} message${count === 1 ? "" : "s"}. Download it first if you want to keep it.`,
+    confirmLabel: "Reset session",
+    danger: true,
+  }))) return;
   try {
     await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
     await gateway.loadSession(gateway.currentSessionId);
@@ -2708,14 +2810,23 @@ async function resetSession() {
 }
 
 async function handleRewind(messageId: string) {
+  // Everything from that message on is cut, here and on the gateway: one small button must not
+  // do that on a single click.
+  const at = gateway.messages.findIndex((message) => message.id === messageId);
+  const cut = at < 0 ? 0 : gateway.messages.length - at;
+  if (cut > 1 && !(await confirmAction({
+    title: "Restart from this message?",
+    message: `This removes it and the ${cut - 1} message${cut - 1 === 1 ? "" : "s"} after it, here and on the gateway. Your question comes back into the input to edit and send again.`,
+    confirmLabel: "Restart here",
+    danger: true,
+  }))) return;
   try {
     const text = await gateway.rewindToMessage(messageId);
-    inputText.value = text;
-    await nextTick();
-    composerTextareaEl.value?.focus();
+    openComposer(text);
   } catch (err) {
     // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
-    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`);
+    composerOpen.value = true;
+    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`, "error");
   }
 }
 
@@ -2725,7 +2836,12 @@ async function handleResendSteer(messageId: string) {
 
 async function archiveCurrentSession() {
   if (!gateway.currentSessionId) return;
-  await gateway.archiveSession(gateway.currentSessionId);
+  try {
+    await gateway.archiveSession(gateway.currentSessionId);
+  } catch (err) {
+    composerOpen.value = true;
+    showSteeringNote(`Couldn't archive the session — ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
 }
 
 async function handleSessionSwitch(event: Event) {
@@ -3885,14 +4001,66 @@ onUnmounted(() => {
     0 0 26px rgba(var(--accent-purple), 0.55);
 }
 .radial-menu--open .radial-menu__toggle:hover { transform: rotate(90deg) scale(1.08); }
-.radial-menu__item {
+/* A pod with no session behind it: dimmed, its rim dashed. */
+.hud-orb__btn--idle {
+  border-style: dashed;
+  color: rgba(var(--logo-cyan), 0.55);
+  filter: saturate(0.6);
+}
+.radial-menu__toggle:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.8);
+  outline-offset: 3px;
+}
+
+/* The session actions: a list with names, opening beside the pod towards the middle of the
+   screen. Each row keeps its glyph as a badge and flies in a beat after the one above. */
+.actions-pod {
   position: absolute;
-  inset: 0;
-  z-index: 1;
+  top: 0;
+  width: min(17.5rem, calc(100vw - 5rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-3);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+.actions-pod--up { top: auto; bottom: 0; }
+.actions-pod__item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.45rem;
+  border: 1px solid transparent;
+  text-align: left;
+  color: rgb(226, 232, 240);
+  cursor: pointer;
+  animation: actions-pod-in 260ms var(--ease-out) var(--delay, 0ms) both;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+@keyframes actions-pod-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+.actions-pod__item:hover:not(:disabled),
+.actions-pod__item:focus-visible {
+  background: rgba(var(--logo-cyan), 0.08);
+  border-color: rgba(var(--logo-cyan), 0.3);
+  outline: none;
+}
+.actions-pod__item:disabled { opacity: 0.45; cursor: not-allowed; }
+.actions-pod__glyph {
+  flex: none;
   display: grid;
   place-items: center;
-  width: 2.4rem;
-  height: 2.4rem;
+  width: 2rem;
+  height: 2rem;
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: 0.55rem;
@@ -3901,32 +4069,28 @@ onUnmounted(() => {
   color: rgba(207, 250, 254, 0.92);
   background: rgb(5, 19, 25);
   border: 1px solid rgba(var(--accent-purple), 0.4);
-  box-shadow: 0 0 12px rgba(var(--accent-purple), 0.2);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(0, 0) scale(0.25);
-  transition:
-    transform 340ms var(--ease-out) var(--delay, 0ms),
-    opacity 240ms var(--ease-out) var(--delay, 0ms);
+  box-shadow: 0 0 10px rgba(var(--accent-purple), 0.18);
 }
-.radial-menu--open .radial-menu__item {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(var(--tx, 0), var(--ty, 0)) scale(1);
+.actions-pod__text { display: grid; min-width: 0; }
+.actions-pod__label { font-size: 0.82rem; font-weight: 500; line-height: 1.25; }
+.actions-pod__hint {
+  font-size: 0.68rem;
+  line-height: 1.3;
+  color: rgb(148, 163, 184);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.radial-menu--open .radial-menu__item:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.radial-menu__item:not(:disabled):hover {
-  color: #fff;
-  border-color: rgba(var(--logo-cyan), 0.7);
-  box-shadow: 0 0 18px rgba(var(--accent-purple), 0.45);
-}
-.radial-menu__item--danger {
+.actions-pod__rule { height: 1px; margin: 0.25rem 0.3rem; background: var(--hairline); }
+.actions-pod__item--danger .actions-pod__label { color: rgb(254, 202, 202); }
+.actions-pod__item--danger .actions-pod__glyph {
   border-color: rgba(248, 113, 113, 0.45);
   color: rgba(254, 202, 202, 0.95);
+}
+.actions-pod__item--danger:hover:not(:disabled),
+.actions-pod__item--danger:focus-visible {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.4);
 }
 
 .chat-mobile-panels__summary::-webkit-details-marker,
@@ -3956,6 +4120,24 @@ onUnmounted(() => {
   color: rgb(186 230 253 / 0.8);
   font-size: 0.9rem;
 }
+
+/* Only where there is a keyboard to type on. */
+.chat-starters__hint {
+  display: none;
+  margin: 0.15rem 0 0;
+  font-family: var(--font-label);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(165, 243, 252, 0.45);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat-starters__hint { display: block; }
+}
+
+/* Where the conversation lies over the orb and not beside it, the orb steps back. */
+.chat-orb-layer { transition: opacity 600ms var(--ease-out); }
+.chat-orb-layer--behind-text { opacity: 0.28; }
 
 .chat-starters__list {
   display: flex;
@@ -4130,6 +4312,10 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.35rem;
 }
+.chat-composer__steering-note--error { color: rgb(252 165 165); }
+
+/* With the bay up, the pill stands above it: under it, it was hidden exactly when it mattered. */
+.chat-scroll-resume--above-bay { bottom: clamp(12rem, 26vh, 18rem); }
 
 /* Slash-command autocomplete popup. Anchored to the bottom of the field so it
    floats above the textarea — keyboard nav (↑↓), Enter/Tab to accept, Esc to
@@ -4368,7 +4554,8 @@ onUnmounted(() => {
   z-index: 30;
   border-radius: 1.3rem;
   border: 1px solid rgba(168, 85, 247, 0.18);
-  background: linear-gradient(180deg, rgba(6, 10, 20, 0.96), rgba(10, 14, 28, 0.92));
+  /* opaque enough that the composer's text under it does not read through */
+  background: linear-gradient(180deg, rgba(6, 10, 20, 0.985), rgba(10, 14, 28, 0.975));
   box-shadow: 0 24px 50px rgba(0, 0, 0, 0.38);
   padding: 0.9rem;
   display: grid;
@@ -4604,24 +4791,50 @@ onUnmounted(() => {
   margin: 0;
 }
 
+/* The message field takes the bay's whole width and the controls sit in one row under it. On a
+   wide screen they used to stand BESIDE the field and left it some 300 px: a prompt wrapped
+   after 35 characters, in a bay 736 px wide. */
 @media (min-width: 1024px) {
-  .chat-composer {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    column-gap: 0.9rem;
-    align-items: flex-end;
-  }
-
   .chat-composer__controls {
-    width: max-content;
-    max-width: 100%;
-    min-width: 0;
-    justify-self: start;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem;
   }
+  .chat-composer__menus { flex-wrap: nowrap; }
+  .chat-composer__primary-actions { flex: none; flex-wrap: nowrap; }
+  .chat-composer__primary-actions > button { min-width: 8.5rem; }
+}
 
-  .chat-composer__menus,
-  .chat-composer__primary-actions {
-    flex-wrap: nowrap;
+/* Below that the controls stack and each menu button sits at the bay's left edge: a menu hung
+   from its right edge opened leftwards, most of it off the screen, and Attach, audio and Record
+   are its first items. It hangs from the left edge there. */
+@media (max-width: 1023px) {
+  .chat-dropdown__menu {
+    left: 0;
+    right: auto;
+    transform-origin: bottom left;
+  }
+}
+
+/* Motion on request only (the bay's 3D recede, the launcher's breathing, the fly-ins). */
+@media (prefers-reduced-motion: reduce) {
+  .chat-input-bay,
+  .chat-composer-launcher,
+  .radial-menu__toggle,
+  .chat-orb-layer,
+  .chat-scroll-resume,
+  .chat-drop-overlay {
+    transition-duration: 1ms !important;
+    animation: none !important;
+  }
+  .chat-input-bay--hidden { transform: none; }
+  .actions-pod__item,
+  .chat-dropdown__menu,
+  .wake-feedback-card,
+  .chat-job-strip__item,
+  .multimodal-status {
+    animation: none !important;
   }
 }
 </style>

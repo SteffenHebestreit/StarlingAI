@@ -6,8 +6,14 @@
         <p class="sessions-page__subtitle">Resume active conversations, inspect archived missions, and prune stored history.</p>
       </div>
       <div class="sessions-page__actions">
-        <button @click="clearArchivedSessions" class="sessions-page__clear" title="Remove all archived session history">Clear archived</button>
-        <button @click="refresh" class="sessions-page__refresh">Refresh</button>
+        <button
+          type="button"
+          class="sessions-page__clear"
+          :disabled="gateway.archivedSessions.length === 0"
+          :title="gateway.archivedSessions.length === 0 ? 'No archived sessions to remove' : 'Remove all archived session history'"
+          @click="clearArchivedSessions"
+        >Clear archived</button>
+        <button type="button" @click="refresh" class="sessions-page__refresh">Refresh</button>
       </div>
     </div>
 
@@ -39,7 +45,12 @@
           v-for="session in filteredSessionCards"
           :key="session.id"
           :class="['session-card', selectedSessionId === session.id && 'session-card--active']"
+          role="button"
+          tabindex="0"
+          :aria-pressed="selectedSessionId === session.id"
           @click="selectSession(session.id)"
+          @keydown.enter.self="selectSession(session.id)"
+          @keydown.space.self.prevent="selectSession(session.id)"
         >
           <div class="session-card__top">
             <span class="session-card__id">{{ session.id.substring(0, 12) }}…</span>
@@ -60,8 +71,10 @@
                 @click.stop="archive(session.id)"
               >Archive</button>
               <button
+                type="button"
                 class="session-card__delete"
                 :title="session.isActive ? 'Delete this session' : 'Remove session history'"
+                :aria-label="session.isActive ? 'Delete this session' : 'Remove session history'"
                 @click.stop="removeSession(session.id)"
               >✕</button>
             </div>
@@ -172,6 +185,7 @@ import { marked } from "marked";
 import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
+import { confirmAction } from "@/composables/useConfirm";
 import { useProductStore } from "@/stores/product";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -385,6 +399,13 @@ async function archive(sessionId: string) {
 }
 
 async function removeSession(sessionId: string) {
+  // One small ✕ beside "Archive" used to delete a conversation's whole history at once.
+  if (!(await confirmAction({
+    title: "Delete this session?",
+    message: `Session ${sessionId.substring(0, 12)}… and its history are removed from the gateway. Archive it instead if you only want it out of the way.`,
+    confirmLabel: "Delete session",
+    danger: true,
+  }))) return;
   await gateway.deleteSession(sessionId);
   if (selectedSessionId.value === sessionId) {
     selectedSessionId.value = null;
@@ -394,7 +415,14 @@ async function removeSession(sessionId: string) {
 }
 
 async function clearArchivedSessions() {
-  const archived = gateway.archivedSessions;
+  const archived = [...gateway.archivedSessions];
+  if (archived.length === 0) return;
+  if (!(await confirmAction({
+    title: `Delete ${archived.length} archived session${archived.length === 1 ? "" : "s"}?`,
+    message: "Their conversations and swarm history are removed from the gateway for good. Active sessions are not touched.",
+    confirmLabel: "Delete archived",
+    danger: true,
+  }))) return;
   for (const s of archived) {
     await gateway.deleteSession(s.id);
   }
@@ -1094,5 +1122,10 @@ onMounted(refresh);
     flex-direction: column;
     align-items: flex-start;
   }
+}
+.sessions-page__clear:disabled { opacity: 0.45; cursor: not-allowed; }
+.session-card:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
 }
 </style>

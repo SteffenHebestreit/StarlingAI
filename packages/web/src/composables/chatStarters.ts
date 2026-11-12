@@ -17,6 +17,8 @@ export interface ChatStarter {
 export interface ChatStarters {
   lead: string;
   items: readonly ChatStarter[];
+  /** Under the starters, for whoever has a keyboard: the input is folded away, and typing brings it up. */
+  typeHint: string;
 }
 
 const STARTERS: Record<"de" | "en", ChatStarters> = {
@@ -29,6 +31,7 @@ const STARTERS: Record<"de" | "en", ChatStarters> = {
       { label: "Präsentation bauen", prompt: "Erstelle eine kurze Präsentation über " },
       { label: "Skript schreiben", prompt: "Schreibe ein kleines Skript, das " },
     ],
+    typeHint: "oder einfach lostippen",
   },
   en: {
     lead: "What shall I start with?",
@@ -39,6 +42,7 @@ const STARTERS: Record<"de" | "en", ChatStarters> = {
       { label: "Build a presentation", prompt: "Create a short presentation about " },
       { label: "Write a script", prompt: "Write a small script that " },
     ],
+    typeHint: "or just start typing",
   },
 };
 

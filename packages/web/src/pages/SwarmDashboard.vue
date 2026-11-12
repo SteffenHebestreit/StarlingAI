@@ -1,5 +1,5 @@
 <template>
-  <div class="settings-page">
+  <div class="page-shell">
 
     <div class="glass-card p-5 mb-5">
       <div class="flex items-center justify-between">
@@ -19,7 +19,7 @@
       {{ error }}
     </div>
 
-    <div class="settings-grid">
+    <div class="page-grid">
 
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
       <div class="space-y-5">

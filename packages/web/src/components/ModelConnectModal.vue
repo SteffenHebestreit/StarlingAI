@@ -1,9 +1,9 @@
 <template>
   <Teleport to="body">
-    <div class="fixed inset-0 z-[80] flex items-center justify-center p-4">
+    <div class="fixed inset-0 z-modal flex items-center justify-center p-4">
       <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="close" />
 
-      <div class="relative z-[81] w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-gray-950/95 shadow-2xl shadow-black/50">
+      <div class="relative z-[1] w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-gray-950/95 shadow-2xl shadow-black/50">
         <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div class="flex items-center gap-2">
             <span class="inline-block h-2 w-2 rounded-full" :class="connected ? 'bg-emerald-400' : 'bg-orange-400'" />

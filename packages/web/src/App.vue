@@ -40,23 +40,32 @@
           </div>
         </router-link>
 
+        <!-- Where you are: every page but the chat names itself here, since the navigation
+             itself is folded away behind the burger. -->
+        <nav v-if="currentPage" class="app-crumb" aria-label="Current page">
+          <span class="app-crumb__sep" aria-hidden="true">/</span>
+          <span v-if="currentPage.group" class="app-crumb__group">{{ currentPage.group }}</span>
+          <span v-if="currentPage.group" class="app-crumb__sep app-crumb__sep--inner" aria-hidden="true">/</span>
+          <span class="app-crumb__page" aria-current="page">{{ currentPage.label }}</span>
+        </nav>
+
         <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
           <!-- Connection status -->
-          <div class="flex items-center gap-2 text-xs shrink-0">
+          <div class="flex items-center gap-2 text-xs shrink-0" role="status" :aria-label="connectionLabel" :title="connectionLabel">
             <div :class="[
               'w-1.5 h-1.5 rounded-full transition-colors',
-              gateway.connected   ? 'bg-emerald-400 dot-pulse'
-              : gateway.connecting ? 'bg-amber-400 animate-pulse'
+              gateway.connected ? 'bg-emerald-400 dot-pulse'
+              : gateway.connecting || gateway.reconnecting ? 'bg-amber-400 motion-safe:animate-pulse'
               : 'bg-red-500'
             ]" />
-            <span class="text-gray-400 hidden sm:inline">
-              {{ gateway.connected ? 'Connected' : gateway.connecting ? 'Connecting…' : 'Disconnected' }}
-            </span>
+            <!-- A lost connection is worth words on a phone too; "Connected" is not. -->
+            <span class="text-gray-400" :class="gateway.connected ? 'hidden sm:inline' : ''">{{ connectionLabel }}</span>
           </div>
 
           <!-- Burger: the main nav and header tools live behind this toggle so
                the default chrome is just brand + status + account. -->
           <button
+            ref="burgerRef"
             type="button"
             class="nav-burger hud-btn inline-flex h-9 w-9 shrink-0 items-center justify-center"
             :class="navOpen ? 'hud-btn--active' : ''"
@@ -77,7 +86,7 @@
           <Teleport to="body">
           <div v-if="navOpen" class="fixed inset-0 z-[225]" @click="navOpen = false" />
           <Transition name="hud-pop">
-          <div v-if="navOpen" class="app-nav-panel">
+          <div v-if="navOpen" ref="navPanelRef" class="app-nav-panel">
             <div class="app-nav-panel__meta">
               <span>v{{ appVersion }}</span>
               <span>{{ gateway.connected ? 'Online' : 'Offline' }}</span>
@@ -129,10 +138,10 @@
             </button>
             <button
               type="button"
-              class="ml-0.5 flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition hover:bg-white/5 hover:text-gray-300"
+              class="ml-0.5 flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition hover:bg-white/5 hover:text-gray-300"
               title="Claude settings — model & subscription"
               aria-label="Claude settings"
-              @click="showModelConnect = true"
+              @click="openModelConnect"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5">
                 <circle cx="12" cy="12" r="3" />
@@ -145,15 +154,16 @@
           <button
             v-if="!modelPreset.oauthConnected && modelPreset.canChange && gateway.connected"
             type="button"
-            class="hidden shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15 sm:inline-flex"
-            @click="showModelConnect = true"
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1.5 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15"
+            @click="openModelConnect"
           >
             Connect Claude
           </button>
 
           <button
             v-if="notifications.supported && notifications.permission === 'default'"
-            class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
+            type="button"
+            class="inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
             @click="enableBrowserNotifications"
           >
             Enable Notifications
@@ -170,6 +180,7 @@
                   ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
                   : 'border-transparent text-gray-300 hover:border-white/10 hover:bg-white/5 hover:text-white'"
                 :aria-current="$route.path === entry.to ? 'page' : undefined"
+                @click="navOpen = false"
               >
                 {{ entry.label }}
               </RouterLink>
@@ -177,6 +188,8 @@
                 v-else
                 type="button"
                 class="nav-group__trigger inline-flex items-center rounded-full border border-transparent px-3 py-2 text-sm font-medium transition-colors hover:border-white/10 hover:bg-white/5"
+                :class="groupHoldsCurrentPage(entry) ? 'nav-group__trigger--current' : ''"
+                :aria-current="groupHoldsCurrentPage(entry) ? 'true' : undefined"
                 @click="navLevel = entry.label"
               >
                 <span>{{ entry.label }}</span>
@@ -204,6 +217,8 @@
                 :to="item.to"
                 class="app-nav-panel__subitem"
                 :class="$route.path === item.to ? 'app-nav-panel__subitem--active' : ''"
+                :aria-current="$route.path === item.to ? 'page' : undefined"
+                @click="navOpen = false"
               >
                 <span>{{ item.label }}</span>
                 <span v-if="item.hint" class="app-nav-panel__subitem-hint">{{ item.hint }}</span>
@@ -244,12 +259,12 @@
             <!-- Teleported to <body> so it escapes the header's stacking
                  context (otherwise the page content paints over it). -->
             <Teleport to="body">
-              <div v-if="accountMenuOpen" class="fixed inset-0 z-[60]" @click="accountMenuOpen = false" />
+              <div v-if="accountMenuOpen" class="fixed inset-0 z-popover-catch" @click="accountMenuOpen = false" />
 
               <Transition name="hud-pop">
               <div
                 v-if="accountMenuOpen"
-                class="fixed z-[70] w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+                class="fixed z-popover w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
                 :style="accountMenuStyle"
                 role="menu"
               >
@@ -296,7 +311,7 @@
     <!-- Login modal: auto-shown when disconnected/auth-failed, or opened on
          demand (e.g. token mode → sign in as a created user / switch account). -->
     <LoginModal
-      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting)"
+      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting && !gateway.reconnecting)"
       :dismissible="gateway.connected"
       :sso-error="ssoError"
       @close="showLogin = false"
@@ -305,7 +320,7 @@
     <TransitionGroup
       name="toast"
       tag="div"
-      class="pointer-events-none fixed right-4 top-[4.5rem] z-50 flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
+      class="pointer-events-none fixed right-4 top-[4.5rem] z-toast flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
     >
       <section
         v-for="item in notifications.items"
@@ -353,6 +368,9 @@
       <RouterView />
     </main>
 
+    <!-- The one "are you sure?" dialog, for any page that asks (composables/useConfirm.ts). -->
+    <ConfirmHost />
+
     <!-- Claude subscription connect / manage (browser OAuth verification). -->
     <ModelConnectModal
       v-if="showModelConnect"
@@ -381,6 +399,8 @@ import ModelConnectModal from "@/components/ModelConnectModal.vue";
 import { type NavGroupItem } from "@/components/NavGroup.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import ConfirmHost from "@/components/ConfirmHost.vue";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
@@ -430,8 +450,29 @@ const ssoError = ref<string | null>(null);
 // that replaces the panel content (navLevel = the open group's label).
 const navOpen = ref(false);
 const navLevel = ref<string | null>(null);
+const burgerRef = ref<HTMLElement | null>(null);
+const navPanelRef = ref<HTMLElement | null>(null);
 watch(() => $route.path, () => { navOpen.value = false; });
-watch(navOpen, (open) => { if (open) navLevel.value = null; });
+// Opening puts the keyboard inside the panel (it is teleported to the end of the page, far from
+// the burger in tab order); closing hands it back to the burger, unless something else took it.
+watch(navOpen, (open) => {
+  if (open) {
+    navLevel.value = null;
+    void nextTick(() => navPanelRef.value?.querySelector<HTMLElement>(".app-nav a, .app-nav button")?.focus({ preventScroll: true }));
+  } else if (!document.activeElement || document.activeElement === document.body || navPanelRef.value?.contains(document.activeElement)) {
+    burgerRef.value?.focus({ preventScroll: true });
+  }
+});
+// A drill-down swaps the panel's content, which takes the focused button with it.
+watch(navLevel, () => {
+  if (!navOpen.value) return;
+  setTimeout(() => navPanelRef.value?.querySelector<HTMLElement>(".app-nav-panel__back, .app-nav a, .app-nav button")?.focus({ preventScroll: true }), 240);
+});
+// Escape climbs out one step at a time: sub-level, then the panel.
+useEscapeToClose(() => navOpen.value, () => {
+  if (navLevel.value) navLevel.value = null;
+  else navOpen.value = false;
+});
 
 const activeGroupItems = computed<NavGroupItem[]>(() => {
   const entry = navEntries.value.find(
@@ -442,6 +483,11 @@ const activeGroupItems = computed<NavGroupItem[]>(() => {
 
 // Claude subscription connect/manage modal (browser OAuth verification).
 const showModelConnect = ref(false);
+/** From the nav panel: the panel goes first, or the dialog would open underneath it. */
+function openModelConnect(): void {
+  navOpen.value = false;
+  showModelConnect.value = true;
+}
 function onClaudeConnected(): void {
   notifications.pushLocalNotification({
     title: "Claude subscription connected",
@@ -481,6 +527,10 @@ function signOutFromMenu(): void {
 }
 // Close the menu on navigation so it never lingers over a new page.
 watch(() => $route.path, () => { accountMenuOpen.value = false; });
+useEscapeToClose(() => accountMenuOpen.value, () => {
+  accountMenuOpen.value = false;
+  accountBtnRef.value?.focus({ preventScroll: true });
+});
 
 /**
  * The top-level nav is small (5 entries) and either renders as a single
@@ -584,6 +634,37 @@ const navEntries = computed<NavEntry[]>(() => {
   return [...shown, ...extensionNav.value];
 });
 
+/** Whether the page on screen is one of a group's items: the group's button is marked then. */
+function groupHoldsCurrentPage(entry: NavGroupDef): boolean {
+  return entry.items.some((item) => item.to === $route.path);
+}
+
+/**
+ * The page on screen, by the name the navigation gives it, with its group. The chat is home and
+ * names nothing. Read from the full list: a page a role cannot see in the menu is still a page.
+ */
+const currentPage = computed<{ group: string | null; label: string } | null>(() => {
+  for (const entry of [...allNavEntries, ...extensionNav.value]) {
+    if (entry.kind === "leaf") {
+      if (entry.to === $route.path && entry.to !== "/") return { group: null, label: entry.label };
+    } else {
+      const item = entry.items.find((candidate) => candidate.to === $route.path);
+      if (item) return { group: entry.label, label: item.label };
+    }
+  }
+  return null;
+});
+// The browser tab names the page too: with several tabs open they all read the product's name.
+watch([currentPage, () => product.name], ([page, name]) => {
+  document.title = page ? `${page.label} · ${name}` : name;
+}, { immediate: true });
+
+const connectionLabel = computed(() => {
+  if (gateway.connected) return "Connected";
+  if (gateway.connecting) return "Connecting…";
+  return gateway.reconnecting ? "Reconnecting…" : "Disconnected";
+});
+
 function notificationCardClass(level: NotificationLevel): string {
   switch (level) {
     case "success":
@@ -683,6 +764,43 @@ watch(() => gateway.isLoading, (running) => {
     rgba(var(--app-bg), 0.72);
   border-bottom: 1px solid var(--hairline);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.28);
+}
+
+/* Where you are, beside the brand. */
+.app-crumb {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  font-family: var(--font-label);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.app-crumb__sep { color: rgba(var(--logo-cyan), 0.35); }
+.app-crumb__group { color: rgba(165, 243, 252, 0.5); }
+.app-crumb__page {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgb(var(--logo-cyan));
+  text-shadow: 0 0 14px rgba(var(--logo-cyan), 0.45);
+}
+@media (max-width: 639px) {
+  .app-crumb__group, .app-crumb__sep--inner { display: none; }
+}
+/* A group that holds the page on screen. */
+.nav-group__trigger--current {
+  border-color: rgba(var(--logo-cyan), 0.28);
+  color: rgb(var(--logo-cyan));
+}
+.app-nav a:focus-visible,
+.app-nav button:focus-visible,
+.app-nav-panel__back:focus-visible,
+.app-nav-panel__subitem:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
 }
 
 /* Burger nav panel: header tools + main nav, summoned on demand.

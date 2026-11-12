@@ -146,7 +146,8 @@ function longRunningSummary(r: PendingLongRunning): string {
   position: fixed;
   right: 1rem;
   bottom: 1rem;
-  z-index: 80;
+  /* above the chat's composer launcher, which shares this corner: a request waiting for an answer wins */
+  z-index: var(--z-dock);
   font-size: 0.85rem;
 }
 
@@ -172,7 +173,7 @@ function longRunningSummary(r: PendingLongRunning): string {
 }
 
 .dock-panel {
-  width: 340px;
+  width: min(340px, calc(100vw - 2rem));
   max-height: 70vh;
   overflow-y: auto;
   border-radius: 12px;
@@ -287,7 +288,7 @@ function longRunningSummary(r: PendingLongRunning): string {
 .browser-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: var(--z-modal);
   background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
