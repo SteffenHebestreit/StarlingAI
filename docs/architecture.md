@@ -579,9 +579,9 @@ packages/
       components/           (15) MessageBubble.vue — chat message renderer
                             LoginModal.vue — JWT login
                             OrbCanvas.vue — Three.js swarm visualizer: particle orb,
-                              arc-reactor bezel and Dyson shell in 3D
+                              Dyson sphere round the core, step ring in 3D
                             OrbActivity.vue — the running turn at the orb: its steps on
-                              the shell's step ring, its newest words in a status line
+                              the orb's step ring, its newest words in a status line
                             SwarmStatusPanel.vue — live agent and bus status
                             BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
                               ShellSessionPanel.vue — live operator docks

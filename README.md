@@ -12,8 +12,8 @@
 
 [Quick Start](#quick-start) · [What it does](#what-the-swarm-can-do) · [Architecture](docs/architecture.md) · [API](docs/api.md) · [Security](docs/security.md)
 
-<img src="assets/screenshots/chat-turn-at-orb.png" alt="The StarlingAI dashboard during a research turn — a Dyson shell of panel strips surrounds the particle orb, one strip lit up as the turn's step ring with its steps riding on it, the newest in front, and a status line under the orb saying what the swarm is doing; the question sits on the right, an earlier answer on the left" width="100%" />
-<sub><em>The swarm at work. A Dyson shell surrounds the orb; while a turn runs, one of its strips lights up and carries the turn's steps — the newest in front — and one line beneath says what it is doing right now.</em></sub>
+<img src="assets/screenshots/chat-turn-at-orb.png" alt="The StarlingAI dashboard during a research turn — strips of a Dyson sphere turn close round the orb's core, a ring of lit panels round the orb carries the turn's steps, the newest in front, and a status line under the orb saying what the swarm is doing; the question sits on the right, an earlier answer on the left" width="100%" />
+<sub><em>The swarm at work. A Dyson sphere is being built round the orb's core; while a turn runs, a ring of lit panels assembles round the orb and carries the turn's steps — the newest in front — and one line beneath says what it is doing right now.</em></sub>
 
 </div>
 
@@ -190,7 +190,7 @@ pnpm sai dev web               # start web UI in dev mode
 <br/><sub><em>Swarm Health: the warden's live view — alerts, capability gaps, tool promotions, paused tasks, circuit breakers.</em></sub>
 </div>
 
-- **The turn at the orb** — the orb sits inside a slowly turning Dyson shell of panel strips. While a turn runs, one more strip assembles around it and its steps ride on it, and one status line under the orb says, in the swarm's own words, what it is doing now: its plan, a finished step, that it is still on it. The conversation keeps only questions and answers; each answer folds its steps into one line that opens the full record, and any step opens in the side panel.
+- **The turn at the orb** — the orb's core sits inside a Dyson sphere of panel strips, each turning on its own axis. While a turn runs, a ring of lit panels assembles round the whole orb and the turn's steps ride on it, and one status line under the orb says, in the swarm's own words, what it is doing now: its plan, a finished step, that it is still on it. The conversation keeps only questions and answers; each answer folds its steps into one line that opens the full record, and any step opens in the side panel.
 - **Live observability** — token streaming to the dashboard via AG-UI SSE, live shell previews, per-turn performance telemetry, and audit/debug Markdown exports on top of a JSONL + PostgreSQL audit trail.
 - **Distributed tracing** — OpenTelemetry spans cover tool calls, sub-agents, and federation hops, with W3C `traceparent` propagated across instances.
 - **Cost governance** — token usage aggregated with per-model pricing and budget thresholds on a `/cost` dashboard. (Per-task limits are post-run signals today; atomic mission-wide budgets are on the roadmap.)

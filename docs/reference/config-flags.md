@@ -349,7 +349,7 @@ Every public schema field, where it is declared, and how many production files r
 | `passwordHash` | packages/core/src/config/schema.ts:406 | 5 |
 | `passwordSelector` | packages/core/src/config/schema.ts:867 | 5 |
 | `path` | packages/core/src/config/schemas/decisions.ts:130 | 347 |
-| `pattern` | packages/core/src/config/schema.ts:1433 | 69 |
+| `pattern` | packages/core/src/config/schema.ts:1433 | 68 |
 | `patterns` | packages/core/src/config/schema.ts:1370 | 28 |
 | `pdf` | packages/core/src/config/schemas/render.ts:18 | 32 |
 | `peers` | packages/core/src/config/schema.ts:664 | 16 |
