@@ -49,9 +49,10 @@
         <button type="button" class="skills-controls__refresh mt-3" @click="clearFilters()">Clear filters</button>
       </div>
       <div v-else-if="skillsLoaded && skills.length === 0 && !loading" class="empty-state">
-        No skills yet. The swarm authors them automatically after successful multi-step turns (when
+        No active or draft skills. The swarm authors them automatically after successful multi-step turns (when
         <code>skillLibrary.autoAuthor</code> is on), an agent can author one with <code>record_skill</code>,
-        or you can write one now with <strong>+ New skill</strong>.
+        or you can write one now with <strong>+ New skill</strong>. Archived skills are listed under
+        Status: Archived.
       </div>
 
       <div class="skills-list">
@@ -107,7 +108,7 @@
 
     <!-- Create / edit modal -->
     <div v-if="showModal" class="skill-modal__scrim" @click.self="closeModal()">
-      <div class="skill-modal" role="dialog" aria-modal="true">
+      <div ref="modalEl" class="skill-modal" role="dialog" aria-modal="true">
         <h2 class="skill-modal__title">{{ editingSlug ? "Edit skill" : "New skill" }}</h2>
         <div v-if="modalError" class="skills-page__notice skills-page__notice--error" role="alert">{{ modalError }}</div>
         <div class="skill-modal__grid">
@@ -168,6 +169,8 @@ import { useGatewayStore } from "@/stores/gateway";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
+import { useFocusTrap } from "@/composables/useFocusTrap";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
@@ -238,6 +241,8 @@ const requiredError = ref<string | null>(null);
 const nameField = ref<HTMLInputElement | null>(null);
 const descriptionField = ref<HTMLInputElement | null>(null);
 const procedureField = ref<HTMLTextAreaElement | null>(null);
+const modalEl = ref<HTMLElement | null>(null);
+useFocusTrap(modalEl);
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -253,7 +258,10 @@ async function loadSkills(): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    const params = new URLSearchParams({ includeArchived: "true" });
+    // Archived skills are asked for only where the filter names them. The gateway leaves them out
+    // otherwise, which is what "Active & draft" means; asked for every time, they were listed there too.
+    const params = new URLSearchParams();
+    if (request.status === "archived") params.set("includeArchived", "true");
     if (request.status) params.set("status", request.status);
     if (request.query) params.set("query", request.query);
     const res = await fetch(`${apiBase()}/api/skills?${params}`, { headers: authHeaders() });
@@ -300,7 +308,8 @@ async function archiveSkill(skill: SkillRecord): Promise<void> {
       headers: authHeaders(),
     });
     if (!res.ok) throw new Error(await failureText(res));
-    toast.success("Skill archived", `"${skill.name}" is no longer offered to agents.`);
+    // It leaves the list on screen unless that list is the archived one: say where it went.
+    toast.success("Skill archived", `"${skill.name}" is no longer offered to agents. It is listed under Status: Archived.`);
     await loadSkills();
   } catch (err) {
     toast.error("Couldn't archive the skill", errorText(err));
@@ -370,6 +379,7 @@ function openEdit(skill: SkillRecord): void {
 function closeModal(): void {
   showModal.value = false;
 }
+useEscapeToClose(() => showModal.value, closeModal);
 
 async function saveSkill(): Promise<void> {
   const f = form.value;

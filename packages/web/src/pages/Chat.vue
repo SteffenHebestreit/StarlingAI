@@ -688,9 +688,10 @@
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            :placeholder="gateway.hasOpenUserInput
+            :placeholder="composerBlockedReason || (gateway.hasOpenUserInput
               ? chatText.cardPlaceholder(uiLanguage)
-              : gateway.isLoading ? chatText.steerPlaceholder(uiLanguage) : composerPlaceholder"
+              : gateway.isLoading ? chatText.steerPlaceholder(uiLanguage) : composerPlaceholder)"
+            :title="composerBlockedReason || undefined"
             rows="3"
           />
           <div
@@ -717,7 +718,7 @@
                       @click="fileInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Attach a document or image"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Attach a document or image'"
                       aria-label="Attach file"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -732,7 +733,7 @@
                       @click="audioInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Upload an audio file for transcription"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Upload an audio file for transcription'"
                       aria-label="Upload audio"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -748,7 +749,7 @@
                       :disabled="(multimodalBusy && recordingState !== 'recording') || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
-                      :title="recordingState === 'recording' ? 'Stop microphone recording' : 'Record voice from the microphone'"
+                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? 'Stop microphone recording' : multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Record voice from the microphone'"
                       :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -853,7 +854,7 @@
                       :key="scene.name"
                       @click="triggerScene(scene.name)"
                       :disabled="gateway.isLoading || !gateway.connected || isSceneRunning(scene.name)"
-                      :title="scene.description"
+                      :title="startButtonTitle(scene.description, startBlockedReason('scene', isSceneRunning(scene.name)))"
                       class="chat-scene-pill"
                     >
                       <span class="text-purple-500 transition-colors">{{ isSceneRunning(scene.name) ? '●' : '▶' }}</span>
@@ -870,7 +871,7 @@
                       :key="job.name"
                       @click="triggerJob(job.name)"
                       :disabled="gateway.isLoading || !gateway.connected || isJobRunning(job.name)"
-                      :title="job.description"
+                      :title="startButtonTitle(job.description, startBlockedReason('job', isJobRunning(job.name)))"
                       class="chat-scene-pill"
                     >
                       <span class="text-cyan-400 transition-colors">{{ isJobRunning(job.name) ? '●' : '↻' }}</span>
@@ -1068,7 +1069,7 @@
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
-              title="Send this into the running turn — it is read at the turn's next step"
+              :title="sendBlockedReason || steerTitle"
             >
               {{ chatText.steer(uiLanguage) }}
             </button>
@@ -1087,6 +1088,7 @@
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
+              :title="sendBlockedReason || undefined"
             >
               {{ chatText.send(uiLanguage) }}
             </button>
@@ -1130,6 +1132,7 @@
     <Transition name="hud-pop">
     <div
       v-if="previewModalUrl"
+      ref="previewModalEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -1160,6 +1163,7 @@
     :request="configuringImageRequest.request"
     :payload="configuringImageRequest.payload"
     :always-auto="gateway.currentSessionImageSettingsPrompt === 'auto'"
+    :language="activeStreamingMessage ? orbLanguage : uiLanguage"
     @close="gateway.closeUserInputForm()"
   />
 </template>
@@ -1192,6 +1196,7 @@ import { formatCountdown, remainingMs } from "@/composables/userInputs";
 import { stepsFor } from "@/composables/turnSteps";
 import { followFocusedStep, latestTurn } from "@/composables/turnSegments";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import { confirmAction } from "@/composables/useConfirm";
 import { browserLanguage, chatText } from "@/composables/chatText";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
@@ -1289,6 +1294,32 @@ const uiLanguage = browserLanguage();
 // "/ for commands" only where there are commands: scenes or jobs to run by name.
 const composerPlaceholder = computed(() =>
   chatText.messagePlaceholder(uiLanguage, product.name, gateway.scenes.length > 0 || configuredJobs.value.length > 0));
+// A disabled control says why. The field, Send, and the scene and job buttons were greyed out
+// while the dashboard was not connected, or a turn ran, with nothing to tell the two apart.
+const offlineReason = computed(() => {
+  if (gateway.connected) return "";
+  return gateway.connecting || gateway.reconnecting
+    ? chatText.notConnectedConnecting(uiLanguage)
+    : chatText.notConnectedSignIn(uiLanguage);
+});
+/** Why nothing can be typed, for the field's placeholder — or "" while it can. */
+const composerBlockedReason = computed(() =>
+  offlineReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
+const steerTitle = "Send this into the running turn — it is read at the turn's next step";
+/** Why Send (or Steer) is disabled, or "". */
+const sendBlockedReason = computed(() =>
+  offlineReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
+/** Why a scene or job cannot be started from its button right now, or "". */
+function startBlockedReason(kind: "scene" | "job", running: boolean): string {
+  if (offlineReason.value) return offlineReason.value;
+  if (running) return kind === "scene" ? chatText.sceneRunning(uiLanguage) : chatText.jobRunning(uiLanguage);
+  return gateway.isLoading ? chatText.waitForTurn(uiLanguage) : "";
+}
+/** A scene or job button's tooltip: the reason it is disabled first, then what it does. */
+function startButtonTitle(description: string | undefined, reason: string): string | undefined {
+  if (!reason) return description;
+  return description ? `${reason}\n${description}` : reason;
+}
 const showStarters = computed(() => startersVisible({
   connected: gateway.connected,
   transcriptLoading: gateway.currentSessionTranscriptLoading,
@@ -1302,6 +1333,8 @@ const showStarters = computed(() => startersVisible({
 const optionsDetailsEl = ref<HTMLDetailsElement | null>(null);
 const previewModalUrl = ref<string | null>(null);
 useEscapeToClose(() => previewModalUrl.value !== null, () => { previewModalUrl.value = null; });
+const previewModalEl = ref<HTMLElement | null>(null);
+useFocusTrap(previewModalEl);
 const expandedMessageHistory = ref(false);
 const approvalNowMs = ref(Date.now());
 let approvalClockId: number | null = null;
@@ -1864,7 +1897,7 @@ watch(() => Boolean(activeStreamingMessage.value), (running) => {
   }
 }, { immediate: true });
 onBeforeUnmount(() => { if (liveClockTimer) clearInterval(liveClockTimer); });
-const orbLanguage = computed(() => turnLanguage(activeStreamingMessage.value?.language ?? null));
+const orbLanguage = computed(() => (activeStreamingMessage.value ? turnLanguage(activeStreamingMessage.value.language ?? null) : uiLanguage));
 const orbActivity = computed(() => liveActivity(gateway.messages, liveClock.value, orbLanguage.value));
 
 // The step ring for the orb canvas: the same ring OrbActivity puts the steps on (a track of

@@ -279,6 +279,7 @@
   <Teleport to="body">
     <div
       v-if="lightboxUrl"
+      ref="lightboxEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -299,6 +300,7 @@
   <Teleport to="body">
     <div
       v-if="artifactPreview"
+      ref="artifactPreviewEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -392,6 +394,7 @@ import { detectLanguage } from "@/speech/speechText";
 import { localExpiresAt, placementKey } from "@/composables/userInputs";
 import { escapeHtml, memoizedRenderMarkdown, renderMarkdown, renderStreamingMarkdown } from "@/composables/markdown";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import { finishReasonNeedsAttention as needsAttention } from "@/composables/finishReasons";
 import "highlight.js/styles/github-dark.css";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
@@ -956,6 +959,12 @@ function closeArtifactPreview(): void {
 
 useEscapeToClose(() => lightboxUrl.value !== null, () => { lightboxUrl.value = null; });
 useEscapeToClose(() => artifactPreview.value !== null, closeArtifactPreview);
+// Both cover the page. A previewed page keeps the keys pressed inside its frame; Tab coming out
+// of it lands back on the preview's own buttons.
+const lightboxEl = ref<HTMLElement | null>(null);
+const artifactPreviewEl = ref<HTMLElement | null>(null);
+useFocusTrap(lightboxEl);
+useFocusTrap(artifactPreviewEl);
 
 async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   if (attachment.dataUrl?.startsWith("data:image/")) {

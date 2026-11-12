@@ -27,7 +27,7 @@
       Plugins directory: <code>{{ directory }}</code>
     </p>
 
-    <p v-if="errorMessage" class="plugins-page__error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="plugins-page__error" role="alert">{{ errorMessage }}</p>
 
     <!-- "No plugins" is only true after a load that worked; a failed one says why in the line above. -->
     <div v-if="loading && plugins.length === 0" class="plugins-page__empty">Loading…</div>

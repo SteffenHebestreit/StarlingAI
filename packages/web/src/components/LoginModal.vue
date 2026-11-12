@@ -1,5 +1,6 @@
 <template>
-  <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-modal p-4"
+  <div ref="dialogEl"
+       class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-modal p-4"
        role="dialog" aria-modal="true" aria-labelledby="login-heading"
        @click.self="onBackdrop">
     <div class="glass-card modal-pop relative w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
@@ -153,6 +154,7 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue"
 import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { ssoErrorMessage } from "@/composables/ssoReturn";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 
 const props = withDefaults(
   defineProps<{ dismissible?: boolean; ssoError?: string | null }>(),
@@ -177,6 +179,10 @@ function onBackdrop(): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape" && props.dismissible) close();
 }
+
+// The page behind is covered, and before a sign-in there is nothing on it to reach.
+const dialogEl = ref<HTMLElement | null>(null);
+useFocusTrap(dialogEl);
 
 type Mode = "password" | "token";
 // Default to the token tab — the single-operator (auth-disabled) setup has no

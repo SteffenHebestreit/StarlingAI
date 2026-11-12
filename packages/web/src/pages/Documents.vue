@@ -308,10 +308,11 @@ useLoadWhenConnected(reload);
 .doc-count { font-size: 0.75rem; color: rgb(156 163 175); border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 0.1rem 0.6rem; }
 .doc-list { display: flex; flex-direction: column; gap: 0.5rem; }
 .doc-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.8rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; background: rgba(255,255,255,0.02); }
-.doc-row__title { font-size: 0.9rem; font-weight: 600; }
+.doc-row__main { min-width: 0; }
+.doc-row__title { font-size: 0.9rem; font-weight: 600; overflow-wrap: anywhere; }
 .doc-row__meta { font-size: 0.75rem; color: rgb(156 163 175); margin-top: 0.15rem; }
 .doc-row__alsoin { opacity: 0.8; }
-.doc-row__actions { display: flex; gap: 0.4rem; shrink: 0; }
+.doc-row__actions { display: flex; gap: 0.4rem; flex-shrink: 0; }
 .doc-remove { border: 1px solid rgba(248, 113, 113, 0.4); color: #fca5a5; background: rgba(248, 113, 113, 0.08); transition: background 0.15s; }
 .doc-remove:hover { background: rgba(248, 113, 113, 0.18); }
 .doc-outdate { border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd9a8; background: rgba(245, 158, 11, 0.08); transition: background 0.15s; }

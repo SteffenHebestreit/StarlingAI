@@ -50,7 +50,7 @@
       </p>
     </div>
 
-    <p v-if="errorMessage && !bootstrapHandoff" class="users-page__error">{{ errorMessage }}</p>
+    <p v-if="errorMessage && !bootstrapHandoff" class="users-page__error" role="alert">{{ errorMessage }}</p>
 
     <!-- "No users" is only true after a load that worked; a failed one says why in the line above. -->
     <div v-if="loading && users.length === 0" class="users-page__empty">Loading…</div>
@@ -94,6 +94,7 @@
 
     <div
       v-if="creating"
+      ref="createDialogEl"
       class="users-create-modal"
       role="dialog"
       aria-modal="true"
@@ -149,6 +150,7 @@
 
     <div
       v-if="resetting"
+      ref="resetDialogEl"
       class="users-create-modal"
       role="dialog"
       aria-modal="true"
@@ -187,6 +189,7 @@ import { useAuthStore } from "@/stores/auth";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
@@ -285,6 +288,8 @@ function dismissCreateForm(): void {
 }
 
 useEscapeToClose(() => creating.value, closeCreateForm);
+const createDialogEl = ref<HTMLElement | null>(null);
+useFocusTrap(createDialogEl);
 
 async function submitCreate(): Promise<void> {
   formError.value = null;
@@ -347,6 +352,8 @@ function dismissResetForm(): void {
 }
 
 useEscapeToClose(() => resetting.value !== null, closeResetForm);
+const resetDialogEl = ref<HTMLElement | null>(null);
+useFocusTrap(resetDialogEl);
 
 async function submitReset(): Promise<void> {
   if (!resetting.value) return;

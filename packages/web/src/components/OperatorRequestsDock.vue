@@ -71,6 +71,9 @@ watch(showBrowser, (shown) => {
   }
 });
 useEscapeToClose(() => showBrowser.value, () => { showBrowser.value = false; });
+// No focus trap here (composables/useFocusTrap.ts), unlike the other dialogs: Tab is a key the
+// page in the remote browser needs — it moves between that page's fields — so it is never taken
+// from the viewer or turned round at this dialog's edge.
 
 function approvalSummary(a: PendingApproval): string {
   const host = a.args && typeof a.args["hostname"] === "string" ? String(a.args["hostname"]) : "";

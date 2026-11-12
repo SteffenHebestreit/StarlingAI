@@ -536,7 +536,7 @@
             </div>
             <div class="flex items-center gap-2 flex-wrap">
               <span v-if="isCardDirty('multimodal')" class="unsaved-chip">Unsaved</span>
-              <button type="button" v-if="gateway.connected" @click="multimodalStore.fetch()" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" v-if="gateway.connected" @click="reloadMultimodal()" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
               <button type="button" @click="revertCard('multimodal')" :disabled="!isCardDirty('multimodal') || multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
             </div>
           </div>
@@ -992,7 +992,7 @@
                 <p class="text-xs text-gray-500 mt-0.5">Scan incoming messages for jailbreak and injection patterns.</p>
               </div>
               <toggle-switch label="Prompt Injection Protection" :value="guardrails.state.promptInjectionBlock"
-                @change="updateGuardrails({ promptInjectionBlock: $event })" :disabled="guardrails.loading" />
+                @change="setProtection('promptInjectionBlock', $event)" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
             <div class="flex items-start justify-between gap-4">
@@ -1001,7 +1001,7 @@
                 <p class="text-xs text-gray-500 mt-0.5">Redact API keys, tokens, and credentials from LLM responses.</p>
               </div>
               <toggle-switch label="Output Secret Scanning" :value="guardrails.state.outputSecretScan"
-                @change="updateGuardrails({ outputSecretScan: $event })" :disabled="guardrails.loading" />
+                @change="setProtection('outputSecretScan', $event)" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
             <div class="space-y-2">
@@ -1883,9 +1883,9 @@
 
   <!-- ── Site form modal ─────────────────────────────────────────────────── -->
   <div v-if="siteForm.open" class="modal-backdrop" @click.self="dismissSiteForm">
-    <div class="modal-box">
+    <div ref="siteDialogEl" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="site-dialog-title">
       <div class="modal-header">
-        <h3 class="font-semibold text-gray-100">{{ siteForm.editing ? 'Edit Site' : 'Add Site' }}</h3>
+        <h3 id="site-dialog-title" class="font-semibold text-gray-100">{{ siteForm.editing ? 'Edit Site' : 'Add Site' }}</h3>
         <button type="button" @click="siteForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
@@ -1951,9 +1951,9 @@
   </div>
 
   <div v-if="jobForm.open" class="modal-backdrop" @click.self="dismissJobForm">
-    <div class="modal-box">
+    <div ref="jobDialogEl" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="job-dialog-title">
       <div class="modal-header">
-        <h3 class="font-semibold text-gray-100">{{ jobForm.editing ? 'Edit Job' : 'Add Job' }}</h3>
+        <h3 id="job-dialog-title" class="font-semibold text-gray-100">{{ jobForm.editing ? 'Edit Job' : 'Add Job' }}</h3>
         <button type="button" @click="jobForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
@@ -2007,9 +2007,9 @@
 
   <!-- ── Channel form modal ──────────────────────────────────────────────── -->
   <div v-if="channelForm.open" class="modal-backdrop" @click.self="dismissChannelForm">
-    <div class="modal-box">
+    <div ref="channelDialogEl" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="channel-dialog-title">
       <div class="modal-header">
-        <h3 class="font-semibold text-gray-100">Configure {{ channelForm.label }}</h3>
+        <h3 id="channel-dialog-title" class="font-semibold text-gray-100">Configure {{ channelForm.label }}</h3>
         <button type="button" @click="channelForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
@@ -2233,9 +2233,9 @@
 
   <!-- ── Scene form modal ────────────────────────────────────────────────── -->
   <div v-if="sceneForm.open" class="modal-backdrop" @click.self="dismissSceneForm">
-    <div class="modal-box">
+    <div ref="sceneDialogEl" class="modal-box" role="dialog" aria-modal="true" aria-labelledby="scene-dialog-title">
       <div class="modal-header">
-        <h3 class="font-semibold text-gray-100">{{ sceneForm.editing ? 'Edit Scene' : 'Add Scene' }}</h3>
+        <h3 id="scene-dialog-title" class="font-semibold text-gray-100">{{ sceneForm.editing ? 'Edit Scene' : 'Add Scene' }}</h3>
         <button type="button" @click="sceneForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
@@ -2298,6 +2298,7 @@ import { appVersion } from "@/appVersion";
 import { useProductStore } from "@/stores/product";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import { errorText, useToast } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -2809,53 +2810,97 @@ function formatPersonalityUpdatedAt(value: string): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
 }
 
+type MultimodalFormFields = Omit<typeof multimodalForm, "error">;
+
+/** The form's fields as a stored config has them. */
+function multimodalFormFields(config: MultimodalConfig): MultimodalFormFields {
+  return {
+    maxUploadBytes: config.maxUploadBytes,
+    filesBaseUrl: config.files.baseUrl,
+    filesApiKey: config.files.apiKey ?? "",
+    filesTimeoutMs: config.files.timeoutMs,
+    fileToolName: config.files.toolName,
+    visionModel: config.files.visionModel ?? "",
+    visionBaseUrl: config.files.visionBaseUrl ?? "",
+    visionApiKey: config.files.visionApiKey ?? "",
+    sttBaseUrl: config.stt.baseUrl,
+    sttApi: config.stt.api,
+    sttApiKey: config.stt.apiKey ?? "",
+    sttTimeoutMs: config.stt.timeoutMs,
+    sttModel: config.stt.model,
+    ttsBaseUrl: config.tts.baseUrl,
+    ttsApi: config.tts.api,
+    ttsApiKey: config.tts.apiKey ?? "",
+    ttsTimeoutMs: config.tts.timeoutMs,
+    ttsModel: config.tts.model ?? "",
+    ttsDefaultLanguage: config.tts.defaultLanguage,
+    ttsDefaultSpeaker: config.tts.defaultSpeaker,
+    ttsDefaultVoiceId: config.tts.defaultVoiceId ?? "",
+    ttsVoiceSamplePath: config.tts.voiceSamplePath ?? "",
+    ttsVoiceSampleText: config.tts.voiceSampleText ?? "",
+    ttsDefaultQuality: config.tts.defaultQuality,
+    imageGenBaseUrl: config.imageGeneration?.baseUrl ?? "",
+    imageGenApi: config.imageGeneration?.api ?? "automatic1111-compatible",
+    imageGenApiKey: config.imageGeneration?.apiKey ?? "",
+    imageGenTimeoutMs: config.imageGeneration?.timeoutMs ?? 120_000,
+    imageGenModel: config.imageGeneration?.model ?? "",
+    imageGenDefaultWidth: config.imageGeneration?.defaultWidth ?? 1024,
+    imageGenDefaultHeight: config.imageGeneration?.defaultHeight ?? 1024,
+    imageGenDefaultSteps: config.imageGeneration?.defaultSteps ?? 28,
+    imageGenGuidanceScale: config.imageGeneration?.defaultGuidanceScale ?? 5.0,
+    imageGenDefaultNegativePrompt: config.imageGeneration?.defaultNegativePrompt ?? "",
+    wakeEnabled: config.wakeWord.enabled,
+    wakeLanguage: config.wakeWord.language,
+    wakeSilenceTimeoutMs: config.wakeWord.silenceTimeoutMs,
+    wakeKeywordsText: config.wakeWord.keywords.join(", "),
+    wakeStopPhrasesText: config.wakeWord.stopPhrases.join(", "),
+  };
+}
+
+/** The whole form follows the stored config: a load, this card's Save, Revert. */
 function syncMultimodalForm(config: MultimodalConfig) {
-  multimodalForm.maxUploadBytes = config.maxUploadBytes;
-  multimodalForm.filesBaseUrl = config.files.baseUrl;
-  multimodalForm.filesApiKey = config.files.apiKey ?? "";
-  multimodalForm.filesTimeoutMs = config.files.timeoutMs;
-  multimodalForm.fileToolName = config.files.toolName;
-  multimodalForm.visionModel = config.files.visionModel ?? "";
-  multimodalForm.visionBaseUrl = config.files.visionBaseUrl ?? "";
-  multimodalForm.visionApiKey = config.files.visionApiKey ?? "";
-  multimodalForm.sttBaseUrl = config.stt.baseUrl;
-  multimodalForm.sttApi = config.stt.api;
-  multimodalForm.sttApiKey = config.stt.apiKey ?? "";
-  multimodalForm.sttTimeoutMs = config.stt.timeoutMs;
-  multimodalForm.sttModel = config.stt.model;
-  multimodalForm.ttsBaseUrl = config.tts.baseUrl;
-  multimodalForm.ttsApi = config.tts.api;
-  multimodalForm.ttsApiKey = config.tts.apiKey ?? "";
-  multimodalForm.ttsTimeoutMs = config.tts.timeoutMs;
-  multimodalForm.ttsModel = config.tts.model ?? "";
-  multimodalForm.ttsDefaultLanguage = config.tts.defaultLanguage;
-  multimodalForm.ttsDefaultSpeaker = config.tts.defaultSpeaker;
-  multimodalForm.ttsDefaultVoiceId = config.tts.defaultVoiceId ?? "";
-  multimodalForm.ttsVoiceSamplePath = config.tts.voiceSamplePath ?? "";
-  multimodalForm.ttsVoiceSampleText = config.tts.voiceSampleText ?? "";
-  multimodalForm.ttsDefaultQuality = config.tts.defaultQuality;
+  Object.assign(multimodalForm, multimodalFormFields(config));
   savedVoiceForm.language = config.tts.defaultLanguage;
-  multimodalForm.imageGenBaseUrl = config.imageGeneration?.baseUrl ?? "";
-  multimodalForm.imageGenApi = config.imageGeneration?.api ?? "automatic1111-compatible";
-  multimodalForm.imageGenApiKey = config.imageGeneration?.apiKey ?? "";
-  multimodalForm.imageGenTimeoutMs = config.imageGeneration?.timeoutMs ?? 120_000;
-  multimodalForm.imageGenModel = config.imageGeneration?.model ?? "";
-  multimodalForm.imageGenDefaultWidth = config.imageGeneration?.defaultWidth ?? 1024;
-  multimodalForm.imageGenDefaultHeight = config.imageGeneration?.defaultHeight ?? 1024;
-  multimodalForm.imageGenDefaultSteps = config.imageGeneration?.defaultSteps ?? 28;
-  multimodalForm.imageGenGuidanceScale = config.imageGeneration?.defaultGuidanceScale ?? 5.0;
-  multimodalForm.imageGenDefaultNegativePrompt = config.imageGeneration?.defaultNegativePrompt ?? "";
-  multimodalForm.wakeEnabled = config.wakeWord.enabled;
-  multimodalForm.wakeLanguage = config.wakeWord.language;
-  multimodalForm.wakeSilenceTimeoutMs = config.wakeWord.silenceTimeoutMs;
-  multimodalForm.wakeKeywordsText = config.wakeWord.keywords.join(", ");
-  multimodalForm.wakeStopPhrasesText = config.wakeWord.stopPhrases.join(", ");
   multimodalForm.error = "";
   markSaved("multimodal");
 }
 
 function resetMultimodalForm() {
   syncMultimodalForm(multimodalStore.config);
+}
+
+// The store's config is replaced as a whole by every load and every save — also by a save made
+// beside the form: the Voice Studio's voices, "Upload And Save Voice". Syncing the whole form
+// to it then threw away whatever had been typed and not saved, and the "Unsaved" mark with it.
+// So only a load and this card's own Save hand the form the whole stored config (counted here
+// while one runs). Any other change brings in just the fields whose stored value changed.
+let wholeMultimodalFormFollows = 0;
+
+async function replacingMultimodalForm(run: () => Promise<void>) {
+  wholeMultimodalFormFollows += 1;
+  try {
+    await run();
+  } finally {
+    wholeMultimodalFormFollows -= 1;
+  }
+}
+
+function reloadMultimodal() {
+  return replacingMultimodalForm(() => multimodalStore.fetch());
+}
+
+/** What a save beside the form changed in the stored config, and nothing else. */
+function adoptStoredMultimodalFields(config: MultimodalConfig, previous: MultimodalConfig) {
+  const before = multimodalFormFields(previous);
+  const after = multimodalFormFields(config);
+  const changed: Partial<Record<keyof MultimodalFormFields, unknown>> = {};
+  for (const key of Object.keys(after) as Array<keyof MultimodalFormFields>) {
+    if (after[key] !== before[key]) changed[key] = after[key];
+  }
+  Object.assign(multimodalForm, changed);
+  if ("ttsDefaultLanguage" in changed) savedVoiceForm.language = config.tts.defaultLanguage;
+  // These fields are stored as they now stand; the rest of the form is compared as before.
+  markFieldsSaved("multimodal", changed);
 }
 
 // Key fields whose endpoint changed while they still show the saved key's mask: the gateway
@@ -2914,12 +2959,14 @@ async function saveVoiceSampleToLibrary() {
       multimodalForm.ttsVoiceSampleText = result.ref_text;
     }
 
-    const nextConfig = structuredClone(multimodalStore.config);
-    nextConfig.tts.defaultVoiceId = result.voice_id;
-    if (!nextConfig.tts.voiceSampleText && result.ref_text) {
-      nextConfig.tts.voiceSampleText = result.ref_text;
+    // Only the two fields this action owns go back, as a patch the gateway merges. It used to
+    // send a copy of the whole stored config — and making that copy failed in the browser (the
+    // store's config cannot be cloned), so the voice was uploaded and never became the default.
+    const ownFields: { defaultVoiceId: string; voiceSampleText?: string } = { defaultVoiceId: result.voice_id };
+    if (!multimodalStore.config.tts.voiceSampleText && result.ref_text) {
+      ownFields.voiceSampleText = result.ref_text;
     }
-    await multimodalStore.save(nextConfig);
+    await multimodalStore.save({ tts: ownFields });
     if (multimodalStore.error) {
       throw new Error(`Saved voice '${result.name}' as '${result.voice_id}', but failed to persist it as Default Voice ID: ${shownError(multimodalStore.error)}`);
     }
@@ -3014,10 +3061,10 @@ async function submitMultimodalForm() {
 
   // Only what the user changed goes back; the server merges it over what it stored (see
   // buildMultimodalPatch).
-  await multimodalStore.save(buildMultimodalPatch(multimodalStore.config, multimodalForm, {
+  await replacingMultimodalForm(() => multimodalStore.save(buildMultimodalPatch(multimodalStore.config, multimodalForm, {
     keywords: wakeKeywords,
     stopPhrases: wakeStopPhrases,
-  }, refusedMultimodalKey.value));
+  }, refusedMultimodalKey.value)));
 
   if (!multimodalStore.error) {
     syncMultimodalForm(multimodalStore.config);
@@ -3047,6 +3094,34 @@ async function updateGuardrails(patch: GuardrailPatch) {
   else toast.error("Guardrail not changed", shownError(guardrails.error) || "The gateway did not take this value. The control shows what is in effect.");
 }
 
+// Switching a protection off took effect on one click. Off asks first, and says what is no
+// longer checked; on needs no question. The switch shows the stored state, so backing out of the
+// question leaves it where it was.
+const PROTECTION_OFF_QUESTIONS = {
+  promptInjectionBlock: {
+    title: "Turn off prompt injection protection?",
+    message: "Incoming messages, and what tools bring back from web pages and files, are no longer checked for jailbreak and injection patterns: text written to take over an agent reaches it unblocked. You can switch the protection back on here at any time.",
+  },
+  outputSecretScan: {
+    title: "Turn off output secret scanning?",
+    message: "Answers are no longer scanned for API keys, tokens and credentials: one that turns up in a reply is shown as it is instead of being redacted. Only the gateway's own secrets are still removed. You can switch the scanning back on here at any time.",
+  },
+} as const;
+
+async function setProtection(protection: keyof typeof PROTECTION_OFF_QUESTIONS, on: boolean) {
+  if (!on) {
+    const confirmed = await confirmAction({
+      ...PROTECTION_OFF_QUESTIONS[protection],
+      confirmLabel: "Turn off",
+      cancelLabel: "Keep it on",
+      danger: true,
+      eyebrow: "Lowers security",
+    });
+    if (!confirmed) return;
+  }
+  await updateGuardrails({ [protection]: on });
+}
+
 async function resetGuardrails() {
   const confirmed = await confirmAction({
     title: "Reset the guardrails to their defaults?",
@@ -3073,6 +3148,13 @@ function rememberDialog(name: string, form: unknown) {
 function dialogUntouched(name: string, form: unknown): boolean {
   return dialogOpenedAs[name] === JSON.stringify(form);
 }
+
+// Each dialog covers the page: Tab goes round inside the one that is open.
+const siteDialogEl = ref<HTMLElement | null>(null);
+const sceneDialogEl = ref<HTMLElement | null>(null);
+const jobDialogEl = ref<HTMLElement | null>(null);
+const channelDialogEl = ref<HTMLElement | null>(null);
+for (const dialogEl of [siteDialogEl, sceneDialogEl, jobDialogEl, channelDialogEl]) useFocusTrap(dialogEl);
 
 // ── Site form ────────────────────────────────────────────────────────────────
 
@@ -4198,6 +4280,8 @@ interface TrackedCard {
   revert: () => void;
   /** Takes the form as it stands for the stored one. Cards that keep a snapshot only. */
   markSaved?: () => void;
+  /** Takes the given fields for stored and leaves the rest of the snapshot as it is. */
+  markFieldsSaved?: (fields: object) => void;
 }
 
 /** A form's fields without the listed ones: its own state (loading, error…) is not an edit. */
@@ -4221,6 +4305,10 @@ function trackForm<T extends object>(read: () => T, write: (fields: T) => void):
     revert: () => write(saved.value.fields),
     markSaved: () => {
       const fields = read();
+      saved.value = { fields, key: keyOf(fields) };
+    },
+    markFieldsSaved: (stored) => {
+      const fields = { ...saved.value.fields, ...stored };
       saved.value = { fields, key: keyOf(fields) };
     },
   };
@@ -4265,6 +4353,11 @@ const trackedCards: Record<string, TrackedCard> = {
 /** A card's form is as the gateway has it: called when its data loads and after each save. */
 function markSaved(cardId: string) {
   trackedCards[cardId]?.markSaved?.();
+}
+
+/** Some of a card's fields are as the gateway has them; edits to its other fields stay unsaved. */
+function markFieldsSaved(cardId: string, fields: object) {
+  trackedCards[cardId]?.markFieldsSaved?.(fields);
 }
 
 /** The "Revert" buttons: the form goes back to what was loaded; nothing is sent. */
@@ -4358,7 +4451,7 @@ function loadRuntimeSettingsData(keepEdits = false) {
   void channelsStore.fetchDeadLetterCount();
   void runtime.fetch();
   if (keepEdits && isCardDirty("multimodal")) void multimodalStore.fetchStatus();
-  else void multimodalStore.fetch();
+  else void reloadMultimodal();
 }
 
 function loadDefinitionsData(keepEdits = false) {
@@ -4393,8 +4486,10 @@ watch(() => personalityStore.profile, (profile) => {
   if (profile) syncPersonalityForm(profile);
 }, { immediate: true, deep: true });
 
-watch(() => multimodalStore.config, (config) => {
-  syncMultimodalForm(config);
+watch(() => multimodalStore.config, (config, previous) => {
+  // Changed in place, there is no earlier config to compare with: everything follows, as on a load.
+  if (!previous || previous === config || wholeMultimodalFormFollows > 0) syncMultimodalForm(config);
+  else adoptStoredMultimodalFields(config, previous);
 }, { deep: true, immediate: true });
 
 // ── Section index, filter, and deep links ────────────────────────────────────

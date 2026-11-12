@@ -15,7 +15,6 @@
           aria-modal="true"
           aria-labelledby="confirm-title"
           :aria-describedby="request.message ? 'confirm-message' : undefined"
-          @keydown.tab="keepFocusInside"
         >
           <p class="eyebrow" :class="request.danger ? 'confirm-dialog__eyebrow--danger' : ''">
             {{ request.eyebrow ?? (request.danger ? "Cannot be undone" : "Please confirm") }}
@@ -46,6 +45,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { answerConfirm, pendingConfirm } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 
 const request = computed(() => pendingConfirm.value);
 const dialogEl = ref<HTMLElement | null>(null);
@@ -65,20 +65,9 @@ watch(request, (now, before) => {
 
 useEscapeToClose(() => request.value !== null, () => answerConfirm(false));
 
-/** Tab stays between the dialog's two buttons while it is up. */
-function keepFocusInside(event: KeyboardEvent): void {
-  const buttons = [...(dialogEl.value?.querySelectorAll<HTMLElement>("button") ?? [])];
-  if (buttons.length === 0) return;
-  const first = buttons[0]!;
-  const last = buttons[buttons.length - 1]!;
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
-  }
-}
+// Tab stays between the dialog's buttons while the question is up — not while it fades out,
+// when the focus is already back with whoever asked.
+useFocusTrap(() => (request.value ? dialogEl.value : null));
 </script>
 
 <style scoped>

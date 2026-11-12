@@ -19,7 +19,7 @@
     </div>
 
     <!-- Header -->
-    <header class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
+    <header ref="headerRef" class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
@@ -348,10 +348,12 @@
       @close="showLogin = false"
     />
 
+    <!-- Under the header, wherever it ends (toastStackStyle); the class's top is for the moment before it is measured. -->
     <TransitionGroup
       name="toast"
       tag="div"
       class="pointer-events-none fixed right-4 top-[4.5rem] z-toast flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
+      :style="toastStackStyle"
     >
       <section
         v-for="item in notifications.items"
@@ -418,6 +420,7 @@
         @click.self="closeTheme"
       >
         <div
+          ref="themeDialogRef"
           class="glass-card modal-pop flex max-h-full w-full max-w-2xl flex-col"
           role="dialog"
           aria-modal="true"
@@ -468,6 +471,7 @@ import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import ConfirmHost from "@/components/ConfirmHost.vue";
 import CommandPalette from "@/components/CommandPalette.vue";
 import { isPaletteShortcut, type PaletteCommand } from "@/composables/commandPalette";
@@ -524,21 +528,42 @@ const navLevel = ref<string | null>(null);
 const burgerRef = ref<HTMLElement | null>(null);
 const navPanelRef = ref<HTMLElement | null>(null);
 watch(() => $route.path, () => { navOpen.value = false; });
+// Where the header ends on screen. Not a fixed distance from the top: the "model unreachable"
+// banner above pushes the header down, and on a phone the header wraps onto a second row. The
+// nav panel and the toasts both hang under this edge, so neither lies over the header.
+const headerRef = ref<HTMLElement | null>(null);
+const headerBottom = ref(0);
+function measureHeader(): number {
+  headerBottom.value = headerRef.value?.getBoundingClientRect().bottom ?? 0;
+  return headerBottom.value;
+}
+// The toasts keep the gap they had under a one-row header at the top of the page.
+const toastStackStyle = computed(() => (headerBottom.value > 0 ? { top: `${Math.round(headerBottom.value) + 12}px` } : undefined));
+// A wrap changes the header's height without the window changing size (a longer status, a crumb).
+let headerObserver: ResizeObserver | null = null;
+onMounted(() => {
+  measureHeader();
+  if (typeof ResizeObserver === "undefined" || !headerRef.value) return;
+  headerObserver = new ResizeObserver(() => { measureHeader(); });
+  headerObserver.observe(headerRef.value);
+});
+onUnmounted(() => headerObserver?.disconnect());
 // The panel hangs under the burger, wherever the header has put it. Its top used to be a fixed
-// 4.4rem, so it lay over the header whenever the "model unreachable" banner above pushed the
-// header down, or the header wrapped onto a second row.
+// 4.4rem, so it lay over the header whenever the banner showed or the header had wrapped.
 const navPanelStyle = ref<Record<string, string>>({});
 function positionNavPanel(): void {
   const el = burgerRef.value;
   if (!el) return;
   // Under the burger, and under the whole header where it has wrapped onto rows below the burger.
-  const headerBottom = el.closest("header")?.getBoundingClientRect().bottom ?? 0;
-  const top = Math.round(Math.max(el.getBoundingClientRect().bottom + 12, headerBottom)) + 10;
+  const top = Math.round(Math.max(el.getBoundingClientRect().bottom + 12, measureHeader())) + 10;
   navPanelStyle.value = { top: `${top}px`, maxHeight: `calc(100dvh - ${top}px - 1rem)` };
 }
 // The banner comes and goes without a resize.
 watch(() => gateway.modelUnreachable, () => {
-  if (navOpen.value) void nextTick(positionNavPanel);
+  void nextTick(() => {
+    measureHeader();
+    if (navOpen.value) positionNavPanel();
+  });
 });
 // Opening puts the keyboard inside the panel (it is teleported to the end of the page, far from
 // the burger in tab order); closing hands it back to the burger, unless something else took it.
@@ -626,6 +651,7 @@ useEscapeToClose(() => accountMenuOpen.value, () => {
 // them at all. The account menu, which everyone has, opens the same picker in a dialog.
 const themeOpen = ref(false);
 const themeCloseRef = ref<HTMLButtonElement | null>(null);
+const themeDialogRef = ref<HTMLElement | null>(null);
 function openTheme(): void {
   accountMenuOpen.value = false;
   themeOpen.value = true;
@@ -637,6 +663,7 @@ function closeTheme(): void {
   accountBtnRef.value?.focus({ preventScroll: true });
 }
 useEscapeToClose(() => themeOpen.value, closeTheme);
+useFocusTrap(themeDialogRef);
 
 /**
  * The top-level nav is small and each entry is either a single RouterLink
@@ -881,8 +908,10 @@ onMounted(() => {
     void modelPreset.fetchOAuthStatus();
   }
   void auth.refreshCurrentUser();
-  // Keep the teleported account menu and nav panel anchored to their buttons on resize.
+  // Keep the teleported account menu and nav panel anchored to their buttons on resize, and the
+  // toasts under the header.
   window.addEventListener("resize", () => {
+    measureHeader();
     if (accountMenuOpen.value) positionAccountMenu();
     if (navOpen.value) positionNavPanel();
   });

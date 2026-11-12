@@ -213,6 +213,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useModelPresetStore, type PresetScope } from "@/stores/modelPreset";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 
 const emit = defineEmits<{ close: []; connected: [] }>();
 
@@ -262,6 +263,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (opener?.isConnected) opener.focus({ preventScroll: true });
 });
+
+useFocusTrap(dialogEl);
 
 // Re-sync the dropdown when the stored model arrives/changes; fall back to
 // the custom field for ids outside the curated list.
