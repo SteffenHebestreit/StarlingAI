@@ -25,6 +25,7 @@ import { buildApprovalIdempotencyKey } from "../approval/durable-store.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { publishNotification } from "../runtime/notifications.js";
+import { settleScheduledRun, type ScheduledRunEnd } from "../runtime/follow-up.js";
 import { buildWorkflowExecutionKey } from "./workflow-execution-key.js";
 import { workflowStepPipeline } from "./workflow-step-pipeline.js";
 import { getScene } from "../credentials/scenes.js";
@@ -157,8 +158,19 @@ export const LEGACY_JOB_REFUSAL = "This job was queued before account ids: it na
 
 /** Ends a claimed job that never started: failed, audited and logged, so it is not left running
  *  for the stale-job recovery to queue again. */
+/**
+ * A run of a scheduled task ended: its schedule counts it and posts what it found
+ * (runtime/follow-up.ts). Not awaited: the post waits for the conversation to be idle, which can
+ * take as long as a turn, and the worker has the next job to run. It never throws.
+ */
+function settleScheduled(job: ClaimedSceneJob, end: ScheduledRunEnd): void {
+  if (!job.payload.scheduleId) return;
+  void settleScheduledRun({ id: job.id, scheduleId: job.payload.scheduleId }, end);
+}
+
 async function failUnstartedJob(job: ClaimedSceneJob, error: string, err?: unknown): Promise<void> {
   await failJob(job.id, error);
+  settleScheduled(job, { kind: "failed", error });
   logAudit("scene_job_failed", { jobId: job.id, sceneName: job.sceneName, error }, { sessionId: job.sessionId, channel: "scene", severity: "error" });
   log.error({ ...(err ? { err } : {}), jobId: job.id, sceneName: job.sceneName }, "Scene job failed before it started");
 }
@@ -229,6 +241,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     const current = await getJob(job.id);
     if (current?.status === "cancelling" || (controller.signal.aborted && !timedOut)) {
       await markJobCancelled(job.id, "Scene job cancelled by operator");
+      settleScheduled(job, { kind: "cancelled" });
       logAudit("scene_job_cancelled", {
         jobId: job.id,
         sceneName: job.sceneName,
@@ -242,6 +255,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     }
 
     await completeJob(job.id, output);
+    settleScheduled(job, { kind: "completed", response: output.response, blocked: output.blocked });
     logAudit("scene_job_completed", {
       jobId: job.id,
       sceneName: job.sceneName,
@@ -261,6 +275,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     if (timedOut) {
       const error = `Scene timed out after ${Math.round(turnTimeoutMs / 60000)} minutes`;
       await failJob(job.id, error);
+      settleScheduled(job, { kind: "failed", error });
       logAudit("scene_job_failed", {
         jobId: job.id,
         sceneName: job.sceneName,
@@ -272,6 +287,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
       });
     } else if (current?.status === "cancelling" || controller.signal.aborted) {
       await markJobCancelled(job.id, "Scene job cancelled by operator");
+      settleScheduled(job, { kind: "cancelled" });
       logAudit("scene_job_cancelled", {
         jobId: job.id,
         sceneName: job.sceneName,
@@ -284,6 +300,7 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     } else {
       const error = err instanceof Error ? err.message : String(err);
       await failJob(job.id, error);
+      settleScheduled(job, { kind: "failed", error });
       logAudit("scene_job_failed", {
         jobId: job.id,
         sceneName: job.sceneName,

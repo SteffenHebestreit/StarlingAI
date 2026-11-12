@@ -128,7 +128,10 @@
         "graph_upsert_entity",
         "graph_relate",
         "graph_query",
-        "graph_find_paths"
+        "graph_find_paths",
+        // What a ComfyUI server has installed is on that server, not on the web: a turn the
+        // up-front judge flags hands "which models does ComfyUI have" to this agent.
+        "comfyui_catalog"
       ]
     },
     "evidence_analyst": {

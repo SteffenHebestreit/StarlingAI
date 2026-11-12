@@ -40,6 +40,7 @@ import {
   taskRequiresExternalResearch,
   agentIsResearchCapable,
   agentGathersDirectly,
+  agentCfgGathers,
   preferResearchCapableCandidates,
   preferFormatProducingCandidates,
   agentCfgIsMetaFactory,
@@ -1714,7 +1715,20 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
         }
       }
       if (gatherable.length < routingCandidates.length) {
-        const fallback = gatherable.length > 0 ? undefined : pickResearchFallbackAgent(
+        // THE ROUTER'S PICK DROPPED, AND THE NEXT ONE DOES NOT GATHER EITHER. A candidate with a
+        // source of its own keeps the step when the router put it first (a mailbox agent for a
+        // mailbox step). One left only BEHIND a dropped top pick is the topic's neighbour: when the
+        // one that would take the step neither reads the web nor gathers from a source of its own
+        // (agentCfgGathers), the research fallback goes first and the neighbours stay behind it. Of
+        // 17 routed drops that left candidates in 594 lab runs, the 12 that left researcher first ran
+        // it; the other 5 ran the neighbour, wrong every time: computer_use_agent searching a desktop
+        // for "welche Modelle hat ComfyUI installiert" (4) and swarm_maintainer for "Finde die
+        // aktuellen Claude-Preise" (1). Judged by the next candidate, not by any of them: image_sourcer
+        // ranked fifth beside swarm_maintainer second, and swarm_maintainer answered "which open image
+        // model is best" from memory.
+        const topDropped = !gatherable.includes(routingCandidates[0]!);
+        const nextGathers = gatherable.length > 0 && agentCfgGathers(lookupCfg(gatherable[0]!));
+        const fallback = gatherable.length > 0 && !(topDropped && !nextGathers) ? undefined : pickResearchFallbackAgent(
           attemptedAgents,
           (name) => (!ctx.allowedAgents || ctx.allowedAgents.includes(name))
             && (ctx._turnAgentCounts?.get(name) ?? 0) < getPerAgentDelegationLimit(ctx, name),
@@ -1724,20 +1738,19 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
           taskTitle: title,
           droppedAgents: routingCandidates.filter((cand) => !kept.includes(cand)).map((cand) => cand.name),
           redirectedTo: fallback ?? null,
+          ...(fallback && kept.length > 0 ? { keptBehind: kept.map((cand) => cand.name) } : {}),
           trigger: "turn_evidence",
           ...auditExtra,
         }, { sessionId: ctx.sessionId });
-        if (gatherable.length > 0 || !fallback) {
-          routingCandidates = kept;
-        } else {
+        if (fallback) {
           routingCandidateMap.set(fallback, {
             confidence: "medium",
             matchedTerms: ["research", "turn-evidence", "redirected"],
             score: 0.7,
           });
           candidateQueue.push(fallback);
-          routingCandidates = [];
         }
+        routingCandidates = kept;
       }
     }
     // Capability-aware gate: when the task needs a concrete execution tool class

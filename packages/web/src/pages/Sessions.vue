@@ -1,15 +1,21 @@
 <template>
-  <div class="sessions-page" style="height: 100%; overflow-y: auto">
-    <div class="sessions-page__header">
-      <div>
-        <h2 class="sessions-page__title">Sessions</h2>
-        <p class="sessions-page__subtitle">Resume active conversations, inspect archived missions, and prune stored history.</p>
+  <div class="page-shell sessions-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Sessions</h1>
+        <p class="page-subtitle">Resume active conversations, inspect archived missions, and prune stored history.</p>
       </div>
-      <div class="sessions-page__actions">
-        <button @click="clearArchivedSessions" class="sessions-page__clear" title="Remove all archived session history">Clear archived</button>
-        <button @click="refresh" class="sessions-page__refresh">Refresh</button>
+      <div class="page-actions">
+        <button
+          type="button"
+          class="btn-danger px-4 py-2 rounded-xl text-sm"
+          :disabled="gateway.archivedSessions.length === 0"
+          :title="gateway.archivedSessions.length === 0 ? 'No archived sessions to remove' : 'Remove all archived session history'"
+          @click="clearArchivedSessions"
+        >Clear archived</button>
+        <button type="button" @click="refresh" class="btn-ghost px-4 py-2 rounded-xl text-sm">Refresh</button>
       </div>
-    </div>
+    </header>
 
     <div class="sessions-filters">
       <input
@@ -31,53 +37,87 @@
 
     <div class="sessions-layout">
       <section class="sessions-list">
-        <div v-if="!filteredSessionCards.length" class="sessions-list__empty">
-          No sessions match the current filters.
+        <!-- "No sessions" is only true after a load that worked, and is a different thing from a
+             search or filter that hides the ones there are. -->
+        <div v-if="sessionsError" class="notice notice--error" role="alert">
+          The sessions could not be loaded: {{ sessionsError }}
+        </div>
+        <div v-if="!sessionCards.length && sessionsLoaded" class="empty-state">
+          No sessions yet. Start a conversation in the chat and it is listed here.
+        </div>
+        <div v-else-if="!sessionCards.length && !sessionsError" class="sessions-list__empty">
+          {{ gateway.connected && gateway.token ? "Loading sessions…" : "Not connected to the gateway — the sessions load once it is." }}
+        </div>
+        <div v-else-if="sessionCards.length && !filteredSessionCards.length" class="empty-state">
+          <p>{{ noMatchLine("sessions", searchQuery, statusFilter !== "all") }}</p>
+          <button type="button" class="btn-ghost mt-3 px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
         </div>
 
         <div
-          v-for="session in filteredSessionCards"
+          v-for="session in sessionWindow.visible"
           :key="session.id"
           :class="['session-card', selectedSessionId === session.id && 'session-card--active']"
+          role="button"
+          tabindex="0"
+          :aria-pressed="selectedSessionId === session.id"
           @click="selectSession(session.id)"
+          @keydown.enter.self="selectSession(session.id)"
+          @keydown.space.self.prevent="selectSession(session.id)"
         >
           <div class="session-card__top">
-            <span class="session-card__id">{{ session.id.substring(0, 12) }}…</span>
+            <button
+              type="button"
+              class="session-card__id"
+              :title="`${session.id} — click to copy`"
+              :aria-label="`Copy session id ${session.id}`"
+              @click.stop="copyId('Session', session.id)"
+            >{{ session.id.substring(0, 12) }}…</button>
             <div class="session-card__top-right">
               <span :class="['session-card__badge', session.isActive ? 'session-card__badge--active' : 'session-card__badge--archived']">
                 {{ session.isActive ? 'Active' : 'Archived' }}
               </span>
               <button
                 v-if="session.isActive"
-                class="session-card__action"
+                type="button"
+                class="btn-ghost px-3 py-1.5 rounded-lg text-sm"
                 title="Continue this session in chat"
                 @click.stop="continueSession(session.id)"
               >Continue</button>
               <button
                 v-if="session.isActive"
-                class="session-card__action session-card__action--secondary"
+                type="button"
+                class="btn-ghost px-3 py-1.5 rounded-lg text-sm"
                 title="Archive this session"
                 @click.stop="archive(session.id)"
               >Archive</button>
               <button
+                type="button"
                 class="session-card__delete"
                 :title="session.isActive ? 'Delete this session' : 'Remove session history'"
+                :aria-label="session.isActive ? 'Delete this session' : 'Remove session history'"
                 @click.stop="removeSession(session.id)"
               >✕</button>
             </div>
           </div>
           <div class="session-card__meta">
             <span v-if="session.channel">{{ session.channel }}</span>
-            <span v-if="session.createdAt">Created {{ formatDate(session.createdAt) }}</span>
+            <span v-if="session.createdAt" :title="isoTimestamp(session.createdAt)">Created {{ formatDateTime(session.createdAt) }}</span>
             <span v-if="session.turns !== null">{{ session.turns }} turns</span>
           </div>
           <div v-if="session.runCount > 0" class="session-card__history">
             <span :class="['session-card__status', `session-card__status--${session.lastStatus}`]">{{ session.lastStatus }}</span>
             <span>{{ session.runCount }} swarm run{{ session.runCount === 1 ? '' : 's' }}</span>
-            <span>{{ session.lastRecordedAt ? formatDate(session.lastRecordedAt) : 'unknown' }}</span>
+            <span :title="isoTimestamp(session.lastRecordedAt)">{{ session.lastRecordedAt ? formatDateTime(session.lastRecordedAt) : 'unknown' }}</span>
           </div>
           <div v-if="session.preview" class="session-card__preview">{{ session.preview }}</div>
           <div v-else-if="session.lastObjective" class="session-card__objective">{{ session.lastObjective }}</div>
+        </div>
+
+        <div v-if="filteredSessionCards.length && sessionWindow.paged" class="flex flex-col items-center gap-2 text-center">
+          <button v-if="sessionWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="sessionWindow.showMore()">
+            Show {{ sessionWindow.nextStep }} more
+          </button>
+          <p class="text-xs text-gray-400" aria-live="polite">{{ sessionWindow.summary }} sessions</p>
         </div>
       </section>
 
@@ -100,17 +140,17 @@
                 <h3 class="transcript-panel__title">Transcript</h3>
                 <p v-if="selectedTranscript?.session" class="transcript-panel__meta">
                   {{ selectedTranscript.session.messageCount }} messages
-                  <span v-if="selectedTranscript.session.lastMessageAt"> · Last activity {{ formatDate(selectedTranscript.session.lastMessageAt) }}</span>
+                  <span v-if="selectedTranscript.session.lastMessageAt" :title="isoTimestamp(selectedTranscript.session.lastMessageAt)"> · Last activity {{ formatDateTime(selectedTranscript.session.lastMessageAt) }}</span>
                 </p>
               </div>
               <div v-if="selectedTranscript?.session" class="transcript-panel__header-actions">
                 <span :class="['transcript-panel__badge', selectedTranscript.session.archivedAt ? 'transcript-panel__badge--archived' : 'transcript-panel__badge--active']">
                   {{ selectedTranscript.session.archivedAt ? 'Archived transcript' : 'Active transcript' }}
                 </span>
-                <button class="transcript-panel__action" @click="exportTranscriptMarkdown">Export Markdown</button>
-                <button class="transcript-panel__action" @click="exportDebugMarkdown">Debug Markdown</button>
-                <button class="transcript-panel__action" @click="exportAuditMarkdown">Audit Markdown</button>
-                <button class="transcript-panel__action" @click="exportTranscriptPDF">Export PDF</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportTranscriptMarkdown">Export Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportDebugMarkdown">Debug Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportAuditMarkdown">Audit Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportTranscriptPDF">Export PDF</button>
               </div>
             </div>
 
@@ -125,7 +165,7 @@
             </div>
             <div v-else>
               <div v-if="hiddenTranscriptCount > 0" class="transcript-panel__controls">
-                <button class="transcript-panel__action" @click="showOlderTranscriptMessages">
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showOlderTranscriptMessages">
                   Load {{ Math.min(hiddenTranscriptCount, transcriptPageSize) }} older message{{ Math.min(hiddenTranscriptCount, transcriptPageSize) === 1 ? '' : 's' }}
                 </button>
                 <span class="transcript-panel__meta">Showing {{ visibleTranscriptMessages.length }} of {{ selectedTranscript.transcript.length }} messages</span>
@@ -138,7 +178,7 @@
               >
                 <div class="transcript-message__top">
                   <span :class="['transcript-message__role', `transcript-message__role--${message.role}`]">{{ message.role }}</span>
-                  <span class="transcript-message__time">{{ formatDate(message.timestamp) }}</span>
+                  <time class="transcript-message__time" :datetime="isoTimestamp(message.timestamp)" :title="isoTimestamp(message.timestamp)">{{ formatDateTime(message.timestamp) }}</time>
                 </div>
                 <p class="transcript-message__content">{{ message.content || 'No text content' }}</p>
 
@@ -167,11 +207,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { marked } from "marked";
 import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
+import { writeClipboard } from "@/composables/clipboard";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
+import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast, errorText } from "@/composables/useToast";
 import { useProductStore } from "@/stores/product";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -196,10 +242,15 @@ type TranscriptToolCall = NonNullable<GatewaySessionTranscriptMessage["toolCalls
 const gateway = useGatewayStore();
 const route = useRoute();
 const router = useRouter();
+const toast = useToast();
 const selectedSessionId = ref<string | null>(null);
 const selectedRunId = ref<string | null>(null);
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | "archived" | "has-runs" | "ok" | "blocked" | "error">("all");
+// True while the list on screen comes from a load that succeeded: only then does an empty list
+// mean "no sessions".
+const sessionsLoaded = ref(false);
+const sessionsError = ref<string | null>(null);
 const selectedTranscript = ref<GatewaySessionTranscript | null>(null);
 const transcriptLoading = ref(false);
 const transcriptError = ref<string | null>(null);
@@ -273,6 +324,16 @@ const filteredSessionCards = computed(() => {
   });
 });
 
+function clearFilters() {
+  searchQuery.value = "";
+  statusFilter.value = "all";
+}
+
+// The cards are drawn a page at a time; a new search or filter starts again at the first page.
+const sessionWindow = useListWindow(() => filteredSessionCards.value, {
+  resetKey: () => `${statusFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
 const selectedRuns = computed(() => gateway.getSwarmRuns(selectedSessionId.value));
 const selectedRun = computed(() => {
   if (!selectedRuns.value.length) return null;
@@ -316,7 +377,14 @@ function ensureSelection() {
 }
 
 async function refresh() {
-  await gateway.refreshSessions();
+  sessionsError.value = null;
+  try {
+    await gateway.refreshSessions();
+    sessionsLoaded.value = true;
+  } catch (error) {
+    sessionsLoaded.value = false;
+    sessionsError.value = errorText(error);
+  }
   ensureSelection();
 }
 
@@ -385,7 +453,21 @@ async function archive(sessionId: string) {
 }
 
 async function removeSession(sessionId: string) {
-  await gateway.deleteSession(sessionId);
+  // One small ✕ beside "Archive" used to delete a conversation's whole history at once.
+  if (!(await confirmAction({
+    title: "Delete this session?",
+    message: `Session ${sessionId.substring(0, 12)}… and its history are removed from the gateway. Archive it instead if you only want it out of the way.`,
+    confirmLabel: "Delete session",
+    danger: true,
+  }))) return;
+  // A refusal or a lost connection throws now (it used to be swallowed and the row came back on
+  // the next refresh): say so and leave the list as it is.
+  try {
+    await gateway.deleteSession(sessionId);
+  } catch (err) {
+    toast.error("Couldn't delete the session", errorText(err));
+    return;
+  }
   if (selectedSessionId.value === sessionId) {
     selectedSessionId.value = null;
     selectedRunId.value = null;
@@ -394,11 +476,33 @@ async function removeSession(sessionId: string) {
 }
 
 async function clearArchivedSessions() {
-  const archived = gateway.archivedSessions;
+  const archived = [...gateway.archivedSessions];
+  if (archived.length === 0) return;
+  if (!(await confirmAction({
+    title: `Delete ${archived.length} archived session${archived.length === 1 ? "" : "s"}?`,
+    message: "Their conversations and swarm history are removed from the gateway for good. Active sessions are not touched.",
+    confirmLabel: "Delete archived",
+    danger: true,
+  }))) return;
   for (const s of archived) {
-    await gateway.deleteSession(s.id);
+    try {
+      await gateway.deleteSession(s.id);
+    } catch (err) {
+      toast.error("Couldn't delete all archived sessions", `${errorText(err)} — the remaining ones were left alone.`);
+      break;
+    }
   }
   ensureSelection();
+}
+
+// A card shows its id cut to twelve characters; this is how to get the whole of it.
+async function copyId(what: string, id: string): Promise<void> {
+  try {
+    await writeClipboard(id);
+    toast.success("Copied", `${what} id is on the clipboard.`);
+  } catch {
+    toast.error("Couldn't copy", `The browser refused the clipboard. ${what} id: ${id}`);
+  }
 }
 
 function selectSession(id: string) {
@@ -431,12 +535,6 @@ function syncRouteSelection() {
   });
 }
 
-function formatDate(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
 function formatToolArgs(args: TranscriptToolCall["args"]): string {
   try {
     return JSON.stringify(args, null, 2);
@@ -458,8 +556,8 @@ function buildTranscriptMarkdownExport(transcriptPage: GatewaySessionTranscript)
     ``,
     `- Session: ${session.id}`,
     `- Channel: ${session.channel}`,
-    `- Created: ${new Date(session.createdAt).toLocaleString()}`,
-    `- Updated: ${new Date(session.updatedAt).toLocaleString()}`,
+    `- Created: ${formatDateTime(session.createdAt)}`,
+    `- Updated: ${formatDateTime(session.updatedAt)}`,
     `- Status: ${session.archivedAt ? "Archived" : "Active"}`,
     `- Messages: ${session.messageCount}`,
     ``,
@@ -532,7 +630,7 @@ async function exportTranscriptPDF(): Promise<void> {
   if (!transcriptPage) return;
 
   const session = transcriptPage.session;
-  const exportedAt = new Date().toLocaleString();
+  const exportedAt = formatDateTime(new Date());
   const messageHtml = transcriptPage.transcript.map((message) => {
     const role = transcriptRoleLabel(message.role);
     const roleClass = `role-${message.role}`;
@@ -632,64 +730,16 @@ watch(() => route.query, ensureSelection, { deep: true });
 watch([selectedSessionId, selectedRunId], syncRouteSelection);
 watch(selectedSessionId, (sessionId) => {
   void loadTranscript(sessionId);
+  // A session picked from outside the list (a link from Jobs or Cost, the one open in the chat)
+  // can sit beyond the cards on screen: draw the list as far as its card.
+  if (sessionId) sessionWindow.reveal(filteredSessionCards.value.findIndex((session) => session.id === sessionId));
 }, { immediate: true });
 
-onMounted(refresh);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
-.sessions-page {
-  padding: 1.5rem;
-}
-
-.sessions-page__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.sessions-page__title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: #f5ecff;
-}
-
-.sessions-page__subtitle {
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-  color: rgba(226, 217, 243, 0.72);
-}
-
-.sessions-page__actions {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.sessions-page__refresh,
-.sessions-page__clear {
-  border-radius: 0.85rem;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.sessions-page__clear {
-  border-color: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
-}
-
-.sessions-page__clear:hover {
-  border-color: rgba(239, 68, 68, 0.5);
-  background: rgba(127, 29, 29, 0.3);
-}
-
 .sessions-filters {
   display: flex;
   flex-wrap: wrap;
@@ -767,6 +817,7 @@ onMounted(refresh);
 
 .session-card__top-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
 }
@@ -794,37 +845,24 @@ onMounted(refresh);
   background: rgba(127, 29, 29, 0.3);
 }
 
-.session-card__action {
-  border-radius: 9999px;
-  border: 1px solid rgba(96, 165, 250, 0.25);
-  background: rgba(30, 41, 59, 0.72);
-  color: #bfdbfe;
-  font-size: 0.68rem;
-  line-height: 1;
-  padding: 0.38rem 0.58rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.session-card__action:hover {
-  border-color: rgba(96, 165, 250, 0.5);
-  background: rgba(30, 64, 175, 0.22);
-}
-
-.session-card__action--secondary {
-  border-color: rgba(251, 191, 36, 0.24);
-  color: #fcd34d;
-}
-
-.session-card__action--secondary:hover {
-  border-color: rgba(251, 191, 36, 0.45);
-  background: rgba(120, 53, 15, 0.24);
-}
-
+/* The id is shown cut short: the button holds all of it (title) and copies it. */
 .session-card__id {
   font-family: monospace;
   font-size: 0.85rem;
   color: #c4b5fd;
+  cursor: copy;
+}
+
+.session-card__id:hover {
+  color: #ede9fe;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.session-card__id:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .session-card__badge,
@@ -946,22 +984,6 @@ onMounted(refresh);
 .transcript-panel__badge--archived {
   background: rgba(55, 65, 81, 0.5);
   color: #d1d5db;
-}
-
-.transcript-panel__action {
-  border-radius: 9999px;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.38rem 0.7rem;
-  font-size: 0.74rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.transcript-panel__action:hover {
-  border-color: rgba(196, 181, 253, 0.42);
-  background: rgba(49, 46, 129, 0.28);
 }
 
 .transcript-panel__error {
@@ -1094,5 +1116,9 @@ onMounted(refresh);
     flex-direction: column;
     align-items: flex-start;
   }
+}
+.session-card:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
 }
 </style>

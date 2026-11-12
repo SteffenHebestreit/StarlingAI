@@ -37,6 +37,23 @@ describe("shouldRequireWorkflowExecutionAfterSearch", () => {
     // automation on the wrong workflow. With no keyword overlap, require
     // a much higher semantic score (0.78+) before forcing.
     expect(shouldRequireWorkflowExecutionAfterSearch([m(0.65, [])])).toBe(false);
+  });
+
+  it("does not force a match barely above workflows that share no word with the request", () => {
+    // The lab: "ComfyUI image generation workflow" forced deck_images and the turn fetched stock photos.
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.56, ["image", "workflow"]), m(0.5537, []), m(0.551, [])])).toBe(false);
+  });
+
+  it("still forces a match that stands clear of the unrelated ones", () => {
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.62, ["image", "workflow"]), m(0.55, [])])).toBe(true);
+  });
+
+  it("still forces when the close runners-up share words with the request, as sibling workflows do", () => {
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.62, ["deck", "slides"]), m(0.6, ["deck"]), m(0.59, ["deck", "sources"])])).toBe(true);
+  });
+
+  it("looks past close siblings to the first unrelated match", () => {
+    expect(shouldRequireWorkflowExecutionAfterSearch([m(0.56, ["deck"]), m(0.555, ["deck"]), m(0.55, [])])).toBe(false);
     expect(shouldRequireWorkflowExecutionAfterSearch([m(0.74, [])])).toBe(false);
   });
 

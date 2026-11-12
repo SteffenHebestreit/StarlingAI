@@ -187,7 +187,7 @@ All writes are confined to the configured `workspacePath`. The agent cannot writ
 | `ask_user` | Pause execution and surface a question to the operator (multi-choice or free-text) | None | No |
 | `tool_dev_start` / `tool_dev_submit` | Start / submit a self-developed tool for review | Per-call | Yes — Docker sandbox |
 | `cron_remove` / `cron_list` | Remove or list scheduled cron jobs | Per-call | No |
-| `reminder_create` / `reminder_remove` / `timer_start` / `timer_cancel` | Reminder + timer scheduling | None | No |
+| `schedule_list` | List the scheduled tasks: what runs later or repeats, and what each watch waits for | None | No |
 | `request_new_capability` / `list_capability_gaps` | Capability-gap signaling for the self-improvement loop | None | No |
 | `swarm_validate` | Validate self-authored scenes/jobs/agent definitions (JSON, schema, references) before applying — read-only | None | No |
 | `assistant_personality_update` | Update the persistent main-assistant personality profile | Per-call | No |
@@ -213,6 +213,8 @@ Internal orchestration tools stay inside the guarded runtime, so they do not nee
 | `send_email` | Send an email message (separate from `mail_send_draft`) | Per-call + audit |
 | `send_agent_message` | Direct A2A message to another sub-agent (Stage 9 messaging) | Per-call + audit |
 | `cron_create` | Register a new cron schedule | Per-call + audit |
+| `schedule_task` | Run a task later, once or repeating, as a turn of its own, and post what it finds into the conversation it was made in; with `until`, a watch that stays silent until the awaited thing has happened. Held by the main assistant. A scheduled run has nobody to approve a call, so it cannot schedule more | Per-call + audit |
+| `schedule_remove` | Remove a scheduled task | Per-call + audit |
 | `vm_manage` | Manage VMs through configured infrastructure backends | Per-call + audit |
 | `proxmox_vm` | Manage Proxmox VMs via the Proxmox VE API | Per-call + audit |
 | `terraform_exec` | Run Terraform provisioning and stateful changes | Per-call + audit |

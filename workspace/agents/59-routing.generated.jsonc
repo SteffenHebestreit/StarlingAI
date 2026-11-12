@@ -483,10 +483,10 @@
         "surface": [
           "workspace"
         ],
-        "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
-        "sourceHash": "04d84c4c3b7cc478",
-        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
-        "labeledAt": "2026-09-19"
+        "oneLiner": "Generates and EDITS visuals (diffusion raster/SVG/QR, img2img, ComfyUI workflows, local sharpen/crop/resize); creates or revises, distinct from image_sourcer(find). Unreachable by any scene.",
+        "sourceHash": "02c5d0c7bfd8aa09",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated); re-labelled 2026-11-11 for the reordered description, verdict unchanged: input stays text, so a flagged turn's step naming it is still redirected to research (a step asking which open model is best for ComfyUI was named for it)",
+        "labeledAt": "2026-11-11"
       }
     },
     "image_sourcer": {
@@ -1001,9 +1001,9 @@
           "external_network"
         ],
         "oneLiner": "The only fresh-discovery web researcher; shares web tools with source_verifier(audits) and image_sourcer(images) -- separated by L1 + deliverable.",
-        "sourceHash": "c903980b24718e9e",
-        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated)",
-        "labeledAt": "2026-09-19"
+        "sourceHash": "f27664e7092b27e4",
+        "labeledBy": "idcm-merge (two independent taxonomies, adjudicated); re-labelled 2026-11-11 for comfyui_catalog, verdict unchanged",
+        "labeledAt": "2026-11-11"
       }
     },
     "shell_agent": {

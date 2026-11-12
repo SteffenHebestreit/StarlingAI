@@ -12,8 +12,8 @@
 
 [Quick Start](#quick-start) · [What it does](#what-the-swarm-can-do) · [Architecture](docs/architecture.md) · [API](docs/api.md) · [Security](docs/security.md)
 
-<img src="assets/screenshots/chat-orb.png" alt="The StarlingAI dashboard — the swarm idles as a living particle orb, waiting for its next task" width="100%" />
-<sub><em>The swarm at rest. Every particle is waiting for work — give it some.</em></sub>
+<img src="assets/screenshots/chat-turn-at-orb.png" alt="The StarlingAI dashboard during a research turn — a sphere of fine light rings holds the orb's glowing core and its cloud of particles, a track of light round the orb carries the turn's steps, the newest in front, and a status line under the orb saying what the swarm is doing; the question sits on the right, an earlier answer on the left" width="100%" />
+<sub><em>The swarm at work. A sphere of fine light rings holds the orb's breathing core; while a turn runs, a track of light assembles round the orb and carries the turn's steps — the newest in front — and one line beneath says what it is doing right now.</em></sub>
 
 </div>
 
@@ -105,6 +105,7 @@ Repo-local launchers work too: `./sai ...` in Bash/WSL, `./sai ...` / `.\sai ...
 pnpm sai start --rag               # include document-RAG stack (engram + reranker)
 pnpm sai start --pentest           # include Kali Linux pentest service
 pnpm sai start --computer-desktop  # include VNC desktop for computer-use
+pnpm sai start --comfyui           # include ComfyUI (NVIDIA GPU; fetches ~18 GB of models on first start)
 pnpm sai start --all               # all remaining optional services
 
 pnpm sai stop                  # stop all services
@@ -150,16 +151,41 @@ pnpm sai dev web               # start web UI in dev mode
 
 - **Every channel** — webchat, Telegram, Slack, Discord, WhatsApp, and email, with delivery SLOs, dead-letter queues, and retry with backoff.
 - **Multimodal tools** — speech-to-text, speech synthesis, image analysis, file-to-Markdown conversion, browser automation, shell execution, MCP, and webhooks — all behind the same gateway.
+- **Voice** — a record button, a wake word, or a hands-free conversation in which the microphone stays open; answers and the turn's progress are read aloud.
+- **One switch between local and cloud models** — the model preset changes from the dashboard header, or by asking in the chat (`switch_model`, admin-only and approval-gated).
 - **Server operations** — SSH, Docker, `systemctl`, and log triage route to shell/ops specialists with `ssh_exec`, not to desktop automation. A dedicated `computer-remote` sidecar keeps raw VNC/RDP/SSH sessions isolated from the gateway.
 - **Open interoperability** — StarlingAI both *speaks and serves* the open agent protocols: an MCP server (HTTP + stdio) exposes its tools to other clients, and a public A2A server + client lets external agents collaborate with the swarm.
 - **Federated swarms** — instances delegate work to each other over HMAC-signed, short-lived, peer-scoped tokens. Each side keeps its own tool tiers and approval gates — federation never bypasses local guardrails.
 - **Plugin SDK** — trusted third-party tool packages extend the registry under a namespaced Tier-2 surface with tier-shadow rejection and per-call approval. (Plugin code currently runs in the gateway process and must be treated as trusted; digest trust and isolated execution are priority hardening items.)
 - **Penetration testing** — a full Kali Linux toolchain (nmap, nikto, gobuster, sqlmap, hydra, wpscan, sslscan, ffuf, Metasploit, and more) wrapped in a scope-enforcing swarm with mandatory authorization.
 
+### It creates
+
+<div align="center">
+<img src="assets/screenshots/chat-comfyui.png" alt="A finished ComfyUI turn — the photo of a red fox in snow, upscaled to 4096 by 4096, with the steps folded into one line above the answer" width="90%" />
+<br/><sub><em>Asked for a fox in the snow at four times the size: one ComfyUI workflow, one run, 4096 × 4096 — and the workflow waiting in the ComfyUI editor.</em></sub>
+</div>
+
+- **Image generation** — up to three engine tiers (fast, balanced, quality), each an image backend you point it at. A change inside a picture is an edit that keeps the rest of it, a painted mask confines it to a region, and sharpening, cropping or resizing run locally without the model. In the chat you can review the settings before a render, or skip it.
+- **ComfyUI workflows** — with the bundled ComfyUI container on an NVIDIA GPU, `image_creator` builds node workflows from the official templates your installed models can run, adds a stage (an upscaler, a LoRA, a filter) onto the connection it belongs on, runs the result, and hands it to the ComfyUI editor. Every picture carries the workflow that made it. Ask what the server has installed and the answer comes from the server, not from memory. ([docs](docs/comfyui.md))
+- **Documents and sites** — decks, Word documents, PDFs, charts, diagrams and small web apps are written to the workspace as files you can open, preview and download from the answer.
+
+### It follows up
+
+<div align="center">
+<img src="assets/screenshots/chat-follow-up.png" alt="A conversation in which the user asked to be told when a release is out: the assistant's confirmation that it checks every weekday at nine, and below it, two weeks later, a message labelled Scheduled, Release watch, watch finished, saying that the full release is out, with licence, variants and sources" width="90%" />
+<br/><sub><em>Asked once to say when it is out: nine silent checks later, the answer arrives in the same conversation.</em></sub>
+</div>
+
+- **Watches** — "tell me when it is out": the assistant checks on a schedule and says nothing until what you are waiting for has happened. That run is posted and the watch ends; so does a watch that has used up its runs.
+- **Reminders and briefings** — "remind me tomorrow at nine", "in two hours", "brief me every weekday at eight", on your clock, not the server's. Each run is a turn of its own with the whole swarm behind it.
+- **In the conversation you asked in** — what a run finds is posted there as a message of the assistant, marked as scheduled, with a notification for you alone. A run that fails says so instead of going quiet.
+- **Yours to approve and to stop** — every schedule asks for your approval when it is made, and all of them are listed on the Jobs page with what each is waiting for, its next and last run, and a Remove. A scheduled run cannot schedule more.
+
 ### It stays guarded
 
 <div align="center">
-<img src="assets/screenshots/guardrails-settings.png" alt="Runtime settings — prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
+<img src="assets/screenshots/guardrails-settings.png" alt="The Settings page — a searchable index of its sections on top, the appearance picker, and the guardrails: prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
 <br/><sub><em>Guardrails in the dashboard: prompt-injection scanning, output secret redaction — and a shell sandbox that is locked on. Some switches you don't get to flip.</em></sub>
 </div>
 
@@ -172,10 +198,12 @@ pnpm sai dev web               # start web UI in dev mode
 ### It stays watchable
 
 <div align="center">
-<img src="assets/screenshots/swarm-dashboard.png" alt="The Swarm Health dashboard — live warden alerts, capability gaps, tool promotions, paused tasks, and circuit-breaker states" width="90%" />
+<img src="assets/screenshots/swarm-dashboard.png" alt="The Swarm Health dashboard on a quiet swarm — warden alerts, capability gaps, paused tasks, the tool promotion queue and self-developed tools, each saying there is nothing to report" width="90%" />
 <br/><sub><em>Swarm Health: the warden's live view — alerts, capability gaps, tool promotions, paused tasks, circuit breakers.</em></sub>
 </div>
 
+- **The turn at the orb** — the orb's core and its cloud of particles breathe inside a sphere of hairline rings: a globe cage, graduated scales and slowly tumbling gimbals, drawn in light. While a turn runs, a track of the same make assembles round the whole orb and the turn's steps ride on it, and one status line under the orb says, in the swarm's own words, what it is doing now: its plan, a finished step, that it is still on it. The conversation keeps only questions and answers; each answer folds its steps into one line that opens the full record, and any step opens in the side panel.
+- **A dashboard that answers** — `Ctrl+K` reaches any page or action in a few letters, and typing anywhere on the chat starts a message. Every page names itself, says so when its data could not be loaded, and asks before anything that cannot be undone. Settings has a section index, a search over its cards, and marks what is not saved yet. Chat labels follow the conversation's language (English or German).
 - **Live observability** — token streaming to the dashboard via AG-UI SSE, live shell previews, per-turn performance telemetry, and audit/debug Markdown exports on top of a JSONL + PostgreSQL audit trail.
 - **Distributed tracing** — OpenTelemetry spans cover tool calls, sub-agents, and federation hops, with W3C `traceparent` propagated across instances.
 - **Cost governance** — token usage aggregated with per-model pricing and budget thresholds on a `/cost` dashboard. (Per-task limits are post-run signals today; atomic mission-wide budgets are on the roadmap.)
@@ -296,6 +324,7 @@ workspace/              # Durable workspace definitions and runtime overlays
 | [docs/channels.md](docs/channels.md) | Channel capability matrix and delivery model |
 | [docs/channel-setup.md](docs/channel-setup.md) | Channel onboarding walkthrough |
 | [docs/knowledge-bases.md](docs/knowledge-bases.md) | Crawled corpora: crawler scope/safety, storage, retrieval |
+| [docs/comfyui.md](docs/comfyui.md) | ComfyUI workflows: the GPU container, its models, and the tools that build, run and export them |
 | [docs/mail-service.md](docs/mail-service.md) | Headless mail-service architecture and API |
 | [docs/forking.md](docs/forking.md) | Fork StarlingAI into a specialized swarm, stay rebase-clean |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |

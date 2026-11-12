@@ -12,48 +12,56 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import * as THREE from "three";
-import { vertexShader as torusVS, fragmentShader as torusFS } from "./shaders/torusParticles";
+import {
+  DUST_OUTER, buildDust, vertexShader as dustVS, fragmentShader as dustFS, type DustCloud, type DustNode,
+} from "./shaders/dustParticles";
 import { vertexShader as sphereVS, fragmentShader as sphereFS } from "./shaders/neuralSphereParticles";
 import {
   orbitalVertexShader, orbitalFragmentShader,
   coreGlowVertexShader, coreGlowFragmentShader,
 } from "./shaders/orbitalSystem";
 import { ambientVertexShader, ambientFragmentShader } from "./shaders/ambientSystem";
+import {
+  HUD_RING_KINDS, SPHERE_FRAMES, SPHERE_RINGS, STEP_RINGS, hudRingFragmentShader, hudRingVertexShader, type HudRingSpec,
+} from "./shaders/hudRings";
 
-const props = withDefaults(defineProps<{ aiState?: string }>(), { aiState: "default" });
+/**
+ * The step ring (composables/orbActivity.ts activityRing): its radius in orb units, how far it is
+ * tipped towards the viewer, and whether a turn is running on it: its strip assembles while
+ * `active`.
+ */
+interface StepRingProp { radius: number; tilt: number; active: boolean }
+const props = withDefaults(defineProps<{ aiState?: string; ring?: StepRingProp }>(), {
+  aiState: "default",
+  ring: () => ({ radius: 2.4, tilt: Math.asin(0.28), active: false }),
+});
 
-// ─── Constants (matching original Orb.jsx) ────────────────────────────────────
-// Main cloud: full particle density spread over double the old reach, with
-// smaller points (see torusParticles gl_PointSize) — a fine, wide mist
-// rather than a dense fuzz hugging the core.
-const PARTICLE_COUNT          = 2400;
-const OUTER_RADIUS            = 1.9;
-const INNER_RADIUS            = 0.6;
-const PORTAL_DEPTH            = 1.0;
-const Z_DRIFT_SPEED           = 0.1;
-const SNAKE_EYE_SCALE_X       = 0.8;
-const SNAKE_EYE_SCALE_Y       = 1.35;
-const RADIAL_WAVE_SPEED       = 0.75;
-const Z_WAVE_SPEED            = 0.6;
+// ─── Constants ────────────────────────────────────────────────────────────────
+// The orb's breathing body, the dust inside the hologram sphere (shaders/dustParticles.ts): how
+// fast its points drift along their circles and stir, per second, before the state's speed factor.
+const OUTER_RADIUS            = DUST_OUTER;
+const DUST_ORBIT_SPEED        = 1.0;
+const DUST_FLUTTER_SPEED      = 0.6;
 // Default palette follows the Jarvis HUD reference: bright hologram cyan
 // line-work fading into deep teal-blue, instead of the old cyan→violet.
 const COLOR_NEAR              = new THREE.Color("#35d8ff").multiplyScalar(1.5);
 const COLOR_FAR               = new THREE.Color("#0a5a78").multiplyScalar(1.3);
-const BASE_BREATHE_SPEED      = 0.5;
 const BASE_PARTICLE_OPACITY   = 0.9;
 
-const NUM_NODES               = 10;
 const PULSE_COLOR             = new THREE.Color(0xffffff);
 const PULSE_SPEED             = 2.5;
-// 2.25× the doubled OUTER_RADIUS keeps the same absolute pulse reach the
-// old 4.5 × 0.95 gave — pulses must not overshoot the ambient star shell.
-const PULSE_MAX_TRAVEL_RADIUS = OUTER_RADIUS * 2.25;
+// A pulse is done once it has crossed the whole body from a point on its edge: the body's
+// diameter at its fullest, and the pulse's own width on top.
+const PULSE_MAX_TRAVEL_RADIUS = OUTER_RADIUS * 2.8;
 const MAX_ACTIVE_PULSES       = 9;
 const PULSE_INTERVAL_MIN      = 0.5;
 const PULSE_INTERVAL_MAX      = 2.0;
 
 const NS_RADIUS               = 0.4;
-const NS_COUNT                = 400;
+// The core's shell of points is a quiet skin over the glow, not a second light: few points, and
+// dimmed in its own shader (neuralSphereParticles), because its colour is also the colour of the
+// core glow and of the hologram sphere's rings.
+const NS_COUNT                = 240;
 const NS_BASE_COLOR           = new THREE.Color(0x7dd3fc).multiplyScalar(1.4);
 const NS_ACTIVITY_COLOR       = new THREE.Color(0xffffff);
 const NS_ERROR_COLOR          = new THREE.Color(0xff3333).multiplyScalar(1.3);
@@ -120,6 +128,15 @@ const BASE_FOV_DEG            = 60;
 const MIN_FRAMED_ASPECT       = 0.4;
 const REFERENCE_FRAME_PX      = 1900;
 const pointScaleUniform       = { value: 1 };
+// A hairline of the hologram sphere follows the orb's size like the points do: 1.6 drawing-buffer
+// pixels at the reference frame. It is never drawn under one pixel wide — below that it keeps the
+// pixel and gives up brightness instead (lineThin) — and on a small orb the sphere's minor rings
+// step back (lineDetail), so the sphere thins out instead of clotting.
+const linePxUniform           = { value: 1 };
+const lineThinUniform         = { value: 1 };
+const lineDetailUniform       = { value: 1 };
+// The entity's breath, for every shader that shows its crest of light (shaders/breath.ts).
+const breathUniform           = { value: 0 };
 
 // ─── Visual state ─────────────────────────────────────────────────────────────
 interface VisualState {
@@ -268,12 +285,33 @@ let clock:       THREE.Clock;
 let animId:      number;
 let resizeObserver: ResizeObserver | null = null;
 let orbGroup:    THREE.Group;          // scaled root for the whole orb
-let torusPoints: THREE.Points;
+let dustClouds: THREE.Points[] = [];
 let sphereGroup: THREE.Group;
 let orbitalPoints: THREE.Points;
 let ambientPoints: THREE.Points;
 let coreGlowMesh:  THREE.Mesh;
-let torusUniforms: Record<string, THREE.IUniform>;
+/**
+ * The hologram sphere round the core and the step ring (shaders/hudRings.ts). Each ring is a
+ * pivot, leaning the way the ring's normal points, holding a mesh that spins on its own axis; the
+ * sphere's rings hang in frames that turn about their poles while the poles tumble, like gimbals.
+ * The step ring lives outside the breathing orb group, at the orb's fixed scale, so it stays
+ * exactly where the page draws the steps.
+ */
+interface HudRing { pivot: THREE.Group; mesh: THREE.Mesh; spec: HudRingSpec; lean: THREE.Quaternion }
+interface HudFrameGroup {
+  group: THREE.Group; lean: THREE.Quaternion; speed: number; tumbleAxis: THREE.Vector3; tumbleSpeed: number;
+}
+let sphereFrames:  HudFrameGroup[] = [];
+let stepGroup:     THREE.Group;
+let sphereRings:   HudRing[] = [];
+let stepRings:     HudRing[] = [];
+let stepRadius     = 2.4;
+let stepAssemble   = 0;
+const RING_AXIS    = new THREE.Vector3(0, 0, 1);
+const swayEuler    = new THREE.Euler();
+const swayTurn     = new THREE.Quaternion();
+const tumbleTurn   = new THREE.Quaternion();
+let dustUniforms: Record<string, THREE.IUniform>;
 let sphereUniforms: Record<string, THREE.IUniform>;
 let orbitalUniforms: Record<string, THREE.IUniform>;
 let ambientUniforms: Record<string, THREE.IUniform>;
@@ -284,20 +322,19 @@ interface Pulse { origin: THREE.Vector3; startTime: number }
 let activePulses: Pulse[] = [];
 let lastPulseTime    = 0;
 let nextPulseInterval = PULSE_INTERVAL_MIN + Math.random() * (PULSE_INTERVAL_MAX - PULSE_INTERVAL_MIN);
-let nodeIndices: number[] = [];
-let torusBasePositions: Float32Array;   // CPU-side copy for pulse origins
+let dustNodes: DustNode[] = [];   // where a pulse can start from
 
 // Phase accumulators: advanced by delta * currentSpeed each frame, so speed
 // changes (transitions, freezes, tab visibility) never cause phase jumps.
-let breathePhase         = 0;
-let radialWavePhase      = 0;
-let zWavePhase           = 0;
-let driftOffset          = 0;
+let dustOrbitPhase       = 0;
+let dustFlutterPhase     = 0;
 let orbitTime            = 0;
 let glowPhase            = 0;
 let nsShimmerPhase       = 0;
 let nsPulsePhase         = 0;
 let neuralSphereRotation = 0;
+let hudPhase             = 0;
+let spherePhase          = 0;
 let nsShimmerSpeed       = NS_SHIMMER_SPEED;
 let nsPulseSpeed         = NS_PULSE_SPEED;
 let starPhase            = 0;
@@ -312,55 +349,22 @@ let transitionStart  = -1;
 let transitionProgress = 1.0;
 
 // ─── Geometry ─────────────────────────────────────────────────────────────────
-function buildTorusGeometry(): THREE.BufferGeometry {
-  const indexSet = new Set<number>();
-  while (indexSet.size < NUM_NODES) indexSet.add(Math.floor(Math.random() * PARTICLE_COUNT));
-  nodeIndices = Array.from(indexSet);
-
-  const positions              = new Float32Array(PARTICLE_COUNT * 3);
-  const particleAngles         = new Float32Array(PARTICLE_COUNT);
-  const particleRadii          = new Float32Array(PARTICLE_COUNT);
-  const particlePhases         = new Float32Array(PARTICLE_COUNT);
-  const particleDriftZ         = new Float32Array(PARTICLE_COUNT);
-  const particleZOffsets       = new Float32Array(PARTICLE_COUNT);
-  const particleIsNode         = new Float32Array(PARTICLE_COUNT);
-  torusBasePositions           = new Float32Array(PARTICLE_COUNT * 3);
-
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
-    const i3     = i * 3;
-    const isNode = indexSet.has(i);
-
-    const r     = INNER_RADIUS + Math.random() * (OUTER_RADIUS - INNER_RADIUS);
-    const angle = (i / PARTICLE_COUNT) * Math.PI * 2;
-    const dz    = (Math.random() - 0.5) * PORTAL_DEPTH;
-    const zo    = (Math.random() - 0.5) * 0.05;
-    const bx    = Math.cos(angle) * r;
-    const by    = Math.sin(angle) * r;
-    const bz    = dz + zo;
-
-    positions[i3]     = bx * SNAKE_EYE_SCALE_X;
-    positions[i3 + 1] = by * SNAKE_EYE_SCALE_Y;
-    positions[i3 + 2] = bz;
-
-    particleAngles[i]        = angle;
-    particleRadii[i]         = r;
-    particlePhases[i]        = Math.random() * Math.PI * 2;
-    particleDriftZ[i]        = dz;
-    particleZOffsets[i]      = zo;
-    particleIsNode[i]        = isNode ? 1.0 : 0.0;
-    torusBasePositions[i3]     = bx;
-    torusBasePositions[i3 + 1] = by;
-    torusBasePositions[i3 + 2] = bz;
+/** One cloud of dust as a geometry; `position` is where each point starts, for the bounding sphere. */
+function buildDustGeometry(cloud: DustCloud): THREE.BufferGeometry {
+  const positions = new Float32Array(cloud.count * 3);
+  for (let i = 0; i < cloud.count; i++) {
+    positions[i * 3]     = Math.cos(cloud.angle[i]!) * cloud.radius[i]!;
+    positions[i * 3 + 1] = Math.sin(cloud.angle[i]!) * cloud.radius[i]!;
+    positions[i * 3 + 2] = cloud.height[i]!;
   }
-
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position",        new THREE.BufferAttribute(positions,         3));
-  geo.setAttribute("particleAngle",   new THREE.BufferAttribute(particleAngles,    1));
-  geo.setAttribute("particleRadius",  new THREE.BufferAttribute(particleRadii,     1));
-  geo.setAttribute("particlePhase",   new THREE.BufferAttribute(particlePhases,    1));
-  geo.setAttribute("particleDriftZ",  new THREE.BufferAttribute(particleDriftZ,    1));
-  geo.setAttribute("particleZOffset", new THREE.BufferAttribute(particleZOffsets,  1));
-  geo.setAttribute("particleIsNode",  new THREE.BufferAttribute(particleIsNode,    1));
+  geo.setAttribute("position", new THREE.BufferAttribute(positions,     3));
+  geo.setAttribute("aRadius",  new THREE.BufferAttribute(cloud.radius,  1));
+  geo.setAttribute("aAngle",   new THREE.BufferAttribute(cloud.angle,   1));
+  geo.setAttribute("aHeight",  new THREE.BufferAttribute(cloud.height,  1));
+  geo.setAttribute("aSpeed",   new THREE.BufferAttribute(cloud.speed,   1));
+  geo.setAttribute("aPhase",   new THREE.BufferAttribute(cloud.phase,   1));
+  geo.setAttribute("aIsNode",  new THREE.BufferAttribute(cloud.isNode,  1));
   return geo;
 }
 
@@ -528,9 +532,9 @@ function animate() {
     cv.neuralSphereColor.lerpColors(src.neuralSphereColor, dst.neuralSphereColor, t);
     if (t > 0.5) { cv.pulsesFromCenter = dst.pulsesFromCenter; cv.frozenAnimation = dst.frozenAnimation; }
 
-    (torusUniforms["uPulseColor"]!.value      as THREE.Color).copy(cv.pulseColor);
-    (torusUniforms["uPortalColorNear"]!.value as THREE.Color).copy(cv.portalColorNear);
-    (torusUniforms["uPortalColorFar"]!.value  as THREE.Color).copy(cv.portalColorFar);
+    (dustUniforms["uPulseColor"]!.value      as THREE.Color).copy(cv.pulseColor);
+    (dustUniforms["uPortalColorNear"]!.value as THREE.Color).copy(cv.portalColorNear);
+    (dustUniforms["uPortalColorFar"]!.value  as THREE.Color).copy(cv.portalColorFar);
     (sphereUniforms["uNeuralSphereColor"]!.value as THREE.Color).copy(cv.neuralSphereColor);
     sphereUniforms["uNeuralSphereOpacity"]!.value     = cv.neuralSphereOpacity;
     sphereUniforms["uNeuralSpherePulseAmount"]!.value = cv.neuralSpherePulseAmount;
@@ -548,15 +552,16 @@ function animate() {
 
   // ── Phase accumulation (CPU-side, jump-free) ─────────────────────────────────
   const dt = delta * MOTION_SCALE;
-  breathePhase    += dt * BASE_BREATHE_SPEED * cv.portalSpeedFactor;
-  radialWavePhase += dt * RADIAL_WAVE_SPEED  * cv.portalSpeedFactor;
-  zWavePhase      += dt * Z_WAVE_SPEED       * cv.portalSpeedFactor;
-  driftOffset      = (driftOffset + dt * Z_DRIFT_SPEED * cv.portalSpeedFactor) % PORTAL_DEPTH;
+  dustOrbitPhase   += dt * DUST_ORBIT_SPEED   * (0.4 + cv.portalSpeedFactor) * motion;
+  dustFlutterPhase += dt * DUST_FLUTTER_SPEED * cv.portalSpeedFactor;
   orbitTime       += dt * cv.orbitSpeedFactor * motion;
   glowPhase       += dt * GLOW_PULSE_SPEED * (cv.frozenAnimation ? 0.15 : 1);
   nsShimmerPhase  += dt * nsShimmerSpeed;
   nsPulsePhase    += dt * nsPulseSpeed;
   neuralSphereRotation += dt * NS_ROTATION_SPEED * motion;
+  hudPhase             += dt * (cv.frozenAnimation ? 0.15 : 1);
+  // The sphere quickens while a turn runs: its instruments are at work.
+  spherePhase          += dt * (cv.frozenAnimation ? 0.15 : 1) * (1 + 0.9 * stepAssemble);
   // Stars are environment, not entity — they keep drifting even when frozen.
   starPhase       += dt * STAR_ROTATION_SPEED;
   // The breath quickens with the entity's state; even frozen it faintly
@@ -566,15 +571,16 @@ function animate() {
   // One shared breath: scale and glow of every layer swell together.
   const breath = Math.sin(entityBreath);
   orbGroup.scale.setScalar(ORB_SCALE * (1 + 0.02 * breath));
-  torusUniforms["uParticleOpacity"]!.value = cv.particleOpacity * (1 + 0.06 * breath);
+  dustUniforms["uParticleOpacity"]!.value = cv.particleOpacity * (1 + 0.06 * breath);
   orbitalUniforms["uOpacity"]!.value       = cv.particleOpacity * (1 + 0.09 * breath);
   coreUniforms["uIntensity"]!.value        = cv.coreIntensity   * (1 + 0.13 * breath);
 
-  torusUniforms["uTime"]!.value            = time;
-  torusUniforms["uBreathePhase"]!.value    = breathePhase;
-  torusUniforms["uRadialWavePhase"]!.value = radialWavePhase;
-  torusUniforms["uZWavePhase"]!.value      = zWavePhase;
-  torusUniforms["uDriftOffset"]!.value     = driftOffset;
+  dustUniforms["uTime"]!.value            = time;
+  dustUniforms["uOrbitPhase"]!.value      = dustOrbitPhase;
+  dustUniforms["uFlutterPhase"]!.value    = dustFlutterPhase;
+  // The breath as light: the sphere's rings, the dust and the step ring all read this one phase,
+  // so the crest that leaves the core passes through each of them in turn.
+  breathUniform.value                      = entityBreath;
   sphereUniforms["uShimmerPhase"]!.value   = nsShimmerPhase;
   sphereUniforms["uPulsePhase"]!.value     = nsPulsePhase;
   orbitalUniforms["uOrbitTime"]!.value     = orbitTime;
@@ -616,10 +622,11 @@ function animate() {
     if (cv.pulsesFromCenter) {
       origin = new THREE.Vector3(0, 0, 0);
     } else {
-      const ni = nodeIndices[Math.floor(Math.random() * nodeIndices.length)]!;
-      origin   = new THREE.Vector3(
-        torusBasePositions[ni*3]!, torusBasePositions[ni*3+1]!, torusBasePositions[ni*3+2]!,
-      );
+      // Where the node is right now, in the orb's own space: on its circle, in its frame.
+      const node  = dustNodes[Math.floor(Math.random() * dustNodes.length)]!;
+      const angle = node.angle + dustOrbitPhase * node.speed;
+      origin = new THREE.Vector3(Math.cos(angle) * node.radius, Math.sin(angle) * node.radius, node.height)
+        .applyQuaternion(sphereFrames[node.frame]!.group.quaternion);
     }
     activePulses.push({ origin, startTime: time });
     lastPulseTime     = time;
@@ -633,17 +640,56 @@ function animate() {
   activePulses.length = alive;
 
   // ── Upload pulse data as uniforms → GPU computes intensity per-vertex ─────────
-  const pulseOrigins = torusUniforms["uPulseOrigins"]!.value as THREE.Vector3[];
-  const pulseRadii   = torusUniforms["uPulseTravelRadii"]!.value as number[];
+  const pulseOrigins = dustUniforms["uPulseOrigins"]!.value as THREE.Vector3[];
+  const pulseRadii   = dustUniforms["uPulseTravelRadii"]!.value as number[];
   for (let i = 0; i < activePulses.length; i++) {
     pulseOrigins[i]!.copy(activePulses[i]!.origin);
     pulseRadii[i] = (time - activePulses[i]!.startTime) * effectivePulseSpeed;
   }
-  torusUniforms["uActivePulseCount"]!.value = activePulses.length;
+  dustUniforms["uActivePulseCount"]!.value = activePulses.length;
 
   // ── Neural sphere ─────────────────────────────────────────────────────────────
   sphereGroup.rotation.y = neuralSphereRotation;
   sphereGroup.scale.setScalar(cv.neuralSphereScale);
+
+  // ── Hologram sphere: each ring spins on its own axis (a loose one sways a little too), and
+  // the frames they hang in turn and tumble, so the sphere keeps showing its depth ──
+  for (const { pivot, mesh, spec, lean } of sphereRings) {
+    swayEuler.set(
+      spec.wobble * Math.sin(hudPhase * 0.31 + spec.seed),
+      spec.wobble * Math.cos(hudPhase * 0.23 + spec.seed),
+      0,
+    );
+    pivot.quaternion.copy(lean).multiply(swayTurn.setFromEuler(swayEuler));
+    mesh.rotation.z = spec.spin * spherePhase;
+    (mesh.material as THREE.ShaderMaterial).uniforms["uFlow"]!.value = spec.flow * spherePhase;
+  }
+  for (const { group, lean, speed, tumbleAxis, tumbleSpeed } of sphereFrames) {
+    group.quaternion
+      .copy(tumbleTurn.setFromAxisAngle(tumbleAxis, tumbleSpeed * spherePhase))
+      .multiply(lean)
+      .multiply(swayTurn.setFromAxisAngle(RING_AXIS, speed * spherePhase));
+  }
+  // The step ring follows the page's ring radius (it changes with the window), easing so a resize
+  // does not jump.
+  stepRadius += (props.ring.radius - stepRadius) * Math.min(1, delta * 4);
+  // The step ring: built round the circle while a turn runs, taken down after it. Its plane is
+  // the page's (ringPosition): tipped from edge-on so its front is below the orb.
+  const target = props.ring.active ? 1 : 0;
+  stepAssemble += (target - stepAssemble) * Math.min(1, delta * (target ? 0.9 : 1.6));
+  if (target === 0 && stepAssemble < 0.002) stepAssemble = 0;
+  if (target === 1 && stepAssemble > 0.995) stepAssemble = 1;
+  stepGroup.scale.setScalar(ORB_SCALE * stepRadius);
+  for (const { pivot, mesh, spec } of stepRings) {
+    pivot.rotation.set(Math.PI / 2 + props.ring.tilt, 0, 0);
+    mesh.rotation.z = spec.spin * hudPhase;
+    const material = mesh.material as THREE.ShaderMaterial;
+    material.uniforms["uFlow"]!.value     = spec.flow * hudPhase;
+    material.uniforms["uAssemble"]!.value = stepAssemble;
+    material.uniforms["uWaveRadius"]!.value = stepRadius * spec.radius;
+    material.uniforms["uStrength"]!.value = spec.strength * (0.4 + 0.6 * stepAssemble);
+    mesh.visible = stepAssemble > 0;
+  }
 
   renderer.render(scene, camera);
 }
@@ -681,6 +727,10 @@ function frameCanvas(w: number, h: number) {
   const buffer = renderer.getDrawingBufferSize(new THREE.Vector2());
   const framePx = buffer.y * baseHalfTan / halfTan;
   pointScaleUniform.value = framePx / REFERENCE_FRAME_PX;
+  const hairline = 1.6 * pointScaleUniform.value;
+  linePxUniform.value     = THREE.MathUtils.clamp(hairline, 1, 2);
+  lineThinUniform.value   = THREE.MathUtils.clamp(hairline, 0.6, 1);
+  lineDetailUniform.value = THREE.MathUtils.smoothstep(pointScaleUniform.value, 0.42, 0.72);
 }
 
 function handleVisibilityChange() {
@@ -721,12 +771,12 @@ onMounted(() => {
 
   clock = new THREE.Clock();
 
-  torusUniforms = {
+  dustUniforms = {
     uTime:             { value: 0 },
-    uBreathePhase:     { value: 0 },
-    uRadialWavePhase:  { value: 0 },
-    uZWavePhase:       { value: 0 },
-    uDriftOffset:      { value: 0 },
+    uBreath:           breathUniform,
+    uOrbitPhase:       { value: 0 },
+    uFlutterPhase:     { value: 0 },
+    uOuter:            { value: DUST_OUTER },
     uParticleOpacity:  { value: currentVisuals.particleOpacity },
     uPulseColor:       { value: currentVisuals.pulseColor.clone() },
     uPortalColorNear:  { value: currentVisuals.portalColorNear.clone() },
@@ -786,11 +836,84 @@ onMounted(() => {
   coreGlowMesh.position.z = -0.05;
   orbGroup.add(coreGlowMesh);
 
-  torusPoints = new THREE.Points(buildTorusGeometry(), new THREE.ShaderMaterial({
-    vertexShader: torusVS, fragmentShader: torusFS, uniforms: torusUniforms,
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  }));
-  orbGroup.add(torusPoints);
+  // The hologram sphere and the step ring in the orb's own space: the core glow's colour,
+  // intensity and phase drive them, so a state change recolours them with the core. `margin` is
+  // the room the mesh leaves round a ring for its halo and end points, which are a few pixels
+  // wide whatever the ring's size: more of the ring's own units on a small ring.
+  const makeRing = (spec: HudRingSpec, parent: THREE.Object3D, margin: number): HudRing => {
+    const reach = spec.width + margin;
+    const mesh = new THREE.Mesh(
+      new THREE.RingGeometry(Math.max(0.01, spec.radius - reach), spec.radius + reach, 192, 1),
+      new THREE.ShaderMaterial({
+        vertexShader: hudRingVertexShader, fragmentShader: hudRingFragmentShader,
+        uniforms: {
+          uCoreColor: coreUniforms["uCoreColor"]!,
+          uIntensity: coreUniforms["uIntensity"]!,
+          uGlowPhase: coreUniforms["uGlowPhase"]!,
+          uLinePx:    linePxUniform,
+          uThin:      lineThinUniform,
+          uDetail:    lineDetailUniform,
+          uMinor:     { value: spec.minor ? 1 : 0 },
+          uWeight:    { value: spec.weight ?? 1 },
+          uRadius:    { value: spec.radius },
+          uWidth:     { value: spec.width },
+          uSphere:    { value: Math.hypot(spec.radius, spec.offset) },
+          uOffset:    { value: spec.offset },
+          uStrength:  { value: spec.strength },
+          uKind:      { value: HUD_RING_KINDS.indexOf(spec.kind) },
+          uTiles:     { value: spec.tiles },
+          uArc:       { value: spec.arc },
+          uSeed:      { value: spec.seed },
+          uFlow:      { value: 0 },
+          uBreath:    breathUniform,
+          uWaveRadius: { value: Math.hypot(spec.radius, spec.offset) },
+          uAssemble:  { value: 1 },
+          uHot:       { value: spec.hot ?? 0 },
+        },
+        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      }),
+    );
+    mesh.position.z = spec.offset;
+    const lean = new THREE.Quaternion().setFromUnitVectors(RING_AXIS, new THREE.Vector3(...spec.normal).normalize());
+    const pivot = new THREE.Group();
+    pivot.quaternion.copy(lean);
+    pivot.add(mesh);
+    parent.add(pivot);
+    return { pivot, mesh, spec, lean };
+  };
+  sphereFrames = SPHERE_FRAMES.map((frame) => {
+    const group = new THREE.Group();
+    const lean = new THREE.Quaternion().setFromUnitVectors(RING_AXIS, new THREE.Vector3(...frame.pole).normalize());
+    group.quaternion.copy(lean);
+    orbGroup.add(group);
+    return {
+      group, lean, speed: frame.speed,
+      tumbleAxis: new THREE.Vector3(...frame.tumbleAxis).normalize(), tumbleSpeed: frame.tumbleSpeed,
+    };
+  });
+  sphereRings = SPHERE_RINGS.map((spec) => makeRing(spec, sphereFrames[spec.frame]!.group, 0.14));
+  stepRadius = props.ring.radius;
+  stepGroup = new THREE.Group();
+  stepGroup.scale.setScalar(ORB_SCALE * stepRadius);
+  stepRings = STEP_RINGS.map((spec) => makeRing(spec, stepGroup, 0.06));
+  for (const { mesh } of stepRings) mesh.visible = false;
+  scene.add(stepGroup);
+
+  // The dust: the body's clouds, each hanging in one of the sphere's frames so it turns with the
+  // cage that holds it. The clouds share every uniform but their own frame's matrix, which the
+  // pulses need to spread through the orb's space and not each cloud's own.
+  const dust = buildDust();
+  dustNodes = dust.nodes;
+  dustClouds = dust.clouds.map((cloud) => {
+    const frame = sphereFrames[cloud.frame]!.group;
+    const points = new THREE.Points(buildDustGeometry(cloud), new THREE.ShaderMaterial({
+      vertexShader: dustVS, fragmentShader: dustFS,
+      uniforms: { ...dustUniforms, uFrame: { value: frame.matrix } },
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    frame.add(points);
+    return points;
+  });
 
   sphereGroup = new THREE.Group();
   sphereGroup.add(new THREE.Points(buildSphereGeometry(), new THREE.ShaderMaterial({
@@ -826,8 +949,11 @@ onUnmounted(() => {
   stopAnimation();
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   resizeObserver?.disconnect();
-  torusPoints?.geometry.dispose();
-  (torusPoints?.material as THREE.Material | undefined)?.dispose();
+  for (const cloud of dustClouds) {
+    cloud.geometry.dispose();
+    (cloud.material as THREE.Material).dispose();
+  }
+  dustClouds = [];
   const spherePoints = sphereGroup?.children[0] as THREE.Points | undefined;
   spherePoints?.geometry.dispose();
   (spherePoints?.material as THREE.Material | undefined)?.dispose();
@@ -837,6 +963,13 @@ onUnmounted(() => {
   (ambientPoints?.material as THREE.Material | undefined)?.dispose();
   coreGlowMesh?.geometry.dispose();
   (coreGlowMesh?.material as THREE.Material | undefined)?.dispose();
+  for (const { mesh } of [...sphereRings, ...stepRings]) {
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+  }
+  sphereRings = [];
+  stepRings = [];
+  sphereFrames = [];
   renderer?.dispose();
 });
 

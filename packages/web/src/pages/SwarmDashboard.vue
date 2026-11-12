@@ -1,25 +1,26 @@
 <template>
-  <div class="settings-page">
+  <div class="page-shell">
 
-    <div class="glass-card p-5 mb-5">
-      <div class="flex items-center justify-between">
-        <div>
-          <div class="section-title mb-1">Swarm Health</div>
-          <div class="text-sm text-gray-400 max-w-3xl">
-            Live view of warden alerts, capability gaps, tool promotions, paused tasks, and circuit breaker states.
-          </div>
-        </div>
-        <button @click="refresh" :disabled="loading" class="btn-ghost px-4 py-2 rounded-xl text-sm">
+    <!-- Held to the grid's width so the title lines up with the cards on a wide screen. -->
+    <header class="page-header mx-auto max-w-[1400px]">
+      <div class="page-header__text">
+        <h1 class="page-title">Swarm Health</h1>
+        <p class="page-subtitle">
+          Live view of warden alerts, capability gaps, tool promotions, paused tasks, and circuit breaker states.
+        </p>
+      </div>
+      <div class="page-actions">
+        <button type="button" @click="refresh" :disabled="loading" class="btn-ghost px-4 py-2 rounded-xl text-sm">
           {{ loading ? 'Refreshing…' : 'Refresh' }}
         </button>
       </div>
-    </div>
+    </header>
 
-    <div v-if="error" class="glass-card p-4 mb-5 border border-red-500/30 bg-red-900/20 text-red-200 text-sm">
+    <div v-if="error" class="notice notice--error mb-5" role="alert">
       {{ error }}
     </div>
 
-    <div class="settings-grid">
+    <div class="page-grid">
 
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
       <div class="space-y-5">
@@ -31,7 +32,7 @@
               {{ health.wardenAlerts.length }}
             </span>
           </h3>
-          <div v-if="!health.wardenAlerts.length" class="text-sm text-gray-500">No alerts — swarm is healthy.</div>
+          <div v-if="!health.wardenAlerts.length" class="text-sm text-gray-500">{{ emptyCopy(healthLoaded, "No alerts — swarm is healthy.") }}</div>
           <div v-else class="space-y-2 max-h-72 overflow-y-auto pr-1">
             <div v-for="alert in [...health.wardenAlerts].reverse()" :key="alert.ts + alert.type"
               :class="['rounded-lg p-3 text-xs border', alert.severity === 'error'
@@ -39,7 +40,7 @@
                 : 'bg-yellow-900/20 border-yellow-500/30 text-yellow-200']">
               <div class="flex justify-between items-start mb-1">
                 <span class="font-mono font-bold">{{ alert.type }}</span>
-                <span class="text-gray-400 text-[10px]">{{ formatTime(alert.ts) }}</span>
+                <time class="text-gray-400 text-[10px]" :datetime="isoTimestamp(alert.ts)" :title="isoTimestamp(alert.ts)">{{ formatDateTime(alert.ts) }}</time>
               </div>
               <div class="text-gray-300">{{ alert.detail }}</div>
               <div class="mt-1 text-gray-400">Subject: {{ alert.subject }} · Action: {{ alert.action }}</div>
@@ -54,7 +55,7 @@
               {{ openGaps.length }} open
             </span>
           </h3>
-          <div v-if="!health.capabilityGaps.length" class="text-sm text-gray-500">No gaps detected.</div>
+          <div v-if="!health.capabilityGaps.length" class="text-sm text-gray-500">{{ emptyCopy(healthLoaded, "No gaps detected.") }}</div>
           <div v-else class="space-y-2 max-h-64 overflow-y-auto pr-1">
             <div v-for="gap in health.capabilityGaps" :key="gap.id"
               class="rounded-lg p-3 text-xs border border-purple-500/20 bg-purple-900/10">
@@ -77,7 +78,7 @@
               {{ pausedCheckpoints.length }}
             </span>
           </h3>
-          <div v-if="!pausedCheckpoints.length" class="text-sm text-gray-500">No paused tasks.</div>
+          <div v-if="!pausedCheckpoints.length" class="text-sm text-gray-500">{{ emptyCopy(checkpointsLoaded, "No paused tasks.") }}</div>
           <div v-else class="space-y-2 max-h-64 overflow-y-auto pr-1">
             <div v-for="cp in pausedCheckpoints" :key="cp.taskId"
               class="rounded-lg p-3 text-xs border border-blue-500/20 bg-blue-900/10">
@@ -88,8 +89,8 @@
               <div class="text-gray-200 line-clamp-2">{{ cp.task }}</div>
               <div v-if="cp.progressNote" class="mt-1 text-gray-400 italic line-clamp-1">{{ cp.progressNote }}</div>
               <div class="mt-2">
-                <button @click="resumeTask(cp.taskId)"
-                  class="btn-ghost text-[10px] px-2 py-1 rounded-lg">Resume</button>
+                <button type="button" @click="resumeTask(cp)" :disabled="resumingTaskId === cp.taskId"
+                  class="btn-ghost text-[10px] px-2 py-1 rounded-lg">{{ resumingTaskId === cp.taskId ? "Resuming…" : "Resume" }}</button>
               </div>
             </div>
           </div>
@@ -108,8 +109,8 @@
             </span>
           </h3>
           <div v-if="!health.promotionCandidates.length" class="text-sm text-gray-500">
-            No tools are promotion candidates yet.
-            <div class="mt-1 text-gray-600">
+            {{ emptyCopy(healthLoaded, "No tools are promotion candidates yet.") }}
+            <div v-if="healthLoaded" class="mt-1 text-gray-600">
               Tools need {{ PROMOTION_MIN_CALLS }} calls at ≥80% success rate to qualify.
             </div>
           </div>
@@ -127,10 +128,10 @@
                 {{ cand.callCount }} calls · {{ (cand.successRate * 100).toFixed(0) }}% success
               </div>
               <div v-if="cand.status === 'pending'" class="flex gap-2 mt-2">
-                <button @click="approvePromotion(cand.toolName)"
-                  class="btn-grad text-[10px] px-2 py-1 rounded-lg">Approve</button>
-                <button @click="rejectPromotion(cand.toolName)"
-                  class="btn-ghost text-[10px] px-2 py-1 rounded-lg text-red-400">Reject</button>
+                <button type="button" @click="approvePromotion(cand)" :disabled="promotionBusy?.tool === cand.toolName"
+                  class="btn-grad text-[10px] px-2 py-1 rounded-lg">{{ isPromotionBusy(cand, "approve") ? "Approving…" : "Approve" }}</button>
+                <button type="button" @click="rejectPromotion(cand)" :disabled="promotionBusy?.tool === cand.toolName"
+                  class="btn-ghost text-[10px] px-2 py-1 rounded-lg text-red-400">{{ isPromotionBusy(cand, "reject") ? "Rejecting…" : "Reject" }}</button>
               </div>
             </div>
           </div>
@@ -139,18 +140,36 @@
         <!-- ── Dynamic Tool Stats ────────────────────────────────────────── -->
         <div class="glass-card p-5">
           <h3 class="section-title mb-3">Dynamic Tools (selfdev__)</h3>
-          <div v-if="!health.dynamicToolStats.length" class="text-sm text-gray-500">No self-developed tools deployed.</div>
+          <!-- What the marks at the end of each row stand for. Hidden from a screen reader, which
+               is read the same thing in words on every row. -->
+          <p v-if="health.dynamicToolStats.length" class="-mt-2 mb-3 text-[11px] leading-relaxed text-gray-500" aria-hidden="true">
+            <span class="text-gray-400">Nc</span> = N calls made
+            · <span class="text-green-400">%</span> = how many of them succeeded (<span class="text-yellow-400">yellow</span> under 80%)
+            · <span class="text-green-300">●</span> = waiting in the promotion queue
+            · <span class="text-blue-300">✓</span> = promoted
+          </p>
+          <div v-if="!health.dynamicToolStats.length" class="text-sm text-gray-500">{{ emptyCopy(healthLoaded, "No self-developed tools deployed.") }}</div>
           <div v-else class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
             <div v-for="tool in health.dynamicToolStats" :key="tool.fullName"
               class="flex items-center justify-between text-xs p-2 rounded bg-white/5">
               <span class="font-mono text-purple-300 truncate max-w-[55%]">{{ tool.fullName }}</span>
               <div class="flex items-center gap-2 text-gray-400 shrink-0">
-                <span>{{ tool.calls }}c</span>
-                <span :class="tool.successRate >= 0.8 ? 'text-green-400' : 'text-yellow-400'">
-                  {{ tool.calls > 0 ? (tool.successRate * 100).toFixed(0) + '%' : '–' }}
+                <span :title="callsText(tool)">
+                  <span aria-hidden="true">{{ tool.calls }}c</span>
+                  <span class="sr-only">{{ callsText(tool) }}</span>
                 </span>
-                <span v-if="tool.promotionStatus === 'pending'" class="text-green-300">●</span>
-                <span v-else-if="tool.promotionStatus === 'approved'" class="text-blue-300">✓</span>
+                <span :class="tool.successRate >= 0.8 ? 'text-green-400' : 'text-yellow-400'" :title="successText(tool)">
+                  <span aria-hidden="true">{{ tool.calls > 0 ? (tool.successRate * 100).toFixed(0) + '%' : '–' }}</span>
+                  <span class="sr-only">{{ successText(tool) }}</span>
+                </span>
+                <span v-if="tool.promotionStatus === 'pending'" class="text-green-300" title="Nominated for promotion — waiting for a decision in the Promotion Queue">
+                  <span aria-hidden="true">●</span>
+                  <span class="sr-only">Promotion pending</span>
+                </span>
+                <span v-else-if="tool.promotionStatus === 'approved'" class="text-blue-300" :title="`Promoted — also registered as ${tool.toolName}`">
+                  <span aria-hidden="true">✓</span>
+                  <span class="sr-only">Promoted, also registered as {{ tool.toolName }}</span>
+                </span>
               </div>
             </div>
           </div>
@@ -162,12 +181,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast, errorText } from "@/composables/useToast";
 
 const PROMOTION_MIN_CALLS = 10;
 
 const gateway = useGatewayStore();
+const toast = useToast();
 
 interface WardenAlert {
   type: string;
@@ -233,6 +257,23 @@ const health = ref<SwarmHealth>({
 });
 const checkpoints = ref<TaskCheckpoint[]>([]);
 const error = ref<string | null>(null);
+// True while that part of the page comes from a load that succeeded.
+const healthLoaded = ref(false);
+const checkpointsLoaded = ref(false);
+// The row whose request is in flight.
+const promotionBusy = ref<{ tool: string; action: "approve" | "reject" } | null>(null);
+const resumingTaskId = ref<string | null>(null);
+
+// An empty list means "nothing there" only after a load that worked: "No alerts — swarm is
+// healthy." under a failed request told the operator the opposite of what was known.
+function emptyCopy(loaded: boolean, whenEmpty: string): string {
+  if (loaded) return whenEmpty;
+  return loading.value ? "Loading…" : "Could not be loaded.";
+}
+
+function isPromotionBusy(cand: PromotionCandidate, action: "approve" | "reject"): boolean {
+  return promotionBusy.value?.tool === cand.toolName && promotionBusy.value.action === action;
+}
 
 const openGaps = computed(() =>
   health.value.capabilityGaps.filter(g => g.status === "detected" || g.status === "proposed")
@@ -260,62 +301,106 @@ async function refresh() {
       fetch(`${apiBase()}/api/swarm/health`, { headers: authHeaders() }),
       fetch(`${apiBase()}/api/checkpoints`, { headers: authHeaders() }),
     ]);
+    const failed: string[] = [];
     if (healthRes.ok) health.value = await healthRes.json();
+    else failed.push(`swarm health (HTTP ${healthRes.status})`);
+    healthLoaded.value = healthRes.ok;
     if (cpRes.ok) {
       const data = await cpRes.json();
       checkpoints.value = data.checkpoints ?? [];
+    } else {
+      failed.push(`paused tasks (HTTP ${cpRes.status})`);
     }
+    checkpointsLoaded.value = cpRes.ok;
+    if (failed.length > 0) error.value = `Failed to load ${failed.join(" and ")}.`;
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Failed to load swarm health";
+    healthLoaded.value = false;
+    checkpointsLoaded.value = false;
+    error.value = `Failed to load swarm health: ${errorText(e)}`;
   } finally {
     loading.value = false;
   }
 }
 
-async function approvePromotion(toolName: string) {
+/** The gateway's own reason when it sent one, else the status. */
+async function failureText(res: Response): Promise<string> {
+  const body = await res.json().catch(() => ({})) as { error?: string };
+  return body.error || `HTTP ${res.status}`;
+}
+
+// The three actions below report through toasts: the refresh() that follows them clears the
+// page's error line, so a failure written there was gone before it could be read.
+async function approvePromotion(cand: PromotionCandidate) {
+  if (promotionBusy.value) return;
+  promotionBusy.value = { tool: cand.toolName, action: "approve" };
   try {
-    await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(toolName)}/promote`, {
+    const res = await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(cand.toolName)}/promote`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ reviewedBy: "operator" }),
     });
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Promotion approved", `${cand.fullName} is now also registered as ${cand.toolName}.`);
     await refresh();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Promotion failed";
+    toast.error("Couldn't approve the promotion", errorText(e));
+  } finally {
+    promotionBusy.value = null;
   }
 }
 
-async function rejectPromotion(toolName: string) {
+async function rejectPromotion(cand: PromotionCandidate) {
+  if (promotionBusy.value) return;
+  if (!(await confirmAction({
+    title: "Reject this promotion?",
+    message: `${cand.fullName} is marked rejected and is not nominated again. The tool itself stays available under its selfdev name. This page cannot take a rejection back.`,
+    confirmLabel: "Reject promotion",
+    danger: true,
+  }))) return;
+  promotionBusy.value = { tool: cand.toolName, action: "reject" };
   try {
-    await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(toolName)}/reject-promotion`, {
+    const res = await fetch(`${apiBase()}/api/tools/dynamic/${encodeURIComponent(cand.toolName)}/reject-promotion`, {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ reviewedBy: "operator" }),
     });
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Promotion rejected", `${cand.fullName} stays a self-developed tool and will not be nominated again.`);
     await refresh();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Rejection failed";
+    toast.error("Couldn't reject the promotion", errorText(e));
+  } finally {
+    promotionBusy.value = null;
   }
 }
 
-async function resumeTask(taskId: string) {
+async function resumeTask(cp: TaskCheckpoint) {
+  if (resumingTaskId.value) return;
+  resumingTaskId.value = cp.taskId;
   try {
-    await fetch(`${apiBase()}/api/checkpoints/${taskId}/resume`, {
+    const res = await fetch(`${apiBase()}/api/checkpoints/${cp.taskId}/resume`, {
       method: "POST",
       headers: authHeaders(),
     });
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Task resumed", `The paused task of ${cp.agentName} is marked resumed.`);
     await refresh();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Resume failed";
+    toast.error("Couldn't resume the task", errorText(e));
+  } finally {
+    resumingTaskId.value = null;
   }
 }
 
-function formatTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString();
-  } catch {
-    return iso;
-  }
+// What the short marks on a Dynamic Tools row say, in words: for the hover title and for a
+// screen reader, which gets nothing from "12c" or a bare dot.
+function callsText(tool: DynamicToolStat): string {
+  return `${tool.calls} call${tool.calls === 1 ? "" : "s"} made`;
+}
+
+function successText(tool: DynamicToolStat): string {
+  if (tool.calls === 0) return "Not called yet — no success rate";
+  return `${tool.successes} of ${tool.calls} call${tool.calls === 1 ? "" : "s"} succeeded (${(tool.successRate * 100).toFixed(0)}%)`;
 }
 
 function gapStatusClass(status: string): string {
@@ -338,5 +423,6 @@ function promotionStatusClass(status: string): string {
   }
 }
 
-onMounted(refresh);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>

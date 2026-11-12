@@ -1,17 +1,19 @@
 <template>
-  <div class="plugins-page" style="height: 100%; overflow-y: auto">
-    <div class="plugins-page__header">
-      <div>
-        <h2 class="plugins-page__title">Plugins</h2>
-        <p class="plugins-page__subtitle">
+  <div class="page-shell plugins-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Plugins</h1>
+        <p class="page-subtitle">
           Explicitly enabled third-party tool packages load from the configured directory.
           All plugin tools register at Tier 2 with per-call approval, but currently execute in the gateway process.
         </p>
       </div>
-      <div class="plugins-page__actions">
-        <button class="plugins-page__button" :disabled="loading" @click="loadPlugins">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="loadPlugins">
+          {{ loading ? "Refreshing…" : "Refresh" }}
+        </button>
       </div>
-    </div>
+    </header>
 
     <div v-if="!enabled" class="plugins-disabled">
       <p>
@@ -25,14 +27,15 @@
       Plugins directory: <code>{{ directory }}</code>
     </p>
 
-    <p v-if="errorMessage" class="plugins-page__error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="plugins-page__error" role="alert">{{ errorMessage }}</p>
 
+    <!-- "No plugins" is only true after a load that worked; a failed one says why in the line above. -->
     <div v-if="loading && plugins.length === 0" class="plugins-page__empty">Loading…</div>
-    <div v-else-if="plugins.length === 0" class="plugins-page__empty">
+    <div v-else-if="loaded && plugins.length === 0" class="plugins-page__empty">
       No plugins loaded.  Drop a plugin into <code>{{ directory ?? "the plugins directory" }}</code> and refresh.
     </div>
 
-    <ul v-else class="plugin-grid">
+    <ul v-else-if="plugins.length > 0" class="plugin-grid">
       <li v-for="plugin in plugins" :key="plugin.name" class="plugin-card">
         <div class="plugin-card__top">
           <div>
@@ -51,7 +54,9 @@
           </ul>
         </details>
         <p class="plugin-card__meta">
-          Loaded {{ formatTimestamp(plugin.loadedAt) }} · source <code>{{ plugin.source }}</code>
+          Loaded
+          <time :datetime="isoTimestamp(plugin.loadedAt)" :title="isoTimestamp(plugin.loadedAt)">{{ formatDateTime(plugin.loadedAt) }}</time>
+          · source <code>{{ plugin.source }}</code>
         </p>
       </li>
     </ul>
@@ -72,7 +77,7 @@
         >
           <div class="plugins-activity__item-head">
             <code class="plugins-activity__type">{{ event.type }}</code>
-            <span class="plugins-activity__time">{{ formatActivityTime(event.timestamp) }}</span>
+            <span class="plugins-activity__time" :title="isoTimestamp(event.timestamp)">{{ formatActivityTime(event.timestamp) }}</span>
           </div>
           <div class="plugins-activity__body">{{ describeActivity(event) }}</div>
         </li>
@@ -82,9 +87,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 
 interface PluginRecord {
   name: string;
@@ -111,6 +118,8 @@ const enabled = ref(true);
 const directory = ref<string | null>(null);
 const plugins = ref<PluginRecord[]>([]);
 const loading = ref(false);
+// True while the last load succeeded: only then does an empty list mean "no plugins".
+const loaded = ref(false);
 const errorMessage = ref<string | null>(null);
 
 // Live activity comes from the audit-store WS feed, filtered to plugin_*
@@ -124,7 +133,11 @@ function apiBase(): string {
 }
 
 async function loadPlugins(): Promise<void> {
-  if (!gateway.token) return;
+  loaded.value = false;
+  if (!gateway.token) {
+    errorMessage.value = "Not signed in to the gateway — sign in, then refresh to see the plugins.";
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
   try {
@@ -143,6 +156,7 @@ async function loadPlugins(): Promise<void> {
     enabled.value = body.enabled;
     directory.value = body.directory;
     plugins.value = body.plugins;
+    loaded.value = true;
   } catch (err) {
     errorMessage.value = (err as Error).message;
   } finally {
@@ -180,12 +194,6 @@ function describeActivity(event: ActivityEvent): string {
   }
 }
 
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-}
-
 function formatActivityTime(iso: string): string {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return iso;
@@ -193,68 +201,17 @@ function formatActivityTime(iso: string): string {
   if (diffMs < 60_000) return "just now";
   if (diffMs < 3_600_000) return `${Math.round(diffMs / 60_000)}m ago`;
   if (diffMs < 86_400_000) return `${Math.round(diffMs / 3_600_000)}h ago`;
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(parsed);
 }
 
-onMounted(() => {
-  void loadPlugins();
-});
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(loadPlugins);
 </script>
 
 <style scoped>
 .plugins-page {
-  padding: 1.5rem 1.75rem 3rem;
   color: rgb(229 231 235);
 }
-
-.plugins-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-.plugins-page__title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 0;
-  background: linear-gradient(90deg, rgb(165 243 252), rgb(196 181 253));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.plugins-page__subtitle {
-  margin: 0.4rem 0 0;
-  color: rgb(156 163 175);
-  font-size: 0.875rem;
-  max-width: 36rem;
-}
-
-.plugins-page__actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.plugins-page__button {
-  background: rgba(76, 29, 149, 0.35);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: rgb(233 213 255);
-  padding: 0.4rem 0.85rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.plugins-page__button:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.55);
-  color: white;
-}
-
-.plugins-page__button:disabled { opacity: 0.5; cursor: progress; }
 
 .plugins-disabled {
   border: 1px dashed rgba(168, 85, 247, 0.35);

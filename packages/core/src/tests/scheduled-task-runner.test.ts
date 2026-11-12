@@ -7,7 +7,7 @@ import { join } from "node:path";
 const h = vi.hoisted(() => {
   let n = 0;
   return {
-    cronJobs: new Map<string, { onTick: () => void | Promise<void> }>(),
+    cronJobs: new Map<string, { onTick: () => void | Promise<void>; timeZone?: string }>(),
     removed: [] as string[],
     createJobMock: vi.fn(async (_input?: Record<string, unknown>) => ({ id: "job_123" })),
     nextId: () => `cron_${++n}`,
@@ -17,9 +17,9 @@ const h = vi.hoisted(() => {
 
 // Mock the in-memory scheduler: capture the onTick + hand back a fake job id.
 vi.mock("../runtime/scheduler.js", () => ({
-  createCronJob: vi.fn((_expr: string, _label: string, _action: string, onTick: () => void | Promise<void>) => {
+  createCronJob: vi.fn((_expr: string, _label: string, _action: string, onTick: () => void | Promise<void>, timeZone?: string) => {
     const id = h.nextId();
-    h.cronJobs.set(id, { onTick });
+    h.cronJobs.set(id, { onTick, timeZone });
     return { id };
   }),
   removeCronJob: vi.fn((id: string) => { h.removed.push(id); return h.cronJobs.delete(id); }),
@@ -37,9 +37,11 @@ import {
   rehydrateScheduledTasks,
   activeScheduledTaskCount,
   disableAccountScheduledTasks,
+  scheduledRunSettled,
+  scheduledTaskCronIds,
   _resetScheduledTaskRuntimeForTests,
 } from "../runtime/scheduled-task-runner.js";
-import { _setScheduledTasksPathForTests, disableScheduledTask, listScheduledTaskRecords } from "../runtime/scheduled-tasks.js";
+import { _setScheduledTasksPathForTests, disableScheduledTask, getScheduledTask, listScheduledTaskRecords } from "../runtime/scheduled-tasks.js";
 
 let dir = "";
 beforeEach(() => {
@@ -48,6 +50,7 @@ beforeEach(() => {
   _setScheduledTasksPathForTests(join(dir, ".starlingai", "scheduled-tasks.json"));
 });
 afterEach(() => {
+  vi.useRealTimers();
   _resetScheduledTaskRuntimeForTests();
   _setScheduledTasksPathForTests(null);
   if (dir) { rmSync(dir, { recursive: true, force: true }); dir = ""; }
@@ -144,5 +147,128 @@ describe("scheduled-task-runner", () => {
     disableScheduledTask("s1", { at: "x", reason: "account deleted" });
     await [...h.cronJobs.values()][0]!.onTick();
     expect(h.createJobMock).not.toHaveBeenCalled();
+  });
+
+  it("names its schedule on every run it queues", async () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "0 8 * * *", label: "Brief", task: "research X", createdAt: "x" });
+    await [...h.cronJobs.values()][0]!.onTick();
+    expect(h.createJobMock).toHaveBeenCalledWith(expect.objectContaining({ scheduleId: "s1", task: "research X" }));
+  });
+
+  // Two runs of one watch at once would each post the same news.
+  it("does not queue a schedule's next run while the one before is still out", async () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "* * * * *", label: "Watch", task: "check", createdAt: "x" });
+    const tick = [...h.cronJobs.values()][0]!.onTick;
+    await tick();
+    await tick();
+    expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    scheduledRunSettled("s1");
+    await tick();
+    expect(h.createJobMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops waiting for a run that never reported back, once it is past the turn's time limit", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+    addAndActivateScheduledTask({ id: "s1", cron: "* * * * *", label: "Watch", task: "check", createdAt: "x" });
+    const tick = [...h.cronJobs.values()][0]!.onTick;
+    await tick();
+    vi.setSystemTime(new Date("2026-11-12T08:02:00Z"));
+    await tick();
+    expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    // The mocked turn limit is 123456 ms; the grace after it is two minutes.
+    vi.setSystemTime(new Date("2026-11-12T08:05:00Z"));
+    await tick();
+    expect(h.createJobMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a tick runs the schedule as it is stored now: removed, it runs nothing", async () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "* * * * *", label: "Watch", task: "check", createdAt: "x" });
+    const tick = [...h.cronJobs.values()][0]!.onTick;
+    removeScheduledTask("s1");
+    await tick();
+    expect(h.createJobMock).not.toHaveBeenCalled();
+  });
+
+  describe("a schedule that runs once", () => {
+    it("runs at its time, once, and is marked as run before the run is queued", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      addAndActivateScheduledTask({ id: "o1", at: "2026-11-12T09:00:00.000Z", label: "Reminder", task: "remind", createdAt: "x" });
+      expect(h.cronJobs.size).toBe(0);
+      expect(activeScheduledTaskCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(59 * 60_000);
+      expect(h.createJobMock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+      expect(h.createJobMock).toHaveBeenCalledWith(expect.objectContaining({ scheduleId: "o1", task: "remind" }));
+      expect(getScheduledTask("o1")?.firedAt).toBe("2026-11-12T09:00:00.000Z");
+      expect(activeScheduledTaskCount()).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("reaches a time further off than one timer lasts", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      addAndActivateScheduledTask({ id: "o1", at: "2027-01-01T08:00:00.000Z", label: "New year", task: "remind", createdAt: "x" });
+      await vi.advanceTimersByTimeAsync(49 * 24 * 60 * 60_000);
+      expect(h.createJobMock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs at once after a restart when its time passed while the gateway was down", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      addAndActivateScheduledTask({ id: "o1", at: "2026-11-12T09:00:00.000Z", label: "Reminder", task: "remind", createdAt: "x" });
+      _resetScheduledTaskRuntimeForTests();
+      vi.setSystemTime(new Date("2026-11-12T11:00:00Z"));
+      rehydrateScheduledTasks();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("is not run again by a restart once its run was queued", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      addAndActivateScheduledTask({ id: "o1", at: "2026-11-12T08:00:01.000Z", label: "Reminder", task: "remind", createdAt: "x" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+      _resetScheduledTaskRuntimeForTests();
+      rehydrateScheduledTasks();
+      // Not armed at all: its run is out, or was lost with the job store.
+      expect(activeScheduledTaskCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("tries again when its run could not be queued", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      h.createJobMock.mockRejectedValueOnce(new Error("store down"));
+      addAndActivateScheduledTask({ id: "o1", at: "2026-11-12T08:00:01.000Z", label: "Reminder", task: "remind", createdAt: "x" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(1);
+      expect(getScheduledTask("o1")?.firedAt).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(h.createJobMock).toHaveBeenCalledTimes(2);
+      expect(getScheduledTask("o1")?.firedAt).toBeDefined();
+    });
+
+    it("removed before its time, it never runs", async () => {
+      vi.useFakeTimers({ now: new Date("2026-11-12T08:00:00Z") });
+      addAndActivateScheduledTask({ id: "o1", at: "2026-11-12T09:00:00.000Z", label: "Reminder", task: "remind", createdAt: "x" });
+      expect(removeScheduledTask("o1")).toBe(true);
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      expect(h.createJobMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it("runs a repeating schedule on its maker's clock, and on UTC when it names none", () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "0 8 * * 1-5", timeZone: "Europe/Berlin", label: "a", task: "t", createdAt: "x" });
+    addAndActivateScheduledTask({ id: "s2", cron: "0 8 * * 1-5", label: "b", task: "t", createdAt: "x" });
+    expect([...h.cronJobs.values()].map((job) => job.timeZone)).toEqual(["Europe/Berlin", "UTC"]);
+  });
+
+  it("says which cron jobs are scheduled tasks, for the trigger listing to leave out", () => {
+    addAndActivateScheduledTask({ id: "s1", cron: "* * * * *", label: "a", task: "private task text", createdAt: "x" });
+    expect([...scheduledTaskCronIds()]).toEqual([...h.cronJobs.keys()]);
   });
 });

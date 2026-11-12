@@ -1,3 +1,4 @@
+import { browserTimeZone } from "@/composables/browserTime";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -110,6 +111,21 @@ export interface ChatMessage {
    * that finished — not its answer. Saved on the server beside the turn; never read by the model.
    */
   progress?: boolean;
+  /** What a scheduled task found, posted into this conversation by the gateway: no turn wrote it. */
+  followUp?: FollowUpMark;
+}
+
+/** The mark of a scheduled task's post (the gateway's runtime/follow-up-mark.ts). */
+export interface FollowUpMark {
+  scheduleId: string;
+  label: string;
+  jobId: string;
+  /** Which run of the schedule this was, counted from 1. */
+  run: number;
+  /** The schedule ended with this run: it ran its one time, what it waited for happened, it used
+   *  up its runs, or it kept failing. */
+  ended?: "once" | "condition_met" | "max_runs" | "failed";
+  failed?: boolean;
 }
 
 export interface SwarmTaskAttempt {
@@ -191,6 +207,8 @@ export interface GatewaySessionTranscriptMessage {
   requestId?: string;
   /** A progress message the turn posted while it worked (ChatMessage.progress). */
   progress?: true;
+  /** A scheduled task's post (ChatMessage.followUp). */
+  followUp?: FollowUpMark;
 }
 
 interface SendMessageOptions {
@@ -881,6 +899,10 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
+  // True from a lost connection until it is back or given up on. Between two attempts neither
+  // `connected` nor `connecting` is set, and the shell took that for "signed out": a login screen
+  // covered the app for the whole wait of every reconnect.
+  const reconnecting = ref(false);
   const pendingIntervention = ref<InterventionNotice | null>(null);
 
   interface PendingRpc {
@@ -1054,17 +1076,24 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
 
   function scheduleReconnect(delayMs?: number): void {
-    if (reconnectTimer || !token.value || authFailed.value) return;
-    if (consecutiveReconnects >= MAX_RECONNECT_ATTEMPTS) {
-      console.warn(`[gateway] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    if (reconnectTimer) return;
+    if (!token.value || authFailed.value) {
+      reconnecting.value = false;
       return;
     }
+    if (consecutiveReconnects >= MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[gateway] gave up reconnecting after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+      reconnecting.value = false;
+      return;
+    }
+    reconnecting.value = true;
     const backoff = delayMs ?? Math.min(
       RECONNECT_DELAY_MS * Math.pow(1.5, consecutiveReconnects),
       MAX_RECONNECT_DELAY_MS,
     );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
+      if (!token.value || authFailed.value) reconnecting.value = false;
       if (!token.value || authFailed.value || connected.value || connecting.value) return;
       consecutiveReconnects++;
       connect();
@@ -2702,6 +2731,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         // for this page's own (hydration, turnRecovery).
         ...(message.requestId ? { requestId: message.requestId } : {}),
         ...(message.progress ? { progress: true } : {}),
+        ...(message.followUp ? { followUp: message.followUp } : {}),
       };
     });
     return normalizeHydratedMessages(mappedReversed.reverse());
@@ -3010,6 +3040,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         stopHeartbeat();
         rejectPendingRpcs("Connection closed");
         clearReconnectTimer();
+        reconnecting.value = false;
         authFailed.value = true;
         token.value = "";
         return;
@@ -3058,6 +3089,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function disconnect() {
     clearReconnectTimer();
+    reconnecting.value = false;
     clearConnectTimeout();
     stopHeartbeat();
     rejectPendingRpcs("Disconnected");
@@ -3093,6 +3125,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     if (type === "hello-ok") {
       clearConnectTimeout();
       connected.value = true;
+      reconnecting.value = false;
       connecting.value = false;
       consecutiveReconnects = 0;
       connectionEpoch += 1;
@@ -3143,6 +3176,17 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (data) {
         audit.addEvent(data);
         applyAuditEventFallback(data as GatewayAuditEvent);
+      }
+      return;
+    }
+
+    // A scheduled task posted what it found into a conversation this page has loaded. The gateway
+    // writes it only between turns, so it never lands inside a turn that is being shown.
+    if (type === "session.follow_up") {
+      const data = msg["data"] as { sessionId?: unknown; message?: GatewaySessionTranscriptMessage } | undefined;
+      if (data?.message && typeof data.sessionId === "string" && data.sessionId === currentSessionId.value) {
+        const [posted] = mapTranscriptMessages([data.message]);
+        if (posted && !messages.value.some((message) => message.id === posted.id)) messages.value.push(posted);
       }
       return;
     }
@@ -3733,9 +3777,18 @@ export const useGatewayStore = defineStore("gateway", () => {
     clearPendingTurnRecovery();
   }
 
+  /**
+   * Delete a session on the gateway, then here. A refusal or a lost connection throws and leaves
+   * the list alone: it used to be swallowed, the row vanished, and the session was back on the
+   * next refresh. Only "it is already gone" counts as done.
+   */
   async function deleteSession(sessionId: string): Promise<void> {
-    if (ws?.readyState === WebSocket.OPEN) {
-      try { await rpc("session.delete", { sessionId }); } catch { /* already deleted */ }
+    if (ws?.readyState !== WebSocket.OPEN) throw new Error("Not connected to the gateway");
+    try {
+      await rpc("session.delete", { sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/not found|no such session|unknown session|does not exist/i.test(message)) throw error;
     }
     const next = { ...swarmRunsBySession.value };
     delete next[sessionId];
@@ -4114,6 +4167,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         displayContent: displayText,
         attachments: attachmentsForRpc(attachments),
         ...(enableThinking !== undefined && { enableThinking }),
+        // A time of day the person names is theirs: the gateway runs in UTC and knows no other.
+        ...browserTimeZone(),
       }) as { accepted?: unknown; unreadSteering?: unknown } | undefined;
       if (reply?.accepted === true) acceptedRequestId = requestId;
       // What the turn this one replaced never read, retired as this one started: this page's own
@@ -4641,6 +4696,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     wsUrl,
     connected,
     connecting,
+    reconnecting,
     modelUnreachable,
     authFailed,
     currentSessionId,

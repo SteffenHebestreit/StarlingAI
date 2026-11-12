@@ -459,6 +459,21 @@ Separation of concerns holds: a *static* page or slide deck never needs this pat
 
 ---
 
+## Acting Later (scheduled tasks and follow-ups)
+
+A turn ends with its answer; nothing runs for a conversation until its user writes again. The one exception is a **scheduled task**, which the main assistant creates with `schedule_task` (Tier 3, approved on every call):
+
+- **Three kinds.** `once` runs at a time on the user's clock or a number of minutes from now; `repeat` runs on a cron expression and posts every run; `watch` runs on a cron expression and stays silent until what the user is waiting for (`until`) has happened. The kind is a required argument: left to infer it, the model wrote "report only when something is new" into the task text, where nothing reads it.
+- **The user's clock.** The gateway runs in UTC and the prompt carries the date only (it is part of the cached head). The browser sends its time zone with each message (`chat.send` `timeZone`), the tool takes wall-clock times and applies that zone (`runtime/user-time.ts`), and a repeating schedule runs on it.
+- **A run is a turn of its own.** `runtime/scheduled-task-runner.ts` queues it as a scene job in a fresh session under its owner's identity. It has no approval channel, so approval-gated tools are refused in it, and it cannot schedule more runs. A schedule's next tick waits while its previous run is still out.
+- **The result comes back.** When a run ends, `runtime/follow-up.ts` counts it against its schedule and, when it has something to say, appends its answer to the conversation the schedule was made in, as an assistant message marked `followUp`, pushes `session.follow_up` to the owner's open pages and raises a notification for the owner alone. For a watch, one routing-tier call decides whether the result says the awaited thing has happened; an unanswered check never ends a watch. The message is written only between turns.
+- **It ends.** A one-shot ends with its run; a watch ends when its condition is met or after its last run (30 unless told otherwise), which is posted either way; a failed one-shot, or three failed runs in a row, end a schedule with a message that says so.
+- **It stays in reach.** Schedules persist in `<workspace>/.starlingai/scheduled-tasks.json` and are armed again at boot (a one-shot whose time passed while the gateway was down runs then). `schedule_list` / `schedule_remove` in a chat and the Jobs page's Follow-ups panel (`/api/schedules`) list and remove them, each owner their own.
+
+The front desk is part of this: it used to see a message alone, so "yes please" after "shall I set that up?" was small talk to it and what the user had agreed to was never done. It is now shown the question the assistant's previous reply ends on (`agent/receptionist.ts` `previousQuestion`) and hands a message that takes it up to the full assistant.
+
+---
+
 ## Hybrid Agent Routing
 
 The `search_agents` tool scores every registered agent against the query using four signals:
@@ -576,15 +591,23 @@ packages/
                                             analyze_image, browser_* (Playwright MCP)
   web/                      Vue 3 dashboard (Vite + Tailwind + Three.js)
     src/
-      components/           (15) MessageBubble.vue — chat message renderer
+      components/           (18) MessageBubble.vue — chat message renderer
+                            TurnStepStream.vue · StepDetailPanel.vue — a turn's steps:
+                              the folded list in an answer, one step in the side panel
                             LoginModal.vue — JWT login
-                            OrbCanvas.vue — Three.js swarm visualizer
+                            OrbCanvas.vue — Three.js swarm visualizer: the core, its
+                              breathing dust, a hologram sphere of rings round both,
+                              and the step ring, in 3D
+                            OrbActivity.vue — the running turn at the orb: its steps on
+                              the orb's step ring, its newest words in a status line
                             SwarmStatusPanel.vue — live agent and bus status
                             BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
                               ShellSessionPanel.vue — live operator docks
                             OperatorRequestsDock.vue — human-assist requests
                             AppearanceSettings.vue — theme picker
-                            ToggleSwitch.vue · ChannelIcon.vue · NavGroup.vue ·
+                            CommandPalette.vue — Ctrl/Cmd+K: any page or action
+                            ConfirmHost.vue — the one "are you sure?" dialog
+                            ToggleSwitch.vue · ChannelIcon.vue ·
                               SidePanel.vue · ModelConnectModal.vue
       pages/                (18) Chat.vue — main chat interface with streaming
                             Settings.vue — agent, guardrail, channel configuration

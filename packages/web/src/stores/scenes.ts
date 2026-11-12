@@ -97,15 +97,22 @@ export const useScenesStore = defineStore("scenes", () => {
     return { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" };
   }
 
+  /** How many runs the list keeps when it only ever grew by single updates (the chat's job strip). */
+  const RECENT_JOBS_FLOOR = 12;
+
   function upsertJob(job: SceneJob) {
     const withoutCurrent = recentJobs.value.filter((entry) => entry.id !== job.id);
+    // Never shorter than what is already there: this runs on every poll of a running job, and
+    // cutting to twelve each time shrank the Jobs page's loaded list to twelve rows two seconds
+    // after it had loaded a hundred.
+    const keep = Math.max(RECENT_JOBS_FLOOR, recentJobs.value.length);
     recentJobs.value = [job, ...withoutCurrent]
       .sort((left, right) => {
         const leftTs = left.completedAt ?? left.startedAt ?? left.createdAt ?? "";
         const rightTs = right.completedAt ?? right.startedAt ?? right.createdAt ?? "";
         return rightTs.localeCompare(leftTs);
       })
-      .slice(0, 12);
+      .slice(0, keep);
   }
 
   function dismissJob(jobId: string) {
@@ -137,13 +144,16 @@ export const useScenesStore = defineStore("scenes", () => {
       if (!["queued", "running", "cancelling"].includes(job.status)) stopPolling(job.id);
       return job;
     } catch (e) {
-      runError.value = String(e);
+      runError.value = e instanceof Error ? e.message : String(e);
       stopPolling(jobId);
       return null;
     }
   }
 
   async function fetchJobs(options: { limit?: number; status?: SceneJob["status"] } = {}): Promise<SceneJob[]> {
+    // A failed load is reported in runError and nowhere else: without this it would stay on
+    // screen after a load that worked.
+    runError.value = null;
     try {
       const params = new URLSearchParams();
       if (options.limit) params.set("limit", String(options.limit));
@@ -158,7 +168,7 @@ export const useScenesStore = defineStore("scenes", () => {
       resumeRunningJobs();
       return body.jobs;
     } catch (e) {
-      runError.value = String(e);
+      runError.value = e instanceof Error ? e.message : String(e);
       return recentJobs.value;
     }
   }
@@ -190,7 +200,7 @@ export const useScenesStore = defineStore("scenes", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       scenes.value = await res.json() as SceneDetail[];
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }
@@ -211,7 +221,7 @@ export const useScenesStore = defineStore("scenes", () => {
       }
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }
@@ -230,7 +240,7 @@ export const useScenesStore = defineStore("scenes", () => {
       }
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }
@@ -281,7 +291,7 @@ export const useScenesStore = defineStore("scenes", () => {
       schedulePoll(job.id, 0);
       return job;
     } catch (e) {
-      runError.value = String(e);
+      runError.value = e instanceof Error ? e.message : String(e);
       return null;
     }
   }
@@ -308,7 +318,7 @@ export const useScenesStore = defineStore("scenes", () => {
       recentJobs.value = recentJobs.value.filter((entry) => entry.id !== jobId);
       return { ok: true };
     } catch (e) {
-      const msg = String(e);
+      const msg = e instanceof Error ? e.message : String(e);
       runError.value = msg;
       return { ok: false, error: msg };
     }
@@ -352,7 +362,7 @@ export const useScenesStore = defineStore("scenes", () => {
       }
       return job;
     } catch (e) {
-      runError.value = String(e);
+      runError.value = e instanceof Error ? e.message : String(e);
       return null;
     }
   }

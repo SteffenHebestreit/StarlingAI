@@ -25,6 +25,7 @@ Always allowed; no side effects.
 | `browser_wait_for` | — | — | Wait for text to appear or disappear on the current browser page |
 | `calendar_list_calendars` | — | — | List available CalDAV calendars for a configured account |
 | `calendar_list_events` | — | — | List events in a CalDAV calendar within a date range |
+| `comfyui_catalog` | — | — | Look up the ComfyUI server's node types, model files, templates and saved editor workflows |
 | `computer_capture_region` | — | — | Capture a specific screen region and analyze with vision |
 | `computer_list_nodes` | — | — | List configured computer nodes available for connection |
 | `computer_list_sessions` | — | — | List currently open computer sessions for reuse or attach |
@@ -140,6 +141,8 @@ Write operations inside the workspace; session-level consent once.
 | `calendar_create_event` | per-call | — | Create a new event in a CalDAV calendar |
 | `calendar_delete_event` | per-call | — | Delete an event from a CalDAV calendar |
 | `calendar_update_event` | per-call | — | Update an existing event in a CalDAV calendar |
+| `comfyui_run` | — | — | Run a ComfyUI workflow and save what it produces inside the workspace |
+| `comfyui_workflow` | — | — | Create or change a ComfyUI workflow file in the workspace, or save it to the ComfyUI editor's library |
 | `computer_session_stop` | — | — | Graceful stop of a computer session |
 | `contacts_create` | per-call | — | Create a new contact in a CardDAV address book |
 | `contacts_delete` | per-call | — | Delete a contact from a CardDAV address book |

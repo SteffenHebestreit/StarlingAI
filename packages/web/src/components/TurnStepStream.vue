@@ -1,5 +1,7 @@
 <template>
-  <div v-if="rows.length || (isStreaming && liveText)" class="tss">
+  <!-- While the turn runs its steps are at the orb (OrbActivity.vue) when `atOrb` is set; only a
+       step waiting on the user stays here, since its question is under it. -->
+  <div v-if="(rows.length || (isStreaming && liveText)) && !(isStreaming && atOrb && !hasAwaiting)" class="tss">
     <!-- Finished turns get a one-line header that folds the stream away. Older answers start
          folded so scrolling back through a session is not scrolling past every step ever taken. -->
     <button
@@ -96,6 +98,8 @@ const props = defineProps<{
   awaiting?: Record<string, { kind: string; expiresAt: string }>;
   /** The language the turn is shown in: the user's (composables/turnText.ts). */
   language?: TurnLanguage;
+  /** The orb shows the running turn's steps: none here while it runs, unless one waits on the user. */
+  atOrb?: boolean;
 }>();
 
 const lang = computed<TurnLanguage>(() => props.language ?? "en");
@@ -258,6 +262,10 @@ function markFor(status: StepDisplayStatus): string {
   cursor: pointer;
 }
 .tss-row__btn:hover { background: rgba(148, 163, 184, 0.1); }
+/* A step row is some 23 px tall: under a finger, a tap often opened the row next to it. */
+@media (pointer: coarse) {
+  .tss-row__btn { min-height: 2.5rem; align-items: center; }
+}
 .tss-row__btn:focus-visible { outline: 2px solid rgba(var(--accent-purple), 0.8); outline-offset: 1px; }
 
 .tss-mark {

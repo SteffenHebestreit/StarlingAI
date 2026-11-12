@@ -224,6 +224,8 @@ export function mergeWorkflowCatalogMatches(...groups: WorkflowCatalogMatch[][])
   });
 }
 
+const NOISE_FLOOR_MARGIN = 0.03;
+
 export function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatalogMatch[]): boolean {
   const topMatch = matches[0];
   if (!topMatch) return false;
@@ -238,6 +240,12 @@ export function shouldRequireWorkflowExecutionAfterSearch(matches: WorkflowCatal
   // so a moderate score is a real signal.
   const hasKeywordOverlap = topMatch.matchedTerms.length > 0;
   if (hasKeywordOverlap) {
+    // Barely above workflows that share no word with the request, the score is the embedding's
+    // noise floor and the shared word incidental. "ComfyUI image generation workflow" forced
+    // deck_images at 0.56 ("image", "workflow") over deep_research at 0.55 and content_creation
+    // at 0.55, and the turn went looking for stock photos.
+    const nearestUnrelated = matches.slice(1).find((match) => match.matchedTerms.length === 0);
+    if (nearestUnrelated && topMatch.score - nearestUnrelated.score < NOISE_FLOOR_MARGIN) return false;
     return topMatch.score >= 0.5 || (topMatch.matchedTerms.length >= 3 && topMatch.score >= 0.3);
   }
   // Pure-semantic matches with NO keyword overlap need a much higher bar.

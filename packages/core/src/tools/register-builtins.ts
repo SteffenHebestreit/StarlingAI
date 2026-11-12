@@ -43,6 +43,7 @@ import "./workspace-search.js";
 import "./web.js";
 import "./web-table.js";
 import "./multimodal.js";
+import "./comfyui.js";
 import "./document-output.js";
 import "./render-pdf.js";
 import "./code-navigation.js";

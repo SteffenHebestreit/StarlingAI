@@ -1,5 +1,5 @@
 <template>
-  <div :class="[
+  <div v-if="!quietLiveBubble" :class="[
     'message-row',
     message.role === 'user'
       ? 'message-row--user'
@@ -21,12 +21,29 @@
 
       <!-- A message the turn posted while it worked: its plan, a step it finished. Not its answer. -->
       <div v-if="message.progress" class="progress-eyebrow">{{ turnText.progressLabel(bubbleLanguage) }}</div>
+      <!-- What a scheduled task found: written by the gateway between turns, not by a turn. -->
+      <div
+        v-if="message.followUp"
+        :class="['follow-up-eyebrow', message.followUp.failed && 'follow-up-eyebrow--failed']"
+        :title="chatText.followUpTitle(bubbleLanguage)"
+      >
+        <span aria-hidden="true">◷</span>
+        {{ chatText.followUp(bubbleLanguage, message.followUp.label) }}<template v-if="followUpState"> · {{ followUpState }}</template>
+      </div>
       <!-- A turn the user stopped: their choice, not an error. -->
       <div v-if="message.stopped" class="guardrail-badge guardrail-badge--stopped">{{ turnText.stoppedBadge(bubbleLanguage) }}</div>
       <!-- Guardrail / blocked badge -->
       <div v-else-if="message.blocked" :class="['guardrail-badge', blockLabel.startsWith('⛔') ? 'guardrail-badge--blocked' : 'guardrail-badge--warn']">
         {{ blockLabel }}
       </div>
+      <!-- An answer that failed left the user to type the question again: one press asks it again. -->
+      <button
+        v-if="message.blocked && !message.stopped && message.role === 'assistant' && !isStreaming && allowRewind !== false"
+        type="button"
+        class="export-btn retry-btn"
+        :title="chatText.retryTitle(bubbleLanguage)"
+        @click="emit('retry', message.id)"
+      >{{ chatText.retry(bubbleLanguage) }}</button>
       <div v-if="visibleGuardrailEvents.length" class="guardrail-events">
         <div v-for="(label, i) in visibleGuardrailEvents" :key="i" class="guardrail-badge guardrail-badge--warn">
           {{ label }}
@@ -50,7 +67,7 @@
             <span class="thinking-dot">·</span>
           </span>
           <span v-else class="thinking-toggle-label">
-            {{ thinkingOpen ? 'Hide thinking' : 'Show thinking' }}
+            {{ thinkingOpen ? chatText.hideThinking(bubbleLanguage) : chatText.showThinking(bubbleLanguage) }}
           </span>
           <span v-if="!isThinking" class="thinking-chevron" aria-hidden="true">{{ thinkingOpen ? '▲' : '▼' }}</span>
         </button>
@@ -95,6 +112,7 @@
         :start-collapsed="stepsStartCollapsed"
         :awaiting="awaitingSteps"
         :language="bubbleLanguage"
+        :at-orb="liveAtOrb"
         @select="(stepId) => emit('show-step', message.id, stepId)"
       >
         <!-- A question a step is waiting on sits under that step, so it moves with the step
@@ -104,6 +122,7 @@
             v-for="inputId in gateway.userInputPlacement.byStep[placementKey(message.id, stepId)] ?? []"
             :key="inputId"
             :input-id="inputId"
+            :language="bubbleLanguage"
           />
         </template>
       </TurnStepStream>
@@ -115,16 +134,17 @@
           :key="`${att.filename}-${i}`"
           class="message-attachment-figure"
         >
-          <img
-            :src="att.dataUrl"
-            :alt="att.filename"
-            class="message-attachment-img"
-            @click="previewAttachment(att)"
-            title="Click to enlarge"
-          />
+          <!-- A button, so the keyboard can enlarge the picture too: a bare <img @click> took no focus. -->
+          <button type="button" class="message-attachment-btn" :aria-label="chatText.enlarge(bubbleLanguage, att.filename)" :title="chatText.clickToEnlarge(bubbleLanguage)" @click="previewAttachment(att)">
+            <img
+              :src="att.dataUrl"
+              :alt="att.filename"
+              class="message-attachment-img"
+            />
+          </button>
           <figcaption class="message-attachment-caption">
             <span class="message-attachment-name">{{ att.filename }}</span>
-            <button class="artifact-action" @click="downloadAttachment(att)">Download</button>
+            <button type="button" class="artifact-action" @click="downloadAttachment(att)">{{ chatText.download(bubbleLanguage) }}</button>
           </figcaption>
         </figure>
       </div>
@@ -152,7 +172,7 @@
         @click="contentCollapsed = !contentCollapsed"
         class="collapse-toggle"
       >
-        {{ contentCollapsed ? 'Show more ▼' : 'Show less ▲' }}
+        {{ contentCollapsed ? chatText.showMore(bubbleLanguage) : chatText.showLess(bubbleLanguage) }}
       </button>
 
       <!-- Diagrams stay VISIBLE — a mermaid artifact is the answer in picture form, not a file
@@ -163,7 +183,7 @@
           :key="`mermaid-${att.filename}-${i}`"
           class="artifact-diagram"
         >
-          <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder">Rendering diagram…</div>
+          <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder">{{ chatText.renderingDiagram(bubbleLanguage) }}</div>
           <div v-else-if="mermaidPreviewErrors[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder artifact-diagram__placeholder--error">
             {{ mermaidPreviewErrors[mermaidAttachmentKey(att)] }}
           </div>
@@ -202,26 +222,34 @@
         <button
           v-if="message.steer?.state === 'undelivered'"
           class="export-btn"
-          title="Send this message again"
+          :title="chatText.resendTitle(bubbleLanguage)"
           @click="emit('resend', message.id)"
-        >↻ Resend</button>
+        >{{ chatText.resend(bubbleLanguage) }}</button>
       </div>
 
       <!-- Timestamp + usage row -->
       <div class="message-footer">
         <div class="message-time">{{ formatTime(message.timestamp) }}</div>
         <div v-if="!isStreaming && mainContent && !message.progress" class="message-export-actions">
-          <button @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
-          <button @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
+          <button
+            type="button"
+            class="export-btn"
+            :class="copyState === 'copied' ? 'export-btn--done' : copyState === 'failed' ? 'export-btn--failed' : ''"
+            :title="chatText.copyTitle(bubbleLanguage)"
+            @click="copyMessageText"
+          >{{ copyState === "copied" ? chatText.copied(bubbleLanguage) : copyState === "failed" ? chatText.copyFailed(bubbleLanguage) : chatText.copy(bubbleLanguage) }}</button>
+          <button type="button" @click="exportMessageMarkdown" :title="chatText.markdownTitle(bubbleLanguage)" class="export-btn">⬇ MD</button>
+          <button type="button" @click="exportMessagePDF" :title="chatText.pdfTitle(bubbleLanguage)" class="export-btn">⬇ PDF</button>
           <!-- Not on a message read mid-turn: restarting there would cut the turn it was read into
                in half, on the server as well as here. Nor while any turn runs: the rewind would
                cut the history under a runtime that is still appending to it. -->
           <button
             v-if="message.role === 'user' && !message.midTurn && !message.steer && allowRewind !== false"
+            type="button"
             @click="emit('rewind', message.id)"
-            title="Restart the conversation from this message"
+            :title="chatText.restartTitle(bubbleLanguage)"
             class="export-btn"
-          >↩ Restart</button>
+          >{{ chatText.restart(bubbleLanguage) }}</button>
         </div>
         <div
           v-if="(message.usage || message.perf) && message.role === 'assistant'"
@@ -260,6 +288,7 @@
   <Teleport to="body">
     <div
       v-if="lightboxUrl"
+      ref="lightboxEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -280,6 +309,7 @@
   <Teleport to="body">
     <div
       v-if="artifactPreview"
+      ref="artifactPreviewEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -292,7 +322,17 @@
             <div class="artifact-preview-modal__eyebrow">Artifact Preview</div>
             <div class="artifact-preview-modal__title">{{ artifactPreview.title }}</div>
           </div>
-          <button @click="closeArtifactPreview" class="artifact-preview-modal__close" aria-label="Close preview">✕</button>
+          <div class="artifact-preview-modal__actions">
+            <!-- A file that can be previewed could not be saved from here: the click on its link
+                 previews it, and the way to the download was the side panel. -->
+            <button
+              v-if="artifactPreviewSource && !artifactPreviewSource.externalUrl"
+              type="button"
+              class="artifact-action"
+              @click="downloadAttachment(artifactPreviewSource, Boolean(artifactPreviewSource.isDirectory))"
+            >⬇ {{ chatText.download(bubbleLanguage) }}</button>
+            <button type="button" @click="closeArtifactPreview" class="artifact-preview-modal__close" aria-label="Close preview">✕</button>
+          </div>
         </div>
 
         <div class="artifact-preview-modal__body">
@@ -350,6 +390,8 @@ async function loadMermaid(): Promise<MermaidModule> {
 </script>
 
 <script setup lang="ts">
+import { chatText } from "@/composables/chatText";
+import { writeClipboard } from "@/composables/clipboard";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
@@ -361,6 +403,7 @@ import { detectLanguage } from "@/speech/speechText";
 import { localExpiresAt, placementKey } from "@/composables/userInputs";
 import { escapeHtml, memoizedRenderMarkdown, renderMarkdown, renderStreamingMarkdown } from "@/composables/markdown";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 import { finishReasonNeedsAttention as needsAttention } from "@/composables/finishReasons";
 import "highlight.js/styles/github-dark.css";
 import { sanitizeAssistantMessageContent, useGatewayStore, type ChatAttachment, type ChatMessage } from "@/stores/gateway";
@@ -406,12 +449,16 @@ const props = defineProps<{
   foldSteps?: boolean;
   /** False while a turn runs: a Restart then would cut the history under it. */
   allowRewind?: boolean;
+  /** The orb shows the running turn's steps and words (OrbActivity.vue), so the live bubble does not. */
+  liveAtOrb?: boolean;
 }>();
 
 const emit = defineEmits<{
   rewind: [messageId: string];
   /** Try again to deliver a message sent into a running turn that never reached it. */
   resend: [messageId: string];
+  /** Ask the question this (failed) answer belongs to once more. */
+  retry: [messageId: string];
   /** Ask the page to show ONE step of this message in the side panel. */
   "show-step": [messageId: string, stepId: string];
 }>();
@@ -423,6 +470,8 @@ const COLLAPSE_CHAR_THRESHOLD = 400;
 const thinkingOpen = ref(false);
 const lightboxUrl = ref<string | null>(null);
 const artifactPreview = ref<ArtifactPreviewState | null>(null);
+/** The attachment the open preview shows, so the preview can offer its download. */
+const artifactPreviewSource = ref<ChatAttachment | null>(null);
 const artifactPreviewLoading = ref<string | null>(null);
 const renderedMessageRef = ref<HTMLElement | null>(null);
 const contentCollapsed = ref(props.autoCollapse ?? false);
@@ -431,6 +480,12 @@ const turnSteps = computed(() => stepsFor(props.message));
  * The language the turn is told in: the one the store noted when the turn started, else the
  * answer's own (a reloaded transcript), else English — the rest of the page is English.
  */
+/** How the schedule stands after this post, when the post ended it. */
+const followUpState = computed(() => {
+  const mark = props.message.followUp;
+  return mark?.ended ? chatText.followUpEnded(bubbleLanguage.value, mark.ended, mark.run) : mark?.failed ? chatText.followUpEnded(bubbleLanguage.value, "failed", mark.run) : "";
+});
+
 const bubbleLanguage = computed<TurnLanguage>(() =>
   turnLanguage(props.message.language ?? detectLanguage(props.message.content ?? "")));
 const stepsStartCollapsed = computed(() => Boolean(props.autoCollapse)
@@ -447,6 +502,20 @@ const awaitingSteps = computed(() => {
   }
   return awaiting;
 });
+
+/**
+ * The live bubble with nothing of its own to show yet: no answer text, no thinking, no question
+ * waiting on the user. Its steps are at the orb, so an empty frame here would only say "working"
+ * a second time.
+ */
+const quietLiveBubble = computed(() => Boolean(props.liveAtOrb)
+  && isStreamingMessage.value
+  && !props.message.blocked
+  && !mainStreamingText.value.trim()
+  && !displayThinkingContent.value
+  && subAgentReasoning.value.length === 0
+  && Object.keys(awaitingSteps.value).length === 0
+  && imageAttachments.value.length === 0);
 
 const steerBadge = computed((): { label: string; tone: "pending" | "error" | "read"; title?: string } | null => {
   if (props.message.role !== "user") return null;
@@ -896,6 +965,7 @@ async function ensureMermaidPreview(attachment: ChatAttachment): Promise<void> {
 }
 
 function closeArtifactPreview(): void {
+  artifactPreviewSource.value = null;
   if (artifactPreview.value?.url?.startsWith("blob:")) {
     URL.revokeObjectURL(artifactPreview.value.url);
   }
@@ -904,6 +974,12 @@ function closeArtifactPreview(): void {
 
 useEscapeToClose(() => lightboxUrl.value !== null, () => { lightboxUrl.value = null; });
 useEscapeToClose(() => artifactPreview.value !== null, closeArtifactPreview);
+// Both cover the page. A previewed page keeps the keys pressed inside its frame; Tab coming out
+// of it lands back on the preview's own buttons.
+const lightboxEl = ref<HTMLElement | null>(null);
+const artifactPreviewEl = ref<HTMLElement | null>(null);
+useFocusTrap(lightboxEl);
+useFocusTrap(artifactPreviewEl);
 
 async function previewAttachment(attachment: ChatAttachment): Promise<void> {
   if (attachment.dataUrl?.startsWith("data:image/")) {
@@ -913,6 +989,7 @@ async function previewAttachment(attachment: ChatAttachment): Promise<void> {
 
   artifactPreviewLoading.value = attachment.filename;
   closeArtifactPreview();
+  artifactPreviewSource.value = attachment;
 
   try {
     if (attachment.externalUrl) {
@@ -1039,9 +1116,33 @@ async function onArtifactLinkClick(attachment: ChatAttachment): Promise<void> {
  * a temporary <textarea> selectAll-and-copy when navigator.clipboard is
  * unavailable (older browsers, insecure context, etc.).
  */
+/** The whole message as it was written (its Markdown), with a word of confirmation on the button. */
+const copyState = ref<"idle" | "copied" | "failed">("idle");
+let copyStateTimer: number | null = null;
+function copyMessageText(): void {
+  const flash = (state: "copied" | "failed"): void => {
+    copyState.value = state;
+    if (copyStateTimer !== null) window.clearTimeout(copyStateTimer);
+    copyStateTimer = window.setTimeout(() => { copyState.value = "idle"; copyStateTimer = null; }, 1800);
+  };
+  writeClipboard(mainContent.value).then(() => flash("copied"), () => flash("failed"));
+}
+
 function onMessageContentClick(event: MouseEvent): void {
   const target = event.target as HTMLElement | null;
   if (!target) return;
+  // A link in an answer leaves by a new tab. The sanitiser strips `target`, so a click used to
+  // navigate the dashboard's own tab away — out of the chat, and out of a running turn's view.
+  // A link to a place on this page (#…) stays a jump.
+  const link = target.closest("a[href]") as HTMLAnchorElement | null;
+  if (link && !target.closest("[data-copy-code], [data-svg-mode-button]")) {
+    const href = link.getAttribute("href") ?? "";
+    if (href && !href.startsWith("#") && !/^javascript:/i.test(href)) {
+      event.preventDefault();
+      window.open(link.href, "_blank", "noopener,noreferrer");
+    }
+    return;
+  }
   const toggleButton = target.closest("[data-svg-mode-button]") as HTMLButtonElement | null;
   if (toggleButton) {
     const wrapper = toggleButton.closest(".code-block--svg") as HTMLElement | null;
@@ -1073,28 +1174,10 @@ function onMessageContentClick(event: MouseEvent): void {
       button.classList.remove(modifier);
     }, 1800);
   };
-  const writePromise = (navigator.clipboard?.writeText
-    ? navigator.clipboard.writeText(text)
-    : Promise.reject(new Error("clipboard unavailable"))
+  writeClipboard(text).then(
+    () => flash("Copied", "code-block__copy--copied"),
+    () => flash("Failed", "code-block__copy--failed"),
   );
-  writePromise
-    .then(() => flash("Copied", "code-block__copy--copied"))
-    .catch(() => {
-      try {
-        const textarea = document.createElement("textarea");
-        textarea.value = text;
-        textarea.setAttribute("readonly", "");
-        textarea.style.position = "fixed";
-        textarea.style.opacity = "0";
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand("copy");
-        document.body.removeChild(textarea);
-        flash("Copied", "code-block__copy--copied");
-      } catch {
-        flash("Failed", "code-block__copy--failed");
-      }
-    });
 }
 
 async function downloadAttachment(attachment: ChatAttachment, archive = false): Promise<void> {
@@ -1419,9 +1502,15 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.artifact-preview-modal__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: none;
+}
 .artifact-preview-modal__close {
-  width: 2rem;
-  height: 2rem;
+  width: 2.5rem;
+  height: 2.5rem;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: #d6c8ff;
@@ -1574,6 +1663,19 @@ onBeforeUnmount(() => {
   margin-bottom: 0.25rem;
 }
 
+.follow-up-eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgb(var(--accent-rgb, 103 232 249) / 0.85);
+  margin-bottom: 0.4rem;
+  overflow-wrap: anywhere;
+}
+.follow-up-eyebrow--failed { color: #fca5a5; }
+
 .message-bubble--system {
   max-width: min(82%, 42rem);
   background: rgba(120, 113, 108, 0.12);
@@ -1709,6 +1811,19 @@ onBeforeUnmount(() => {
 /* ── Message content ──────────────────────────────────────────────────────────── */
 .message-content { white-space: pre-wrap; }
 .message-content.prose-content { white-space: normal; }
+/* A long URL, path or hash has no place to break: on a phone it ran past the bubble's edge and
+   made the chat scroll sideways. */
+.message-content { overflow-wrap: anywhere; }
+.message-bubble { min-width: 0; }
+/* A link in an answer opens in a new tab (onMessageContentClick): it says so. */
+.prose-content :deep(a[href^="http"])::after {
+  content: "↗";
+  display: inline-block;
+  margin-left: 0.15em;
+  font-size: 0.75em;
+  opacity: 0.6;
+  text-decoration: none;
+}
 
 .prose-content :deep(p)           { margin: 0 0 0.5rem; }
 .prose-content :deep(p:last-child){ margin-bottom: 0; }
@@ -1851,6 +1966,12 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 .prose-content :deep(ul), .prose-content :deep(ol) { padding-left: 1.25rem; margin: 0.25rem 0; }
+/* The CSS reset takes every list's markers: a numbered list in an answer came out without its
+   numbers, a bulleted one without bullets. */
+.prose-content :deep(ul) { list-style: disc; }
+.prose-content :deep(ol) { list-style: decimal; }
+.prose-content :deep(ul ul) { list-style: circle; }
+.prose-content :deep(li)::marker { color: rgba(var(--logo-cyan), 0.7); }
 .prose-content :deep(li)          { margin: 0.15rem 0; }
 .prose-content :deep(a)           { color: #a78bfa; text-decoration: underline; }
 .prose-content :deep(a:hover)     { color: #c4b5fd; }
@@ -1923,7 +2044,16 @@ onBeforeUnmount(() => {
   opacity: 0;
   transition: opacity 0.15s;
 }
-.message-bubble:hover .message-export-actions { opacity: 1; }
+.message-bubble:hover .message-export-actions,
+/* The keyboard gets them too: Tab used to land on buttons nobody could see. */
+.message-bubble:focus-within .message-export-actions { opacity: 1; }
+/* A touch screen has no hover: there the actions simply stand, at a size a finger can hit. */
+@media (hover: none) {
+  .message-export-actions { opacity: 0.85; gap: 0.4rem; }
+  .message-export-actions .export-btn { min-height: 2rem; padding-inline: 0.6rem; }
+}
+.export-btn--done { color: rgb(110 231 183) !important; border-color: rgba(110, 231, 183, 0.4) !important; }
+.export-btn--failed { color: rgb(252 165 165) !important; border-color: rgba(252, 165, 165, 0.4) !important; }
 
 .export-btn {
   font-size: 0.62rem;
@@ -2005,4 +2135,31 @@ onBeforeUnmount(() => {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.2; }
 }
+.export-btn:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.75);
+  outline-offset: 1px;
+}
+
+/* Motion on request only: the thinking dots and the streaming cursor stand still. */
+@media (prefers-reduced-motion: reduce) {
+  .message-bubble *,
+  .message-bubble *::before,
+  .message-bubble *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+.message-attachment-btn {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 0.6rem;
+  cursor: zoom-in;
+}
+.message-attachment-btn:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.8);
+  outline-offset: 2px;
+}
+.retry-btn { margin: 0.1rem 0 0.4rem; font-size: 0.72rem; padding: 0.3rem 0.7rem; opacity: 1; }
 </style>

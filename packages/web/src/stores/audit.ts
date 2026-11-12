@@ -12,10 +12,12 @@ export interface AuditEvent {
   data: Record<string, unknown>;
 }
 
+/** How many events the live buffer keeps. Past this the oldest are dropped, and the Audit Log says so. */
+export const MAX_AUDIT_EVENTS = 500;
+
 export const useAuditStore = defineStore("audit", () => {
   const events = ref<AuditEvent[]>([]);
   const subscribed = ref(false);
-  const MAX_EVENTS = 500;
   const gateway = useGatewayStore();
 
   async function subscribe() {
@@ -27,8 +29,8 @@ export const useAuditStore = defineStore("audit", () => {
 
   function addEvent(event: AuditEvent) {
     events.value.unshift(event); // newest first
-    if (events.value.length > MAX_EVENTS) {
-      events.value.splice(MAX_EVENTS);
+    if (events.value.length > MAX_AUDIT_EVENTS) {
+      events.value.splice(MAX_AUDIT_EVENTS);
     }
   }
 

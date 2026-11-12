@@ -107,6 +107,10 @@ services:
       - SAI_MAIL_SERVICE_URL=${SAI_MAIL_SERVICE_URL:-http://mail-service:5020}
       # Set by `sai start --laya` (http://laya:8080); empty keeps the Laya decision layer inert.
       - SAI_LAYA_URL=${SAI_LAYA_URL:-}
+      # Set by `sai start --comfyui`; empty turns the comfyui_* tools off. The editor URL is the
+      # address a person's browser opens, handed to the user with an exported workflow.
+      - SAI_COMFYUI_URL=${SAI_COMFYUI_URL:-}
+      - SAI_COMFYUI_EDITOR_URL=${SAI_COMFYUI_EDITOR_URL:-}
       - SAI_MAIL_SERVICE_TOKEN=${SAI_MAIL_SERVICE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
       - SAI_COMPUTER_REMOTE_URL=${SAI_COMPUTER_REMOTE_URL:-http://computer-remote:8890}
       - SAI_COMPUTER_REMOTE_TOKEN=${SAI_COMPUTER_REMOTE_TOKEN:?run pnpm sai setup first — it generates internal service credentials}
@@ -520,6 +524,41 @@ services:
       retries: 5
       start_period: 120s
 
+  comfyui:
+    # ComfyUI (docker/comfyui): the node-graph image engine the comfyui_* tools build, change and
+    # run workflows on. OFF unless the `comfyui` profile is on (`sai start --comfyui`, or
+    # SAI_ENABLE_COMFYUI=1 in .env), which also hands the gateway SAI_COMFYUI_URL. Needs an NVIDIA
+    # GPU to be useful; the reservation is in docker-compose.gpu.yml.
+    # Model files (~18 GB for the default sets) download into a named volume at first start and
+    # survive rebuilds. A gated set (FLUX 3 Image Klein) needs HF_TOKEN from an account that has
+    # accepted its license; without one it is skipped and the others still load.
+    # The editor is published on the host's loopback only: ComfyUI has no login of its own.
+    profiles: ["comfyui"]
+    build:
+      context: ./docker/comfyui
+    image: starlingai/comfyui:dev
+    restart: unless-stopped
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - COMFYUI_MODEL_SETS=${COMFYUI_MODEL_SETS:-}
+      - COMFYUI_FETCH_MODELS=${COMFYUI_FETCH_MODELS:-1}
+      - COMFYUI_EXTRA_ARGS=${COMFYUI_EXTRA_ARGS:-}
+    volumes:
+      - gc-comfyui-models:/opt/comfyui/models
+      - gc-comfyui-data:/data
+    ports:
+      - "127.0.0.1:${SAI_COMFYUI_PORT:-8188}:8188"
+    networks:
+      - starlingai-internal
+      # Egress for the model downloads only; the server itself runs --offline.
+      - starlingai-public
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats', timeout=8)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
   mail-service:
     build:
       context: .
@@ -919,6 +958,9 @@ volumes:
   gc-qwen-model-cache:
   gc-engram-reranker-cache:
   gc-laya-hf-cache:
+  # ComfyUI model files (tens of GB, downloaded once) and its outputs, inputs and saved workflows.
+  gc-comfyui-models:
+  gc-comfyui-data:
   # engram-db snapshot — persists uploaded documents (CV/profile, workspace library)
   # across container restarts/rebuilds. Wiped only by `sai stop --volumes` / `--fresh`.
   engram-data:

@@ -1,0 +1,29 @@
+{
+  "sets": [
+    {
+      "name": "qwen-image-2.1",
+      "description": "Qwen-Image 2.1, int8: text to image and image edits",
+      "files": [
+        { "folder": "diffusion_models", "name": "qwen_image_2.1_int8_convrot.safetensors", "repo": "Comfy-Org/Qwen-Image-2.1", "revision": "aacf31a6d48e707f352ecba714cee0680da3479b", "path": "diffusion_models/qwen_image_2.1_int8_convrot.safetensors" },
+        { "folder": "text_encoders", "name": "qwen3vl_8b_int8_convrot.safetensors", "repo": "Comfy-Org/Qwen-Image-2.1", "revision": "aacf31a6d48e707f352ecba714cee0680da3479b", "path": "text_encoders/qwen3vl_8b_int8_convrot.safetensors" },
+        { "folder": "vae", "name": "qwen_image_2.1_vae_bf16.safetensors", "repo": "Comfy-Org/Qwen-Image-2.1", "revision": "aacf31a6d48e707f352ecba714cee0680da3479b", "path": "vae/qwen_image_2.1_vae_bf16.safetensors" }
+      ]
+    },
+    {
+      "name": "flux-3-klein",
+      "description": "FLUX 3 Image Klein, int8 distilled: fast text to image and reference edits (FLUX Kommunity License, gated)",
+      "files": [
+        { "folder": "diffusion_models", "name": "flux3-image-klein-int8-convrot.safetensors", "repo": "black-forest-labs/flux-3-image-klein-comfy", "revision": "9d36114cf7a2e03a45c28f5cc4987d20ebfdb6c1", "path": "diffusion_models/flux3-image-klein-int8-convrot.safetensors", "gated": true },
+        { "folder": "text_encoders", "name": "qwen3vl_4b_int8_convrot.safetensors", "repo": "black-forest-labs/flux-3-image-klein-comfy", "revision": "9d36114cf7a2e03a45c28f5cc4987d20ebfdb6c1", "path": "text_encoders/qwen3vl_4b_int8_convrot.safetensors", "gated": true },
+        { "folder": "vae", "name": "flux2-vae.safetensors", "repo": "Comfy-Org/Flux-2-Klein-4B", "revision": "5b3abca5c0dc1ecd4eaf3340868d09063fc1c965", "path": "split_files/vae/flux2-vae.safetensors" }
+      ]
+    },
+    {
+      "name": "upscale",
+      "description": "Real-ESRGAN x4plus (BSD-3-Clause): 4x upscaling",
+      "files": [
+        { "folder": "upscale_models", "name": "RealESRGAN_x4plus.pth", "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth", "bytes": 67040989 }
+      ]
+    }
+  ]
+}

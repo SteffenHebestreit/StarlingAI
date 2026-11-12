@@ -1,15 +1,24 @@
 <template>
   <Teleport to="body">
-    <div class="fixed inset-0 z-[80] flex items-center justify-center p-4">
-      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="close" />
+    <div class="fixed inset-0 z-modal flex items-center justify-center p-4">
+      <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="onBackdropClick" />
 
-      <div class="relative z-[81] w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-gray-950/95 shadow-2xl shadow-black/50">
+      <div
+        ref="dialogEl"
+        class="relative z-[1] w-full max-w-lg overflow-hidden rounded-2xl border border-white/10 bg-gray-950/95 shadow-2xl shadow-black/50 outline-none"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="model-connect-title"
+        tabindex="-1"
+      >
         <div class="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div class="flex items-center gap-2">
-            <span class="inline-block h-2 w-2 rounded-full" :class="connected ? 'bg-emerald-400' : 'bg-orange-400'" />
-            <h2 class="text-sm font-semibold text-gray-100">Connect Claude subscription</h2>
+            <span class="inline-block h-2 w-2 rounded-full" :class="connected ? 'bg-emerald-400' : 'bg-orange-400'" aria-hidden="true" />
+            <h2 id="model-connect-title" class="text-sm font-semibold text-gray-100">
+              {{ connected ? "Claude subscription — connected" : "Connect Claude subscription" }}
+            </h2>
           </div>
-          <button class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200" @click="close">
+          <button type="button" class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200" @click="close">
             Close
           </button>
         </div>
@@ -49,6 +58,7 @@
                 <span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-[11px] text-gray-300">1</span>
                 <div class="min-w-0 flex-1">
                   <button
+                    type="button"
                     class="rounded-lg border border-orange-400/30 bg-orange-500/15 px-3 py-1.5 text-[12px] font-medium text-orange-100 transition hover:bg-orange-500/25 disabled:opacity-50"
                     :disabled="store.oauthBusy"
                     @click="openAuthorize"
@@ -63,8 +73,10 @@
               <li class="flex gap-3">
                 <span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-[11px] text-gray-300">2</span>
                 <div class="min-w-0 flex-1">
-                  <label class="block text-[12px] text-gray-400">Paste the authorization code</label>
+                  <label for="model-connect-code" class="block text-[12px] text-gray-400">Paste the authorization code</label>
                   <input
+                    id="model-connect-code"
+                    ref="codeEl"
                     v-model="code"
                     type="text"
                     autocomplete="off"
@@ -78,7 +90,7 @@
               </li>
             </ol>
 
-            <p v-if="store.oauthError" class="mt-3 text-[12px] text-red-300">{{ store.oauthError }}</p>
+            <p v-if="store.oauthError" class="mt-3 text-[12px] text-red-300" role="alert">{{ store.oauthError }}</p>
 
             <div class="mt-4 flex justify-end gap-2">
               <button
@@ -108,7 +120,7 @@
                Shown whenever Claude is usable (subscription OR API key). -->
           <div v-if="connected || claudePresetExists" class="mt-4 border-t border-white/10 pt-4">
             <div class="flex items-center justify-between gap-2">
-              <label class="block text-[12px] font-medium text-gray-300">Claude model</label>
+              <label for="model-connect-model" class="block text-[12px] font-medium text-gray-300">Claude model</label>
               <button
                 class="shrink-0 rounded-md border border-white/10 px-2 py-1 text-[11px] text-gray-300 transition hover:border-orange-400/40 hover:text-gray-100 disabled:opacity-50"
                 :disabled="store.anthropicModelsRefreshing"
@@ -123,6 +135,7 @@
             </p>
             <div class="mt-2 flex items-center gap-2">
               <select
+                id="model-connect-model"
                 v-model="selectedModel"
                 class="min-w-0 flex-1 rounded-lg border border-white/10 bg-gray-900 px-2.5 py-2 text-[12px] text-gray-100 outline-none transition focus:border-orange-400/40"
                 :disabled="store.modelSaving"
@@ -147,6 +160,7 @@
               autocomplete="off"
               spellcheck="false"
               placeholder="claude-…"
+              aria-label="Custom model id"
               class="mt-2 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 font-mono text-[12px] text-gray-100 outline-none transition focus:border-orange-400/40"
               :disabled="store.modelSaving"
             />
@@ -164,15 +178,17 @@
 
             <!-- Claude routing scope — how widely the header switch applies across the swarm. -->
             <div class="mt-4 border-t border-white/10 pt-4">
-              <label class="block text-[12px] font-medium text-gray-300">Claude routing scope</label>
+              <!-- A caption, not a <label>: what it names is a group of buttons, not one field. -->
+              <div id="model-connect-scope" class="block text-[12px] font-medium text-gray-300">Claude routing scope</div>
               <p class="mt-0.5 text-[11px] text-gray-500">
                 When the header switch is on, which agents actually run on Claude.
               </p>
-              <div class="mt-2 grid grid-cols-1 gap-1.5">
+              <div class="mt-2 grid grid-cols-1 gap-1.5" role="group" aria-labelledby="model-connect-scope">
                 <button
                   v-for="opt in scopeOptions"
                   :key="opt.value"
                   type="button"
+                  :aria-pressed="store.scope === opt.value"
                   class="flex flex-col items-start rounded-lg border px-3 py-2 text-left transition disabled:opacity-50"
                   :class="store.scope === opt.value
                     ? 'border-orange-400/50 bg-orange-500/15 text-orange-100'
@@ -193,8 +209,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useModelPresetStore, type PresetScope } from "@/stores/modelPreset";
+import { confirmAction } from "@/composables/useConfirm";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 
 const emit = defineEmits<{ close: []; connected: [] }>();
 
@@ -212,6 +231,10 @@ const code = ref("");
 const started = ref(false);
 const verifier = ref("");
 const state = ref("");
+const dialogEl = ref<HTMLElement | null>(null);
+const codeEl = ref<HTMLInputElement | null>(null);
+/** What had the focus before the dialog, to hand it back on the way out. */
+let opener: HTMLElement | null = null;
 
 // Model picker: dropdown of curated choices + free-text escape hatch.
 const selectedModel = ref(store.anthropicModel);
@@ -233,7 +256,15 @@ onMounted(() => {
   // would otherwise reappear on reopen, long after the condition cleared.
   store.anthropicModelsWarning = "";
   void store.fetchAnthropicModel();
+  opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  void nextTick(() => dialogEl.value?.focus({ preventScroll: true }));
 });
+
+onBeforeUnmount(() => {
+  if (opener?.isConnected) opener.focus({ preventScroll: true });
+});
+
+useFocusTrap(dialogEl);
 
 // Re-sync the dropdown when the stored model arrives/changes; fall back to
 // the custom field for ids outside the curated list.
@@ -271,6 +302,8 @@ async function openAuthorize(): Promise<void> {
   state.value = flow.state;
   started.value = true;
   window.open(flow.authorizeUrl, "_blank", "noopener");
+  // Coming back from the provider's tab, the code goes straight into its field.
+  void nextTick(() => codeEl.value?.focus({ preventScroll: true }));
 }
 
 async function complete(): Promise<void> {
@@ -290,6 +323,36 @@ async function disconnect(): Promise<void> {
 function close(): void {
   emit("close");
 }
+
+// The sign-in's verifier and state live only in this dialog: once the provider's tab is open,
+// closing throws them away and the code copied over there can no longer be used. So what can
+// happen by accident no longer closes it then — a click beside the dialog does nothing, and
+// Escape asks first. The Close and Cancel buttons still close at once.
+const signInUnderway = computed(() => started.value && !connected.value);
+
+function onBackdropClick(): void {
+  if (!signInUnderway.value) close();
+}
+
+let asking = false;
+useEscapeToClose(() => true, () => {
+  if (!signInUnderway.value) {
+    close();
+    return;
+  }
+  if (asking) return;
+  asking = true;
+  void confirmAction({
+    title: "Close without finishing the sign-in?",
+    message: "The code from the Claude tab only works in this dialog. If you close it, you start the sign-in again.",
+    confirmLabel: "Close",
+    cancelLabel: "Keep signing in",
+    eyebrow: "Sign-in in progress",
+  }).then((confirmed) => {
+    asking = false;
+    if (confirmed) close();
+  });
+});
 
 function formatExpiry(iso: string): string {
   const d = new Date(iso);

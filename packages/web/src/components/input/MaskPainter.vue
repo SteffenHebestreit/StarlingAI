@@ -1,29 +1,29 @@
 <template>
   <div class="mp">
     <div class="mp__toolbar">
-      <div class="mp__modes" role="group" aria-label="Brush">
-        <button type="button" :class="['mp__tool', { 'mp__tool--on': mode === 'paint' }]" :aria-pressed="mode === 'paint'" @click="mode = 'paint'">Paint</button>
-        <button type="button" :class="['mp__tool', { 'mp__tool--on': mode === 'erase' }]" :aria-pressed="mode === 'erase'" title="Erase (E)" @click="mode = 'erase'">Erase</button>
+      <div class="mp__modes" role="group" :aria-label="chatText.brush(lang)">
+        <button type="button" :class="['mp__tool', { 'mp__tool--on': mode === 'paint' }]" :aria-pressed="mode === 'paint'" @click="mode = 'paint'">{{ chatText.paint(lang) }}</button>
+        <button type="button" :class="['mp__tool', { 'mp__tool--on': mode === 'erase' }]" :aria-pressed="mode === 'erase'" :title="chatText.eraseTitle(lang)" @click="mode = 'erase'">{{ chatText.erase(lang) }}</button>
       </div>
       <label class="mp__brush">
-        <span>Brush</span>
-        <input v-model.number="brush" type="range" :min="MIN_BRUSH" :max="MAX_BRUSH" step="1" aria-label="Brush size in pixels" />
+        <span>{{ chatText.brush(lang) }}</span>
+        <input v-model.number="brush" type="range" :min="MIN_BRUSH" :max="MAX_BRUSH" step="1" :aria-label="chatText.brushSize(lang)" />
         <span class="mp__num">{{ brush }} px</span>
       </label>
-      <button type="button" class="mp__tool" title="Swap what may change and what is kept (X)" @click="invert">Invert</button>
-      <button type="button" class="mp__tool" :disabled="undoDepth === 0" title="Undo (Ctrl+Z)" @click="undo">Undo</button>
-      <button type="button" class="mp__tool" title="Start over: nothing may change" @click="clear">Clear</button>
-      <span class="mp__coverage" aria-live="polite">{{ coverageLabel(coverage) }} may change</span>
+      <button type="button" class="mp__tool" :title="chatText.invertTitle(lang)" @click="invert">{{ chatText.invert(lang) }}</button>
+      <button type="button" class="mp__tool" :disabled="undoDepth === 0" :title="chatText.undoTitle(lang)" @click="undo">{{ chatText.undo(lang) }}</button>
+      <button type="button" class="mp__tool" :title="chatText.clearMaskTitle(lang)" @click="clear">{{ chatText.clearMask(lang) }}</button>
+      <span class="mp__coverage" aria-live="polite">{{ chatText.mayChange(lang, coverageLabel(coverage)) }}</span>
     </div>
     <p class="mp__hint">
-      Paint over what may change — the tinted part. Everything else is kept.
-      <span class="mp__keys">[ ] brush size · E eraser · X invert · Ctrl+Z undo</span>
+      {{ chatText.painterHint(lang) }}
+      <span class="mp__keys">{{ chatText.painterKeys(lang) }}</span>
     </p>
 
     <div class="mp__stage-wrap">
       <div class="mp__stage" :style="stageStyle">
-        <img v-if="baseUrl" :src="baseUrl" class="mp__layer" alt="The picture to edit" draggable="false" />
-        <div v-else class="mp__layer mp__loading">{{ baseError || 'Loading the picture…' }}</div>
+        <img v-if="baseUrl" :src="baseUrl" class="mp__layer" :alt="chatText.pictureBeingEdited(lang)" draggable="false" />
+        <div v-else class="mp__layer mp__loading">{{ baseError || chatText.loadingPicture(lang) }}</div>
         <canvas
           ref="overlayEl"
           :width="width"
@@ -40,8 +40,8 @@
     </div>
 
     <div class="mp__footer">
-      <button type="button" class="btn-ghost mp__action" @click="emit('cancel')">Cancel</button>
-      <button type="button" class="btn-grad mp__action" :disabled="!exportable" :title="exportTitle" @click="apply">Use this mask</button>
+      <button type="button" class="btn-ghost mp__action" @click="cancel">{{ chatText.cancel(lang) }}</button>
+      <button type="button" class="btn-grad mp__action" :disabled="!exportable" :title="exportTitle" @click="apply">{{ chatText.useThisMask(lang) }}</button>
     </div>
   </div>
 </template>
@@ -70,6 +70,9 @@ import {
   type MaskImage,
   type Point,
 } from "@/composables/maskPainter";
+import { answerConfirm, confirmAction } from "@/composables/useConfirm";
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 
 const props = defineProps<{
   /** The base picture's natural size — the mask is exactly this size. */
@@ -80,7 +83,10 @@ const props = defineProps<{
   baseError?: string;
   /** A mask to start from (the agent's, or one painted earlier) instead of a blank one. */
   initialMaskUrl?: string;
+  /** The language of the painter's labels: the form's it is part of. */
+  language?: TurnLanguage;
 }>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 const emit = defineEmits<{
   /** The mask as a PNG data URL: transparent pixels may change, opaque ones are kept. */
@@ -104,9 +110,9 @@ let last: Point | null = null;
 
 const exportable = computed(() => canExportMask(coverage.value));
 const exportTitle = computed(() => {
-  if (coverage.value.editable === 0) return "Paint the region that may change first";
-  if (coverage.value.editable === coverage.value.total) return "Everything may change — that is an edit without a mask";
-  return "Send this mask with the render";
+  if (coverage.value.editable === 0) return chatText.paintFirst(lang.value);
+  if (coverage.value.editable === coverage.value.total) return chatText.everythingMayChange(lang.value);
+  return chatText.sendThisMask(lang.value);
 });
 // The stage keeps the picture's shape and fits the space both ways, so a tall picture is not
 // cut off on a wide screen or the other way round.
@@ -210,6 +216,37 @@ function undo(): void {
   recount();
 }
 
+// What was painted and its undo history live only in this component, and go with it when the
+// dialog steps back to the form. One stray Escape or Cancel used to lose all of it, so leaving
+// with strokes that were not applied asks first.
+let asking = false;
+
+/** Whether the painter may be left: at once when nothing was painted, else by the user's answer. */
+async function confirmLeave(): Promise<boolean> {
+  if (undoDepth.value === 0) return true;
+  if (asking) return false;
+  asking = true;
+  try {
+    return await confirmAction({
+      title: chatText.discardPaintTitle(lang.value),
+      message: chatText.discardPaintMessage(lang.value),
+      confirmLabel: chatText.discardPaint(lang.value),
+      cancelLabel: chatText.keepPainting(lang.value),
+      danger: true,
+      eyebrow: chatText.cannotBeUndone(lang.value),
+    });
+  } finally {
+    asking = false;
+  }
+}
+
+async function cancel(): Promise<void> {
+  if (await confirmLeave()) emit("cancel");
+}
+
+// The dialog around the painter asks the same before Escape or its own close button leaves it.
+defineExpose({ confirmLeave });
+
 function apply(): void {
   if (!exportable.value) return;
   const canvas = document.createElement("canvas");
@@ -224,6 +261,8 @@ function apply(): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  // While the question above is up, a key is an answer to it, not a brush command.
+  if (asking) return;
   const target = event.target as HTMLElement | null;
   if (target && (target.tagName === "TEXTAREA" || (target.tagName === "INPUT" && (target as HTMLInputElement).type !== "range"))) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
@@ -270,6 +309,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
+  // A question about a painter that is gone has nothing left to decide.
+  if (asking) answerConfirm(false);
 });
 </script>
 

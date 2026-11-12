@@ -56,6 +56,9 @@ const GRANTABLE_TOOLS = new Set([
   // Tier 0; its "tab" source needs a page-driving browser tool granted beside it.
   "web_table",
   "list_knowledge_bases", "search_knowledge_base",
+  // ComfyUI node workflows: a temporary agent for an ad-hoc pipeline (upscale a folder, a
+  // ControlNet pass, a LoRA test) builds and runs it without a permanent ComfyUI specialist.
+  "comfyui_catalog", "comfyui_workflow", "comfyui_run",
   // Native live-site inspection + read-only web audits, so a temporary agent
   // spun up for an ad-hoc "evaluate site X (optionally against knowledge base Y)"
   // task can actually inspect the running page — not just fetch its HTML. All
