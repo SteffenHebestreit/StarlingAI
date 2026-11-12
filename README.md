@@ -170,6 +170,18 @@ pnpm sai dev web               # start web UI in dev mode
 - **ComfyUI workflows** — with the bundled ComfyUI container on an NVIDIA GPU, `image_creator` builds node workflows from the official templates your installed models can run, adds a stage (an upscaler, a LoRA, a filter) onto the connection it belongs on, runs the result, and hands it to the ComfyUI editor. Every picture carries the workflow that made it. Ask what the server has installed and the answer comes from the server, not from memory. ([docs](docs/comfyui.md))
 - **Documents and sites** — decks, Word documents, PDFs, charts, diagrams and small web apps are written to the workspace as files you can open, preview and download from the answer.
 
+### It follows up
+
+<div align="center">
+<img src="assets/screenshots/chat-follow-up.png" alt="A conversation in which the user asked to be told when a release is out: the assistant's confirmation that it checks every weekday at nine, and below it, two weeks later, a message labelled Scheduled, Release watch, watch finished, saying that the full release is out, with licence, variants and sources" width="90%" />
+<br/><sub><em>Asked once to say when it is out: nine silent checks later, the answer arrives in the same conversation.</em></sub>
+</div>
+
+- **Watches** — "tell me when it is out": the assistant checks on a schedule and says nothing until what you are waiting for has happened. That run is posted and the watch ends; so does a watch that has used up its runs.
+- **Reminders and briefings** — "remind me tomorrow at nine", "in two hours", "brief me every weekday at eight", on your clock, not the server's. Each run is a turn of its own with the whole swarm behind it.
+- **In the conversation you asked in** — what a run finds is posted there as a message of the assistant, marked as scheduled, with a notification for you alone. A run that fails says so instead of going quiet.
+- **Yours to approve and to stop** — every schedule asks for your approval when it is made, and all of them are listed on the Jobs page with what each is waiting for, its next and last run, and a Remove. A scheduled run cannot schedule more.
+
 ### It stays guarded
 
 <div align="center">

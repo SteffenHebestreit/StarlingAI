@@ -200,8 +200,8 @@ describe("deleting a builtin account", () => {
       sessionId: "chat-1", workspacePath: workspace, userId: "root", identity: { userId: "root", account: root.id }, userRole: "admin",
     });
     const lines = listed.output.split("\n");
-    expect(lines.find((line) => line.includes(hers.scheduleId))).toBe(`- **${hers.scheduleId}** "alice's brief" — \`0 8 * * 1-5\` — brief me — disabled (account deleted)`);
-    expect(lines.find((line) => line.includes(his.scheduleId))).toBe(`- **${his.scheduleId}** "bob's brief" — \`0 8 * * 1-5\` — brief me`);
+    expect(lines.find((line) => line.includes(hers.scheduleId))).toBe(`- **${hers.scheduleId}** "alice's brief" — \`0 8 * * 1-5\` (UTC) — brief me — disabled (account deleted)`);
+    expect(lines.find((line) => line.includes(his.scheduleId))).toBe(`- **${his.scheduleId}** "bob's brief" — \`0 8 * * 1-5\` (UTC) — brief me`);
   });
 
   it("records a tombstone that keeps the name from a channel sender and a new identity-provider subject", async () => {

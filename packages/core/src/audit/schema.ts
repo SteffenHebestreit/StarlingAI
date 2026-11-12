@@ -92,6 +92,7 @@ export type CoreAuditEventType =
   | "scene_job_completed"
   | "scene_job_failed"
   | "scene_job_cancelled"
+  | "scheduled_run_settled"
   | "ephemeral_agent_rejected"
   | "ephemeral_tools_autofilled"
   | "artifact_completion_claim_unbacked_bannered"

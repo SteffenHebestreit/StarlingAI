@@ -381,8 +381,18 @@
             <p class="mt-2 text-sm leading-5 text-gray-300">{{ item.message }}</p>
             <div class="mt-3 flex items-center justify-between gap-3 text-[11px] text-gray-500">
               <span>{{ formatNotificationTime(item.createdAt) }}</span>
+              <!-- A scheduled task's post names its conversation: Open goes to that one, not to
+                   whichever is on the chat page. -->
+              <button
+                v-if="item.targetPath && item.category === 'follow_up' && item.sessionId"
+                type="button"
+                class="rounded-full border border-white/10 px-2.5 py-1 text-gray-300 transition hover:border-white/20 hover:text-white"
+                @click="openFollowUp(item)"
+              >
+                Open
+              </button>
               <RouterLink
-                v-if="item.targetPath"
+                v-else-if="item.targetPath"
                 :to="item.targetPath"
                 class="rounded-full border border-white/10 px-2.5 py-1 text-gray-300 transition hover:border-white/20 hover:text-white"
               >
@@ -877,6 +887,20 @@ function notificationDotClass(level: NotificationLevel): string {
       return "bg-red-400 shadow-[0_0_14px_rgba(248,113,113,0.55)]";
     default:
       return "bg-cyan-400 shadow-[0_0_14px_rgba(34,211,238,0.55)]";
+  }
+}
+
+/** Open the conversation a scheduled task posted into. One that is gone opens in the session list,
+ *  which says so. */
+async function openFollowUp(item: { id: string; sessionId?: string }): Promise<void> {
+  const sessionId = item.sessionId;
+  if (!sessionId) return;
+  notifications.dismiss(item.id);
+  try {
+    if (gateway.currentSessionId !== sessionId) await gateway.switchSession(sessionId);
+    await router.push({ path: "/" });
+  } catch {
+    await router.push({ path: "/sessions", query: { sessionId } });
   }
 }
 

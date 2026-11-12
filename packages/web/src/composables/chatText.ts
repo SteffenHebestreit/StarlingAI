@@ -40,6 +40,18 @@ export const chatText = {
   download: (l: TurnLanguage) => pick(l, "Download", "Herunterladen"),
   renderingDiagram: (l: TurnLanguage) => pick(l, "Rendering diagram…", "Diagramm wird gezeichnet…"),
 
+  // ── What a scheduled task posted ──────────────────────────────────────────────────────────
+  followUp: (l: TurnLanguage, label: string) => pick(l, `Scheduled · ${label}`, `Geplant · ${label}`),
+  followUpEnded: (l: TurnLanguage, ended: "once" | "condition_met" | "max_runs" | "failed", run: number) => ({
+    once: "",
+    condition_met: pick(l, "watch finished", "Beobachtung beendet"),
+    max_runs: pick(l, `ended after ${run} check${run === 1 ? "" : "s"}`, `nach ${run} ${run === 1 ? "Prüfung" : "Prüfungen"} beendet`),
+    failed: pick(l, "failed", "fehlgeschlagen"),
+  })[ended],
+  followUpTitle: (l: TurnLanguage) => pick(l,
+    "Posted by a scheduled task, not by a turn of this conversation. Its schedules are on the Jobs page.",
+    "Von einer geplanten Aufgabe geschrieben, nicht von einer Antwort in diesem Gespräch. Die Planungen stehen auf der Jobs-Seite."),
+
   retry: (l: TurnLanguage) => pick(l, "↻ Ask again", "↻ Nochmal fragen"),
   retryTitle: (l: TurnLanguage) => pick(l, "Send the question this answer failed on once more", "Die Frage, an der diese Antwort gescheitert ist, noch einmal senden"),
 

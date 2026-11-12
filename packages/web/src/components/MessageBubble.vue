@@ -21,6 +21,15 @@
 
       <!-- A message the turn posted while it worked: its plan, a step it finished. Not its answer. -->
       <div v-if="message.progress" class="progress-eyebrow">{{ turnText.progressLabel(bubbleLanguage) }}</div>
+      <!-- What a scheduled task found: written by the gateway between turns, not by a turn. -->
+      <div
+        v-if="message.followUp"
+        :class="['follow-up-eyebrow', message.followUp.failed && 'follow-up-eyebrow--failed']"
+        :title="chatText.followUpTitle(bubbleLanguage)"
+      >
+        <span aria-hidden="true">◷</span>
+        {{ chatText.followUp(bubbleLanguage, message.followUp.label) }}<template v-if="followUpState"> · {{ followUpState }}</template>
+      </div>
       <!-- A turn the user stopped: their choice, not an error. -->
       <div v-if="message.stopped" class="guardrail-badge guardrail-badge--stopped">{{ turnText.stoppedBadge(bubbleLanguage) }}</div>
       <!-- Guardrail / blocked badge -->
@@ -471,6 +480,12 @@ const turnSteps = computed(() => stepsFor(props.message));
  * The language the turn is told in: the one the store noted when the turn started, else the
  * answer's own (a reloaded transcript), else English — the rest of the page is English.
  */
+/** How the schedule stands after this post, when the post ended it. */
+const followUpState = computed(() => {
+  const mark = props.message.followUp;
+  return mark?.ended ? chatText.followUpEnded(bubbleLanguage.value, mark.ended, mark.run) : mark?.failed ? chatText.followUpEnded(bubbleLanguage.value, "failed", mark.run) : "";
+});
+
 const bubbleLanguage = computed<TurnLanguage>(() =>
   turnLanguage(props.message.language ?? detectLanguage(props.message.content ?? "")));
 const stepsStartCollapsed = computed(() => Boolean(props.autoCollapse)
@@ -1647,6 +1662,19 @@ onBeforeUnmount(() => {
   color: rgba(196, 181, 253, 0.7);
   margin-bottom: 0.25rem;
 }
+
+.follow-up-eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgb(var(--accent-rgb, 103 232 249) / 0.85);
+  margin-bottom: 0.4rem;
+  overflow-wrap: anywhere;
+}
+.follow-up-eyebrow--failed { color: #fca5a5; }
 
 .message-bubble--system {
   max-width: min(82%, 42rem);

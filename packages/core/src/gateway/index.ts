@@ -17,6 +17,7 @@ import { registerSkillLibraryRoutes } from "./skill-routes.js";
 import { registerDocumentRoutes } from "./document-routes.js";
 import { registerKnowledgeBaseRoutes } from "./knowledge-base-routes.js";
 import { registerMemoryGraphRoutes } from "./memory-graph-routes.js";
+import { registerScheduleRoutes } from "./schedule-routes.js";
 import { registerSessionDashboardRoutes } from "./session-dashboard-routes.js";
 import { registerMissionRoutes } from "./mission-routes.js";
 import { registerLongRunningRoutes } from "./long-running-routes.js";
@@ -2753,12 +2754,19 @@ export function createGateway() {
   // ── Memory + knowledge-graph inspector routes — extracted to ./memory-graph-routes.ts ──
   registerMemoryGraphRoutes(app);
 
+  // ── Scheduled tasks (follow-ups, watches) — ./schedule-routes.ts ──
+  registerScheduleRoutes(app);
+
   app.get("/api/triggers/cron", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
     try {
       const { listCronJobs } = await import("../runtime/scheduler.js");
-      const jobs = listCronJobs();
+      const { scheduledTaskCronIds } = await import("../runtime/scheduled-task-runner.js");
+      // A scheduled task's cron job carries its owner's task text and this listing has no owner
+      // filter: those are listed, each to its owner, by /api/schedules.
+      const own = scheduledTaskCronIds();
+      const jobs = listCronJobs().filter((job) => !own.has(job.id));
       return c.json({ jobs });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);

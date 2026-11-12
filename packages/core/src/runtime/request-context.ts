@@ -91,6 +91,12 @@ export interface RequestContext {
    */
   userWords?: string;
   /**
+   * The IANA time zone of the person's browser, sent with the message (chat.send `timeZone`). A
+   * time of day they name is wall-clock time in it (runtime/user-time.ts). Absent on a channel, a
+   * scheduled run and an older client: such a time is then taken as UTC, and said to be.
+   */
+  userTimeZone?: string;
+  /**
    * The in-process sub-agent run doing this work: the task its own outcome records, the account it
    * runs for and how far it has got, for record_lesson. Attached by the run to its own context
    * (attachRequestOutcomeRun) before its first tool call, so a nested run replaces the parent's run

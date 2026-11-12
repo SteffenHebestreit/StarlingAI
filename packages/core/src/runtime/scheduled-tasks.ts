@@ -19,8 +19,14 @@ const log = childLogger("scheduled-tasks");
 export interface ScheduledTaskRecord {
   /** Stable id (survives rehydration); the in-memory cron job id is ephemeral. */
   id: string;
-  /** 5- or 6-field cron expression (UTC). */
-  cron: string;
+  /** 5- or 6-field cron expression of a schedule that repeats, on the clock of `timeZone` (UTC
+   *  when there is none). A record has this or `at`. */
+  cron?: string;
+  /** When a schedule that runs once runs: an instant (ISO 8601, UTC). */
+  at?: string;
+  /** The IANA zone of the person who made the schedule: the clock `cron` runs on, and the one its
+   *  times are shown in. */
+  timeZone?: string;
   /** Short human label. */
   label: string;
   /** The free-text task run as a real turn (a scene) each time it fires. */
@@ -37,7 +43,37 @@ export interface ScheduledTaskRecord {
    *  kept, not removed: its owner's data stays until a purge, and an admin can still read and remove
    *  it. The runner registers no cron job for it. */
   disabled?: { at: string; reason: string };
+  /**
+   * The conversation the schedule was made in. What its runs find is posted there
+   * (runtime/follow-up.ts); a schedule without one keeps its results on the job runs alone, as
+   * every schedule did.
+   */
+  sessionId?: string;
+  /**
+   * What ends a watch, in words ("the full release is out"). A run whose result does not meet it
+   * says nothing and is only counted; the run that meets it is posted and the schedule removed.
+   * Without it every run is posted.
+   */
+  until?: string;
+  /** The most runs before the schedule ends by itself. A watch is given one, so that a condition
+   *  that never comes true does not run for ever. */
+  maxRuns?: number;
+  /** Runs settled so far (a run a person cancelled is not counted). */
+  runs?: number;
+  /** When the last run was settled, and what it came to. */
+  lastRunAt?: string;
+  lastOutcome?: ScheduledRunOutcome;
+  /** Failed runs in a row; the schedule is stopped at FAILED_RUNS_BEFORE_STOP (runtime/follow-up.ts). */
+  failedRuns?: number;
+  /** A one-shot's run has been queued: it is not queued again, whatever a restart finds. */
+  firedAt?: string;
 }
+
+/** The runs a watch gets when its maker named no number. */
+export const DEFAULT_WATCH_RUNS = 30;
+
+/** What a settled run came to: it was posted, it found nothing that ends the watch, or it failed. */
+export type ScheduledRunOutcome = "reported" | "nothing_new" | "failed";
 
 let _cache: ScheduledTaskRecord[] | null = null;
 let _pathOverride: string | null = null;
@@ -49,7 +85,7 @@ function storePath(): string {
 
 function isValid(t: unknown): t is ScheduledTaskRecord {
   const r = t as ScheduledTaskRecord;
-  return !!r && typeof r.id === "string" && typeof r.cron === "string"
+  return !!r && typeof r.id === "string" && (typeof r.cron === "string" || typeof r.at === "string")
     && typeof r.label === "string" && typeof r.task === "string";
 }
 
@@ -80,6 +116,23 @@ export function saveScheduledTask(rec: ScheduledTaskRecord): void {
   const tasks = loadScheduledTasks().filter((t) => t.id !== rec.id);
   tasks.push(rec);
   persist(tasks);
+}
+
+/**
+ * Change fields of a stored schedule and persist. Returns the record as stored, or undefined when
+ * it is gone: a run that settles after its schedule was removed must not bring it back.
+ */
+export function updateScheduledTask(id: string, patch: Partial<Omit<ScheduledTaskRecord, "id">>): ScheduledTaskRecord | undefined {
+  const tasks = loadScheduledTasks();
+  const target = tasks.find((t) => t.id === id);
+  if (!target) return undefined;
+  const next = { ...target, ...patch };
+  persist(tasks.map((t) => (t.id === id ? next : t)));
+  return next;
+}
+
+export function getScheduledTask(id: string): ScheduledTaskRecord | undefined {
+  return loadScheduledTasks().find((t) => t.id === id);
 }
 
 /** Mark a schedule disabled, in place, and persist. Returns false if it wasn't there or was

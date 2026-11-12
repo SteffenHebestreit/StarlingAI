@@ -38,7 +38,8 @@ import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
-import { subscribeToNotifications } from "../runtime/notifications.js";
+import { notificationForCaller, subscribeToNotifications } from "../runtime/notifications.js";
+import { validTimeZone } from "../runtime/user-time.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
@@ -875,6 +876,8 @@ export class RpcConnection implements AccountConnection {
         // longer be stopped from a reloaded page and its own tab's Stop hit the other turn (review
         // of round 1, B #6). Refused before anything is sent under that id.
         if (liveChatTurns.has(requestId)) throw new Error(`requestId ${requestId} is already in use by a running turn`);
+        // The browser's time zone: a time of day the person names is theirs (runtime/user-time.ts).
+        const userTimeZone = validTimeZone(params["timeZone"]);
         const enableThinkingRaw = params["enableThinking"];
         const enableThinking: boolean | undefined =
           enableThinkingRaw === true || enableThinkingRaw === "true" ? true :
@@ -1304,7 +1307,7 @@ export class RpcConnection implements AccountConnection {
         // The turn runs under this request id (RequestContext.turnId), so the watchdog's tracker above
         // and every wait of the run name the same turn — an --auto turn too, which has no question
         // channel to carry one (review of round 1, B #7).
-        runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: requestId }, () => runTurn({
+        runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: requestId, ...(userTimeZone ? { userTimeZone } : {}) }, () => runTurn({
           session,
           userMessage: message,
           userDisplayContent: displayContent,
@@ -1579,7 +1582,9 @@ export class RpcConnection implements AccountConnection {
         this.notificationsUnsubscribe?.();
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
           if (!this.pushAllowed()) return;
-          this.sendEvent({ type: "notification.event", data: notification });
+          // A notification with an owner (a scheduled follow-up's result) is that person's alone.
+          const wire = notificationForCaller(notification, this.connIdentity());
+          if (wire) this.sendEvent({ type: "notification.event", data: wire });
         });
         return { subscribed: true };
       }

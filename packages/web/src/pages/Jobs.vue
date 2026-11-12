@@ -22,6 +22,44 @@
       </div>
     </header>
 
+    <!-- What the assistant was asked to run later, to repeat or to watch (schedule_task): each
+         with what it waits for, when it runs next, and a way to stop it without asking in a chat. -->
+    <section v-if="schedules.length > 0 || schedulesError" class="ambient-panel">
+      <header class="ambient-panel__header">
+        <h3 class="ambient-panel__title">Follow-ups</h3>
+        <span class="ambient-panel__meta">{{ schedules.length }} scheduled · results are posted into their conversation</span>
+      </header>
+      <p v-if="schedulesError" class="notice notice--error" role="alert">{{ schedulesError }}</p>
+      <div class="ambient-panel__grid">
+        <article v-for="schedule in schedules" :key="schedule.id" class="trigger-card">
+          <div class="trigger-card__top">
+            <code class="trigger-card__expression">{{ scheduleWhen(schedule) }}</code>
+            <span class="trigger-card__count">{{ scheduleRuns(schedule) }}</span>
+          </div>
+          <h4 class="trigger-card__label">{{ schedule.label }}</h4>
+          <p class="trigger-card__action">{{ schedule.task }}</p>
+          <p v-if="schedule.until" class="trigger-card__note">Says nothing until: {{ schedule.until }}</p>
+          <p v-if="schedule.disabled" class="trigger-card__note">Does not run: {{ schedule.disabled }}</p>
+          <p v-if="schedule.userId" class="trigger-card__note">Owner: {{ schedule.userId }}</p>
+          <div class="trigger-card__times">
+            <span :title="isoTimestamp(schedule.nextRunAt)">Next: {{ formatTriggerTime(schedule.nextRunAt) }}</span>
+            <span :title="isoTimestamp(schedule.lastRunAt)">Last: {{ schedule.lastRunAt ? `${formatTriggerTime(schedule.lastRunAt)}, ${lastOutcomeText(schedule.lastOutcome)}` : "never" }}</span>
+          </div>
+          <div class="trigger-card__actions">
+            <button v-if="schedule.sessionId" type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="openJobSession(schedule.sessionId)">Open conversation</button>
+            <button
+              type="button"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm"
+              :disabled="removingScheduleIds.has(schedule.id)"
+              @click="removeSchedule(schedule)"
+            >
+              {{ removingScheduleIds.has(schedule.id) ? "Removing…" : "Remove" }}
+            </button>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <!-- Scheduled triggers panel — surfaces cron-driven scenes/jobs ambiently
          so operators can see what fires on its own without digging through
          JSONC. Reads from the in-memory scheduler via /api/triggers/cron;
@@ -264,6 +302,93 @@ async function loadCronTriggers(): Promise<void> {
   }
 }
 
+// ── Follow-ups: the scheduled tasks of schedule_task ────────────────────────────────────────
+interface Schedule {
+  id: string;
+  label: string;
+  task: string;
+  cron?: string;
+  at?: string;
+  timeZone?: string;
+  until?: string;
+  maxRuns?: number;
+  runs: number;
+  lastRunAt?: string;
+  lastOutcome?: "reported" | "nothing_new" | "failed";
+  nextRunAt?: string;
+  sessionId?: string;
+  createdAt: string;
+  disabled?: string;
+  /** Only in an admin's listing: whose schedule it is. */
+  userId?: string;
+}
+const schedules = ref<Schedule[]>([]);
+const schedulesError = ref("");
+const removingScheduleIds = ref<Set<string>>(new Set());
+
+async function loadSchedules(): Promise<void> {
+  if (!gateway.token) return;
+  try {
+    const res = await fetch(`${apiBase()}/api/schedules`, { headers: { Authorization: `Bearer ${gateway.token}` } });
+    // A gateway from before follow-ups has no such route: then there is nothing to show, not an error.
+    if (res.status === 404) { schedules.value = []; schedulesError.value = ""; return; }
+    if (!res.ok) { schedulesError.value = `The follow-ups could not be loaded (HTTP ${res.status}).`; return; }
+    const data = await res.json() as { schedules?: Schedule[] };
+    schedules.value = Array.isArray(data.schedules) ? data.schedules : [];
+    schedulesError.value = "";
+  } catch (error) {
+    schedulesError.value = `The follow-ups could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** When it runs: a cron expression on its maker's clock, or the one time, shown on this browser's. */
+function scheduleWhen(schedule: Schedule): string {
+  if (schedule.cron) return `${schedule.cron} (${schedule.timeZone ?? "UTC"})`;
+  return schedule.at ? `once · ${formatDateTime(schedule.at)}` : "—";
+}
+
+function scheduleRuns(schedule: Schedule): string {
+  const limit = schedule.maxRuns !== undefined ? ` of ${schedule.maxRuns}` : "";
+  return `${schedule.runs}${limit} run${schedule.runs === 1 && !limit ? "" : "s"}`;
+}
+
+function lastOutcomeText(outcome: Schedule["lastOutcome"]): string {
+  if (outcome === "failed") return "failed";
+  if (outcome === "nothing_new") return "nothing new";
+  return "posted";
+}
+
+async function removeSchedule(schedule: Schedule): Promise<void> {
+  if (removingScheduleIds.value.has(schedule.id)) return;
+  if (!(await confirmAction({
+    title: "Remove this follow-up?",
+    message: `"${schedule.label}" does not run again. What it already posted stays in its conversation.`,
+    confirmLabel: "Remove",
+    cancelLabel: "Keep it",
+    danger: true,
+  }))) return;
+  removingScheduleIds.value = new Set(removingScheduleIds.value).add(schedule.id);
+  try {
+    const res = await fetch(`${apiBase()}/api/schedules/${encodeURIComponent(schedule.id)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${gateway.token}` },
+    });
+    if (!res.ok && res.status !== 404) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      toast.error("Couldn't remove the follow-up", body.error ?? `The gateway answered HTTP ${res.status}.`);
+      return;
+    }
+    schedules.value = schedules.value.filter((entry) => entry.id !== schedule.id);
+    toast.success("Follow-up removed", `"${schedule.label}" does not run again.`);
+  } catch (error) {
+    toast.error("Couldn't remove the follow-up", error instanceof Error ? error.message : String(error));
+  } finally {
+    const next = new Set(removingScheduleIds.value);
+    next.delete(schedule.id);
+    removingScheduleIds.value = next;
+  }
+}
+
 function formatTriggerTime(value: string | null | undefined): string {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -499,10 +624,11 @@ function jobToneClass(status: SceneJob["status"]): string {
 useLoadWhenConnected(() => {
   void refreshJobs();
   void loadCronTriggers();
+  void loadSchedules();
 });
 
 onMounted(() => {
-  cronTriggersTimer = setInterval(() => { void loadCronTriggers(); }, 30_000);
+  cronTriggersTimer = setInterval(() => { void loadCronTriggers(); void loadSchedules(); }, 30_000);
 });
 
 onBeforeUnmount(() => {
@@ -608,6 +734,20 @@ watch(statusFilter, () => {
   font-size: 0.72rem;
   color: rgb(148 163 184);
   margin-top: 0.2rem;
+}
+
+.trigger-card__note {
+  margin: 0;
+  font-size: 0.74rem;
+  color: rgb(148 163 184);
+  overflow-wrap: anywhere;
+}
+
+.trigger-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
 }
 
 .jobs-page__filters {

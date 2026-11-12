@@ -87,6 +87,9 @@ export interface SceneJobPayload {
   turnTimeoutMs: number;
   /** The principal kind of the run's owner (SceneJob.principal): the table has no column for it. */
   principal?: PrincipalKind;
+  /** The scheduled task this run is one run of (runtime/scheduled-tasks.ts): the worker hands the
+   *  run's end to runtime/follow-up.ts, which counts it and posts what it found. */
+  scheduleId?: string;
   /**
    * Resumable-workflow checkpoint (B31): the outputs of steps that have FULLY completed,
    * persisted after each step. On worker recovery the workflow restores these and resumes
@@ -115,6 +118,8 @@ export interface CreateSceneJobInput {
   approvalTimeoutMs?: number;
   params?: Record<string, string>;
   turnTimeoutMs: number;
+  /** Set by the scheduled-task runner: the schedule this run belongs to. */
+  scheduleId?: string;
 }
 
 export interface ClaimedSceneJob extends SceneJob {
@@ -414,6 +419,7 @@ class InMemorySceneJobStore implements SceneJobStore {
         params: input.params,
         turnTimeoutMs: input.turnTimeoutMs,
         ...jobPrincipalStamp(input),
+        ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
       },
     };
     this.jobs.set(job.id, job);
@@ -664,6 +670,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       params: input.params,
       turnTimeoutMs: input.turnTimeoutMs,
       ...jobPrincipalStamp(input),
+      ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
     };
 
     await this.pool.query(
@@ -1054,6 +1061,7 @@ function normalizePayload(value: unknown): SceneJobPayload {
       : undefined,
     turnTimeoutMs: typeof payload.turnTimeoutMs === "number" && Number.isFinite(payload.turnTimeoutMs) ? payload.turnTimeoutMs : 900_000,
     ...(isPrincipalKind(payload.principal) ? { principal: payload.principal } : {}),
+    ...(typeof payload.scheduleId === "string" && payload.scheduleId ? { scheduleId: payload.scheduleId } : {}),
     // B31 resumable-workflow checkpoint: MUST round-trip through the Postgres jsonb read
     // path or resume silently never happens (the field is written by saveWorkflowCheckpoint
     // but would otherwise be stripped here). Keep only entries with the TurnOutput shape

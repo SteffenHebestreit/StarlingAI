@@ -128,6 +128,9 @@ export interface RunReceptionistDeps {
   conversationLanguage?: string;
   /** agents.mainAssistant.defaultLanguage. */
   defaultLanguage?: string;
+  /** The assistant's previous reply: the desk is shown the question it ends on, if any
+   *  (buildReceptionistMessages). */
+  previousReply?: string;
   /**
    * The model `complete` runs on, for the logit readout of the same question (decisions.readout):
    * "small talk or task?" answered as one letter. Without it the readout is never asked.
@@ -158,6 +161,7 @@ export async function runReceptionist(
     confidenceAttempt,
     ...(deps.conversationLanguage ? { conversationLanguage: deps.conversationLanguage } : {}),
     ...(deps.defaultLanguage ? { defaultLanguage: deps.defaultLanguage } : {}),
+    ...(deps.previousReply ? { previousReply: deps.previousReply } : {}),
   });
   let raw: string;
   try {
@@ -279,6 +283,44 @@ export function languageIsUndetermined(userMessage: string): boolean {
   return words.length <= 2 && raw.length <= 15; // a bare greeting or acknowledgement
 }
 
+/** How far back from the end of the assistant's previous reply a question is looked for, and the
+ *  most of it that is shown. */
+const PREVIOUS_QUESTION_WINDOW_CHARS = 400;
+const PREVIOUS_QUESTION_MAX_CHARS = 240;
+const QUESTION_MARK = /[?？؟]/;
+const SENTENCE_END = /[.!?？؟…]/;
+
+/**
+ * The question the assistant's previous reply ends on, if it asks one near its end: the sentence up
+ * to its last question mark. Structural (a question mark, a sentence break), no word list.
+ *
+ * Only a question is ever shown to the desk. Measured on the routing model (2026-11-12, 32 cases x
+ * 3, 6 wordings): shown the END of the previous reply whatever it was, the desk handed on most of
+ * the plain small talk it used to answer (a "thanks" after a report, "ok cool" after a summary),
+ * because the reply's facts read as a request for real-world information. Shown the question
+ * alone, before the message, it handed on 47 of 48 messages that say yes to it, answer it or pick
+ * an option (31 of 48 with the message alone) and still answered 42 of 48 small-talk messages (48
+ * of 48); the six it handed on came after a question ("no thanks", "bye for now"), where the full
+ * assistant's answer is right and only slower. With the question AFTER the message it handed on
+ * every "no thanks" and "good night". Also showing a short previous reply that asks nothing (an
+ * offer made as a statement) gained one case in 48 and is not done.
+ */
+export function previousQuestion(previousReply: string | undefined): string | undefined {
+  const text = singleLine(previousReply ?? "").slice(-PREVIOUS_QUESTION_WINDOW_CHARS);
+  let end = -1;
+  for (let i = text.length - 1; i >= 0; i -= 1) {
+    if (QUESTION_MARK.test(text[i]!)) { end = i; break; }
+  }
+  if (end < 0) return undefined;
+  let start = 0;
+  for (let i = end - 1; i >= 0; i -= 1) {
+    if (SENTENCE_END.test(text[i]!) && /\s/.test(text[i + 1] ?? "")) { start = i + 1; break; }
+  }
+  const question = text.slice(start, end + 1).trim();
+  if (!question) return undefined;
+  return question.length > PREVIOUS_QUESTION_MAX_CHARS ? `…${question.slice(-PREVIOUS_QUESTION_MAX_CHARS)}` : question;
+}
+
 export function buildReceptionistMessages(
   userMessage: string,
   opts: {
@@ -290,6 +332,14 @@ export function buildReceptionistMessages(
     conversationLanguage?: string;
     /** agents.mainAssistant.defaultLanguage — used only when the conversation has none yet. */
     defaultLanguage?: string;
+    /**
+     * The assistant's previous reply. The desk saw the message alone, so "ja bitte" after "shall I
+     * keep watching this for you?" was small talk to it: it answered "Gerne!" and what the user had
+     * just agreed to was never done (session af72b76e: "machen wir so" got "Alles klar!"). The
+     * question that reply ends on, when it does (previousQuestion), goes into the user turn, in
+     * front of the message, so the system text stays the same for every call.
+     */
+    previousReply?: string;
   } = {},
 ): LLMMessage[] {
   // ONE unconditional directive when the message carries no language of its own — a conditional
@@ -315,6 +365,9 @@ export function buildReceptionistMessages(
     // Claude" was answered "I cannot switch models" by a swarm that can. What it says it CAN do is
     // a guess too: "Was kannst du so?" was answered with small talk, the desk's own job.
     `Never say you cannot do something, and never say what you can do: only the full assistant knows what it can do. A request you would decline, or a question about what you can do, gets exactly ${ESCALATE_SENTINEL} and nothing else.`,
+    // An answer to the assistant's question is the assistant's to act on: the desk cannot do what was
+    // offered. KEEP THE WORDING AND THE ORDER (question first, message last): see previousQuestion.
+    `If the user's message comes with a QUESTION the assistant asked just before it: a message that says yes to it, answers it or picks one of its options is the full assistant's to act on, so reply with exactly ${ESCALATE_SENTINEL} and nothing else. A message that says no to it, or is only thanks, a greeting or a goodbye, you answer yourself as usual.`,
     ...(opts.personaLines ?? []),
     opts.assistantName ? `If asked your name, you are "${opts.assistantName}".` : "Do not invent a name for yourself.",
     opts.memoryCapsule ? `Known context (use only if directly relevant):\n${opts.memoryCapsule}` : "",
@@ -343,9 +396,10 @@ export function buildReceptionistMessages(
         "When you do answer, keep it to ONE short, polite sentence. Do not introduce yourself unless explicitly asked.",
         ...common,
       ];
+  const asked = previousQuestion(opts.previousReply);
   return [
     { role: "system", content: lines.filter(Boolean).join("\n") },
-    { role: "user", content: userMessage },
+    { role: "user", content: asked ? `[The assistant had just asked: "${asked}"]\n\n${userMessage}` : userMessage },
   ];
 }
 
@@ -442,8 +496,8 @@ export async function tryReceptionistFastLane(
 
 /** What the fast lane may know about the conversation it is answering inside. */
 export interface FastLaneConversationContext {
-  /** The assistant's previous reply in this session, if any — the language anchor for a
-   *  message that carries none of its own. */
+  /** The assistant's previous reply in this session, if any: the language anchor for a message
+   *  that carries none of its own, and what a short message may be an answer to. */
   previousReply?: string;
   /** For the decision ledger. */
   sessionId?: string;
@@ -505,6 +559,7 @@ export async function tryReceptionistFastLaneDetailed(
 
   const result = await runReceptionist(userMessage, {
     ...(conversationLanguage ? { conversationLanguage } : {}),
+    ...(context.previousReply?.trim() ? { previousReply: context.previousReply } : {}),
     defaultLanguage: defaultReplyLanguage(),
     // A routing-tier call like the triage and the source-sensitivity judge, labelled like them.
     // Unlabelled it inherited the turn's own context, so its provider row read agentName main,

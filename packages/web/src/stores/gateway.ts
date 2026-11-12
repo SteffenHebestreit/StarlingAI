@@ -1,3 +1,4 @@
+import { browserTimeZone } from "@/composables/browserTime";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -110,6 +111,21 @@ export interface ChatMessage {
    * that finished — not its answer. Saved on the server beside the turn; never read by the model.
    */
   progress?: boolean;
+  /** What a scheduled task found, posted into this conversation by the gateway: no turn wrote it. */
+  followUp?: FollowUpMark;
+}
+
+/** The mark of a scheduled task's post (the gateway's runtime/follow-up-mark.ts). */
+export interface FollowUpMark {
+  scheduleId: string;
+  label: string;
+  jobId: string;
+  /** Which run of the schedule this was, counted from 1. */
+  run: number;
+  /** The schedule ended with this run: it ran its one time, what it waited for happened, it used
+   *  up its runs, or it kept failing. */
+  ended?: "once" | "condition_met" | "max_runs" | "failed";
+  failed?: boolean;
 }
 
 export interface SwarmTaskAttempt {
@@ -191,6 +207,8 @@ export interface GatewaySessionTranscriptMessage {
   requestId?: string;
   /** A progress message the turn posted while it worked (ChatMessage.progress). */
   progress?: true;
+  /** A scheduled task's post (ChatMessage.followUp). */
+  followUp?: FollowUpMark;
 }
 
 interface SendMessageOptions {
@@ -2713,6 +2731,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         // for this page's own (hydration, turnRecovery).
         ...(message.requestId ? { requestId: message.requestId } : {}),
         ...(message.progress ? { progress: true } : {}),
+        ...(message.followUp ? { followUp: message.followUp } : {}),
       };
     });
     return normalizeHydratedMessages(mappedReversed.reverse());
@@ -3157,6 +3176,17 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (data) {
         audit.addEvent(data);
         applyAuditEventFallback(data as GatewayAuditEvent);
+      }
+      return;
+    }
+
+    // A scheduled task posted what it found into a conversation this page has loaded. The gateway
+    // writes it only between turns, so it never lands inside a turn that is being shown.
+    if (type === "session.follow_up") {
+      const data = msg["data"] as { sessionId?: unknown; message?: GatewaySessionTranscriptMessage } | undefined;
+      if (data?.message && typeof data.sessionId === "string" && data.sessionId === currentSessionId.value) {
+        const [posted] = mapTranscriptMessages([data.message]);
+        if (posted && !messages.value.some((message) => message.id === posted.id)) messages.value.push(posted);
       }
       return;
     }
@@ -4137,6 +4167,8 @@ export const useGatewayStore = defineStore("gateway", () => {
         displayContent: displayText,
         attachments: attachmentsForRpc(attachments),
         ...(enableThinking !== undefined && { enableThinking }),
+        // A time of day the person names is theirs: the gateway runs in UTC and knows no other.
+        ...browserTimeZone(),
       }) as { accepted?: unknown; unreadSteering?: unknown } | undefined;
       if (reply?.accepted === true) acceptedRequestId = requestId;
       // What the turn this one replaced never read, retired as this one started: this page's own
