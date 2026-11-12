@@ -19,12 +19,12 @@ import {
   coreGlowVertexShader, coreGlowFragmentShader,
 } from "./shaders/orbitalSystem";
 import { ambientVertexShader, ambientFragmentShader } from "./shaders/ambientSystem";
-import { BEZEL_RINGS, SHELL_RINGS, STEP_RING, hudRingFragmentShader, hudRingVertexShader, type HudRingSpec } from "./shaders/hudRings";
+import { SPHERE_RINGS, STEP_RING, hudRingFragmentShader, hudRingVertexShader, type HudRingSpec } from "./shaders/hudRings";
 
 /**
  * The step ring (composables/orbActivity.ts activityRing): its radius in orb units, how far it is
- * tipped towards the viewer, and whether a turn is running on it. The Dyson shell shares its
- * radius; the ring's own strip assembles while `active`.
+ * tipped towards the viewer, and whether a turn is running on it: its strip assembles while
+ * `active`.
  */
 interface StepRingProp { radius: number; tilt: number; active: boolean }
 const props = withDefaults(defineProps<{ aiState?: string; ring?: StepRingProp }>(), {
@@ -284,19 +284,18 @@ let orbitalPoints: THREE.Points;
 let ambientPoints: THREE.Points;
 let coreGlowMesh:  THREE.Mesh;
 /**
- * The HUD in 3D (shaders/hudRings.ts), each ring a tilted pivot holding a spinning mesh: the bezel
- * round the core, the Dyson shell round the orb, and the step ring's strip. The strip lives outside
- * the breathing orb group, at the orb's fixed scale, so it stays exactly where the page draws the
- * steps.
+ * The Dyson sphere round the core and the step ring (shaders/hudRings.ts), each strip a tilted
+ * pivot holding a spinning mesh. The sphere's two shells turn against each other. The step ring
+ * lives outside the breathing orb group, at the orb's fixed scale, so it stays exactly where the
+ * page draws the steps.
  */
 interface HudRing { pivot: THREE.Group; mesh: THREE.Mesh; spec: HudRingSpec }
-let hudGroup:      THREE.Group;
-let shellGroup:    THREE.Group;
+let innerShell:    THREE.Group;
+let outerShell:    THREE.Group;
 let stepGroup:     THREE.Group;
-let hudRings:      HudRing[] = [];
-let shellRings:    HudRing[] = [];
+let sphereRings:   HudRing[] = [];
 let stepRing:      HudRing | null = null;
-let shellRadius    = 2.4;
+let stepRadius     = 2.4;
 let stepAssemble   = 0;
 let torusUniforms: Record<string, THREE.IUniform>;
 let sphereUniforms: Record<string, THREE.IUniform>;
@@ -672,9 +671,9 @@ function animate() {
   sphereGroup.rotation.y = neuralSphereRotation;
   sphereGroup.scale.setScalar(cv.neuralSphereScale);
 
-  // ── HUD rings: each plane sways a little about its tilt, each ring spins on its own axis, and
-  // the whole set precesses slowly, so the rings keep showing they are rings in space ─────────
-  for (const { pivot, mesh, spec } of [...hudRings, ...shellRings]) {
+  // ── Dyson sphere: each strip's plane sways a little about its tilt and the strip spins on its
+  // own axis, and the two shells turn against each other, so the sphere keeps showing its depth ──
+  for (const { pivot, mesh, spec } of sphereRings) {
     pivot.rotation.set(
       spec.tilt[0] + spec.wobble * Math.sin(hudPhase * 0.31 + spec.seed),
       spec.tilt[1] + spec.wobble * Math.cos(hudPhase * 0.23 + spec.seed),
@@ -682,19 +681,18 @@ function animate() {
     );
     mesh.rotation.z = spec.spin * hudPhase;
   }
-  hudGroup.rotation.y = hudPhase * 0.06;
-  // The shell turns slowly as a whole too, and follows the step ring's radius (it changes with the
-  // window), easing so a resize does not jump.
-  shellRadius += (props.ring.radius - shellRadius) * Math.min(1, delta * 4);
-  shellGroup.scale.setScalar(shellRadius);
-  shellGroup.rotation.y = hudPhase * 0.025;
+  innerShell.rotation.y = hudPhase * 0.08;
+  outerShell.rotation.y = -hudPhase * 0.05;
+  // The step ring follows the page's ring radius (it changes with the window), easing so a resize
+  // does not jump.
+  stepRadius += (props.ring.radius - stepRadius) * Math.min(1, delta * 4);
   // The step ring's strip: built round the circle while a turn runs, taken down after it. Its
   // plane is the page's (ringPosition): tipped from edge-on so its front is below the orb.
   if (stepRing) {
     const target = props.ring.active ? 1 : 0;
     stepAssemble += (target - stepAssemble) * Math.min(1, delta * (target ? 0.9 : 1.6));
     if (target === 0 && stepAssemble < 0.002) stepAssemble = 0;
-    stepGroup.scale.setScalar(ORB_SCALE * shellRadius);
+    stepGroup.scale.setScalar(ORB_SCALE * stepRadius);
     stepRing.pivot.rotation.set(Math.PI / 2 + props.ring.tilt, 0, 0);
     stepRing.mesh.rotation.z = STEP_RING.spin * hudPhase;
     const material = stepRing.mesh.material as THREE.ShaderMaterial;
@@ -844,10 +842,10 @@ onMounted(() => {
   coreGlowMesh.position.z = -0.05;
   orbGroup.add(coreGlowMesh);
 
-  // HUD rings in the orb's own space: the core glow's colour, intensity and phase drive them, so a
-  // state change recolours them with the core.
+  // The Dyson sphere and the step ring in the orb's own space: the core glow's colour, intensity
+  // and phase drive them, so a state change recolours them with the core.
   const makeRing = (spec: HudRingSpec, parent: THREE.Group): HudRing => {
-    const reach = 3 * spec.width + (spec.kind === 0 ? spec.radius * 0.04 : 0);
+    const reach = 3 * spec.width;
     const mesh = new THREE.Mesh(
       new THREE.RingGeometry(Math.max(0.01, spec.radius - reach), spec.radius + reach, 256, 1),
       new THREE.ShaderMaterial({
@@ -856,12 +854,11 @@ onMounted(() => {
           uCoreColor: coreUniforms["uCoreColor"]!,
           uIntensity: coreUniforms["uIntensity"]!,
           uGlowPhase: coreUniforms["uGlowPhase"]!,
-          uKind:      { value: spec.kind },
           uRadius:    { value: spec.radius },
           uWidth:     { value: spec.width },
           uStrength:  { value: spec.strength },
-          uTiles:     { value: spec.tiles ?? 1 },
-          uCoverage:  { value: spec.coverage ?? 1 },
+          uTiles:     { value: spec.tiles },
+          uCoverage:  { value: spec.coverage },
           uSeed:      { value: spec.seed },
           uAssemble:  { value: 1 },
           uHot:       { value: spec.hot ?? 0 },
@@ -875,16 +872,14 @@ onMounted(() => {
     parent.add(pivot);
     return { pivot, mesh, spec };
   };
-  hudGroup = new THREE.Group();
-  hudRings = BEZEL_RINGS.map((spec) => makeRing(spec, hudGroup));
-  orbGroup.add(hudGroup);
-  shellRadius = props.ring.radius;
-  shellGroup = new THREE.Group();
-  shellGroup.scale.setScalar(shellRadius);
-  shellRings = SHELL_RINGS.map((spec) => makeRing(spec, shellGroup));
-  orbGroup.add(shellGroup);
+  innerShell = new THREE.Group();
+  outerShell = new THREE.Group();
+  const innerRadius = Math.min(...SPHERE_RINGS.map((spec) => spec.radius));
+  sphereRings = SPHERE_RINGS.map((spec) => makeRing(spec, spec.radius === innerRadius ? innerShell : outerShell));
+  orbGroup.add(innerShell, outerShell);
+  stepRadius = props.ring.radius;
   stepGroup = new THREE.Group();
-  stepGroup.scale.setScalar(ORB_SCALE * shellRadius);
+  stepGroup.scale.setScalar(ORB_SCALE * stepRadius);
   stepRing = makeRing(STEP_RING, stepGroup);
   stepRing.mesh.visible = false;
   scene.add(stepGroup);
@@ -940,12 +935,11 @@ onUnmounted(() => {
   (ambientPoints?.material as THREE.Material | undefined)?.dispose();
   coreGlowMesh?.geometry.dispose();
   (coreGlowMesh?.material as THREE.Material | undefined)?.dispose();
-  for (const { mesh } of [...hudRings, ...shellRings, ...(stepRing ? [stepRing] : [])]) {
+  for (const { mesh } of [...sphereRings, ...(stepRing ? [stepRing] : [])]) {
     mesh.geometry.dispose();
     (mesh.material as THREE.Material).dispose();
   }
-  hudRings = [];
-  shellRings = [];
+  sphereRings = [];
   stepRing = null;
   renderer?.dispose();
 });
