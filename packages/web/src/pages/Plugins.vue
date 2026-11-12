@@ -85,9 +85,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 
 interface PluginRecord {
   name: string;
@@ -206,9 +207,8 @@ function formatActivityTime(iso: string): string {
   return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-onMounted(() => {
-  void loadPlugins();
-});
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(loadPlugins);
 </script>
 
 <style scoped>

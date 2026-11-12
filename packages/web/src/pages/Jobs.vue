@@ -83,23 +83,40 @@
               <span class="badge-store">{{ job.definitionType === 'job' ? 'job' : 'scene' }}</span>
               <span :class="jobBadgeClass(job.status)">{{ job.status }}</span>
             </div>
-            <div class="job-card__meta">Job {{ shortJobId(job.id) }} · Session {{ shortJobId(job.sessionId) }}</div>
+            <div class="job-card__meta">
+              Job
+              <button
+                type="button"
+                class="job-card__id"
+                :title="`${job.id} — click to copy`"
+                :aria-label="`Copy job id ${job.id}`"
+                @click="copyId('Job', job.id)"
+              >{{ shortJobId(job.id) }}</button>
+              · Session
+              <button
+                type="button"
+                class="job-card__id"
+                :title="`${job.sessionId} — click to copy`"
+                :aria-label="`Copy session id ${job.sessionId}`"
+                @click="copyId('Session', job.sessionId)"
+              >{{ shortJobId(job.sessionId) }}</button>
+            </div>
           </div>
           <div class="job-card__actions">
             <button
               v-if="isCancelable(job.status)"
               type="button"
-              class="job-card__button job-card__button--warn"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm"
               :disabled="cancellingIds.has(job.id)"
               @click="cancelJob(job)"
             >
               {{ cancellingIds.has(job.id) ? "Cancelling…" : "Cancel" }}
             </button>
-            <button type="button" class="job-card__button" @click="openJobSession(job.sessionId)">Open Session</button>
+            <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="openJobSession(job.sessionId)">Open Session</button>
             <button
               v-if="!isCancelable(job.status)"
               type="button"
-              class="job-card__button job-card__button--danger"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm"
               :disabled="deletingIds.has(job.id)"
               title="Remove this run from the store (the session transcript is kept)"
               @click="deleteRun(job)"
@@ -162,7 +179,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
+import { writeClipboard } from "@/composables/clipboard";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast } from "@/composables/useToast";
 
 const router = useRouter();
@@ -383,6 +402,16 @@ function shortJobId(value: string): string {
   return `${value.slice(0, 8)}…`;
 }
 
+// The cards show ids cut to eight characters; this is how to get a whole one.
+async function copyId(what: string, id: string): Promise<void> {
+  try {
+    await writeClipboard(id);
+    toast.success("Copied", `${what} id is on the clipboard.`);
+  } catch {
+    toast.error("Couldn't copy", `The browser refused the clipboard. ${what} id: ${id}`);
+  }
+}
+
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "unknown";
@@ -420,9 +449,13 @@ function jobToneClass(status: SceneJob["status"]): string {
   return "job-card--running";
 }
 
-onMounted(() => {
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(() => {
   void refreshJobs();
   void loadCronTriggers();
+});
+
+onMounted(() => {
   cronTriggersTimer = setInterval(() => { void loadCronTriggers(); }, 30_000);
 });
 
@@ -674,31 +707,19 @@ watch(statusFilter, () => {
   color: #fecaca;
 }
 
-.job-card__button {
-  border-radius: 9999px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.72);
-  color: #e2e8f0;
-  padding: 0.35rem 0.65rem;
-  font-size: 0.72rem;
-  cursor: pointer;
+/* An id is shown cut short: the button holds all of it (title) and copies it. */
+.job-card__id {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: copy;
 }
-
-.job-card__button--warn {
-  border-color: rgba(245, 158, 11, 0.24);
-  color: #fde68a;
+.job-card__id:hover {
+  color: #f8fafc;
 }
-
-.job-card__button--danger {
-  border-color: rgba(248, 113, 113, 0.3);
-  color: #fca5a5;
-}
-.job-card__button--danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.1);
-}
-.job-card__button:disabled {
-  opacity: 0.55;
-  cursor: default;
+.job-card__id:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .job-card__progress {

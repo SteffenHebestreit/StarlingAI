@@ -6,6 +6,7 @@ describe("chatText", () => {
     const sample: Record<string, unknown[]> = {
       enlarge: ["fox.png"], firstCharacters: [500], messagePlaceholder: ["StarlingAI", true],
       launcherTitle: ["StarlingAI"], restartConfirmMessage: [3], resetConfirmMessage: [4],
+      showOlder: [5], hideOlder: [5],
     };
     for (const [key, label] of Object.entries(chatText)) {
       const args = sample[key] ?? [];
@@ -13,8 +14,8 @@ describe("chatText", () => {
       const de = (label as (...a: unknown[]) => string)("de", ...args);
       expect(en.trim(), key).not.toBe("");
       expect(de.trim(), key).not.toBe("");
-      // "Details" is the one word both languages share.
-      if (key !== "details") expect(de, key).not.toBe(en);
+      // The words both languages share.
+      if (!["details", "tabLive"].includes(key)) expect(de, key).not.toBe(en);
     }
   });
 

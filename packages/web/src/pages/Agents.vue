@@ -55,8 +55,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useAgentsStore } from "@/stores/agents";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 
 const store = useAgentsStore();
 const query = ref("");
@@ -70,7 +71,9 @@ const filtered = computed(() => {
   });
 });
 
-onMounted(() => { if (!store.agents.length) void store.fetch(); });
+// Also when the gateway comes up after the page did. A catalog that is already loaded stays as
+// it is: the store is shared with the Agent tuning page.
+useLoadWhenConnected(() => { if (!store.agents.length) void store.fetch(); });
 </script>
 
 <style scoped>

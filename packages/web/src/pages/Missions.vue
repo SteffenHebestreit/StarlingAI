@@ -31,8 +31,23 @@
               <span :class="['mission-badge', `mission-badge--${mission.status}`]">{{ mission.status }}</span>
             </div>
             <div class="mission-card__meta">
-              Mission {{ shortId(mission.id) }} · Session {{ shortId(mission.rootSessionId) }} ·
-              {{ mission.eventCount }} events · {{ formatTokens(mission.budgetTokensSpent) }} tokens ·
+              Mission
+              <button
+                type="button"
+                class="mission-card__id"
+                :title="`${mission.id} — click to copy`"
+                :aria-label="`Copy mission id ${mission.id}`"
+                @click="copyId('Mission', mission.id)"
+              >{{ shortId(mission.id) }}</button>
+              · Session
+              <button
+                type="button"
+                class="mission-card__id"
+                :title="`${mission.rootSessionId} — click to copy`"
+                :aria-label="`Copy session id ${mission.rootSessionId}`"
+                @click="copyId('Session', mission.rootSessionId)"
+              >{{ shortId(mission.rootSessionId) }}</button>
+              · {{ mission.eventCount }} events · {{ formatTokens(mission.budgetTokensSpent) }} tokens ·
               updated {{ formatTime(mission.updatedAt) }}
             </div>
           </div>
@@ -82,10 +97,12 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { writeClipboard } from "@/composables/clipboard";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 interface MissionSummary {
@@ -204,6 +221,16 @@ async function cancelMission(mission: MissionSummary): Promise<void> {
 }
 
 function shortId(id: string): string { return id.length > 8 ? id.slice(0, 8) : id; }
+
+// The cards show ids cut to eight characters; this is how to get a whole one.
+async function copyId(what: string, id: string): Promise<void> {
+  try {
+    await writeClipboard(id);
+    toast.success("Copied", `${what} id is on the clipboard.`);
+  } catch {
+    toast.error("Couldn't copy", `The browser refused the clipboard. ${what} id: ${id}`);
+  }
+}
 function formatTokens(n: number): string { return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n); }
 function formatTime(ts: string): string { try { return new Date(ts).toLocaleString(); } catch { return ts; } }
 function formatDuration(ms: number): string {
@@ -222,7 +249,8 @@ function payloadPreview(payload: Record<string, unknown>): string {
   return json.length > 140 ? `${json.slice(0, 140)}…` : json;
 }
 
-onMounted(refresh);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
@@ -235,6 +263,10 @@ onMounted(refresh);
 .mission-card__title-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
 .mission-card__title { margin: 0; font-size: 0.98rem; font-weight: 600; }
 .mission-card__meta { color: rgb(156 163 175); font-size: 0.78rem; margin-top: 0.25rem; }
+/* An id is shown cut short: the button holds all of it (title) and copies it. */
+.mission-card__id { text-decoration: underline dotted; text-underline-offset: 2px; cursor: copy; }
+.mission-card__id:hover { color: rgb(229 231 235); }
+.mission-card__id:focus-visible { outline: 2px solid rgba(var(--logo-cyan), 0.7); outline-offset: 2px; border-radius: 2px; }
 .mission-card__actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
 .mission-badge { font-size: 0.7rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; text-transform: uppercase; letter-spacing: 0.04em; }
 .mission-badge--active { color: rgb(var(--logo-cyan)); }

@@ -1,5 +1,16 @@
 <template>
-  <div class="page-shell">
+  <!-- The shell is what scrolls, so it carries the scroll watch for the index. Any input from
+       the reader hands the scroll position back to them (see holdCard in the script). -->
+  <div
+    ref="shellEl"
+    class="page-shell"
+    :style="indexHeight ? { '--settings-index-h': `${indexHeight}px` } : undefined"
+    @scroll.passive="scheduleSpy"
+    @wheel.passive="releaseHold"
+    @touchmove.passive="releaseHold"
+    @pointerdown="releaseHold"
+    @keydown="releaseHold"
+  >
 
     <!-- Held to the grid's width so the title lines up with the cards on a wide screen. -->
     <header class="page-header mx-auto max-w-[1400px]">
@@ -9,21 +20,61 @@
       </div>
     </header>
 
-    <div class="settings-grid">
+    <!-- Section index: a filter over this route's cards and one chip per card, in page order.
+         Built from SETTINGS_CARDS, which also names the anchors other pages link to. -->
+    <nav ref="indexEl" class="settings-index" aria-label="Sections on this page">
+      <div class="settings-index__find">
+        <label for="settings-find" class="sr-only">Find a setting</label>
+        <input
+          id="settings-find"
+          ref="filterInputEl"
+          v-model="settingFilter"
+          type="search"
+          class="input-box settings-index__input"
+          placeholder="Find a setting…"
+          autocomplete="off"
+          spellcheck="false"
+          @keydown.esc="clearFilter()"
+        />
+      </div>
+      <ul ref="chipRowEl" class="settings-index__chips">
+        <li v-for="card in pageCards" :key="card.id">
+          <!-- A real link, so a chip can be copied or opened in a new tab; a plain click
+               scrolls instead of navigating. -->
+          <a
+            :href="`#${card.id}`"
+            class="settings-index__chip"
+            :class="{ 'settings-index__chip--dim': !isCardShown(card.id) }"
+            :aria-current="currentCardId === card.id ? 'true' : undefined"
+            @click.exact.prevent="goToCard(card.id)"
+          >{{ card.label }}</a>
+        </li>
+      </ul>
+    </nav>
+
+    <!-- Always in the page, so a screen reader hears the line when it appears. -->
+    <div class="settings-no-match" role="status">
+      <p v-if="noCardShown" class="notice">
+        No setting matches “{{ settingFilter.trim() }}”.
+        <button type="button" class="btn-ghost ml-2 px-3 py-1 rounded-lg text-xs" @click="clearFilter(true)">Clear</button>
+      </p>
+    </div>
+
+    <div ref="gridEl" class="settings-grid" :class="{ 'settings-grid--filtered': filterTerms.length > 0 }">
 
       <!-- ══ LEFT COLUMN ══════════════════════════════════════════════════════ -->
       <div class="space-y-5">
 
         <!-- ── Appearance ─────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
-          <h3 class="section-title mb-1">Appearance</h3>
+        <div id="appearance" v-if="isSettingsPage" v-show="isCardShown('appearance')" class="glass-card settings-card p-5">
+          <h3 class="section-title mb-1" tabindex="-1">Appearance</h3>
           <div class="text-xs text-gray-500 mb-4">Palette, typeface, and curated presets. Saved in this browser.</div>
           <AppearanceSettings />
         </div>
 
         <!-- ── Gateway Connection ─────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
-          <h3 class="section-title">Gateway Connection</h3>
+        <div id="gateway-connection" v-if="isSettingsPage" v-show="isCardShown('gateway-connection')" class="glass-card settings-card p-5">
+          <h3 class="section-title" tabindex="-1">Gateway Connection</h3>
           <div class="space-y-4">
             <div>
               <label class="field-label">WebSocket URL</label>
@@ -41,8 +92,8 @@
         </div>
 
         <!-- ── Status ─────────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
-          <h3 class="section-title">Status</h3>
+        <div id="status" v-if="isSettingsPage" v-show="isCardShown('status')" class="glass-card settings-card p-5">
+          <h3 class="section-title" tabindex="-1">Status</h3>
           <div class="space-y-3 text-sm">
             <div class="flex justify-between items-center">
               <span class="text-gray-400">Gateway</span>
@@ -84,10 +135,10 @@
           </div>
         </div>
 
-        <div v-if="isAgentsPage" class="glass-card p-5">
+        <div id="personality" v-if="isAgentsPage" v-show="isCardShown('personality')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
             <div>
-              <h3 class="section-title mb-0">Main AI Personality</h3>
+              <h3 class="section-title mb-0" tabindex="-1">Main AI Personality</h3>
               <div class="text-xs text-gray-500 mt-1">Persistent voice guidance injected into the main assistant prompt and shared with the assistant’s self-profile tools.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -167,8 +218,8 @@
           </div>
         </div>
 
-        <div v-if="isAgentsPage" class="glass-card p-5">
-          <h3 class="section-title">Model Endpoints</h3>
+        <div id="model-endpoints" v-if="isAgentsPage" v-show="isCardShown('model-endpoints')" class="glass-card settings-card p-5">
+          <h3 class="section-title" tabindex="-1">Model Endpoints</h3>
           <div class="space-y-3 text-sm">
             <div class="flex justify-between items-center">
               <span class="text-gray-400">Endpoint Health</span>
@@ -194,10 +245,269 @@
           </div>
         </div>
 
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <!-- Orchestration Tuning, Skill Library and Document RAG stand in this column: in the
+             right one they left /agents with two cards here and seven there. Only the column
+             break moved; the order of the cards is the one they always had. -->
+          <!-- ── Orchestration Tuning ────────────────────────────────── -->
+          <div id="orchestration-tuning" v-if="isAgentsPage" v-show="isCardShown('orchestration-tuning')" class="glass-card settings-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0" tabindex="-1">Orchestration Tuning</h3>
+                <div class="text-xs text-gray-500 mt-1">Adjust limits to match your hardware. Leave a field at its default to use the built-in value.</div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button type="button" v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+                <button type="button" @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              </div>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure orchestration limits.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required.
+              </div>
+
+              <!-- Default effort tier (seeds new sessions; per-session override in chat) -->
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Default Effort <span class="text-gray-600 font-normal">new sessions inherit this</span></label>
+                  <select v-model="effortDefaultForm" @change="saveEffortDefaultUI" class="input-box">
+                    <option value="low">Low — fast &amp; tight</option>
+                    <option value="medium">Medium — balanced (default)</option>
+                    <option value="high">High — thorough, quality gates kept</option>
+                    <option value="max">Max — unbounded, gates relaxed</option>
+                  </select>
+                  <div class="text-xs text-gray-500 mt-1">Per session, change it from the chat composer (or <code class="font-mono">--effort TIER</code>). Per-tier profiles are tuned in config shards.</div>
+                </div>
+              </div>
+
+              <!-- Parallel slices -->
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Max Parallel Research Slices <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.maxParallelSlices ?? 2 }}</span></label>
+                  <input v-model.number="orchestrationForm.maxParallelSlices" type="number" min="1" max="8" class="input-box" />
+                  <div class="text-xs text-gray-500 mt-1">2 for a single local GPU · 3–4 for multi-GPU or API backends</div>
+                </div>
+              </div>
+
+              <!-- Sub-agent caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Sub-Agent Caps</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_search ?? 14 }}</span></label>
+                    <input v-model.number="orchestrationForm.subAgentWebSearch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_search ?? 14)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16 }}</span></label>
+                    <input v-model.number="orchestrationForm.subAgentWebFetch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Coordinator caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Coordinator Caps</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordWebSearch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordWebFetch" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6 }}</span></label>
+                    <input v-model.number="orchestrationForm.coordDelegate" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Per-turn caps -->
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Per-Turn Caps (main agent)</div>
+                <div class="multimodal-grid">
+                  <div>
+                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnDelegate" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">computer_click <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_click ?? 8 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnComputerClick" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_click ?? 8)" class="input-box" />
+                  </div>
+                  <div>
+                    <label class="field-label">computer_type <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_type ?? 6 }}</span></label>
+                    <input v-model.number="orchestrationForm.perTurnComputerType" type="number" min="1" max="500"
+                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_type ?? 6)" class="input-box" />
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="orchestrationError" class="text-sm text-red-400">{{ orchestrationError }}</div>
+
+              <div class="flex justify-end">
+                <button type="button" @click="saveOrchestrationConfigUI" :disabled="orchestrationSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ orchestrationSaving ? 'Saving…' : 'Save Limits' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Skill Library & Automation ──────────────────────────── -->
+          <div id="skill-library" v-if="isAgentsPage" v-show="isCardShown('skill-library')" class="glass-card settings-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0" tabindex="-1">Skill Library &amp; Automation</h3>
+                <div class="text-xs text-gray-500 mt-1">Self-authoring procedural memory and batched tool execution. Browse authored skills on the <RouterLink to="/skills" class="text-indigo-300 hover:underline">Skills</RouterLink> page.</div>
+              </div>
+              <button type="button" v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure the Skill Library.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required.
+              </div>
+
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Enable Skill Library</div>
+                  <div class="text-xs text-gray-500">Retrieve and inject learned procedures at planning time.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.enabled" @change="skillForm.enabled = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Autonomous authoring</div>
+                  <div class="text-xs text-gray-500">Distill skill drafts from successful multi-step turns.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.autoAuthor" :disabled="!skillForm.enabled" @change="skillForm.autoAuthor = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Auto-promote to scenes</div>
+                  <div class="text-xs text-gray-500">Graduate consistently reliable skills into reusable workflow scenes.</div>
+                </div>
+                <ToggleSwitch :value="skillForm.autoPromoteToScene" :disabled="!skillForm.enabled" @change="skillForm.autoPromoteToScene = $event" />
+              </div>
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Max skills injected per turn <span class="text-gray-600 font-normal">default 3</span></label>
+                  <input v-model.number="skillForm.maxInjected" type="number" min="1" max="10" class="input-box" />
+                </div>
+              </div>
+
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Tool Pipeline</div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Enable run_tool_pipeline</div>
+                    <div class="text-xs text-gray-500">Let granted agents batch several tool calls in one turn. Each step still passes tier + approval + the agent's own allowlist.</div>
+                  </div>
+                  <ToggleSwitch :value="pipelineForm.enabled" @change="pipelineForm.enabled = $event" />
+                </div>
+              </div>
+
+              <div v-if="skillConfigError" class="text-sm text-red-400">{{ skillConfigError }}</div>
+
+              <div class="flex justify-end">
+                <button type="button" @click="saveSkillConfigUI" :disabled="skillConfigSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ skillConfigSaving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── Document RAG ────────────────────────────────────────── -->
+          <div id="document-rag" v-if="isAgentsPage" v-show="isCardShown('document-rag')" class="glass-card settings-card p-5">
+            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <div>
+                <h3 class="section-title mb-0" tabindex="-1">Document RAG</h3>
+                <div class="text-xs text-gray-500 mt-1">Retrieval-augmented context from attached/uploaded documents (engram graph-RAG). Files are extracted to text and indexed; relevant excerpts are injected into the conversation.</div>
+              </div>
+              <button type="button" v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            </div>
+
+            <div v-if="!gateway.connected" class="empty-state">Connect to configure Document RAG.</div>
+            <div v-else class="space-y-4">
+              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
+                Changes take effect immediately — no restart required. Requires the engram + reranker services to be running.
+              </div>
+
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Enable Document RAG</div>
+                  <div class="text-xs text-gray-500">Master switch for indexing and retrieving from attached documents.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.enabled" @change="docRagForm.enabled = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Auto-ingest attachments</div>
+                  <div class="text-xs text-gray-500">Index files attached to a message into that conversation's document library automatically.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.autoIngestAttachments" :disabled="!docRagForm.enabled" @change="docRagForm.autoIngestAttachments = $event" />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <div>
+                  <div class="field-label">Inject context automatically</div>
+                  <div class="text-xs text-gray-500">Before answering, retrieve relevant excerpts and add them to the prompt.</div>
+                </div>
+                <ToggleSwitch :value="docRagForm.injectContext" :disabled="!docRagForm.enabled" @change="docRagForm.injectContext = $event" />
+              </div>
+
+              <div class="border-t border-purple-500/10 pt-3 space-y-3">
+                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Scope</div>
+                <div class="text-xs text-gray-500 -mt-1">Documents are always searchable within the conversation they were attached to. Extend retrieval to shared libraries:</div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Include the user's personal library</div>
+                    <div class="text-xs text-gray-500">Also search documents scoped to the signed-in user (user:&lt;id&gt;).</div>
+                  </div>
+                  <ToggleSwitch :value="docRagForm.includeUserDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeUserDocs = $event" />
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div>
+                    <div class="field-label">Include the workspace library</div>
+                    <div class="text-xs text-gray-500">Also search documents shared across the whole workspace.</div>
+                  </div>
+                  <ToggleSwitch :value="docRagForm.includeWorkspaceDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeWorkspaceDocs = $event" />
+                </div>
+              </div>
+
+              <div class="multimodal-grid">
+                <div>
+                  <label class="field-label">Excerpts injected per turn <span class="text-gray-600 font-normal">default 6</span></label>
+                  <input v-model.number="docRagForm.retrievalTopK" type="number" min="1" max="20" class="input-box" :disabled="!docRagForm.enabled" />
+                </div>
+                <div>
+                  <label class="field-label">Max context characters <span class="text-gray-600 font-normal">default 6000</span></label>
+                  <input v-model.number="docRagForm.maxContextChars" type="number" min="500" max="50000" step="500" class="input-box" :disabled="!docRagForm.enabled" />
+                </div>
+              </div>
+
+              <div v-if="docRagError" class="text-sm text-red-400">{{ docRagError }}</div>
+
+              <div class="flex justify-end">
+                <button type="button" @click="saveDocumentRagConfigUI" :disabled="docRagSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                  {{ docRagSaving ? 'Saving…' : 'Save' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+        <div id="multimodal" v-if="isSettingsPage" v-show="isCardShown('multimodal')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3">
             <div>
-              <h3 class="section-title mb-0">Multimodal</h3>
+              <h3 class="section-title mb-0" tabindex="-1">Multimodal</h3>
               <div class="text-xs text-gray-500 mt-1">Set file ingestion, STT, TTS, and wake-word defaults.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -617,8 +927,8 @@
         </div>
 
         <!-- ── About ──────────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
-          <h3 class="section-title">About {{ product.name }}</h3>
+        <div id="about" v-if="isSettingsPage" v-show="isCardShown('about')" class="glass-card settings-card p-5">
+          <h3 class="section-title" tabindex="-1">About {{ product.name }}</h3>
           <div class="text-sm text-gray-500 space-y-1">
             <p>Version: <span class="text-gray-300">{{ appVersion }}</span></p>
             <p>Security-hardened local AI assistant with multi-agent orchestration.</p>
@@ -632,9 +942,9 @@
       <div class="space-y-5">
 
         <!-- ── Guardrails ──────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <div id="guardrails" v-if="isSettingsPage" v-show="isCardShown('guardrails')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0">Guardrails</h3>
+            <h3 class="section-title mb-0" tabindex="-1">Guardrails</h3>
             <div class="flex items-center gap-2">
               <button type="button" v-if="guardrails.state" @click="resetGuardrails" :disabled="guardrails.loading"
                 class="text-xs text-gray-500 hover:text-purple-400 transition-colors">Reset defaults</button>
@@ -695,9 +1005,9 @@
         </div>
 
         <!-- ── Site Credentials ───────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <div id="site-credentials" v-if="isSettingsPage" v-show="isCardShown('site-credentials')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0">Site Credentials</h3>
+            <h3 class="section-title mb-0" tabindex="-1">Site Credentials</h3>
             <div class="flex gap-2">
               <button type="button" v-if="gateway.connected && !sites.sites.length" @click="sites.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
               <button type="button" @click="openSiteForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Site</button>
@@ -739,9 +1049,9 @@
         </div>
 
         <!-- ── Scenes ─────────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <div id="scenes" v-if="isSettingsPage" v-show="isCardShown('scenes')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0">Scenes</h3>
+            <h3 class="section-title mb-0" tabindex="-1">Scenes</h3>
             <div class="flex gap-2">
               <button type="button" v-if="gateway.connected && !scenesStore.scenes.length" @click="scenesStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
               <button type="button" @click="openSceneForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Scene</button>
@@ -780,9 +1090,9 @@
           <div v-else class="empty-state">No scenes configured.</div>
         </div>
 
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <div id="jobs" v-if="isSettingsPage" v-show="isCardShown('jobs')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0">Jobs</h3>
+            <h3 class="section-title mb-0" tabindex="-1">Jobs</h3>
             <div class="flex gap-2">
               <button type="button" v-if="gateway.connected && !jobsStore.jobs.length" @click="jobsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
               <button type="button" @click="openJobForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Job</button>
@@ -821,267 +1131,11 @@
           <div v-else class="empty-state">No jobs configured.</div>
         </div>
 
-          <!-- ── Orchestration Tuning ────────────────────────────────── -->
-          <div v-if="isAgentsPage" class="glass-card p-5">
-            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-              <div>
-                <h3 class="section-title mb-0">Orchestration Tuning</h3>
-                <div class="text-xs text-gray-500 mt-1">Adjust limits to match your hardware. Leave a field at its default to use the built-in value.</div>
-              </div>
-              <div class="flex items-center gap-2">
-                <button type="button" v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-                <button type="button" @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
-              </div>
-            </div>
-
-            <div v-if="!gateway.connected" class="empty-state">Connect to configure orchestration limits.</div>
-            <div v-else class="space-y-4">
-              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required.
-              </div>
-
-              <!-- Default effort tier (seeds new sessions; per-session override in chat) -->
-              <div class="multimodal-grid">
-                <div>
-                  <label class="field-label">Default Effort <span class="text-gray-600 font-normal">new sessions inherit this</span></label>
-                  <select v-model="effortDefaultForm" @change="saveEffortDefaultUI" class="input-box">
-                    <option value="low">Low — fast &amp; tight</option>
-                    <option value="medium">Medium — balanced (default)</option>
-                    <option value="high">High — thorough, quality gates kept</option>
-                    <option value="max">Max — unbounded, gates relaxed</option>
-                  </select>
-                  <div class="text-xs text-gray-500 mt-1">Per session, change it from the chat composer (or <code class="font-mono">--effort TIER</code>). Per-tier profiles are tuned in config shards.</div>
-                </div>
-              </div>
-
-              <!-- Parallel slices -->
-              <div class="multimodal-grid">
-                <div>
-                  <label class="field-label">Max Parallel Research Slices <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.maxParallelSlices ?? 2 }}</span></label>
-                  <input v-model.number="orchestrationForm.maxParallelSlices" type="number" min="1" max="8" class="input-box" />
-                  <div class="text-xs text-gray-500 mt-1">2 for a single local GPU · 3–4 for multi-GPU or API backends</div>
-                </div>
-              </div>
-
-              <!-- Sub-agent caps -->
-              <div class="border-t border-purple-500/10 pt-3 space-y-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Sub-Agent Caps</div>
-                <div class="multimodal-grid">
-                  <div>
-                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_search ?? 14 }}</span></label>
-                    <input v-model.number="orchestrationForm.subAgentWebSearch" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_search ?? 14)" class="input-box" />
-                  </div>
-                  <div>
-                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16 }}</span></label>
-                    <input v-model.number="orchestrationForm.subAgentWebFetch" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.subAgentToolCaps?.web_fetch ?? 16)" class="input-box" />
-                  </div>
-                </div>
-              </div>
-
-              <!-- Coordinator caps -->
-              <div class="border-t border-purple-500/10 pt-3 space-y-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Coordinator Caps</div>
-                <div class="multimodal-grid">
-                  <div>
-                    <label class="field-label">web_search <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20 }}</span></label>
-                    <input v-model.number="orchestrationForm.coordWebSearch" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_search ?? 20)" class="input-box" />
-                  </div>
-                  <div>
-                    <label class="field-label">web_fetch <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25 }}</span></label>
-                    <input v-model.number="orchestrationForm.coordWebFetch" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.web_fetch ?? 25)" class="input-box" />
-                  </div>
-                  <div>
-                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6 }}</span></label>
-                    <input v-model.number="orchestrationForm.coordDelegate" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.coordinatorToolCaps?.delegate_to_agent ?? 6)" class="input-box" />
-                  </div>
-                </div>
-              </div>
-
-              <!-- Per-turn caps -->
-              <div class="border-t border-purple-500/10 pt-3 space-y-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Per-Turn Caps (main agent)</div>
-                <div class="multimodal-grid">
-                  <div>
-                    <label class="field-label">delegate_to_agent <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5 }}</span></label>
-                    <input v-model.number="orchestrationForm.perTurnDelegate" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.perTurnCaps?.delegate_to_agent ?? 5)" class="input-box" />
-                  </div>
-                  <div>
-                    <label class="field-label">computer_click <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_click ?? 8 }}</span></label>
-                    <input v-model.number="orchestrationForm.perTurnComputerClick" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_click ?? 8)" class="input-box" />
-                  </div>
-                  <div>
-                    <label class="field-label">computer_type <span class="text-gray-600 font-normal">default {{ orchestrationDefaults.perTurnCaps?.computer_type ?? 6 }}</span></label>
-                    <input v-model.number="orchestrationForm.perTurnComputerType" type="number" min="1" max="500"
-                      :placeholder="String(orchestrationDefaults.perTurnCaps?.computer_type ?? 6)" class="input-box" />
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="orchestrationError" class="text-sm text-red-400">{{ orchestrationError }}</div>
-
-              <div class="flex justify-end">
-                <button type="button" @click="saveOrchestrationConfigUI" :disabled="orchestrationSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
-                  {{ orchestrationSaving ? 'Saving…' : 'Save Limits' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- ── Skill Library & Automation ──────────────────────────── -->
-          <div v-if="isAgentsPage" class="glass-card p-5">
-            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-              <div>
-                <h3 class="section-title mb-0">Skill Library &amp; Automation</h3>
-                <div class="text-xs text-gray-500 mt-1">Self-authoring procedural memory and batched tool execution. Browse authored skills on the <RouterLink to="/skills" class="text-indigo-300 hover:underline">Skills</RouterLink> page.</div>
-              </div>
-              <button type="button" v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-            </div>
-
-            <div v-if="!gateway.connected" class="empty-state">Connect to configure the Skill Library.</div>
-            <div v-else class="space-y-4">
-              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required.
-              </div>
-
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Enable Skill Library</div>
-                  <div class="text-xs text-gray-500">Retrieve and inject learned procedures at planning time.</div>
-                </div>
-                <ToggleSwitch :value="skillForm.enabled" @change="skillForm.enabled = $event" />
-              </div>
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Autonomous authoring</div>
-                  <div class="text-xs text-gray-500">Distill skill drafts from successful multi-step turns.</div>
-                </div>
-                <ToggleSwitch :value="skillForm.autoAuthor" :disabled="!skillForm.enabled" @change="skillForm.autoAuthor = $event" />
-              </div>
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Auto-promote to scenes</div>
-                  <div class="text-xs text-gray-500">Graduate consistently reliable skills into reusable workflow scenes.</div>
-                </div>
-                <ToggleSwitch :value="skillForm.autoPromoteToScene" :disabled="!skillForm.enabled" @change="skillForm.autoPromoteToScene = $event" />
-              </div>
-              <div class="multimodal-grid">
-                <div>
-                  <label class="field-label">Max skills injected per turn <span class="text-gray-600 font-normal">default 3</span></label>
-                  <input v-model.number="skillForm.maxInjected" type="number" min="1" max="10" class="input-box" />
-                </div>
-              </div>
-
-              <div class="border-t border-purple-500/10 pt-3 space-y-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Tool Pipeline</div>
-                <div class="flex items-center justify-between gap-4">
-                  <div>
-                    <div class="field-label">Enable run_tool_pipeline</div>
-                    <div class="text-xs text-gray-500">Let granted agents batch several tool calls in one turn. Each step still passes tier + approval + the agent's own allowlist.</div>
-                  </div>
-                  <ToggleSwitch :value="pipelineForm.enabled" @change="pipelineForm.enabled = $event" />
-                </div>
-              </div>
-
-              <div v-if="skillConfigError" class="text-sm text-red-400">{{ skillConfigError }}</div>
-
-              <div class="flex justify-end">
-                <button type="button" @click="saveSkillConfigUI" :disabled="skillConfigSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
-                  {{ skillConfigSaving ? 'Saving…' : 'Save' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- ── Document RAG ────────────────────────────────────────── -->
-          <div v-if="isAgentsPage" class="glass-card p-5">
-            <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
-              <div>
-                <h3 class="section-title mb-0">Document RAG</h3>
-                <div class="text-xs text-gray-500 mt-1">Retrieval-augmented context from attached/uploaded documents (engram graph-RAG). Files are extracted to text and indexed; relevant excerpts are injected into the conversation.</div>
-              </div>
-              <button type="button" v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-            </div>
-
-            <div v-if="!gateway.connected" class="empty-state">Connect to configure Document RAG.</div>
-            <div v-else class="space-y-4">
-              <div class="rounded-xl border border-cyan-500/15 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-100/80">
-                Changes take effect immediately — no restart required. Requires the engram + reranker services to be running.
-              </div>
-
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Enable Document RAG</div>
-                  <div class="text-xs text-gray-500">Master switch for indexing and retrieving from attached documents.</div>
-                </div>
-                <ToggleSwitch :value="docRagForm.enabled" @change="docRagForm.enabled = $event" />
-              </div>
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Auto-ingest attachments</div>
-                  <div class="text-xs text-gray-500">Index files attached to a message into that conversation's document library automatically.</div>
-                </div>
-                <ToggleSwitch :value="docRagForm.autoIngestAttachments" :disabled="!docRagForm.enabled" @change="docRagForm.autoIngestAttachments = $event" />
-              </div>
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <div class="field-label">Inject context automatically</div>
-                  <div class="text-xs text-gray-500">Before answering, retrieve relevant excerpts and add them to the prompt.</div>
-                </div>
-                <ToggleSwitch :value="docRagForm.injectContext" :disabled="!docRagForm.enabled" @change="docRagForm.injectContext = $event" />
-              </div>
-
-              <div class="border-t border-purple-500/10 pt-3 space-y-3">
-                <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Scope</div>
-                <div class="text-xs text-gray-500 -mt-1">Documents are always searchable within the conversation they were attached to. Extend retrieval to shared libraries:</div>
-                <div class="flex items-center justify-between gap-4">
-                  <div>
-                    <div class="field-label">Include the user's personal library</div>
-                    <div class="text-xs text-gray-500">Also search documents scoped to the signed-in user (user:&lt;id&gt;).</div>
-                  </div>
-                  <ToggleSwitch :value="docRagForm.includeUserDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeUserDocs = $event" />
-                </div>
-                <div class="flex items-center justify-between gap-4">
-                  <div>
-                    <div class="field-label">Include the workspace library</div>
-                    <div class="text-xs text-gray-500">Also search documents shared across the whole workspace.</div>
-                  </div>
-                  <ToggleSwitch :value="docRagForm.includeWorkspaceDocs" :disabled="!docRagForm.enabled" @change="docRagForm.includeWorkspaceDocs = $event" />
-                </div>
-              </div>
-
-              <div class="multimodal-grid">
-                <div>
-                  <label class="field-label">Excerpts injected per turn <span class="text-gray-600 font-normal">default 6</span></label>
-                  <input v-model.number="docRagForm.retrievalTopK" type="number" min="1" max="20" class="input-box" :disabled="!docRagForm.enabled" />
-                </div>
-                <div>
-                  <label class="field-label">Max context characters <span class="text-gray-600 font-normal">default 6000</span></label>
-                  <input v-model.number="docRagForm.maxContextChars" type="number" min="500" max="50000" step="500" class="input-box" :disabled="!docRagForm.enabled" />
-                </div>
-              </div>
-
-              <div v-if="docRagError" class="text-sm text-red-400">{{ docRagError }}</div>
-
-              <div class="flex justify-end">
-                <button type="button" @click="saveDocumentRagConfigUI" :disabled="docRagSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
-                  {{ docRagSaving ? 'Saving…' : 'Save' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
           <!-- ── User Model ──────────────────────────────────────────── -->
-          <div v-if="isAgentsPage" class="glass-card p-5">
+          <div id="user-model" v-if="isAgentsPage" v-show="isCardShown('user-model')" class="glass-card settings-card p-5">
             <div class="flex items-center justify-between mb-4 gap-3 flex-wrap">
               <div>
-                <h3 class="section-title mb-0">User Model</h3>
+                <h3 class="section-title mb-0" tabindex="-1">User Model</h3>
                 <div class="text-xs text-gray-500 mt-1">The swarm's evolving understanding of you — one item per line. The agent also refines this automatically as it learns; this is distinct from durable memory facts and the assistant's own personality.</div>
               </div>
               <div class="flex items-center gap-2">
@@ -1124,10 +1178,10 @@
             </div>
           </div>
 
-          <div v-if="isAgentsPage" class="glass-card p-5">
+          <div id="config-assistant" v-if="isAgentsPage" v-show="isCardShown('config-assistant')" class="glass-card settings-card p-5">
             <div class="flex items-center justify-between mb-4 gap-3">
               <div>
-                <h3 class="section-title mb-0">Config Assistant</h3>
+                <h3 class="section-title mb-0" tabindex="-1">Config Assistant</h3>
                 <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. {{ product.name }} drafts the changes, you review them, and nothing applies until you approve it.</div>
               </div>
               <button
@@ -1322,10 +1376,10 @@
             </div>
           </div>
 
-        <div v-if="isAgentsPage" class="glass-card p-5">
+        <div id="model-routing" v-if="isAgentsPage" v-show="isCardShown('model-routing')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4 gap-3">
             <div>
-              <h3 class="section-title mb-0">Model Routing</h3>
+              <h3 class="section-title mb-0" tabindex="-1">Model Routing</h3>
               <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
             </div>
             <div class="flex items-center gap-2">
@@ -1460,9 +1514,9 @@
         </div>
 
         <!-- ── Sub-Agents ─────────────────────────────────────────────────── -->
-        <div v-if="isAgentsPage" class="glass-card p-5">
+        <div id="sub-agents" v-if="isAgentsPage" v-show="isCardShown('sub-agents')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="section-title mb-0">Sub-Agents</h3>
+            <h3 class="section-title mb-0" tabindex="-1">Sub-Agents</h3>
             <button type="button" v-if="gateway.connected" @click="agentsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
           </div>
 
@@ -1676,10 +1730,10 @@
         </div>
 
         <!-- ── Channels ───────────────────────────────────────────────────── -->
-        <div v-if="isSettingsPage" class="glass-card p-5">
+        <div id="channels" v-if="isSettingsPage" v-show="isCardShown('channels')" class="glass-card settings-card p-5">
           <div class="flex items-center justify-between mb-4">
             <div class="flex items-center gap-3">
-              <h3 class="section-title mb-0">Channels</h3>
+              <h3 class="section-title mb-0" tabindex="-1">Channels</h3>
               <span v-if="channelsStore.deadLetterCount > 0" class="text-xs px-2 py-0.5 rounded-full bg-red-900/60 text-red-300 font-medium" title="Messages that failed all delivery retries">
                 {{ channelsStore.deadLetterCount }} dead letter{{ channelsStore.deadLetterCount === 1 ? '' : 's' }}
               </span>
@@ -2142,8 +2196,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
 import { usePersonalityStore, type AssistantPersonalityProfile } from "@/stores/personality";
@@ -3765,6 +3819,272 @@ watch(() => personalityStore.profile, (profile) => {
 watch(() => multimodalStore.config, (config) => {
   syncMultimodalForm(config);
 }, { deep: true, immediate: true });
+
+// ── Section index, filter, and deep links ────────────────────────────────────
+// One list drives the chips under the page header, the anchors other pages link
+// to (/agents#document-rag), and the filter. Each route's cards are listed in the
+// order they stand in the template: left column first, then right.
+
+interface SettingsCard {
+  /** The card's element id. Other pages link to these, so renaming one breaks their links. */
+  id: string;
+  /** The chip's text. */
+  label: string;
+  page: "settings" | "agents";
+  /** Words a reader may type that the card prints only once the gateway is connected, or never. */
+  keywords?: string;
+}
+
+const SETTINGS_CARDS: readonly SettingsCard[] = [
+  { id: "appearance", label: "Appearance", page: "settings", keywords: "theme palette typeface font color colour preset" },
+  { id: "gateway-connection", label: "Gateway Connection", page: "settings", keywords: "websocket url token reconnect disconnect" },
+  { id: "status", label: "Status", page: "settings", keywords: "health runtime sync active session" },
+  { id: "multimodal", label: "Multimodal", page: "settings", keywords: "upload files vision stt tts speech voice image generation comfyui negative prompt wake word" },
+  { id: "about", label: "About", page: "settings", keywords: "version" },
+  { id: "guardrails", label: "Guardrails", page: "settings", keywords: "prompt injection secret scanning max input length shell sandbox" },
+  { id: "site-credentials", label: "Site Credentials", page: "settings", keywords: "login username password hostname" },
+  { id: "scenes", label: "Scenes", page: "settings", keywords: "task prompt" },
+  { id: "jobs", label: "Jobs", page: "settings", keywords: "steps triggers schedule" },
+  { id: "channels", label: "Channels", page: "settings", keywords: "telegram slack discord whatsapp email signal dead letter delivery" },
+  { id: "personality", label: "Personality", page: "agents", keywords: "main ai assistant name identity tone style avoidances quirks growth notes" },
+  { id: "model-endpoints", label: "Model Endpoints", page: "agents", keywords: "endpoint health" },
+  { id: "orchestration-tuning", label: "Orchestration Tuning", page: "agents", keywords: "default effort parallel research slices caps web_search web_fetch delegate_to_agent computer_click" },
+  { id: "skill-library", label: "Skill Library", page: "agents", keywords: "automation autonomous authoring auto-promote scenes tool pipeline run_tool_pipeline" },
+  { id: "document-rag", label: "Document RAG", page: "agents", keywords: "retrieval engram auto-ingest attachments inject context excerpts personal workspace library" },
+  { id: "user-model", label: "User Model", page: "agents", keywords: "goals expertise working style communication preferences open questions" },
+  { id: "config-assistant", label: "Config Assistant", page: "agents", keywords: "proposals flow memory initial setup enhancement prompt improvement" },
+  { id: "model-routing", label: "Model Routing", page: "agents", keywords: "orchestrator primary model embeddings reranker guard moderation endpoint override api key" },
+  { id: "sub-agents", label: "Sub-Agents", page: "agents", keywords: "routing lab temperature maxtokens top_p top_k min_p repeat_penalty seed thinking mode" },
+];
+
+const router = useRouter();
+const shellEl = ref<HTMLElement | null>(null);
+const gridEl = ref<HTMLElement | null>(null);
+const indexEl = ref<HTMLElement | null>(null);
+const chipRowEl = ref<HTMLElement | null>(null);
+const filterInputEl = ref<HTMLInputElement | null>(null);
+
+const pageCards = computed(() => SETTINGS_CARDS.filter((card) => card.page === pageMode.value));
+
+// The filter. It lasts one visit: nothing about it is stored.
+const settingFilter = ref("");
+const filterTerms = computed(() => settingFilter.value.toLowerCase().split(/\s+/).filter(Boolean));
+
+// What each card says, read off the page when the query changes rather than once at mount:
+// most cards print their labels only after the gateway has connected. Hidden cards stay in
+// the page (v-show), so their text is still there to read.
+const cardText = ref<Record<string, string>>({});
+
+watch(filterTerms, (terms) => {
+  const text: Record<string, string> = {};
+  if (terms.length) {
+    for (const card of pageCards.value) {
+      text[card.id] = (document.getElementById(card.id)?.textContent ?? "").replace(/\s+/g, " ").toLowerCase();
+    }
+  }
+  cardText.value = text;
+});
+
+// A card stays when every word of the query is somewhere in its chip label, its keywords,
+// or its own text.
+const shownCardIds = computed(() => {
+  const terms = filterTerms.value;
+  const shown = new Set<string>();
+  for (const card of pageCards.value) {
+    const haystack = `${card.label} ${card.keywords ?? ""} ${cardText.value[card.id] ?? ""}`.toLowerCase();
+    if (terms.every((term) => haystack.includes(term))) shown.add(card.id);
+  }
+  return shown;
+});
+const noCardShown = computed(() => filterTerms.value.length > 0 && shownCardIds.value.size === 0);
+
+function isCardShown(id: string): boolean {
+  return shownCardIds.value.has(id);
+}
+
+function clearFilter(refocus = false) {
+  settingFilter.value = "";
+  // The "Clear" button leaves the page with the line it stands in: hand focus to the box.
+  if (refocus) filterInputEl.value?.focus();
+}
+
+// A jump names its card as current and keeps it at the top until the reader takes over.
+// Two things would otherwise undo it: the scroll watch (the last cards of a page cannot
+// rise to the top, so it would name a neighbour), and the cards above the target, which
+// grow when the gateway answers a moment after a deep link has landed.
+const HOLD_MS = 5000;
+let heldCardId = "";
+let heldUntil = 0;
+
+function holdCard(id: string) {
+  heldCardId = id;
+  heldUntil = Date.now() + HOLD_MS;
+}
+
+function releaseHold() {
+  heldCardId = "";
+}
+
+function heldCard(): string {
+  return heldCardId && Date.now() < heldUntil ? heldCardId : "";
+}
+
+interface CardEdges {
+  id: string;
+  top: number;
+  bottom: number;
+}
+
+/**
+ * The card a reader is at: the last one whose top has risen into the upper third of what is
+ * visible. Before any has (the top of the page), the highest one; at the very end, where the
+ * last cards cannot rise that far, the lowest one in view. Side by side, the earlier card wins.
+ */
+function pickCurrentCard(cards: CardEdges[], viewTop: number, viewBottom: number, atEnd: boolean): string {
+  const inView = cards.filter((card) => card.bottom > viewTop && card.top < viewBottom);
+  const risen = inView.filter((card) => card.top <= viewTop + (viewBottom - viewTop) / 3);
+  const pool = atEnd || !risen.length ? inView : risen;
+  const lowest = atEnd || risen.length > 0;
+  let pick: CardEdges | undefined;
+  for (const card of pool) {
+    if (!pick || (lowest ? card.top > pick.top : card.top < pick.top)) pick = card;
+  }
+  return pick?.id ?? "";
+}
+
+const currentCardId = ref("");
+// The sticky index's height: the cards' scroll margin and the scroll watch both need it.
+const indexHeight = ref(0);
+
+function updateCurrentCard() {
+  const shell = shellEl.value;
+  if (!shell || heldCard()) return;
+  const view = shell.getBoundingClientRect();
+  const edges: CardEdges[] = [];
+  for (const card of pageCards.value) {
+    const el = isCardShown(card.id) ? document.getElementById(card.id) : null;
+    if (!el) continue;
+    const rect = el.getBoundingClientRect();
+    edges.push({ id: card.id, top: rect.top, bottom: rect.bottom });
+  }
+  const atEnd = shell.scrollTop > 0 && shell.scrollTop + shell.clientHeight >= shell.scrollHeight - 2;
+  currentCardId.value = pickCurrentCard(edges, view.top + indexHeight.value, view.bottom, atEnd);
+}
+
+// Scroll events come faster than frames: one look per frame is enough.
+let spyFrame = 0;
+
+function scheduleSpy() {
+  if (spyFrame) return;
+  spyFrame = requestAnimationFrame(() => {
+    spyFrame = 0;
+    updateCurrentCard();
+  });
+}
+
+function jumpToCard(id: string, smooth: boolean) {
+  const card = document.getElementById(id);
+  if (!card) return;
+  currentCardId.value = id;
+  holdCard(id);
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  card.scrollIntoView({ behavior: smooth && !reducedMotion ? "smooth" : "auto", block: "start" });
+  // preventScroll: taking focus must not cut the smooth scroll short.
+  card.querySelector<HTMLElement>(".section-title")?.focus({ preventScroll: true });
+}
+
+// The hash a chip has just written, so the watcher below does not jump a second time.
+let hashFromChip = "";
+
+function goToCard(id: string) {
+  // The chip of a card the filter hides: the reader asked for that card, so the filter goes.
+  if (!isCardShown(id)) settingFilter.value = "";
+  void nextTick(() => {
+    jumpToCard(id, true);
+    const hash = `#${id}`;
+    if (route.hash === hash) return;
+    hashFromChip = hash;
+    void router.replace({ path: route.path, query: route.query, hash }).then((failure) => {
+      if (failure) hashFromChip = "";
+    });
+  });
+}
+
+/** Follows the URL's hash to its card. A hash that names no card of this route is left alone. */
+async function followHash(smooth: boolean) {
+  const id = route.hash.slice(1);
+  if (!pageCards.value.some((card) => card.id === id)) return;
+  if (!isCardShown(id)) settingFilter.value = "";
+  // A route just entered has not put its cards in the page yet.
+  await nextTick();
+  jumpToCard(id, smooth);
+}
+
+watch([() => route.path, () => route.hash], ([path, hash], [previousPath]) => {
+  const sameRoute = path === previousPath;
+  // /settings and /agents share this component: the other route's cards are a new visit.
+  if (!sameRoute) {
+    settingFilter.value = "";
+    releaseHold();
+  }
+  const ownHash = hash !== "" && hash === hashFromChip;
+  hashFromChip = "";
+  if (ownHash) return;
+  void followHash(sameRoute).then(scheduleSpy);
+});
+
+// The filter changes which cards there are to be at, and where they are: typed from far
+// down the page, the shorter list would show its end. Bring its start up under the index.
+watch(shownCardIds, async () => {
+  await nextTick();
+  const shell = shellEl.value;
+  const grid = gridEl.value;
+  if (shell && grid && filterTerms.value.length) {
+    const above = grid.getBoundingClientRect().top - (shell.getBoundingClientRect().top + indexHeight.value + 12);
+    if (above < 0) shell.scrollTop += above;
+  }
+  scheduleSpy();
+});
+
+// On a narrow screen the chips are one row that scrolls sideways: keep the current one in sight.
+watch(currentCardId, async () => {
+  await nextTick();
+  const row = chipRowEl.value;
+  const chip = row?.querySelector<HTMLElement>('[aria-current="true"]');
+  if (!row || !chip || row.scrollWidth <= row.clientWidth) return;
+  const left = chip.offsetLeft;
+  const right = left + chip.offsetWidth;
+  if (left < row.scrollLeft) row.scrollLeft = left - 8;
+  else if (right > row.scrollLeft + row.clientWidth) row.scrollLeft = right - row.clientWidth + 8;
+});
+
+// Runs when the index or the grid changes size: the chips wrapped, a card grew, the window
+// was resized.
+function onLayoutChange() {
+  indexHeight.value = indexEl.value?.offsetHeight ?? 0;
+  const held = heldCard();
+  if (held) document.getElementById(held)?.scrollIntoView({ block: "start" });
+  else scheduleSpy();
+}
+
+let layoutObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  if (typeof ResizeObserver !== "undefined") {
+    layoutObserver = new ResizeObserver(onLayoutChange);
+    if (indexEl.value) layoutObserver.observe(indexEl.value);
+    if (gridEl.value) layoutObserver.observe(gridEl.value);
+  }
+  onLayoutChange();
+  void followHash(false);
+});
+
+// The scroll and input listeners are bound in the template and go with the shell; these two
+// are not.
+onBeforeUnmount(() => {
+  layoutObserver?.disconnect();
+  if (spyFrame) cancelAnimationFrame(spyFrame);
+});
 </script>
 
 <style scoped>
@@ -3774,6 +4094,132 @@ watch(() => multimodalStore.config, (config) => {
   gap: 1.25rem;
   max-width: 1400px;
   margin: 0 auto;
+}
+
+/* While a filter is on, the two column wrappers step aside and the cards that are left flow
+   two to a row: a lone match would otherwise sit beside an empty column. */
+.settings-grid--filtered { align-items: start; }
+.settings-grid--filtered > div { display: contents; }
+/* The wrappers space their cards with a top margin; the grid's gap does that here. */
+.settings-grid.settings-grid--filtered .settings-card { margin-top: 0; }
+
+/* A jump leaves the card's title clear of the sticky index, whose height the script measures. */
+.settings-card {
+  /* the index's height, the gap it keeps above itself while stuck, and a little air */
+  scroll-margin-top: calc(var(--settings-index-h, 3.25rem) + 1.75rem);
+}
+
+/* ── Section index ─────────────────────────────────────────────────────────
+   Stays at the top of the shell while the cards scroll beneath it. */
+.settings-index {
+  position: sticky;
+  top: 0;
+  /* Over the cards (their glass gives each a stacking context), under the modals (z-50). */
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem 0.75rem;
+  max-width: 1400px;
+  margin: 0 auto 1.25rem;
+  padding: 0.5rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.3rem;
+  /* The raised-surface tint is see-through by itself: the page colour under it keeps the
+     cards that pass beneath from showing. */
+  background: linear-gradient(var(--surface-2), var(--surface-2)), rgb(var(--app-bg));
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.settings-index__find {
+  flex: 0 0 13rem;
+}
+
+.settings-index__input {
+  height: 2rem;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-radius: 0.25rem;
+}
+
+.settings-index__chips {
+  /* Chips measure their offset against the row when it scrolls sideways. */
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.settings-index__chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0 0.7rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.25rem;
+  font-family: var(--font-label);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: rgba(165, 243, 252, 0.72);
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease, opacity 160ms ease;
+}
+
+.settings-index__chip:hover {
+  color: rgb(var(--logo-cyan));
+  border-color: rgba(var(--accent-purple), 0.3);
+  background-color: rgba(var(--accent-purple), 0.08);
+}
+
+.settings-index__chip:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+}
+
+.settings-index__chip[aria-current="true"] {
+  color: rgb(var(--logo-cyan));
+  border-color: rgba(var(--logo-cyan), 0.45);
+  box-shadow: inset 0 -2px 0 rgba(var(--logo-cyan), 0.8);
+  text-shadow: 0 0 14px rgba(var(--logo-cyan), 0.45);
+}
+
+/* The chip of a card the filter hides. */
+.settings-index__chip--dim {
+  opacity: 0.35;
+}
+
+.settings-no-match {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+/* Where the cards stand in one column there is no width to wrap ten chips in: they become
+   one row that scrolls sideways, and the script keeps the current chip in sight. */
+@media (max-width: 900px) {
+  .settings-index__chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    /* Room for a chip's focus ring, which the scroll box would otherwise clip. */
+    margin: -3px;
+    padding: 3px;
+    scrollbar-width: thin;
+  }
+}
+
+/* A phone: the filter box takes the first row, the chips the second. */
+@media (max-width: 639px) {
+  .settings-index {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-index__find,
+  .settings-index__chips {
+    flex: none;
+  }
 }
 
 .model-endpoint-row {
@@ -3888,6 +4334,16 @@ watch(() => multimodalStore.config, (config) => {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* A jump from the index moves focus to the card's heading: show that to keyboard users only. */
+.section-title:focus {
+  outline: none;
+}
+
+.section-title:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 4px;
 }
 
 .field-label {

@@ -308,9 +308,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 const gateway = useGatewayStore();
@@ -810,12 +811,8 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-onMounted(() => {
-  if (gateway.connected) void refreshList();
-});
-watch(() => gateway.connected, (connected) => {
-  if (connected) void refreshList();
-});
+// On mount, and whenever the gateway comes up after the page did or reconnects.
+useLoadWhenConnected(() => refreshList());
 </script>
 
 <style scoped>
@@ -832,13 +829,13 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__form { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
 .knowledge-page__form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
 .knowledge-page__field { display: flex; flex-direction: column; gap: 0.3rem; }
-.knowledge-page__label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #9aa4b2); }
+.knowledge-page__label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgb(156 163 175); }
 .knowledge-page__hint { text-transform: none; letter-spacing: 0; opacity: 0.75; }
 .knowledge-page__textarea { resize: vertical; min-height: 4.5rem; font: inherit; font-size: 0.85rem; }
 .knowledge-page__textarea--mono { font-family: var(--font-mono, monospace); font-size: 0.78rem; }
 .knowledge-page__advanced-toggle {
   appearance: none; background: transparent; border: none; cursor: pointer; text-align: left;
-  font-size: 0.78rem; color: var(--muted, #9aa4b2); padding: 0.1rem 0;
+  font-size: 0.78rem; color: rgb(156 163 175); padding: 0.1rem 0;
 }
 .knowledge-page__advanced-toggle:hover { color: rgb(229 231 235); }
 .knowledge-page__advanced { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; }
@@ -849,7 +846,7 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__worker-block { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; }
 .knowledge-page__worker-head { display: flex; flex-direction: column; gap: 0.15rem; }
 .knowledge-page__worker-head code { font-family: var(--font-mono, monospace); font-size: 0.9em; }
-.knowledge-page__worker-usage { font-size: 0.75rem; color: var(--muted, #9aa4b2); }
+.knowledge-page__worker-usage { font-size: 0.75rem; color: rgb(156 163 175); }
 .knowledge-page__worker-usage code { font-family: var(--font-mono, monospace); font-size: 0.9em; color: rgb(209 213 219); }
 
 /* ── KB cards ──────────────────────────────────────────────────────────── */
@@ -862,7 +859,7 @@ watch(() => gateway.connected, (connected) => {
   font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
   border: 1px solid; border-radius: 999px; padding: 0.08rem 0.55rem; white-space: nowrap;
 }
-.knowledge-page__chip--id { text-transform: none; font-weight: 500; font-family: var(--font-mono, monospace); border-color: rgba(148, 163, 184, 0.3); color: var(--muted, #9aa4b2); background: rgba(148, 163, 184, 0.08); }
+.knowledge-page__chip--id { text-transform: none; font-weight: 500; font-family: var(--font-mono, monospace); border-color: rgba(148, 163, 184, 0.3); color: rgb(156 163 175); background: rgba(148, 163, 184, 0.08); }
 .knowledge-page__chip--idle { border-color: rgba(148, 163, 184, 0.4); color: rgb(203 213 225); background: rgba(148, 163, 184, 0.1); }
 .knowledge-page__chip--crawling { border-color: rgba(34, 211, 238, 0.5); color: rgb(165 243 252); background: rgba(34, 211, 238, 0.1); }
 .knowledge-page__chip--ready { border-color: rgba(52, 211, 153, 0.4); color: rgb(167 243 208); background: rgba(52, 211, 153, 0.1); }
@@ -874,12 +871,12 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__chip--scope-session { border-color: rgba(251, 191, 36, 0.4); color: rgb(253 230 138); background: rgba(251, 191, 36, 0.1); }
 
 .knowledge-page__desc { font-size: 0.85rem; color: rgb(209 213 219); margin-top: 0.5rem; }
-.knowledge-page__meta { font-size: 0.75rem; color: var(--muted, #9aa4b2); margin-top: 0.4rem; }
+.knowledge-page__meta { font-size: 0.75rem; color: rgb(156 163 175); margin-top: 0.4rem; }
 .knowledge-page__seeds { display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.4rem; }
 .knowledge-page__seed { font-size: 0.75rem; font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
-.knowledge-page__seed a { color: var(--muted, #9aa4b2); text-decoration: none; }
+.knowledge-page__seed a { color: rgb(156 163 175); text-decoration: none; }
 .knowledge-page__seed a:hover { color: rgb(229 231 235); text-decoration: underline; }
-.knowledge-page__crawl-summary { font-size: 0.78rem; color: var(--muted, #9aa4b2); margin-top: 0.5rem; }
+.knowledge-page__crawl-summary { font-size: 0.78rem; color: rgb(156 163 175); margin-top: 0.5rem; }
 
 .knowledge-page__btn-warn { border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd9a8; background: rgba(245, 158, 11, 0.08); transition: background 0.15s; }
 .knowledge-page__btn-warn:hover:not(:disabled) { background: rgba(245, 158, 11, 0.18); }
@@ -895,17 +892,17 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__progress-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr)); gap: 0.5rem; }
 .knowledge-page__stat { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; }
 .knowledge-page__stat-value { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.knowledge-page__stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #9aa4b2); }
-.knowledge-page__current-url { font-size: 0.72rem; font-family: var(--font-mono, monospace); color: var(--muted, #9aa4b2); margin-top: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.knowledge-page__detail-config { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted, #9aa4b2); }
+.knowledge-page__stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgb(156 163 175); }
+.knowledge-page__current-url { font-size: 0.72rem; font-family: var(--font-mono, monospace); color: rgb(156 163 175); margin-top: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-page__detail-config { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.75rem; color: rgb(156 163 175); }
 .knowledge-page__page-filter { max-width: 26rem; }
 .knowledge-page__pages { display: flex; flex-direction: column; gap: 0.35rem; max-height: 24rem; overflow-y: auto; }
 .knowledge-page__page-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.4rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.6rem; background: rgba(255,255,255,0.02); }
 .knowledge-page__page-main { min-width: 0; }
 .knowledge-page__page-url { font-size: 0.75rem; font-family: var(--font-mono, monospace); color: rgb(209 213 219); text-decoration: none; overflow-wrap: anywhere; }
 .knowledge-page__page-url:hover { text-decoration: underline; }
-.knowledge-page__page-title { font-size: 0.72rem; color: var(--muted, #9aa4b2); margin-top: 0.1rem; }
-.knowledge-page__page-chunks { font-size: 0.7rem; color: var(--muted, #9aa4b2); white-space: nowrap; }
+.knowledge-page__page-title { font-size: 0.72rem; color: rgb(156 163 175); margin-top: 0.1rem; }
+.knowledge-page__page-chunks { font-size: 0.7rem; color: rgb(156 163 175); white-space: nowrap; }
 
 .section-title {
   font-weight: 600; color: rgb(243 244 246); font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.025em;
@@ -915,7 +912,6 @@ watch(() => gateway.connected, (connected) => {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
-.empty-state { color: var(--muted, #9aa4b2); font-size: 0.9rem; padding: 2rem; text-align: center; }
 
 @media (max-width: 720px) {
   .knowledge-page__form-grid { grid-template-columns: 1fr; }

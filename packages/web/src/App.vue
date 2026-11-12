@@ -62,6 +62,19 @@
             <span class="text-gray-400" :class="gateway.connected ? 'hidden sm:inline' : ''">{{ connectionLabel }}</span>
           </div>
 
+          <!-- The command palette's way in for whoever does not know the shortcut yet. -->
+          <button
+            type="button"
+            class="hud-btn hidden h-9 w-9 shrink-0 items-center justify-center sm:inline-flex"
+            :aria-label="`Search pages and actions (${paletteShortcut})`"
+            :title="`Search pages and actions (${paletteShortcut})`"
+            @click="paletteOpen = true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="h-[17px] w-[17px]" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
+            </svg>
+          </button>
+
           <!-- Burger: the main nav and header tools live behind this toggle so
                the default chrome is just brand + status + account. -->
           <button
@@ -97,6 +110,14 @@
                navigation direction. -->
           <Transition :name="navLevel ? 'nav-fwd' : 'nav-back'" mode="out-in">
           <div v-if="!navLevel" key="root" class="app-nav-panel__level">
+
+          <button type="button" class="app-nav-panel__search" @click="openPaletteFromNav">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="h-4 w-4" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
+            </svg>
+            <span>Go to a page or action…</span>
+            <kbd>{{ paletteShortcut }}</kbd>
+          </button>
 
           <!-- Model switch: Local ⇄ presets (e.g. Claude via the Anthropic
                provider). Appears once the gateway reports at least one
@@ -371,6 +392,14 @@
     <!-- The one "are you sure?" dialog, for any page that asks (composables/useConfirm.ts). -->
     <ConfirmHost />
 
+    <CommandPalette
+      :open="paletteOpen"
+      :commands="paletteCommands"
+      :current-path="$route.path"
+      @close="paletteOpen = false"
+      @choose="runPaletteCommand"
+    />
+
     <!-- Claude subscription connect / manage (browser OAuth verification). -->
     <ModelConnectModal
       v-if="showModelConnect"
@@ -385,8 +414,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { useProductStore } from "@/stores/product";
@@ -401,6 +430,8 @@ import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import ConfirmHost from "@/components/ConfirmHost.vue";
+import CommandPalette from "@/components/CommandPalette.vue";
+import { isPaletteShortcut, type PaletteCommand } from "@/composables/commandPalette";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
@@ -410,6 +441,7 @@ const product = useProductStore();
 const notifications = useNotificationStore();
 const modelPreset = useModelPresetStore();
 const $route = useRoute();
+const router = useRouter();
 
 // Header model switch (Local ⇄ Claude). The gateway persists the choice in the
 // runtime overlay, so it survives restarts and applies to the whole swarm.
@@ -659,6 +691,55 @@ watch([currentPage, () => product.name], ([page, name]) => {
   document.title = page ? `${page.label} · ${name}` : name;
 }, { immediate: true });
 
+// ── Command palette (Ctrl/Cmd+K) ────────────────────────────────────────────────────────────
+// Every page the menu shows this user, and the few actions that are not a page.
+const paletteOpen = ref(false);
+const paletteShortcut = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K";
+function openPaletteFromNav(): void {
+  navOpen.value = false;
+  paletteOpen.value = true;
+}
+const paletteCommands = computed<PaletteCommand[]>(() => {
+  const pages: PaletteCommand[] = [];
+  for (const entry of navEntries.value) {
+    if (entry.kind === "leaf") pages.push({ id: `go:${entry.to}`, label: entry.label, group: "Go to", to: entry.to });
+    else for (const item of entry.items) pages.push({ id: `go:${item.to}`, label: item.label, group: entry.label, hint: item.hint, to: item.to });
+  }
+  const actions: PaletteCommand[] = [];
+  if (gateway.connected) {
+    actions.push({
+      id: "do:new-session", label: "New session", group: "Action", hint: "Start a fresh conversation in the chat", keywords: "chat conversation clear",
+      run: () => { void router.push("/").then(() => gateway.createSession()); },
+    });
+  }
+  if (modelPreset.canChange && gateway.connected) {
+    actions.push({ id: "do:claude", label: modelPreset.oauthConnected ? "Claude subscription" : "Connect Claude", group: "Action", hint: "Model & subscription", keywords: "anthropic model oauth", run: () => { showModelConnect.value = true; } });
+  }
+  if (notifications.supported && notifications.permission === "default") {
+    actions.push({ id: "do:notifications", label: "Enable notifications", group: "Action", hint: "Let the browser tell you when a turn finishes", run: () => { void enableBrowserNotifications(); } });
+  }
+  actions.push(signedInUser.value
+    ? { id: "do:sign-out", label: "Sign out", group: "Account", hint: currentUser.value?.displayName ?? currentUser.value?.username, run: () => { signOut(); } }
+    : { id: "do:sign-in", label: "Sign in", group: "Account", hint: "Switch to a user account", run: () => { showLogin.value = true; } });
+  return [...pages, ...actions];
+});
+function runPaletteCommand(command: PaletteCommand): void {
+  paletteOpen.value = false;
+  if (command.to) void router.push(command.to);
+  else command.run?.();
+}
+function onPaletteShortcut(event: KeyboardEvent): void {
+  if (!isPaletteShortcut(event)) return;
+  // Not over the sign-in screen: there is nowhere to go yet.
+  if (!gateway.connected && !gateway.reconnecting) return;
+  event.preventDefault();
+  navOpen.value = false;
+  accountMenuOpen.value = false;
+  paletteOpen.value = !paletteOpen.value;
+}
+onMounted(() => window.addEventListener("keydown", onPaletteShortcut));
+onUnmounted(() => window.removeEventListener("keydown", onPaletteShortcut));
+
 const connectionLabel = computed(() => {
   if (gateway.connected) return "Connected";
   if (gateway.connecting) return "Connecting…";
@@ -789,6 +870,39 @@ watch(() => gateway.isLoading, (running) => {
 }
 @media (max-width: 639px) {
   .app-crumb__group, .app-crumb__sep--inner { display: none; }
+}
+/* The palette's row at the top of the panel: looks like the field it opens. */
+.app-nav-panel__search {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: rgb(156, 163, 175);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms var(--ease-out), color 160ms var(--ease-out);
+}
+.app-nav-panel__search:hover,
+.app-nav-panel__search:focus-visible {
+  border-color: rgba(var(--logo-cyan), 0.5);
+  color: rgb(226, 232, 240);
+  outline: none;
+}
+.app-nav-panel__search span { flex: 1 1 auto; }
+.app-nav-panel__search kbd {
+  font-family: var(--font-label);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--hairline);
 }
 /* A group that holds the page on screen. */
 .nav-group__trigger--current {

@@ -94,7 +94,7 @@
       <section class="federation-activity">
         <header class="federation-activity__header">
           <h3 class="federation-activity__title">Recent federation activity</h3>
-          <button type="button" class="federation-page__button" :disabled="loadingActivity" @click="loadActivity">
+          <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" :disabled="loadingActivity" @click="loadActivity">
             {{ loadingActivity ? "Refreshing…" : "Refresh" }}
           </button>
         </header>
@@ -118,9 +118,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { errorText } from "@/composables/useToast";
 
 interface PeerAgent { name: string; description?: string; tags?: string[] }
@@ -307,55 +308,21 @@ function formatActivityTime(iso: string): string {
   return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-const _bootstrapped = computed(() => Boolean(gateway.token));
-
-onMounted(() => {
-  if (_bootstrapped.value) {
-    void refresh(false);
-  }
-});
-
-// When the gateway reconnects (e.g. after a network blip), refresh the
-// HTTP backfill so any events that fired while we were offline land in
-// the timeline.  The audit-store WS subscription handles live updates
-// independently — no polling timer needed.
-watch(() => gateway.connected, (now) => {
-  if (!now || !_bootstrapped.value) return;
+// On mount, and again when the gateway comes up after the page did or reconnects (e.g. after a
+// network blip): the HTTP backfill is read again, so events that fired while we were offline
+// land in the timeline.  The audit-store WS subscription handles live updates independently —
+// no polling timer needed.
+useLoadWhenConnected(() => {
   void loadActivity();
-  // Opened before there was a token, or the first load failed: the peers still need loading.
+  // Peers already on screen stay as they are: a reload would drop their ping results. They are
+  // loaded here only when no load has worked yet.
   if (!peersLoaded.value && !loadingPeers.value) void loadPeers();
-});
-
-onBeforeUnmount(() => {
-  // No timer to clean up — activity is now WS-driven.
 });
 </script>
 
 <style scoped>
 .federation-page {
   color: rgb(229 231 235);
-}
-
-/* Still used by the activity feed's own Refresh. */
-.federation-page__button {
-  background: rgba(76, 29, 149, 0.35);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: rgb(233 213 255);
-  padding: 0.4rem 0.85rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.federation-page__button:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.55);
-  color: white;
-}
-
-.federation-page__button:disabled {
-  opacity: 0.5;
-  cursor: progress;
 }
 
 .federation-page__error {

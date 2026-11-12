@@ -88,6 +88,40 @@ export const chatText = {
     "Images queue for analysis · audio gets transcribed · documents go to your library and into this conversation",
     "Bilder werden analysiert · Audio wird transkribiert · Dokumente kommen in deine Bibliothek und in diese Unterhaltung"),
 
+  // ── Above the conversation, and the banners that ask ─────────────────────────────────────
+  loadOlder: (l: TurnLanguage) => pick(l, "Load older messages", "Ältere Nachrichten laden"),
+  loadingOlder: (l: TurnLanguage) => pick(l, "Loading older messages…", "Ältere Nachrichten werden geladen…"),
+  showOlder: (l: TurnLanguage, count: number) => pick(l,
+    `Show ${count} older message${count === 1 ? "" : "s"}`,
+    `${count} ältere Nachricht${count === 1 ? "" : "en"} anzeigen`),
+  hideOlder: (l: TurnLanguage, count: number) => pick(l,
+    `Hide ${count} older message${count === 1 ? "" : "s"}`,
+    `${count} ältere Nachricht${count === 1 ? "" : "en"} ausblenden`),
+  approvalRequired: (l: TurnLanguage) => pick(l, "Approval Required", "Freigabe erforderlich"),
+  approve: (l: TurnLanguage) => pick(l, "Approve", "Freigeben"),
+  deny: (l: TurnLanguage) => pick(l, "Deny", "Ablehnen"),
+  question: (l: TurnLanguage) => pick(l, "Question", "Frage"),
+  answerPlaceholder: (l: TurnLanguage) => pick(l, "Type your answer…", "Antwort eingeben…"),
+  operatorAction: (l: TurnLanguage) => pick(l, "Operator Action Suggested", "Eingreifen empfohlen"),
+  dismiss: (l: TurnLanguage) => pick(l, "Dismiss", "Schließen"),
+
+  // ── The voice bar ─────────────────────────────────────────────────────────────────────────
+  voiceStop: (l: TurnLanguage) => pick(l, "Stop", "Stopp"),
+  voiceDone: (l: TurnLanguage) => pick(l, "Done", "Fertig"),
+  readFull: (l: TurnLanguage) => pick(l, "Read full answer", "Ganze Antwort vorlesen"),
+  replay: (l: TurnLanguage) => pick(l, "Replay", "Nochmal"),
+  showText: (l: TurnLanguage) => pick(l, "Show text", "Text anzeigen"),
+  hideText: (l: TurnLanguage) => pick(l, "Hide text", "Text ausblenden"),
+  endConversation: (l: TurnLanguage) => pick(l, "End conversation", "Gespräch beenden"),
+
+  // ── The side panel ────────────────────────────────────────────────────────────────────────
+  tabLive: (l: TurnLanguage) => pick(l, "Live", "Live"),
+  tabSteps: (l: TurnLanguage) => pick(l, "Steps", "Schritte"),
+  tabArtifacts: (l: TurnLanguage) => pick(l, "Artifacts", "Dateien"),
+  openPanel: (l: TurnLanguage) => pick(l, "Open side panel", "Seitenleiste öffnen"),
+  closePanel: (l: TurnLanguage) => pick(l, "Close side panel", "Seitenleiste schließen"),
+  panelEmpty: (l: TurnLanguage) => pick(l, "Nothing to show here yet", "Hier gibt es noch nichts zu sehen"),
+
   // ── Asking first ──────────────────────────────────────────────────────────────────────────
   restartConfirmTitle: (l: TurnLanguage) => pick(l, "Restart from this message?", "Ab dieser Nachricht neu starten?"),
   restartConfirmMessage: (l: TurnLanguage, later: number) => pick(l,

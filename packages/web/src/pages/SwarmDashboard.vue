@@ -163,9 +163,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 const PROMOTION_MIN_CALLS = 10;
@@ -400,5 +401,6 @@ function promotionStatusClass(status: string): string {
   }
 }
 
-onMounted(refresh);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>

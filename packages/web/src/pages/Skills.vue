@@ -7,7 +7,7 @@
           Reusable procedures. The swarm authors them automatically from successful work (drafts graduate to
           <strong>active</strong> once they succeed in real use; reliable ones are promoted to workflow scenes) —
           or write one by hand with <strong>New skill</strong>. Configure auto-authoring on
-          <RouterLink to="/agents" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
+          <RouterLink :to="{ path: '/agents', hash: '#skill-library' }" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
         </p>
       </div>
       <div class="page-actions">
@@ -148,9 +148,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 interface SkillRecord {
@@ -373,7 +374,8 @@ function formatDate(iso: string): string {
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
 }
 
-onMounted(() => { void loadSkills(); });
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(loadSkills);
 </script>
 
 <style scoped>

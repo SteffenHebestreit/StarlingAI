@@ -36,7 +36,7 @@
         Account <strong>{{ bootstrapHandoff }}</strong> was created.  The bootstrap admin session
         has ended now that a real account exists — sign in with the new account to continue.
       </p>
-      <button type="button" class="users-page__button users-page__button--primary" @click="signInAsNewUser">
+      <button type="button" class="btn-grad px-3 py-1.5 rounded-lg text-sm" @click="signInAsNewUser">
         Sign in
       </button>
     </div>
@@ -74,13 +74,13 @@
             <code class="user-card__username">{{ user.username }}</code>
           </div>
           <div v-if="isAdmin" class="user-card__actions">
-            <button type="button" class="user-card__button user-card__button--neutral" @click="openResetForm(user)">
+            <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm whitespace-nowrap" @click="openResetForm(user)">
               Reset password
             </button>
             <button
               v-if="user.username !== currentUsername"
               type="button"
-              class="user-card__button user-card__button--danger"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm whitespace-nowrap"
               :disabled="deleting === user.username"
               @click="deleteUser(user)"
             >
@@ -139,8 +139,8 @@
         </fieldset>
         <p v-if="formError" class="users-page__error">{{ formError }}</p>
         <div class="users-create-card__actions">
-          <button type="button" class="users-page__button" @click="closeCreateForm">Cancel</button>
-          <button type="submit" class="users-page__button users-page__button--primary" :disabled="submitting">
+          <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="closeCreateForm">Cancel</button>
+          <button type="submit" class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="submitting">
             {{ submitting ? "Creating…" : "Create user" }}
           </button>
         </div>
@@ -170,8 +170,8 @@
         </label>
         <p v-if="formError" class="users-page__error">{{ formError }}</p>
         <div class="users-create-card__actions">
-          <button type="button" class="users-page__button" @click="closeResetForm">Cancel</button>
-          <button type="submit" class="users-page__button users-page__button--primary" :disabled="submitting">
+          <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="closeResetForm">Cancel</button>
+          <button type="submit" class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="submitting">
             {{ submitting ? "Saving…" : "Set password" }}
           </button>
         </div>
@@ -181,11 +181,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { confirmAction } from "@/composables/useConfirm";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 interface User {
@@ -422,42 +423,13 @@ function formatTimestamp(value: string): string {
   return parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
-onMounted(() => {
-  void loadUsers();
-});
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(loadUsers);
 </script>
 
 <style scoped>
 .users-page {
   color: rgb(229 231 235);
-}
-
-/* Still used by the hand-off notice and the two forms. */
-.users-page__button {
-  background: rgba(76, 29, 149, 0.35);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: rgb(233 213 255);
-  padding: 0.4rem 0.85rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.users-page__button:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.55);
-  color: white;
-}
-
-.users-page__button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.users-page__button--primary {
-  background: linear-gradient(90deg, rgba(124, 58, 237, 0.65), rgba(217, 70, 239, 0.55));
-  border-color: rgba(217, 70, 239, 0.55);
-  color: white;
 }
 
 .users-page__error {
@@ -574,41 +546,11 @@ onMounted(() => {
   color: rgb(148 163 184);
 }
 
-.user-card__button {
-  background: transparent;
-  border: 1px solid rgba(248, 113, 113, 0.45);
-  color: rgb(252 165 165);
-  padding: 0.25rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.user-card__button:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.18);
-  color: white;
-}
-
-.user-card__button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .user-card__actions {
   display: flex;
   gap: 0.4rem;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-
-.user-card__button--neutral {
-  border-color: rgba(168, 85, 247, 0.4);
-  color: rgb(216 180 254);
-}
-
-.user-card__button--neutral:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.25);
 }
 
 .users-create-modal {

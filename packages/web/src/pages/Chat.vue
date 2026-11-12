@@ -178,7 +178,7 @@
                 :disabled="gateway.currentSessionTranscriptLoading"
                 class="rounded-full border border-purple-500/25 bg-gray-900/70 px-4 py-1.5 text-xs text-purple-200 transition hover:border-purple-400/45 hover:text-purple-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {{ gateway.currentSessionTranscriptLoading ? 'Loading older messages...' : 'Load older messages' }}
+                {{ gateway.currentSessionTranscriptLoading ? chatText.loadingOlder(uiLanguage) : chatText.loadOlder(uiLanguage) }}
               </button>
             </div>
 
@@ -187,7 +187,7 @@
                 @click="expandedMessageHistory = !expandedMessageHistory"
                 class="chat-history-collapsed__button"
               >
-                {{ expandedMessageHistory ? `Hide ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` : `Show ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` }}
+                {{ expandedMessageHistory ? chatText.hideOlder(uiLanguage, collapsedMessageCount) : chatText.showOlder(uiLanguage, collapsedMessageCount) }}
               </button>
             </div>
 
@@ -240,6 +240,7 @@
 
     <!-- Off-canvas side panel: Live Context + Artifacts -->
     <SidePanel
+      :language="uiLanguage"
       v-model="sidePanelOpen"
       :has-live-content="hasSidePanels"
       :artifact-count="sessionArtifacts.length"
@@ -366,7 +367,7 @@
              role="alertdialog" aria-live="assertive"
              class="approval-banner">
           <div class="approval-banner__header">
-            <span class="approval-banner__eyebrow">Approval Required</span>
+            <span class="approval-banner__eyebrow">{{ chatText.approvalRequired(uiLanguage) }}</span>
             <span v-if="approvalCountdownLabel" class="approval-banner__timer">{{ approvalCountdownLabel }}</span>
           </div>
           <p class="approval-banner__copy">
@@ -377,10 +378,10 @@
           <pre class="approval-banner__args">{{ JSON.stringify(gateway.pendingApproval.args, null, 2) }}</pre>
           <div class="approval-banner__actions">
             <button @click="approveAction(true)" class="btn-grad approval-banner__button">
-              Approve
+              {{ chatText.approve(uiLanguage) }}
             </button>
             <button @click="approveAction(false)" class="btn-ghost approval-banner__button approval-banner__button--deny">
-              Deny
+              {{ chatText.deny(uiLanguage) }}
             </button>
           </div>
         </div>
@@ -397,7 +398,7 @@
           <div class="flex items-center gap-2 mb-2">
             <span class="text-xs font-semibold tracking-widest uppercase"
                   style="background: linear-gradient(90deg,#38bdf8,#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-              Question
+              {{ chatText.question(uiLanguage) }}
             </span>
             <span v-if="inputRequestCountdownLabel" class="ml-auto text-xs tabular-nums text-gray-400">{{ inputRequestCountdownLabel }}</span>
           </div>
@@ -416,7 +417,7 @@
             <input
               v-model="inputRequestText"
               type="text"
-              placeholder="Type your answer…"
+              :placeholder="chatText.answerPlaceholder(uiLanguage)"
               @keydown="onInputRequestKeydown"
               aria-label="Free-text answer to the agent's question"
               class="flex-1 rounded-xl bg-gray-800/60 border border-white/10 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-sky-500/50" />
@@ -442,21 +443,23 @@
       </div>
     </Transition>
 
+    <Teleport to="body">
     <Transition name="approval">
       <div v-if="gateway.pendingIntervention"
            role="alert" aria-live="assertive"
-           class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
+           class="intervention-banner rounded-2xl overflow-hidden"
+           :style="gateway.pendingApproval ? { bottom: 'calc(max(5.5rem, var(--bay-h, 0px) + 2.5rem) + 11rem)' } : undefined"
            :class="gateway.pendingIntervention.severity === 'error' ? 'border border-red-500/45' : 'border border-amber-500/45'"
            style="background: rgba(18,14,28,0.97); box-shadow: 0 0 24px rgba(245,158,11,0.16);">
         <div class="px-5 py-4">
           <div class="flex items-center justify-between gap-3 mb-2">
             <div>
-              <div class="text-xs font-semibold tracking-widest uppercase text-amber-300">Operator Action Suggested</div>
+              <div class="text-xs font-semibold tracking-widest uppercase text-amber-300">{{ chatText.operatorAction(uiLanguage) }}</div>
               <div class="mt-1 text-sm text-gray-100">{{ gateway.pendingIntervention.summary }}</div>
             </div>
             <button @click="gateway.dismissIntervention()"
                     class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200">
-              Dismiss
+              {{ chatText.dismiss(uiLanguage) }}
             </button>
           </div>
           <p class="text-sm text-gray-300 mb-3">{{ gateway.pendingIntervention.detail }}</p>
@@ -474,11 +477,13 @@
         </div>
       </div>
     </Transition>
+    </Teleport>
 
     <!-- Input bay: a floating bottom panel (no layout impact at all);
          recedes into depth while idle, summoned by the launcher. -->
     <div class="chat-input-bay-wrap" :class="bayOpen ? 'chat-input-bay-wrap--open' : ''">
     <div
+      ref="bayEl"
       class="chat-input-bay relative bg-gray-900/85 backdrop-blur-xl border border-purple-500/25 rounded-2xl px-5 py-4 shadow-2xl shadow-black/50"
       :class="bayOpen ? '' : 'chat-input-bay--hidden'"
       :inert="!bayOpen"
@@ -629,12 +634,12 @@
             <span :style="{ width: `${Math.round(micLevel * 100)}%` }" />
           </div>
           <div class="voice-bar__actions">
-            <button v-if="voiceBarBusy" type="button" class="voice-bar__button voice-bar__button--stop" @click="voice.stopSpeaking()">Stop</button>
-            <button v-if="recordingState === 'recording'" type="button" class="voice-bar__button" @click="toggleRecording()">Done</button>
-            <button v-if="lastReply?.summarized" type="button" class="voice-bar__button" @click="voice.readFullReply()">Read full answer</button>
-            <button v-if="lastReply && !voiceBarBusy" type="button" class="voice-bar__button" @click="voice.replay()">Replay</button>
-            <button v-if="lastReply" type="button" class="voice-bar__button" @click="replyTextOpen = !replyTextOpen">{{ replyTextOpen ? 'Hide text' : 'Show text' }}</button>
-            <button v-if="voiceConversationMode" type="button" class="voice-bar__button" @click="voice.toggleConversation()">End conversation</button>
+            <button v-if="voiceBarBusy" type="button" class="voice-bar__button voice-bar__button--stop" @click="voice.stopSpeaking()">{{ chatText.voiceStop(uiLanguage) }}</button>
+            <button v-if="recordingState === 'recording'" type="button" class="voice-bar__button" @click="toggleRecording()">{{ chatText.voiceDone(uiLanguage) }}</button>
+            <button v-if="lastReply?.summarized" type="button" class="voice-bar__button" @click="voice.readFullReply()">{{ chatText.readFull(uiLanguage) }}</button>
+            <button v-if="lastReply && !voiceBarBusy" type="button" class="voice-bar__button" @click="voice.replay()">{{ chatText.replay(uiLanguage) }}</button>
+            <button v-if="lastReply" type="button" class="voice-bar__button" @click="replyTextOpen = !replyTextOpen">{{ replyTextOpen ? chatText.hideText(uiLanguage) : chatText.showText(uiLanguage) }}</button>
+            <button v-if="voiceConversationMode" type="button" class="voice-bar__button" @click="voice.toggleConversation()">{{ chatText.endConversation(uiLanguage) }}</button>
             <button
               v-if="!voiceBarBusy && !voiceConversationMode && recordingState === 'idle'"
               type="button"
@@ -905,7 +910,7 @@
                         @click="scenesStore.dismissJob(job.id)"
                         class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
                       >
-                        Dismiss
+                        {{ chatText.dismiss(uiLanguage) }}
                       </button>
                     </div>
                   </div>
@@ -1679,6 +1684,29 @@ function maybeCloseComposer() {
     composerOpen.value = false;
   }
 }
+
+// The bay floats over the page, and its height changes with what is in it (chips, the voice bar,
+// two rows of controls on a phone). What has to stay clear of it — the newest message, the "new
+// messages" pill, a banner that asks something — reads its height from --bay-h instead of a
+// guessed constant, under which the pill and the banners ended up hidden behind the bay.
+const bayEl = ref<HTMLElement | null>(null);
+let bayObserver: ResizeObserver | null = null;
+function publishBayHeight(): void {
+  const height = bayOpen.value && bayEl.value ? bayEl.value.offsetHeight : 0;
+  document.documentElement.style.setProperty("--bay-h", `${height}px`);
+}
+onMounted(() => {
+  if (typeof ResizeObserver !== "undefined" && bayEl.value) {
+    bayObserver = new ResizeObserver(publishBayHeight);
+    bayObserver.observe(bayEl.value);
+  }
+  publishBayHeight();
+});
+onUnmounted(() => {
+  bayObserver?.disconnect();
+  document.documentElement.style.removeProperty("--bay-h");
+});
+watch(bayOpen, publishBayHeight, { flush: "post" });
 
 // Text can arrive in the input without a keystroke: a restart hands the old question back, a
 // dropped audio file or a wake word is transcribed into it. It must not sit there unseen.
@@ -3379,8 +3407,10 @@ onUnmounted(() => {
   position: fixed;
   left: clamp(1rem, 4vw, 2rem);
   right: clamp(1rem, 4vw, 2rem);
-  bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem));
-  z-index: 70;
+  /* above the composer when it is up, above the launcher when it is not */
+  bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem), calc(var(--bay-h, 0px) + 2.5rem));
+  /* a question that waits for an answer beats the floating pods (220) */
+  z-index: var(--z-popover);
   max-width: 48rem;
   margin: 0 auto;
   overflow: hidden;
@@ -3914,7 +3944,8 @@ onUnmounted(() => {
   transition: padding-bottom 460ms var(--ease-out);
 }
 .chat-message-scroll--bay-open {
-  padding-bottom: clamp(12rem, 26vh, 18rem);
+  /* the bay's own height (--bay-h, set by the page), not a guess at it */
+  padding-bottom: calc(var(--bay-h, 12rem) + 1.75rem);
 }
 
 /* Miniature 3D orb like the radial toggles, one size up. */
@@ -4383,7 +4414,7 @@ onUnmounted(() => {
 .chat-composer__steering-note--error { color: rgb(252 165 165); }
 
 /* With the bay up, the pill stands above it: under it, it was hidden exactly when it mattered. */
-.chat-scroll-resume--above-bay { bottom: clamp(12rem, 26vh, 18rem); }
+.chat-scroll-resume--above-bay { bottom: calc(var(--bay-h, 12rem) + 1.25rem); }
 
 /* Slash-command autocomplete popup. Anchored to the bottom of the field so it
    floats above the textarea — keyboard nav (↑↓), Enter/Tab to accept, Esc to
@@ -4920,5 +4951,17 @@ onUnmounted(() => {
 .chip-remove:hover, .chip-remove:focus-visible {
   background: rgba(248, 113, 113, 0.14);
   outline: none;
+}
+
+/* A suggestion to step in: it lay in the page's flow under the composer, which covered it while
+   a turn ran — exactly when it appears. It floats above the composer now, like the approval. */
+.intervention-banner {
+  position: fixed;
+  left: clamp(1rem, 4vw, 2rem);
+  right: clamp(1rem, 4vw, 2rem);
+  bottom: max(5.5rem, calc(var(--bay-h, 0px) + 2.5rem));
+  z-index: var(--z-popover);
+  max-width: 48rem;
+  margin: 0 auto;
 }
 </style>

@@ -56,7 +56,7 @@
             <div class="text-xs text-gray-500 mt-1">
               {{ group.hint }}
               <template v-if="group.ragSwitch">
-                <RouterLink to="/agents" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>
+                <RouterLink :to="{ path: '/agents', hash: '#document-rag' }" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>
                 (Document RAG).
               </template>
             </div>
@@ -105,10 +105,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed } from "vue";
 import { useGatewayStore, type ManagedDocument, type ManagedDocumentScope } from "@/stores/gateway";
 import { ownUserSourceMatcher } from "@/composables/documentSources";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 const gateway = useGatewayStore();
@@ -294,14 +295,9 @@ function formatDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-onMounted(() => {
-  if (gateway.connected) void reload();
-});
-// The page can be open before the gateway is reachable (a reload of this URL): without this
-// the lists would stay unloaded once it connects.
-watch(() => gateway.connected, (connected) => {
-  if (connected) void reload();
-});
+// The page can be open before the gateway is reachable (a reload of this URL): the lists load
+// once it connects, and again after every reconnect.
+useLoadWhenConnected(reload);
 </script>
 
 <style scoped>

@@ -53,20 +53,28 @@
           @keydown.space.self.prevent="selectSession(session.id)"
         >
           <div class="session-card__top">
-            <span class="session-card__id">{{ session.id.substring(0, 12) }}…</span>
+            <button
+              type="button"
+              class="session-card__id"
+              :title="`${session.id} — click to copy`"
+              :aria-label="`Copy session id ${session.id}`"
+              @click.stop="copyId('Session', session.id)"
+            >{{ session.id.substring(0, 12) }}…</button>
             <div class="session-card__top-right">
               <span :class="['session-card__badge', session.isActive ? 'session-card__badge--active' : 'session-card__badge--archived']">
                 {{ session.isActive ? 'Active' : 'Archived' }}
               </span>
               <button
                 v-if="session.isActive"
-                class="session-card__action"
+                type="button"
+                class="btn-ghost px-3 py-1.5 rounded-lg text-sm"
                 title="Continue this session in chat"
                 @click.stop="continueSession(session.id)"
               >Continue</button>
               <button
                 v-if="session.isActive"
-                class="session-card__action session-card__action--secondary"
+                type="button"
+                class="btn-ghost px-3 py-1.5 rounded-lg text-sm"
                 title="Archive this session"
                 @click.stop="archive(session.id)"
               >Archive</button>
@@ -120,10 +128,10 @@
                 <span :class="['transcript-panel__badge', selectedTranscript.session.archivedAt ? 'transcript-panel__badge--archived' : 'transcript-panel__badge--active']">
                   {{ selectedTranscript.session.archivedAt ? 'Archived transcript' : 'Active transcript' }}
                 </span>
-                <button class="transcript-panel__action" @click="exportTranscriptMarkdown">Export Markdown</button>
-                <button class="transcript-panel__action" @click="exportDebugMarkdown">Debug Markdown</button>
-                <button class="transcript-panel__action" @click="exportAuditMarkdown">Audit Markdown</button>
-                <button class="transcript-panel__action" @click="exportTranscriptPDF">Export PDF</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportTranscriptMarkdown">Export Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportDebugMarkdown">Debug Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportAuditMarkdown">Audit Markdown</button>
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="exportTranscriptPDF">Export PDF</button>
               </div>
             </div>
 
@@ -138,7 +146,7 @@
             </div>
             <div v-else>
               <div v-if="hiddenTranscriptCount > 0" class="transcript-panel__controls">
-                <button class="transcript-panel__action" @click="showOlderTranscriptMessages">
+                <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="showOlderTranscriptMessages">
                   Load {{ Math.min(hiddenTranscriptCount, transcriptPageSize) }} older message{{ Math.min(hiddenTranscriptCount, transcriptPageSize) === 1 ? '' : 's' }}
                 </button>
                 <span class="transcript-panel__meta">Showing {{ visibleTranscriptMessages.length }} of {{ selectedTranscript.transcript.length }} messages</span>
@@ -180,12 +188,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { marked } from "marked";
 import { useRoute, useRouter } from "vue-router";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import { sanitizeAssistantMessageContent, useGatewayStore, type GatewaySessionTranscript, type GatewaySessionTranscriptMessage, type SwarmRunRecord } from "@/stores/gateway";
+import { writeClipboard } from "@/composables/clipboard";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast } from "@/composables/useToast";
 import { useProductStore } from "@/stores/product";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -210,6 +221,7 @@ type TranscriptToolCall = NonNullable<GatewaySessionTranscriptMessage["toolCalls
 const gateway = useGatewayStore();
 const route = useRoute();
 const router = useRouter();
+const toast = useToast();
 const selectedSessionId = ref<string | null>(null);
 const selectedRunId = ref<string | null>(null);
 const searchQuery = ref("");
@@ -427,6 +439,16 @@ async function clearArchivedSessions() {
     await gateway.deleteSession(s.id);
   }
   ensureSelection();
+}
+
+// A card shows its id cut to twelve characters; this is how to get the whole of it.
+async function copyId(what: string, id: string): Promise<void> {
+  try {
+    await writeClipboard(id);
+    toast.success("Copied", `${what} id is on the clipboard.`);
+  } catch {
+    toast.error("Couldn't copy", `The browser refused the clipboard. ${what} id: ${id}`);
+  }
 }
 
 function selectSession(id: string) {
@@ -662,7 +684,8 @@ watch(selectedSessionId, (sessionId) => {
   void loadTranscript(sessionId);
 }, { immediate: true });
 
-onMounted(refresh);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
@@ -743,6 +766,7 @@ onMounted(refresh);
 
 .session-card__top-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
 }
@@ -770,37 +794,24 @@ onMounted(refresh);
   background: rgba(127, 29, 29, 0.3);
 }
 
-.session-card__action {
-  border-radius: 9999px;
-  border: 1px solid rgba(96, 165, 250, 0.25);
-  background: rgba(30, 41, 59, 0.72);
-  color: #bfdbfe;
-  font-size: 0.68rem;
-  line-height: 1;
-  padding: 0.38rem 0.58rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.session-card__action:hover {
-  border-color: rgba(96, 165, 250, 0.5);
-  background: rgba(30, 64, 175, 0.22);
-}
-
-.session-card__action--secondary {
-  border-color: rgba(251, 191, 36, 0.24);
-  color: #fcd34d;
-}
-
-.session-card__action--secondary:hover {
-  border-color: rgba(251, 191, 36, 0.45);
-  background: rgba(120, 53, 15, 0.24);
-}
-
+/* The id is shown cut short: the button holds all of it (title) and copies it. */
 .session-card__id {
   font-family: monospace;
   font-size: 0.85rem;
   color: #c4b5fd;
+  cursor: copy;
+}
+
+.session-card__id:hover {
+  color: #ede9fe;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.session-card__id:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .session-card__badge,
@@ -922,22 +933,6 @@ onMounted(refresh);
 .transcript-panel__badge--archived {
   background: rgba(55, 65, 81, 0.5);
   color: #d1d5db;
-}
-
-.transcript-panel__action {
-  border-radius: 9999px;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.38rem 0.7rem;
-  font-size: 0.74rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.transcript-panel__action:hover {
-  border-color: rgba(196, 181, 253, 0.42);
-  background: rgba(49, 46, 129, 0.28);
 }
 
 .transcript-panel__error {

@@ -266,7 +266,7 @@
           :disabled="personality.saving"
           @click="startPersonalityEdit()"
         >Edit</button>
-        <RouterLink to="/agents" class="memory-controls__refresh memory-controls__refresh--link">
+        <RouterLink :to="{ path: '/agents', hash: '#personality' }" class="memory-controls__refresh memory-controls__refresh--link">
           Full editor in Manage → Agent tuning
         </RouterLink>
       </div>
@@ -276,7 +276,7 @@
       <div v-if="!personality.profile && !personality.loading && !personality.error" class="memory-page__notice">
         No assistant personality saved yet. It is written by <code>assistant_personality_update</code>
         (the assistant's own name, voice, and quirks) and editable here or on
-        <RouterLink to="/agents" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
+        <RouterLink :to="{ path: '/agents', hash: '#personality' }" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
         This is a separate store from the durable memory records in the Memory Store tab.
       </div>
 
@@ -347,12 +347,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import { useGatewayStore } from "@/stores/gateway";
 import { usePersonalityStore } from "@/stores/personality";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 cytoscape.use(fcose);
@@ -872,8 +873,15 @@ watch(activeTab, (tab) => {
   }
 });
 
-onMounted(async () => {
-  await Promise.all([loadGraphLabels(), loadMemory(), loadCuration(), personality.fetch()]);
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(async () => {
+  await Promise.all([
+    loadGraphLabels(),
+    loadMemory(),
+    loadCuration(),
+    // Not under an open editor: its Refresh is disabled while editing, and so is this.
+    pEditing.value ? Promise.resolve() : personality.fetch(),
+  ]);
   await nextTick();
   void loadGraph();
 });

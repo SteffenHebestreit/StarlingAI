@@ -18,7 +18,8 @@
         'sp-handle--live': hasLiveContent && !modelValue,
       }"
       :disabled="!hasContent"
-      :aria-label="modelValue ? 'Close side panel' : 'Open side panel'"
+      :aria-label="modelValue ? chatText.closePanel(lang) : chatText.openPanel(lang)"
+      :title="modelValue ? chatText.closePanel(lang) : (hasAnything ? chatText.openPanel(lang) : chatText.panelEmpty(lang))"
       @click="$emit('update:modelValue', !modelValue)"
     >
       <!-- Chevron: points left when open, right when closed -->
@@ -58,7 +59,7 @@
             :aria-selected="activeTab === 'live'"
             @click="activeTab = 'live'"
           >
-            Live
+            {{ chatText.tabLive(lang) }}
             <span v-if="hasLiveContent" class="sp-tab__dot" aria-hidden="true" />
           </button>
           <button
@@ -69,7 +70,7 @@
             :aria-selected="activeTab === 'steps'"
             @click="activeTab = 'steps'"
           >
-            Steps
+            {{ chatText.tabSteps(lang) }}
             <span v-if="(stepCount ?? 0) > 0" class="sp-tab__badge">{{ stepCount }}</span>
           </button>
           <button
@@ -80,14 +81,14 @@
             :aria-selected="activeTab === 'artifacts'"
             @click="activeTab = 'artifacts'"
           >
-            Artifacts
+            {{ chatText.tabArtifacts(lang) }}
             <span v-if="(artifactCount ?? 0) > 0" class="sp-tab__badge">{{ artifactCount }}</span>
           </button>
         </div>
 
         <button
           class="sp-close-btn"
-          aria-label="Close panel"
+          :aria-label="chatText.closePanel(lang)"
           @click="$emit('update:modelValue', false)"
         >
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
@@ -136,12 +137,16 @@
 </template>
 
 <script setup lang="ts">
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 import { ref, computed, watch } from "vue";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
 
 type PanelTab = "live" | "steps" | "artifacts";
 
 const props = defineProps<{
+  /** The language of the panel's own labels: the page's. */
+  language?: TurnLanguage;
   /** Whether the panel is currently open */
   modelValue: boolean;
   /** Whether there is active live content (swarm, computer session, shell) */
@@ -158,6 +163,9 @@ const props = defineProps<{
    */
   requestedTab?: PanelTab | null;
 }>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
+/** Whether the panel has anything in it: its handle says why it is dimmed when it has not. */
+const hasAnything = computed(() => Boolean(props.hasLiveContent) || (props.stepCount ?? 0) > 0 || (props.artifactCount ?? 0) > 0);
 
 const emit = defineEmits<{
   "update:modelValue": [value: boolean];

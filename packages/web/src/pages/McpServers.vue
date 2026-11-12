@@ -265,10 +265,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { reactive, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -574,9 +575,8 @@ function describeTransport(cfg: { transport: string } & Record<string, unknown>)
   }
 }
 
-onMounted(() => {
-  void refresh();
-});
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
