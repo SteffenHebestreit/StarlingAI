@@ -19,8 +19,13 @@ export interface ConfirmRequest {
   /** The button that goes ahead; names the action ("Delete"), never just "OK". */
   confirmLabel: string;
   cancelLabel?: string;
-  /** The action destroys something: the go-ahead button is styled as a warning. */
+  /** The action destroys something or lowers a protection: the go-ahead button is styled as a warning. */
   danger?: boolean;
+  /**
+   * The small line above the title. Defaults to "Cannot be undone" for a dangerous action — say
+   * what it is instead where that is not true (a protection that can be switched back on).
+   */
+  eyebrow?: string;
 }
 
 interface PendingConfirm extends ConfirmRequest {

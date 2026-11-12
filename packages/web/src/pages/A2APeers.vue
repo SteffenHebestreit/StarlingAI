@@ -1,18 +1,20 @@
 <template>
-  <div class="a2a-page" style="height: 100%; overflow-y: auto">
-    <div class="a2a-page__header">
-      <div>
-        <h2 class="a2a-page__title">A2A Peers</h2>
-        <p class="a2a-page__subtitle">
+  <div class="page-shell a2a-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">A2A Peers</h1>
+        <p class="page-subtitle">
           Cross-vendor Agent-to-Agent peers (LangGraph, CrewAI, Vertex AI, …) bridged into the swarm.
           Each remote skill becomes a virtual sub-agent named
           <code>a2a__&lt;peer&gt;__&lt;skill&gt;</code> that the orchestrator can delegate to.
         </p>
       </div>
-      <div class="a2a-page__actions">
-        <button class="a2a-page__button" :disabled="loading" @click="refresh">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="refresh">
+          {{ loading ? "Refreshing…" : "Refresh" }}
+        </button>
       </div>
-    </div>
+    </header>
 
     <p v-if="errorMessage" class="a2a-page__error">{{ errorMessage }}</p>
 
@@ -49,8 +51,11 @@
       </header>
 
       <div v-if="loading && peers.length === 0" class="a2a-page__empty">Loading…</div>
-      <div v-else-if="peers.length === 0" class="a2a-page__empty">
+      <div v-else-if="loaded && peers.length === 0" class="a2a-page__empty">
         No A2A peers configured.  Add one below.
+      </div>
+      <div v-else-if="peers.length === 0" class="notice notice--error">
+        The peer list could not be loaded.
       </div>
 
       <ul v-else class="a2a-peer-grid">
@@ -75,7 +80,7 @@
           </details>
           <p class="a2a-peer-card__meta">Last polled: {{ formatTime(peer.lastPolledAt) }}</p>
           <div class="a2a-peer-card__actions">
-            <button class="a2a-page__button a2a-page__button--danger" :disabled="busyId === peer.id" @click="confirmRemove(peer.id)">
+            <button type="button" class="btn-danger px-3 py-1.5 rounded-lg text-sm" :disabled="busyId === peer.id" @click="confirmRemove(peer.id)">
               Remove
             </button>
           </div>
@@ -102,13 +107,13 @@
         </label>
         <label class="a2a-form__field">
           <span>Bearer token (optional, supports <code>$ENV_VAR</code>)</span>
-          <input v-model="addForm.bearerToken" autocomplete="off" />
+          <input v-model="addForm.bearerToken" type="password" autocomplete="off" />
         </label>
         <label class="a2a-form__field a2a-form__field--inline">
           <input type="checkbox" v-model="addForm.enabled" />
           <span>Enabled</span>
         </label>
-        <button class="a2a-page__button" type="submit" :disabled="adding">
+        <button class="btn-grad px-4 py-2 rounded-xl text-sm" type="submit" :disabled="adding">
           {{ adding ? "Adding…" : "Add peer" }}
         </button>
         <p v-if="addError" class="a2a-page__error">{{ addError }}</p>
@@ -120,6 +125,8 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast, errorText } from "@/composables/useToast";
 
 interface PeerSkill { id: string; name: string; description: string; tags?: string[] }
 interface PeerEntry {
@@ -140,9 +147,12 @@ interface A2AStatus {
 }
 
 const gateway = useGatewayStore();
+const toast = useToast();
 const status = ref<A2AStatus | null>(null);
 const peers = ref<PeerEntry[]>([]);
 const loading = ref(false);
+// True while the last load succeeded: only then does an empty list mean "no peers".
+const loaded = ref(false);
 const adding = ref(false);
 const errorMessage = ref<string | null>(null);
 const addError = ref<string | null>(null);
@@ -164,7 +174,11 @@ function authHeaders(): Record<string, string> {
 }
 
 async function refresh(): Promise<void> {
-  if (!gateway.token) return;
+  loaded.value = false;
+  if (!gateway.token) {
+    errorMessage.value = "Not signed in to the gateway — sign in, then refresh.";
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
   try {
@@ -176,8 +190,9 @@ async function refresh(): Promise<void> {
     const body = await res.json() as A2AStatus;
     status.value = body;
     peers.value = body.peers;
+    loaded.value = true;
   } catch (err) {
-    errorMessage.value = (err as Error).message;
+    errorMessage.value = errorText(err);
   } finally {
     loading.value = false;
   }
@@ -211,29 +226,59 @@ async function submitAdd(): Promise<void> {
       addError.value = body.error ?? `POST failed (${res.status})`;
       return;
     }
+    const addedId = addForm.id;
     addForm.id = "";
     addForm.url = "";
     addForm.description = "";
     addForm.bearerToken = "";
     await refresh();
+    announceAdded(addedId);
+  } catch (err) {
+    toast.error("Couldn't add the peer", errorText(err));
   } finally {
     adding.value = false;
   }
 }
 
+/** Says what became of a peer that was just added, from the list the gateway sent back. */
+function announceAdded(id: string): void {
+  const peer = peers.value.find((entry) => entry.id === id);
+  if (errorMessage.value) {
+    toast.success(`Added "${id}"`, "The peer is saved, but the list could not be reloaded.");
+  } else if (!peer) {
+    // The gateway lists only the peers it polls.
+    toast.success(`Added "${id}"`, "The peer is saved but not bridged: it, or the A2A protocol, is switched off.");
+  } else if (peer.lastError) {
+    toast.info(`Added "${id}", but it is unreachable`, peer.lastError);
+  } else {
+    toast.success(`Added "${id}"`, `${peer.skillCount} skill${peer.skillCount === 1 ? "" : "s"} bridged as virtual agents.`);
+  }
+}
+
 async function confirmRemove(id: string): Promise<void> {
-  if (!window.confirm(`Remove A2A peer "${id}"?  Its virtual agents will be unregistered immediately.`)) return;
+  const confirmed = await confirmAction({
+    title: `Remove the A2A peer "${id}"?`,
+    message: "Its virtual agents are unregistered immediately and its configuration, bearer token included, is deleted. To get it back you add it again.",
+    confirmLabel: "Remove peer",
+    danger: true,
+  });
+  if (!confirmed) return;
   busyId.value = id;
   try {
     const res = await fetch(`${apiBase()}/api/a2a/peers/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers: authHeaders(),
     });
+    // Toasts, not the page's error line: the refresh below clears that line.
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
-      errorMessage.value = body.error ?? `Delete failed (${res.status})`;
+      toast.error(`Couldn't remove "${id}"`, body.error || `Delete failed (${res.status})`);
+    } else {
+      toast.success("Peer removed", `"${id}" and its virtual agents are gone.`);
     }
     await refresh();
+  } catch (err) {
+    toast.error(`Couldn't remove "${id}"`, errorText(err));
   } finally {
     busyId.value = null;
   }
@@ -249,16 +294,9 @@ onMounted(() => { void refresh(); });
 </script>
 
 <style scoped>
-.a2a-page { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
-.a2a-page__header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
-.a2a-page__title { font-size: 1.4rem; font-weight: 600; margin: 0; }
-.a2a-page__subtitle { margin: 0.25rem 0 0 0; color: rgb(156 163 175); max-width: 60rem; }
-.a2a-page__button {
-  background: rgb(67 56 202 / 0.6); color: white; border: 1px solid rgb(99 102 241 / 0.4);
-  border-radius: 0.5rem; padding: 0.45rem 0.9rem; font-size: 0.85rem; cursor: pointer;
-}
-.a2a-page__button:disabled { opacity: 0.5; cursor: not-allowed; }
-.a2a-page__button--danger { background: rgb(127 29 29 / 0.6); border-color: rgb(220 38 38 / 0.4); }
+/* The sections keep their 1.5rem rhythm; the shared header brings its own margin. */
+.a2a-page > .a2a-page__error { margin-bottom: 1.5rem; }
+.a2a-section + .a2a-section { margin-top: 1.5rem; }
 .a2a-page__error { color: rgb(248 113 113); font-size: 0.9rem; }
 .a2a-page__empty { color: rgb(156 163 175); padding: 1rem 0; }
 

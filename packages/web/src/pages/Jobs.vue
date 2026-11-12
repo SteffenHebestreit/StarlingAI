@@ -1,15 +1,18 @@
 <template>
-  <div class="jobs-page" style="height: 100%; overflow-y: auto">
-    <div class="jobs-page__header">
-      <div>
-        <h2 class="jobs-page__title">Jobs</h2>
-        <p class="jobs-page__subtitle">Monitor queued scene and job runs, cancel active work, and jump back into related sessions.</p>
+  <div class="page-shell jobs-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Jobs</h1>
+        <p class="page-subtitle">Monitor queued scene and job runs, cancel active work, and jump back into related sessions.</p>
       </div>
-      <div class="jobs-page__actions">
-        <button @click="refreshJobs" class="jobs-page__button">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="refreshing" @click="refreshJobs">
+          {{ refreshing ? "Refreshing…" : "Refresh" }}
+        </button>
         <button
           v-if="finishedJobCount > 0"
-          class="jobs-page__button jobs-page__button--danger"
+          type="button"
+          class="btn-danger px-4 py-2 rounded-xl text-sm"
           :disabled="clearingFinished"
           :title="`Delete every finished run from the store (${finishedJobCount})`"
           @click="clearFinished"
@@ -17,7 +20,7 @@
           {{ clearingFinished ? "Clearing…" : `Clear finished (${finishedJobCount})` }}
         </button>
       </div>
-    </div>
+    </header>
 
     <!-- Scheduled triggers panel — surfaces cron-driven scenes/jobs ambiently
          so operators can see what fires on its own without digging through
@@ -62,9 +65,16 @@
       </select>
     </div>
 
-    <div v-if="!filteredJobs.length" class="jobs-page__empty">No jobs match the current filters.</div>
+    <div v-if="runErrorText" class="notice notice--error jobs-page__error" role="alert">
+      The last jobs request failed: {{ runErrorText }}
+    </div>
 
-    <div v-else class="jobs-grid">
+    <!-- "No jobs" is only true after a load that worked: before that the list is still loading,
+         and after a failed one the notice above says so. -->
+    <div v-if="!filteredJobs.length && refreshing && !jobsLoaded" class="jobs-page__empty">Loading jobs…</div>
+    <div v-else-if="!filteredJobs.length && jobsLoaded" class="jobs-page__empty">No jobs match the current filters.</div>
+
+    <div v-else-if="filteredJobs.length" class="jobs-grid">
       <article v-for="job in filteredJobs" :key="job.id" :class="['job-card', jobToneClass(job.status)]">
         <div class="job-card__top">
           <div>
@@ -76,14 +86,23 @@
             <div class="job-card__meta">Job {{ shortJobId(job.id) }} · Session {{ shortJobId(job.sessionId) }}</div>
           </div>
           <div class="job-card__actions">
-            <button v-if="isCancelable(job.status)" class="job-card__button job-card__button--warn" @click="scenesStore.cancel(job.id)">Cancel</button>
-            <button class="job-card__button" @click="openJobSession(job.sessionId)">Open Session</button>
+            <button
+              v-if="isCancelable(job.status)"
+              type="button"
+              class="job-card__button job-card__button--warn"
+              :disabled="cancellingIds.has(job.id)"
+              @click="cancelJob(job)"
+            >
+              {{ cancellingIds.has(job.id) ? "Cancelling…" : "Cancel" }}
+            </button>
+            <button type="button" class="job-card__button" @click="openJobSession(job.sessionId)">Open Session</button>
             <button
               v-if="!isCancelable(job.status)"
+              type="button"
               class="job-card__button job-card__button--danger"
               :disabled="deletingIds.has(job.id)"
               title="Remove this run from the store (the session transcript is kept)"
-              @click="deleteRun(job.id)"
+              @click="deleteRun(job)"
             >
               {{ deletingIds.has(job.id) ? "Deleting…" : "Delete" }}
             </button>
@@ -143,15 +162,26 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 
 const router = useRouter();
 const gateway = useGatewayStore();
 const scenesStore = useScenesStore();
+const toast = useToast();
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | SceneJob["status"]>("all");
 // Tracks per-row in-flight delete calls (button disabled state).
 const deletingIds = ref<Set<string>>(new Set());
+// Same for cancel calls.
+const cancellingIds = ref<Set<string>>(new Set());
 const clearingFinished = ref(false);
+const refreshing = ref(false);
+// True while the list on screen comes from a load that succeeded.
+const jobsLoaded = ref(false);
+
+// The store keeps errors as String(error): drop the "Error: " that adds.
+const runErrorText = computed(() => (scenesStore.runError ?? "").replace(/^Error: /, ""));
 
 // ── Scheduled cron triggers ──────────────────────────────────────────────────
 interface CronTrigger {
@@ -236,10 +266,19 @@ const filteredJobs = computed(() => {
 });
 
 async function refreshJobs() {
-  await scenesStore.fetchJobs({
-    limit: statusFilter.value === "active" ? 100 : 200,
-    status: serverStatusFilter.value,
-  });
+  refreshing.value = true;
+  // The store reports a failed load here and nowhere else, and clears it only before a
+  // mutation: without this a failure would stay on screen after a load that worked.
+  scenesStore.runError = null;
+  try {
+    await scenesStore.fetchJobs({
+      limit: statusFilter.value === "active" ? 100 : 200,
+      status: serverStatusFilter.value,
+    });
+    jobsLoaded.value = scenesStore.runError === null;
+  } finally {
+    refreshing.value = false;
+  }
 }
 
 // Counts finished (non-active) jobs across the current local list, used by
@@ -248,16 +287,50 @@ const finishedJobCount = computed(() =>
   scenesStore.recentJobs.filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled").length
 );
 
-async function deleteRun(jobId: string) {
-  if (deletingIds.value.has(jobId)) return;
-  if (!confirm("Delete this run from the store? The session transcript is kept.")) return;
-  deletingIds.value = new Set(deletingIds.value).add(jobId);
+async function cancelJob(job: SceneJob) {
+  if (cancellingIds.value.has(job.id)) return;
+  const name = formatSceneName(job.sceneName);
+  if (!(await confirmAction({
+    title: "Cancel this job?",
+    message: `"${name}" is stopped before it finishes. A cancelled run cannot be resumed — it would have to be started again from the beginning.`,
+    confirmLabel: "Cancel job",
+    cancelLabel: "Keep running",
+    danger: true,
+  }))) return;
+  cancellingIds.value = new Set(cancellingIds.value).add(job.id);
   try {
-    const r = await scenesStore.deleteRun(jobId);
-    if (!r.ok && r.error) alert(`Delete failed: ${r.error}`);
+    const cancelled = await scenesStore.cancel(job.id);
+    if (!cancelled) {
+      toast.error("Couldn't cancel the job", runErrorText.value || "The gateway did not accept the cancel request.");
+    } else if (cancelled.status === "cancelled") {
+      toast.success("Job cancelled", `"${name}" has stopped.`);
+    } else {
+      toast.success("Cancel requested", `"${name}" is stopping; its card updates when the worker confirms.`);
+    }
+  } finally {
+    const next = new Set(cancellingIds.value);
+    next.delete(job.id);
+    cancellingIds.value = next;
+  }
+}
+
+async function deleteRun(job: SceneJob) {
+  if (deletingIds.value.has(job.id)) return;
+  const name = formatSceneName(job.sceneName);
+  if (!(await confirmAction({
+    title: "Delete this run?",
+    message: `Run ${shortJobId(job.id)} of "${name}" is removed from the store and cannot be restored. The session transcript is kept.`,
+    confirmLabel: "Delete run",
+    danger: true,
+  }))) return;
+  deletingIds.value = new Set(deletingIds.value).add(job.id);
+  try {
+    const r = await scenesStore.deleteRun(job.id);
+    if (r.ok) toast.success("Run deleted", `Run ${shortJobId(job.id)} of "${name}" was removed from the store.`);
+    else toast.error("Couldn't delete the run", r.error || "Unknown error");
   } finally {
     const next = new Set(deletingIds.value);
-    next.delete(jobId);
+    next.delete(job.id);
     deletingIds.value = next;
   }
 }
@@ -265,11 +338,23 @@ async function deleteRun(jobId: string) {
 async function clearFinished() {
   const n = finishedJobCount.value;
   if (n === 0) return;
-  if (!confirm(`Delete all ${n} finished runs from the store? Session transcripts are kept. Active runs are not affected.`)) return;
+  if (!(await confirmAction({
+    title: `Delete ${n} finished run${n === 1 ? "" : "s"}?`,
+    message: "They are removed from the store and cannot be restored. Session transcripts are kept. Active runs are not affected.",
+    confirmLabel: "Delete finished runs",
+    danger: true,
+  }))) return;
   clearingFinished.value = true;
   try {
     const r = await scenesStore.clearFinishedRuns();
-    if (r.failed > 0) alert(`Cleared ${r.deleted}, ${r.failed} could not be deleted (may have transitioned to active).`);
+    if (r.failed > 0) {
+      toast.error(
+        "Some runs could not be deleted",
+        `Deleted ${r.deleted}; ${r.failed} could not be deleted (they may have become active again).`,
+      );
+    } else {
+      toast.success("Finished runs cleared", `${r.deleted} run${r.deleted === 1 ? "" : "s"} removed from the store.`);
+    }
   } finally {
     clearingFinished.value = false;
   }
@@ -354,40 +439,6 @@ watch(statusFilter, () => {
 </script>
 
 <style scoped>
-.jobs-page {
-  padding: 1.5rem;
-}
-
-.jobs-page__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.jobs-page__title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: #f5ecff;
-}
-
-.jobs-page__subtitle {
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-  color: rgba(226, 217, 243, 0.72);
-}
-
-.jobs-page__button {
-  border-radius: 0.85rem;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-
 /* Scheduled triggers panel — ambient view of cron-driven scenes/jobs.
    Sits above the filter row so operators see what fires on its own
    before scrolling into the recent-runs grid. */
@@ -503,6 +554,10 @@ watch(statusFilter, () => {
 
 .jobs-page__select {
   min-width: 180px;
+}
+
+.jobs-page__error {
+  margin-bottom: 1rem;
 }
 
 .jobs-page__empty {
@@ -641,18 +696,9 @@ watch(statusFilter, () => {
 .job-card__button--danger:hover:not(:disabled) {
   background: rgba(248, 113, 113, 0.1);
 }
-.job-card__button--danger:disabled,
-.jobs-page__button--danger:disabled {
+.job-card__button:disabled {
   opacity: 0.55;
   cursor: default;
-}
-
-.jobs-page__button--danger {
-  border-color: rgba(248, 113, 113, 0.3);
-  color: #fca5a5;
-}
-.jobs-page__button--danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.1);
 }
 
 .job-card__progress {

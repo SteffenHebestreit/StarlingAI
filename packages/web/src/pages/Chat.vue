@@ -27,8 +27,8 @@
     >
       <div class="chat-drop-overlay__panel">
         <div class="chat-drop-overlay__icon" aria-hidden="true">📎</div>
-        <div class="chat-drop-overlay__title">Drop to attach</div>
-        <div class="chat-drop-overlay__hint">Images queue for analysis · audio gets transcribed · documents go to your library and into this conversation</div>
+        <div class="chat-drop-overlay__title">{{ chatText.dropTitle(uiLanguage) }}</div>
+        <div class="chat-drop-overlay__hint">{{ chatText.dropHint(uiLanguage) }}</div>
       </div>
     </div>
 
@@ -165,10 +165,10 @@
               class="chat-scroll-resume"
               :class="composerOpen ? 'chat-scroll-resume--above-bay' : ''"
               @click="jumpToBottom"
-              aria-label="Jump to latest messages"
+              :aria-label="chatText.jumpToLatest(uiLanguage)"
             >
               <span aria-hidden="true">↓</span>
-              <span>{{ gateway.isLoading ? "New activity" : "New messages" }}</span>
+              <span>{{ gateway.isLoading ? chatText.newActivity(uiLanguage) : chatText.newMessages(uiLanguage) }}</span>
             </button>
           </Transition>
           <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''">
@@ -248,7 +248,7 @@
     >
       <!-- Steps slot: every step of the ONE answer whose row was clicked, that row opened. -->
       <template #steps>
-        <StepDetailPanel :steps="stepDetailSteps" :focus-step-id="focusedStepId" :focus-request="focusRequest" />
+        <StepDetailPanel :steps="stepDetailSteps" :focus-step-id="focusedStepId" :focus-request="focusRequest" :language="stepDetailLanguage" />
       </template>
       <!-- Live context slot: swarm, shell, computer sessions -->
       <template #live>
@@ -424,16 +424,18 @@
               @click="submitInputFreeText"
               :disabled="!inputRequestText.trim()"
               class="btn-grad px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-40">
-              Send
+              {{ chatText.send(uiLanguage) }}
             </button>
             <!-- The floating steering bay (with its Stop button) is folded away while a question is
                  pending, so surface Stop here to keep the abort path available. -->
             <button
               v-if="gateway.isLoading"
-              @click="gateway.cancelTurn()"
-              class="px-4 py-2 rounded-xl text-sm font-semibold shrink-0 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white transition-colors"
-              title="Stop the current turn">
-              Stop
+              type="button"
+              :disabled="stoppingTurn"
+              @click="stopTurn"
+              class="px-4 py-2 rounded-xl text-sm font-semibold shrink-0 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white transition-colors disabled:opacity-60 disabled:cursor-progress"
+              :title="chatText.stopTitle(uiLanguage)">
+              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
           </div>
         </div>
@@ -493,9 +495,11 @@
         >
           <!-- Thumbnail — click opens preview modal -->
           <button
+            type="button"
             @click="previewModalUrl = img.previewUrl"
-            class="shrink-0 focus:outline-none"
+            class="shrink-0 rounded-l-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70"
             title="Preview image"
+            :aria-label="`Preview ${img.filename}`"
           >
             <img :src="img.previewUrl" :alt="img.filename" class="h-9 w-9 object-cover rounded-l-xl" />
           </button>
@@ -503,9 +507,11 @@
           <span class="text-xs text-purple-300 max-w-[8rem] truncate select-none">{{ img.filename }}</span>
           <!-- Remove -->
           <button
+            type="button"
             @click="removeImage(idx)"
-            class="text-purple-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            class="chip-remove text-purple-400 hover:text-red-300"
             title="Remove"
+            :aria-label="`Remove ${img.filename}`"
           >✕</button>
         </div>
       </div>
@@ -520,9 +526,11 @@
           <span class="text-cyan-300 text-sm leading-none" aria-hidden="true">📄</span>
           <span class="text-xs text-cyan-200 max-w-[10rem] truncate select-none" :title="doc.filename">{{ doc.filename }}</span>
           <button
+            type="button"
             @click="removeDocument(idx)"
-            class="text-cyan-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            class="chip-remove text-cyan-400 hover:text-red-300"
             title="Remove"
+            :aria-label="`Remove ${doc.filename}`"
           >✕</button>
         </div>
       </div>
@@ -592,6 +600,7 @@
           ref="fileInputEl"
           type="file"
           class="hidden"
+          multiple
           accept=".pdf,.doc,.docx,.txt,.md,.csv,image/*"
           @change="onDocumentSelected"
         />
@@ -673,8 +682,8 @@
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
             :placeholder="gateway.hasOpenUserInput
-              ? 'Waiting on the card above — use its Configure to change the engine or prompt…'
-              : gateway.isLoading ? 'Steer the running turn — your message is queued and read at its next step…' : composerPlaceholder"
+              ? chatText.cardPlaceholder(uiLanguage)
+              : gateway.isLoading ? chatText.steerPlaceholder(uiLanguage) : composerPlaceholder"
             rows="3"
           />
           <div
@@ -687,7 +696,7 @@
 
         <div class="chat-composer__controls">
           <div class="chat-composer__menus">
-            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown">
+            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown" @toggle="onComposerMenuToggle">
               <summary class="chat-dropdown__summary">
                 <span>Options</span>
                 <span class="chat-dropdown__chevron">▾</span>
@@ -865,7 +874,7 @@
               </div>
             </details>
 
-            <details v-if="showJobsDropdown" class="chat-dropdown">
+            <details v-if="showJobsDropdown" class="chat-dropdown" @toggle="onComposerMenuToggle">
               <summary class="chat-dropdown__summary">
                 <span>{{ jobsDropdownLabel }}</span>
                 <span class="chat-dropdown__chevron">▾</span>
@@ -1031,15 +1040,17 @@
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
               title="Send this into the running turn — it is read at the turn's next step"
             >
-              Steer
+              {{ chatText.steer(uiLanguage) }}
             </button>
             <button
               v-if="gateway.isLoading"
-              @click="gateway.cancelTurn()"
-              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white"
-              title="Stop the current turn"
+              type="button"
+              :disabled="stoppingTurn"
+              @click="stopTurn"
+              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
+              :title="chatText.stopTitle(uiLanguage)"
             >
-              Stop
+              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
             <button
               v-else
@@ -1047,7 +1058,7 @@
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
             >
-              Send
+              {{ chatText.send(uiLanguage) }}
             </button>
           </div>
         </div>
@@ -1060,7 +1071,7 @@
     </div>
 
     <!-- Composer launcher: the single round control left behind when the
-         input bay has flown out. Click (or press "/") to summon it. -->
+         input bay has flown out. Click it, or just start typing, to summon it. -->
     <Teleport to="body">
     <Transition name="composer-launcher">
       <button
@@ -1068,8 +1079,8 @@
         type="button"
         class="chat-composer-launcher"
         :style="launcherOrbStyle"
-        :title="`Message ${product.name} (just start typing · drag to move)`"
-        aria-label="Open message input"
+        :title="chatText.launcherTitle(uiLanguage, product.name)"
+        :aria-label="chatText.launcherLabel(uiLanguage)"
         @pointerdown="launcherOrbDown"
         @pointermove="launcherOrbMove"
         @pointerup="launcherOrbUp"
@@ -1142,6 +1153,7 @@ import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import OrbActivity from "@/components/OrbActivity.vue";
 import { activityRing, freeHalfWidth, liveActivity } from "@/composables/orbActivity";
 import { turnLanguage } from "@/composables/turnText";
+import { detectLanguage } from "@/speech/speechText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
 import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
 import { chatStarters, startersVisible } from "@/composables/chatStarters";
@@ -1151,6 +1163,7 @@ import { stepsFor } from "@/composables/turnSteps";
 import { followFocusedStep, latestTurn } from "@/composables/turnSegments";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { confirmAction } from "@/composables/useConfirm";
+import { browserLanguage, chatText } from "@/composables/chatText";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
@@ -1241,11 +1254,11 @@ const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([])
 const composerHasContent = computed(() =>
   Boolean(inputText.value.trim()) || pendingImageContexts.value.length > 0 || pendingDocumentContexts.value.length > 0);
 const starters = chatStarters(navigator.language);
+// The composer belongs to no message: its labels follow the browser, like the starters above it.
+const uiLanguage = browserLanguage();
 // "/ for commands" only where there are commands: scenes or jobs to run by name.
-const composerPlaceholder = computed(() => {
-  const commands = gateway.scenes.length > 0 || configuredJobs.value.length > 0;
-  return `Message ${product.name}… (Enter to send, Shift+Enter for a new line${commands ? ", / for commands" : ""})`;
-});
+const composerPlaceholder = computed(() =>
+  chatText.messagePlaceholder(uiLanguage, product.name, gateway.scenes.length > 0 || configuredJobs.value.length > 0));
 const showStarters = computed(() => startersVisible({
   connected: gateway.connected,
   transcriptLoading: gateway.currentSessionTranscriptLoading,
@@ -1317,6 +1330,45 @@ function removeImage(idx: number) {
 function removeDocument(idx: number) {
   pendingDocumentContexts.value.splice(idx, 1);
 }
+
+// Stop says it is stopping. The request takes a moment, and the button used to sit there
+// unchanged meanwhile — so it got clicked again and again.
+const stoppingTurn = ref(false);
+async function stopTurn(): Promise<void> {
+  if (stoppingTurn.value) return;
+  stoppingTurn.value = true;
+  try {
+    await gateway.cancelTurn();
+  } catch (err) {
+    showSteeringNote(`Couldn't stop the turn — ${err instanceof Error ? err.message : String(err)}`, "error");
+  } finally {
+    stoppingTurn.value = false;
+  }
+}
+watch(() => gateway.isLoading, (loading) => { if (!loading) stoppingTurn.value = false; });
+
+// The composer's menus are native <details>: they stayed open on a click anywhere else and
+// ignored Escape, so one could be left hanging over the conversation. A press outside closes
+// them; Escape closes them through the same layered handler as every other overlay.
+function openComposerMenus(): HTMLDetailsElement[] {
+  return [...document.querySelectorAll<HTMLDetailsElement>(".chat-input-bay details.chat-dropdown[open]")];
+}
+function closeComposerMenus(except?: Element | null): void {
+  for (const menu of openComposerMenus()) if (menu !== except) menu.open = false;
+}
+const composerMenuOpen = ref(false);
+function onComposerMenuToggle(): void {
+  composerMenuOpen.value = openComposerMenus().length > 0;
+}
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (!composerMenuOpen.value) return;
+  const inside = (event.target as Element | null)?.closest?.("details.chat-dropdown") ?? null;
+  closeComposerMenus(inside);
+  composerMenuOpen.value = openComposerMenus().length > 0;
+}
+onMounted(() => document.addEventListener("pointerdown", onDocumentPointerDown));
+onUnmounted(() => document.removeEventListener("pointerdown", onDocumentPointerDown));
+useEscapeToClose(() => composerMenuOpen.value, () => { closeComposerMenus(); composerMenuOpen.value = false; });
 
 /** Close the Options dropdown (a native <details>) — used after picking a file. */
 function closeOptionsDropdown() {
@@ -1849,6 +1901,12 @@ function openLiveSteps(stepId: string | undefined): void {
   void nextTick(() => { requestedPanelTab.value = null; });
 }
 
+// The panel reads like the list it was opened from: in that answer's language.
+const stepDetailLanguage = computed(() => {
+  const message = gateway.messages.find((candidate) => candidate.id === stepDetailMessageId.value);
+  return message ? turnLanguage(message.language ?? detectLanguage(message.content ?? "")) : orbLanguage.value;
+});
+
 function showStep(messageId: string, stepId: string): void {
   stepDetailMessageId.value = messageId;
   focusedStepId.value = stepId;
@@ -2286,11 +2344,11 @@ async function toggleRecording() {
 
 function onDocumentSelected(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
+  // Read the list before clearing the input: clearing empties it.
+  const files = [...(input.files ?? [])];
   input.value = "";
   closeOptionsDropdown();
-  if (!file) return;
-  queueAttachment(file);
+  for (const file of files) queueAttachment(file);
 }
 
 /**
@@ -2542,6 +2600,12 @@ function onComposerKeydown(event: KeyboardEvent) {
   // drafted message stays where it is and only loses the focus.
   if (event.key === "Escape" && !event.isComposing) {
     event.preventDefault();
+    // One step at a time: an open menu goes first, the composer on the next press.
+    if (composerMenuOpen.value) {
+      closeComposerMenus();
+      composerMenuOpen.value = false;
+      return;
+    }
     if (/^\/\S*\s*$/.test(inputText.value)) inputText.value = "";
     composerTextareaEl.value?.blur();
     composerFocused.value = false;
@@ -2795,9 +2859,11 @@ async function resetSession() {
   }
   const count = gateway.messages.length;
   if (count > 0 && !(await confirmAction({
-    title: "Reset this session?",
-    message: `This clears the conversation here and on the gateway — ${count} message${count === 1 ? "" : "s"}. Download it first if you want to keep it.`,
-    confirmLabel: "Reset session",
+    title: chatText.resetConfirmTitle(uiLanguage),
+    message: chatText.resetConfirmMessage(uiLanguage, count),
+    confirmLabel: chatText.resetConfirmLabel(uiLanguage),
+    cancelLabel: chatText.cancel(uiLanguage),
+    eyebrow: chatText.cannotBeUndone(uiLanguage),
     danger: true,
   }))) return;
   try {
@@ -2815,9 +2881,11 @@ async function handleRewind(messageId: string) {
   const at = gateway.messages.findIndex((message) => message.id === messageId);
   const cut = at < 0 ? 0 : gateway.messages.length - at;
   if (cut > 1 && !(await confirmAction({
-    title: "Restart from this message?",
-    message: `This removes it and the ${cut - 1} message${cut - 1 === 1 ? "" : "s"} after it, here and on the gateway. Your question comes back into the input to edit and send again.`,
-    confirmLabel: "Restart here",
+    title: chatText.restartConfirmTitle(uiLanguage),
+    message: chatText.restartConfirmMessage(uiLanguage, cut - 1),
+    confirmLabel: chatText.restartConfirmLabel(uiLanguage),
+    cancelLabel: chatText.cancel(uiLanguage),
+    eyebrow: chatText.cannotBeUndone(uiLanguage),
     danger: true,
   }))) return;
   try {
@@ -4836,5 +4904,21 @@ onUnmounted(() => {
   .multimodal-status {
     animation: none !important;
   }
+}
+
+/* The ✕ on an attachment chip: a target a finger can hit, not a 12-pixel glyph. */
+.chip-remove {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  line-height: 1;
+  transition: color 0.15s, background-color 0.15s;
+}
+.chip-remove:hover, .chip-remove:focus-visible {
+  background: rgba(248, 113, 113, 0.14);
+  outline: none;
 }
 </style>

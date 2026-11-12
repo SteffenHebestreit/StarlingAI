@@ -623,6 +623,62 @@
   .page-shell { padding: 1rem; }
   .page-grid { grid-template-columns: 1fr; }
 }
+/* A page's head: what it is, one line on what it is for, and its actions on the right. The
+   seventeen management pages had seven different heads between them. */
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.page-header__text { min-width: 0; flex: 1 1 20rem; }
+.page-title {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: var(--display-tracking);
+  color: rgb(249, 250, 251);
+}
+.page-subtitle {
+  margin-top: 0.35rem;
+  max-width: 48rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(156, 163, 175);
+}
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* A line that says something went wrong, or that there is nothing here — one look for each,
+   wherever it stands. */
+.notice {
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(209, 213, 219);
+}
+.notice--error {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(127, 29, 29, 0.22);
+  color: rgb(254, 202, 202);
+}
+.empty-state {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(156, 163, 175);
+}
+
 .section-title {
   margin-bottom: 1rem;
   font-family: var(--font-label);

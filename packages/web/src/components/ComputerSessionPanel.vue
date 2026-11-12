@@ -62,6 +62,14 @@ const screenshotAge = computed<string>(() => {
   if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}s ago`;
   return `${Math.round(ageMs / 60_000)}m ago`;
 });
+// How old the picture is, as a warning: a frame minutes old wore the same green as "live", so a
+// frozen screen looked current to whoever was deciding whether to stop the agent.
+const screenshotStaleness = computed<"live" | "stale" | "old">(() => {
+  void _markerTick.value;
+  if (!screenshot.value?.timestamp) return "live";
+  const ageMs = Date.now() - screenshot.value.timestamp;
+  return ageMs < 5_000 ? "live" : ageMs < 60_000 ? "stale" : "old";
+});
 const screenshotImage = ref<HTMLImageElement | null>(null);
 const copyStatus = ref("");
 const mappedClick = ref<{
@@ -96,8 +104,21 @@ function stopObserving() {
   computer.observeSession(null);
 }
 
-function emergencyStop(sessionId: string) {
-  computer.emergencyStop(sessionId);
+// The safety stop answers: "Stopping…" while the gateway is asked, and a failure said out loud.
+// It used to fire and forget — a refused or lost request looked exactly like a stop that worked.
+const stopping = ref<string | null>(null);
+const stopError = ref("");
+async function emergencyStop(sessionId: string) {
+  if (stopping.value) return;
+  stopping.value = sessionId;
+  stopError.value = "";
+  try {
+    await computer.emergencyStop(sessionId);
+  } catch (err) {
+    stopError.value = `The stop did not go through: ${err instanceof Error ? err.message : String(err)}. The agent may still be acting — try again.`;
+  } finally {
+    stopping.value = null;
+  }
 }
 
 function refresh() {
@@ -197,14 +218,17 @@ async function copyClickCommand() {
           </button>
           <button
             v-if="session.state === 'active'"
+            type="button"
             class="btn-sm btn-emergency"
+            :disabled="stopping !== null"
             @click="emergencyStop(session.id)"
           >
-            Emergency Stop
+            {{ stopping === session.id ? "Stopping…" : "Emergency Stop" }}
           </button>
         </div>
       </div>
     </div>
+    <p v-if="stopError" class="stop-error" role="alert">{{ stopError }}</p>
 
     <!-- Screenshot viewer -->
     <div v-if="previewSessionId && screenshot" class="screenshot-viewer">
@@ -250,7 +274,7 @@ async function copyClickCommand() {
         <span>Frame: {{ screenshot.frameId ? screenshot.frameId.slice(0, 8) : "n/a" }}</span>
         <span>Bitmap: {{ screenshot.width }} x {{ screenshot.height }}</span>
         <span v-if="screenshot.displayTopology">Monitors: {{ screenshot.displayTopology.monitors.length }}</span>
-        <span class="screenshot-age">{{ screenshotAge }}</span>
+        <span class="screenshot-age" :class="`screenshot-age--${screenshotStaleness}`">{{ screenshotAge }}</span>
       </div>
       <div v-if="mappedClick" class="click-inspector">
         <div class="click-inspector-header">
@@ -674,4 +698,16 @@ async function copyClickCommand() {
 .action-time {
   color: var(--color-text-muted, #888);
 }
+.btn-emergency:disabled { opacity: 0.6; cursor: progress; }
+.stop-error {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.3);
+  color: rgb(254, 202, 202);
+  font-size: 0.85rem;
+}
+.screenshot-age--stale { color: rgb(251, 191, 36) !important; }
+.screenshot-age--old { color: rgb(248, 113, 113) !important; }
 </style>

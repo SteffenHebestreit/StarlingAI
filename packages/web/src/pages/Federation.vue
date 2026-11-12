@@ -1,17 +1,27 @@
 <template>
-  <div class="federation-page" style="height: 100%; overflow-y: auto">
-    <div class="federation-page__header">
-      <div>
-        <h2 class="federation-page__title">Federation</h2>
-        <p class="federation-page__subtitle">Configured peer instances and recent cross-instance delegations.</p>
+  <div class="page-shell federation-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Federation</h1>
+        <p class="page-subtitle">Configured peer instances and recent cross-instance delegations.</p>
       </div>
-      <div class="federation-page__actions">
-        <button class="federation-page__button" :disabled="loadingPeers" @click="refresh(false)">Refresh</button>
-        <button class="federation-page__button" :disabled="loadingPeers" @click="refresh(true)">Ping all</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loadingPeers" @click="refresh(false)">
+          {{ loadingPeers && !pinging ? "Refreshing…" : "Refresh" }}
+        </button>
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loadingPeers" @click="refresh(true)">
+          {{ pinging ? "Pinging…" : "Ping all" }}
+        </button>
       </div>
-    </div>
+    </header>
 
-    <div v-if="!enabled" class="federation-disabled">
+    <div v-if="peersError" class="notice notice--error federation-page__error" role="alert">{{ peersError }}</div>
+
+    <!-- "Disabled" is something the gateway has to have said: before the first answer the page
+         does not know, and after a failed request it still does not. -->
+    <p v-if="!peersLoaded && loadingPeers" class="federation-instance-row">Loading federation status…</p>
+
+    <div v-else-if="peersLoaded && !enabled" class="federation-disabled">
       <p>
         Federation is currently disabled. Set <code>federation.enabled = true</code> in
         <code>starlingai.json</code> and configure <code>federation.sharedSecret</code>
@@ -19,7 +29,7 @@
       </p>
     </div>
 
-    <div v-else>
+    <div v-else-if="peersLoaded">
       <p class="federation-instance-row">
         This instance: <code>{{ instanceId }}</code>
         <span v-if="peers.length === 0" class="federation-instance-row__hint">
@@ -84,12 +94,16 @@
       <section class="federation-activity">
         <header class="federation-activity__header">
           <h3 class="federation-activity__title">Recent federation activity</h3>
-          <button class="federation-page__button" :disabled="loadingActivity" @click="loadActivity">Refresh</button>
+          <button type="button" class="federation-page__button" :disabled="loadingActivity" @click="loadActivity">
+            {{ loadingActivity ? "Refreshing…" : "Refresh" }}
+          </button>
         </header>
-        <p v-if="activity.length === 0" class="federation-activity__empty">
+        <p v-if="activityError" class="notice notice--error federation-page__error" role="alert">{{ activityError }}</p>
+        <p v-if="activity.length === 0 && loadingActivity && !activityLoaded" class="federation-activity__empty">Loading activity…</p>
+        <p v-else-if="activity.length === 0 && activityLoaded" class="federation-activity__empty">
           No federation activity yet. Cross-instance delegations and capability fetches will show up here.
         </p>
-        <ol v-else class="federation-activity__list">
+        <ol v-else-if="activity.length > 0" class="federation-activity__list">
           <li v-for="event in activity" :key="event.id" :class="['federation-activity__item', activityToneClass(event.severity)]">
             <div class="federation-activity__item-head">
               <code class="federation-activity__type">{{ event.type }}</code>
@@ -107,6 +121,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuditStore } from "@/stores/audit";
+import { errorText } from "@/composables/useToast";
 
 interface PeerAgent { name: string; description?: string; tags?: string[] }
 interface PeerSummary {
@@ -141,6 +156,13 @@ const peers = ref<PeerSummary[]>([]);
 const backfillActivity = ref<ActivityEvent[]>([]);
 const loadingPeers = ref(false);
 const loadingActivity = ref(false);
+// The in-flight peer load is a ping round (labels the button that started it).
+const pinging = ref(false);
+// True while that part of the page comes from a load that succeeded.
+const peersLoaded = ref(false);
+const activityLoaded = ref(false);
+const peersError = ref<string | null>(null);
+const activityError = ref<string | null>(null);
 
 /**
  * Live activity merges three sources, deduped by event id, newest first:
@@ -169,31 +191,44 @@ function apiBase(): string {
 async function loadPeers(ping = false): Promise<void> {
   if (!gateway.token) return;
   loadingPeers.value = true;
+  pinging.value = ping;
+  peersError.value = null;
   try {
     const url = new URL(`${apiBase()}/api/federation/peers`);
     if (ping) url.searchParams.set("ping", "1");
     const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${gateway.token}` } });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as { enabled: boolean; instanceId: string; peers: PeerSummary[] };
     enabled.value = Boolean(data.enabled);
     instanceId.value = data.instanceId ?? "primary";
     peers.value = data.peers ?? [];
+    peersLoaded.value = true;
+  } catch (err) {
+    // A failed first load leaves the page saying what failed, not "Federation is disabled".
+    // After a good one the peers already on screen stay, under the error.
+    peersError.value = `Failed to ${ping ? "ping the peers" : "load the federation peers"}: ${errorText(err)}`;
   } finally {
     loadingPeers.value = false;
+    pinging.value = false;
   }
 }
 
 async function loadActivity(): Promise<void> {
   if (!gateway.token) return;
   loadingActivity.value = true;
+  activityError.value = null;
   try {
     const res = await fetch(`${apiBase()}/api/federation/activity?limit=80`, {
       headers: { Authorization: `Bearer ${gateway.token}` },
     });
-    if (!res.ok) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json() as { events: ActivityEvent[] };
     // Most recent first.
     backfillActivity.value = (data.events ?? []).slice().reverse();
+    activityLoaded.value = true;
+  } catch (err) {
+    activityLoaded.value = false;
+    activityError.value = `Failed to load federation activity: ${errorText(err)}`;
   } finally {
     loadingActivity.value = false;
   }
@@ -285,7 +320,10 @@ onMounted(() => {
 // the timeline.  The audit-store WS subscription handles live updates
 // independently — no polling timer needed.
 watch(() => gateway.connected, (now) => {
-  if (now && _bootstrapped.value) void loadActivity();
+  if (!now || !_bootstrapped.value) return;
+  void loadActivity();
+  // Opened before there was a token, or the first load failed: the peers still need loading.
+  if (!peersLoaded.value && !loadingPeers.value) void loadPeers();
 });
 
 onBeforeUnmount(() => {
@@ -295,42 +333,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .federation-page {
-  padding: 1.5rem 1.75rem 3rem;
   color: rgb(229 231 235);
 }
 
-.federation-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-.federation-page__title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  margin: 0;
-  background: linear-gradient(90deg, rgb(165 243 252), rgb(196 181 253));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.federation-page__subtitle {
-  margin: 0.4rem 0 0;
-  color: rgb(156 163 175);
-  font-size: 0.875rem;
-  max-width: 36rem;
-}
-
-.federation-page__actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
+/* Still used by the activity feed's own Refresh. */
 .federation-page__button {
   background: rgba(76, 29, 149, 0.35);
   border: 1px solid rgba(168, 85, 247, 0.35);
@@ -350,6 +356,10 @@ onBeforeUnmount(() => {
 .federation-page__button:disabled {
   opacity: 0.5;
   cursor: progress;
+}
+
+.federation-page__error {
+  margin-bottom: 1rem;
 }
 
 .federation-disabled {

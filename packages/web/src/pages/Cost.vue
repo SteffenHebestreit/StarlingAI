@@ -1,23 +1,23 @@
 <template>
-  <div class="cost-page" style="height: 100%; overflow-y: auto">
-    <div class="cost-page__header">
-      <div>
-        <h2 class="cost-page__title">Cost Governance</h2>
-        <p class="cost-page__subtitle">
+  <div class="page-shell cost-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Cost Governance</h1>
+        <p class="page-subtitle">
           Token usage and estimated dollar spend rolled up from audit events.
           Pricing is best-effort — operators can override the rate card via <code>cost.models[]</code>.
         </p>
       </div>
-      <div class="cost-page__actions">
+      <div class="page-actions">
         <select v-model.number="rangeDays" class="cost-page__select">
           <option :value="1">Last 24h</option>
           <option :value="7">Last 7d</option>
           <option :value="30">Last 30d</option>
           <option :value="90">Last 90d</option>
         </select>
-        <button class="cost-page__button" :disabled="loading" @click="refresh">Refresh</button>
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="refresh">{{ loading ? "Refreshing…" : "Refresh" }}</button>
       </div>
-    </div>
+    </header>
 
     <div v-if="!enabled" class="cost-disabled">
       <p>
@@ -28,31 +28,32 @@
       </p>
     </div>
 
-    <div v-if="errorMessage" class="cost-page__error">{{ errorMessage }}</div>
+    <div v-if="errorMessage" class="notice notice--error cost-page__error" role="alert">{{ errorMessage }}</div>
 
     <section class="cost-stat-row">
       <article class="cost-stat-card">
         <div class="cost-stat-card__label">Total cost · {{ rangeDays }}d</div>
-        <div class="cost-stat-card__value">{{ formatCurrency(summary?.totalCost ?? 0, currency) }}</div>
-        <div class="cost-stat-card__hint">{{ formatNumber(summary?.totalTokens ?? 0) }} tokens</div>
+        <div class="cost-stat-card__value">{{ summary ? formatCurrency(summary.totalCost, currency) : noValue }}</div>
+        <div class="cost-stat-card__hint">{{ summary ? formatNumber(summary.totalTokens) + " tokens" : noValueHint }}</div>
       </article>
       <article class="cost-stat-card">
-        <div class="cost-stat-card__label">Avg / day · last {{ projection?.windowDays ?? 0 }}d</div>
-        <div class="cost-stat-card__value">{{ formatCurrency(projection?.averageDailyCost ?? 0, currency) }}</div>
-        <div class="cost-stat-card__hint">excl. today (in-progress)</div>
+        <div class="cost-stat-card__label">Avg / day<template v-if="projection"> · last {{ projection.windowDays }}d</template></div>
+        <div class="cost-stat-card__value">{{ projection ? formatCurrency(projection.averageDailyCost, currency) : noValue }}</div>
+        <div class="cost-stat-card__hint">{{ projection ? "excl. today (in-progress)" : noValueHint }}</div>
       </article>
       <article class="cost-stat-card cost-stat-card--projection">
         <div class="cost-stat-card__label">Projected / month</div>
-        <div class="cost-stat-card__value">{{ formatCurrency(projection?.projectedMonthlyCost ?? 0, currency) }}</div>
-        <div class="cost-stat-card__hint">at current daily rate × 30</div>
+        <div class="cost-stat-card__value">{{ projection ? formatCurrency(projection.projectedMonthlyCost, currency) : noValue }}</div>
+        <div class="cost-stat-card__hint">{{ projection ? "at current daily rate × 30" : noValueHint }}</div>
       </article>
       <article v-if="budgets.monthlyUsd > 0" class="cost-stat-card cost-stat-card--budget">
         <div class="cost-stat-card__label">Monthly budget</div>
         <div class="cost-stat-card__value">{{ formatCurrency(budgets.monthlyUsd, currency) }}</div>
         <div class="cost-stat-card__hint">
-          <span :class="monthlyClass">
+          <span v-if="summary" :class="monthlyClass">
             {{ monthSpendLabel }} ({{ Math.round((monthSpend / budgets.monthlyUsd) * 100) }}%)
           </span>
+          <span v-else>{{ noValueHint }}</span>
         </div>
       </article>
     </section>
@@ -81,7 +82,8 @@
             <span class="cost-table__cost">{{ formatCurrency(row.estimatedCost, currency) }}</span>
             <span class="cost-table__tokens">{{ formatNumber(row.totalTokens) }}</span>
           </li>
-          <li v-if="(summary?.bySession ?? []).length === 0" class="cost-table__empty">No session activity yet.</li>
+          <li v-if="!summary" class="cost-table__empty">{{ noValueHint }}</li>
+          <li v-else-if="summary.bySession.length === 0" class="cost-table__empty">No session activity yet.</li>
         </ol>
       </article>
 
@@ -93,7 +95,8 @@
             <span class="cost-table__cost">{{ formatCurrency(row.estimatedCost, currency) }}</span>
             <span class="cost-table__tokens">{{ formatNumber(row.totalTokens) }}</span>
           </li>
-          <li v-if="(summary?.byAgent ?? []).length === 0" class="cost-table__empty">No agent activity yet.</li>
+          <li v-if="!summary" class="cost-table__empty">{{ noValueHint }}</li>
+          <li v-else-if="summary.byAgent.length === 0" class="cost-table__empty">No agent activity yet.</li>
         </ol>
       </article>
 
@@ -105,7 +108,8 @@
             <span class="cost-table__cost">{{ formatCurrency(row.estimatedCost, currency) }}</span>
             <span class="cost-table__tokens">{{ formatNumber(row.totalTokens) }}</span>
           </li>
-          <li v-if="(summary?.byModel ?? []).length === 0" class="cost-table__empty">No model activity yet.</li>
+          <li v-if="!summary" class="cost-table__empty">{{ noValueHint }}</li>
+          <li v-else-if="summary.byModel.length === 0" class="cost-table__empty">No model activity yet.</li>
         </ol>
       </article>
     </section>
@@ -115,6 +119,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { errorText } from "@/composables/useToast";
 
 interface CostBucket {
   promptTokens: number;
@@ -152,8 +157,15 @@ const projection = ref<CostProjection | null>(null);
 const budgets = ref<CostBudgets>({ dailyUsd: 0, monthlyUsd: 0 });
 const loading = ref(false);
 const errorMessage = ref<string | null>(null);
+// Counts loads, so a slow answer for an earlier range cannot land under a newer one.
+let loadRun = 0;
 
-const currency = computed(() => summary.value?.currency ?? "USD");
+const currency = computed(() => summary.value?.currency ?? projection.value?.currency ?? "USD");
+
+// What stands in for a figure that is not loaded. The cards used to print $0.00 while loading
+// and after a failed load, which reads as "nothing was spent".
+const noValue = computed(() => (loading.value ? "…" : "—"));
+const noValueHint = computed(() => (loading.value ? "Loading…" : "Not loaded"));
 
 const monthSpend = computed(() => {
   if (!summary.value || budgets.value.monthlyUsd <= 0) return 0;
@@ -185,43 +197,48 @@ function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
 }
 
-async function loadSummary(): Promise<void> {
+async function loadSummary(run: number): Promise<void> {
   if (!gateway.token) return;
   const url = new URL(`${apiBase()}/api/cost/summary`);
   url.searchParams.set("range", String(rangeDays.value));
   const res = await fetch(url.toString(), { headers: { Authorization: `Bearer ${gateway.token}` } });
-  if (!res.ok) {
-    errorMessage.value = `Failed to load cost summary (${res.status})`;
-    return;
-  }
+  if (!res.ok) throw new Error(`Failed to load cost summary (HTTP ${res.status})`);
   const body = await res.json() as { enabled: boolean; budgets: CostBudgets; summary: CostSummary };
+  if (run !== loadRun) return;
   enabled.value = body.enabled;
   budgets.value = body.budgets;
   summary.value = body.summary;
 }
 
-async function loadProjection(): Promise<void> {
+async function loadProjection(run: number): Promise<void> {
   if (!gateway.token) return;
   const res = await fetch(`${apiBase()}/api/cost/projection`, {
     headers: { Authorization: `Bearer ${gateway.token}` },
   });
-  if (!res.ok) return;
-  projection.value = await res.json() as CostProjection;
+  if (!res.ok) throw new Error(`Failed to load cost projection (HTTP ${res.status})`);
+  const body = await res.json() as CostProjection;
+  if (run !== loadRun) return;
+  projection.value = body;
 }
 
 async function refresh(): Promise<void> {
+  const run = ++loadRun;
   loading.value = true;
   errorMessage.value = null;
-  try {
-    await Promise.all([loadSummary(), loadProjection()]);
-  } catch (err) {
-    errorMessage.value = (err as Error).message;
-  } finally {
-    loading.value = false;
-  }
+  // Settled, not all: one half failing must not hide the other half or its own error.
+  const results = await Promise.allSettled([loadSummary(run), loadProjection(run)]);
+  if (run !== loadRun) return; // a newer load owns the page now
+  const failures = results.flatMap((result) => (result.status === "rejected" ? [errorText(result.reason)] : []));
+  if (failures.length > 0) errorMessage.value = failures.join(" · ");
+  loading.value = false;
 }
 
-watch(rangeDays, () => { void loadSummary(); });
+// A new range goes through the normal load. The old range's figures are dropped first, so they
+// never sit under the new range's label, and a failed request shows like any other.
+watch(rangeDays, () => {
+  summary.value = null;
+  void refresh();
+});
 
 function formatCurrency(value: number, code: string): string {
   try {
@@ -246,37 +263,9 @@ onMounted(() => { void refresh(); });
 
 <style scoped>
 .cost-page {
-  padding: 1.5rem 1.75rem 3rem;
   color: rgb(229 231 235);
 }
 
-.cost-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-.cost-page__title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 0;
-  background: linear-gradient(90deg, rgb(165 243 252), rgb(196 181 253));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.cost-page__subtitle {
-  margin: 0.4rem 0 0;
-  color: rgb(156 163 175);
-  font-size: 0.875rem;
-  max-width: 36rem;
-}
-
-.cost-page__subtitle code,
 .cost-disabled code {
   background: rgba(0, 0, 0, 0.4);
   padding: 0.05rem 0.35rem;
@@ -285,38 +274,16 @@ onMounted(() => { void refresh(); });
   font-size: 0.85em;
 }
 
-.cost-page__actions {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
+/* Sized to sit level with the header's buttons. */
 .cost-page__select {
   background: rgba(15, 23, 42, 0.7);
-  border: 1px solid rgba(168, 85, 247, 0.35);
+  border: 1px solid var(--hairline-strong);
   color: rgb(229 231 235);
-  padding: 0.4rem 0.7rem;
-  border-radius: 8px;
-  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
 }
-
-.cost-page__button {
-  background: rgba(76, 29, 149, 0.35);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: rgb(233 213 255);
-  padding: 0.4rem 0.85rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.cost-page__button:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.55);
-  color: white;
-}
-
-.cost-page__button:disabled { opacity: 0.5; cursor: progress; }
 
 .cost-disabled {
   border: 1px dashed rgba(168, 85, 247, 0.35);
@@ -330,12 +297,6 @@ onMounted(() => { void refresh(); });
 }
 
 .cost-page__error {
-  background: rgba(239, 68, 68, 0.12);
-  border: 1px solid rgba(248, 113, 113, 0.4);
-  border-radius: 8px;
-  padding: 0.55rem 0.8rem;
-  color: rgb(252 165 165);
-  font-size: 0.85rem;
   margin-bottom: 1rem;
 }
 

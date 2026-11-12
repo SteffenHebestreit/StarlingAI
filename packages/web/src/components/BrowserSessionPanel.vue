@@ -90,12 +90,18 @@ function observe(id: string) {
   browser.observeSession(id);
 }
 
+// "I solved it" that did not reach the gateway must say so: the button used to flip back from
+// "Resuming…" in silence, and the agent kept waiting for a hand-back that never came.
+const assistError = ref("");
 async function resolveAssist() {
   const id = observedId.value;
   if (!id) return;
   resolving.value = true;
+  assistError.value = "";
   try {
     await browser.resolveAssist(id);
+  } catch (err) {
+    assistError.value = `The agent was not told to continue: ${err instanceof Error ? err.message : String(err)}. Press the button again.`;
   } finally {
     resolving.value = false;
   }
@@ -129,10 +135,11 @@ onUnmounted(teardown);
         <span>{{ observed?.assistReason || "Solve the challenge in the browser below, then continue." }}</span>
         <span v-if="observed?.page" class="assist-page">on {{ observed.page }}</span>
       </div>
-      <button class="btn-resolve" :disabled="resolving" @click="resolveAssist">
+      <button type="button" class="btn-resolve" :disabled="resolving" @click="resolveAssist">
         {{ resolving ? "Resuming…" : "I solved it — continue" }}
       </button>
     </div>
+    <p v-if="assistError" class="assist-error" role="alert">{{ assistError }}</p>
 
     <!-- Session switcher (usually one session) -->
     <div v-if="sessions.length > 1" class="session-list">
@@ -153,6 +160,14 @@ onUnmounted(teardown);
         Live Browser
         <span class="vnc-status" :class="vncStatus" :title="vncDetail">{{ vncStatus }}</span>
         <span v-if="vncDetail" class="vnc-detail">{{ vncDetail }}</span>
+        <!-- A dropped view stayed dropped: nothing re-ran the connect short of reloading the page,
+             in the middle of a CAPTCHA. -->
+        <button
+          v-if="vncStatus === 'disconnected' || vncStatus === 'error'"
+          type="button"
+          class="btn-sm btn-reconnect"
+          @click="connect"
+        >Reconnect</button>
       </h4>
       <button class="btn-sm btn-fullscreen" :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" @click="toggleFullscreen">
         {{ isFullscreen ? "⤡ Exit fullscreen" : "⤢ Fullscreen" }}
@@ -325,4 +340,17 @@ onUnmounted(teardown);
   cursor: pointer;
 }
 .btn-sm:hover { background: var(--color-bg-hover, #333); }
+.assist-error {
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(127, 29, 29, 0.3);
+  color: rgb(254, 202, 202);
+  font-size: 0.85rem;
+}
+.btn-reconnect { margin-left: 0.5rem; }
+@media (prefers-reduced-motion: reduce) {
+  .assist-banner, .assist-banner * { animation: none !important; }
+}
 </style>

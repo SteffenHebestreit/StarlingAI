@@ -1,9 +1,11 @@
 <template>
-  <div class="p-4 h-full overflow-hidden flex flex-col">
-    <div class="flex items-center justify-between mb-4">
-      <h2 class="font-semibold text-lg">Audit Log</h2>
-      <div class="flex gap-2">
-        <select v-model="typeFilter" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
+  <div class="page-shell flex flex-col">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Audit Log</h1>
+      </div>
+      <div class="page-actions">
+        <select v-model="typeFilter" class="max-w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm">
           <option value="">All Events</option>
           <option value="agent_routing_evaluated">Routing</option>
           <option value="tool_call_requested">Tool Requests</option>
@@ -18,24 +20,30 @@
           <option value="ephemeral_agent_rejected">Factory Rejections</option>
           <option value="channel_delivery_failed">Channel Failures</option>
         </select>
-        <select v-model="severityFilter" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm">
+        <select v-model="severityFilter" class="max-w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm">
           <option value="">All</option>
           <option value="info">Info</option>
           <option value="warn">Warn</option>
           <option value="error">Error</option>
         </select>
         <button
+          type="button"
           @click="exportFilteredAuditMarkdown"
           :disabled="filteredEvents.length === 0 || auditExporting"
-          class="px-3 py-1 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed rounded text-sm transition-colors"
+          class="btn-ghost px-4 py-2 rounded-xl text-sm"
         >
           Export Markdown
         </button>
-        <button @click="audit.clear()" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">
-          Clear
+        <button
+          type="button"
+          @click="clearView"
+          :disabled="audit.events.length === 0"
+          class="btn-danger px-4 py-2 rounded-xl text-sm"
+        >
+          Clear view
         </button>
       </div>
-    </div>
+    </header>
 
     <div v-if="performanceSummary" class="mb-4 grid gap-3 md:grid-cols-4">
       <div :class="['rounded-xl px-4 py-3', performanceCardClass(performanceSummary.reliabilityState)]">
@@ -166,7 +174,9 @@
       </div>
     </div>
 
-    <div class="flex-1 overflow-y-auto space-y-1 font-mono text-xs">
+    <!-- The list scrolls by itself. Its floor keeps it tall enough to read when the summary
+         cards stack on a phone; the page then scrolls to reach it. -->
+    <div class="flex-1 min-h-[60vh] md:min-h-[16rem] overflow-y-auto space-y-1 font-mono text-xs">
       <div v-if="!filteredEvents.length" class="text-gray-600 text-center py-8">
         No audit events yet. Start chatting to see events here.
       </div>
@@ -314,6 +324,8 @@ import { ref, computed, onMounted } from "vue";
 import { useAuditStore, type AuditEvent } from "@/stores/audit";
 import { useProductStore } from "@/stores/product";
 import { ITERATION_STOP_FINISH_REASONS } from "@/composables/finishReasons";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -332,9 +344,25 @@ const PERFORMANCE_THRESHOLDS = {
 };
 
 const audit = useAuditStore();
+const toast = useToast();
 const severityFilter = ref("");
 const typeFilter = ref("");
 const auditExporting = ref(false);
+
+// The buffer is one store that other pages read too, and nothing can load it again: it only
+// ever receives live events. So this asks first, and says what else goes with it.
+async function clearView(): Promise<void> {
+  const count = audit.events.length;
+  if (count === 0) return;
+  if (!(await confirmAction({
+    title: "Clear the live event view?",
+    message: `${count === 1 ? "The one event" : `All ${count} events`} in this browser's live buffer ${count === 1 ? "is" : "are"} removed, not only what the filters show. The Plugins activity feed and the Federation live feed read the same buffer and lose them too. They cannot be loaded again; nothing is deleted on the gateway, and new events keep arriving.`,
+    confirmLabel: "Clear view",
+    danger: true,
+  }))) return;
+  audit.clear();
+  toast.success("View cleared", `${count} event${count === 1 ? "" : "s"} removed from the live buffer. New events will appear as they happen.`);
+}
 
 const recentPerformanceEvents = computed(() => audit.events
   .filter((event) => event.type === "turn_performance")

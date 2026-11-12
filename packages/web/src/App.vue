@@ -576,7 +576,7 @@ const allNavEntries: NavEntry[] = [
   { kind: "leaf", to: "/skills", label: "Skills" },
   { kind: "leaf", to: "/documents", label: "Documents" },
   { kind: "leaf", to: "/knowledge", label: "Knowledge" },
-  { kind: "leaf", to: "/catalog", label: "Agents" },
+  { kind: "leaf", to: "/catalog", label: "Agent catalog" },
   {
     kind: "group",
     label: "Manage",

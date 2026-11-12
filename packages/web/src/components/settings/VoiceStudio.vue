@@ -189,7 +189,7 @@
           <li v-for="job in training.jobs" :key="job.id" class="py-2 space-y-1">
             <div class="flex items-center justify-between gap-2 text-xs">
               <span class="text-gray-200">{{ job.modelName ?? job.id }} <span class="text-gray-500">· {{ job.status }}</span></span>
-              <button v-if="isActive(job)" type="button" class="text-[11px] text-red-400/80 hover:text-red-300" @click="cancelTraining(job.id)">Cancel</button>
+              <button v-if="isActive(job)" type="button" class="text-[11px] text-red-400/80 hover:text-red-300" @click="cancelTraining(job)">Cancel</button>
             </div>
             <div v-if="job.progress !== undefined" class="vs-progress"><span :style="{ width: `${Math.min(100, Math.max(0, job.progress))}%` }" /></div>
             <div class="text-[11px] text-gray-500">
@@ -209,17 +209,18 @@ import { useGatewayStore, type HubVoiceInfo, type VoiceTrainingJob } from "@/sto
 import { useMultimodalStore } from "@/stores/multimodal";
 import { unlockAudio } from "@/speech/audioOutput";
 import { VoiceCapture } from "@/speech/voiceCapture";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast, errorText } from "@/composables/useToast";
 import { VOICE_LANGUAGES, cleanVoiceName, voiceCaption, voicesFor } from "./voicePresets";
 
 const gateway = useGatewayStore();
 const multimodal = useMultimodalStore();
+const toast = useToast();
 
 const voices = ref<HubVoiceInfo[]>([]);
 const engines = ref<string[]>([]);
 const loading = ref(false);
 const loadError = ref("");
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 async function refresh(): Promise<void> {
   loading.value = true;
@@ -256,7 +257,10 @@ async function saveAssignments(): Promise<void> {
   savingAssignments.value = false;
   assignError.value = Boolean(multimodal.error);
   assignMessage.value = multimodal.error || "Saved — the chat speaks with these voices now.";
-  if (!multimodal.error) resetAssignments();
+  if (!multimodal.error) {
+    resetAssignments();
+    toast.success("Voices saved", "The chat speaks each language with the voice chosen for it.");
+  }
 }
 
 /** The languages a voice speaks in the chat ("German, English"), or "". */
@@ -312,13 +316,21 @@ const builtInSummary = computed(() => {
 const removing = ref<string | null>(null);
 
 async function remove(voice: HubVoiceInfo): Promise<void> {
-  if (!window.confirm(`Delete the voice "${voice.name}" from the speech service? This cannot be undone.`)) return;
+  const confirmed = await confirmAction({
+    title: `Delete the voice "${voice.name}"?`,
+    message: "It is deleted from the speech service and can no longer be chosen for a language. This cannot be undone.",
+    confirmLabel: "Delete voice",
+    danger: true,
+  });
+  if (!confirmed) return;
   removing.value = voice.id;
   try {
     await gateway.removeTtsVoice(voice.id);
+    toast.success("Voice deleted", `"${voice.name}" is gone from the speech service.`);
     await refresh();
   } catch (error) {
-    loadError.value = errorText(error);
+    // A toast: the error line sits in the first card, and the next refresh clears it.
+    toast.error(`Couldn't delete "${voice.name}"`, errorText(error));
   } finally {
     removing.value = null;
   }
@@ -416,6 +428,7 @@ async function saveClone(): Promise<void> {
     clone.conflict = false;
     clone.replace = false;
     clone.message = `Saved "${saved.name}". Choose it above to have the chat speak with it.`;
+    toast.success("Voice saved", `"${saved.name}" is in your voices. Choose it for a language to have the chat speak with it.`);
     if (!clone.transcript.trim() && saved.referenceText) clone.transcript = saved.referenceText;
     await refresh();
   } catch (error) {
@@ -474,6 +487,7 @@ async function saveDesign(): Promise<void> {
     });
     design.error = false;
     design.message = `Saved "${saved.name}". Choose it above to have the chat speak with it.`;
+    toast.success("Voice saved", `"${saved.name}" is in your voices. Choose it for a language to have the chat speak with it.`);
     await refresh();
   } catch (error) {
     design.error = true;
@@ -529,6 +543,7 @@ async function startTraining(): Promise<void> {
     await gateway.startVoiceTraining({ name: training.name, language: training.language, files: training.files });
     training.error = false;
     training.message = "Training started. It takes hours; the voice appears under Your voices when it is done.";
+    toast.success("Training started", `"${training.name}" takes hours; it appears under Your voices when it is done.`);
     await loadTraining();
   } catch (error) {
     training.error = true;
@@ -538,9 +553,19 @@ async function startTraining(): Promise<void> {
   }
 }
 
-async function cancelTraining(jobId: string): Promise<void> {
+async function cancelTraining(job: VoiceTrainingJob): Promise<void> {
+  const name = job.modelName ?? job.id;
+  const confirmed = await confirmAction({
+    title: `Cancel the training of "${name}"?`,
+    message: "The speech service stops the job before it has produced a voice. It cannot be resumed from here: training again starts from the beginning.",
+    confirmLabel: "Cancel training",
+    cancelLabel: "Keep training",
+    danger: true,
+  });
+  if (!confirmed) return;
   try {
-    await gateway.cancelVoiceTraining(jobId);
+    await gateway.cancelVoiceTraining(job.id);
+    toast.success("Training cancelled", `"${name}" was stopped.`);
     await loadTraining();
   } catch (error) {
     training.error = true;

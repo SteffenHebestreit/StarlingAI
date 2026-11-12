@@ -1,12 +1,13 @@
 <template>
-  <div class="settings-page">
+  <div class="page-shell">
 
-    <div class="glass-card p-5 mb-5">
-      <div>
-        <div class="section-title mb-1">{{ pageTitle }}</div>
-        <div class="text-sm text-gray-400 max-w-3xl">{{ pageDescription }}</div>
+    <!-- Held to the grid's width so the title lines up with the cards on a wide screen. -->
+    <header class="page-header mx-auto max-w-[1400px]">
+      <div class="page-header__text">
+        <h1 class="page-title">{{ pageTitle }}</h1>
+        <p class="page-subtitle">{{ pageDescription }}</p>
       </div>
-    </div>
+    </header>
 
     <div class="settings-grid">
 
@@ -33,8 +34,8 @@
               <input v-model="gateway.token" type="password" class="input-box" autocomplete="current-password" />
             </div>
             <div class="flex gap-2 pt-1">
-              <button @click="gateway.connect()" class="btn-grad px-4 py-2 rounded-xl text-sm">Reconnect</button>
-              <button @click="gateway.disconnect()" class="btn-ghost px-4 py-2 rounded-xl text-sm">Disconnect</button>
+              <button type="button" @click="gateway.connect()" class="btn-grad px-4 py-2 rounded-xl text-sm">Reconnect</button>
+              <button type="button" @click="gateway.disconnect()" class="btn-ghost px-4 py-2 rounded-xl text-sm">Disconnect</button>
             </div>
           </div>
         </div>
@@ -90,9 +91,9 @@
               <div class="text-xs text-gray-500 mt-1">Persistent voice guidance injected into the main assistant prompt and shared with the assistant’s self-profile tools.</div>
             </div>
             <div class="flex items-center gap-2">
-              <button v-if="gateway.connected" @click="personalityStore.fetch()" :disabled="personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="resetPersonalityForm" :disabled="!personalityStore.lastLoaded || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
-              <button @click="restoreDefaultPersonality" :disabled="!gateway.connected || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Defaults</button>
+              <button type="button" v-if="gateway.connected" @click="personalityStore.fetch()" :disabled="personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="resetPersonalityForm" :disabled="!personalityStore.lastLoaded || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Revert</button>
+              <button type="button" @click="restoreDefaultPersonality" :disabled="!gateway.connected || personalityStore.loading || personalityStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Defaults</button>
             </div>
           </div>
 
@@ -159,7 +160,7 @@
             <div v-if="personalityForm.error || personalityStore.error" class="text-sm text-red-400">{{ personalityForm.error || personalityStore.error }}</div>
 
             <div class="flex justify-end">
-              <button @click="submitPersonalityForm" :disabled="personalityStore.loading || personalityStore.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+              <button type="button" @click="submitPersonalityForm" :disabled="personalityStore.loading || personalityStore.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                 {{ personalityStore.saving ? 'Saving…' : 'Save Personality' }}
               </button>
             </div>
@@ -200,8 +201,8 @@
               <div class="text-xs text-gray-500 mt-1">Set file ingestion, STT, TTS, and wake-word defaults.</div>
             </div>
             <div class="flex items-center gap-2">
-              <button v-if="gateway.connected" @click="multimodalStore.fetch()" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="resetMultimodalForm" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              <button type="button" v-if="gateway.connected" @click="multimodalStore.fetch()" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="resetMultimodalForm" :disabled="multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
             </div>
           </div>
 
@@ -218,7 +219,7 @@
                   <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Service Health</div>
                   <div class="text-xs text-gray-500 mt-1">Chat icons only appear when the corresponding backend is reachable.</div>
                 </div>
-                <button @click="multimodalStore.fetchStatus()" :disabled="multimodalStore.statusLoading || multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">
+                <button type="button" @click="multimodalStore.fetchStatus()" :disabled="multimodalStore.statusLoading || multimodalStore.loading || multimodalStore.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">
                   {{ multimodalStore.statusLoading ? 'Checking…' : 'Check Health' }}
                 </button>
               </div>
@@ -461,7 +462,7 @@
                 </div>
                 <div v-if="savedVoiceForm.message" class="text-xs" :class="savedVoiceForm.error ? 'text-red-400' : 'text-green-300'">{{ savedVoiceForm.message }}</div>
                 <div class="flex justify-end">
-                  <button @click="saveVoiceSampleToLibrary" :disabled="savedVoiceForm.saving || !savedVoiceForm.file || qwenVoiceSaveSupported === false" class="btn-ghost px-4 py-2 rounded-xl text-xs">
+                  <button type="button" @click="saveVoiceSampleToLibrary" :disabled="savedVoiceForm.saving || !savedVoiceForm.file || qwenVoiceSaveSupported === false" class="btn-ghost px-4 py-2 rounded-xl text-xs">
                     {{ savedVoiceForm.saving ? 'Saving Voice…' : 'Upload And Save Voice' }}
                   </button>
                 </div>
@@ -473,7 +474,7 @@
                     <div class="text-xs uppercase tracking-[0.18em] text-gray-500">Saved Voice Library</div>
                     <div class="text-xs text-gray-500 mt-1">All voices saved in the qwen-compatible TTS backend. Click a voice ID to set it as Default Voice ID.</div>
                   </div>
-                  <button @click="loadSavedVoices" :disabled="voiceLibrary.loading" class="btn-ghost px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5">
+                  <button type="button" @click="loadSavedVoices" :disabled="voiceLibrary.loading" class="btn-ghost px-3 py-1.5 rounded-xl text-xs flex items-center gap-1.5">
                     <svg v-if="!voiceLibrary.loading" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H3.989a.75.75 0 0 0-.75.75v4.242a.75.75 0 0 0 1.5 0v-2.43l.31.31a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm1.23-3.723a.75.75 0 0 0 .219-.53V2.929a.75.75 0 0 0-1.5 0V5.36l-.31-.31A7 7 0 0 0 3.239 8.188a.75.75 0 1 0 1.448.389A5.5 5.5 0 0 1 13.89 6.11l.311.31h-2.432a.75.75 0 0 0 0 1.5h4.243a.75.75 0 0 0 .53-.219Z" clip-rule="evenodd" /></svg>
                     <svg v-else xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 animate-spin"><path fill-rule="evenodd" d="M15.312 11.424a5.5 5.5 0 0 1-9.201 2.466l-.312-.311h2.433a.75.75 0 0 0 0-1.5H3.989a.75.75 0 0 0-.75.75v4.242a.75.75 0 0 0 1.5 0v-2.43l.31.31a7 7 0 0 0 11.712-3.138.75.75 0 0 0-1.449-.39Zm1.23-3.723a.75.75 0 0 0 .219-.53V2.929a.75.75 0 0 0-1.5 0V5.36l-.31-.31A7 7 0 0 0 3.239 8.188a.75.75 0 1 0 1.448.389A5.5 5.5 0 0 1 13.89 6.11l.311.31h-2.432a.75.75 0 0 0 0 1.5h4.243a.75.75 0 0 0 .53-.219Z" clip-rule="evenodd" /></svg>
                     {{ voiceLibrary.loading ? 'Loading…' : 'Refresh' }}
@@ -485,7 +486,7 @@
                 <ul v-else class="divide-y divide-purple-500/10">
                   <li v-for="voice in voiceLibrary.voices" :key="voice.voice_id" class="flex items-center justify-between py-2 gap-3 group">
                     <div class="min-w-0 flex-1">
-                      <button @click="multimodalForm.ttsDefaultVoiceId = voice.voice_id" class="text-left max-w-full">
+                      <button type="button" @click="multimodalForm.ttsDefaultVoiceId = voice.voice_id" class="text-left max-w-full">
                         <div class="text-xs font-semibold text-gray-200 truncate group-hover:text-purple-300 transition-colors" :class="{ 'text-purple-300': multimodalForm.ttsDefaultVoiceId === voice.voice_id }">{{ voice.name }}</div>
                         <div class="text-[11px] text-gray-500 font-mono truncate">{{ voice.voice_id }}<span v-if="voice.lang" class="ml-2 text-gray-600">{{ voice.lang }}</span></div>
                       </button>
@@ -493,6 +494,7 @@
                     <div class="flex items-center gap-2 flex-shrink-0">
                       <span v-if="multimodalForm.ttsDefaultVoiceId === voice.voice_id" class="text-[10px] text-purple-400 font-medium">active</span>
                       <button
+                        type="button"
                         @click="removeSavedVoice(voice.voice_id)"
                         :disabled="voiceLibrary.removingId === voice.voice_id"
                         class="text-[11px] text-red-400/70 hover:text-red-300 transition-colors disabled:opacity-40"
@@ -562,6 +564,7 @@
                     <div class="text-[11px] text-gray-500">Presets — click to append terms to the field above:</div>
                     <div class="flex flex-wrap gap-1.5">
                       <button
+                        type="button"
                         v-for="preset in IMAGE_GEN_NEGATIVE_PRESETS"
                         :key="preset.label"
                         @click="applyNegativePreset(preset.value)"
@@ -569,6 +572,7 @@
                         :title="preset.value"
                       >{{ preset.label }}</button>
                       <button
+                        type="button"
                         @click="multimodalForm.imageGenDefaultNegativePrompt = ''"
                         class="px-2.5 py-1 rounded-lg text-xs border border-red-500/20 bg-red-900/10 text-red-300 hover:bg-red-800/20 transition-colors"
                       >Clear</button>
@@ -605,7 +609,7 @@
             <div v-if="multimodalStore.error || multimodalForm.error" class="text-sm text-red-400">{{ multimodalForm.error || multimodalStore.error }}</div>
 
             <div class="flex justify-end">
-              <button @click="submitMultimodalForm" :disabled="multimodalStore.saving || multimodalStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+              <button type="button" @click="submitMultimodalForm" :disabled="multimodalStore.saving || multimodalStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
                 {{ multimodalStore.saving ? 'Saving…' : 'Save Multimodal Settings' }}
               </button>
             </div>
@@ -632,9 +636,9 @@
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Guardrails</h3>
             <div class="flex items-center gap-2">
-              <button v-if="guardrails.state" @click="guardrails.reset()" :disabled="guardrails.loading"
+              <button type="button" v-if="guardrails.state" @click="resetGuardrails" :disabled="guardrails.loading"
                 class="text-xs text-gray-500 hover:text-purple-400 transition-colors">Reset defaults</button>
-              <button v-if="!guardrails.state && gateway.connected" @click="guardrails.fetch()" :disabled="guardrails.loading"
+              <button type="button" v-if="!guardrails.state && gateway.connected" @click="guardrails.fetch()" :disabled="guardrails.loading"
                 class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Load</button>
             </div>
           </div>
@@ -650,7 +654,7 @@
                 <p class="text-xs text-gray-500 mt-0.5">Scan incoming messages for jailbreak and injection patterns.</p>
               </div>
               <toggle-switch :value="guardrails.state.promptInjectionBlock"
-                @change="guardrails.update({ promptInjectionBlock: $event })" :disabled="guardrails.loading" />
+                @change="updateGuardrails({ promptInjectionBlock: $event })" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
             <div class="flex items-start justify-between gap-4">
@@ -659,7 +663,7 @@
                 <p class="text-xs text-gray-500 mt-0.5">Redact API keys, tokens, and credentials from LLM responses.</p>
               </div>
               <toggle-switch :value="guardrails.state.outputSecretScan"
-                @change="guardrails.update({ outputSecretScan: $event })" :disabled="guardrails.loading" />
+                @change="updateGuardrails({ outputSecretScan: $event })" :disabled="guardrails.loading" />
             </div>
             <div class="border-t border-purple-500/10" />
             <div class="space-y-2">
@@ -671,7 +675,7 @@
                 <span class="text-sm font-mono text-purple-300 tabular-nums">{{ guardrails.state.maxInputLength.toLocaleString() }}</span>
               </div>
               <input type="range" min="1000" max="100000" step="1000" :value="guardrails.state.maxInputLength"
-                @change="guardrails.update({ maxInputLength: Number(($event.target as HTMLInputElement).value) })"
+                @change="updateGuardrails({ maxInputLength: Number(($event.target as HTMLInputElement).value) })"
                 :disabled="guardrails.loading" class="w-full accent-purple-500" />
               <div class="flex justify-between text-xs text-gray-600"><span>1 000</span><span>100 000</span></div>
             </div>
@@ -695,8 +699,8 @@
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Site Credentials</h3>
             <div class="flex gap-2">
-              <button v-if="gateway.connected && !sites.sites.length" @click="sites.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="openSiteForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Site</button>
+              <button type="button" v-if="gateway.connected && !sites.sites.length" @click="sites.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="openSiteForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Site</button>
             </div>
           </div>
 
@@ -723,10 +727,10 @@
                 <div v-if="site.notes" class="text-xs text-gray-600 italic mt-0.5">{{ site.notes }}</div>
               </div>
               <div class="flex gap-1 shrink-0">
-                <button v-if="site.source === 'store'" @click="openSiteForm(site)" class="icon-btn" title="Edit">✏</button>
-                <button v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" disabled>🔒</button>
-                <button v-if="site.source === 'store'" @click="confirmDeleteSite(site.hostname)"
-                  :disabled="sites.loading" class="icon-btn icon-btn--danger" title="Delete">✕</button>
+                <button type="button" v-if="site.source === 'store'" @click="openSiteForm(site)" class="icon-btn" title="Edit" :aria-label="`Edit the credentials for ${site.hostname}`">✏</button>
+                <button type="button" v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" :aria-label="`${site.hostname} is defined in starlingai.json and cannot be edited here`" disabled>🔒</button>
+                <button type="button" v-if="site.source === 'store'" @click="confirmDeleteSite(site.hostname)"
+                  :disabled="sites.loading" class="icon-btn icon-btn--danger" title="Delete" :aria-label="`Delete the credentials for ${site.hostname}`">✕</button>
               </div>
             </div>
           </div>
@@ -739,8 +743,8 @@
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Scenes</h3>
             <div class="flex gap-2">
-              <button v-if="gateway.connected && !scenesStore.scenes.length" @click="scenesStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="openSceneForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Scene</button>
+              <button type="button" v-if="gateway.connected && !scenesStore.scenes.length" @click="scenesStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="openSceneForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Scene</button>
             </div>
           </div>
 
@@ -760,10 +764,10 @@
                   <div class="text-xs text-gray-400 mt-0.5">{{ scene.description }}</div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <button v-if="scene.source === 'store'" @click="openSceneForm(scene)" class="icon-btn" title="Edit">✏</button>
-                  <button v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" disabled>🔒</button>
-                  <button v-if="scene.source === 'store'" @click="confirmDeleteScene(scene.name)"
-                    :disabled="scenesStore.loading" class="icon-btn icon-btn--danger" title="Delete">✕</button>
+                  <button type="button" v-if="scene.source === 'store'" @click="openSceneForm(scene)" class="icon-btn" title="Edit" :aria-label="`Edit the scene ${scene.name}`">✏</button>
+                  <button type="button" v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" :aria-label="`The scene ${scene.name} is defined in starlingai.json and cannot be edited here`" disabled>🔒</button>
+                  <button type="button" v-if="scene.source === 'store'" @click="confirmDeleteScene(scene.name)"
+                    :disabled="scenesStore.loading" class="icon-btn icon-btn--danger" title="Delete" :aria-label="`Delete the scene ${scene.name}`">✕</button>
                 </div>
               </div>
               <details class="mt-2">
@@ -780,8 +784,8 @@
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Jobs</h3>
             <div class="flex gap-2">
-              <button v-if="gateway.connected && !jobsStore.jobs.length" @click="jobsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="openJobForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Job</button>
+              <button type="button" v-if="gateway.connected && !jobsStore.jobs.length" @click="jobsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="openJobForm(null)" :disabled="!gateway.connected" class="btn-grad px-3 py-1.5 rounded-lg text-xs">+ Add Job</button>
             </div>
           </div>
 
@@ -802,9 +806,9 @@
                   <div class="text-xs text-gray-400 mt-0.5">{{ job.description }}</div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <button v-if="job.source === 'store'" @click="openJobForm(job)" class="icon-btn" title="Edit">✏</button>
-                  <button v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" disabled>🔒</button>
-                  <button v-if="job.source === 'store'" @click="confirmDeleteJob(job.name)" :disabled="jobsStore.loading" class="icon-btn icon-btn--danger" title="Delete">✕</button>
+                  <button type="button" v-if="job.source === 'store'" @click="openJobForm(job)" class="icon-btn" title="Edit" :aria-label="`Edit the job ${job.name}`">✏</button>
+                  <button type="button" v-else class="icon-btn opacity-40 cursor-not-allowed" title="Defined in starlingai.json" :aria-label="`The job ${job.name} is defined in starlingai.json and cannot be edited here`" disabled>🔒</button>
+                  <button type="button" v-if="job.source === 'store'" @click="confirmDeleteJob(job.name)" :disabled="jobsStore.loading" class="icon-btn icon-btn--danger" title="Delete" :aria-label="`Delete the job ${job.name}`">✕</button>
                 </div>
               </div>
               <details class="mt-2">
@@ -825,8 +829,8 @@
                 <div class="text-xs text-gray-500 mt-1">Adjust limits to match your hardware. Leave a field at its default to use the built-in value.</div>
               </div>
               <div class="flex items-center gap-2">
-                <button v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-                <button @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+                <button type="button" v-if="gateway.connected" @click="reloadOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+                <button type="button" @click="resetOrchestrationConfig" :disabled="orchestrationSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
               </div>
             </div>
 
@@ -923,7 +927,7 @@
               <div v-if="orchestrationError" class="text-sm text-red-400">{{ orchestrationError }}</div>
 
               <div class="flex justify-end">
-                <button @click="saveOrchestrationConfigUI" :disabled="orchestrationSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                <button type="button" @click="saveOrchestrationConfigUI" :disabled="orchestrationSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                   {{ orchestrationSaving ? 'Saving…' : 'Save Limits' }}
                 </button>
               </div>
@@ -937,7 +941,7 @@
                 <h3 class="section-title mb-0">Skill Library &amp; Automation</h3>
                 <div class="text-xs text-gray-500 mt-1">Self-authoring procedural memory and batched tool execution. Browse authored skills on the <RouterLink to="/skills" class="text-indigo-300 hover:underline">Skills</RouterLink> page.</div>
               </div>
-              <button v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" v-if="gateway.connected" @click="reloadSkillConfig" :disabled="skillConfigSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to configure the Skill Library.</div>
@@ -988,7 +992,7 @@
               <div v-if="skillConfigError" class="text-sm text-red-400">{{ skillConfigError }}</div>
 
               <div class="flex justify-end">
-                <button @click="saveSkillConfigUI" :disabled="skillConfigSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                <button type="button" @click="saveSkillConfigUI" :disabled="skillConfigSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                   {{ skillConfigSaving ? 'Saving…' : 'Save' }}
                 </button>
               </div>
@@ -1002,7 +1006,7 @@
                 <h3 class="section-title mb-0">Document RAG</h3>
                 <div class="text-xs text-gray-500 mt-1">Retrieval-augmented context from attached/uploaded documents (engram graph-RAG). Files are extracted to text and indexed; relevant excerpts are injected into the conversation.</div>
               </div>
-              <button v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" v-if="gateway.connected" @click="reloadDocumentRagConfig" :disabled="docRagSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
             </div>
 
             <div v-if="!gateway.connected" class="empty-state">Connect to configure Document RAG.</div>
@@ -1066,7 +1070,7 @@
               <div v-if="docRagError" class="text-sm text-red-400">{{ docRagError }}</div>
 
               <div class="flex justify-end">
-                <button @click="saveDocumentRagConfigUI" :disabled="docRagSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                <button type="button" @click="saveDocumentRagConfigUI" :disabled="docRagSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                   {{ docRagSaving ? 'Saving…' : 'Save' }}
                 </button>
               </div>
@@ -1081,8 +1085,8 @@
                 <div class="text-xs text-gray-500 mt-1">The swarm's evolving understanding of you — one item per line. The agent also refines this automatically as it learns; this is distinct from durable memory facts and the assistant's own personality.</div>
               </div>
               <div class="flex items-center gap-2">
-                <button v-if="gateway.connected" @click="reloadUserModel" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-                <button @click="resetUserModelUI" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+                <button type="button" v-if="gateway.connected" @click="reloadUserModel" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+                <button type="button" @click="resetUserModelUI" :disabled="userModelSaving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
               </div>
             </div>
 
@@ -1113,7 +1117,7 @@
 
               <div class="flex items-center justify-between">
                 <div class="text-xs text-gray-500">rev {{ userModelRevision }}<span v-if="userModelUpdatedBy"> · last updated by {{ userModelUpdatedBy }}</span></div>
-                <button @click="saveUserModelUI" :disabled="userModelSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+                <button type="button" @click="saveUserModelUI" :disabled="userModelSaving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                   {{ userModelSaving ? 'Saving…' : 'Save' }}
                 </button>
               </div>
@@ -1127,6 +1131,7 @@
                 <div class="text-xs text-gray-500 mt-1">Describe the setup or enhancement you want. {{ product.name }} drafts the changes, you review them, and nothing applies until you approve it.</div>
               </div>
               <button
+                type="button"
                 v-if="gateway.connected"
                 @click="reloadConfigAssistant"
                 :disabled="configAssistant.loading || configAssistant.flowLoading || configAssistant.proposing || Boolean(configAssistant.activeProposalId)"
@@ -1180,8 +1185,8 @@
                 <div v-if="configAssistant.proposeError" class="text-sm text-red-400">{{ configAssistant.proposeError }}</div>
 
                 <div class="flex justify-end gap-2">
-                  <button @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
-                  <button @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
+                  <button type="button" @click="resetConfigAssistantForm" :disabled="configAssistant.proposing" class="btn-ghost px-4 py-2 rounded-xl text-xs">Reset</button>
+                  <button type="button" @click="submitConfigAssistantRequest" :disabled="configAssistant.proposing || !configAssistantForm.request.trim()" class="btn-grad px-4 py-2 rounded-xl text-sm">
                     {{ configAssistant.proposing ? 'Drafting…' : 'Generate Proposal' }}
                   </button>
                 </div>
@@ -1275,30 +1280,35 @@
 
                     <div class="flex flex-wrap justify-end gap-2 pt-1">
                       <button
+                        type="button"
                         v-if="proposal.status === 'pending'"
                         @click="applyConfigProposal(proposal.id)"
                         :disabled="configAssistant.activeProposalId === proposal.id"
                         class="btn-grad px-3 py-1.5 rounded-lg text-xs"
                       >{{ configAssistant.activeProposalId === proposal.id ? 'Applying…' : 'Apply With Consent' }}</button>
                       <button
+                        type="button"
                         v-if="proposal.status === 'pending'"
                         @click="sendProposalFeedback(proposal.id, 'rejected')"
                         :disabled="configAssistant.activeProposalId === proposal.id"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Reject</button>
                       <button
+                        type="button"
                         v-if="proposal.status === 'applied'"
                         @click="sendProposalFeedback(proposal.id, 'success')"
                         :disabled="configAssistant.activeProposalId === proposal.id"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Worked</button>
                       <button
+                        type="button"
                         v-if="proposal.status === 'applied'"
                         @click="sendProposalFeedback(proposal.id, 'partial')"
                         :disabled="configAssistant.activeProposalId === proposal.id"
                         class="btn-ghost px-3 py-1.5 rounded-lg text-xs"
                       >Partial</button>
                       <button
+                        type="button"
                         v-if="proposal.status === 'applied'"
                         @click="sendProposalFeedback(proposal.id, 'failure')"
                         :disabled="configAssistant.activeProposalId === proposal.id"
@@ -1319,8 +1329,8 @@
               <div class="text-xs text-gray-500 mt-1">Persist endpoint overrides for the default orchestrator, embeddings, reranker, and guard model.</div>
             </div>
             <div class="flex items-center gap-2">
-              <button v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
-              <button @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
+              <button type="button" v-if="gateway.connected" @click="fetchModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+              <button type="button" @click="resetModelEndpointConfig" :disabled="!modelEndpointForm.lastLoaded || modelEndpointForm.loading || modelEndpointForm.saving" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reset</button>
             </div>
           </div>
 
@@ -1442,7 +1452,7 @@
             <div v-if="modelEndpointForm.error" class="text-sm text-red-400">{{ modelEndpointForm.error }}</div>
 
             <div class="flex justify-end">
-              <button @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
+              <button type="button" @click="submitModelEndpointConfig" :disabled="modelEndpointForm.loading || modelEndpointForm.saving" class="btn-grad px-5 py-2 rounded-xl text-sm">
                 {{ modelEndpointForm.saving ? 'Saving…' : 'Save Model Routing' }}
               </button>
             </div>
@@ -1453,7 +1463,7 @@
         <div v-if="isAgentsPage" class="glass-card p-5">
           <div class="flex items-center justify-between mb-4">
             <h3 class="section-title mb-0">Sub-Agents</h3>
-            <button v-if="gateway.connected" @click="agentsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            <button type="button" v-if="gateway.connected" @click="agentsStore.fetch()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
           </div>
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage agents.</div>
@@ -1485,10 +1495,10 @@
                   <option value="medium">medium</option>
                   <option value="low">low</option>
                 </select>
-                <button @click="runRoutingLab" :disabled="agentsStore.routingLoading || !routingLab.query.trim()" class="btn-grad px-3 py-2 rounded-xl text-xs">
+                <button type="button" @click="runRoutingLab" :disabled="agentsStore.routingLoading || !routingLab.query.trim()" class="btn-grad px-3 py-2 rounded-xl text-xs">
                   {{ agentsStore.routingLoading ? 'Testing…' : 'Resolve' }}
                 </button>
-                <button @click="clearRoutingLab" :disabled="agentsStore.routingLoading" class="btn-ghost px-3 py-2 rounded-xl text-xs">Clear</button>
+                <button type="button" @click="clearRoutingLab" :disabled="agentsStore.routingLoading" class="btn-ghost px-3 py-2 rounded-xl text-xs">Clear</button>
               </div>
 
               <div v-if="agentsStore.routingError" class="text-xs text-red-400 mt-3">{{ agentsStore.routingError }}</div>
@@ -1564,7 +1574,7 @@
                     <input type="number" step="0.05" min="0" max="2"
                       :value="agent.model.temperature ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { temperature: ($event.target as HTMLInputElement).value === '' ? null : +($event.target as HTMLInputElement).value })"
+                      @change="patchAgentModel(agent.name, 'temperature', { temperature: ($event.target as HTMLInputElement).value === '' ? null : +($event.target as HTMLInputElement).value })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1573,7 +1583,7 @@
                       :value="agent.model.maxTokens ?? ''"
                       placeholder="derived"
                       title="Leave empty to derive the output budget per request from the context window. A value here is a hard ceiling."
-                      @change="agentsStore.patchModel(agent.name, { maxTokens: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'maxTokens', { maxTokens: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1581,7 +1591,7 @@
                     <input type="number" step="0.01" min="0" max="1"
                       :value="agent.model.topP ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { topP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'top_p', { topP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1589,7 +1599,7 @@
                     <input type="number" step="1" min="1" max="200"
                       :value="agent.model.topK ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { topK: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'top_k', { topK: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1597,7 +1607,7 @@
                     <input type="number" step="0.01" min="0" max="1"
                       :value="agent.model.minP ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { minP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'min_p', { minP: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1605,7 +1615,7 @@
                     <input type="number" step="0.05" min="0.5" max="2"
                       :value="agent.model.repeatPenalty ?? ''"
                       placeholder="default"
-                      @change="agentsStore.patchModel(agent.name, { repeatPenalty: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'repeat_penalty', { repeatPenalty: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
@@ -1613,14 +1623,14 @@
                     <input type="number" step="1"
                       :value="agent.model.seed ?? ''"
                       placeholder="random"
-                      @change="agentsStore.patchModel(agent.name, { seed: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
+                      @change="patchAgentModel(agent.name, 'seed', { seed: ($event.target as HTMLInputElement).value ? +($event.target as HTMLInputElement).value : null })"
                       class="input-box text-sm" />
                   </div>
                   <div>
                     <label class="field-label text-xs">model</label>
                     <input type="text"
                       :value="agent.model.primary ?? ''"
-                      @change="agentsStore.patchModel(agent.name, { primary: ($event.target as HTMLInputElement).value.trim() || null })"
+                      @change="patchAgentModel(agent.name, 'model', { primary: ($event.target as HTMLInputElement).value.trim() || null })"
                       class="input-box text-sm font-mono" />
                   </div>
                   <div class="md:col-span-2">
@@ -1650,7 +1660,7 @@
                     </div>
                     <select
                       :value="agent.model.enableThinking === undefined ? '' : agent.model.enableThinking ? 'on' : 'off'"
-                      @change="agentsStore.patchModel(agent.name, { enableThinking: ($event.target as HTMLSelectElement).value === '' ? null : ($event.target as HTMLSelectElement).value === 'on' })"
+                      @change="patchAgentModel(agent.name, 'thinking mode', { enableThinking: ($event.target as HTMLSelectElement).value === '' ? null : ($event.target as HTMLSelectElement).value === 'on' })"
                       class="input-box text-sm w-24 shrink-0">
                       <option value="">auto</option>
                       <option value="on">on</option>
@@ -1674,7 +1684,7 @@
                 {{ channelsStore.deadLetterCount }} dead letter{{ channelsStore.deadLetterCount === 1 ? '' : 's' }}
               </span>
             </div>
-            <button v-if="gateway.connected" @click="channelsStore.fetch(); channelsStore.fetchDeadLetterCount()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
+            <button type="button" v-if="gateway.connected" @click="channelsStore.fetch(); channelsStore.fetchDeadLetterCount()" class="btn-ghost px-3 py-1.5 rounded-lg text-xs">Reload</button>
           </div>
 
           <div v-if="!gateway.connected" class="empty-state">Connect to manage channels.</div>
@@ -1740,8 +1750,8 @@
                     </div>
                   </div>
                 </div>
-                <button @click="void openChannelForm(def)" :disabled="!gateway.connected"
-                  class="icon-btn shrink-0" title="Configure">✏</button>
+                <button type="button" @click="void openChannelForm(def)" :disabled="!gateway.connected"
+                  class="icon-btn shrink-0" title="Configure" :aria-label="`Configure the ${def.label} channel`">✏</button>
               </div>
             </div>
           </div>
@@ -1752,11 +1762,11 @@
   </div>
 
   <!-- ── Site form modal ─────────────────────────────────────────────────── -->
-  <div v-if="siteForm.open" class="modal-backdrop" @click.self="siteForm.open = false">
+  <div v-if="siteForm.open" class="modal-backdrop" @click.self="dismissSiteForm">
     <div class="modal-box">
       <div class="modal-header">
         <h3 class="font-semibold text-gray-100">{{ siteForm.editing ? 'Edit Site' : 'Add Site' }}</h3>
-        <button @click="siteForm.open = false" class="modal-close">✕</button>
+        <button type="button" @click="siteForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
       <div class="space-y-4 p-5">
@@ -1789,7 +1799,7 @@
             <div v-for="(entry, i) in siteForm.urlEntries" :key="i" class="flex gap-2 items-center">
               <input v-model="entry.label" type="text" class="input-box w-28 shrink-0" placeholder="label" />
               <input v-model="entry.url" type="text" class="input-box flex-1" placeholder="https://…" />
-              <button @click="siteForm.urlEntries.splice(i, 1)" class="text-gray-600 hover:text-red-400 transition-colors px-1 text-lg leading-none">✕</button>
+              <button type="button" @click="siteForm.urlEntries.splice(i, 1)" class="text-gray-600 hover:text-red-400 transition-colors px-1 text-lg leading-none" aria-label="Remove this URL">✕</button>
             </div>
           </div>
         </div>
@@ -1812,19 +1822,19 @@
       <div v-if="siteForm.error" class="px-5 pb-2 text-sm text-red-400">{{ siteForm.error }}</div>
 
       <div class="modal-footer">
-        <button @click="siteForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
-        <button @click="submitSiteForm" :disabled="sites.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+        <button type="button" @click="siteForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
+        <button type="button" @click="submitSiteForm" :disabled="sites.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ sites.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
     </div>
   </div>
 
-  <div v-if="jobForm.open" class="modal-backdrop" @click.self="jobForm.open = false">
+  <div v-if="jobForm.open" class="modal-backdrop" @click.self="dismissJobForm">
     <div class="modal-box">
       <div class="modal-header">
         <h3 class="font-semibold text-gray-100">{{ jobForm.editing ? 'Edit Job' : 'Add Job' }}</h3>
-        <button @click="jobForm.open = false" class="modal-close">✕</button>
+        <button type="button" @click="jobForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
       <div class="space-y-4 p-5">
@@ -1853,8 +1863,8 @@
       <div v-if="jobForm.error" class="px-5 pb-2 text-sm text-red-400">{{ jobForm.error }}</div>
 
       <div class="modal-footer">
-        <button @click="jobForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
-        <button @click="submitJobForm" :disabled="jobsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+        <button type="button" @click="jobForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
+        <button type="button" @click="submitJobForm" :disabled="jobsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ jobsStore.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
@@ -1862,11 +1872,11 @@
   </div>
 
   <!-- ── Channel form modal ──────────────────────────────────────────────── -->
-  <div v-if="channelForm.open" class="modal-backdrop" @click.self="channelForm.open = false">
+  <div v-if="channelForm.open" class="modal-backdrop" @click.self="dismissChannelForm">
     <div class="modal-box">
       <div class="modal-header">
         <h3 class="font-semibold text-gray-100">Configure {{ channelForm.label }}</h3>
-        <button @click="channelForm.open = false" class="modal-close">✕</button>
+        <button type="button" @click="channelForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
       <div class="space-y-4 p-5">
@@ -2079,8 +2089,8 @@
       <div v-if="channelForm.error" class="px-5 pb-2 text-sm text-red-400">{{ channelForm.error }}</div>
 
       <div class="modal-footer">
-        <button @click="closeChannelForm" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
-        <button @click="submitChannelForm" :disabled="channelsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+        <button type="button" @click="closeChannelForm" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
+        <button type="button" @click="submitChannelForm" :disabled="channelsStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ channelsStore.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
@@ -2088,11 +2098,11 @@
   </div>
 
   <!-- ── Scene form modal ────────────────────────────────────────────────── -->
-  <div v-if="sceneForm.open" class="modal-backdrop" @click.self="sceneForm.open = false">
+  <div v-if="sceneForm.open" class="modal-backdrop" @click.self="dismissSceneForm">
     <div class="modal-box">
       <div class="modal-header">
         <h3 class="font-semibold text-gray-100">{{ sceneForm.editing ? 'Edit Scene' : 'Add Scene' }}</h3>
-        <button @click="sceneForm.open = false" class="modal-close">✕</button>
+        <button type="button" @click="sceneForm.open = false" class="modal-close" aria-label="Close">✕</button>
       </div>
 
       <div class="space-y-4 p-5">
@@ -2122,8 +2132,8 @@
       <div v-if="sceneForm.error" class="px-5 pb-2 text-sm text-red-400">{{ sceneForm.error }}</div>
 
       <div class="modal-footer">
-        <button @click="sceneForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
-        <button @click="submitSceneForm" :disabled="scenesStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
+        <button type="button" @click="sceneForm.open = false" class="btn-ghost px-4 py-2 rounded-xl text-sm">Cancel</button>
+        <button type="button" @click="submitSceneForm" :disabled="scenesStore.loading" class="btn-grad px-5 py-2 rounded-xl text-sm">
           {{ scenesStore.loading ? 'Saving…' : 'Save' }}
         </button>
       </div>
@@ -2152,6 +2162,9 @@ import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import VoiceStudio from "@/components/settings/VoiceStudio.vue";
 import { appVersion } from "@/appVersion";
 import { useProductStore } from "@/stores/product";
+import { confirmAction } from "@/composables/useConfirm";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useToast } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -2169,6 +2182,7 @@ const runtime = useRuntimeStore();
 const agentsStore = useAgentsStore();
 const multimodalStore = useMultimodalStore();
 const configAssistant = useConfigAssistantStore();
+const toast = useToast();
 
 const pageMode = computed<"settings" | "agents">(() => {
   if (route.path === "/agents") return "agents";
@@ -2176,15 +2190,16 @@ const pageMode = computed<"settings" | "agents">(() => {
 });
 const isSettingsPage = computed(() => pageMode.value === "settings");
 const isAgentsPage = computed(() => pageMode.value === "agents");
+// Each title is the name the navigation gives the route, so the menu and the page agree.
 const pageTitle = computed(() => {
-  if (isAgentsPage.value) return "Agents & Models";
-  return "Runtime Settings";
+  if (isAgentsPage.value) return "Agent tuning";
+  return "Settings";
 });
 const pageDescription = computed(() => {
   if (isAgentsPage.value) {
-    return "Agent personality, sub-agent routing, model endpoint health, model routing, and configuration proposals live here.";
+    return "Assistant personality, model endpoints and routing, orchestration tuning, skill automation, Document RAG, the user model, sub-agents, and configuration proposals live here.";
   }
-  return "Connection, runtime health, multimodal services, guardrails, channels, sites, scenes, and jobs live here.";
+  return "Appearance, gateway connection, runtime health, multimodal services, guardrails, site credentials, scenes, jobs, and channels live here.";
 });
 
 const routingLab = reactive({
@@ -2498,6 +2513,7 @@ async function submitModelEndpointConfig() {
 
     modelEndpointForm.refusedField = "";
     syncModelEndpointForm(await response.json() as ModelEndpointEditorConfig);
+    toast.success("Model routing saved", "The orchestrator, embeddings, reranker and guard endpoints are stored; their health is checked again.");
     await runtime.fetch();
   } catch (error) {
     modelEndpointForm.error = error instanceof Error ? error.message : String(error);
@@ -2522,8 +2538,25 @@ async function saveAgentEndpoint(agent: AgentInfo) {
   // Left empty, the key falls back to the default one (see keyAsSaved); the mask stands for the saved key.
   const apiKey = keyAsSaved(draft.apiKey ?? agent.model.apiKey ?? "", baseUrl, { key: agent.model.apiKey, endpoint: agent.model.baseUrl });
   const refusal = await agentsStore.patchModel(agent.name, { baseUrl: baseUrl || null, apiKey: apiKey ?? null });
-  if (refusal) draft.error = refusal;
-  else delete agentEndpointDrafts[agent.name];
+  if (refusal) {
+    draft.error = refusal;
+    return;
+  }
+  delete agentEndpointDrafts[agent.name];
+  toast.success("Agent endpoint saved", `${agent.name} uses ${baseUrl || "the provider's default endpoint"}.`);
+}
+
+// A refused patch makes the store fetch the agents again, which clears its error line and snaps
+// the field back to the old value: the reason is raised here, where it outlives that.
+async function patchAgentModel(name: string, label: string, patch: Parameters<typeof agentsStore.patchModel>[1]) {
+  const refusal = await agentsStore.patchModel(name, patch);
+  if (refusal) {
+    toast.error(`Couldn't change ${label} for ${name}`, refusal);
+    return;
+  }
+  const value = Object.values(patch)[0];
+  const state = value === null ? "back to its default" : `now ${value === true ? "on" : value === false ? "off" : String(value)}`;
+  toast.success("Agent setting saved", `${name}: ${label} is ${state}.`);
 }
 
 function applyNegativePreset(value: string) {
@@ -2597,13 +2630,21 @@ async function submitPersonalityForm() {
   });
 
   if (personalityStore.error) personalityForm.error = personalityStore.error;
+  else toast.success("Personality saved", "The assistant uses it from the next turn.");
 }
 
 async function restoreDefaultPersonality() {
-  if (!confirm("Reset the main assistant personality to the built-in defaults?")) return;
+  const confirmed = await confirmAction({
+    title: "Reset the personality to the built-in defaults?",
+    message: "The assistant's name, identity, tone, style, collaboration notes, quirks and growth notes are replaced with the defaults. What is saved now cannot be brought back.",
+    confirmLabel: "Reset personality",
+    danger: true,
+  });
+  if (!confirmed) return;
   personalityForm.error = "";
   await personalityStore.reset();
   if (personalityStore.error) personalityForm.error = personalityStore.error;
+  else toast.success("Personality reset", "The built-in defaults are in use again.");
 }
 
 function formatPersonalityUpdatedAt(value: string): string {
@@ -2727,6 +2768,7 @@ async function saveVoiceSampleToLibrary() {
 
     savedVoiceForm.error = false;
     savedVoiceForm.message = `Saved voice '${result.name}' as '${result.voice_id}' and set it as Default Voice ID`;
+    toast.success("Voice saved", `"${result.name}" is in the library and is now the default voice.`);
     void loadSavedVoices();
   } catch (error) {
     savedVoiceForm.error = true;
@@ -2764,7 +2806,13 @@ async function loadSavedVoices() {
 }
 
 async function removeSavedVoice(voiceId: string) {
-  if (!confirm(`Remove voice "${voiceId}" from the library?`)) return;
+  const confirmed = await confirmAction({
+    title: `Remove the voice "${voiceId}"?`,
+    message: "It is deleted from the speech backend's voice library. This cannot be undone; to use it again you upload its sample again.",
+    confirmLabel: "Remove voice",
+    danger: true,
+  });
+  if (!confirmed) return;
   voiceLibrary.removingId = voiceId;
   voiceLibrary.error = "";
   try {
@@ -2773,6 +2821,7 @@ async function removeSavedVoice(voiceId: string) {
     if (multimodalForm.ttsDefaultVoiceId === voiceId) {
       multimodalForm.ttsDefaultVoiceId = "";
     }
+    toast.success("Voice removed", `"${voiceId}" is gone from the library.`);
   } catch (error) {
     voiceLibrary.error = error instanceof Error ? error.message : String(error);
   } finally {
@@ -2814,9 +2863,57 @@ async function submitMultimodalForm() {
 
   if (!multimodalStore.error) {
     syncMultimodalForm(multimodalStore.config);
+    toast.success("Multimodal settings saved", "File, speech and image services use the new settings, and the chat's wake-word settings are in sync.");
   } else {
     multimodalForm.error = multimodalStore.error;
   }
+}
+
+// ── Guardrails ───────────────────────────────────────────────────────────────
+
+type GuardrailPatch = Parameters<typeof guardrails.update>[0];
+
+function describeGuardrails(patch: GuardrailPatch): string {
+  if (patch.promptInjectionBlock !== undefined) return `Prompt injection protection is ${patch.promptInjectionBlock ? "on" : "off"}.`;
+  if (patch.outputSecretScan !== undefined) return `Output secret scanning is ${patch.outputSecretScan ? "on" : "off"}.`;
+  return `Messages may be up to ${(patch.maxInputLength ?? 0).toLocaleString()} characters long.`;
+}
+
+// The store fetches the state again after a refused update, which clears its error line, and it
+// returns nothing: whether the change took is read off the state that came back.
+async function updateGuardrails(patch: GuardrailPatch) {
+  await guardrails.update(patch);
+  const state = guardrails.state;
+  const applied = state !== null && (Object.keys(patch) as Array<keyof GuardrailPatch>).every((key) => state[key] === patch[key]);
+  if (applied) toast.success("Guardrails updated", describeGuardrails(patch));
+  else toast.error("Guardrail not changed", guardrails.error || "The gateway did not take this value. The control shows what is in effect.");
+}
+
+async function resetGuardrails() {
+  const confirmed = await confirmAction({
+    title: "Reset the guardrails to their defaults?",
+    message: "Prompt injection protection, output secret scanning and the maximum input length go back to the defaults from the configuration. The values set here are discarded.",
+    confirmLabel: "Reset guardrails",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await guardrails.reset();
+  if (guardrails.error) toast.error("Couldn't reset the guardrails", guardrails.error);
+  else toast.success("Guardrails reset", "The defaults from the configuration are in effect again.");
+}
+
+// ── Dialogs ──────────────────────────────────────────────────────────────────
+
+// A click beside a dialog closes it only while its form is as it was opened: a stray click must
+// not throw away what was typed. Escape, ✕ and Cancel always close.
+const dialogOpenedAs: Record<string, string> = {};
+
+function rememberDialog(name: string, form: unknown) {
+  dialogOpenedAs[name] = JSON.stringify(form);
+}
+
+function dialogUntouched(name: string, form: unknown): boolean {
+  return dialogOpenedAs[name] === JSON.stringify(form);
 }
 
 // ── Site form ────────────────────────────────────────────────────────────────
@@ -2831,6 +2928,12 @@ const siteForm = reactive({
   notes: "", usernameSelector: "", passwordSelector: "", submitSelector: "",
   error: "",
 });
+
+useEscapeToClose(() => siteForm.open, () => { siteForm.open = false; });
+
+function dismissSiteForm() {
+  if (dialogUntouched("site", siteForm)) siteForm.open = false;
+}
 
 function openSiteForm(site: SiteSummary | null) {
   siteForm.error = "";
@@ -2852,6 +2955,7 @@ function openSiteForm(site: SiteSummary | null) {
     siteForm.usernameSelector = ""; siteForm.passwordSelector = ""; siteForm.submitSelector = "";
   }
   siteForm.open = true;
+  rememberDialog("site", siteForm);
 }
 
 function addUrlEntry() { siteForm.urlEntries.push({ label: "", url: "" }); }
@@ -2878,12 +2982,25 @@ async function submitSiteForm() {
     submitSelector: siteForm.submitSelector.trim() || undefined,
   });
 
-  if (!sites.error) siteForm.open = false;
-  else siteForm.error = sites.error;
+  if (sites.error) {
+    siteForm.error = sites.error;
+    return;
+  }
+  siteForm.open = false;
+  toast.success(siteForm.editing ? "Site credentials updated" : "Site credentials saved", `The login for ${siteForm.hostname.trim()} is stored.`);
 }
 
 async function confirmDeleteSite(hostname: string) {
-  if (confirm(`Delete credentials for ${hostname}?`)) await sites.remove(hostname);
+  const confirmed = await confirmAction({
+    title: `Delete the credentials for ${hostname}?`,
+    message: "The stored username, password and URLs for this site are removed. This cannot be undone.",
+    confirmLabel: "Delete credentials",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await sites.remove(hostname);
+  if (sites.error) toast.error("Couldn't delete the credentials", sites.error);
+  else toast.success("Credentials deleted", `The login for ${hostname} is no longer stored.`);
 }
 
 // ── Scene form ───────────────────────────────────────────────────────────────
@@ -2894,6 +3011,12 @@ const sceneForm = reactive({
   name: "", description: "", task: "", webhookKey: "",
   error: "",
 });
+
+useEscapeToClose(() => sceneForm.open, () => { sceneForm.open = false; });
+
+function dismissSceneForm() {
+  if (dialogUntouched("scene", sceneForm)) sceneForm.open = false;
+}
 
 function openSceneForm(scene: SceneDetail | null) {
   sceneForm.error = "";
@@ -2908,6 +3031,7 @@ function openSceneForm(scene: SceneDetail | null) {
     sceneForm.name = ""; sceneForm.description = ""; sceneForm.task = ""; sceneForm.webhookKey = "";
   }
   sceneForm.open = true;
+  rememberDialog("scene", sceneForm);
 }
 
 async function submitSceneForm() {
@@ -2922,12 +3046,25 @@ async function submitSceneForm() {
     webhookKey: sceneForm.webhookKey.trim() || undefined,
   });
 
-  if (!scenesStore.error) sceneForm.open = false;
-  else sceneForm.error = scenesStore.error;
+  if (scenesStore.error) {
+    sceneForm.error = scenesStore.error;
+    return;
+  }
+  sceneForm.open = false;
+  toast.success(sceneForm.editing ? "Scene updated" : "Scene created", `"${sceneForm.name.trim()}" is saved and ready to run.`);
 }
 
 async function confirmDeleteScene(name: string) {
-  if (confirm(`Delete scene "${name}"?`)) await scenesStore.remove(name);
+  const confirmed = await confirmAction({
+    title: `Delete the scene "${name}"?`,
+    message: "Its task prompt and webhook key are removed. This cannot be undone.",
+    confirmLabel: "Delete scene",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await scenesStore.remove(name);
+  if (scenesStore.error) toast.error("Couldn't delete the scene", scenesStore.error);
+  else toast.success("Scene deleted", `"${name}" is gone from the scene list.`);
 }
 
 const jobForm = reactive({
@@ -2940,6 +3077,12 @@ const jobForm = reactive({
   triggersJson: "[]",
   error: "",
 });
+
+useEscapeToClose(() => jobForm.open, () => { jobForm.open = false; });
+
+function dismissJobForm() {
+  if (dialogUntouched("job", jobForm)) jobForm.open = false;
+}
 
 function openJobForm(job: JobDetail | null) {
   jobForm.error = "";
@@ -2959,6 +3102,7 @@ function openJobForm(job: JobDetail | null) {
     jobForm.triggersJson = "[]";
   }
   jobForm.open = true;
+  rememberDialog("job", jobForm);
 }
 
 async function submitJobForm() {
@@ -3003,12 +3147,25 @@ async function submitJobForm() {
     triggers,
   });
 
-  if (!jobsStore.error) jobForm.open = false;
-  else jobForm.error = jobsStore.error;
+  if (jobsStore.error) {
+    jobForm.error = jobsStore.error;
+    return;
+  }
+  jobForm.open = false;
+  toast.success(jobForm.editing ? "Job updated" : "Job created", `"${jobForm.name.trim()}" is saved with ${steps.length} step${steps.length === 1 ? "" : "s"}.`);
 }
 
 async function confirmDeleteJob(name: string) {
-  if (confirm(`Delete job "${name}"?`)) await jobsStore.remove(name);
+  const confirmed = await confirmAction({
+    title: `Delete the job "${name}"?`,
+    message: "Its steps and triggers are removed, so it no longer runs on a schedule, webhook or channel message. This cannot be undone.",
+    confirmLabel: "Delete job",
+    danger: true,
+  });
+  if (!confirmed) return;
+  await jobsStore.remove(name);
+  if (jobsStore.error) toast.error("Couldn't delete the job", jobsStore.error);
+  else toast.success("Job deleted", `"${name}" is gone from the job list.`);
 }
 
 function formatJobPreview(job: JobDetail): string {
@@ -3117,11 +3274,14 @@ async function openChannelForm(def: typeof CHANNEL_DEFS[number]) {
   channelForm.details = null;
   channelForm.loadingDetails = true;
   channelForm.open = true;
+  rememberDialog("channel", channelForm.config);
 
   const detail = await channelsStore.fetchDetails(def.type);
   if (detail) {
     channelForm.details = detail;
     channelForm.config = { ...DEFAULT_CHANNEL_CONFIG, ...detail.config };
+    // The saved settings arrive after the dialog opened: they are what "untouched" means.
+    rememberDialog("channel", channelForm.config);
   }
   channelForm.loadingDetails = false;
 }
@@ -3131,14 +3291,26 @@ async function submitChannelForm() {
   await channelsStore.save(channelForm.type, channelForm.config);
   await channelsStore.fetchDeadLetterCount();
   await runtime.fetch();
-  if (!channelsStore.error) closeChannelForm();
-  else channelForm.error = channelsStore.error;
+  if (channelsStore.error) {
+    channelForm.error = channelsStore.error;
+    return;
+  }
+  toast.success(`${channelForm.label} channel saved`, channelForm.config.enabled
+    ? "The channel is enabled. Some changes, such as new bot tokens, take effect after the gateway restarts."
+    : "The channel is saved and stays off until you enable it.");
+  closeChannelForm();
 }
 
 function closeChannelForm() {
   channelForm.open = false;
   channelForm.details = null;
   channelForm.loadingDetails = false;
+}
+
+useEscapeToClose(() => channelForm.open, closeChannelForm);
+
+function dismissChannelForm() {
+  if (dialogUntouched("channel", channelForm.config)) closeChannelForm();
 }
 
 function formatRuntimeName(name: string | undefined): string {
@@ -3181,6 +3353,7 @@ async function submitConfigAssistantRequest() {
   });
   if (proposal) {
     configAssistantForm.request = "";
+    toast.success("Proposal drafted", "Review it under Proposals. Nothing changes until you apply it.");
   }
 }
 
@@ -3200,6 +3373,7 @@ async function reloadEffortConfig() {
 async function saveEffortDefaultUI() {
   try {
     await gateway.saveEffortDefault(effortDefaultForm.value);
+    toast.success("Default effort saved", `New sessions start at ${effortDefaultForm.value} effort.`);
   } catch (e) {
     orchestrationError.value = `Failed to save default effort: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -3273,6 +3447,7 @@ async function saveOrchestrationConfigUI() {
     if (orchestrationForm.perTurnComputerClick) payload.perTurnCaps.computer_click = orchestrationForm.perTurnComputerClick;
     if (orchestrationForm.perTurnComputerType) payload.perTurnCaps.computer_type = orchestrationForm.perTurnComputerType;
     await gateway.saveOrchestrationConfig(payload);
+    toast.success("Orchestration limits saved", "They apply immediately, without a restart.");
   } catch (e) {
     orchestrationError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -3330,6 +3505,9 @@ async function saveDocumentRagConfigUI() {
       retrievalTopK: docRagForm.retrievalTopK,
       maxContextChars: docRagForm.maxContextChars,
     });
+    toast.success("Document RAG saved", docRagForm.enabled
+      ? "Document retrieval is on; the settings apply immediately."
+      : "Document retrieval is off.");
   } catch (e) {
     docRagError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -3380,6 +3558,7 @@ async function saveSkillConfigUI() {
         enabled: pipelineForm.enabled,
       },
     });
+    toast.success("Skill Library saved", "The skill library and tool pipeline settings apply immediately.");
   } catch (e) {
     skillConfigError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -3436,6 +3615,7 @@ async function saveUserModelUI() {
       append: false,
     });
     applyUserModel(p);
+    toast.success("User model saved", `Stored as revision ${p.revision}.`);
   } catch (e) {
     userModelError.value = `Failed to save: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -3444,10 +3624,18 @@ async function saveUserModelUI() {
 }
 
 async function resetUserModelUI() {
+  const confirmed = await confirmAction({
+    title: "Reset the user model?",
+    message: "Everything the assistant has learned about you — goals, expertise, working style, communication preferences and open questions — is erased on the server. This cannot be undone.",
+    confirmLabel: "Reset user model",
+    danger: true,
+  });
+  if (!confirmed) return;
   userModelSaving.value = true;
   userModelError.value = "";
   try {
     applyUserModel(await gateway.resetUserModel());
+    toast.success("User model reset", "What the assistant had learned about you is erased.");
   } catch (e) {
     userModelError.value = `Failed to reset: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -3463,7 +3651,8 @@ async function reloadConfigAssistant() {
 }
 
 async function applyConfigProposal(id: string) {
-  await configAssistant.applyProposal(id);
+  const applied = await configAssistant.applyProposal(id);
+  if (applied) toast.success("Proposal applied", applied.summary || "Its changes are applied.");
 }
 
 async function sendProposalFeedback(id: string, outcome: ConfigAssistantFeedbackOutcome) {
@@ -3474,11 +3663,20 @@ async function sendProposalFeedback(id: string, outcome: ConfigAssistantFeedback
       : outcome === "rejected"
         ? "Why are you rejecting this proposal?"
         : "What failed? This note becomes reusable flow memory.";
-  const lesson = window.prompt(lessonPrompt, "")?.trim() || undefined;
+  // Cancel on the question means "not now": it used to send the feedback anyway, so backing
+  // out of "Reject" still rejected the proposal.
+  const answer = window.prompt(lessonPrompt, "");
+  if (answer === null) return;
+  const lesson = answer.trim() || undefined;
   const notes = outcome === "rejected"
     ? (window.prompt("Optional extra notes for the rejection", "")?.trim() || undefined)
     : undefined;
-  await configAssistant.submitFeedback(id, { outcome, lesson, notes });
+  const updated = await configAssistant.submitFeedback(id, { outcome, lesson, notes });
+  if (updated) {
+    toast.success(outcome === "rejected" ? "Proposal rejected" : "Feedback recorded", lesson
+      ? "Your note is kept as flow memory for later proposals."
+      : "The outcome is kept as flow memory for later proposals.");
+  }
 }
 
 function stringifyPreview(value: unknown): string {
@@ -3570,12 +3768,6 @@ watch(() => multimodalStore.config, (config) => {
 </script>
 
 <style scoped>
-.settings-page {
-  height: 100%;
-  overflow-y: auto;
-  padding: 1.5rem;
-}
-
 .settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

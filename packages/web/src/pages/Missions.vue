@@ -1,21 +1,23 @@
 <template>
-  <div class="missions-page" style="height: 100%; overflow-y: auto">
-    <div class="missions-page__header">
-      <div>
-        <h2 class="missions-page__title">Missions</h2>
-        <p class="missions-page__subtitle">
+  <div class="page-shell missions-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Missions</h1>
+        <p class="page-subtitle">
           The flight recorder: every mission's event timeline, cost, and status — who did what, when, and what it cost.
           Cancel reaches the owning process wherever it runs.
         </p>
       </div>
-      <div class="missions-page__actions">
-        <button class="missions-page__button" :disabled="loading" @click="refresh">{{ loading ? "Loading…" : "Refresh" }}</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="refresh">{{ loading ? "Loading…" : "Refresh" }}</button>
       </div>
-    </div>
+    </header>
 
-    <p v-if="errorMessage" class="missions-page__error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="notice notice--error missions-page__error" role="alert">{{ errorMessage }}</p>
 
-    <div v-if="!loading && missions.length === 0" class="missions-page__empty">
+    <!-- "No missions" is only true after a load that worked. -->
+    <div v-if="loading && !loaded && missions.length === 0" class="missions-page__empty">Loading missions…</div>
+    <div v-else-if="loaded && missions.length === 0" class="missions-page__empty">
       No missions recorded yet. Missions appear once the swarm delegates work with the mission store enabled
       (<code>mission.store: "shadow"</code> or beyond).
     </div>
@@ -37,13 +39,14 @@
           <div class="mission-card__actions">
             <button
               v-if="auth.isOperator && mission.status === 'active'"
-              class="mission-card__button mission-card__button--warn"
+              type="button"
+              class="btn-danger px-3 py-1.5 rounded-lg text-xs"
               :disabled="cancelling === mission.id"
               @click="cancelMission(mission)"
             >
               {{ cancelling === mission.id ? "Cancelling…" : "Cancel" }}
             </button>
-            <button class="mission-card__button" @click="toggleTimeline(mission.id)">
+            <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-xs" @click="toggleTimeline(mission.id)">
               {{ expanded === mission.id ? "Hide timeline" : "Timeline" }}
             </button>
           </div>
@@ -82,6 +85,8 @@
 import { onMounted, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast, errorText } from "@/composables/useToast";
 
 interface MissionSummary {
   id: string;
@@ -105,9 +110,12 @@ interface FlightRecord {
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
+const toast = useToast();
 
 const missions = ref<MissionSummary[]>([]);
 const loading = ref(false);
+// True while the list on screen comes from a load that succeeded.
+const loaded = ref(false);
 const errorMessage = ref<string | null>(null);
 const expanded = ref<string | null>(null);
 const timeline = ref<FlightRecord | null>(null);
@@ -125,10 +133,12 @@ async function refresh(): Promise<void> {
     const res = await fetch(`${apiBase()}/api/missions?limit=200`, {
       headers: { Authorization: `Bearer ${gateway.token}` },
     });
-    if (!res.ok) { errorMessage.value = `Failed to load missions (${res.status})`; return; }
+    if (!res.ok) { loaded.value = false; errorMessage.value = `Failed to load missions (${res.status})`; return; }
     const body = await res.json() as { missions: MissionSummary[] };
     missions.value = body.missions;
+    loaded.value = true;
   } catch (err) {
+    loaded.value = false;
     errorMessage.value = `Failed to load missions: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
     loading.value = false;
@@ -157,7 +167,14 @@ async function toggleTimeline(id: string): Promise<void> {
 }
 
 async function cancelMission(mission: MissionSummary): Promise<void> {
-  if (!confirm(`Cancel mission "${mission.objective || mission.id}"? The owning process aborts its active turn.`)) return;
+  const name = mission.objective || `Mission ${shortId(mission.id)}`;
+  if (!(await confirmAction({
+    title: "Cancel this mission?",
+    message: `"${name}": the owning process aborts its active turn, and whatever that turn had not finished is lost. A cancelled mission is closed and cannot be resumed.`,
+    confirmLabel: "Cancel mission",
+    cancelLabel: "Keep running",
+    danger: true,
+  }))) return;
   cancelling.value = mission.id;
   try {
     const res = await fetch(`${apiBase()}/api/missions/${encodeURIComponent(mission.id)}/cancel`, {
@@ -165,17 +182,22 @@ async function cancelMission(mission: MissionSummary): Promise<void> {
       headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "cancelled from dashboard" }),
     });
-    const body = await res.json().catch(() => ({})) as { status?: string; reason?: string; unconfirmed?: boolean };
+    const body = await res.json().catch(() => ({})) as { status?: string; reason?: string; unconfirmed?: boolean; alreadyTerminal?: boolean; error?: string };
     if (res.status === 409 && body.unconfirmed) {
       // Cancel issued but not confirmed — the mission is still running, so leave
       // its status alone and tell the operator why (they can retry).
-      errorMessage.value = `Cancel could not be confirmed: ${body.reason ?? "the owning process did not stop the turn"}.`;
+      toast.error("Cancel could not be confirmed", `${body.reason ?? "The owning process did not stop the turn"}. The mission is still running; you can try again.`);
       return;
     }
-    if (!res.ok) { errorMessage.value = `Cancel failed (${res.status})`; return; }
+    if (!res.ok) { toast.error("Couldn't cancel the mission", body.error ?? `The gateway answered HTTP ${res.status}.`); return; }
     // Patch only the changed row instead of refetching all summaries (which
     // re-runs the server-side budget scan just to flip one badge).
     if (body.status) mission.status = body.status;
+    // The mission can end on its own between the list load and the click.
+    if (body.alreadyTerminal) toast.info("Mission had already ended", `"${name}" was ${body.status ?? "finished"} before the cancel arrived.`);
+    else toast.success("Mission cancelled", `"${name}" was stopped.`);
+  } catch (err) {
+    toast.error("Couldn't cancel the mission", errorText(err));
   } finally {
     cancelling.value = null;
   }
@@ -204,40 +226,32 @@ onMounted(refresh);
 </script>
 
 <style scoped>
-.missions-page { padding: 1.25rem 1.5rem; }
-.missions-page__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; margin-bottom: 1rem; }
-.missions-page__title { margin: 0 0 0.25rem; font-size: 1.25rem; }
-.missions-page__subtitle { margin: 0; color: var(--text-secondary, #8b93a7); font-size: 0.85rem; max-width: 60ch; }
-.missions-page__button { padding: 0.4rem 0.9rem; border-radius: 6px; border: 1px solid var(--border-color, #2c3242); background: transparent; color: inherit; cursor: pointer; }
-.missions-page__button:disabled { opacity: 0.6; cursor: default; }
-.missions-page__error { color: var(--danger, #e5534b); font-size: 0.85rem; }
-.missions-page__empty { color: var(--text-secondary, #8b93a7); padding: 2rem 0; font-size: 0.9rem; }
+.missions-page__error { margin-bottom: 0.75rem; }
+.missions-page__empty { color: rgb(156 163 175); padding: 2rem 0; font-size: 0.9rem; }
 .missions-grid { display: flex; flex-direction: column; gap: 0.75rem; }
-.mission-card { border: 1px solid var(--border-color, #2c3242); border-radius: 10px; padding: 0.9rem 1.1rem; }
+.mission-card { border: 1px solid var(--hairline); border-radius: 10px; padding: 0.9rem 1.1rem; }
 .mission-card--cancelled, .mission-card--failed { opacity: 0.75; }
 .mission-card__top { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 .mission-card__title-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
 .mission-card__title { margin: 0; font-size: 0.98rem; font-weight: 600; }
-.mission-card__meta { color: var(--text-secondary, #8b93a7); font-size: 0.78rem; margin-top: 0.25rem; }
+.mission-card__meta { color: rgb(156 163 175); font-size: 0.78rem; margin-top: 0.25rem; }
 .mission-card__actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
-.mission-card__button { padding: 0.3rem 0.7rem; border-radius: 6px; border: 1px solid var(--border-color, #2c3242); background: transparent; color: inherit; cursor: pointer; font-size: 0.8rem; }
-.mission-card__button--warn { border-color: var(--danger, #e5534b); color: var(--danger, #e5534b); }
 .mission-badge { font-size: 0.7rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; text-transform: uppercase; letter-spacing: 0.04em; }
-.mission-badge--active { color: var(--accent, #4c8dff); }
-.mission-badge--completed { color: var(--success, #3fb950); }
-.mission-badge--cancelled, .mission-badge--failed { color: var(--danger, #e5534b); }
-.mission-timeline { margin-top: 0.8rem; border-top: 1px dashed var(--border-color, #2c3242); padding-top: 0.7rem; }
-.mission-timeline__budget { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-secondary, #8b93a7); margin-bottom: 0.5rem; }
+.mission-badge--active { color: rgb(var(--logo-cyan)); }
+.mission-badge--completed { color: rgb(52 211 153); }
+.mission-badge--cancelled, .mission-badge--failed { color: rgb(248 113 113); }
+.mission-timeline { margin-top: 0.8rem; border-top: 1px dashed var(--hairline); padding-top: 0.7rem; }
+.mission-timeline__budget { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.78rem; color: rgb(156 163 175); margin-bottom: 0.5rem; }
 .mission-timeline__unlimited { font-style: italic; }
-.mission-timeline__truncated { font-size: 0.75rem; color: var(--text-secondary, #8b93a7); font-style: italic; margin: 0 0 0.4rem; }
-.mission-timeline__loading { color: var(--text-secondary, #8b93a7); font-size: 0.85rem; }
+.mission-timeline__truncated { font-size: 0.75rem; color: rgb(156 163 175); font-style: italic; margin: 0 0 0.4rem; }
+.mission-timeline__loading { color: rgb(156 163 175); font-size: 0.85rem; }
 .mission-timeline__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
 .mission-event { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.8rem; flex-wrap: wrap; }
-.mission-event__seq { color: var(--text-secondary, #8b93a7); min-width: 2.2rem; }
+.mission-event__seq { color: rgb(156 163 175); min-width: 2.2rem; }
 .mission-event__type { font-weight: 600; }
-.mission-event__type--good { color: var(--success, #3fb950); }
-.mission-event__type--bad { color: var(--danger, #e5534b); }
-.mission-event__actor { color: var(--accent, #4c8dff); }
-.mission-event__ts { color: var(--text-secondary, #8b93a7); }
-.mission-event__payload { color: var(--text-secondary, #8b93a7); font-size: 0.72rem; overflow-wrap: anywhere; }
+.mission-event__type--good { color: rgb(52 211 153); }
+.mission-event__type--bad { color: rgb(248 113 113); }
+.mission-event__actor { color: rgb(var(--accent-purple)); }
+.mission-event__ts { color: rgb(156 163 175); }
+.mission-event__payload { color: rgb(156 163 175); font-size: 0.72rem; overflow-wrap: anywhere; }
 </style>

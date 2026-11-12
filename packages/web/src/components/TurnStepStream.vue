@@ -262,6 +262,10 @@ function markFor(status: StepDisplayStatus): string {
   cursor: pointer;
 }
 .tss-row__btn:hover { background: rgba(148, 163, 184, 0.1); }
+/* A step row is some 23 px tall: under a finger, a tap often opened the row next to it. */
+@media (pointer: coarse) {
+  .tss-row__btn { min-height: 2.5rem; align-items: center; }
+}
 .tss-row__btn:focus-visible { outline: 2px solid rgba(var(--accent-purple), 0.8); outline-offset: 1px; }
 
 .tss-mark {

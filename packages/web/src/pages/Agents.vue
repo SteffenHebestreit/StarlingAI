@@ -1,12 +1,13 @@
 <template>
-  <div class="agents-page" style="height: 100%">
-    <header class="agents-page__header">
-      <div>
-        <p class="eyebrow agents-page__eyebrow">Capability Directory</p>
-        <h1 class="agents-page__title">Agent Catalog</h1>
-        <p class="agents-page__subtitle">
+  <div class="page-shell agents-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <p class="eyebrow mb-1.5">Capability Directory</p>
+        <h1 class="page-title">Agent catalog</h1>
+        <p class="page-subtitle">
           The specialist sub-agents the swarm can delegate to, and what each one does. This is the read-only
-          capability directory — model tuning and the routing lab live on the Settings → Agents page.
+          capability directory — model tuning and the routing lab live on
+          <RouterLink to="/agents" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
         </p>
       </div>
     </header>
@@ -23,7 +24,7 @@
           />
         </div>
         <span class="agents-count">{{ filtered.length }} / {{ store.agents.length }}</span>
-        <button class="agents-controls__refresh" @click="store.fetch()" :disabled="store.loading">
+        <button type="button" class="agents-controls__refresh" @click="store.fetch()" :disabled="store.loading">
           {{ store.loading ? "Loading…" : "Refresh" }}
         </button>
       </div>
@@ -79,37 +80,15 @@ onMounted(() => { if (!store.agents.length) void store.fetch(); });
   /* Near-transparent scrim — the themed app canvas glows through. */
   background: rgba(8, 10, 18, 0.30);
   color: rgb(229 231 235);
-  overflow: hidden;
 }
 
-.agents-page__header {
-  padding: 1.25rem 1.5rem 0.75rem;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.18);
-}
-
-.agents-page__eyebrow {
-  margin: 0 0 0.35rem;
-}
-.agents-page__title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  margin: 0 0 0.3rem;
-}
-
-.agents-page__subtitle {
-  margin: 0;
-  font-size: 0.85rem;
-  color: rgb(156 163 175);
-  max-width: 56rem;
-}
-
+/* The list scrolls inside the panel; the floor keeps it readable in a short
+   window, where the page itself scrolls instead. */
 .agents-page__panel {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  padding: 1rem 1.5rem 1.5rem;
+  min-height: 18rem;
   overflow: hidden;
 }
 

@@ -18,7 +18,7 @@
           @keydown.tab="keepFocusInside"
         >
           <p class="eyebrow" :class="request.danger ? 'confirm-dialog__eyebrow--danger' : ''">
-            {{ request.danger ? "Cannot be undone" : "Please confirm" }}
+            {{ request.eyebrow ?? (request.danger ? "Cannot be undone" : "Please confirm") }}
           </p>
           <h2 id="confirm-title" class="confirm-dialog__title">{{ request.title }}</h2>
           <p v-if="request.message" id="confirm-message" class="confirm-dialog__message">{{ request.message }}</p>

@@ -1,17 +1,19 @@
 <template>
-  <div class="plugins-page" style="height: 100%; overflow-y: auto">
-    <div class="plugins-page__header">
-      <div>
-        <h2 class="plugins-page__title">Plugins</h2>
-        <p class="plugins-page__subtitle">
+  <div class="page-shell plugins-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Plugins</h1>
+        <p class="page-subtitle">
           Explicitly enabled third-party tool packages load from the configured directory.
           All plugin tools register at Tier 2 with per-call approval, but currently execute in the gateway process.
         </p>
       </div>
-      <div class="plugins-page__actions">
-        <button class="plugins-page__button" :disabled="loading" @click="loadPlugins">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="loadPlugins">
+          {{ loading ? "Refreshing…" : "Refresh" }}
+        </button>
       </div>
-    </div>
+    </header>
 
     <div v-if="!enabled" class="plugins-disabled">
       <p>
@@ -27,12 +29,13 @@
 
     <p v-if="errorMessage" class="plugins-page__error">{{ errorMessage }}</p>
 
+    <!-- "No plugins" is only true after a load that worked; a failed one says why in the line above. -->
     <div v-if="loading && plugins.length === 0" class="plugins-page__empty">Loading…</div>
-    <div v-else-if="plugins.length === 0" class="plugins-page__empty">
+    <div v-else-if="loaded && plugins.length === 0" class="plugins-page__empty">
       No plugins loaded.  Drop a plugin into <code>{{ directory ?? "the plugins directory" }}</code> and refresh.
     </div>
 
-    <ul v-else class="plugin-grid">
+    <ul v-else-if="plugins.length > 0" class="plugin-grid">
       <li v-for="plugin in plugins" :key="plugin.name" class="plugin-card">
         <div class="plugin-card__top">
           <div>
@@ -111,6 +114,8 @@ const enabled = ref(true);
 const directory = ref<string | null>(null);
 const plugins = ref<PluginRecord[]>([]);
 const loading = ref(false);
+// True while the last load succeeded: only then does an empty list mean "no plugins".
+const loaded = ref(false);
 const errorMessage = ref<string | null>(null);
 
 // Live activity comes from the audit-store WS feed, filtered to plugin_*
@@ -124,7 +129,11 @@ function apiBase(): string {
 }
 
 async function loadPlugins(): Promise<void> {
-  if (!gateway.token) return;
+  loaded.value = false;
+  if (!gateway.token) {
+    errorMessage.value = "Not signed in to the gateway — sign in, then refresh to see the plugins.";
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
   try {
@@ -143,6 +152,7 @@ async function loadPlugins(): Promise<void> {
     enabled.value = body.enabled;
     directory.value = body.directory;
     plugins.value = body.plugins;
+    loaded.value = true;
   } catch (err) {
     errorMessage.value = (err as Error).message;
   } finally {
@@ -203,58 +213,8 @@ onMounted(() => {
 
 <style scoped>
 .plugins-page {
-  padding: 1.5rem 1.75rem 3rem;
   color: rgb(229 231 235);
 }
-
-.plugins-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-.plugins-page__title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 0;
-  background: linear-gradient(90deg, rgb(165 243 252), rgb(196 181 253));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.plugins-page__subtitle {
-  margin: 0.4rem 0 0;
-  color: rgb(156 163 175);
-  font-size: 0.875rem;
-  max-width: 36rem;
-}
-
-.plugins-page__actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.plugins-page__button {
-  background: rgba(76, 29, 149, 0.35);
-  border: 1px solid rgba(168, 85, 247, 0.35);
-  color: rgb(233 213 255);
-  padding: 0.4rem 0.85rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-
-.plugins-page__button:hover:not(:disabled) {
-  background: rgba(124, 58, 237, 0.55);
-  color: white;
-}
-
-.plugins-page__button:disabled { opacity: 0.5; cursor: progress; }
 
 .plugins-disabled {
   border: 1px dashed rgba(168, 85, 247, 0.35);

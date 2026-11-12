@@ -1,15 +1,18 @@
 <template>
-  <div class="skills-page" style="height: 100%">
-    <header class="skills-page__header">
-      <div>
-        <h1 class="skills-page__title">Skill Library</h1>
-        <p class="skills-page__subtitle">
+  <div class="page-shell skills-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Skill Library</h1>
+        <p class="page-subtitle">
           Reusable procedures. The swarm authors them automatically from successful work (drafts graduate to
           <strong>active</strong> once they succeed in real use; reliable ones are promoted to workflow scenes) —
-          or write one by hand with <strong>New skill</strong>. Configure auto-authoring on the Settings → Agents page.
+          or write one by hand with <strong>New skill</strong>. Configure auto-authoring on
+          <RouterLink to="/agents" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
         </p>
       </div>
-      <button class="skills-page__new" @click="openCreate()">+ New skill</button>
+      <div class="page-actions">
+        <button type="button" class="btn-grad px-4 py-2 rounded-xl text-sm" @click="openCreate()">+ New skill</button>
+      </div>
     </header>
 
     <section class="skills-page__panel">
@@ -33,7 +36,7 @@
             @input="onQueryChange"
           />
         </div>
-        <button class="skills-controls__refresh" @click="loadSkills()" :disabled="loading">
+        <button type="button" class="skills-controls__refresh" @click="loadSkills()" :disabled="loading">
           {{ loading ? "Loading…" : "Refresh" }}
         </button>
       </div>
@@ -69,13 +72,20 @@
             <pre>{{ skill.body }}</pre>
           </details>
           <footer class="skill-card__actions">
-            <button class="skill-card__btn" @click="openEdit(skill)">Edit</button>
+            <button type="button" class="skill-card__btn" @click="openEdit(skill)">Edit</button>
             <button
               v-if="skill.status !== 'archived'"
+              type="button"
               class="skill-card__btn"
-              @click="archiveSkill(skill.slug)"
-            >Archive</button>
-            <button class="skill-card__btn skill-card__btn--danger" @click="deleteSkill(skill.slug)">Delete</button>
+              :disabled="rowBusy?.slug === skill.slug"
+              @click="archiveSkill(skill)"
+            >{{ isRowBusy(skill, "archive") ? "Archiving…" : "Archive" }}</button>
+            <button
+              type="button"
+              class="skill-card__btn skill-card__btn--danger"
+              :disabled="rowBusy?.slug === skill.slug"
+              @click="deleteSkill(skill)"
+            >{{ isRowBusy(skill, "delete") ? "Deleting…" : "Delete" }}</button>
           </footer>
         </article>
       </div>
@@ -85,7 +95,7 @@
     <div v-if="showModal" class="skill-modal__scrim" @click.self="closeModal()">
       <div class="skill-modal" role="dialog" aria-modal="true">
         <h2 class="skill-modal__title">{{ editingSlug ? "Edit skill" : "New skill" }}</h2>
-        <div v-if="modalError" class="skills-page__notice skills-page__notice--error">{{ modalError }}</div>
+        <div v-if="modalError" class="skills-page__notice skills-page__notice--error" role="alert">{{ modalError }}</div>
         <div class="skill-modal__grid">
           <label class="skill-modal__field">
             <span>Name</span>
@@ -127,8 +137,8 @@
           Guidance only — a skill never runs code or grants tools; the agents/tools you list are advisory hints for retrieval.
         </p>
         <div class="skill-modal__actions">
-          <button class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
-          <button class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
+          <button type="button" class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
+          <button type="button" class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
             {{ saving ? "Saving…" : (editingSlug ? "Save changes" : "Create skill") }}
           </button>
         </div>
@@ -140,6 +150,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast, errorText } from "@/composables/useToast";
 
 interface SkillRecord {
   slug: string;
@@ -162,6 +174,7 @@ interface SkillRecord {
 }
 
 const gateway = useGatewayStore();
+const toast = useToast();
 
 const skills = ref<SkillRecord[]>([]);
 const statusFilter = ref<string>("");
@@ -169,6 +182,12 @@ const query = ref<string>("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
+// The card whose archive or delete request is in flight.
+const rowBusy = ref<{ slug: string; action: "archive" | "delete" } | null>(null);
+
+function isRowBusy(skill: SkillRecord, action: "archive" | "delete"): boolean {
+  return rowBusy.value?.slug === skill.slug && rowBusy.value.action === action;
+}
 
 interface SkillForm {
   name: string;
@@ -216,30 +235,57 @@ async function loadSkills(): Promise<void> {
   }
 }
 
-async function archiveSkill(slug: string): Promise<void> {
+/** The gateway's own reason when it sent one ("Skill is pinned…"), else the status. */
+async function failureText(res: Response): Promise<string> {
+  const body = await res.json().catch(() => ({})) as { error?: string };
+  return body.error || `HTTP ${res.status}`;
+}
+
+async function archiveSkill(skill: SkillRecord): Promise<void> {
+  if (rowBusy.value) return;
+  // Not marked as destructive: saving an archived skill from Edit puts it back in use.
+  if (!(await confirmAction({
+    title: "Archive this skill?",
+    message: `"${skill.name}" is taken out of use: agents no longer find it when they look for a procedure. Nothing is deleted — it stays in the library marked archived, and Edit → Save changes makes it active again.`,
+    confirmLabel: "Archive skill",
+  }))) return;
+  rowBusy.value = { slug: skill.slug, action: "archive" };
   try {
-    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(slug)}/archive`, {
+    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(skill.slug)}/archive`, {
       method: "POST",
       headers: authHeaders(),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Skill archived", `"${skill.name}" is no longer offered to agents.`);
     await loadSkills();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    toast.error("Couldn't archive the skill", errorText(err));
+  } finally {
+    rowBusy.value = null;
   }
 }
 
-async function deleteSkill(slug: string): Promise<void> {
-  if (!window.confirm(`Delete skill "${slug}"? This cannot be undone.`)) return;
+async function deleteSkill(skill: SkillRecord): Promise<void> {
+  if (rowBusy.value) return;
+  if (!(await confirmAction({
+    title: "Delete this skill?",
+    message: `"${skill.name}" is removed from the library with its procedure, version history and usage record. This cannot be undone — archive it instead if you only want it out of use.`,
+    confirmLabel: "Delete skill",
+    danger: true,
+  }))) return;
+  rowBusy.value = { slug: skill.slug, action: "delete" };
   try {
-    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(slug)}`, {
+    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(skill.slug)}`, {
       method: "DELETE",
       headers: authHeaders(),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Skill deleted", `"${skill.name}" was removed from the library.`);
     await loadSkills();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    toast.error("Couldn't delete the skill", errorText(err));
+  } finally {
+    rowBusy.value = null;
   }
 }
 
@@ -311,9 +357,12 @@ async function saveSkill(): Promise<void> {
       throw new Error(body.error || `HTTP ${res.status}`);
     }
     showModal.value = false;
+    if (editingSlug.value) toast.success("Skill saved", `Your changes to "${payload.name}" are stored (status: ${payload.status}).`);
+    else toast.success("Skill created", `"${payload.name}" was added to the library as ${payload.status}.`);
     await loadSkills();
   } catch (err) {
     modalError.value = err instanceof Error ? err.message : String(err);
+    toast.error(editingSlug.value ? "Couldn't save the skill" : "Couldn't create the skill", errorText(err));
   } finally {
     saving.value = false;
   }
@@ -334,62 +383,15 @@ onMounted(() => { void loadSkills(); });
   /* Near-transparent scrim — the themed app canvas glows through. */
   background: rgba(8, 10, 18, 0.30);
   color: rgb(229 231 235);
-  overflow: hidden;
 }
 
-.skills-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem 0.75rem;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.18);
-}
-
-.skills-page__new {
-  flex: 0 0 auto;
-  appearance: none;
-  background: rgba(168, 85, 247, 0.22);
-  color: rgb(243 232 255);
-  border: 1px solid rgba(168, 85, 247, 0.45);
-  border-radius: 999px;
-  padding: 0.4rem 1rem;
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.skills-page__new:hover { background: rgba(168, 85, 247, 0.32); }
-
-.skills-page__title {
-  font-size: 1.4rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.25rem;
-}
-
-.skills-page__subtitle {
-  margin: 0;
-  font-size: 0.85rem;
-  color: rgb(156 163 175);
-  max-width: 56rem;
-}
-
-.skills-page__subtitle code {
-  font-family: 'SFMono-Regular', Consolas, monospace;
-  background: rgba(168, 85, 247, 0.18);
-  color: rgb(216 180 254);
-  padding: 0.05rem 0.3rem;
-  border-radius: 4px;
-  font-size: 0.78em;
-}
-
+/* The list scrolls inside the panel; the floor keeps it readable in a short
+   window, where the page itself scrolls instead. */
 .skills-page__panel {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  padding: 1rem 1.5rem 1.5rem;
+  min-height: 18rem;
   overflow: hidden;
 }
 
@@ -566,9 +568,10 @@ onMounted(() => { void loadSkills(); });
   font-size: 0.78rem;
   cursor: pointer;
 }
-.skill-card__btn:hover { background: rgba(168, 85, 247, 0.15); }
+.skill-card__btn:hover:not(:disabled) { background: rgba(168, 85, 247, 0.15); }
+.skill-card__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .skill-card__btn--danger { border-color: rgba(248, 113, 113, 0.4); color: rgb(254 202 202); }
-.skill-card__btn--danger:hover { background: rgba(127, 29, 29, 0.3); }
+.skill-card__btn--danger:hover:not(:disabled) { background: rgba(127, 29, 29, 0.3); }
 
 /* Create / edit modal */
 .skill-modal__scrim {

@@ -1,21 +1,21 @@
 <template>
-  <div class="sessions-page" style="height: 100%; overflow-y: auto">
-    <div class="sessions-page__header">
-      <div>
-        <h2 class="sessions-page__title">Sessions</h2>
-        <p class="sessions-page__subtitle">Resume active conversations, inspect archived missions, and prune stored history.</p>
+  <div class="page-shell sessions-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Sessions</h1>
+        <p class="page-subtitle">Resume active conversations, inspect archived missions, and prune stored history.</p>
       </div>
-      <div class="sessions-page__actions">
+      <div class="page-actions">
         <button
           type="button"
-          class="sessions-page__clear"
+          class="btn-danger px-4 py-2 rounded-xl text-sm"
           :disabled="gateway.archivedSessions.length === 0"
           :title="gateway.archivedSessions.length === 0 ? 'No archived sessions to remove' : 'Remove all archived session history'"
           @click="clearArchivedSessions"
         >Clear archived</button>
-        <button type="button" @click="refresh" class="sessions-page__refresh">Refresh</button>
+        <button type="button" @click="refresh" class="btn-ghost px-4 py-2 rounded-xl text-sm">Refresh</button>
       </div>
-    </div>
+    </header>
 
     <div class="sessions-filters">
       <input
@@ -666,58 +666,6 @@ onMounted(refresh);
 </script>
 
 <style scoped>
-.sessions-page {
-  padding: 1.5rem;
-}
-
-.sessions-page__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.sessions-page__title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: #f5ecff;
-}
-
-.sessions-page__subtitle {
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-  color: rgba(226, 217, 243, 0.72);
-}
-
-.sessions-page__actions {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.sessions-page__refresh,
-.sessions-page__clear {
-  border-radius: 0.85rem;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-
-.sessions-page__clear {
-  border-color: rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
-}
-
-.sessions-page__clear:hover {
-  border-color: rgba(239, 68, 68, 0.5);
-  background: rgba(127, 29, 29, 0.3);
-}
-
 .sessions-filters {
   display: flex;
   flex-wrap: wrap;
@@ -1123,7 +1071,6 @@ onMounted(refresh);
     align-items: flex-start;
   }
 }
-.sessions-page__clear:disabled { opacity: 0.45; cursor: not-allowed; }
 .session-card:focus-visible {
   outline: 2px solid rgba(var(--logo-cyan), 0.7);
   outline-offset: 2px;

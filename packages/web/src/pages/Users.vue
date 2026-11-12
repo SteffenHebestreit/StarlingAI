@@ -1,17 +1,20 @@
 <template>
-  <div class="users-page" style="height: 100%; overflow-y: auto">
-    <div class="users-page__header">
-      <div>
-        <h2 class="users-page__title">Users</h2>
-        <p class="users-page__subtitle">
+  <div class="page-shell users-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Users</h1>
+        <p class="page-subtitle">
           Manage operator and viewer accounts.  Only an admin can add, reset or delete one.  Passwords are stored as bcrypt hashes — plaintext is never persisted.
         </p>
       </div>
-      <div class="users-page__actions">
-        <button class="users-page__button" :disabled="loading" @click="loadUsers">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="loadUsers">
+          {{ loading ? "Refreshing…" : "Refresh" }}
+        </button>
         <button
           v-if="!accountsFromIdp"
-          class="users-page__button users-page__button--primary"
+          type="button"
+          class="btn-grad px-4 py-2 rounded-xl text-sm"
           :disabled="!isAdmin"
           :title="isAdmin ? '' : 'Only admins can add users'"
           @click="openCreateForm"
@@ -19,7 +22,7 @@
           + Add user
         </button>
       </div>
-    </div>
+    </header>
 
     <div v-if="accountsFromIdp" class="users-disabled">
       <p>
@@ -33,7 +36,7 @@
         Account <strong>{{ bootstrapHandoff }}</strong> was created.  The bootstrap admin session
         has ended now that a real account exists — sign in with the new account to continue.
       </p>
-      <button class="users-page__button users-page__button--primary" @click="signInAsNewUser">
+      <button type="button" class="users-page__button users-page__button--primary" @click="signInAsNewUser">
         Sign in
       </button>
     </div>
@@ -49,14 +52,15 @@
 
     <p v-if="errorMessage && !bootstrapHandoff" class="users-page__error">{{ errorMessage }}</p>
 
+    <!-- "No users" is only true after a load that worked; a failed one says why in the line above. -->
     <div v-if="loading && users.length === 0" class="users-page__empty">Loading…</div>
 
-    <div v-else-if="users.length === 0" class="users-page__empty">
+    <div v-else-if="loaded && users.length === 0" class="users-page__empty">
       <template v-if="accountsFromIdp">No local accounts.</template>
       <template v-else>No users configured yet.  Click <strong>Add user</strong> to create the first account.</template>
     </div>
 
-    <ul v-else class="user-grid">
+    <ul v-else-if="users.length > 0" class="user-grid">
       <li v-for="user in users" :key="user.username" class="user-card">
         <div class="user-card__top">
           <div>
@@ -70,11 +74,12 @@
             <code class="user-card__username">{{ user.username }}</code>
           </div>
           <div v-if="isAdmin" class="user-card__actions">
-            <button class="user-card__button user-card__button--neutral" @click="openResetForm(user)">
+            <button type="button" class="user-card__button user-card__button--neutral" @click="openResetForm(user)">
               Reset password
             </button>
             <button
               v-if="user.username !== currentUsername"
+              type="button"
               class="user-card__button user-card__button--danger"
               :disabled="deleting === user.username"
               @click="deleteUser(user)"
@@ -92,7 +97,7 @@
       class="users-create-modal"
       role="dialog"
       aria-modal="true"
-      @click.self="closeCreateForm"
+      @click.self="dismissCreateForm"
     >
       <form class="users-create-card" @submit.prevent="submitCreate">
         <h3 class="users-create-card__title">Add user</h3>
@@ -147,7 +152,7 @@
       class="users-create-modal"
       role="dialog"
       aria-modal="true"
-      @click.self="closeResetForm"
+      @click.self="dismissResetForm"
     >
       <form class="users-create-card" @submit.prevent="submitReset">
         <h3 class="users-create-card__title">New password for {{ resetting }}</h3>
@@ -179,6 +184,9 @@
 import { computed, onMounted, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
+import { confirmAction } from "@/composables/useConfirm";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useToast, errorText } from "@/composables/useToast";
 
 interface User {
   username: string;
@@ -189,6 +197,7 @@ interface User {
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
+const toast = useToast();
 // Adding, resetting and deleting accounts is admin-only at the gateway (user-routes.ts): operator
 // is every account's default role, so an operator could otherwise become anyone.
 const isAdmin = computed(() => auth.currentUser?.role === "admin");
@@ -199,6 +208,8 @@ const authEnabled = ref(true);
 // Under OIDC the identity provider owns the usernames and the gateway creates no local account.
 const accountsFromIdp = ref(false);
 const loading = ref(false);
+// True while the last load succeeded: only then does an empty list mean "no users".
+const loaded = ref(false);
 const errorMessage = ref<string | null>(null);
 const deleting = ref<string | null>(null);
 
@@ -225,7 +236,11 @@ function apiBase(): string {
 }
 
 async function loadUsers(): Promise<void> {
-  if (!gateway.token) return;
+  loaded.value = false;
+  if (!gateway.token) {
+    errorMessage.value = "Not signed in to the gateway — sign in, then refresh to see the users.";
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
   try {
@@ -242,8 +257,9 @@ async function loadUsers(): Promise<void> {
     authEnabled.value = body.enabled;
     accountsFromIdp.value = body.provider === "oidc";
     users.value = body.users;
+    loaded.value = true;
   } catch (err) {
-    errorMessage.value = (err as Error).message;
+    errorMessage.value = errorText(err);
   } finally {
     loading.value = false;
   }
@@ -258,6 +274,15 @@ function openCreateForm(): void {
 function closeCreateForm(): void {
   creating.value = false;
 }
+
+// A click beside a dialog closes it only while nothing has been entered: a stray click must not
+// throw away a half-filled form. Escape and Cancel always close.
+function dismissCreateForm(): void {
+  const { username, password, displayName, role } = form.value;
+  if (!username && !password && !displayName && role === "operator") closeCreateForm();
+}
+
+useEscapeToClose(() => creating.value, closeCreateForm);
 
 async function submitCreate(): Promise<void> {
   formError.value = null;
@@ -286,7 +311,9 @@ async function submitCreate(): Promise<void> {
       return;
     }
     const createdUsername = form.value.username.trim().toLowerCase();
+    const createdRole = form.value.role;
     closeCreateForm();
+    toast.success("User created", `"${createdUsername}" can sign in now, as ${createdRole === "viewer" ? "a viewer" : "an operator"}.`);
     // Creating the first account closes the gateway's bootstrap window, which
     // invalidates a bootstrap (token-mode) session mid-flight. Detect that via
     // a session re-check and hand off to sign-in instead of 401-ing on reload.
@@ -296,6 +323,8 @@ async function submitCreate(): Promise<void> {
       return;
     }
     await loadUsers();
+  } catch (err) {
+    toast.error("Couldn't create the user", errorText(err));
   } finally {
     submitting.value = false;
   }
@@ -311,12 +340,19 @@ function closeResetForm(): void {
   resetting.value = null;
 }
 
+function dismissResetForm(): void {
+  if (!resetPassword.value) closeResetForm();
+}
+
+useEscapeToClose(() => resetting.value !== null, closeResetForm);
+
 async function submitReset(): Promise<void> {
   if (!resetting.value) return;
+  const username = resetting.value;
   formError.value = null;
   submitting.value = true;
   try {
-    const res = await fetch(`${apiBase()}/api/auth/users/${encodeURIComponent(resetting.value)}`, {
+    const res = await fetch(`${apiBase()}/api/auth/users/${encodeURIComponent(username)}`, {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${gateway.token}`,
@@ -334,6 +370,9 @@ async function submitReset(): Promise<void> {
       return;
     }
     closeResetForm();
+    toast.success("Password changed", `"${username}" signs in with the new password from now on. Sessions already signed in stay so until their token expires.`);
+  } catch (err) {
+    toast.error("Couldn't change the password", errorText(err));
   } finally {
     submitting.value = false;
   }
@@ -344,7 +383,13 @@ function signInAsNewUser(): void {
 }
 
 async function deleteUser(user: User): Promise<void> {
-  if (!confirm(`Delete user '${user.username}'?  This cannot be undone.`)) return;
+  const confirmed = await confirmAction({
+    title: `Delete the user "${user.username}"?`,
+    message: "The account is removed and can no longer sign in. This cannot be undone.",
+    confirmLabel: "Delete user",
+    danger: true,
+  });
+  if (!confirmed) return;
   deleting.value = user.username;
   errorMessage.value = null;
   try {
@@ -358,10 +403,14 @@ async function deleteUser(user: User): Promise<void> {
         const body = await res.json() as { error?: string };
         if (body.error) message = body.error;
       } catch { /* ignore */ }
-      errorMessage.value = message;
+      // A toast, not the page's error line: the next reload of the list clears that line.
+      toast.error("Couldn't delete the user", message);
       return;
     }
+    toast.success("User deleted", `"${user.username}" can no longer sign in.`);
     await loadUsers();
+  } catch (err) {
+    toast.error("Couldn't delete the user", errorText(err));
   } finally {
     deleting.value = null;
   }
@@ -380,41 +429,10 @@ onMounted(() => {
 
 <style scoped>
 .users-page {
-  padding: 1.5rem 1.75rem 3rem;
   color: rgb(229 231 235);
 }
 
-.users-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-
-.users-page__title {
-  font-size: 1.5rem;
-  font-weight: 600;
-  margin: 0;
-  background: linear-gradient(90deg, rgb(165 243 252), rgb(196 181 253));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-
-.users-page__subtitle {
-  margin: 0.4rem 0 0;
-  color: rgb(156 163 175);
-  font-size: 0.875rem;
-  max-width: 36rem;
-}
-
-.users-page__actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
+/* Still used by the hand-off notice and the two forms. */
 .users-page__button {
   background: rgba(76, 29, 149, 0.35);
   border: 1px solid rgba(168, 85, 247, 0.35);

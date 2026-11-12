@@ -50,7 +50,7 @@
             <span class="thinking-dot">·</span>
           </span>
           <span v-else class="thinking-toggle-label">
-            {{ thinkingOpen ? 'Hide thinking' : 'Show thinking' }}
+            {{ thinkingOpen ? chatText.hideThinking(bubbleLanguage) : chatText.showThinking(bubbleLanguage) }}
           </span>
           <span v-if="!isThinking" class="thinking-chevron" aria-hidden="true">{{ thinkingOpen ? '▲' : '▼' }}</span>
         </button>
@@ -116,16 +116,17 @@
           :key="`${att.filename}-${i}`"
           class="message-attachment-figure"
         >
-          <img
-            :src="att.dataUrl"
-            :alt="att.filename"
-            class="message-attachment-img"
-            @click="previewAttachment(att)"
-            title="Click to enlarge"
-          />
+          <!-- A button, so the keyboard can enlarge the picture too: a bare <img @click> took no focus. -->
+          <button type="button" class="message-attachment-btn" :aria-label="chatText.enlarge(bubbleLanguage, att.filename)" :title="chatText.clickToEnlarge(bubbleLanguage)" @click="previewAttachment(att)">
+            <img
+              :src="att.dataUrl"
+              :alt="att.filename"
+              class="message-attachment-img"
+            />
+          </button>
           <figcaption class="message-attachment-caption">
             <span class="message-attachment-name">{{ att.filename }}</span>
-            <button class="artifact-action" @click="downloadAttachment(att)">Download</button>
+            <button type="button" class="artifact-action" @click="downloadAttachment(att)">{{ chatText.download(bubbleLanguage) }}</button>
           </figcaption>
         </figure>
       </div>
@@ -153,7 +154,7 @@
         @click="contentCollapsed = !contentCollapsed"
         class="collapse-toggle"
       >
-        {{ contentCollapsed ? 'Show more ▼' : 'Show less ▲' }}
+        {{ contentCollapsed ? chatText.showMore(bubbleLanguage) : chatText.showLess(bubbleLanguage) }}
       </button>
 
       <!-- Diagrams stay VISIBLE — a mermaid artifact is the answer in picture form, not a file
@@ -164,7 +165,7 @@
           :key="`mermaid-${att.filename}-${i}`"
           class="artifact-diagram"
         >
-          <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder">Rendering diagram…</div>
+          <div v-if="mermaidPreviewLoading[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder">{{ chatText.renderingDiagram(bubbleLanguage) }}</div>
           <div v-else-if="mermaidPreviewErrors[mermaidAttachmentKey(att)]" class="artifact-diagram__placeholder artifact-diagram__placeholder--error">
             {{ mermaidPreviewErrors[mermaidAttachmentKey(att)] }}
           </div>
@@ -203,9 +204,9 @@
         <button
           v-if="message.steer?.state === 'undelivered'"
           class="export-btn"
-          title="Send this message again"
+          :title="chatText.resendTitle(bubbleLanguage)"
           @click="emit('resend', message.id)"
-        >↻ Resend</button>
+        >{{ chatText.resend(bubbleLanguage) }}</button>
       </div>
 
       <!-- Timestamp + usage row -->
@@ -216,11 +217,11 @@
             type="button"
             class="export-btn"
             :class="copyState === 'copied' ? 'export-btn--done' : copyState === 'failed' ? 'export-btn--failed' : ''"
-            title="Copy this message's text"
+            :title="chatText.copyTitle(bubbleLanguage)"
             @click="copyMessageText"
-          >{{ copyState === "copied" ? "✓ Copied" : copyState === "failed" ? "Copy failed" : "⧉ Copy" }}</button>
-          <button type="button" @click="exportMessageMarkdown" title="Download as Markdown" class="export-btn">⬇ MD</button>
-          <button type="button" @click="exportMessagePDF" title="Export as PDF" class="export-btn">⬇ PDF</button>
+          >{{ copyState === "copied" ? chatText.copied(bubbleLanguage) : copyState === "failed" ? chatText.copyFailed(bubbleLanguage) : chatText.copy(bubbleLanguage) }}</button>
+          <button type="button" @click="exportMessageMarkdown" :title="chatText.markdownTitle(bubbleLanguage)" class="export-btn">⬇ MD</button>
+          <button type="button" @click="exportMessagePDF" :title="chatText.pdfTitle(bubbleLanguage)" class="export-btn">⬇ PDF</button>
           <!-- Not on a message read mid-turn: restarting there would cut the turn it was read into
                in half, on the server as well as here. Nor while any turn runs: the rewind would
                cut the history under a runtime that is still appending to it. -->
@@ -228,9 +229,9 @@
             v-if="message.role === 'user' && !message.midTurn && !message.steer && allowRewind !== false"
             type="button"
             @click="emit('rewind', message.id)"
-            title="Restart the conversation from this message"
+            :title="chatText.restartTitle(bubbleLanguage)"
             class="export-btn"
-          >↩ Restart</button>
+          >{{ chatText.restart(bubbleLanguage) }}</button>
         </div>
         <div
           v-if="(message.usage || message.perf) && message.role === 'assistant'"
@@ -359,6 +360,8 @@ async function loadMermaid(): Promise<MermaidModule> {
 </script>
 
 <script setup lang="ts">
+import { chatText } from "@/composables/chatText";
+import { writeClipboard } from "@/composables/clipboard";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import DOMPurify from "dompurify";
 import { useProductStore } from "@/stores/product";
@@ -1064,25 +1067,6 @@ async function onArtifactLinkClick(attachment: ChatAttachment): Promise<void> {
  * a temporary <textarea> selectAll-and-copy when navigator.clipboard is
  * unavailable (older browsers, insecure context, etc.).
  */
-/** Text to the clipboard: the async API where there is one, a hidden textarea otherwise. Rejects when neither works. */
-async function writeClipboard(text: string): Promise<void> {
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.setAttribute("readonly", "");
-    textarea.style.position = "fixed";
-    textarea.style.opacity = "0";
-    document.body.appendChild(textarea);
-    textarea.select();
-    const copied = document.execCommand("copy");
-    document.body.removeChild(textarea);
-    if (!copied) throw new Error("copy refused");
-  }
-}
-
 /** The whole message as it was written (its Markdown), with a word of confirmation on the button. */
 const copyState = ref<"idle" | "copied" | "failed">("idle");
 let copyStateTimer: number | null = null;
@@ -2096,5 +2080,17 @@ onBeforeUnmount(() => {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+.message-attachment-btn {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 0.6rem;
+  cursor: zoom-in;
+}
+.message-attachment-btn:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.8);
+  outline-offset: 2px;
 }
 </style>
