@@ -1,20 +1,22 @@
 <template>
-  <div class="mcp-page" style="height: 100%; overflow-y: auto">
-    <div class="mcp-page__header">
-      <div>
-        <h2 class="mcp-page__title">MCP Integration</h2>
-        <p class="mcp-page__subtitle">
+  <div class="page-shell mcp-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">MCP Integration</h1>
+        <p class="page-subtitle">
           Bridge external Model Context Protocol servers into the swarm — and
           publish {{ product.name }} itself as an MCP endpoint that Claude Desktop,
           Claude Code, Cursor, and Zed can talk to.
         </p>
       </div>
-      <div class="mcp-page__actions">
-        <button class="mcp-page__button" :disabled="loading" @click="refresh">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="refresh">
+          {{ loading ? "Refreshing…" : "Refresh" }}
+        </button>
       </div>
-    </div>
+    </header>
 
-    <p v-if="errorMessage" class="mcp-page__error">{{ errorMessage }}</p>
+    <div v-if="errorMessage" class="notice notice--error mcp-page__notice" role="alert">{{ errorMessage }}</div>
 
     <!-- ── Outbound: this product as an MCP server ────────────────────────── -->
     <section class="mcp-section">
@@ -34,7 +36,7 @@
               type="checkbox"
               :checked="expose.enabled"
               :disabled="patching"
-              @change="patchExpose({ enabled: !expose.enabled })"
+              @change="toggleExpose($event, { enabled: !expose.enabled })"
             />
             <span>{{ expose.enabled ? "Enabled" : "Disabled" }}</span>
           </label>
@@ -43,7 +45,7 @@
               type="checkbox"
               :checked="expose.http.enabled"
               :disabled="patching || !expose.enabled"
-              @change="patchExpose({ http: { ...expose.http, enabled: !expose.http.enabled } })"
+              @change="toggleExpose($event, { http: { ...expose.http, enabled: !expose.http.enabled } })"
             />
             <span>HTTP/SSE at <code>/mcp</code></span>
           </label>
@@ -52,7 +54,7 @@
               type="checkbox"
               :checked="expose.http.requireAuth"
               :disabled="patching || !expose.enabled"
-              @change="patchExpose({ http: { ...expose.http, requireAuth: !expose.http.requireAuth } })"
+              @change="toggleRequireAuth($event)"
             />
             <span>Require gateway JWT</span>
           </label>
@@ -100,6 +102,7 @@
           <code>{{ expose.stdioCommandHint }}</code>
         </p>
       </div>
+      <div v-else-if="exposeError" class="notice notice--error">{{ exposeError }}</div>
       <div v-else class="mcp-page__empty">Loading expose status…</div>
     </section>
 
@@ -115,9 +118,12 @@
       </header>
 
       <div v-if="loading && servers.length === 0" class="mcp-page__empty">Loading…</div>
-      <div v-else-if="servers.length === 0" class="mcp-page__empty">
+      <div v-else-if="serversLoaded && servers.length === 0" class="mcp-page__empty">
         No MCP servers configured.  Add one below — or edit
         <code>starlingai.json</code> directly under <code>mcp.servers</code>.
+      </div>
+      <div v-else-if="servers.length === 0" class="notice notice--error">
+        The server list could not be loaded.
       </div>
 
       <ul v-else class="mcp-server-grid">
@@ -147,10 +153,10 @@
             </ul>
           </details>
           <div class="mcp-server-card__actions">
-            <button class="mcp-page__button" :disabled="busyId === server.id" @click="reconnect(server.id)">
+            <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" :disabled="busyId === server.id" @click="reconnect(server.id)">
               Reconnect
             </button>
-            <button class="mcp-page__button mcp-page__button--danger" :disabled="busyId === server.id" @click="confirmRemove(server.id)">
+            <button type="button" class="btn-danger px-3 py-1.5 rounded-lg text-sm" :disabled="busyId === server.id" @click="confirmRemove(server.id)">
               Remove
             </button>
           </div>
@@ -164,10 +170,12 @@
         <h3 class="mcp-section__title">Add MCP server</h3>
       </header>
 
-      <form class="mcp-form" @submit.prevent="submitAdd">
+      <!-- novalidate: a refused submit is answered in the line under the form, not by the
+           browser's own bubble. -->
+      <form ref="addFormEl" class="mcp-form" novalidate @submit.prevent="submitAdd">
         <label class="mcp-form__field">
-          <span>ID</span>
-          <input v-model="addForm.id" placeholder="e.g. playwright" autocomplete="off" />
+          <span>ID <span class="text-red-400" aria-hidden="true">*</span></span>
+          <input id="mcp-add-id" v-model="addForm.id" required aria-required="true" placeholder="e.g. playwright" autocomplete="off" />
         </label>
 
         <label class="mcp-form__field">
@@ -183,19 +191,19 @@
 
         <template v-if="addForm.transport === 'stdio'">
           <label class="mcp-form__field">
-            <span>Command</span>
-            <input v-model="addForm.command" placeholder="npx" />
+            <span>Command <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-command" v-model="addForm.command" required aria-required="true" placeholder="npx" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line)</span>
-            <textarea v-model="addForm.argsText" rows="3" placeholder="-y\n@modelcontextprotocol/server-filesystem\n/data" />
+            <textarea v-model="addForm.argsText" rows="3" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;/data" />
           </label>
         </template>
 
         <template v-if="addForm.transport === 'docker'">
           <label class="mcp-form__field">
-            <span>Image</span>
-            <input v-model="addForm.image" placeholder="mcp/playwright" />
+            <span>Image <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-image" v-model="addForm.image" required aria-required="true" placeholder="mcp/playwright" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line, optional)</span>
@@ -209,19 +217,19 @@
 
         <template v-if="addForm.transport === 'docker-exec'">
           <label class="mcp-form__field">
-            <span>Container name or id</span>
-            <input v-model="addForm.container" placeholder="my-running-container" />
+            <span>Container name or id <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-container" v-model="addForm.container" required aria-required="true" placeholder="my-running-container" />
           </label>
           <label class="mcp-form__field">
             <span>Args (one per line)</span>
-            <textarea v-model="addForm.argsText" rows="2" placeholder="mcp\nrun" />
+            <textarea v-model="addForm.argsText" rows="2" placeholder="mcp&#10;run" />
           </label>
         </template>
 
         <template v-if="addForm.transport === 'http'">
           <label class="mcp-form__field">
-            <span>URL</span>
-            <input v-model="addForm.url" placeholder="https://example.com/mcp" />
+            <span>URL <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-url" v-model="addForm.url" required aria-required="true" placeholder="https://example.com/mcp" />
           </label>
           <label class="mcp-form__field">
             <span>Protocol</span>
@@ -238,8 +246,8 @@
             <input v-model="addForm.host" placeholder="host.docker.internal" />
           </label>
           <label class="mcp-form__field">
-            <span>Port</span>
-            <input v-model.number="addForm.port" type="number" min="1" max="65535" />
+            <span>Port <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input id="mcp-add-port" v-model.number="addForm.port" type="number" min="1" max="65535" required aria-required="true" />
           </label>
         </template>
 
@@ -248,20 +256,23 @@
           <span>Auto-start on gateway boot</span>
         </label>
 
-        <button class="mcp-page__button" type="submit" :disabled="adding">
+        <button class="btn-grad px-4 py-2 rounded-xl text-sm" type="submit" :disabled="adding">
           {{ adding ? "Connecting…" : "Add and connect" }}
         </button>
 
-        <p v-if="addError" class="mcp-page__error">{{ addError }}</p>
+        <p v-if="addError" class="mcp-page__error" role="alert">{{ addError }}</p>
       </form>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { reactive, ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
+import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast, errorText } from "@/composables/useToast";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
 // file (docs/fork-boilerplate-plan.md WS1).
@@ -289,15 +300,21 @@ interface McpServerEntry {
 }
 
 const gateway = useGatewayStore();
+const toast = useToast();
 
 const expose = ref<ExposeStatus | null>(null);
+// Why there is no expose status to show, once its load has failed.
+const exposeError = ref<string | null>(null);
 const servers = ref<McpServerEntry[]>([]);
+// True while the last load of the list succeeded: only then does an empty list mean "no servers".
+const serversLoaded = ref(false);
 const loading = ref(false);
 const patching = ref(false);
 const adding = ref(false);
 const errorMessage = ref<string | null>(null);
 const addError = ref<string | null>(null);
 const busyId = ref<string | null>(null);
+const addFormEl = ref<HTMLFormElement | null>(null);
 
 const addForm = reactive({
   id: "",
@@ -323,9 +340,15 @@ function authHeaders(): Record<string, string> {
 }
 
 async function refresh(): Promise<void> {
-  if (!gateway.token) return;
+  serversLoaded.value = false;
+  if (!gateway.token) {
+    errorMessage.value = "Not signed in to the gateway — sign in, then refresh.";
+    exposeError.value = "The expose status could not be loaded.";
+    return;
+  }
   loading.value = true;
   errorMessage.value = null;
+  exposeError.value = null;
   try {
     const [serversRes, exposeRes] = await Promise.all([
       fetch(`${apiBase()}/api/mcp/servers`, { headers: authHeaders() }),
@@ -334,21 +357,26 @@ async function refresh(): Promise<void> {
     if (serversRes.ok) {
       const body = await serversRes.json() as { servers: McpServerEntry[] };
       servers.value = body.servers;
+      serversLoaded.value = true;
     } else {
       errorMessage.value = `Failed to load servers (${serversRes.status})`;
     }
     if (exposeRes.ok) {
       expose.value = (await exposeRes.json()) as ExposeStatus;
+    } else {
+      exposeError.value = `Failed to load expose status (${exposeRes.status})`;
     }
   } catch (err) {
-    errorMessage.value = (err as Error).message;
+    errorMessage.value = errorText(err);
+    exposeError.value = "The expose status could not be loaded.";
   } finally {
     loading.value = false;
   }
 }
 
-async function patchExpose(patch: Record<string, unknown>): Promise<void> {
-  if (!gateway.token || !expose.value) return;
+/** Resolves to true when the gateway took the change. */
+async function patchExpose(patch: Record<string, unknown>, saved: string): Promise<boolean> {
+  if (!gateway.token || !expose.value) return false;
   patching.value = true;
   try {
     const res = await fetch(`${apiBase()}/api/mcp/expose`, {
@@ -358,13 +386,57 @@ async function patchExpose(patch: Record<string, unknown>): Promise<void> {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
-      errorMessage.value = body.error ?? `PATCH failed (${res.status})`;
-      return;
+      toast.error("Couldn't change the MCP endpoint", body.error || `PATCH failed (${res.status})`);
+      return false;
     }
+    toast.success("MCP endpoint updated", saved);
     await refresh();
+    return true;
+  } catch (err) {
+    toast.error("Couldn't change the MCP endpoint", errorText(err));
+    return false;
   } finally {
     patching.value = false;
   }
+}
+
+function describeExposePatch(patch: { enabled?: boolean; http?: ExposeStatus["http"] }): string {
+  if (patch.enabled !== undefined) {
+    return patch.enabled ? `${product.name} is published as an MCP server.` : `${product.name} is no longer published as an MCP server.`;
+  }
+  if (patch.http && patch.http.enabled !== expose.value?.http.enabled) {
+    return patch.http.enabled ? "The /mcp endpoint answers over HTTP/SSE." : "The /mcp endpoint is closed.";
+  }
+  return patch.http?.requireAuth ? "Callers of /mcp need a gateway JWT again." : "The /mcp endpoint no longer asks for a gateway JWT.";
+}
+
+async function toggleExpose(event: Event, patch: { enabled?: boolean; http?: ExposeStatus["http"] }): Promise<void> {
+  const box = event.target as HTMLInputElement;
+  const clicked = box.checked;
+  const saved = await patchExpose(patch, describeExposePatch(patch));
+  // The click already flipped the box; a change the gateway did not take puts it back.
+  if (!saved) box.checked = !clicked;
+}
+
+async function toggleRequireAuth(event: Event): Promise<void> {
+  if (!expose.value) return;
+  const box = event.target as HTMLInputElement;
+  const requireAuth = box.checked;
+  // Asked only on the way to less protection; turning the check back on needs no second thought.
+  if (!requireAuth) {
+    const confirmed = await confirmAction({
+      title: "Stop requiring a gateway JWT on /mcp?",
+      message: `Anyone who can reach this gateway will be able to call ${product.name}'s tools, agents and scenes over /mcp without signing in, with operator rights.`,
+      confirmLabel: "Turn off authentication",
+      danger: true,
+      eyebrow: "Lowers security",
+    });
+    if (!confirmed) {
+      box.checked = true;
+      return;
+    }
+  }
+  await toggleExpose(event, { http: { ...expose.value.http, requireAuth } });
 }
 
 async function reconnect(id: string): Promise<void> {
@@ -374,18 +446,36 @@ async function reconnect(id: string): Promise<void> {
       method: "POST",
       headers: authHeaders(),
     });
+    // Toasts, not the page's error line: the refresh below clears that line.
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
-      errorMessage.value = body.error ?? `Reconnect failed (${res.status})`;
+      toast.error(`Couldn't reconnect "${id}"`, body.error || `Reconnect failed (${res.status})`);
+    } else {
+      const body = await res.json().catch(() => ({})) as { status?: string; toolCount?: number };
+      if (body.status === "disconnected") toast.error(`"${id}" did not connect`, "Auto-start is off for it, or the gateway could not reach it.");
+      else toast.success(`Reconnected "${id}"`, toolCountText(body.toolCount));
     }
     await refresh();
+  } catch (err) {
+    toast.error(`Couldn't reconnect "${id}"`, errorText(err));
   } finally {
     busyId.value = null;
   }
 }
 
+function toolCountText(count: number | undefined): string {
+  if (count === undefined) return "Its tools are in the registry.";
+  return `${count} tool${count === 1 ? " is" : "s are"} in the registry.`;
+}
+
 async function confirmRemove(id: string): Promise<void> {
-  if (!window.confirm(`Remove MCP server "${id}"?  Its tools will disappear from the registry.`)) return;
+  const confirmed = await confirmAction({
+    title: `Remove the MCP server "${id}"?`,
+    message: "Its connection is closed, its tools disappear from the registry, and its configuration is deleted. To get it back you add it again.",
+    confirmLabel: "Remove server",
+    danger: true,
+  });
+  if (!confirmed) return;
   busyId.value = id;
   try {
     const res = await fetch(`${apiBase()}/api/mcp/servers/${encodeURIComponent(id)}`, {
@@ -394,9 +484,13 @@ async function confirmRemove(id: string): Promise<void> {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({})) as { error?: string };
-      errorMessage.value = body.error ?? `Delete failed (${res.status})`;
+      toast.error(`Couldn't remove "${id}"`, body.error || `Delete failed (${res.status})`);
+    } else {
+      toast.success("Server removed", `"${id}" and its tools are gone from the registry.`);
     }
     await refresh();
+  } catch (err) {
+    toast.error(`Couldn't remove "${id}"`, errorText(err));
   } finally {
     busyId.value = null;
   }
@@ -433,10 +527,35 @@ function buildAddPayload(): Record<string, unknown> | null {
   }
 }
 
+/** The fields the chosen transport cannot do without, in the order the form shows them. */
+function requiredAddFields(): Array<{ id: string; label: string; filled: boolean }> {
+  const fields = [{ id: "mcp-add-id", label: "ID", filled: addForm.id.trim() !== "" }];
+  switch (addForm.transport) {
+    case "stdio": fields.push({ id: "mcp-add-command", label: "Command", filled: addForm.command.trim() !== "" }); break;
+    case "docker": fields.push({ id: "mcp-add-image", label: "Image", filled: addForm.image.trim() !== "" }); break;
+    case "docker-exec": fields.push({ id: "mcp-add-container", label: "Container name or id", filled: addForm.container.trim() !== "" }); break;
+    case "http": fields.push({ id: "mcp-add-url", label: "URL", filled: addForm.url.trim() !== "" }); break;
+    case "tcp": fields.push({ id: "mcp-add-port", label: "Port", filled: Boolean(addForm.port) }); break;
+  }
+  return fields;
+}
+
+function focusAddField(id: string): void {
+  addFormEl.value?.querySelector<HTMLElement>(`#${id}`)?.focus();
+}
+
 async function submitAdd(): Promise<void> {
   addError.value = null;
-  if (!addForm.id || !/^[a-z0-9_-]+$/i.test(addForm.id)) {
-    addError.value = "ID is required and must match /^[a-z0-9_-]+$/i";
+  // The first required field left empty is named under the form and gets the cursor.
+  const missing = requiredAddFields().find((field) => !field.filled);
+  if (missing) {
+    addError.value = `${missing.label} is required.`;
+    focusAddField(missing.id);
+    return;
+  }
+  if (!/^[a-z0-9_-]+$/i.test(addForm.id)) {
+    addError.value = "ID must match /^[a-z0-9_-]+$/i";
+    focusAddField("mcp-add-id");
     return;
   }
   const config = buildAddPayload();
@@ -454,6 +573,10 @@ async function submitAdd(): Promise<void> {
       addError.value = body.error ?? `POST failed (${res.status})`;
       return;
     }
+    const added = await res.json().catch(() => ({})) as { status?: string; toolCount?: number };
+    const addedId = addForm.id;
+    if (added.status === "disconnected") toast.info(`Added "${addedId}", not connected`, "It is saved, but auto-start is off or the gateway could not reach it.");
+    else toast.success(`Added "${addedId}"`, toolCountText(added.toolCount));
     addForm.id = "";
     addForm.command = "";
     addForm.image = "";
@@ -462,6 +585,8 @@ async function submitAdd(): Promise<void> {
     addForm.argsText = "";
     addForm.network = "";
     await refresh();
+  } catch (err) {
+    toast.error("Couldn't add the server", errorText(err));
   } finally {
     adding.value = false;
   }
@@ -478,48 +603,14 @@ function describeTransport(cfg: { transport: string } & Record<string, unknown>)
   }
 }
 
-onMounted(() => {
-  void refresh();
-});
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(refresh);
 </script>
 
 <style scoped>
-.mcp-page {
-  padding: 1.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-.mcp-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-.mcp-page__title {
-  font-size: 1.4rem;
-  font-weight: 600;
-  margin: 0;
-}
-.mcp-page__subtitle {
-  margin: 0.25rem 0 0 0;
-  color: rgb(156 163 175);
-  max-width: 60rem;
-}
-.mcp-page__button {
-  background: rgb(67 56 202 / 0.6);
-  color: white;
-  border: 1px solid rgb(99 102 241 / 0.4);
-  border-radius: 0.5rem;
-  padding: 0.45rem 0.9rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-.mcp-page__button:disabled { opacity: 0.5; cursor: not-allowed; }
-.mcp-page__button--danger {
-  background: rgb(127 29 29 / 0.6);
-  border-color: rgb(220 38 38 / 0.4);
-}
+/* The sections keep their 1.5rem rhythm; the shared header brings its own margin. */
+.mcp-page > .mcp-page__notice { margin-bottom: 1.5rem; }
+.mcp-section + .mcp-section { margin-top: 1.5rem; }
 .mcp-page__error {
   color: rgb(248 113 113);
   font-size: 0.9rem;

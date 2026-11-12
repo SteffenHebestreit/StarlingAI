@@ -1,5 +1,6 @@
 <template>
-  <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+  <div ref="dialogEl"
+       class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-modal p-4"
        role="dialog" aria-modal="true" aria-labelledby="login-heading"
        @click.self="onBackdrop">
     <div class="glass-card modal-pop relative w-full max-w-sm p-8 shadow-2xl shadow-purple-500/10">
@@ -127,7 +128,7 @@
           </div>
         </template>
 
-        <p v-if="errorMessage" class="text-xs text-red-300 -mt-2">
+        <p v-if="errorMessage" role="alert" class="text-xs text-red-300 -mt-2">
           {{ errorMessage }}
         </p>
 
@@ -149,10 +150,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue";
 import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { ssoErrorMessage } from "@/composables/ssoReturn";
+import { useFocusTrap } from "@/composables/useFocusTrap";
 
 const props = withDefaults(
   defineProps<{ dismissible?: boolean; ssoError?: string | null }>(),
@@ -177,6 +179,10 @@ function onBackdrop(): void {
 function onKeydown(event: KeyboardEvent): void {
   if (event.key === "Escape" && props.dismissible) close();
 }
+
+// The page behind is covered, and before a sign-in there is nothing on it to reach.
+const dialogEl = ref<HTMLElement | null>(null);
+useFocusTrap(dialogEl);
 
 type Mode = "password" | "token";
 // Default to the token tab — the single-operator (auth-disabled) setup has no
@@ -205,19 +211,54 @@ function startSso(): void {
   window.location.href = `${apiBaseFromWsUrl(wsUrl.value)}/api/auth/oidc/login`;
 }
 
+/** The cursor goes where the typing starts: the first field of the open tab that is still empty. */
+function focusFirstField(): void {
+  void nextTick(() => {
+    const ids = mode.value === "password" ? ["login-username", "login-password"] : ["login-token"];
+    const fields = ids.map((id) => document.getElementById(id) as HTMLInputElement | null).filter((el) => el !== null);
+    (fields.find((el) => !el.value) ?? fields[0])?.focus();
+  });
+}
+
+let unmounted = false;
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-  void detectAuthMode();
+  void detectAuthMode().then(focusFirstField);
 });
-onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
+onBeforeUnmount(() => {
+  unmounted = true;
+  window.removeEventListener("keydown", onKeydown);
+});
 
 const usernameInput = ref("");
 const passwordInput = ref("");
 const tokenInput = ref(gateway.authFailed ? "" : gateway.token);
 const wsUrl = ref(gateway.wsUrl);
 const defaultWsUrl = defaultGatewayWsUrl();
-const errorMessage = ref<string | null>(null);
+// A sign-in the gateway turned away is why this screen is up: say so, instead of an empty form.
+const REJECTED = "The gateway did not accept that sign-in. Check the token or sign in again.";
+const errorMessage = ref<string | null>(gateway.authFailed ? REJECTED : null);
 const submitting = ref(false);
+watch(() => gateway.authFailed, (failed) => { if (failed) errorMessage.value = REJECTED; });
+
+/**
+ * A connect is only started by `gateway.connect()`; whether the gateway took the sign-in comes
+ * later, over the socket. Wait for that answer, so "Connecting…" shows for as long as it is true
+ * and a refusal is not met with silence. Resolves "open" (this screen closes), "rejected", or
+ * "waiting" when the gateway has not answered in time.
+ */
+function connectionSettled(timeoutMs = 10_000): Promise<"open" | "rejected" | "waiting"> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const check = (): void => {
+      if (gateway.connected) resolve("open");
+      else if (gateway.authFailed) resolve("rejected");
+      else if (unmounted || Date.now() - started > timeoutMs) resolve("waiting");
+      else setTimeout(check, 120);
+    };
+    check();
+  });
+}
 
 const tabHint = computed(() =>
   mode.value === "password"
@@ -228,6 +269,7 @@ const tabHint = computed(() =>
 function setMode(next: Mode): void {
   mode.value = next;
   errorMessage.value = null;
+  focusFirstField();
 }
 
 function apiBaseFromWsUrl(value: string): string {
@@ -264,6 +306,11 @@ async function submit(): Promise<void> {
       gateway.token = tokenInput.value;
       gateway.wsUrl = wsUrl.value;
       gateway.connect();
+    }
+    const outcome = await connectionSettled();
+    if (outcome === "rejected") errorMessage.value = REJECTED;
+    else if (outcome === "waiting" && !unmounted) {
+      errorMessage.value = `No answer from the gateway at ${apiBaseFromWsUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
     }
   } catch (err) {
     // A thrown fetch (or JSON parse) means we never reached the gateway — the most

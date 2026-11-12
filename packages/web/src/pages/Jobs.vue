@@ -1,15 +1,18 @@
 <template>
-  <div class="jobs-page" style="height: 100%; overflow-y: auto">
-    <div class="jobs-page__header">
-      <div>
-        <h2 class="jobs-page__title">Jobs</h2>
-        <p class="jobs-page__subtitle">Monitor queued scene and job runs, cancel active work, and jump back into related sessions.</p>
+  <div class="page-shell jobs-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Jobs</h1>
+        <p class="page-subtitle">Monitor queued scene and job runs, cancel active work, and jump back into related sessions.</p>
       </div>
-      <div class="jobs-page__actions">
-        <button @click="refreshJobs" class="jobs-page__button">Refresh</button>
+      <div class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="refreshing" @click="refreshJobs">
+          {{ refreshing ? "Refreshing…" : "Refresh" }}
+        </button>
         <button
           v-if="finishedJobCount > 0"
-          class="jobs-page__button jobs-page__button--danger"
+          type="button"
+          class="btn-danger px-4 py-2 rounded-xl text-sm"
           :disabled="clearingFinished"
           :title="`Delete every finished run from the store (${finishedJobCount})`"
           @click="clearFinished"
@@ -17,7 +20,7 @@
           {{ clearingFinished ? "Clearing…" : `Clear finished (${finishedJobCount})` }}
         </button>
       </div>
-    </div>
+    </header>
 
     <!-- Scheduled triggers panel — surfaces cron-driven scenes/jobs ambiently
          so operators can see what fires on its own without digging through
@@ -41,8 +44,8 @@
           <h4 class="trigger-card__label">{{ trigger.label }}</h4>
           <p class="trigger-card__action">{{ trigger.action }}</p>
           <div class="trigger-card__times">
-            <span>Next: {{ formatTriggerTime(trigger.nextFireAt) }}</span>
-            <span>Last: {{ trigger.lastFiredAt ? formatTriggerTime(trigger.lastFiredAt) : "never" }}</span>
+            <span :title="isoTimestamp(trigger.nextFireAt)">Next: {{ formatTriggerTime(trigger.nextFireAt) }}</span>
+            <span :title="isoTimestamp(trigger.lastFiredAt)">Last: {{ trigger.lastFiredAt ? formatTriggerTime(trigger.lastFiredAt) : "never" }}</span>
           </div>
         </article>
       </div>
@@ -62,10 +65,26 @@
       </select>
     </div>
 
-    <div v-if="!filteredJobs.length" class="jobs-page__empty">No jobs match the current filters.</div>
+    <div v-if="runErrorText" class="notice notice--error jobs-page__error" role="alert">
+      The last jobs request failed: {{ runErrorText }}
+    </div>
 
-    <div v-else class="jobs-grid">
-      <article v-for="job in filteredJobs" :key="job.id" :class="['job-card', jobToneClass(job.status)]">
+    <!-- "No jobs" is only true after a load that worked: before that the list is still loading,
+         and after a failed one the notice above says so. -->
+    <div v-if="!filteredJobs.length && refreshing && !jobsLoaded" class="jobs-page__empty">Loading jobs…</div>
+    <!-- An empty list is one of two things: the filter hides every run, or nothing has run. -->
+    <div v-else-if="!filteredJobs.length && jobsLoaded && filtersActive" class="empty-state">
+      <p>{{ noMatchLine("jobs", searchQuery, statusFilter !== "all") }}</p>
+      <p v-if="loadedSpan" class="mt-1 text-xs">Only {{ loadedSpan }} were looked through — older ones are not loaded.</p>
+      <button type="button" class="btn-ghost mt-3 px-4 py-2 rounded-xl text-sm" @click="clearFilters">Clear filters</button>
+    </div>
+    <div v-else-if="!filteredJobs.length && jobsLoaded" class="empty-state">
+      No runs yet. One is listed here each time a scene or job is started — from the chat, on a schedule,
+      by a webhook or by a channel trigger.
+    </div>
+
+    <div v-else-if="filteredJobs.length" class="jobs-grid">
+      <article v-for="job in jobWindow.visible" :key="job.id" :class="['job-card', jobToneClass(job.status)]">
         <div class="job-card__top">
           <div>
             <div class="job-card__title-row">
@@ -73,17 +92,43 @@
               <span class="badge-store">{{ job.definitionType === 'job' ? 'job' : 'scene' }}</span>
               <span :class="jobBadgeClass(job.status)">{{ job.status }}</span>
             </div>
-            <div class="job-card__meta">Job {{ shortJobId(job.id) }} · Session {{ shortJobId(job.sessionId) }}</div>
+            <div class="job-card__meta">
+              Job
+              <button
+                type="button"
+                class="job-card__id"
+                :title="`${job.id} — click to copy`"
+                :aria-label="`Copy job id ${job.id}`"
+                @click="copyId('Job', job.id)"
+              >{{ shortJobId(job.id) }}</button>
+              · Session
+              <button
+                type="button"
+                class="job-card__id"
+                :title="`${job.sessionId} — click to copy`"
+                :aria-label="`Copy session id ${job.sessionId}`"
+                @click="copyId('Session', job.sessionId)"
+              >{{ shortJobId(job.sessionId) }}</button>
+            </div>
           </div>
           <div class="job-card__actions">
-            <button v-if="isCancelable(job.status)" class="job-card__button job-card__button--warn" @click="scenesStore.cancel(job.id)">Cancel</button>
-            <button class="job-card__button" @click="openJobSession(job.sessionId)">Open Session</button>
+            <button
+              v-if="isCancelable(job.status)"
+              type="button"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm"
+              :disabled="cancellingIds.has(job.id)"
+              @click="cancelJob(job)"
+            >
+              {{ cancellingIds.has(job.id) ? "Cancelling…" : "Cancel" }}
+            </button>
+            <button type="button" class="btn-ghost px-3 py-1.5 rounded-lg text-sm" @click="openJobSession(job.sessionId)">Open Session</button>
             <button
               v-if="!isCancelable(job.status)"
-              class="job-card__button job-card__button--danger"
+              type="button"
+              class="btn-danger px-3 py-1.5 rounded-lg text-sm"
               :disabled="deletingIds.has(job.id)"
               title="Remove this run from the store (the session transcript is kept)"
-              @click="deleteRun(job.id)"
+              @click="deleteRun(job)"
             >
               {{ deletingIds.has(job.id) ? "Deleting…" : "Delete" }}
             </button>
@@ -91,8 +136,8 @@
         </div>
 
         <div class="job-card__timeline">
-          <span>{{ lifecycleLabel(job) }}</span>
-          <span v-if="job.completedAt">Finished {{ formatTimestamp(job.completedAt) }}</span>
+          <span :title="isoTimestamp(job.startedAt ?? job.createdAt)">{{ lifecycleLabel(job) }}</span>
+          <span v-if="job.completedAt" :title="isoTimestamp(job.completedAt)">Finished {{ formatDateTime(job.completedAt) }}</span>
           <span>{{ Math.round(job.progress.percent ?? 0) }}%</span>
         </div>
 
@@ -135,6 +180,15 @@
         <p v-else-if="job.response" class="job-card__response">{{ job.response }}</p>
       </article>
     </div>
+
+    <div v-if="filteredJobs.length && (jobWindow.paged || loadCapNote)" class="mt-4 flex flex-col items-center gap-2 text-center">
+      <button v-if="jobWindow.hasMore" type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" @click="jobWindow.showMore()">
+        Show {{ jobWindow.nextStep }} more
+      </button>
+      <p class="text-xs text-gray-400" aria-live="polite">
+        {{ jobWindow.summary }} jobs<template v-if="loadCapNote"> · {{ loadCapNote }}</template>
+      </p>
+    </div>
   </div>
 </template>
 
@@ -143,15 +197,31 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useScenesStore, type SceneJob } from "@/stores/scenes";
+import { writeClipboard } from "@/composables/clipboard";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
+import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast } from "@/composables/useToast";
 
 const router = useRouter();
 const gateway = useGatewayStore();
 const scenesStore = useScenesStore();
+const toast = useToast();
 const searchQuery = ref("");
 const statusFilter = ref<"all" | "active" | SceneJob["status"]>("all");
 // Tracks per-row in-flight delete calls (button disabled state).
 const deletingIds = ref<Set<string>>(new Set());
+// Same for cancel calls.
+const cancellingIds = ref<Set<string>>(new Set());
 const clearingFinished = ref(false);
+const refreshing = ref(false);
+// True while the list on screen comes from a load that succeeded.
+const jobsLoaded = ref(false);
+// What the load on screen asked the gateway for.
+const loadedQuery = ref<{ limit: number; status: "all" | "active" | SceneJob["status"] } | null>(null);
+
+const runErrorText = computed(() => scenesStore.runError ?? "");
 
 // ── Scheduled cron triggers ──────────────────────────────────────────────────
 interface CronTrigger {
@@ -209,7 +279,7 @@ function formatTriggerTime(value: string | null | undefined): string {
     const hours = Math.round(absMs / 3_600_000);
     return diffMs >= 0 ? `in ${hours}h` : `${hours}h ago`;
   }
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return formatDateTime(parsed);
 }
 
 const serverStatusFilter = computed<SceneJob["status"] | undefined>(() => {
@@ -235,11 +305,51 @@ const filteredJobs = computed(() => {
   });
 });
 
+const filtersActive = computed(() => searchQuery.value.trim() !== "" || statusFilter.value !== "all");
+
+function clearFilters() {
+  searchQuery.value = "";
+  // The watcher below loads the unfiltered list.
+  statusFilter.value = "all";
+}
+
+// The cards are drawn a page at a time; a new search or status starts again at the first page.
+const jobWindow = useListWindow(() => filteredJobs.value, {
+  resetKey: () => `${statusFilter.value}|${searchQuery.value.trim().toLowerCase()}`,
+});
+
+// The gateway sends the newest runs up to the limit it is asked for, 200 at most, and cannot be
+// asked for the ones before them. A full answer therefore means "there may be older runs", and
+// the count line says so. The status is applied by the gateway before the limit, so a status
+// reaches further back than "All jobs" does.
+// What a full answer covers ("the newest 200 failed runs"); empty when the answer was not full.
+const loadedSpan = computed(() => {
+  const loaded = loadedQuery.value;
+  if (!loaded || scenesStore.recentJobs.length < loaded.limit) return "";
+  const kind = loaded.status === "all" || loaded.status === "active" ? "" : `${loaded.status} `;
+  return `the newest ${loaded.limit} ${kind}runs`;
+});
+const loadCapNote = computed(() => {
+  if (!loadedSpan.value) return "";
+  const note = `${loadedSpan.value} — older ones are not loaded`;
+  if (loadedQuery.value?.status === "active") return `from ${note}`;
+  return loadedQuery.value?.status === "all" ? `${note}; pick a status to reach further back` : note;
+});
+
 async function refreshJobs() {
-  await scenesStore.fetchJobs({
-    limit: statusFilter.value === "active" ? 100 : 200,
-    status: serverStatusFilter.value,
-  });
+  refreshing.value = true;
+  const status = statusFilter.value;
+  const limit = status === "active" ? 100 : 200;
+  try {
+    await scenesStore.fetchJobs({
+      limit,
+      status: serverStatusFilter.value,
+    });
+    jobsLoaded.value = scenesStore.runError === null;
+    if (jobsLoaded.value) loadedQuery.value = { limit, status };
+  } finally {
+    refreshing.value = false;
+  }
 }
 
 // Counts finished (non-active) jobs across the current local list, used by
@@ -248,16 +358,50 @@ const finishedJobCount = computed(() =>
   scenesStore.recentJobs.filter((j) => j.status === "completed" || j.status === "failed" || j.status === "cancelled").length
 );
 
-async function deleteRun(jobId: string) {
-  if (deletingIds.value.has(jobId)) return;
-  if (!confirm("Delete this run from the store? The session transcript is kept.")) return;
-  deletingIds.value = new Set(deletingIds.value).add(jobId);
+async function cancelJob(job: SceneJob) {
+  if (cancellingIds.value.has(job.id)) return;
+  const name = formatSceneName(job.sceneName);
+  if (!(await confirmAction({
+    title: "Cancel this job?",
+    message: `"${name}" is stopped before it finishes. A cancelled run cannot be resumed — it would have to be started again from the beginning.`,
+    confirmLabel: "Cancel job",
+    cancelLabel: "Keep running",
+    danger: true,
+  }))) return;
+  cancellingIds.value = new Set(cancellingIds.value).add(job.id);
   try {
-    const r = await scenesStore.deleteRun(jobId);
-    if (!r.ok && r.error) alert(`Delete failed: ${r.error}`);
+    const cancelled = await scenesStore.cancel(job.id);
+    if (!cancelled) {
+      toast.error("Couldn't cancel the job", runErrorText.value || "The gateway did not accept the cancel request.");
+    } else if (cancelled.status === "cancelled") {
+      toast.success("Job cancelled", `"${name}" has stopped.`);
+    } else {
+      toast.success("Cancel requested", `"${name}" is stopping; its card updates when the worker confirms.`);
+    }
+  } finally {
+    const next = new Set(cancellingIds.value);
+    next.delete(job.id);
+    cancellingIds.value = next;
+  }
+}
+
+async function deleteRun(job: SceneJob) {
+  if (deletingIds.value.has(job.id)) return;
+  const name = formatSceneName(job.sceneName);
+  if (!(await confirmAction({
+    title: "Delete this run?",
+    message: `Run ${shortJobId(job.id)} of "${name}" is removed from the store and cannot be restored. The session transcript is kept.`,
+    confirmLabel: "Delete run",
+    danger: true,
+  }))) return;
+  deletingIds.value = new Set(deletingIds.value).add(job.id);
+  try {
+    const r = await scenesStore.deleteRun(job.id);
+    if (r.ok) toast.success("Run deleted", `Run ${shortJobId(job.id)} of "${name}" was removed from the store.`);
+    else toast.error("Couldn't delete the run", r.error || "Unknown error");
   } finally {
     const next = new Set(deletingIds.value);
-    next.delete(jobId);
+    next.delete(job.id);
     deletingIds.value = next;
   }
 }
@@ -265,11 +409,23 @@ async function deleteRun(jobId: string) {
 async function clearFinished() {
   const n = finishedJobCount.value;
   if (n === 0) return;
-  if (!confirm(`Delete all ${n} finished runs from the store? Session transcripts are kept. Active runs are not affected.`)) return;
+  if (!(await confirmAction({
+    title: `Delete ${n} finished run${n === 1 ? "" : "s"}?`,
+    message: "They are removed from the store and cannot be restored. Session transcripts are kept. Active runs are not affected.",
+    confirmLabel: "Delete finished runs",
+    danger: true,
+  }))) return;
   clearingFinished.value = true;
   try {
     const r = await scenesStore.clearFinishedRuns();
-    if (r.failed > 0) alert(`Cleared ${r.deleted}, ${r.failed} could not be deleted (may have transitioned to active).`);
+    if (r.failed > 0) {
+      toast.error(
+        "Some runs could not be deleted",
+        `Deleted ${r.deleted}; ${r.failed} could not be deleted (they may have become active again).`,
+      );
+    } else {
+      toast.success("Finished runs cleared", `${r.deleted} run${r.deleted === 1 ? "" : "s"} removed from the store.`);
+    }
   } finally {
     clearingFinished.value = false;
   }
@@ -298,15 +454,19 @@ function shortJobId(value: string): string {
   return `${value.slice(0, 8)}…`;
 }
 
-function formatTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// The cards show ids cut to eight characters; this is how to get a whole one.
+async function copyId(what: string, id: string): Promise<void> {
+  try {
+    await writeClipboard(id);
+    toast.success("Copied", `${what} id is on the clipboard.`);
+  } catch {
+    toast.error("Couldn't copy", `The browser refused the clipboard. ${what} id: ${id}`);
+  }
 }
 
 function lifecycleLabel(job: SceneJob): string {
-  if (job.startedAt) return `Started ${formatTimestamp(job.startedAt)}`;
-  if (job.createdAt) return `Queued ${formatTimestamp(job.createdAt)}`;
+  if (job.startedAt) return `Started ${formatDateTime(job.startedAt)}`;
+  if (job.createdAt) return `Queued ${formatDateTime(job.createdAt)}`;
   return "Waiting for worker";
 }
 
@@ -335,9 +495,13 @@ function jobToneClass(status: SceneJob["status"]): string {
   return "job-card--running";
 }
 
-onMounted(() => {
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(() => {
   void refreshJobs();
   void loadCronTriggers();
+});
+
+onMounted(() => {
   cronTriggersTimer = setInterval(() => { void loadCronTriggers(); }, 30_000);
 });
 
@@ -354,40 +518,6 @@ watch(statusFilter, () => {
 </script>
 
 <style scoped>
-.jobs-page {
-  padding: 1.5rem;
-}
-
-.jobs-page__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-}
-
-.jobs-page__title {
-  font-size: 1.125rem;
-  font-weight: 600;
-  color: #f5ecff;
-}
-
-.jobs-page__subtitle {
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-  color: rgba(226, 217, 243, 0.72);
-}
-
-.jobs-page__button {
-  border-radius: 0.85rem;
-  border: 1px solid rgba(196, 181, 253, 0.18);
-  background: rgba(31, 41, 55, 0.78);
-  color: #f3f4f6;
-  padding: 0.5rem 0.85rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-}
-
 /* Scheduled triggers panel — ambient view of cron-driven scenes/jobs.
    Sits above the filter row so operators see what fires on its own
    before scrolling into the recent-runs grid. */
@@ -505,6 +635,10 @@ watch(statusFilter, () => {
   min-width: 180px;
 }
 
+.jobs-page__error {
+  margin-bottom: 1rem;
+}
+
 .jobs-page__empty {
   border-radius: 1rem;
   border: 1px solid rgba(107, 114, 128, 0.24);
@@ -619,40 +753,19 @@ watch(statusFilter, () => {
   color: #fecaca;
 }
 
-.job-card__button {
-  border-radius: 9999px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  background: rgba(15, 23, 42, 0.72);
-  color: #e2e8f0;
-  padding: 0.35rem 0.65rem;
-  font-size: 0.72rem;
-  cursor: pointer;
+/* An id is shown cut short: the button holds all of it (title) and copies it. */
+.job-card__id {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: copy;
 }
-
-.job-card__button--warn {
-  border-color: rgba(245, 158, 11, 0.24);
-  color: #fde68a;
+.job-card__id:hover {
+  color: #f8fafc;
 }
-
-.job-card__button--danger {
-  border-color: rgba(248, 113, 113, 0.3);
-  color: #fca5a5;
-}
-.job-card__button--danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.1);
-}
-.job-card__button--danger:disabled,
-.jobs-page__button--danger:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.jobs-page__button--danger {
-  border-color: rgba(248, 113, 113, 0.3);
-  color: #fca5a5;
-}
-.jobs-page__button--danger:hover:not(:disabled) {
-  background: rgba(248, 113, 113, 0.1);
+.job-card__id:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .job-card__progress {

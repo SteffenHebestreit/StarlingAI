@@ -63,7 +63,9 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
     active.value = state.active;
     activePrimary.value = state.activePrimary;
     defaultPrimary.value = state.defaultPrimary;
-    presets.value = state.presets;
+    // A body without a preset list (an older gateway, a proxy's page) must not take the shell down:
+    // the navigation panel reads this list while it renders.
+    presets.value = Array.isArray(state.presets) ? state.presets : [];
     if (state.scope) scope.value = state.scope;
     // Only the GET carries it; a write's answer leaves the last one standing.
     if (state.canChange !== undefined) canChange.value = state.canChange;

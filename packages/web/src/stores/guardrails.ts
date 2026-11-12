@@ -34,7 +34,7 @@ export const useGuardrailsStore = defineStore("guardrails", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       state.value = await res.json() as GuardrailState;
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }
@@ -52,7 +52,7 @@ export const useGuardrailsStore = defineStore("guardrails", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       state.value = await res.json() as GuardrailState;
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       // revert optimistic UI by re-fetching
       await fetch();
     } finally {
@@ -71,7 +71,7 @@ export const useGuardrailsStore = defineStore("guardrails", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       state.value = await res.json() as GuardrailState;
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }

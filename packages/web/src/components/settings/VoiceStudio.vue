@@ -23,9 +23,11 @@
         <button
           type="button"
           class="btn-ghost px-3 py-1.5 rounded-xl text-xs"
-          :disabled="previewing === language.code"
-          @click="preview(language.code, assignments[language.code], language.code === '*' ? 'en' : language.code)"
-        >{{ previewing === language.code ? '…' : 'Listen' }}</button>
+          :disabled="previewing === languageKey(language.code)"
+          @click="preview(languageKey(language.code), assignments[language.code], language.code === '*' ? 'en' : language.code)"
+        >{{ listenLabel(languageKey(language.code)) }}</button>
+        <!-- Why a preview failed, at the row that was clicked. -->
+        <div v-if="previewError?.key === languageKey(language.code)" class="vs-error vs-row__error" role="alert">{{ previewError.message }}</div>
       </div>
       <div class="vs-actions">
         <span v-if="assignMessage" class="text-xs" :class="assignError ? 'text-red-400' : 'text-green-300'">{{ assignMessage }}</span>
@@ -40,21 +42,27 @@
       <div class="vs-eyebrow">Your voices</div>
       <div v-if="ownVoices.length === 0" class="vs-hint">None yet — clone one from a recording or design one below.</div>
       <ul v-else class="divide-y divide-purple-500/10">
-        <li v-for="voice in ownVoices" :key="voice.id" class="flex items-center justify-between gap-3 py-2">
+        <li v-for="voice in ownVoices" :key="voice.id" class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 py-2">
           <div class="min-w-0">
             <div class="text-xs font-semibold text-gray-200 truncate">{{ voice.name }}</div>
             <div class="text-[11px] text-gray-500 font-mono truncate">{{ voice.id }}<span v-if="usedFor(voice.id)" class="ml-2 text-purple-300">speaks {{ usedFor(voice.id) }}</span></div>
           </div>
-          <div class="flex items-center gap-2 shrink-0">
-            <button type="button" class="text-[11px] text-gray-300 hover:text-white" @click="preview(voice.id, voice.id, languageOf(voice))">Listen</button>
+          <div class="flex items-center gap-1 shrink-0">
             <button
               type="button"
-              class="text-[11px] text-red-400/80 hover:text-red-300 disabled:opacity-40"
+              class="vs-row-btn text-gray-300 hover:text-white disabled:opacity-40"
+              :disabled="previewing === voiceKey(voice.id)"
+              @click="preview(voiceKey(voice.id), voice.id, languageOf(voice))"
+            >{{ listenLabel(voiceKey(voice.id)) }}</button>
+            <button
+              type="button"
+              class="vs-row-btn text-red-400/80 hover:text-red-300 disabled:opacity-40"
               :disabled="Boolean(usedFor(voice.id)) || removing === voice.id"
               :title="usedFor(voice.id) ? `It speaks ${usedFor(voice.id)} — choose another voice for it first` : 'Delete this voice from the speech service'"
               @click="remove(voice)"
             >{{ removing === voice.id ? 'Deleting…' : 'Delete' }}</button>
           </div>
+          <div v-if="previewError?.key === voiceKey(voice.id)" class="vs-error w-full" role="alert">{{ previewError.message }}</div>
         </li>
       </ul>
       <div class="vs-hint">{{ builtInSummary }}</div>
@@ -78,9 +86,11 @@
         <button type="button" class="btn-ghost px-3 py-1.5 rounded-xl text-xs" :disabled="clone.saving" @click="toggleRecording">
           {{ recording ? 'Stop recording' : 'Record from the microphone' }}
         </button>
-        <label class="btn-ghost px-3 py-1.5 rounded-xl text-xs cursor-pointer">
+        <!-- sr-only, not hidden: a display:none input takes no keyboard focus, and neither does
+             the label around it. The label shows the ring for the input inside it. -->
+        <label class="vs-file btn-ghost relative px-3 py-1.5 rounded-xl text-xs cursor-pointer">
           Choose a file
-          <input type="file" accept="audio/*" class="hidden" @change="onCloneFile" />
+          <input type="file" accept="audio/*" class="sr-only" @change="onCloneFile" />
         </label>
         <span v-if="recording" class="vs-meter" aria-hidden="true"><span :style="{ width: `${Math.round(level * 100)}%` }" /></span>
         <span v-if="clone.sampleName && !recording" class="text-[11px] text-gray-400">{{ clone.sampleName }}</span>
@@ -189,7 +199,7 @@
           <li v-for="job in training.jobs" :key="job.id" class="py-2 space-y-1">
             <div class="flex items-center justify-between gap-2 text-xs">
               <span class="text-gray-200">{{ job.modelName ?? job.id }} <span class="text-gray-500">· {{ job.status }}</span></span>
-              <button v-if="isActive(job)" type="button" class="text-[11px] text-red-400/80 hover:text-red-300" @click="cancelTraining(job.id)">Cancel</button>
+              <button v-if="isActive(job)" type="button" class="text-[11px] text-red-400/80 hover:text-red-300" @click="cancelTraining(job)">Cancel</button>
             </div>
             <div v-if="job.progress !== undefined" class="vs-progress"><span :style="{ width: `${Math.min(100, Math.max(0, job.progress))}%` }" /></div>
             <div class="text-[11px] text-gray-500">
@@ -209,17 +219,18 @@ import { useGatewayStore, type HubVoiceInfo, type VoiceTrainingJob } from "@/sto
 import { useMultimodalStore } from "@/stores/multimodal";
 import { unlockAudio } from "@/speech/audioOutput";
 import { VoiceCapture } from "@/speech/voiceCapture";
+import { confirmAction } from "@/composables/useConfirm";
+import { useToast, errorText } from "@/composables/useToast";
 import { VOICE_LANGUAGES, cleanVoiceName, voiceCaption, voicesFor } from "./voicePresets";
 
 const gateway = useGatewayStore();
 const multimodal = useMultimodalStore();
+const toast = useToast();
 
 const voices = ref<HubVoiceInfo[]>([]);
 const engines = ref<string[]>([]);
 const loading = ref(false);
 const loadError = ref("");
-
-const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 async function refresh(): Promise<void> {
   loading.value = true;
@@ -256,7 +267,10 @@ async function saveAssignments(): Promise<void> {
   savingAssignments.value = false;
   assignError.value = Boolean(multimodal.error);
   assignMessage.value = multimodal.error || "Saved — the chat speaks with these voices now.";
-  if (!multimodal.error) resetAssignments();
+  if (!multimodal.error) {
+    resetAssignments();
+    toast.success("Voices saved", "The chat speaks each language with the voice chosen for it.");
+  }
 }
 
 /** The languages a voice speaks in the chat ("German, English"), or "". */
@@ -265,15 +279,33 @@ function usedFor(id: string): string {
 }
 
 // ── Listening ───────────────────────────────────────────────────────────────
+// One preview at a time, named by its row: a language's ("language:de") or a voice's ("voice:<id>").
+const languageKey = (code: string) => `language:${code}`;
+const voiceKey = (id: string) => `voice:${id}`;
+/** The row whose sample is being made by the speech service. */
 const previewing = ref<string | null>(null);
+/** The row whose sample is audible now: its button stops it. */
+const playing = ref<string | null>(null);
+/** Why the last preview failed, shown at its row. */
+const previewError = ref<{ key: string; message: string } | null>(null);
 let previewAudio: HTMLAudioElement | null = null;
 let previewUrl: string | null = null;
+// Counts up with every start and stop, so a sample that arrives late knows it is no longer wanted.
+let previewRun = 0;
 
 function stopPreview(): void {
+  previewRun += 1;
   previewAudio?.pause();
   previewAudio = null;
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   previewUrl = null;
+  previewing.value = null;
+  playing.value = null;
+}
+
+function listenLabel(key: string): string {
+  if (playing.value === key) return "Stop";
+  return previewing.value === key ? "…" : "Listen";
 }
 
 function sampleText(code: string): string {
@@ -286,18 +318,34 @@ function languageOf(voice: HubVoiceInfo): string {
 }
 
 async function preview(key: string, voice: string | undefined, language: string): Promise<void> {
+  // The row that is playing: its button reads "Stop".
+  if (playing.value === key) {
+    stopPreview();
+    return;
+  }
   unlockAudio();
   stopPreview();
+  const run = previewRun;
+  previewError.value = null;
   previewing.value = key;
   try {
     const blob = await gateway.synthesizeSpeech({ text: sampleText(language), language, ...(voice ? { voice } : {}) });
+    // Another row was clicked, or the page left, while the sample was made.
+    if (run !== previewRun) return;
     previewUrl = URL.createObjectURL(blob);
-    previewAudio = new Audio(previewUrl);
-    await previewAudio.play();
-  } catch (error) {
-    loadError.value = errorText(error);
-  } finally {
+    const audio = new Audio(previewUrl);
+    previewAudio = audio;
+    // Playing lasts until the sample ends by itself, not just until it has started.
+    audio.addEventListener("ended", () => { if (previewAudio === audio) stopPreview(); });
+    await audio.play();
+    if (run !== previewRun) return;
     previewing.value = null;
+    playing.value = key;
+  } catch (error) {
+    // A sample stopped before it could start rejects play(); that is not a failure to report.
+    if (run !== previewRun) return;
+    stopPreview();
+    previewError.value = { key, message: errorText(error) };
   }
 }
 
@@ -312,13 +360,21 @@ const builtInSummary = computed(() => {
 const removing = ref<string | null>(null);
 
 async function remove(voice: HubVoiceInfo): Promise<void> {
-  if (!window.confirm(`Delete the voice "${voice.name}" from the speech service? This cannot be undone.`)) return;
+  const confirmed = await confirmAction({
+    title: `Delete the voice "${voice.name}"?`,
+    message: "It is deleted from the speech service and can no longer be chosen for a language. This cannot be undone.",
+    confirmLabel: "Delete voice",
+    danger: true,
+  });
+  if (!confirmed) return;
   removing.value = voice.id;
   try {
     await gateway.removeTtsVoice(voice.id);
+    toast.success("Voice deleted", `"${voice.name}" is gone from the speech service.`);
     await refresh();
   } catch (error) {
-    loadError.value = errorText(error);
+    // A toast: the error line sits in the first card, and the next refresh clears it.
+    toast.error(`Couldn't delete "${voice.name}"`, errorText(error));
   } finally {
     removing.value = null;
   }
@@ -416,6 +472,7 @@ async function saveClone(): Promise<void> {
     clone.conflict = false;
     clone.replace = false;
     clone.message = `Saved "${saved.name}". Choose it above to have the chat speak with it.`;
+    toast.success("Voice saved", `"${saved.name}" is in your voices. Choose it for a language to have the chat speak with it.`);
     if (!clone.transcript.trim() && saved.referenceText) clone.transcript = saved.referenceText;
     await refresh();
   } catch (error) {
@@ -474,6 +531,7 @@ async function saveDesign(): Promise<void> {
     });
     design.error = false;
     design.message = `Saved "${saved.name}". Choose it above to have the chat speak with it.`;
+    toast.success("Voice saved", `"${saved.name}" is in your voices. Choose it for a language to have the chat speak with it.`);
     await refresh();
   } catch (error) {
     design.error = true;
@@ -529,6 +587,7 @@ async function startTraining(): Promise<void> {
     await gateway.startVoiceTraining({ name: training.name, language: training.language, files: training.files });
     training.error = false;
     training.message = "Training started. It takes hours; the voice appears under Your voices when it is done.";
+    toast.success("Training started", `"${training.name}" takes hours; it appears under Your voices when it is done.`);
     await loadTraining();
   } catch (error) {
     training.error = true;
@@ -538,9 +597,19 @@ async function startTraining(): Promise<void> {
   }
 }
 
-async function cancelTraining(jobId: string): Promise<void> {
+async function cancelTraining(job: VoiceTrainingJob): Promise<void> {
+  const name = job.modelName ?? job.id;
+  const confirmed = await confirmAction({
+    title: `Cancel the training of "${name}"?`,
+    message: "The speech service stops the job before it has produced a voice. It cannot be resumed from here: training again starts from the beginning.",
+    confirmLabel: "Cancel training",
+    cancelLabel: "Keep training",
+    danger: true,
+  });
+  if (!confirmed) return;
   try {
-    await gateway.cancelVoiceTraining(jobId);
+    await gateway.cancelVoiceTraining(job.id);
+    toast.success("Training cancelled", `"${name}" was stopped.`);
     await loadTraining();
   } catch (error) {
     training.error = true;
@@ -578,6 +647,14 @@ onBeforeUnmount(() => {
 .vs-warn { font-size: 0.72rem; color: rgb(253 230 138); border: 1px solid rgba(245, 158, 11, 0.22); background: rgba(245, 158, 11, 0.08); border-radius: 0.5rem; padding: 0.45rem 0.6rem; }
 .vs-badge { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em; color: rgb(253 230 138); border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 9999px; padding: 0.05rem 0.45rem; }
 .vs-row { display: grid; grid-template-columns: 9rem minmax(0, 1fr) auto; align-items: center; gap: 0.5rem; }
+.vs-row__error { grid-column: 1 / -1; }
+/* A row's own actions: text buttons, with room to hit and a state to see. */
+.vs-row-btn { padding: 0.375rem 0.5rem; border-radius: 0.375rem; font-size: 11px; line-height: 1rem; transition: background-color 0.15s, color 0.15s; }
+.vs-row-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.06); }
+.vs-row-btn:focus-visible { outline: 2px solid rgba(var(--accent-purple), 0.65); outline-offset: 1px; background: rgba(255, 255, 255, 0.06); }
+.vs-row-btn:disabled { cursor: not-allowed; }
+/* The same ring the other buttons show, for the file input inside this label. */
+.vs-file:has(input:focus-visible) { box-shadow: 0 0 0 2px rgb(10, 8, 18), 0 0 0 4px rgba(var(--accent-purple), 0.65); }
 .vs-label { font-size: 0.75rem; color: rgb(156 163 175); }
 .vs-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
 .vs-field { display: grid; gap: 0.3rem; font-size: 0.72rem; color: rgb(156 163 175); }

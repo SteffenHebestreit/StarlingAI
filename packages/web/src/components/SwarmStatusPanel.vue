@@ -1,10 +1,11 @@
 <template>
   <section class="swarm-panel">
-    <!-- Always-visible header row -->
-    <div class="swarm-panel__header" @click="toggleExpanded">
-      <div class="swarm-panel__left">
-        <div class="swarm-panel__eyebrow">{{ active ? 'Live swarm state' : 'Latest swarm state' }}</div>
-      </div>
+    <!-- Always-visible header row. The toggle is a real button, stretched over the whole row, so
+         the keyboard can open a collapsed panel; "Sessions" sits above it as its sibling. -->
+    <div class="swarm-panel__header">
+      <button type="button" class="swarm-panel__toggle" :aria-expanded="expanded" @click="toggleExpanded">
+        <span class="swarm-panel__eyebrow">{{ active ? 'Live swarm state' : 'Latest swarm state' }}</span>
+      </button>
       <div class="swarm-panel__right">
         <span class="swarm-panel__stamp">{{ formatTimestamp(state.updatedAt) }}</span>
         <div class="swarm-panel__meta">
@@ -15,8 +16,8 @@
           <span v-if="counts.failed" class="swarm-pill swarm-pill--failed">{{ counts.failed }} failed</span>
           <span v-if="counts.blocked" class="swarm-pill swarm-pill--blocked">{{ counts.blocked }} blocked</span>
         </div>
-        <button v-if="showArchiveAction" class="swarm-panel__link" @click.stop="$emit('open-archive')">Sessions</button>
-        <span class="swarm-panel__chevron">{{ expanded ? '▲' : '▼' }}</span>
+        <button v-if="showArchiveAction" type="button" class="swarm-panel__link" @click.stop="$emit('open-archive')">Sessions</button>
+        <span class="swarm-panel__chevron" aria-hidden="true">{{ expanded ? '▲' : '▼' }}</span>
       </div>
     </div>
 
@@ -37,9 +38,9 @@
 
       <!-- Timeline — collapsed by default -->
       <div v-if="timeline.length" class="swarm-timeline">
-        <button class="swarm-timeline__toggle" @click.stop="timelineOpen = !timelineOpen">
+        <button type="button" class="swarm-timeline__toggle" :aria-expanded="timelineOpen" @click.stop="timelineOpen = !timelineOpen">
           <span class="swarm-timeline__label">Mission timeline ({{ timeline.length }})</span>
-          <span class="swarm-result__chevron">{{ timelineOpen ? '▲' : '▼' }}</span>
+          <span class="swarm-result__chevron" aria-hidden="true">{{ timelineOpen ? '▲' : '▼' }}</span>
         </button>
         <div v-if="timelineOpen" class="swarm-timeline__list">
           <div v-for="(entry, index) in timeline" :key="`${entry.taskId}-${entry.startedAt}-${index}`" class="swarm-timeline__item">
@@ -88,18 +89,18 @@
 
           <!-- Output toggle -->
           <div v-if="task.output" class="swarm-result">
-            <button class="swarm-result__toggle" @click.stop="toggleOutput(task.id)">
+            <button type="button" class="swarm-result__toggle" :aria-expanded="Boolean(outputOpen[task.id])" @click.stop="toggleOutput(task.id)">
               <span>{{ outputLabel(task) }}</span>
-              <span class="swarm-result__chevron">{{ outputOpen[task.id] ? '▲' : '▼' }}</span>
+              <span class="swarm-result__chevron" aria-hidden="true">{{ outputOpen[task.id] ? '▲' : '▼' }}</span>
             </button>
             <div v-if="outputOpen[task.id]" class="swarm-result__body prose-output" v-html="renderOutput(task.output)" />
           </div>
 
           <!-- Attempts toggle — only show when there were fallbacks -->
           <div v-if="task.attempts.length > 1" class="swarm-attempts">
-            <button class="swarm-attempts__toggle" @click.stop="toggleAttempts(task.id)">
+            <button type="button" class="swarm-attempts__toggle" :aria-expanded="Boolean(attemptsOpen[task.id])" @click.stop="toggleAttempts(task.id)">
               <span class="swarm-attempts__label">{{ task.attempts.length }} attempts</span>
-              <span class="swarm-result__chevron">{{ attemptsOpen[task.id] ? '▲' : '▼' }}</span>
+              <span class="swarm-result__chevron" aria-hidden="true">{{ attemptsOpen[task.id] ? '▲' : '▼' }}</span>
             </button>
             <div v-if="attemptsOpen[task.id]" class="swarm-attempts__list">
               <div v-for="(attempt, index) in task.attempts" :key="`${task.id}-${index}`" class="swarm-attempt">
@@ -268,6 +269,7 @@ function formatTimestamp(value: string): string {
 }
 
 .swarm-panel__header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -280,7 +282,26 @@ function formatTimestamp(value: string): string {
   color: #e9d5ff;
 }
 
-.swarm-panel__left { flex-shrink: 0; }
+/* The button is only as large as its label; its ::after covers the row, so a click anywhere on
+   the header still toggles and the focus ring goes round the whole row. */
+.swarm-panel__toggle {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.swarm-panel__toggle::after {
+  content: "";
+  position: absolute;
+  inset: -0.35rem;
+  border-radius: 0.75rem;
+}
+.swarm-panel__toggle:focus-visible { outline: none; }
+.swarm-panel__toggle:focus-visible::after {
+  outline: 2px solid rgba(var(--logo-cyan), 0.75);
+}
 
 .swarm-panel__right {
   display: flex;
@@ -317,6 +338,9 @@ function formatTimestamp(value: string): string {
 }
 
 .swarm-panel__link {
+  /* above the toggle's stretched hit area */
+  position: relative;
+  z-index: 1;
   border-radius: 9999px;
   border: 1px solid rgba(196, 181, 253, 0.18);
   background: rgba(17, 24, 39, 0.42);

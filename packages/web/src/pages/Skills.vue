@@ -1,15 +1,18 @@
 <template>
-  <div class="skills-page" style="height: 100%">
-    <header class="skills-page__header">
-      <div>
-        <h1 class="skills-page__title">Skill Library</h1>
-        <p class="skills-page__subtitle">
+  <div class="page-shell skills-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Skill Library</h1>
+        <p class="page-subtitle">
           Reusable procedures. The swarm authors them automatically from successful work (drafts graduate to
           <strong>active</strong> once they succeed in real use; reliable ones are promoted to workflow scenes) —
-          or write one by hand with <strong>New skill</strong>. Configure auto-authoring on the Settings → Agents page.
+          or write one by hand with <strong>New skill</strong>. Configure auto-authoring on
+          <RouterLink :to="{ path: '/agents', hash: '#skill-library' }" class="underline decoration-dotted hover:text-white">Manage → Agent tuning</RouterLink>.
         </p>
       </div>
-      <button class="skills-page__new" @click="openCreate()">+ New skill</button>
+      <div class="page-actions">
+        <button type="button" class="btn-grad px-4 py-2 rounded-xl text-sm" @click="openCreate()">+ New skill</button>
+      </div>
     </header>
 
     <section class="skills-page__panel">
@@ -33,20 +36,27 @@
             @input="onQueryChange"
           />
         </div>
-        <button class="skills-controls__refresh" @click="loadSkills()" :disabled="loading">
+        <button type="button" class="skills-controls__refresh" @click="loadSkills()" :disabled="loading">
           {{ loading ? "Loading…" : "Refresh" }}
         </button>
       </div>
 
       <div v-if="error" class="skills-page__notice skills-page__notice--error">{{ error }}</div>
-      <div v-else-if="skills.length === 0 && !loading" class="skills-page__notice">
-        No skills yet. The swarm authors them automatically after successful multi-step turns (when
+      <!-- An empty list after a load that worked is one of two things: the search or status
+           hides every skill, or the library has none. -->
+      <div v-else-if="skillsLoaded && skills.length === 0 && !loading && (skillsLoaded.query || skillsLoaded.status)" class="empty-state">
+        <p>{{ noMatchLine("skills", skillsLoaded.query, skillsLoaded.status !== "") }}</p>
+        <button type="button" class="skills-controls__refresh mt-3" @click="clearFilters()">Clear filters</button>
+      </div>
+      <div v-else-if="skillsLoaded && skills.length === 0 && !loading" class="empty-state">
+        No active or draft skills. The swarm authors them automatically after successful multi-step turns (when
         <code>skillLibrary.autoAuthor</code> is on), an agent can author one with <code>record_skill</code>,
-        or you can write one now with <strong>+ New skill</strong>.
+        or you can write one now with <strong>+ New skill</strong>. Archived skills are listed under
+        Status: Archived.
       </div>
 
       <div class="skills-list">
-        <article v-for="skill in skills" :key="skill.slug" class="skill-card">
+        <article v-for="skill in skillWindow.visible" :key="skill.slug" class="skill-card">
           <header class="skill-card__header">
             <span :class="['skill-card__status', `skill-card__status--${skill.status}`]">{{ skill.status }}</span>
             <span class="skill-card__version">v{{ skill.version }}</span>
@@ -55,7 +65,7 @@
               class="skill-card__rate"
               :title="`${skill.successes} ok / ${skill.failures} fail`"
             >{{ skill.uses > 0 ? Math.round(skill.successRate * 100) + '% over ' + skill.uses : 'untested' }}</span>
-            <span class="skill-card__date">{{ formatDate(skill.updatedAt) }}</span>
+            <time class="skill-card__date" :datetime="isoTimestamp(skill.updatedAt)" :title="isoTimestamp(skill.updatedAt)">{{ formatDateTime(skill.updatedAt) }}</time>
           </header>
           <h3 class="skill-card__name">{{ skill.name }}</h3>
           <p class="skill-card__when"><span class="skill-card__when-label">When:</span> {{ skill.whenToUse }}</p>
@@ -69,27 +79,42 @@
             <pre>{{ skill.body }}</pre>
           </details>
           <footer class="skill-card__actions">
-            <button class="skill-card__btn" @click="openEdit(skill)">Edit</button>
+            <button type="button" class="skill-card__btn" @click="openEdit(skill)">Edit</button>
             <button
               v-if="skill.status !== 'archived'"
+              type="button"
               class="skill-card__btn"
-              @click="archiveSkill(skill.slug)"
-            >Archive</button>
-            <button class="skill-card__btn skill-card__btn--danger" @click="deleteSkill(skill.slug)">Delete</button>
+              :disabled="rowBusy?.slug === skill.slug"
+              @click="archiveSkill(skill)"
+            >{{ isRowBusy(skill, "archive") ? "Archiving…" : "Archive" }}</button>
+            <button
+              type="button"
+              class="skill-card__btn skill-card__btn--danger"
+              :disabled="rowBusy?.slug === skill.slug"
+              @click="deleteSkill(skill)"
+            >{{ isRowBusy(skill, "delete") ? "Deleting…" : "Delete" }}</button>
           </footer>
         </article>
+      </div>
+
+      <!-- Under the list, which scrolls by itself. -->
+      <div v-if="skills.length > 0 && skillWindow.paged" class="mt-3 flex shrink-0 flex-col items-center gap-2 text-center">
+        <button v-if="skillWindow.hasMore" type="button" class="skills-controls__refresh" @click="skillWindow.showMore()">
+          Show {{ skillWindow.nextStep }} more
+        </button>
+        <p class="text-xs text-gray-400" aria-live="polite">{{ skillWindow.summary }} skills</p>
       </div>
     </section>
 
     <!-- Create / edit modal -->
     <div v-if="showModal" class="skill-modal__scrim" @click.self="closeModal()">
-      <div class="skill-modal" role="dialog" aria-modal="true">
+      <div ref="modalEl" class="skill-modal" role="dialog" aria-modal="true">
         <h2 class="skill-modal__title">{{ editingSlug ? "Edit skill" : "New skill" }}</h2>
-        <div v-if="modalError" class="skills-page__notice skills-page__notice--error">{{ modalError }}</div>
+        <div v-if="modalError" class="skills-page__notice skills-page__notice--error" role="alert">{{ modalError }}</div>
         <div class="skill-modal__grid">
           <label class="skill-modal__field">
-            <span>Name</span>
-            <input v-model="form.name" type="text" placeholder="Build a reveal.js deck from research" />
+            <span>Name <span class="text-red-400" aria-hidden="true">*</span></span>
+            <input ref="nameField" v-model="form.name" type="text" required aria-required="true" placeholder="Build a reveal.js deck from research" />
           </label>
           <label class="skill-modal__field">
             <span>Status</span>
@@ -103,12 +128,12 @@
             <input v-model="form.whenToUse" type="text" placeholder="When the user asks for a slide deck backed by sources" />
           </label>
           <label class="skill-modal__field skill-modal__field--full">
-            <span>Description <em>— one-line summary</em></span>
-            <input v-model="form.description" type="text" placeholder="What this procedure accomplishes" />
+            <span>Description <span class="text-red-400" aria-hidden="true">*</span> <em>— one-line summary</em></span>
+            <input ref="descriptionField" v-model="form.description" type="text" required aria-required="true" placeholder="What this procedure accomplishes" />
           </label>
           <label class="skill-modal__field skill-modal__field--full">
-            <span>Procedure <em>— Markdown: the steps &amp; pitfalls</em></span>
-            <textarea v-model="form.procedure" rows="10" placeholder="1. …&#10;2. …"></textarea>
+            <span>Procedure <span class="text-red-400" aria-hidden="true">*</span> <em>— Markdown: the steps &amp; pitfalls</em></span>
+            <textarea ref="procedureField" v-model="form.procedure" rows="10" required aria-required="true" placeholder="1. …&#10;2. …"></textarea>
           </label>
           <label class="skill-modal__field">
             <span>Tags <em>— comma-separated</em></span>
@@ -126,9 +151,10 @@
         <p class="skill-modal__hint">
           Guidance only — a skill never runs code or grants tools; the agents/tools you list are advisory hints for retrieval.
         </p>
+        <p v-if="requiredError" class="mt-2 text-sm text-red-400" role="alert">{{ requiredError }}</p>
         <div class="skill-modal__actions">
-          <button class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
-          <button class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
+          <button type="button" class="skill-card__btn" @click="closeModal()" :disabled="saving">Cancel</button>
+          <button type="button" class="skills-controls__refresh" @click="saveSkill()" :disabled="saving">
             {{ saving ? "Saving…" : (editingSlug ? "Save changes" : "Create skill") }}
           </button>
         </div>
@@ -138,8 +164,15 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { ref } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine, useListWindow } from "@/composables/listWindow";
+import { confirmAction } from "@/composables/useConfirm";
+import { useFocusTrap } from "@/composables/useFocusTrap";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast, errorText } from "@/composables/useToast";
 
 interface SkillRecord {
   slug: string;
@@ -162,6 +195,7 @@ interface SkillRecord {
 }
 
 const gateway = useGatewayStore();
+const toast = useToast();
 
 const skills = ref<SkillRecord[]>([]);
 const statusFilter = ref<string>("");
@@ -169,6 +203,22 @@ const query = ref<string>("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 let queryTimer: ReturnType<typeof setTimeout> | null = null;
+// The status and search the list on screen was loaded with (the gateway applies both); null
+// until a load has worked.
+const skillsLoaded = ref<{ status: string; query: string } | null>(null);
+// Counts loads, so a slow answer to an earlier search cannot land under a newer one.
+let loadRun = 0;
+
+// The cards are drawn a page at a time; another status or search starts again at the first page.
+const skillWindow = useListWindow(() => skills.value, {
+  resetKey: () => `${skillsLoaded.value?.status ?? ""}|${skillsLoaded.value?.query ?? ""}`,
+});
+// The card whose archive or delete request is in flight.
+const rowBusy = ref<{ slug: string; action: "archive" | "delete" } | null>(null);
+
+function isRowBusy(skill: SkillRecord, action: "archive" | "delete"): boolean {
+  return rowBusy.value?.slug === skill.slug && rowBusy.value.action === action;
+}
 
 interface SkillForm {
   name: string;
@@ -186,6 +236,13 @@ const editingSlug = ref<string | null>(null);
 const saving = ref(false);
 const modalError = ref<string | null>(null);
 const form = ref<SkillForm>(emptyForm());
+// Which required field a refused save found empty; shown under the form.
+const requiredError = ref<string | null>(null);
+const nameField = ref<HTMLInputElement | null>(null);
+const descriptionField = ref<HTMLInputElement | null>(null);
+const procedureField = ref<HTMLTextAreaElement | null>(null);
+const modalEl = ref<HTMLElement | null>(null);
+useFocusTrap(modalEl);
 
 function apiBase(): string {
   return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
@@ -196,50 +253,92 @@ function authHeaders(): Record<string, string> {
 }
 
 async function loadSkills(): Promise<void> {
+  const run = ++loadRun;
+  const request = { status: statusFilter.value, query: query.value.trim() };
   loading.value = true;
   error.value = null;
   try {
-    const params = new URLSearchParams({ includeArchived: "true" });
-    if (statusFilter.value) params.set("status", statusFilter.value);
-    if (query.value.trim()) params.set("query", query.value.trim());
+    // Archived skills are asked for only where the filter names them. The gateway leaves them out
+    // otherwise, which is what "Active & draft" means; asked for every time, they were listed there too.
+    const params = new URLSearchParams();
+    if (request.status === "archived") params.set("includeArchived", "true");
+    if (request.status) params.set("status", request.status);
+    if (request.query) params.set("query", request.query);
     const res = await fetch(`${apiBase()}/api/skills?${params}`, { headers: authHeaders() });
     if (!res.ok) {
       const body = await res.text();
       throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
     }
     const data = await res.json() as { records: SkillRecord[] };
+    if (run !== loadRun) return; // a newer load owns the list now
     skills.value = data.records ?? [];
+    skillsLoaded.value = request;
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    if (run === loadRun) error.value = err instanceof Error ? err.message : String(err);
   } finally {
-    loading.value = false;
+    if (run === loadRun) loading.value = false;
   }
 }
 
-async function archiveSkill(slug: string): Promise<void> {
+function clearFilters(): void {
+  if (queryTimer) clearTimeout(queryTimer);
+  query.value = "";
+  statusFilter.value = "";
+  void loadSkills();
+}
+
+/** The gateway's own reason when it sent one ("Skill is pinned…"), else the status. */
+async function failureText(res: Response): Promise<string> {
+  const body = await res.json().catch(() => ({})) as { error?: string };
+  return body.error || `HTTP ${res.status}`;
+}
+
+async function archiveSkill(skill: SkillRecord): Promise<void> {
+  if (rowBusy.value) return;
+  // Not marked as destructive: saving an archived skill from Edit puts it back in use.
+  if (!(await confirmAction({
+    title: "Archive this skill?",
+    message: `"${skill.name}" is taken out of use: agents no longer find it when they look for a procedure. Nothing is deleted — it stays in the library marked archived, and Edit → Save changes makes it active again.`,
+    confirmLabel: "Archive skill",
+  }))) return;
+  rowBusy.value = { slug: skill.slug, action: "archive" };
   try {
-    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(slug)}/archive`, {
+    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(skill.slug)}/archive`, {
       method: "POST",
       headers: authHeaders(),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await failureText(res));
+    // It leaves the list on screen unless that list is the archived one: say where it went.
+    toast.success("Skill archived", `"${skill.name}" is no longer offered to agents. It is listed under Status: Archived.`);
     await loadSkills();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    toast.error("Couldn't archive the skill", errorText(err));
+  } finally {
+    rowBusy.value = null;
   }
 }
 
-async function deleteSkill(slug: string): Promise<void> {
-  if (!window.confirm(`Delete skill "${slug}"? This cannot be undone.`)) return;
+async function deleteSkill(skill: SkillRecord): Promise<void> {
+  if (rowBusy.value) return;
+  if (!(await confirmAction({
+    title: "Delete this skill?",
+    message: `"${skill.name}" is removed from the library with its procedure, version history and usage record. This cannot be undone — archive it instead if you only want it out of use.`,
+    confirmLabel: "Delete skill",
+    danger: true,
+  }))) return;
+  rowBusy.value = { slug: skill.slug, action: "delete" };
   try {
-    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(slug)}`, {
+    const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(skill.slug)}`, {
       method: "DELETE",
       headers: authHeaders(),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(await failureText(res));
+    toast.success("Skill deleted", `"${skill.name}" was removed from the library.`);
     await loadSkills();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
+    toast.error("Couldn't delete the skill", errorText(err));
+  } finally {
+    rowBusy.value = null;
   }
 }
 
@@ -255,6 +354,7 @@ function splitList(v: string): string[] {
 function openCreate(): void {
   editingSlug.value = null;
   modalError.value = null;
+  requiredError.value = null;
   form.value = emptyForm();
   showModal.value = true;
 }
@@ -262,6 +362,7 @@ function openCreate(): void {
 function openEdit(skill: SkillRecord): void {
   editingSlug.value = skill.slug;
   modalError.value = null;
+  requiredError.value = null;
   form.value = {
     name: skill.name,
     whenToUse: skill.whenToUse ?? "",
@@ -278,13 +379,22 @@ function openEdit(skill: SkillRecord): void {
 function closeModal(): void {
   showModal.value = false;
 }
+useEscapeToClose(() => showModal.value, closeModal);
 
 async function saveSkill(): Promise<void> {
   const f = form.value;
-  if (!f.name.trim() || !f.description.trim() || !f.procedure.trim()) {
-    modalError.value = "Name, description, and procedure are required.";
+  // The first required field left empty is named under the form and gets the cursor.
+  const missing = [
+    { label: "Name", value: f.name, field: nameField.value },
+    { label: "Description", value: f.description, field: descriptionField.value },
+    { label: "Procedure", value: f.procedure, field: procedureField.value },
+  ].find((entry) => !entry.value.trim());
+  if (missing) {
+    requiredError.value = `${missing.label} is required.`;
+    missing.field?.focus();
     return;
   }
+  requiredError.value = null;
   saving.value = true;
   modalError.value = null;
   try {
@@ -311,20 +421,19 @@ async function saveSkill(): Promise<void> {
       throw new Error(body.error || `HTTP ${res.status}`);
     }
     showModal.value = false;
+    if (editingSlug.value) toast.success("Skill saved", `Your changes to "${payload.name}" are stored (status: ${payload.status}).`);
+    else toast.success("Skill created", `"${payload.name}" was added to the library as ${payload.status}.`);
     await loadSkills();
   } catch (err) {
     modalError.value = err instanceof Error ? err.message : String(err);
+    toast.error(editingSlug.value ? "Couldn't save the skill" : "Couldn't create the skill", errorText(err));
   } finally {
     saving.value = false;
   }
 }
 
-function formatDate(iso: string): string {
-  if (!iso) return "—";
-  try { return new Date(iso).toLocaleString(); } catch { return iso; }
-}
-
-onMounted(() => { void loadSkills(); });
+// Also when the gateway comes up after the page did (opened by URL, or signed in to here).
+useLoadWhenConnected(loadSkills);
 </script>
 
 <style scoped>
@@ -334,62 +443,15 @@ onMounted(() => { void loadSkills(); });
   /* Near-transparent scrim — the themed app canvas glows through. */
   background: rgba(8, 10, 18, 0.30);
   color: rgb(229 231 235);
-  overflow: hidden;
 }
 
-.skills-page__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.25rem 1.5rem 0.75rem;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.18);
-}
-
-.skills-page__new {
-  flex: 0 0 auto;
-  appearance: none;
-  background: rgba(168, 85, 247, 0.22);
-  color: rgb(243 232 255);
-  border: 1px solid rgba(168, 85, 247, 0.45);
-  border-radius: 999px;
-  padding: 0.4rem 1rem;
-  font-size: 0.82rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.skills-page__new:hover { background: rgba(168, 85, 247, 0.32); }
-
-.skills-page__title {
-  font-size: 1.4rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.25rem;
-}
-
-.skills-page__subtitle {
-  margin: 0;
-  font-size: 0.85rem;
-  color: rgb(156 163 175);
-  max-width: 56rem;
-}
-
-.skills-page__subtitle code {
-  font-family: 'SFMono-Regular', Consolas, monospace;
-  background: rgba(168, 85, 247, 0.18);
-  color: rgb(216 180 254);
-  padding: 0.05rem 0.3rem;
-  border-radius: 4px;
-  font-size: 0.78em;
-}
-
+/* The list scrolls inside the panel; the floor keeps it readable in a short
+   window, where the page itself scrolls instead. */
 .skills-page__panel {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  padding: 1rem 1.5rem 1.5rem;
+  min-height: 18rem;
   overflow: hidden;
 }
 
@@ -566,9 +628,10 @@ onMounted(() => { void loadSkills(); });
   font-size: 0.78rem;
   cursor: pointer;
 }
-.skill-card__btn:hover { background: rgba(168, 85, 247, 0.15); }
+.skill-card__btn:hover:not(:disabled) { background: rgba(168, 85, 247, 0.15); }
+.skill-card__btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .skill-card__btn--danger { border-color: rgba(248, 113, 113, 0.4); color: rgb(254 202 202); }
-.skill-card__btn--danger:hover { background: rgba(127, 29, 29, 0.3); }
+.skill-card__btn--danger:hover:not(:disabled) { background: rgba(127, 29, 29, 0.3); }
 
 /* Create / edit modal */
 .skill-modal__scrim {

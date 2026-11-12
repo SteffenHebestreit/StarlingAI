@@ -74,7 +74,7 @@ export const useAgentsStore = defineStore("agents", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       agents.value = await res.json() as AgentInfo[];
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }
@@ -115,7 +115,7 @@ export const useAgentsStore = defineStore("agents", () => {
       if (agent) agent.model = updated.model;
       return null;
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       // Revert by re-fetching
       await fetch();
       return e instanceof Error ? e.message : String(e);
@@ -133,7 +133,7 @@ export const useAgentsStore = defineStore("agents", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       routingResult.value = await res.json() as AgentRoutingResolution;
     } catch (e) {
-      routingError.value = String(e);
+      routingError.value = e instanceof Error ? e.message : String(e);
       routingResult.value = null;
     } finally {
       routingLoading.value = false;

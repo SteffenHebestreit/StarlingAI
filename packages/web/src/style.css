@@ -601,8 +601,137 @@
 ::-webkit-scrollbar-thumb:hover { background: rgba(var(--accent-purple), 0.45); }
 
 /* Honour reduced-motion: drop hover lifts, sweeps, pulses, and transitions. */
+/* ── Page shell ────────────────────────────────────────────────────────────
+   What a management page stands in: it scrolls by itself (the app's <main>
+   clips), keeps a margin, and lays its cards out in two columns where there is
+   room. These lived in Settings.vue's scoped styles, so the Swarm page, which
+   uses the same markup, got none of them: no padding, one long column, and no
+   way to scroll to the cards below the fold. */
+.page-shell {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1.5rem;
+}
+.page-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+@media (max-width: 1023px) {
+  .page-shell { padding: 1rem; }
+  .page-grid { grid-template-columns: 1fr; }
+}
+/* A page's head: what it is, one line on what it is for, and its actions on the right. The
+   seventeen management pages had seven different heads between them. */
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.page-header__text { min-width: 0; flex: 1 1 20rem; }
+.page-title {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: var(--display-tracking);
+  color: rgb(249, 250, 251);
+}
+.page-subtitle {
+  margin-top: 0.35rem;
+  max-width: 48rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(156, 163, 175);
+}
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+/* A line that says something went wrong, or that there is nothing here — one look for each,
+   wherever it stands. */
+.notice {
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(209, 213, 219);
+}
+.notice--error {
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(127, 29, 29, 0.22);
+  color: rgb(254, 202, 202);
+}
+.empty-state {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgb(156, 163, 175);
+}
+
+.section-title {
+  margin-bottom: 1rem;
+  font-family: var(--font-label);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  color: rgb(243, 244, 246);
+  background: linear-gradient(to right, rgb(var(--accent-purple)), rgb(var(--accent-pink)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Stacking order ────────────────────────────────────────────────────────
+   One scale for everything that floats. The chat page's own chrome (side panel
+   201–223, composer 215, pods and launcher 220) and the navigation panel
+   (catcher 225, panel 230) were already up here, while the shell's menus, dialogs
+   and toasts sat at 50–90: the chat's round buttons floated over the account
+   menu, over a toast's Dismiss and over every dialog, and stayed clickable there.
+   What is summoned beats what floats; what must be answered beats what is
+   summoned; a notice is never covered. */
+:root {
+  --z-dock: 228;
+  --z-popover-catch: 235;
+  --z-popover: 240;
+  --z-modal: 300;
+  --z-toast: 320;
+  --z-confirm: 340;
+}
+.z-dock { z-index: var(--z-dock); }
+.z-popover-catch { z-index: var(--z-popover-catch); }
+.z-popover { z-index: var(--z-popover); }
+.z-modal { z-index: var(--z-modal); }
+.z-toast { z-index: var(--z-toast); }
+.z-confirm { z-index: var(--z-confirm); }
+
 @media (prefers-reduced-motion: reduce) {
   .bg-orb, .dot-pulse, .modal-pop { animation: none; }
+  .hud-pop-enter-active, .hud-pop-leave-active,
+  .nav-fwd-enter-active, .nav-fwd-leave-active,
+  .nav-back-enter-active, .nav-back-leave-active,
+  .toast-enter-active, .toast-leave-active, .toast-move,
+  .hud-btn {
+    transition: opacity 120ms linear !important;
+  }
+  .hud-pop-enter-from, .hud-pop-leave-to,
+  .nav-fwd-enter-from, .nav-fwd-leave-to,
+  .nav-back-enter-from, .nav-back-leave-to,
+  .toast-enter-from, .toast-leave-to,
+  .hud-btn:hover {
+    transform: none !important;
+  }
   .glass-card--interactive,
   .btn-grad,
   .btn-ghost,
@@ -695,6 +824,10 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 0 18px rgba(var(--accent-purple), 0.4);
   transform: translateY(-1px);
+}
+.hud-btn:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.75);
+  outline-offset: 2px;
 }
 .hud-btn--active {
   color: rgb(var(--logo-cyan));

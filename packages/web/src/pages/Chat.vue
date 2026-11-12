@@ -8,7 +8,10 @@
 
     <!-- Orb background canvas: fixed to the viewport so layout changes
          (input bay, panels) can never move or resize the entity. -->
-    <div class="fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden">
+    <div
+      class="chat-orb-layer fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden"
+      :class="orbBehindText ? 'chat-orb-layer--behind-text' : ''"
+    >
       <OrbCanvas :ai-state="orbAiState" :ring="orbRing" class="w-full h-full" />
     </div>
 
@@ -24,8 +27,8 @@
     >
       <div class="chat-drop-overlay__panel">
         <div class="chat-drop-overlay__icon" aria-hidden="true">📎</div>
-        <div class="chat-drop-overlay__title">Drop to attach</div>
-        <div class="chat-drop-overlay__hint">Images queue for analysis · audio gets transcribed · documents convert to Markdown context</div>
+        <div class="chat-drop-overlay__title">{{ chatText.dropTitle(uiLanguage) }}</div>
+        <div class="chat-drop-overlay__hint">{{ chatText.dropHint(uiLanguage) }}</div>
       </div>
     </div>
 
@@ -35,27 +38,19 @@
     <Teleport to="body">
     <div v-if="(actionsOpen || sessionOpen) && gateway.connected" class="fixed inset-0 z-[210]" @click="actionsOpen = false; sessionOpen = false" />
 
-    <!-- Session-actions pod: tools fan out on a full circle around it.
+    <!-- Session-actions pod: its tools open as a labelled list beside it, on the side with room.
+         They used to fan out on a full circle as bare glyphs (MD, DBG, AUD, ARC, RST): near a
+         screen edge half of them left the screen, one landed on the header, and what a glyph
+         did was told by a hover tooltip only.
          The pods are chat controls — they only exist while connected, so
          they can never float above the login modal. -->
     <div v-if="gateway.connected" class="hud-orb" :style="actionsOrbStyle">
       <div class="radial-menu" :class="actionsOpen ? 'radial-menu--open' : ''">
         <button
-          v-for="(action, i) in sessionActions"
-          :key="action.key"
-          type="button"
-          class="radial-menu__item"
-          :class="action.danger ? 'radial-menu__item--danger' : ''"
-          :style="radialItemStyle(i, sessionActions.length)"
-          :disabled="action.disabled"
-          :title="action.title"
-          :tabindex="actionsOpen ? 0 : -1"
-          @click="action.run(); actionsOpen = false;"
-        >{{ action.glyph }}</button>
-        <button
           type="button"
           class="radial-menu__toggle"
           :aria-expanded="actionsOpen"
+          aria-haspopup="menu"
           aria-label="Session actions"
           title="Session actions (drag to move)"
           @pointerdown="actionsOrbDown"
@@ -71,6 +66,37 @@
           </svg>
         </button>
       </div>
+      <Transition name="hud-pop">
+        <div
+          v-if="actionsOpen"
+          ref="actionsMenuEl"
+          class="actions-pod"
+          :class="[actionsPodLeft ? 'session-pod--left' : 'session-pod--right', actionsPodUp ? 'actions-pod--up' : '']"
+          role="menu"
+          aria-label="Session actions"
+          @keydown="onActionsMenuKeydown"
+        >
+          <template v-for="(action, i) in sessionActions" :key="action.key">
+            <div v-if="action.danger" class="actions-pod__rule" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-pod__item"
+              :class="action.danger ? 'actions-pod__item--danger' : ''"
+              :style="{ '--delay': `${i * 26}ms` }"
+              :disabled="action.disabled"
+              :title="action.disabled ? action.disabledReason : undefined"
+              @click="action.run(); actionsOpen = false;"
+            >
+              <span class="actions-pod__glyph" aria-hidden="true">{{ action.glyph }}</span>
+              <span class="actions-pod__text">
+                <span class="actions-pod__label">{{ action.label }}</span>
+                <span class="actions-pod__hint">{{ action.disabled ? action.disabledReason : action.hint }}</span>
+              </span>
+            </button>
+          </template>
+        </div>
+      </Transition>
     </div>
 
     <!-- Session pod: indicator + picker behind its own toggle. -->
@@ -137,11 +163,12 @@
               v-if="!isAtBottom && hasNewBelow"
               type="button"
               class="chat-scroll-resume"
+              :class="composerOpen ? 'chat-scroll-resume--above-bay' : ''"
               @click="jumpToBottom"
-              aria-label="Jump to latest messages"
+              :aria-label="chatText.jumpToLatest(uiLanguage)"
             >
               <span aria-hidden="true">↓</span>
-              <span>{{ gateway.isLoading ? "New activity" : "New messages" }}</span>
+              <span>{{ gateway.isLoading ? chatText.newActivity(uiLanguage) : chatText.newMessages(uiLanguage) }}</span>
             </button>
           </Transition>
           <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''">
@@ -151,7 +178,7 @@
                 :disabled="gateway.currentSessionTranscriptLoading"
                 class="rounded-full border border-purple-500/25 bg-gray-900/70 px-4 py-1.5 text-xs text-purple-200 transition hover:border-purple-400/45 hover:text-purple-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {{ gateway.currentSessionTranscriptLoading ? 'Loading older messages...' : 'Load older messages' }}
+                {{ gateway.currentSessionTranscriptLoading ? chatText.loadingOlder(uiLanguage) : chatText.loadOlder(uiLanguage) }}
               </button>
             </div>
 
@@ -160,7 +187,7 @@
                 @click="expandedMessageHistory = !expandedMessageHistory"
                 class="chat-history-collapsed__button"
               >
-                {{ expandedMessageHistory ? `Hide ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` : `Show ${collapsedMessageCount} older message${collapsedMessageCount === 1 ? '' : 's'}` }}
+                {{ expandedMessageHistory ? chatText.hideOlder(uiLanguage, collapsedMessageCount) : chatText.showOlder(uiLanguage, collapsedMessageCount) }}
               </button>
             </div>
 
@@ -175,8 +202,9 @@
               :auto-collapse="msg.role === 'assistant' && msg.id !== 'streaming' && !latestTurnView.assistantIds.has(msg.id)"
               :fold-steps="msg.role === 'assistant' && msg.id !== 'streaming'"
               :allow-rewind="!gateway.isLoading"
-              :live-at-orb="true"
+              :live-at-orb="orbHasRoomForSteps"
               @rewind="handleRewind"
+              @retry="handleRetry"
               @resend="handleResendSteer"
               @show-step="showStep"
             />
@@ -189,6 +217,7 @@
                 v-for="inputId in gateway.userInputPlacement.floating"
                 :key="inputId"
                 :input-id="inputId"
+                :language="orbLanguage"
               />
             </div>
 
@@ -204,6 +233,7 @@
                   @click="openComposer(starter.prompt)"
                 >{{ starter.label }}</button>
               </div>
+              <p class="chat-starters__hint">{{ starters.typeHint }}</p>
             </div>
           </div>
         </section>
@@ -212,6 +242,7 @@
 
     <!-- Off-canvas side panel: Live Context + Artifacts -->
     <SidePanel
+      :language="uiLanguage"
       v-model="sidePanelOpen"
       :has-live-content="hasSidePanels"
       :artifact-count="sessionArtifacts.length"
@@ -220,7 +251,7 @@
     >
       <!-- Steps slot: every step of the ONE answer whose row was clicked, that row opened. -->
       <template #steps>
-        <StepDetailPanel :steps="stepDetailSteps" :focus-step-id="focusedStepId" :focus-request="focusRequest" />
+        <StepDetailPanel :steps="stepDetailSteps" :focus-step-id="focusedStepId" :focus-request="focusRequest" :language="stepDetailLanguage" />
       </template>
       <!-- Live context slot: swarm, shell, computer sessions -->
       <template #live>
@@ -338,7 +369,7 @@
              role="alertdialog" aria-live="assertive"
              class="approval-banner">
           <div class="approval-banner__header">
-            <span class="approval-banner__eyebrow">Approval Required</span>
+            <span class="approval-banner__eyebrow">{{ chatText.approvalRequired(uiLanguage) }}</span>
             <span v-if="approvalCountdownLabel" class="approval-banner__timer">{{ approvalCountdownLabel }}</span>
           </div>
           <p class="approval-banner__copy">
@@ -349,10 +380,10 @@
           <pre class="approval-banner__args">{{ JSON.stringify(gateway.pendingApproval.args, null, 2) }}</pre>
           <div class="approval-banner__actions">
             <button @click="approveAction(true)" class="btn-grad approval-banner__button">
-              Approve
+              {{ chatText.approve(uiLanguage) }}
             </button>
             <button @click="approveAction(false)" class="btn-ghost approval-banner__button approval-banner__button--deny">
-              Deny
+              {{ chatText.deny(uiLanguage) }}
             </button>
           </div>
         </div>
@@ -369,7 +400,7 @@
           <div class="flex items-center gap-2 mb-2">
             <span class="text-xs font-semibold tracking-widest uppercase"
                   style="background: linear-gradient(90deg,#38bdf8,#818cf8); -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-              Question
+              {{ chatText.question(uiLanguage) }}
             </span>
             <span v-if="inputRequestCountdownLabel" class="ml-auto text-xs tabular-nums text-gray-400">{{ inputRequestCountdownLabel }}</span>
           </div>
@@ -388,7 +419,7 @@
             <input
               v-model="inputRequestText"
               type="text"
-              placeholder="Type your answer…"
+              :placeholder="chatText.answerPlaceholder(uiLanguage)"
               @keydown="onInputRequestKeydown"
               aria-label="Free-text answer to the agent's question"
               class="flex-1 rounded-xl bg-gray-800/60 border border-white/10 px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-sky-500/50" />
@@ -396,37 +427,41 @@
               @click="submitInputFreeText"
               :disabled="!inputRequestText.trim()"
               class="btn-grad px-4 py-2 rounded-xl text-sm font-semibold disabled:opacity-40">
-              Send
+              {{ chatText.send(uiLanguage) }}
             </button>
             <!-- The floating steering bay (with its Stop button) is folded away while a question is
                  pending, so surface Stop here to keep the abort path available. -->
             <button
               v-if="gateway.isLoading"
-              @click="gateway.cancelTurn()"
-              class="px-4 py-2 rounded-xl text-sm font-semibold shrink-0 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white transition-colors"
-              title="Stop the current turn">
-              Stop
+              type="button"
+              :disabled="stoppingTurn"
+              @click="stopTurn"
+              class="px-4 py-2 rounded-xl text-sm font-semibold shrink-0 bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white transition-colors disabled:opacity-60 disabled:cursor-progress"
+              :title="chatText.stopTitle(uiLanguage)">
+              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
           </div>
         </div>
       </div>
     </Transition>
 
+    <Teleport to="body">
     <Transition name="approval">
       <div v-if="gateway.pendingIntervention"
            role="alert" aria-live="assertive"
-           class="relative z-20 mx-5 mb-2 rounded-2xl overflow-hidden"
+           class="intervention-banner rounded-2xl overflow-hidden"
+           :style="gateway.pendingApproval ? { bottom: 'calc(max(5.5rem, var(--bay-h, 0px) + 2.5rem) + 11rem)' } : undefined"
            :class="gateway.pendingIntervention.severity === 'error' ? 'border border-red-500/45' : 'border border-amber-500/45'"
            style="background: rgba(18,14,28,0.97); box-shadow: 0 0 24px rgba(245,158,11,0.16);">
         <div class="px-5 py-4">
           <div class="flex items-center justify-between gap-3 mb-2">
             <div>
-              <div class="text-xs font-semibold tracking-widest uppercase text-amber-300">Operator Action Suggested</div>
+              <div class="text-xs font-semibold tracking-widest uppercase text-amber-300">{{ chatText.operatorAction(uiLanguage) }}</div>
               <div class="mt-1 text-sm text-gray-100">{{ gateway.pendingIntervention.summary }}</div>
             </div>
             <button @click="gateway.dismissIntervention()"
                     class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200">
-              Dismiss
+              {{ chatText.dismiss(uiLanguage) }}
             </button>
           </div>
           <p class="text-sm text-gray-300 mb-3">{{ gateway.pendingIntervention.detail }}</p>
@@ -444,13 +479,16 @@
         </div>
       </div>
     </Transition>
+    </Teleport>
 
     <!-- Input bay: a floating bottom panel (no layout impact at all);
          recedes into depth while idle, summoned by the launcher. -->
     <div class="chat-input-bay-wrap" :class="bayOpen ? 'chat-input-bay-wrap--open' : ''">
     <div
+      ref="bayEl"
       class="chat-input-bay relative bg-gray-900/85 backdrop-blur-xl border border-purple-500/25 rounded-2xl px-5 py-4 shadow-2xl shadow-black/50"
       :class="bayOpen ? '' : 'chat-input-bay--hidden'"
+      :inert="!bayOpen"
       @focusin="composerFocused = true"
       @focusout="onComposerFocusOut"
     >
@@ -464,9 +502,11 @@
         >
           <!-- Thumbnail — click opens preview modal -->
           <button
+            type="button"
             @click="previewModalUrl = img.previewUrl"
-            class="shrink-0 focus:outline-none"
+            class="shrink-0 rounded-l-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70"
             title="Preview image"
+            :aria-label="`Preview ${img.filename}`"
           >
             <img :src="img.previewUrl" :alt="img.filename" class="h-9 w-9 object-cover rounded-l-xl" />
           </button>
@@ -474,9 +514,11 @@
           <span class="text-xs text-purple-300 max-w-[8rem] truncate select-none">{{ img.filename }}</span>
           <!-- Remove -->
           <button
+            type="button"
             @click="removeImage(idx)"
-            class="text-purple-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            class="chip-remove text-purple-400 hover:text-red-300"
             title="Remove"
+            :aria-label="`Remove ${img.filename}`"
           >✕</button>
         </div>
       </div>
@@ -491,9 +533,11 @@
           <span class="text-cyan-300 text-sm leading-none" aria-hidden="true">📄</span>
           <span class="text-xs text-cyan-200 max-w-[10rem] truncate select-none" :title="doc.filename">{{ doc.filename }}</span>
           <button
+            type="button"
             @click="removeDocument(idx)"
-            class="text-cyan-400 hover:text-red-300 transition-colors px-0.5 text-xs leading-none"
+            class="chip-remove text-cyan-400 hover:text-red-300"
             title="Remove"
+            :aria-label="`Remove ${doc.filename}`"
           >✕</button>
         </div>
       </div>
@@ -504,16 +548,18 @@
           v-for="flag in activeFlags"
           :key="flag.label"
           @click="removeFlag(flag.pattern)"
-          :class="['flex items-center gap-1 px-2 py-0.5 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
+          type="button"
+          :class="['flex items-center gap-1 px-2.5 py-1 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
           title="Click to remove flag"
+          :aria-label="`Remove ${flag.label}`"
         >
           {{ flag.label }}
           <span class="opacity-50 ml-0.5">✕</span>
         </button>
       </div>
 
-      <div v-if="showMultimodalStatus" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
-        <span class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
+      <div v-if="showMultimodalStatus && (voiceStatusWorthShowing || (showWakeMode && wakeListening))" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
+        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide" role="status">
           {{ voiceStatus }}
         </span>
         <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
@@ -561,6 +607,7 @@
           ref="fileInputEl"
           type="file"
           class="hidden"
+          multiple
           accept=".pdf,.doc,.docx,.txt,.md,.csv,image/*"
           @change="onDocumentSelected"
         />
@@ -589,12 +636,12 @@
             <span :style="{ width: `${Math.round(micLevel * 100)}%` }" />
           </div>
           <div class="voice-bar__actions">
-            <button v-if="voiceBarBusy" type="button" class="voice-bar__button voice-bar__button--stop" @click="voice.stopSpeaking()">Stop</button>
-            <button v-if="recordingState === 'recording'" type="button" class="voice-bar__button" @click="toggleRecording()">Done</button>
-            <button v-if="lastReply?.summarized" type="button" class="voice-bar__button" @click="voice.readFullReply()">Read full answer</button>
-            <button v-if="lastReply && !voiceBarBusy" type="button" class="voice-bar__button" @click="voice.replay()">Replay</button>
-            <button v-if="lastReply" type="button" class="voice-bar__button" @click="replyTextOpen = !replyTextOpen">{{ replyTextOpen ? 'Hide text' : 'Show text' }}</button>
-            <button v-if="voiceConversationMode" type="button" class="voice-bar__button" @click="voice.toggleConversation()">End conversation</button>
+            <button v-if="voiceBarBusy" type="button" class="voice-bar__button voice-bar__button--stop" @click="voice.stopSpeaking()">{{ chatText.voiceStop(uiLanguage) }}</button>
+            <button v-if="recordingState === 'recording'" type="button" class="voice-bar__button" @click="toggleRecording()">{{ chatText.voiceDone(uiLanguage) }}</button>
+            <button v-if="lastReply?.summarized" type="button" class="voice-bar__button" @click="voice.readFullReply()">{{ chatText.readFull(uiLanguage) }}</button>
+            <button v-if="lastReply && !voiceBarBusy" type="button" class="voice-bar__button" @click="voice.replay()">{{ chatText.replay(uiLanguage) }}</button>
+            <button v-if="lastReply" type="button" class="voice-bar__button" @click="replyTextOpen = !replyTextOpen">{{ replyTextOpen ? chatText.hideText(uiLanguage) : chatText.showText(uiLanguage) }}</button>
+            <button v-if="voiceConversationMode" type="button" class="voice-bar__button" @click="voice.toggleConversation()">{{ chatText.endConversation(uiLanguage) }}</button>
             <button
               v-if="!voiceBarBusy && !voiceConversationMode && recordingState === 'idle'"
               type="button"
@@ -641,31 +688,37 @@
             class="chat-composer__textarea"
             :class="compactComposer ? 'chat-composer__textarea--compact' : ''"
             :style="composerTextareaStyle"
-            :placeholder="gateway.hasOpenUserInput
-              ? 'Waiting on the card above — use its Configure to change the engine or prompt…'
-              : gateway.isLoading ? 'Steer the running turn — your message is queued and read at its next step…' : `Message ${product.name}… (Enter to send, Shift+Enter for newline, / for commands)`"
+            :placeholder="composerBlockedReason || (gateway.hasOpenUserInput
+              ? chatText.cardPlaceholder(uiLanguage)
+              : gateway.isLoading ? chatText.steerPlaceholder(uiLanguage) : composerPlaceholder)"
+            :title="composerBlockedReason || undefined"
             rows="3"
           />
-          <div v-if="steeringNote" class="chat-composer__steering-note">{{ steeringNote }}</div>
+          <div
+            v-if="steeringNote"
+            class="chat-composer__steering-note"
+            :class="steeringNoteTone === 'error' ? 'chat-composer__steering-note--error' : ''"
+            :role="steeringNoteTone === 'error' ? 'alert' : 'status'"
+          >{{ steeringNote }}</div>
         </div>
 
         <div class="chat-composer__controls">
           <div class="chat-composer__menus">
-            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown">
+            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown" @toggle="onComposerMenuToggle">
               <summary class="chat-dropdown__summary">
-                <span>Options</span>
+                <span>{{ chatText.options(uiLanguage) }}</span>
                 <span class="chat-dropdown__chevron">▾</span>
               </summary>
               <div class="chat-dropdown__menu">
                 <div class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Attachments & Voice</div>
+                  <div class="chat-dropdown__label">{{ chatText.attachmentsAndVoice(uiLanguage) }}</div>
                   <div class="chat-dropdown__actions">
                     <button
                       v-if="showFileInput"
                       @click="fileInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Attach a document or image"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Attach a document or image'"
                       aria-label="Attach file"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -680,7 +733,7 @@
                       @click="audioInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Upload an audio file for transcription"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Upload an audio file for transcription'"
                       aria-label="Upload audio"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -696,7 +749,7 @@
                       :disabled="(multimodalBusy && recordingState !== 'recording') || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
-                      :title="recordingState === 'recording' ? 'Stop microphone recording' : 'Record voice from the microphone'"
+                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? 'Stop microphone recording' : multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Record voice from the microphone'"
                       :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -783,25 +836,25 @@
                       </select>
                     </label>
                     <label v-if="showSpeechPlayback" class="chat-dropdown__voice-setting">
-                      <span>While a turn runs</span>
+                      <span>{{ chatText.whileTurnRuns(uiLanguage) }}</span>
                       <select v-model="speechUpdates" class="chat-dropdown__select" title="What you hear while the assistant works, with speech on">
-                        <option value="voice">Spoken updates + tones</option>
-                        <option value="tones">Tones only</option>
-                        <option value="off">Silent until the answer</option>
+                        <option value="voice">{{ chatText.spokenUpdates(uiLanguage) }}</option>
+                        <option value="tones">{{ chatText.tonesOnly(uiLanguage) }}</option>
+                        <option value="off">{{ chatText.silentUntilAnswer(uiLanguage) }}</option>
                       </select>
                     </label>
                   </div>
                 </div>
 
                 <div v-if="gateway.scenes.length > 0" class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Scenes</div>
+                  <div class="chat-dropdown__label">{{ chatText.scenes(uiLanguage) }}</div>
                   <div class="chat-dropdown__scene-grid">
                     <button
                       v-for="scene in gateway.scenes"
                       :key="scene.name"
                       @click="triggerScene(scene.name)"
                       :disabled="gateway.isLoading || !gateway.connected || isSceneRunning(scene.name)"
-                      :title="scene.description"
+                      :title="startButtonTitle(scene.description, startBlockedReason('scene', isSceneRunning(scene.name)))"
                       class="chat-scene-pill"
                     >
                       <span class="text-purple-500 transition-colors">{{ isSceneRunning(scene.name) ? '●' : '▶' }}</span>
@@ -811,14 +864,14 @@
                 </div>
 
                 <div v-if="configuredJobs.length > 0" class="chat-dropdown__group">
-                  <div class="chat-dropdown__label">Jobs</div>
+                  <div class="chat-dropdown__label">{{ chatText.jobs(uiLanguage) }}</div>
                   <div class="chat-dropdown__scene-grid">
                     <button
                       v-for="job in configuredJobs"
                       :key="job.name"
                       @click="triggerJob(job.name)"
                       :disabled="gateway.isLoading || !gateway.connected || isJobRunning(job.name)"
-                      :title="job.description"
+                      :title="startButtonTitle(job.description, startBlockedReason('job', isJobRunning(job.name)))"
                       class="chat-scene-pill"
                     >
                       <span class="text-cyan-400 transition-colors">{{ isJobRunning(job.name) ? '●' : '↻' }}</span>
@@ -829,7 +882,7 @@
               </div>
             </details>
 
-            <details v-if="showJobsDropdown" class="chat-dropdown">
+            <details v-if="showJobsDropdown" class="chat-dropdown" @toggle="onComposerMenuToggle">
               <summary class="chat-dropdown__summary">
                 <span>{{ jobsDropdownLabel }}</span>
                 <span class="chat-dropdown__chevron">▾</span>
@@ -860,7 +913,7 @@
                         @click="scenesStore.dismissJob(job.id)"
                         class="rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-gray-400 transition hover:border-white/20 hover:text-gray-200"
                       >
-                        Dismiss
+                        {{ chatText.dismiss(uiLanguage) }}
                       </button>
                     </div>
                   </div>
@@ -923,21 +976,43 @@
               </div>
             </details>
 
-            <!-- Effort selector: cycles low → medium → high → max for this session.
-                 Higher tiers relax timeouts/iteration & size caps and push reasoning
-                 (high keeps quality gates; max removes them for unbounded runs). -->
-            <button
-              @click="cycleEffort"
-              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
-              :class="effortButtonClass"
-              :title="effortTitle"
-              :aria-label="`Effort: ${currentEffort}`"
-            >
-              <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
-              </svg>
-              <span class="capitalize">{{ currentEffort }}</span>
-            </button>
+            <!-- Effort: the four tiers as a list with what each one does. It used to be one button
+                 that stepped through them — one click past "high" landed on "max", which relaxes
+                 the quality gates, with no warning, and going back to "low" took three more. -->
+            <details ref="effortDetailsEl" class="chat-dropdown chat-dropdown--effort" @toggle="onComposerMenuToggle">
+              <summary
+                class="chat-dropdown__summary chat-dropdown__summary--effort"
+                :class="effortButtonClass"
+                :title="effortTitle"
+                :aria-label="`Effort: ${currentEffort}`"
+              >
+                <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+                </svg>
+                <span class="capitalize">{{ currentEffort }}</span>
+                <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
+              </summary>
+              <div class="chat-dropdown__menu chat-dropdown__menu--effort" role="radiogroup" :aria-label="chatText.effortForSession(uiLanguage)">
+                <div class="chat-dropdown__label">{{ chatText.effortForSession(uiLanguage) }}</div>
+                <button
+                  v-for="tier in EFFORT_TIERS"
+                  :key="tier"
+                  type="button"
+                  role="radio"
+                  class="effort-option"
+                  :class="[tier === currentEffort ? 'effort-option--current' : '', tier === 'max' ? 'effort-option--caution' : '']"
+                  :aria-checked="tier === currentEffort"
+                  @click="chooseEffort(tier)"
+                >
+                  <span class="effort-option__name">
+                    <span class="capitalize">{{ tier }}</span>
+                    <span v-if="tier === 'max'" class="effort-option__flag">{{ chatText.relaxesGates(uiLanguage) }}</span>
+                    <span v-if="tier === currentEffort" class="effort-option__check" aria-hidden="true">✓</span>
+                  </span>
+                  <span class="effort-option__text">{{ EFFORT_DESCRIPTIONS[tier] }}</span>
+                </button>
+              </div>
+            </details>
 
             <!-- Whether a render in this chat stops for the user's settings first. The same
                  session setting as the card's "Always Auto in this chat". -->
@@ -959,12 +1034,12 @@
               <span>Images: {{ gateway.currentSessionImageSettingsPrompt }}</span>
             </button>
 
-            <!-- Thinking toggle lives beside the dropdowns; its state is
-                 carried by color/glow alone (active = cyan glow, off =
-                 dashed + dim, auto = dim). -->
+            <!-- Thinking: its state in words, like the Images button beside it. Glow alone carried
+                 it before, and "auto" and "off" were two shades of dim. -->
             <button
+              type="button"
               @click="cycleThinkingMode"
-              class="btn-brand-ghost multimodal-icon-button px-3 py-3 rounded-2xl shrink-0 transition-colors"
+              class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="thinkingMode === true
                 ? 'multimodal-action-active thinking-toggle--on'
                 : thinkingMode === false
@@ -982,6 +1057,7 @@
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
                 <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
               </svg>
+              <span>Thinking: {{ thinkingMode === undefined ? "auto" : thinkingMode ? "on" : "off" }}</span>
             </button>
           </div>
 
@@ -993,38 +1069,41 @@
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
-              title="Send this into the running turn — it is read at the turn's next step"
+              :title="sendBlockedReason || steerTitle"
             >
-              Steer
+              {{ chatText.steer(uiLanguage) }}
             </button>
             <button
               v-if="gateway.isLoading"
-              @click="gateway.cancelTurn()"
-              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white"
-              title="Stop the current turn"
+              type="button"
+              :disabled="stoppingTurn"
+              @click="stopTurn"
+              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
+              :title="chatText.stopTitle(uiLanguage)"
             >
-              Stop
+              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
             <button
               v-else
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-grad px-5 py-3 rounded-2xl text-sm shrink-0"
+              :title="sendBlockedReason || undefined"
             >
-              Send
+              {{ chatText.send(uiLanguage) }}
             </button>
           </div>
         </div>
       </div>
 
-      <div class="text-xs text-gray-700 mt-1 px-1">
+      <div class="text-xs text-gray-500 mt-1 px-1">
         Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code> <code class="font-mono">--effort TIER</code>
       </div>
     </div>
     </div>
 
     <!-- Composer launcher: the single round control left behind when the
-         input bay has flown out. Click (or press "/") to summon it. -->
+         input bay has flown out. Click it, or just start typing, to summon it. -->
     <Teleport to="body">
     <Transition name="composer-launcher">
       <button
@@ -1032,8 +1111,8 @@
         type="button"
         class="chat-composer-launcher"
         :style="launcherOrbStyle"
-        :title="`Message ${product.name} (press / · drag to move)`"
-        aria-label="Open message input"
+        :title="chatText.launcherTitle(uiLanguage, product.name)"
+        :aria-label="chatText.launcherLabel(uiLanguage)"
         @pointerdown="launcherOrbDown"
         @pointermove="launcherOrbMove"
         @pointerup="launcherOrbUp"
@@ -1053,6 +1132,7 @@
     <Transition name="hud-pop">
     <div
       v-if="previewModalUrl"
+      ref="previewModalEl"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -1083,6 +1163,7 @@
     :request="configuringImageRequest.request"
     :payload="configuringImageRequest.payload"
     :always-auto="gateway.currentSessionImageSettingsPrompt === 'auto'"
+    :language="activeStreamingMessage ? orbLanguage : uiLanguage"
     @close="gateway.closeUserInputForm()"
   />
 </template>
@@ -1106,6 +1187,7 @@ import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import OrbActivity from "@/components/OrbActivity.vue";
 import { activityRing, freeHalfWidth, liveActivity } from "@/composables/orbActivity";
 import { turnLanguage } from "@/composables/turnText";
+import { detectLanguage } from "@/speech/speechText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
 import ImageSettingsModal from "@/components/input/ImageSettingsModal.vue";
 import { chatStarters, startersVisible } from "@/composables/chatStarters";
@@ -1114,6 +1196,9 @@ import { formatCountdown, remainingMs } from "@/composables/userInputs";
 import { stepsFor } from "@/composables/turnSteps";
 import { followFocusedStep, latestTurn } from "@/composables/turnSegments";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
+import { confirmAction } from "@/composables/useConfirm";
+import { browserLanguage, chatText } from "@/composables/chatText";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
@@ -1138,15 +1223,19 @@ const shellStore = useShellStore();
 const router = useRouter();
 const inputText = ref("");
 const steeringNote = ref("");   // transient note shown after a mid-turn steering message is sent
+// A note that something did NOT happen is not a green one, and it stays longer: it used to wear
+// the colour of success and vanish after six seconds like the rest.
+const steeringNoteTone = ref<"ok" | "error">("ok");
 let steeringNoteTimer: number | null = null;
-function showSteeringNote(text: string): void {
+function showSteeringNote(text: string, tone: "ok" | "error" = "ok"): void {
   // One timer for the note, so an earlier note's timeout cannot clear a later one early.
   if (steeringNoteTimer !== null) window.clearTimeout(steeringNoteTimer);
   steeringNote.value = text;
+  steeringNoteTone.value = tone;
   steeringNoteTimer = window.setTimeout(() => {
     steeringNote.value = "";
     steeringNoteTimer = null;
-  }, 6000);
+  }, tone === "error" ? 15_000 : 6000);
 }
 const sessionIdCopied = ref(false); // transient "Copied!" feedback for the session-id click-to-copy
 
@@ -1200,6 +1289,37 @@ const pendingDocumentContexts = ref<Array<{ filename: string; file: File }>>([])
 const composerHasContent = computed(() =>
   Boolean(inputText.value.trim()) || pendingImageContexts.value.length > 0 || pendingDocumentContexts.value.length > 0);
 const starters = chatStarters(navigator.language);
+// The composer belongs to no message: its labels follow the browser, like the starters above it.
+const uiLanguage = browserLanguage();
+// "/ for commands" only where there are commands: scenes or jobs to run by name.
+const composerPlaceholder = computed(() =>
+  chatText.messagePlaceholder(uiLanguage, product.name, gateway.scenes.length > 0 || configuredJobs.value.length > 0));
+// A disabled control says why. The field, Send, and the scene and job buttons were greyed out
+// while the dashboard was not connected, or a turn ran, with nothing to tell the two apart.
+const offlineReason = computed(() => {
+  if (gateway.connected) return "";
+  return gateway.connecting || gateway.reconnecting
+    ? chatText.notConnectedConnecting(uiLanguage)
+    : chatText.notConnectedSignIn(uiLanguage);
+});
+/** Why nothing can be typed, for the field's placeholder — or "" while it can. */
+const composerBlockedReason = computed(() =>
+  offlineReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
+const steerTitle = "Send this into the running turn — it is read at the turn's next step";
+/** Why Send (or Steer) is disabled, or "". */
+const sendBlockedReason = computed(() =>
+  offlineReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
+/** Why a scene or job cannot be started from its button right now, or "". */
+function startBlockedReason(kind: "scene" | "job", running: boolean): string {
+  if (offlineReason.value) return offlineReason.value;
+  if (running) return kind === "scene" ? chatText.sceneRunning(uiLanguage) : chatText.jobRunning(uiLanguage);
+  return gateway.isLoading ? chatText.waitForTurn(uiLanguage) : "";
+}
+/** A scene or job button's tooltip: the reason it is disabled first, then what it does. */
+function startButtonTitle(description: string | undefined, reason: string): string | undefined {
+  if (!reason) return description;
+  return description ? `${reason}\n${description}` : reason;
+}
 const showStarters = computed(() => startersVisible({
   connected: gateway.connected,
   transcriptLoading: gateway.currentSessionTranscriptLoading,
@@ -1213,6 +1333,8 @@ const showStarters = computed(() => startersVisible({
 const optionsDetailsEl = ref<HTMLDetailsElement | null>(null);
 const previewModalUrl = ref<string | null>(null);
 useEscapeToClose(() => previewModalUrl.value !== null, () => { previewModalUrl.value = null; });
+const previewModalEl = ref<HTMLElement | null>(null);
+useFocusTrap(previewModalEl);
 const expandedMessageHistory = ref(false);
 const approvalNowMs = ref(Date.now());
 let approvalClockId: number | null = null;
@@ -1262,15 +1384,63 @@ function formatApprovalCountdown(value: number): string {
 }
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
+/** "… attached — click Send" stands only while something is attached. */
+function clearAttachedNotice(): void {
+  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && /attached — click Send$/.test(wakeStatus.value)) {
+    wakeStatus.value = "Voice idle";
+  }
+}
+
 function removeImage(idx: number) {
   const img = pendingImageContexts.value[idx];
   if (img) URL.revokeObjectURL(img.previewUrl);
   pendingImageContexts.value.splice(idx, 1);
+  clearAttachedNotice();
 }
 
 function removeDocument(idx: number) {
   pendingDocumentContexts.value.splice(idx, 1);
+  clearAttachedNotice();
 }
+
+// Stop says it is stopping. The request takes a moment, and the button used to sit there
+// unchanged meanwhile — so it got clicked again and again.
+const stoppingTurn = ref(false);
+async function stopTurn(): Promise<void> {
+  if (stoppingTurn.value) return;
+  stoppingTurn.value = true;
+  try {
+    await gateway.cancelTurn();
+  } catch (err) {
+    showSteeringNote(`Couldn't stop the turn — ${err instanceof Error ? err.message : String(err)}`, "error");
+  } finally {
+    stoppingTurn.value = false;
+  }
+}
+watch(() => gateway.isLoading, (loading) => { if (!loading) stoppingTurn.value = false; });
+
+// The composer's menus are native <details>: they stayed open on a click anywhere else and
+// ignored Escape, so one could be left hanging over the conversation. A press outside closes
+// them; Escape closes them through the same layered handler as every other overlay.
+function openComposerMenus(): HTMLDetailsElement[] {
+  return [...document.querySelectorAll<HTMLDetailsElement>(".chat-input-bay details.chat-dropdown[open]")];
+}
+function closeComposerMenus(except?: Element | null): void {
+  for (const menu of openComposerMenus()) if (menu !== except) menu.open = false;
+}
+const composerMenuOpen = ref(false);
+function onComposerMenuToggle(): void {
+  composerMenuOpen.value = openComposerMenus().length > 0;
+}
+function onDocumentPointerDown(event: PointerEvent): void {
+  if (!composerMenuOpen.value) return;
+  const inside = (event.target as Element | null)?.closest?.("details.chat-dropdown") ?? null;
+  closeComposerMenus(inside);
+  composerMenuOpen.value = openComposerMenus().length > 0;
+}
+onMounted(() => document.addEventListener("pointerdown", onDocumentPointerDown));
+onUnmounted(() => document.removeEventListener("pointerdown", onDocumentPointerDown));
+useEscapeToClose(() => composerMenuOpen.value, () => { closeComposerMenus(); composerMenuOpen.value = false; });
 
 /** Close the Options dropdown (a native <details>) — used after picking a file. */
 function closeOptionsDropdown() {
@@ -1301,7 +1471,7 @@ const EFFORT_DESCRIPTIONS: Record<EffortTier, string> = {
   max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
 };
 const currentEffort = computed<EffortTier>(() => gateway.currentSessionEffort);
-const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to cycle.`);
+const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to choose.`);
 const effortButtonClass = computed(() => {
   switch (currentEffort.value) {
     case "max": return "multimodal-action-active thinking-toggle--on ring-1 ring-amber-400/60";
@@ -1310,10 +1480,10 @@ const effortButtonClass = computed(() => {
     default: return "opacity-70 hover:opacity-100"; // medium
   }
 });
-function cycleEffort() {
-  const idx = EFFORT_TIERS.indexOf(currentEffort.value);
-  const next = EFFORT_TIERS[(idx + 1) % EFFORT_TIERS.length]!;
-  void gateway.updateSessionSettings({ effort: next });
+const effortDetailsEl = ref<HTMLDetailsElement | null>(null);
+function chooseEffort(tier: EffortTier): void {
+  if (effortDetailsEl.value) effortDetailsEl.value.open = false;
+  if (tier !== currentEffort.value) void gateway.updateSessionSettings({ effort: tier });
 }
 
 interface SpeechRecognitionResultItem {
@@ -1451,7 +1621,7 @@ function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: numb
 }
 
 const {
-  x: actionsOrbX, style: actionsOrbStyle,
+  x: actionsOrbX, y: actionsOrbY, style: actionsOrbStyle,
   down: actionsOrbDown, move: actionsOrbMove, up: actionsOrbUp,
   wasDragged: actionsOrbDragged,
 } = useDraggableOrb("starlingai.hud.actionsOrb", { fx: 0.955, fy: 0.09 });
@@ -1470,6 +1640,9 @@ const {
 
 const sessionOpen = ref(false);
 const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
+// The actions list opens towards the middle of the screen, whichever corner the pod was dragged to.
+const actionsPodLeft = computed(() => actionsOrbX.value > hudWin.value.w / 2);
+const actionsPodUp = computed(() => actionsOrbY.value > hudWin.value.h / 2);
 
 // Disconnecting unmounts the pods; make sure their menus don't reopen in a
 // stale-open state when the connection returns.
@@ -1493,43 +1666,49 @@ function onLauncherClick() {
 // Radial session-action menu: tools sit behind the toggle and fan out on a
 // circle around it when opened.
 const actionsOpen = ref(false);
+const actionsMenuEl = ref<HTMLElement | null>(null);
+useEscapeToClose(() => actionsOpen.value, () => { actionsOpen.value = false; });
+useEscapeToClose(() => sessionOpen.value, () => { sessionOpen.value = false; });
+// The list takes the keyboard when it opens, and the arrow keys walk it.
+watch(actionsOpen, (open) => {
+  if (open) void nextTick(() => actionsMenuEl.value?.querySelector<HTMLElement>("button:not(:disabled)")?.focus({ preventScroll: true }));
+});
+function onActionsMenuKeydown(event: KeyboardEvent): void {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+  const items = [...(actionsMenuEl.value?.querySelectorAll<HTMLElement>("button:not(:disabled)") ?? [])];
+  if (items.length === 0) return;
+  event.preventDefault();
+  const at = items.indexOf(document.activeElement as HTMLElement);
+  const next = event.key === "Home" ? 0
+    : event.key === "End" ? items.length - 1
+    : (at + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+  items[next]!.focus();
+}
 
 interface SessionAction {
-  key: string; glyph: string; title: string;
-  disabled?: boolean; danger?: boolean; run: () => void;
+  key: string; glyph: string; label: string; hint: string;
+  disabled?: boolean; disabledReason?: string; danger?: boolean; run: () => void;
 }
 
 const sessionActions = computed((): SessionAction[] => {
   const actions: SessionAction[] = [
-    { key: "new", glyph: "＋", title: "New Session", run: () => { void gateway.createSession(); } },
+    { key: "new", glyph: "＋", label: "New session", hint: "Start a fresh conversation", run: () => { void gateway.createSession(); } },
   ];
   if (gateway.currentSessionId) {
-    const noMessages = gateway.messages.length === 0 || exportingTranscript.value;
-    const noSession = !gateway.currentSessionId || exportingTranscript.value;
+    const busy = exportingTranscript.value;
+    const noMessages = gateway.messages.length === 0;
+    const whyNot = busy ? "An export is still running" : "Nothing to export yet";
     actions.push(
-      { key: "md",    glyph: "MD",  title: "Download conversation as Markdown",          disabled: noMessages, run: () => { void exportMarkdown(); } },
-      { key: "debug", glyph: "DBG", title: "Download debug markdown (transcript + audit)", disabled: noSession,  run: () => { void exportDebugMarkdown(); } },
-      { key: "audit", glyph: "AUD", title: "Download the session audit log",              disabled: noSession,  run: () => { void exportAuditMarkdown(); } },
-      { key: "pdf",   glyph: "PDF", title: "Export conversation as PDF",                  disabled: noMessages, run: () => { void exportPDF(); } },
-      { key: "arch",  glyph: "ARC", title: "Archive this session",                        run: () => { void archiveCurrentSession(); } },
-      { key: "reset", glyph: "RST", title: "Reset this session", danger: true,            run: () => { void resetSession(); } },
+      { key: "md",    glyph: "MD",  label: "Download as Markdown", hint: "The conversation as a .md file",      disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportMarkdown(); } },
+      { key: "pdf",   glyph: "PDF", label: "Export as PDF",        hint: "Opens the print view in a new tab",   disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportPDF(); } },
+      { key: "debug", glyph: "DBG", label: "Debug bundle",         hint: "Transcript and audit log in one file", disabled: busy, disabledReason: whyNot, run: () => { void exportDebugMarkdown(); } },
+      { key: "audit", glyph: "AUD", label: "Audit log",            hint: "What the swarm did in this session",  disabled: busy, disabledReason: whyNot, run: () => { void exportAuditMarkdown(); } },
+      { key: "arch",  glyph: "ARC", label: "Archive session",      hint: "Moves it to Sessions, out of the way", run: () => { void archiveCurrentSession(); } },
+      { key: "reset", glyph: "RST", label: "Reset session…",       hint: "Clears this conversation", danger: true, run: () => { void resetSession(); } },
     );
   }
   return actions;
 });
-
-// Fan the items around the full circle (starting at 12 o'clock) so every
-// tool gets breathing room regardless of where the pod has been dragged.
-function radialItemStyle(index: number, total: number): Record<string, string> {
-  const angle = -90 + (index * 360) / total;
-  const rad = (angle * Math.PI) / 180;
-  const radius = 4.6;
-  return {
-    "--tx": `${(Math.cos(rad) * radius).toFixed(3)}rem`,
-    "--ty": `${(Math.sin(rad) * radius).toFixed(3)}rem`,
-    "--delay": `${index * 28}ms`,
-  };
-}
 
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
 
@@ -1565,10 +1744,42 @@ function maybeCloseComposer() {
     && !analysing.value
     && pendingImageContexts.value.length === 0
     && pendingDocumentContexts.value.length === 0
+    // The voice bar lives in the bay: while the microphone is open or an answer is read aloud,
+    // folding the bay away would take Stop with it.
+    && !showVoiceBar.value
   ) {
     composerOpen.value = false;
   }
 }
+
+// The bay floats over the page, and its height changes with what is in it (chips, the voice bar,
+// two rows of controls on a phone). What has to stay clear of it — the newest message, the "new
+// messages" pill, a banner that asks something — reads its height from --bay-h instead of a
+// guessed constant, under which the pill and the banners ended up hidden behind the bay.
+const bayEl = ref<HTMLElement | null>(null);
+let bayObserver: ResizeObserver | null = null;
+function publishBayHeight(): void {
+  const height = bayOpen.value && bayEl.value ? bayEl.value.offsetHeight : 0;
+  document.documentElement.style.setProperty("--bay-h", `${height}px`);
+}
+onMounted(() => {
+  if (typeof ResizeObserver !== "undefined" && bayEl.value) {
+    bayObserver = new ResizeObserver(publishBayHeight);
+    bayObserver.observe(bayEl.value);
+  }
+  publishBayHeight();
+});
+onUnmounted(() => {
+  bayObserver?.disconnect();
+  document.documentElement.style.removeProperty("--bay-h");
+});
+watch(bayOpen, publishBayHeight, { flush: "post" });
+
+// Text can arrive in the input without a keystroke: a restart hands the old question back, a
+// dropped audio file or a wake word is transcribed into it. It must not sit there unseen.
+watch(inputText, (text) => {
+  if (text.trim() !== "" && !composerOpen.value) openComposer();
+});
 
 function onComposerFocusOut(event: FocusEvent) {
   const root = event.currentTarget as HTMLElement | null;
@@ -1591,13 +1802,21 @@ watch(() => gateway.isLoading, (loading) => {
   else if (!composerFocused.value) maybeCloseComposer();
 });
 
-// "/" anywhere outside a form control summons the bay ready for a command.
+// Typing anywhere on the page starts a message: the bay comes up with the key already in it. A
+// "/" therefore still starts a command. It used to be "/" alone, announced only in the launcher's
+// tooltip — every other key did nothing, on a page whose one purpose is to be typed into.
 function onGlobalComposerKey(event: KeyboardEvent) {
-  if (composerOpen.value || event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (composerOpen.value || event.defaultPrevented || event.isComposing) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // One printable character; a space scrolls the page and stays that.
+  if (event.key.length !== 1 || event.key === " ") return;
+  if (!gateway.connected || gateway.pendingInputRequest) return;
   const target = event.target as HTMLElement | null;
   if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)) return;
+  // A dialog or a menu that is up owns the keyboard.
+  if (document.querySelector("[role='dialog'], [role='alertdialog'], [role='menu'], .app-nav-panel")) return;
   event.preventDefault();
-  openComposer("/");
+  openComposer(event.key);
 }
 onMounted(() => window.addEventListener("keydown", onGlobalComposerKey));
 onUnmounted(() => window.removeEventListener("keydown", onGlobalComposerKey));
@@ -1678,11 +1897,11 @@ watch(() => Boolean(activeStreamingMessage.value), (running) => {
   }
 }, { immediate: true });
 onBeforeUnmount(() => { if (liveClockTimer) clearInterval(liveClockTimer); });
-const orbLanguage = computed(() => turnLanguage(activeStreamingMessage.value?.language ?? null));
+const orbLanguage = computed(() => (activeStreamingMessage.value ? turnLanguage(activeStreamingMessage.value.language ?? null) : uiLanguage));
 const orbActivity = computed(() => liveActivity(gateway.messages, liveClock.value, orbLanguage.value));
 
-// The step ring for the orb canvas: the same ring OrbActivity puts the steps on (a strip of lit
-// panels round the orb), built while a turn runs and the window is wide enough to show the ring.
+// The step ring for the orb canvas: the same ring OrbActivity puts the steps on (a track of
+// light round the orb), built while a turn runs and the window is wide enough to show the ring.
 const viewportWidth = ref(typeof window === "undefined" ? 1600 : window.innerWidth);
 const viewportHeight = ref(typeof window === "undefined" ? 900 : window.innerHeight);
 function onViewportResize(): void {
@@ -1695,6 +1914,12 @@ const orbRing = computed(() => ({
   ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
+// Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
+// list there, or a running turn's steps would be shown nowhere.
+const orbHasRoomForSteps = computed(() => viewportWidth.value >= 1100);
+// There the messages also lie over the orb, not beside it, and its bright rings came through
+// the bubbles' glass: with a conversation on the page it steps back.
+const orbBehindText = computed(() => viewportWidth.value < 1100 && gateway.messages.length > 0);
 const sceneJobs = computed(() => scenesStore.recentJobs);
 const configuredJobs = computed(() => jobsStore.jobs);
 const activeSessions = computed(() => gateway.activeSessions);
@@ -1770,6 +1995,12 @@ function openLiveSteps(stepId: string | undefined): void {
   sidePanelOpen.value = true;
   void nextTick(() => { requestedPanelTab.value = null; });
 }
+
+// The panel reads like the list it was opened from: in that answer's language.
+const stepDetailLanguage = computed(() => {
+  const message = gateway.messages.find((candidate) => candidate.id === stepDetailMessageId.value);
+  return message ? turnLanguage(message.language ?? detectLanguage(message.content ?? "")) : orbLanguage.value;
+});
 
 function showStep(messageId: string, stepId: string): void {
   stepDetailMessageId.value = messageId;
@@ -1989,6 +2220,7 @@ const voiceStatus = computed(() => {
   if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return "Wake-word detection is unavailable in this browser";
   return wakeStatus.value;
 });
+const voiceStatusWorthShowing = computed(() => voiceStatus.value.trim() !== "" && voiceStatus.value !== "Voice idle");
 const showWakeFeedbackCard = computed(() => showWakeMode.value && wakeFeedbackState.value !== "idle");
 const wakeFeedbackTone = computed(() => {
   if (wakeFeedbackState.value === "error") return "error";
@@ -2207,11 +2439,11 @@ async function toggleRecording() {
 
 function onDocumentSelected(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
+  // Read the list before clearing the input: clearing empties it.
+  const files = [...(input.files ?? [])];
   input.value = "";
   closeOptionsDropdown();
-  if (!file) return;
-  queueAttachment(file);
+  for (const file of files) queueAttachment(file);
 }
 
 /**
@@ -2325,6 +2557,8 @@ const voiceBarListening = computed(() =>
   voicePhase.value === "listening" || voicePhase.value === "hearing" || recordingState.value === "recording");
 const showVoiceBar = computed(() => Boolean(
   voiceBarBusy.value || voiceConversationMode.value || lastReply.value || recordingState.value !== "idle" || voiceNotice.value));
+// The voice bar is in the bay: it comes up with it (see maybeCloseComposer for the other half).
+watch(showVoiceBar, (showing) => { if (showing) composerOpen.value = true; });
 
 /** What the voice bar says is happening. */
 const voiceBarLabel = computed(() => {
@@ -2441,8 +2675,8 @@ function onComposerKeydown(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.preventDefault();
       // Close the popup without dropping the leading '/' in case the user
-      // wants to continue typing — they can press Esc again to cancel input
-      // entirely. Force-close by appending a sentinel space then re-trim.
+      // wants to continue typing — Esc again drops the unfinished command (below).
+      // Force-close by appending a sentinel space then re-trim.
       inputText.value = `${inputText.value} `;
       return;
     }
@@ -2455,6 +2689,23 @@ function onComposerKeydown(event: KeyboardEvent) {
       acceptSlashSuggestion(slashIndex.value);
       return;
     }
+  }
+
+  // Escape puts the composer away: an unfinished command is dropped, an empty bay folds, a
+  // drafted message stays where it is and only loses the focus.
+  if (event.key === "Escape" && !event.isComposing) {
+    event.preventDefault();
+    // One step at a time: an open menu goes first, the composer on the next press.
+    if (composerMenuOpen.value) {
+      closeComposerMenus();
+      composerMenuOpen.value = false;
+      return;
+    }
+    if (/^\/\S*\s*$/.test(inputText.value)) inputText.value = "";
+    composerTextareaEl.value?.blur();
+    composerFocused.value = false;
+    maybeCloseComposer();
+    return;
   }
 
   if (event.key !== "Enter") return;
@@ -2473,13 +2724,16 @@ async function sendMessage() {
   const hasImages = pendingImageContexts.value.length > 0;
   const hasDocs = pendingDocumentContexts.value.length > 0;
   if (!trimmedText && !hasImages && !hasDocs) return;
+  // Whoever sends wants to see it land: scrolled up, both the message and its answer used to
+  // arrive out of view.
+  jumpToBottom();
   // Mid-turn steering: a turn is already running → fold this text into it. Never a new turn,
   // which would cancel the running one: a message that cannot be delivered stays in the chat
   // marked as such, with a resend.
   if (gateway.isLoading) {
     if (hasImages || hasDocs) {
       // Text-only — attachments cannot join a running turn. Say so rather than ignore Enter.
-      showSteeringNote("Attachments can't join a running turn — send them once it finishes.");
+      showSteeringNote("Attachments can't join a running turn — send them once it finishes.", "error");
       return;
     }
     inputText.value = "";
@@ -2499,13 +2753,13 @@ async function sendMessage() {
           // does not finish until the card is answered.
           : gateway.hasOpenUserInput
             ? "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card."
-            : "Queued — folded into the running turn at its next step.");
+            : "Queued — folded into the running turn at its next step.", state === "undelivered" ? "error" : "ok");
     return;
   }
   // The previous message's attachments are still being read, and its turn has not started. Sent
   // now, this one would start first — and the analysed one would then replace it. It waits.
   if (analysing.value) {
-    showSteeringNote("Still reading your attachments — send this once they're done.");
+    showSteeringNote("Still reading your attachments — send this once they're done.", "error");
     return;
   }
   const jobMatch = !hasImages && !hasDocs
@@ -2627,7 +2881,7 @@ async function sendMessage() {
  */
 function giveBackUnsentText(text: string, error: unknown): void {
   if (text && !inputText.value.trim()) inputText.value = text;
-  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`);
+  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`, "error");
 }
 
 async function triggerScene(name: string) {
@@ -2698,6 +2952,15 @@ async function resetSession() {
     await gateway.createSession();
     return;
   }
+  const count = gateway.messages.length;
+  if (count > 0 && !(await confirmAction({
+    title: chatText.resetConfirmTitle(uiLanguage),
+    message: chatText.resetConfirmMessage(uiLanguage, count),
+    confirmLabel: chatText.resetConfirmLabel(uiLanguage),
+    cancelLabel: chatText.cancel(uiLanguage),
+    eyebrow: chatText.cannotBeUndone(uiLanguage),
+    danger: true,
+  }))) return;
   try {
     await gateway.rpc("session.reset", { sessionId: gateway.currentSessionId });
     await gateway.loadSession(gateway.currentSessionId);
@@ -2708,15 +2971,43 @@ async function resetSession() {
 }
 
 async function handleRewind(messageId: string) {
+  // Everything from that message on is cut, here and on the gateway: one small button must not
+  // do that on a single click.
+  const at = gateway.messages.findIndex((message) => message.id === messageId);
+  const cut = at < 0 ? 0 : gateway.messages.length - at;
+  if (cut > 1 && !(await confirmAction({
+    title: chatText.restartConfirmTitle(uiLanguage),
+    message: chatText.restartConfirmMessage(uiLanguage, cut - 1),
+    confirmLabel: chatText.restartConfirmLabel(uiLanguage),
+    cancelLabel: chatText.cancel(uiLanguage),
+    eyebrow: chatText.cannotBeUndone(uiLanguage),
+    danger: true,
+  }))) return;
   try {
     const text = await gateway.rewindToMessage(messageId);
-    inputText.value = text;
-    await nextTick();
-    composerTextareaEl.value?.focus();
+    openComposer(text);
   } catch (err) {
     // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
-    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`);
+    composerOpen.value = true;
+    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`, "error");
   }
+}
+
+/** A failed answer's question, sent once more as a new turn; the failed answer stays in the record. */
+async function handleRetry(messageId: string) {
+  if (gateway.isLoading || analysing.value) return;
+  const at = gateway.messages.findIndex((message) => message.id === messageId);
+  if (at < 0) return;
+  const question = gateway.messages.slice(0, at).reverse().find((message) => message.role === "user" && !message.midTurn && !message.steer);
+  if (!question?.content?.trim()) return;
+  // Whatever is being drafted is not overwritten: the question goes out only from an empty input.
+  if (inputText.value.trim()) {
+    showSteeringNote("Send or clear what you are writing first — asking again would replace it.", "error");
+    return;
+  }
+  inputText.value = question.content;
+  await nextTick();
+  await sendMessage();
 }
 
 async function handleResendSteer(messageId: string) {
@@ -2725,7 +3016,12 @@ async function handleResendSteer(messageId: string) {
 
 async function archiveCurrentSession() {
   if (!gateway.currentSessionId) return;
-  await gateway.archiveSession(gateway.currentSessionId);
+  try {
+    await gateway.archiveSession(gateway.currentSessionId);
+  } catch (err) {
+    composerOpen.value = true;
+    showSteeringNote(`Couldn't archive the session — ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
 }
 
 async function handleSessionSwitch(event: Event) {
@@ -3003,7 +3299,11 @@ async function exportPDF(): Promise<void> {
 </html>`;
 
     const win = window.open("", "_blank");
-    if (!win) return;
+    if (!win) {
+      composerOpen.value = true;
+      showSteeringNote("The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.", "error");
+      return;
+    }
     win.document.write(html);
     win.document.close();
     win.focus();
@@ -3195,8 +3495,10 @@ onUnmounted(() => {
   position: fixed;
   left: clamp(1rem, 4vw, 2rem);
   right: clamp(1rem, 4vw, 2rem);
-  bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem));
-  z-index: 70;
+  /* above the composer when it is up, above the launcher when it is not */
+  bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem), calc(var(--bay-h, 0px) + 2.5rem));
+  /* a question that waits for an answer beats the floating pods (220) */
+  z-index: var(--z-popover);
   max-width: 48rem;
   margin: 0 auto;
   overflow: hidden;
@@ -3679,7 +3981,7 @@ onUnmounted(() => {
 }
 
 @media (min-width: 1100px) {
-  /* The orb's zone, measured from the center: its particle torus reaches
+  /* The orb's zone, measured from the center: its body reaches
      about 14% of the viewport height (OrbCanvas.vue frames it by height),
      the ring of steps around it about 17%, and a margin. A bubble ends
      there, but never narrower than a readable 28rem: on a small window wide
@@ -3730,7 +4032,8 @@ onUnmounted(() => {
   transition: padding-bottom 460ms var(--ease-out);
 }
 .chat-message-scroll--bay-open {
-  padding-bottom: clamp(12rem, 26vh, 18rem);
+  /* the bay's own height (--bay-h, set by the page), not a guess at it */
+  padding-bottom: calc(var(--bay-h, 12rem) + 1.75rem);
 }
 
 /* Miniature 3D orb like the radial toggles, one size up. */
@@ -3885,14 +4188,66 @@ onUnmounted(() => {
     0 0 26px rgba(var(--accent-purple), 0.55);
 }
 .radial-menu--open .radial-menu__toggle:hover { transform: rotate(90deg) scale(1.08); }
-.radial-menu__item {
+/* A pod with no session behind it: dimmed, its rim dashed. */
+.hud-orb__btn--idle {
+  border-style: dashed;
+  color: rgba(var(--logo-cyan), 0.55);
+  filter: saturate(0.6);
+}
+.radial-menu__toggle:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.8);
+  outline-offset: 3px;
+}
+
+/* The session actions: a list with names, opening beside the pod towards the middle of the
+   screen. Each row keeps its glyph as a badge and flies in a beat after the one above. */
+.actions-pod {
   position: absolute;
-  inset: 0;
-  z-index: 1;
+  top: 0;
+  width: min(17.5rem, calc(100vw - 5rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-3);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+}
+.actions-pod--up { top: auto; bottom: 0; }
+.actions-pod__item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 0.45rem;
+  border: 1px solid transparent;
+  text-align: left;
+  color: rgb(226, 232, 240);
+  cursor: pointer;
+  animation: actions-pod-in 260ms var(--ease-out) var(--delay, 0ms) both;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+@keyframes actions-pod-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+.actions-pod__item:hover:not(:disabled),
+.actions-pod__item:focus-visible {
+  background: rgba(var(--logo-cyan), 0.08);
+  border-color: rgba(var(--logo-cyan), 0.3);
+  outline: none;
+}
+.actions-pod__item:disabled { opacity: 0.45; cursor: not-allowed; }
+.actions-pod__glyph {
+  flex: none;
   display: grid;
   place-items: center;
-  width: 2.4rem;
-  height: 2.4rem;
+  width: 2rem;
+  height: 2rem;
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: 0.55rem;
@@ -3901,32 +4256,28 @@ onUnmounted(() => {
   color: rgba(207, 250, 254, 0.92);
   background: rgb(5, 19, 25);
   border: 1px solid rgba(var(--accent-purple), 0.4);
-  box-shadow: 0 0 12px rgba(var(--accent-purple), 0.2);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(0, 0) scale(0.25);
-  transition:
-    transform 340ms var(--ease-out) var(--delay, 0ms),
-    opacity 240ms var(--ease-out) var(--delay, 0ms);
+  box-shadow: 0 0 10px rgba(var(--accent-purple), 0.18);
 }
-.radial-menu--open .radial-menu__item {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate(var(--tx, 0), var(--ty, 0)) scale(1);
+.actions-pod__text { display: grid; min-width: 0; }
+.actions-pod__label { font-size: 0.82rem; font-weight: 500; line-height: 1.25; }
+.actions-pod__hint {
+  font-size: 0.68rem;
+  line-height: 1.3;
+  color: rgb(148, 163, 184);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.radial-menu--open .radial-menu__item:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.radial-menu__item:not(:disabled):hover {
-  color: #fff;
-  border-color: rgba(var(--logo-cyan), 0.7);
-  box-shadow: 0 0 18px rgba(var(--accent-purple), 0.45);
-}
-.radial-menu__item--danger {
+.actions-pod__rule { height: 1px; margin: 0.25rem 0.3rem; background: var(--hairline); }
+.actions-pod__item--danger .actions-pod__label { color: rgb(254, 202, 202); }
+.actions-pod__item--danger .actions-pod__glyph {
   border-color: rgba(248, 113, 113, 0.45);
   color: rgba(254, 202, 202, 0.95);
+}
+.actions-pod__item--danger:hover:not(:disabled),
+.actions-pod__item--danger:focus-visible {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.4);
 }
 
 .chat-mobile-panels__summary::-webkit-details-marker,
@@ -3956,6 +4307,24 @@ onUnmounted(() => {
   color: rgb(186 230 253 / 0.8);
   font-size: 0.9rem;
 }
+
+/* Only where there is a keyboard to type on. */
+.chat-starters__hint {
+  display: none;
+  margin: 0.15rem 0 0;
+  font-family: var(--font-label);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(165, 243, 252, 0.45);
+}
+@media (hover: hover) and (pointer: fine) {
+  .chat-starters__hint { display: block; }
+}
+
+/* Where the conversation lies over the orb and not beside it, the orb steps back. */
+.chat-orb-layer { transition: opacity 600ms var(--ease-out); }
+.chat-orb-layer--behind-text { opacity: 0.28; }
 
 .chat-starters__list {
   display: flex;
@@ -4130,6 +4499,10 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.35rem;
 }
+.chat-composer__steering-note--error { color: rgb(252 165 165); }
+
+/* With the bay up, the pill stands above it: under it, it was hidden exactly when it mattered. */
+.chat-scroll-resume--above-bay { bottom: calc(var(--bay-h, 12rem) + 1.25rem); }
 
 /* Slash-command autocomplete popup. Anchored to the bottom of the field so it
    floats above the textarea — keyboard nav (↑↓), Enter/Tab to accept, Esc to
@@ -4368,7 +4741,8 @@ onUnmounted(() => {
   z-index: 30;
   border-radius: 1.3rem;
   border: 1px solid rgba(168, 85, 247, 0.18);
-  background: linear-gradient(180deg, rgba(6, 10, 20, 0.96), rgba(10, 14, 28, 0.92));
+  /* opaque enough that the composer's text under it does not read through */
+  background: linear-gradient(180deg, rgba(6, 10, 20, 0.985), rgba(10, 14, 28, 0.975));
   box-shadow: 0 24px 50px rgba(0, 0, 0, 0.38);
   padding: 0.9rem;
   display: grid;
@@ -4604,24 +4978,128 @@ onUnmounted(() => {
   margin: 0;
 }
 
+/* The message field takes the bay's whole width and the controls sit in one row under it. On a
+   wide screen they used to stand BESIDE the field and left it some 300 px: a prompt wrapped
+   after 35 characters, in a bay 736 px wide. */
 @media (min-width: 1024px) {
-  .chat-composer {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    column-gap: 0.9rem;
-    align-items: flex-end;
-  }
-
   .chat-composer__controls {
-    width: max-content;
-    max-width: 100%;
-    min-width: 0;
-    justify-self: start;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.9rem;
   }
+  .chat-composer__menus { flex-wrap: nowrap; }
+  .chat-composer__primary-actions { flex: none; flex-wrap: nowrap; }
+  .chat-composer__primary-actions > button { min-width: 8.5rem; }
+}
 
-  .chat-composer__menus,
-  .chat-composer__primary-actions {
-    flex-wrap: nowrap;
+/* Below that the controls stack and each menu button sits at the bay's left edge: a menu hung
+   from its right edge opened leftwards, most of it off the screen, and Attach, audio and Record
+   are its first items. It hangs from the left edge there. */
+@media (max-width: 1023px) {
+  .chat-dropdown__menu {
+    left: 0;
+    right: auto;
+    transform-origin: bottom left;
   }
+}
+
+/* Motion on request only (the bay's 3D recede, the launcher's breathing, the fly-ins). */
+@media (prefers-reduced-motion: reduce) {
+  .chat-input-bay,
+  .chat-composer-launcher,
+  .radial-menu__toggle,
+  .chat-orb-layer,
+  .chat-scroll-resume,
+  .chat-drop-overlay {
+    transition-duration: 1ms !important;
+    animation: none !important;
+  }
+  .chat-input-bay--hidden { transform: none; }
+  .actions-pod__item,
+  .chat-dropdown__menu,
+  .wake-feedback-card,
+  .chat-job-strip__item,
+  .multimodal-status {
+    animation: none !important;
+  }
+}
+
+/* The ✕ on an attachment chip: a target a finger can hit, not a 12-pixel glyph. */
+.chip-remove {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  line-height: 1;
+  transition: color 0.15s, background-color 0.15s;
+}
+.chip-remove:hover, .chip-remove:focus-visible {
+  background: rgba(248, 113, 113, 0.14);
+  outline: none;
+}
+
+/* A suggestion to step in: it lay in the page's flow under the composer, which covered it while
+   a turn ran — exactly when it appears. It floats above the composer now, like the approval. */
+.intervention-banner {
+  position: fixed;
+  left: clamp(1rem, 4vw, 2rem);
+  right: clamp(1rem, 4vw, 2rem);
+  bottom: max(5.5rem, calc(var(--bay-h, 0px) + 2.5rem));
+  z-index: var(--z-popover);
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+/* The Effort menu: one row per tier, the current one marked, "max" flagged. */
+.chat-dropdown__summary--effort { min-width: 0; font-size: 0.75rem; font-weight: 600; }
+.chat-dropdown__menu--effort { width: min(26rem, calc(100vw - 2.5rem)); gap: 0.35rem; }
+.effort-option {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.7rem;
+  border: 1px solid transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+}
+.effort-option:hover, .effort-option:focus-visible {
+  background: rgba(var(--logo-cyan), 0.07);
+  border-color: rgba(var(--logo-cyan), 0.28);
+  outline: none;
+}
+.effort-option--current { border-color: rgba(var(--logo-cyan), 0.45); background: rgba(var(--logo-cyan), 0.06); }
+.effort-option__name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgb(226, 232, 240);
+}
+.effort-option__check { margin-left: auto; color: rgb(var(--logo-cyan)); }
+.effort-option__flag {
+  font-family: var(--font-label);
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: rgb(252, 211, 77);
+}
+.effort-option__text { font-size: 0.72rem; line-height: 1.4; color: rgb(148, 163, 184); }
+
+/* Small controls get a finger-sized target on touch screens; a mouse keeps the compact look. */
+@media (pointer: coarse) {
+  .voice-bar__button,
+  .voice-bar__close { min-height: 2.5rem; min-width: 2.5rem; }
+  .chat-job-strip__item button,
+  .session-pod button { min-height: 2.25rem; }
+  .actions-pod__item { min-height: 3rem; }
 }
 </style>

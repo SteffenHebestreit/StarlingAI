@@ -1,6 +1,9 @@
-// Neural core sphere. Shimmer/pulse motion uses CPU-accumulated phase
-// uniforms so abrupt speed changes (e.g. entering criticalError) slow the
-// motion smoothly instead of snapping every particle to a new phase.
+// Neural core sphere: the shell of points round the core glow. It is kept quiet (SHELL_GLOW,
+// SHELL_OPACITY below), so the glow behind it and the hologram sphere round it carry the light;
+// at its old strength the shell burned out to a white ball.
+//
+// Shimmer/pulse motion uses CPU-accumulated phase uniforms so abrupt speed changes (e.g. entering
+// criticalError) slow the motion smoothly instead of snapping every particle to a new phase.
 import { POINT_SCALE_VERTEX, POINT_SCALE_FRAGMENT } from "./pointScale";
 
 export const vertexShader = `${POINT_SCALE_VERTEX}
@@ -67,10 +70,14 @@ export const fragmentShader = `${POINT_SCALE_FRAGMENT}
 
     float glowFactor = 1.0 - dist * 1.2;
     glowFactor = pow(max(0.0, glowFactor), 1.2);
-    float glowStrength = 2.2;
+    // How hot a point burns and how much of its opacity it keeps: 2.2 and 1.0 made the shell the
+    // brightest thing in the orb.
+    const float SHELL_GLOW    = 1.4;
+    const float SHELL_OPACITY = 0.8;
+    float glowStrength = SHELL_GLOW;
 
     vec3 finalColor = brightColor * glowFactor * glowStrength;
-    float alpha = vColor.a * smoothstep(0.5, 0.1, dist) * vPointFade;
+    float alpha = vColor.a * SHELL_OPACITY * smoothstep(0.5, 0.1, dist) * vPointFade;
 
     gl_FragColor = vec4(finalColor, alpha);
   }

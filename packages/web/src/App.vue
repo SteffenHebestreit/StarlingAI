@@ -19,7 +19,7 @@
     </div>
 
     <!-- Header -->
-    <header class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
+    <header ref="headerRef" class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
 
@@ -40,23 +40,45 @@
           </div>
         </router-link>
 
+        <!-- Where you are: every page but the chat names itself here, since the navigation
+             itself is folded away behind the burger. -->
+        <nav v-if="currentPage" class="app-crumb" aria-label="Current page">
+          <span class="app-crumb__sep" aria-hidden="true">/</span>
+          <span v-if="currentPage.group" class="app-crumb__group">{{ currentPage.group }}</span>
+          <span v-if="currentPage.group" class="app-crumb__sep app-crumb__sep--inner" aria-hidden="true">/</span>
+          <span class="app-crumb__page" aria-current="page">{{ currentPage.label }}</span>
+        </nav>
+
         <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
           <!-- Connection status -->
-          <div class="flex items-center gap-2 text-xs shrink-0">
+          <div class="flex items-center gap-2 text-xs shrink-0" role="status" :aria-label="connectionLabel" :title="connectionLabel">
             <div :class="[
               'w-1.5 h-1.5 rounded-full transition-colors',
-              gateway.connected   ? 'bg-emerald-400 dot-pulse'
-              : gateway.connecting ? 'bg-amber-400 animate-pulse'
+              gateway.connected ? 'bg-emerald-400 dot-pulse'
+              : gateway.connecting || gateway.reconnecting ? 'bg-amber-400 motion-safe:animate-pulse'
               : 'bg-red-500'
             ]" />
-            <span class="text-gray-400 hidden sm:inline">
-              {{ gateway.connected ? 'Connected' : gateway.connecting ? 'Connecting…' : 'Disconnected' }}
-            </span>
+            <!-- A lost connection is worth words on a phone too; "Connected" is not. -->
+            <span class="text-gray-400" :class="gateway.connected ? 'hidden sm:inline' : ''">{{ connectionLabel }}</span>
           </div>
+
+          <!-- The command palette's way in for whoever does not know the shortcut yet. -->
+          <button
+            type="button"
+            class="hud-btn hidden h-9 w-9 shrink-0 items-center justify-center sm:inline-flex"
+            :aria-label="`Search pages and actions (${paletteShortcut})`"
+            :title="`Search pages and actions (${paletteShortcut})`"
+            @click="paletteOpen = true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="h-[17px] w-[17px]" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
+            </svg>
+          </button>
 
           <!-- Burger: the main nav and header tools live behind this toggle so
                the default chrome is just brand + status + account. -->
           <button
+            ref="burgerRef"
             type="button"
             class="nav-burger hud-btn inline-flex h-9 w-9 shrink-0 items-center justify-center"
             :class="navOpen ? 'hud-btn--active' : ''"
@@ -77,7 +99,7 @@
           <Teleport to="body">
           <div v-if="navOpen" class="fixed inset-0 z-[225]" @click="navOpen = false" />
           <Transition name="hud-pop">
-          <div v-if="navOpen" class="app-nav-panel">
+          <div v-if="navOpen" ref="navPanelRef" class="app-nav-panel" :style="navPanelStyle">
             <div class="app-nav-panel__meta">
               <span>v{{ appVersion }}</span>
               <span>{{ gateway.connected ? 'Online' : 'Offline' }}</span>
@@ -88,6 +110,14 @@
                navigation direction. -->
           <Transition :name="navLevel ? 'nav-fwd' : 'nav-back'" mode="out-in">
           <div v-if="!navLevel" key="root" class="app-nav-panel__level">
+
+          <button type="button" class="app-nav-panel__search" @click="openPaletteFromNav">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="h-4 w-4" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" />
+            </svg>
+            <span>Go to a page or action…</span>
+            <kbd>{{ paletteShortcut }}</kbd>
+          </button>
 
           <!-- Model switch: Local ⇄ presets (e.g. Claude via the Anthropic
                provider). Appears once the gateway reports at least one
@@ -129,10 +159,10 @@
             </button>
             <button
               type="button"
-              class="ml-0.5 flex h-6 w-6 items-center justify-center rounded-full text-gray-500 transition hover:bg-white/5 hover:text-gray-300"
+              class="ml-0.5 flex h-8 w-8 items-center justify-center rounded-full text-gray-500 transition hover:bg-white/5 hover:text-gray-300"
               title="Claude settings — model & subscription"
               aria-label="Claude settings"
-              @click="showModelConnect = true"
+              @click="openModelConnect"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="h-3.5 w-3.5">
                 <circle cx="12" cy="12" r="3" />
@@ -145,15 +175,16 @@
           <button
             v-if="!modelPreset.oauthConnected && modelPreset.canChange && gateway.connected"
             type="button"
-            class="hidden shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15 sm:inline-flex"
-            @click="showModelConnect = true"
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-orange-400/25 bg-orange-500/10 px-3 py-1.5 text-[11px] font-medium text-orange-200 transition hover:border-orange-300/45 hover:bg-orange-500/15"
+            @click="openModelConnect"
           >
             Connect Claude
           </button>
 
           <button
             v-if="notifications.supported && notifications.permission === 'default'"
-            class="hidden sm:inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
+            type="button"
+            class="inline-flex items-center rounded-full border border-cyan-400/25 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/45 hover:bg-cyan-500/15"
             @click="enableBrowserNotifications"
           >
             Enable Notifications
@@ -170,6 +201,7 @@
                   ? 'border-purple-400/40 bg-purple-500/12 text-purple-100 shadow-[0_12px_30px_rgba(91,33,182,0.22)]'
                   : 'border-transparent text-gray-300 hover:border-white/10 hover:bg-white/5 hover:text-white'"
                 :aria-current="$route.path === entry.to ? 'page' : undefined"
+                @click="navOpen = false"
               >
                 {{ entry.label }}
               </RouterLink>
@@ -177,6 +209,8 @@
                 v-else
                 type="button"
                 class="nav-group__trigger inline-flex items-center rounded-full border border-transparent px-3 py-2 text-sm font-medium transition-colors hover:border-white/10 hover:bg-white/5"
+                :class="groupHoldsCurrentPage(entry) ? 'nav-group__trigger--current' : ''"
+                :aria-current="groupHoldsCurrentPage(entry) ? 'true' : undefined"
                 @click="navLevel = entry.label"
               >
                 <span>{{ entry.label }}</span>
@@ -204,6 +238,8 @@
                 :to="item.to"
                 class="app-nav-panel__subitem"
                 :class="$route.path === item.to ? 'app-nav-panel__subitem--active' : ''"
+                :aria-current="$route.path === item.to ? 'page' : undefined"
+                @click="navOpen = false"
               >
                 <span>{{ item.label }}</span>
                 <span v-if="item.hint" class="app-nav-panel__subitem-hint">{{ item.hint }}</span>
@@ -244,12 +280,12 @@
             <!-- Teleported to <body> so it escapes the header's stacking
                  context (otherwise the page content paints over it). -->
             <Teleport to="body">
-              <div v-if="accountMenuOpen" class="fixed inset-0 z-[60]" @click="accountMenuOpen = false" />
+              <div v-if="accountMenuOpen" class="fixed inset-0 z-popover-catch" @click="accountMenuOpen = false" />
 
               <Transition name="hud-pop">
               <div
                 v-if="accountMenuOpen"
-                class="fixed z-[70] w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
+                class="fixed z-popover w-56 overflow-hidden rounded-xl border border-white/10 bg-gray-900/95 shadow-2xl shadow-black/40 backdrop-blur-xl"
                 :style="accountMenuStyle"
                 role="menu"
               >
@@ -268,6 +304,16 @@
                   <div class="mt-0.5 text-[10px] text-gray-500">Token / single-operator mode</div>
                 </template>
               </div>
+              <!-- Palette and typeface are kept in this browser, so they are everyone's to set:
+                   the Settings page that also shows them is for operators only. -->
+              <button
+                type="button"
+                role="menuitem"
+                class="block w-full px-3 py-2 text-left text-sm text-gray-300 transition hover:bg-white/5 hover:text-white"
+                @click="openTheme"
+              >
+                Theme
+              </button>
               <button
                 type="button"
                 role="menuitem"
@@ -296,16 +342,18 @@
     <!-- Login modal: auto-shown when disconnected/auth-failed, or opened on
          demand (e.g. token mode → sign in as a created user / switch account). -->
     <LoginModal
-      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting)"
+      v-if="showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting && !gateway.reconnecting)"
       :dismissible="gateway.connected"
       :sso-error="ssoError"
       @close="showLogin = false"
     />
 
+    <!-- Under the header, wherever it ends (toastStackStyle); the class's top is for the moment before it is measured. -->
     <TransitionGroup
       name="toast"
       tag="div"
-      class="pointer-events-none fixed right-4 top-[4.5rem] z-50 flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
+      class="pointer-events-none fixed right-4 top-[4.5rem] z-toast flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-3"
+      :style="toastStackStyle"
     >
       <section
         v-for="item in notifications.items"
@@ -353,6 +401,47 @@
       <RouterView />
     </main>
 
+    <!-- The one "are you sure?" dialog, for any page that asks (composables/useConfirm.ts). -->
+    <ConfirmHost />
+
+    <CommandPalette
+      :open="paletteOpen"
+      :commands="paletteCommands"
+      :current-path="$route.path"
+      @close="paletteOpen = false"
+      @choose="runPaletteCommand"
+    />
+
+    <!-- Theme: the appearance picker in a dialog, opened from the account menu. -->
+    <Teleport to="body">
+      <div
+        v-if="themeOpen"
+        class="fixed inset-0 z-modal flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+        @click.self="closeTheme"
+      >
+        <div
+          ref="themeDialogRef"
+          class="glass-card modal-pop flex max-h-full w-full max-w-2xl flex-col"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="theme-dialog-title"
+        >
+          <div class="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-4">
+            <div class="min-w-0">
+              <h2 id="theme-dialog-title" class="heading-md">Theme</h2>
+              <p class="mt-0.5 text-xs text-gray-400">Palette and typeface. Kept in this browser.</p>
+            </div>
+            <button ref="themeCloseRef" type="button" class="btn-ghost shrink-0 rounded-xl px-3 py-1.5 text-xs" @click="closeTheme">
+              Close
+            </button>
+          </div>
+          <div class="min-h-0 overflow-y-auto px-5 py-4">
+            <AppearanceSettings />
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- Claude subscription connect / manage (browser OAuth verification). -->
     <ModelConnectModal
       v-if="showModelConnect"
@@ -367,8 +456,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { RouterLink, RouterView, useRoute } from "vue-router";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { useProductStore } from "@/stores/product";
@@ -378,9 +467,14 @@ import { useNotificationStore, type NotificationLevel } from "@/stores/notificat
 import LoginModal from "@/components/LoginModal.vue";
 import { readSsoReturn } from "@/composables/ssoReturn";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
-import { type NavGroupItem } from "@/components/NavGroup.vue";
+import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
 import { appVersion } from "@/appVersion";
+import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
+import ConfirmHost from "@/components/ConfirmHost.vue";
+import CommandPalette from "@/components/CommandPalette.vue";
+import { isPaletteShortcut, type PaletteCommand } from "@/composables/commandPalette";
 
 const gateway = useGatewayStore();
 const auth = useAuthStore();
@@ -390,6 +484,7 @@ const product = useProductStore();
 const notifications = useNotificationStore();
 const modelPreset = useModelPresetStore();
 const $route = useRoute();
+const router = useRouter();
 
 // Header model switch (Local ⇄ Claude). The gateway persists the choice in the
 // runtime overlay, so it survives restarts and applies to the whole swarm.
@@ -430,8 +525,67 @@ const ssoError = ref<string | null>(null);
 // that replaces the panel content (navLevel = the open group's label).
 const navOpen = ref(false);
 const navLevel = ref<string | null>(null);
+const burgerRef = ref<HTMLElement | null>(null);
+const navPanelRef = ref<HTMLElement | null>(null);
 watch(() => $route.path, () => { navOpen.value = false; });
-watch(navOpen, (open) => { if (open) navLevel.value = null; });
+// Where the header ends on screen. Not a fixed distance from the top: the "model unreachable"
+// banner above pushes the header down, and on a phone the header wraps onto a second row. The
+// nav panel and the toasts both hang under this edge, so neither lies over the header.
+const headerRef = ref<HTMLElement | null>(null);
+const headerBottom = ref(0);
+function measureHeader(): number {
+  headerBottom.value = headerRef.value?.getBoundingClientRect().bottom ?? 0;
+  return headerBottom.value;
+}
+// The toasts keep the gap they had under a one-row header at the top of the page.
+const toastStackStyle = computed(() => (headerBottom.value > 0 ? { top: `${Math.round(headerBottom.value) + 12}px` } : undefined));
+// A wrap changes the header's height without the window changing size (a longer status, a crumb).
+let headerObserver: ResizeObserver | null = null;
+onMounted(() => {
+  measureHeader();
+  if (typeof ResizeObserver === "undefined" || !headerRef.value) return;
+  headerObserver = new ResizeObserver(() => { measureHeader(); });
+  headerObserver.observe(headerRef.value);
+});
+onUnmounted(() => headerObserver?.disconnect());
+// The panel hangs under the burger, wherever the header has put it. Its top used to be a fixed
+// 4.4rem, so it lay over the header whenever the banner showed or the header had wrapped.
+const navPanelStyle = ref<Record<string, string>>({});
+function positionNavPanel(): void {
+  const el = burgerRef.value;
+  if (!el) return;
+  // Under the burger, and under the whole header where it has wrapped onto rows below the burger.
+  const top = Math.round(Math.max(el.getBoundingClientRect().bottom + 12, measureHeader())) + 10;
+  navPanelStyle.value = { top: `${top}px`, maxHeight: `calc(100dvh - ${top}px - 1rem)` };
+}
+// The banner comes and goes without a resize.
+watch(() => gateway.modelUnreachable, () => {
+  void nextTick(() => {
+    measureHeader();
+    if (navOpen.value) positionNavPanel();
+  });
+});
+// Opening puts the keyboard inside the panel (it is teleported to the end of the page, far from
+// the burger in tab order); closing hands it back to the burger, unless something else took it.
+watch(navOpen, (open) => {
+  if (open) {
+    navLevel.value = null;
+    positionNavPanel();
+    void nextTick(() => navPanelRef.value?.querySelector<HTMLElement>(".app-nav a, .app-nav button")?.focus({ preventScroll: true }));
+  } else if (!document.activeElement || document.activeElement === document.body || navPanelRef.value?.contains(document.activeElement)) {
+    burgerRef.value?.focus({ preventScroll: true });
+  }
+});
+// A drill-down swaps the panel's content, which takes the focused button with it.
+watch(navLevel, () => {
+  if (!navOpen.value) return;
+  setTimeout(() => navPanelRef.value?.querySelector<HTMLElement>(".app-nav-panel__back, .app-nav a, .app-nav button")?.focus({ preventScroll: true }), 240);
+});
+// Escape climbs out one step at a time: sub-level, then the panel.
+useEscapeToClose(() => navOpen.value, () => {
+  if (navLevel.value) navLevel.value = null;
+  else navOpen.value = false;
+});
 
 const activeGroupItems = computed<NavGroupItem[]>(() => {
   const entry = navEntries.value.find(
@@ -442,6 +596,11 @@ const activeGroupItems = computed<NavGroupItem[]>(() => {
 
 // Claude subscription connect/manage modal (browser OAuth verification).
 const showModelConnect = ref(false);
+/** From the nav panel: the panel goes first, or the dialog would open underneath it. */
+function openModelConnect(): void {
+  navOpen.value = false;
+  showModelConnect.value = true;
+}
 function onClaudeConnected(): void {
   notifications.pushLocalNotification({
     title: "Claude subscription connected",
@@ -481,13 +640,43 @@ function signOutFromMenu(): void {
 }
 // Close the menu on navigation so it never lingers over a new page.
 watch(() => $route.path, () => { accountMenuOpen.value = false; });
+useEscapeToClose(() => accountMenuOpen.value, () => {
+  accountMenuOpen.value = false;
+  accountBtnRef.value?.focus({ preventScroll: true });
+});
+
+// ── Theme dialog ────────────────────────────────────────────────────────────────────────────
+// Palette and typeface are a preference of this browser (stores/theme.ts), not of an account or
+// the gateway, yet their only home was the operator-only Settings page: a viewer could not reach
+// them at all. The account menu, which everyone has, opens the same picker in a dialog.
+const themeOpen = ref(false);
+const themeCloseRef = ref<HTMLButtonElement | null>(null);
+const themeDialogRef = ref<HTMLElement | null>(null);
+function openTheme(): void {
+  accountMenuOpen.value = false;
+  themeOpen.value = true;
+  void nextTick(() => themeCloseRef.value?.focus({ preventScroll: true }));
+}
+function closeTheme(): void {
+  themeOpen.value = false;
+  // The menu entry that opened it is gone with its menu; the menu's button takes the focus back.
+  accountBtnRef.value?.focus({ preventScroll: true });
+}
+useEscapeToClose(() => themeOpen.value, closeTheme);
+useFocusTrap(themeDialogRef);
 
 /**
- * The top-level nav is small (5 entries) and either renders as a single
- * RouterLink leaf or a popover NavGroup with sub-items.  Operator-only
+ * The top-level nav is small and each entry is either a single RouterLink
+ * leaf or a group that drills down into its items.  Operator-only
  * groups disappear entirely for viewers; mixed groups (some items
  * operator-only) filter their children.
  */
+interface NavGroupItem {
+  to: string;
+  label: string;
+  /** A few words on what the page holds, beside its name in the group's list. */
+  hint?: string;
+}
 interface NavLeaf {
   kind: "leaf";
   to: string;
@@ -526,7 +715,7 @@ const allNavEntries: NavEntry[] = [
   { kind: "leaf", to: "/skills", label: "Skills" },
   { kind: "leaf", to: "/documents", label: "Documents" },
   { kind: "leaf", to: "/knowledge", label: "Knowledge" },
-  { kind: "leaf", to: "/catalog", label: "Agents" },
+  { kind: "leaf", to: "/catalog", label: "Agent catalog" },
   {
     kind: "group",
     label: "Manage",
@@ -584,6 +773,87 @@ const navEntries = computed<NavEntry[]>(() => {
   return [...shown, ...extensionNav.value];
 });
 
+/** Whether the page on screen is one of a group's items: the group's button is marked then. */
+function groupHoldsCurrentPage(entry: NavGroupDef): boolean {
+  return entry.items.some((item) => item.to === $route.path);
+}
+
+/**
+ * The page on screen, by the name the navigation gives it, with its group. The chat is home and
+ * names nothing. Read from the full list: a page a role cannot see in the menu is still a page.
+ */
+const currentPage = computed<{ group: string | null; label: string } | null>(() => {
+  for (const entry of [...allNavEntries, ...extensionNav.value]) {
+    if (entry.kind === "leaf") {
+      if (entry.to === $route.path && entry.to !== "/") return { group: null, label: entry.label };
+    } else {
+      const item = entry.items.find((candidate) => candidate.to === $route.path);
+      if (item) return { group: entry.label, label: item.label };
+    }
+  }
+  return null;
+});
+// The browser tab names the page too: with several tabs open they all read the product's name.
+watch([currentPage, () => product.name], ([page, name]) => {
+  document.title = page ? `${page.label} · ${name}` : name;
+}, { immediate: true });
+
+// ── Command palette (Ctrl/Cmd+K) ────────────────────────────────────────────────────────────
+// Every page the menu shows this user, and the few actions that are not a page.
+const paletteOpen = ref(false);
+const paletteShortcut = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl K";
+function openPaletteFromNav(): void {
+  navOpen.value = false;
+  paletteOpen.value = true;
+}
+const paletteCommands = computed<PaletteCommand[]>(() => {
+  const pages: PaletteCommand[] = [];
+  for (const entry of navEntries.value) {
+    if (entry.kind === "leaf") pages.push({ id: `go:${entry.to}`, label: entry.label, group: "Go to", to: entry.to });
+    else for (const item of entry.items) pages.push({ id: `go:${item.to}`, label: item.label, group: entry.label, hint: item.hint, to: item.to });
+  }
+  const actions: PaletteCommand[] = [];
+  if (gateway.connected) {
+    actions.push({
+      id: "do:new-session", label: "New session", group: "Action", hint: "Start a fresh conversation in the chat", keywords: "chat conversation clear",
+      run: () => { void router.push("/").then(() => gateway.createSession()); },
+    });
+  }
+  if (modelPreset.canChange && gateway.connected) {
+    actions.push({ id: "do:claude", label: modelPreset.oauthConnected ? "Claude subscription" : "Connect Claude", group: "Action", hint: "Model & subscription", keywords: "anthropic model oauth", run: () => { showModelConnect.value = true; } });
+  }
+  if (notifications.supported && notifications.permission === "default") {
+    actions.push({ id: "do:notifications", label: "Enable notifications", group: "Action", hint: "Let the browser tell you when a turn finishes", run: () => { void enableBrowserNotifications(); } });
+  }
+  actions.push(signedInUser.value
+    ? { id: "do:sign-out", label: "Sign out", group: "Account", hint: currentUser.value?.displayName ?? currentUser.value?.username, run: () => { signOut(); } }
+    : { id: "do:sign-in", label: "Sign in", group: "Account", hint: "Switch to a user account", run: () => { showLogin.value = true; } });
+  return [...pages, ...actions];
+});
+function runPaletteCommand(command: PaletteCommand): void {
+  paletteOpen.value = false;
+  if (command.to) void router.push(command.to);
+  else command.run?.();
+}
+function onPaletteShortcut(event: KeyboardEvent): void {
+  if (!isPaletteShortcut(event)) return;
+  // Not over the sign-in screen: there is nowhere to go yet.
+  if (!gateway.connected && !gateway.reconnecting) return;
+  event.preventDefault();
+  navOpen.value = false;
+  accountMenuOpen.value = false;
+  themeOpen.value = false;
+  paletteOpen.value = !paletteOpen.value;
+}
+onMounted(() => window.addEventListener("keydown", onPaletteShortcut));
+onUnmounted(() => window.removeEventListener("keydown", onPaletteShortcut));
+
+const connectionLabel = computed(() => {
+  if (gateway.connected) return "Connected";
+  if (gateway.connecting) return "Connecting…";
+  return gateway.reconnecting ? "Reconnecting…" : "Disconnected";
+});
+
 function notificationCardClass(level: NotificationLevel): string {
   switch (level) {
     case "success":
@@ -638,9 +908,12 @@ onMounted(() => {
     void modelPreset.fetchOAuthStatus();
   }
   void auth.refreshCurrentUser();
-  // Keep the teleported account menu anchored to its button on resize.
+  // Keep the teleported account menu and nav panel anchored to their buttons on resize, and the
+  // toasts under the header.
   window.addEventListener("resize", () => {
+    measureHeader();
     if (accountMenuOpen.value) positionAccountMenu();
+    if (navOpen.value) positionNavPanel();
   });
 });
 
@@ -685,11 +958,83 @@ watch(() => gateway.isLoading, (running) => {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
+/* Where you are, beside the brand. */
+.app-crumb {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  font-family: var(--font-label);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.app-crumb__sep { color: rgba(var(--logo-cyan), 0.35); }
+.app-crumb__group { color: rgba(165, 243, 252, 0.5); }
+.app-crumb__page {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgb(var(--logo-cyan));
+  text-shadow: 0 0 14px rgba(var(--logo-cyan), 0.45);
+}
+@media (max-width: 639px) {
+  .app-crumb__group, .app-crumb__sep--inner { display: none; }
+}
+/* The palette's row at the top of the panel: looks like the field it opens. */
+.app-nav-panel__search {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--hairline);
+  background: var(--surface-2);
+  color: rgb(156, 163, 175);
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms var(--ease-out), color 160ms var(--ease-out);
+}
+.app-nav-panel__search:hover,
+.app-nav-panel__search:focus-visible {
+  border-color: rgba(var(--logo-cyan), 0.5);
+  color: rgb(226, 232, 240);
+  outline: none;
+}
+.app-nav-panel__search span { flex: 1 1 auto; }
+.app-nav-panel__search kbd {
+  font-family: var(--font-label);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.3rem;
+  border: 1px solid var(--hairline);
+}
+/* A group that holds the page on screen. */
+.nav-group__trigger--current {
+  border-color: rgba(var(--logo-cyan), 0.28);
+  color: rgb(var(--logo-cyan));
+}
+.app-nav a:focus-visible,
+.app-nav button:focus-visible,
+.app-nav-panel__back:focus-visible,
+.app-nav-panel__subitem:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.7);
+  outline-offset: 2px;
+}
+
 /* Burger nav panel: header tools + main nav, summoned on demand.
    Fixed + teleported to <body> so it always paints above page content. */
 .app-nav-panel {
   position: fixed;
   right: 0.75rem;
+  /* Where the header's lower edge usually is; the real top and height are set from the burger's
+     place on screen (positionNavPanel), which moves with the banner and a wrapped header. */
   top: 4.4rem;
   /* above the floating HUD pods (z 220) — the summoned menu always wins */
   z-index: 230;

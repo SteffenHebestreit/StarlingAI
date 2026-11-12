@@ -1,9 +1,11 @@
 <template>
   <div class="space-y-5">
     <!-- ── Presets (curated palette × typeface designs) ───────────────────── -->
+    <!-- The chosen option of each group carries the same check mark and aria-pressed: a tint
+         alone was the only sign for presets and palettes. -->
     <div>
-      <div class="eyebrow mb-2">Presets</div>
-      <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <div :id="`${uid}-presets`" class="eyebrow mb-2">Presets</div>
+      <div class="grid grid-cols-2 gap-2 sm:grid-cols-3" role="group" :aria-labelledby="`${uid}-presets`">
         <button
           v-for="preset in theme.presets"
           :key="preset.id"
@@ -12,6 +14,7 @@
           :class="preset.id === activePresetId
             ? 'border-purple-400/40 bg-purple-500/12'
             : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]'"
+          :aria-pressed="preset.id === activePresetId"
           @click="theme.applyPreset(preset.id)"
         >
           <span
@@ -19,18 +22,21 @@
             :style="{ background: `linear-gradient(135deg, ${presetSwatch(preset.palette)[0]}, ${presetSwatch(preset.palette)[1]})` }"
             aria-hidden="true"
           />
-          <span class="min-w-0">
+          <span class="min-w-0 flex-1">
             <span class="block truncate text-sm font-medium text-gray-100">{{ preset.label }}</span>
             <span class="block truncate text-[10px] uppercase tracking-wide text-gray-500">{{ preset.description }}</span>
           </span>
+          <svg v-if="preset.id === activePresetId" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5 shrink-0 text-purple-300" aria-hidden="true">
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
         </button>
       </div>
     </div>
 
     <!-- ── Palette ────────────────────────────────────────────────────────── -->
     <div>
-      <div class="eyebrow mb-2">Palette</div>
-      <div class="flex flex-wrap gap-2">
+      <div :id="`${uid}-palette`" class="eyebrow mb-2">Palette</div>
+      <div class="flex flex-wrap gap-2" role="group" :aria-labelledby="`${uid}-palette`">
         <button
           v-for="p in theme.palettes"
           :key="p.id"
@@ -40,6 +46,7 @@
           :class="p.id === theme.palette
             ? 'border-purple-400/40 bg-purple-500/12 text-gray-100'
             : 'border-white/10 bg-white/[0.03] text-gray-300 hover:border-white/20 hover:bg-white/[0.06]'"
+          :aria-pressed="p.id === theme.palette"
           @click="theme.applyPalette(p.id)"
         >
           <span
@@ -48,14 +55,17 @@
             aria-hidden="true"
           />
           <span class="text-sm">{{ p.label }}</span>
+          <svg v-if="p.id === theme.palette" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5 shrink-0 text-purple-300" aria-hidden="true">
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
         </button>
       </div>
     </div>
 
     <!-- ── Typeface (display · body · mono systems) ───────────────────────── -->
     <div>
-      <div class="eyebrow mb-2">Typeface</div>
-      <div class="grid gap-2 sm:grid-cols-2">
+      <div :id="`${uid}-typeface`" class="eyebrow mb-2">Typeface</div>
+      <div class="grid gap-2 sm:grid-cols-2" role="group" :aria-labelledby="`${uid}-typeface`">
         <button
           v-for="t in theme.typefaces"
           :key="t.id"
@@ -64,6 +74,7 @@
           :class="t.id === theme.typeface
             ? 'border-purple-400/40 bg-purple-500/12'
             : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.06]'"
+          :aria-pressed="t.id === theme.typeface"
           @click="theme.applyTypeface(t.id)"
         >
           <span
@@ -74,7 +85,7 @@
           <span class="min-w-0 flex-1">
             <span class="flex items-center gap-2">
               <span class="text-sm font-semibold text-gray-100" :style="{ fontFamily: t.display }">{{ t.label }}</span>
-              <svg v-if="t.id === theme.typeface" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5 text-purple-300">
+              <svg v-if="t.id === theme.typeface" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="h-3.5 w-3.5 shrink-0 text-purple-300" aria-hidden="true">
                 <path d="M20 6 9 17l-5-5" />
               </svg>
             </span>
@@ -91,10 +102,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, useId } from "vue";
 import { useThemeStore } from "@/stores/theme";
 
 const theme = useThemeStore();
+// The picker is on the Settings page and in the account menu's dialog, and both can be up at once.
+const uid = useId();
 
 // A preset is "active" only while both axes still match it.
 const activePresetId = computed(() =>

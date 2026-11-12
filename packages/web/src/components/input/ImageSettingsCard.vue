@@ -1,9 +1,9 @@
 <template>
-  <div class="isc" role="group" aria-label="Image settings">
+  <div class="isc" role="group" :aria-label="chatText.imageSettings(lang)">
     <div class="isc__head">
-      <span class="isc__eyebrow">Image settings</span>
+      <span class="isc__eyebrow">{{ chatText.imageSettings(lang) }}</span>
       <span class="isc__timer" :class="{ 'isc__timer--soon': leftMs !== null && leftMs < 15_000 }">
-        {{ leftMs === null ? '' : `Auto in ${formatCountdown(leftMs)}` }}
+        {{ leftMs === null ? '' : chatText.autoIn(lang, formatCountdown(leftMs)) }}
       </span>
     </div>
     <p class="isc__summary">{{ summary }}<span v-if="eta" class="isc__eta"> · {{ eta }}</span></p>
@@ -19,12 +19,12 @@
     <p class="isc__prompt" :title="payload.agent.prompt">“{{ promptPreview }}”</p>
 
     <div class="isc__actions">
-      <button type="button" class="btn-grad isc__button" :disabled="busy" title="Render with the agent's settings" @click="answer('auto')">Auto</button>
-      <button type="button" class="btn-ghost isc__button" :disabled="busy" @click="openConfigure">Configure…</button>
-      <button type="button" class="btn-ghost isc__button" :disabled="busy" title="Do not render this picture" @click="answer('skip')">Skip</button>
-      <label class="isc__always" title="Renders in this chat stop asking and use the agent's settings">
+      <button type="button" class="btn-grad isc__button" :disabled="busy" :title="chatText.autoTitle(lang)" @click="answer('auto')">{{ chatText.auto(lang) }}</button>
+      <button type="button" class="btn-ghost isc__button" :disabled="busy" @click="openConfigure">{{ chatText.configure(lang) }}</button>
+      <button type="button" class="btn-ghost isc__button" :disabled="busy" :title="chatText.skipTitle(lang)" @click="answer('skip')">{{ chatText.skip(lang) }}</button>
+      <label class="isc__always" :title="chatText.alwaysAutoTitle(lang)">
         <input type="checkbox" :checked="alwaysAuto" @change="toggleAlwaysAuto" />
-        Always Auto in this chat
+        {{ chatText.alwaysAuto(lang) }}
       </label>
     </div>
     <p v-if="formError" class="isc__error" role="alert">{{ formError }}</p>
@@ -47,11 +47,16 @@ import {
 } from "@/composables/imageSettings";
 import { fieldErrorMap, formatCountdown, localExpiresAt, remainingMs, type UserInputRequest } from "@/composables/userInputs";
 import { useNow } from "@/composables/useNow";
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 
 const props = defineProps<{
   request: UserInputRequest;
   payload: ImageSettingsPayload;
+  /** The language of the card's own labels: the conversation's, like the step row it sits under. */
+  language?: TurnLanguage;
 }>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 const MASK_FRAME_REM = 4.5;
 

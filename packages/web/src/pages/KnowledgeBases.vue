@@ -1,17 +1,19 @@
 <template>
-  <div class="knowledge-page" style="height:100%;overflow:auto;">
-    <header class="knowledge-page__header">
-      <div>
-        <h1 class="knowledge-page__title">Knowledge Bases</h1>
-        <p class="knowledge-page__subtitle">
+  <div class="page-shell knowledge-page">
+    <header class="page-header">
+      <div class="page-header__text">
+        <h1 class="page-title">Knowledge Bases</h1>
+        <p class="page-subtitle">
           Named corpora crawled from documentation sites into the document-RAG library (engram). Each knowledge base is
           crawled recursively from its seed URLs; agents query it explicitly via <code>search_knowledge_base</code>, or
           — when <strong>ambient</strong> is on — its content joins every turn's document context automatically.
         </p>
       </div>
-      <button v-if="gateway.connected" class="btn-ghost px-3 py-1.5 rounded-lg text-xs" :disabled="loading" @click="reload">
-        {{ loading ? "Loading…" : "Reload" }}
-      </button>
+      <div v-if="gateway.connected" class="page-actions">
+        <button type="button" class="btn-ghost px-4 py-2 rounded-xl text-sm" :disabled="loading" @click="reload">
+          {{ loading ? "Loading…" : "Reload" }}
+        </button>
+      </div>
     </header>
 
     <div v-if="!gateway.connected" class="empty-state">Connect to manage knowledge bases.</div>
@@ -34,7 +36,7 @@
               Point it at a documentation site; the crawl stays on the seed pages' path prefixes by default.
             </div>
           </div>
-          <button class="btn-grad px-4 py-2 rounded-xl text-sm" @click="showCreate = !showCreate">
+          <button type="button" class="btn-grad px-4 py-2 rounded-xl text-sm" @click="showCreate = !showCreate">
             {{ showCreate ? "Close" : "Create knowledge base" }}
           </button>
         </div>
@@ -42,8 +44,8 @@
         <div v-if="showCreate" class="knowledge-page__form">
           <div class="knowledge-page__form-grid">
             <label class="knowledge-page__field">
-              <span class="knowledge-page__label">Name</span>
-              <input v-model="form.name" class="input-box" placeholder="e.g. Vue 3 Docs" />
+              <span class="knowledge-page__label">Name <span class="text-red-400" aria-hidden="true">*</span></span>
+              <input ref="nameField" v-model="form.name" class="input-box" required aria-required="true" placeholder="e.g. Vue 3 Docs" />
             </label>
             <label class="knowledge-page__field">
               <span class="knowledge-page__label">Description <span class="knowledge-page__hint">(optional)</span></span>
@@ -59,8 +61,8 @@
             </select>
           </label>
           <label class="knowledge-page__field">
-            <span class="knowledge-page__label">Seed URLs <span class="knowledge-page__hint">(one per line)</span></span>
-            <textarea v-model="form.seedUrlsText" rows="3" class="input-box knowledge-page__textarea" placeholder="https://vuejs.org/guide/" />
+            <span class="knowledge-page__label">Seed URLs <span class="text-red-400" aria-hidden="true">*</span> <span class="knowledge-page__hint">(one per line)</span></span>
+            <textarea ref="seedUrlsField" v-model="form.seedUrlsText" rows="3" class="input-box knowledge-page__textarea" required aria-required="true" placeholder="https://vuejs.org/guide/" />
           </label>
           <div class="knowledge-page__form-grid">
             <label class="knowledge-page__field">
@@ -119,18 +121,20 @@
           </div>
 
           <div class="knowledge-page__form-actions">
-            <button class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="creating || !enabled || !ragConfigured" @click="submitCreate">
+            <button type="button" class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="creating || !enabled || !ragConfigured" @click="submitCreate">
               {{ creating ? "Creating…" : "Create & crawl" }}
             </button>
-            <button class="btn-ghost px-3 py-2 rounded-xl text-sm" :disabled="creating" @click="resetCreate">Reset</button>
+            <button type="button" class="btn-ghost px-3 py-2 rounded-xl text-sm" :disabled="creating" @click="resetCreate">Reset</button>
           </div>
-          <div v-if="createError" class="text-sm text-red-400 mt-2">{{ createError }}</div>
+          <div v-if="createError" class="text-sm text-red-400 mt-2" role="alert">{{ createError }}</div>
         </div>
         <div v-if="createNote" class="text-sm text-emerald-300 mt-2">{{ createNote }}</div>
       </section>
 
-      <!-- KB list -->
-      <div v-if="kbs.length === 0 && !loading" class="empty-state">
+      <!-- KB list. "No knowledge bases" is only true after a load that worked. -->
+      <div v-if="loadError" class="notice notice--error mb-4" role="alert">{{ loadError }}</div>
+      <div v-if="kbs.length === 0 && loading" class="empty-state">Loading knowledge bases…</div>
+      <div v-else-if="kbs.length === 0 && listLoaded" class="empty-state">
         No knowledge bases yet. Create one above to crawl a documentation site into the RAG library.
       </div>
 
@@ -145,22 +149,25 @@
             <span v-if="kb.ambientRetrieval" class="knowledge-page__chip knowledge-page__chip--ambient" title="Included in every turn's document context">ambient</span>
           </div>
           <div class="knowledge-page__card-actions">
-            <button class="btn-ghost px-3 py-1 rounded-lg text-xs" @click="toggleDetail(kb)">
+            <button type="button" class="btn-ghost px-3 py-1 rounded-lg text-xs" @click="toggleDetail(kb)">
               {{ expandedId === kb.id ? "Hide details" : "Details" }}
             </button>
             <button
               v-if="kb.status !== 'crawling'"
+              type="button"
               class="btn-ghost px-3 py-1 rounded-lg text-xs"
               :disabled="busyId === kb.id || !enabled || !ragConfigured"
               @click="recrawl(kb)"
             >{{ busyId === kb.id ? "…" : "Re-crawl" }}</button>
             <button
               v-else
+              type="button"
               class="knowledge-page__btn-warn px-3 py-1 rounded-lg text-xs"
               :disabled="busyId === kb.id"
               @click="cancelCrawl(kb)"
             >{{ busyId === kb.id ? "…" : "Cancel crawl" }}</button>
             <button
+              type="button"
               class="btn-ghost px-3 py-1 rounded-lg text-xs"
               :disabled="busyId === kb.id"
               :title="kb.ambientRetrieval ? 'Stop including this KB in every turn' : 'Include this KB in the document context of every turn'"
@@ -168,12 +175,12 @@
             >{{ kb.ambientRetrieval ? "Ambient: on" : "Ambient: off" }}</button>
             <template v-if="confirmDeleteId === kb.id">
               <span class="knowledge-page__confirm">Delete corpus + index?</span>
-              <button class="knowledge-page__btn-danger px-3 py-1 rounded-lg text-xs" :disabled="busyId === kb.id" @click="deleteKb(kb)">
+              <button type="button" class="knowledge-page__btn-danger px-3 py-1 rounded-lg text-xs" :disabled="busyId === kb.id" @click="deleteKb(kb)">
                 {{ busyId === kb.id ? "Deleting…" : "Confirm" }}
               </button>
-              <button class="btn-ghost px-3 py-1 rounded-lg text-xs" @click="confirmDeleteId = null">Keep</button>
+              <button type="button" class="btn-ghost px-3 py-1 rounded-lg text-xs" @click="confirmDeleteId = null">Keep</button>
             </template>
-            <button v-else class="knowledge-page__btn-danger px-3 py-1 rounded-lg text-xs" :disabled="busyId === kb.id" @click="confirmDeleteId = kb.id">
+            <button v-else type="button" class="knowledge-page__btn-danger px-3 py-1 rounded-lg text-xs" :disabled="busyId === kb.id" @click="confirmDeleteId = kb.id">
               Delete
             </button>
           </div>
@@ -183,7 +190,8 @@
 
         <div class="knowledge-page__meta">
           {{ kb.pageCount }} page{{ kb.pageCount === 1 ? "" : "s" }} · {{ kb.chunkCount }} chunk{{ kb.chunkCount === 1 ? "" : "s" }}
-          · bounds {{ kb.maxPages }} pages / depth {{ kb.maxDepth }} · updated {{ formatDate(kb.updatedAt) }}
+          · bounds {{ kb.maxPages }} pages / depth {{ kb.maxDepth }} · updated
+          <time :datetime="isoTimestamp(kb.updatedAt)" :title="isoTimestamp(kb.updatedAt)">{{ formatDateTime(kb.updatedAt) }}</time>
         </div>
 
         <ul class="knowledge-page__seeds">
@@ -197,12 +205,14 @@
             Crawling — {{ liveCrawlLine(kb.lastCrawl) }}
           </span>
           <span v-else>
-            Last crawl {{ formatDate(kb.lastCrawl.startedAt) }} — {{ finishedCrawlLine(kb.lastCrawl) }}
+            Last crawl
+            <time :datetime="isoTimestamp(kb.lastCrawl.startedAt)" :title="isoTimestamp(kb.lastCrawl.startedAt)">{{ formatDateTime(kb.lastCrawl.startedAt) }}</time>
+            — {{ finishedCrawlLine(kb.lastCrawl) }}
             <span v-if="kb.lastCrawl.stopReason"> · stopped: {{ kb.lastCrawl.stopReason }}</span>
           </span>
         </div>
         <div v-if="kb.lastCrawl?.error" class="text-sm text-red-400 mt-1">{{ kb.lastCrawl.error }}</div>
-        <div v-if="cardErrors[kb.id]" class="text-sm text-red-400 mt-1">{{ cardErrors[kb.id] }}</div>
+        <div v-if="cardErrors[kb.id]" class="text-sm text-red-400 mt-1" role="alert">{{ cardErrors[kb.id] }}</div>
 
         <!-- Detail expansion -->
         <div v-if="expandedId === kb.id" class="knowledge-page__detail">
@@ -253,16 +263,17 @@
                 <textarea v-model="editWorkerToolsText" rows="2" class="input-box knowledge-page__textarea knowledge-page__textarea--mono" placeholder="web_fetch" />
               </label>
               <div class="knowledge-page__form-actions">
-                <button class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="workerSaving" @click="saveWorker(detail.knowledgeBase)">
+                <button type="button" class="btn-grad px-4 py-2 rounded-xl text-sm" :disabled="workerSaving" @click="saveWorker(detail.knowledgeBase)">
                   {{ workerSaving ? "Saving…" : "Save worker" }}
                 </button>
                 <button
+                  type="button"
                   class="btn-ghost px-3 py-2 rounded-xl text-sm"
                   :disabled="workerSaving || (!editWorkerInstructions.trim() && !editWorkerToolsText.trim() && !detail.knowledgeBase.hasWorker)"
                   @click="clearWorker(detail.knowledgeBase)"
                 >Clear</button>
               </div>
-              <div v-if="workerError" class="text-sm text-red-400">{{ workerError }}</div>
+              <div v-if="workerError" class="text-sm text-red-400" role="alert">{{ workerError }}</div>
               <div v-else-if="workerNote" class="text-sm text-emerald-300">{{ workerNote }}</div>
               <div class="knowledge-page__worker-usage">
                 To use this KB, ask in chat: <code>use {{ detail.knowledgeBase.id }} to …</code> — it runs this KB's worker.
@@ -289,23 +300,30 @@
                   <span class="knowledge-page__page-chunks">{{ page.chunkCount }} chunk{{ page.chunkCount === 1 ? "" : "s" }}</span>
                 </li>
               </ul>
-              <div v-if="filteredPages.length === 0" class="text-sm text-gray-500">No pages match the filter.</div>
+              <div v-if="filteredPages.length === 0" class="empty-state">
+                <p>{{ noMatchLine("pages", pageFilter) }}</p>
+                <button type="button" class="btn-ghost mt-3 px-3 py-1 rounded-lg text-xs" @click="pageFilter = ''">Clear filters</button>
+              </div>
             </template>
             <div v-else-if="!detail.crawling" class="text-sm text-gray-500">No pages ingested yet — run a crawl.</div>
           </template>
         </div>
       </section>
-
-      <div v-if="loadError" class="text-sm text-red-400">{{ loadError }}</div>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
+import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
+import { noMatchLine } from "@/composables/listWindow";
+import { confirmAction } from "@/composables/useConfirm";
+import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
+import { useToast, errorText } from "@/composables/useToast";
 
 const gateway = useGatewayStore();
+const toast = useToast();
 
 // Current chat session — needed so session-scoped KBs are visible/manageable
 // (the gateway derives the session access context from the ?sessionId= query).
@@ -388,6 +406,8 @@ interface KbDetail {
 
 // ── List state ───────────────────────────────────────────────────────────────
 const loading = ref(false);
+// True once a list load has succeeded: only then does an empty list mean "none yet".
+const listLoaded = ref(false);
 const loadError = ref("");
 const kbs = ref<KbSummary[]>([]);
 const enabled = ref(true);
@@ -404,8 +424,12 @@ async function refreshList(quiet = false): Promise<void> {
     kbs.value = Array.isArray(data.knowledgeBases) ? data.knowledgeBases : [];
     enabled.value = data.enabled !== false;
     ragConfigured.value = data.ragConfigured !== false;
+    listLoaded.value = true;
   } catch (e) {
-    if (!quiet) loadError.value = `Failed to load knowledge bases: ${e instanceof Error ? e.message : String(e)}`;
+    if (!quiet) {
+      listLoaded.value = false;
+      loadError.value = `Failed to load knowledge bases: ${e instanceof Error ? e.message : String(e)}`;
+    }
   } finally {
     if (!quiet) loading.value = false;
   }
@@ -422,6 +446,9 @@ const showAdvanced = ref(false);
 const creating = ref(false);
 const createError = ref("");
 const createNote = ref("");
+// The two required fields: a refused submit puts the cursor in the first one left empty.
+const nameField = ref<HTMLInputElement | null>(null);
+const seedUrlsField = ref<HTMLTextAreaElement | null>(null);
 
 function emptyForm() {
   return {
@@ -465,8 +492,8 @@ async function submitCreate(): Promise<void> {
   createNote.value = "";
   const name = form.value.name.trim();
   const seedUrls = linesToList(form.value.seedUrlsText);
-  if (!name) { createError.value = "Name is required."; return; }
-  if (seedUrls.length === 0) { createError.value = "At least one seed URL is required."; return; }
+  if (!name) { createError.value = "Name is required."; nameField.value?.focus(); return; }
+  if (seedUrls.length === 0) { createError.value = "At least one seed URL is required."; seedUrlsField.value?.focus(); return; }
   if (form.value.scope === "session" && !currentSessionId.value) {
     createError.value = "Open a chat first to create a session-scoped knowledge base.";
     return;
@@ -516,6 +543,7 @@ async function submitCreate(): Promise<void> {
     await refreshList();
   } catch (e) {
     createError.value = e instanceof Error ? e.message : String(e);
+    toast.error("Couldn't create the knowledge base", errorText(e));
   } finally {
     creating.value = false;
   }
@@ -526,7 +554,13 @@ const busyId = ref<string | null>(null);
 const confirmDeleteId = ref<string | null>(null);
 const cardErrors = ref<Record<string, string>>({});
 
-async function runAction(kb: KbSummary, action: () => Promise<void>): Promise<void> {
+// A failure is written on the card and raised as a toast: the card may be off screen by the
+// time a slow request fails.
+async function runAction(
+  kb: KbSummary,
+  action: () => Promise<void>,
+  texts: { failed: string; done?: { title: string; message: string } },
+): Promise<void> {
   busyId.value = kb.id;
   if (cardErrors.value[kb.id]) {
     const next = { ...cardErrors.value };
@@ -535,10 +569,12 @@ async function runAction(kb: KbSummary, action: () => Promise<void>): Promise<vo
   }
   try {
     await action();
+    if (texts.done) toast.success(texts.done.title, texts.done.message);
     await refreshList(true);
     if (expandedId.value === kb.id) await loadDetail(kb.id, true);
   } catch (e) {
     cardErrors.value = { ...cardErrors.value, [kb.id]: e instanceof Error ? e.message : String(e) };
+    toast.error(texts.failed, `“${kb.name}”: ${errorText(e)}`);
   } finally {
     busyId.value = null;
   }
@@ -547,12 +583,18 @@ async function runAction(kb: KbSummary, action: () => Promise<void>): Promise<vo
 function recrawl(kb: KbSummary): void {
   void runAction(kb, async () => {
     await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/crawl`), { method: "POST" });
+  }, {
+    failed: "Couldn't start the crawl",
+    done: { title: "Crawl started", message: `“${kb.name}” is being crawled again; its card shows the progress.` },
   });
 }
 
 function cancelCrawl(kb: KbSummary): void {
   void runAction(kb, async () => {
     await gateway.authorizedFetch(withSession(`/api/knowledge-bases/${encodeURIComponent(kb.id)}/cancel`), { method: "POST" });
+  }, {
+    failed: "Couldn't cancel the crawl",
+    done: { title: "Cancel requested", message: `The crawl of “${kb.name}” is stopping.` },
   });
 }
 
@@ -563,6 +605,11 @@ function toggleAmbient(kb: KbSummary): void {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ambientRetrieval: !kb.ambientRetrieval }),
     });
+  }, {
+    failed: "Couldn't change ambient retrieval",
+    done: kb.ambientRetrieval
+      ? { title: "Ambient retrieval off", message: `“${kb.name}” is now only searched when an agent asks for it.` }
+      : { title: "Ambient retrieval on", message: `“${kb.name}” now joins every turn's document context.` },
   });
 }
 
@@ -577,7 +624,7 @@ function deleteKb(kb: KbSummary): void {
     }
     createNote.value = `Deleted “${kb.name}” — ${data.documentsRemoved} document${data.documentsRemoved === 1 ? "" : "s"} removed from the index`
       + (data.documentsFailed > 0 ? ` (${data.documentsFailed} failed to delete)` : "") + ".";
-  });
+  }, { failed: "Couldn't delete the knowledge base" });
 }
 
 // ── Detail expansion ─────────────────────────────────────────────────────────
@@ -665,15 +712,23 @@ async function saveWorker(kb: KbSummary): Promise<void> {
     if (expandedId.value === kb.id) await loadDetail(kb.id, true);
   } catch (e) {
     workerError.value = e instanceof Error ? e.message : String(e);
+    toast.error("Couldn't save the worker template", `“${kb.name}”: ${errorText(e)}`);
   } finally {
     workerSaving.value = false;
   }
 }
 
-function clearWorker(kb: KbSummary): void {
+async function clearWorker(kb: KbSummary): Promise<void> {
+  // One click used to wipe the saved template and whatever was typed into the two fields.
+  if (!(await confirmAction({
+    title: "Clear the worker template?",
+    message: `The instructions and tool list of “${kb.name}” are deleted, including anything typed here and not yet saved. The knowledge base falls back to the default worker. This cannot be undone.`,
+    confirmLabel: "Clear worker",
+    danger: true,
+  }))) return;
   editWorkerInstructions.value = "";
   editWorkerToolsText.value = "";
-  void saveWorker(kb);
+  await saveWorker(kb);
 }
 
 const filteredPages = computed<KbPage[]>(() => {
@@ -762,25 +817,14 @@ function finishedCrawlLine(c: KbCrawlStats): string {
   return parts.join(" · ");
 }
 
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
-
-onMounted(() => {
-  if (gateway.connected) void refreshList();
-});
-watch(() => gateway.connected, (connected) => {
-  if (connected) void refreshList();
-});
+// On mount, and whenever the gateway comes up after the page did or reconnects.
+useLoadWhenConnected(() => refreshList());
 </script>
 
 <style scoped>
-.knowledge-page { padding: 1.25rem 1.5rem 2rem; max-width: 980px; margin: 0 auto; }
-.knowledge-page__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
-.knowledge-page__title { font-size: 1.5rem; font-weight: 700; }
-.knowledge-page__subtitle { font-size: 0.85rem; color: var(--muted, #9aa4b2); max-width: 70ch; margin-top: 0.25rem; }
-.knowledge-page__subtitle code { font-family: var(--font-mono, monospace); font-size: 0.9em; }
+/* A reading column: the header and the cards share one centred width (the old 980px column
+   less its padding) while the page itself scrolls at the window's edge. */
+.knowledge-page > * { max-width: 932px; margin-left: auto; margin-right: auto; }
 
 .knowledge-page__banner { border-radius: 0.75rem; padding: 0.6rem 0.9rem; font-size: 0.8rem; margin-bottom: 1rem; }
 .knowledge-page__banner--warn { border: 1px solid rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.08); color: #fcd9a8; }
@@ -791,13 +835,13 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__form { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
 .knowledge-page__form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
 .knowledge-page__field { display: flex; flex-direction: column; gap: 0.3rem; }
-.knowledge-page__label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #9aa4b2); }
+.knowledge-page__label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgb(156 163 175); }
 .knowledge-page__hint { text-transform: none; letter-spacing: 0; opacity: 0.75; }
 .knowledge-page__textarea { resize: vertical; min-height: 4.5rem; font: inherit; font-size: 0.85rem; }
 .knowledge-page__textarea--mono { font-family: var(--font-mono, monospace); font-size: 0.78rem; }
 .knowledge-page__advanced-toggle {
   appearance: none; background: transparent; border: none; cursor: pointer; text-align: left;
-  font-size: 0.78rem; color: var(--muted, #9aa4b2); padding: 0.1rem 0;
+  font-size: 0.78rem; color: rgb(156 163 175); padding: 0.1rem 0;
 }
 .knowledge-page__advanced-toggle:hover { color: rgb(229 231 235); }
 .knowledge-page__advanced { display: flex; flex-direction: column; gap: 0.75rem; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; }
@@ -808,7 +852,7 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__worker-block { display: flex; flex-direction: column; gap: 0.6rem; padding: 0.75rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.75rem; }
 .knowledge-page__worker-head { display: flex; flex-direction: column; gap: 0.15rem; }
 .knowledge-page__worker-head code { font-family: var(--font-mono, monospace); font-size: 0.9em; }
-.knowledge-page__worker-usage { font-size: 0.75rem; color: var(--muted, #9aa4b2); }
+.knowledge-page__worker-usage { font-size: 0.75rem; color: rgb(156 163 175); }
 .knowledge-page__worker-usage code { font-family: var(--font-mono, monospace); font-size: 0.9em; color: rgb(209 213 219); }
 
 /* ── KB cards ──────────────────────────────────────────────────────────── */
@@ -821,7 +865,7 @@ watch(() => gateway.connected, (connected) => {
   font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;
   border: 1px solid; border-radius: 999px; padding: 0.08rem 0.55rem; white-space: nowrap;
 }
-.knowledge-page__chip--id { text-transform: none; font-weight: 500; font-family: var(--font-mono, monospace); border-color: rgba(148, 163, 184, 0.3); color: var(--muted, #9aa4b2); background: rgba(148, 163, 184, 0.08); }
+.knowledge-page__chip--id { text-transform: none; font-weight: 500; font-family: var(--font-mono, monospace); border-color: rgba(148, 163, 184, 0.3); color: rgb(156 163 175); background: rgba(148, 163, 184, 0.08); }
 .knowledge-page__chip--idle { border-color: rgba(148, 163, 184, 0.4); color: rgb(203 213 225); background: rgba(148, 163, 184, 0.1); }
 .knowledge-page__chip--crawling { border-color: rgba(34, 211, 238, 0.5); color: rgb(165 243 252); background: rgba(34, 211, 238, 0.1); }
 .knowledge-page__chip--ready { border-color: rgba(52, 211, 153, 0.4); color: rgb(167 243 208); background: rgba(52, 211, 153, 0.1); }
@@ -833,12 +877,12 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__chip--scope-session { border-color: rgba(251, 191, 36, 0.4); color: rgb(253 230 138); background: rgba(251, 191, 36, 0.1); }
 
 .knowledge-page__desc { font-size: 0.85rem; color: rgb(209 213 219); margin-top: 0.5rem; }
-.knowledge-page__meta { font-size: 0.75rem; color: var(--muted, #9aa4b2); margin-top: 0.4rem; }
+.knowledge-page__meta { font-size: 0.75rem; color: rgb(156 163 175); margin-top: 0.4rem; }
 .knowledge-page__seeds { display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.4rem; }
 .knowledge-page__seed { font-size: 0.75rem; font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
-.knowledge-page__seed a { color: var(--muted, #9aa4b2); text-decoration: none; }
+.knowledge-page__seed a { color: rgb(156 163 175); text-decoration: none; }
 .knowledge-page__seed a:hover { color: rgb(229 231 235); text-decoration: underline; }
-.knowledge-page__crawl-summary { font-size: 0.78rem; color: var(--muted, #9aa4b2); margin-top: 0.5rem; }
+.knowledge-page__crawl-summary { font-size: 0.78rem; color: rgb(156 163 175); margin-top: 0.5rem; }
 
 .knowledge-page__btn-warn { border: 1px solid rgba(245, 158, 11, 0.4); color: #fcd9a8; background: rgba(245, 158, 11, 0.08); transition: background 0.15s; }
 .knowledge-page__btn-warn:hover:not(:disabled) { background: rgba(245, 158, 11, 0.18); }
@@ -854,17 +898,17 @@ watch(() => gateway.connected, (connected) => {
 .knowledge-page__progress-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(5.5rem, 1fr)); gap: 0.5rem; }
 .knowledge-page__stat { display: flex; flex-direction: column; align-items: center; gap: 0.1rem; }
 .knowledge-page__stat-value { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.knowledge-page__stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted, #9aa4b2); }
-.knowledge-page__current-url { font-size: 0.72rem; font-family: var(--font-mono, monospace); color: var(--muted, #9aa4b2); margin-top: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.knowledge-page__detail-config { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted, #9aa4b2); }
+.knowledge-page__stat-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgb(156 163 175); }
+.knowledge-page__current-url { font-size: 0.72rem; font-family: var(--font-mono, monospace); color: rgb(156 163 175); margin-top: 0.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-page__detail-config { display: flex; gap: 0.9rem; flex-wrap: wrap; font-size: 0.75rem; color: rgb(156 163 175); }
 .knowledge-page__page-filter { max-width: 26rem; }
 .knowledge-page__pages { display: flex; flex-direction: column; gap: 0.35rem; max-height: 24rem; overflow-y: auto; }
 .knowledge-page__page-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.4rem 0.6rem; border: 1px solid rgba(255,255,255,0.06); border-radius: 0.6rem; background: rgba(255,255,255,0.02); }
 .knowledge-page__page-main { min-width: 0; }
 .knowledge-page__page-url { font-size: 0.75rem; font-family: var(--font-mono, monospace); color: rgb(209 213 219); text-decoration: none; overflow-wrap: anywhere; }
 .knowledge-page__page-url:hover { text-decoration: underline; }
-.knowledge-page__page-title { font-size: 0.72rem; color: var(--muted, #9aa4b2); margin-top: 0.1rem; }
-.knowledge-page__page-chunks { font-size: 0.7rem; color: var(--muted, #9aa4b2); white-space: nowrap; }
+.knowledge-page__page-title { font-size: 0.72rem; color: rgb(156 163 175); margin-top: 0.1rem; }
+.knowledge-page__page-chunks { font-size: 0.7rem; color: rgb(156 163 175); white-space: nowrap; }
 
 .section-title {
   font-weight: 600; color: rgb(243 244 246); font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.025em;
@@ -874,7 +918,6 @@ watch(() => gateway.connected, (connected) => {
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
-.empty-state { color: var(--muted, #9aa4b2); font-size: 0.9rem; padding: 2rem; text-align: center; }
 
 @media (max-width: 720px) {
   .knowledge-page__form-grid { grid-template-columns: 1fr; }

@@ -12,8 +12,8 @@
 
 [Quick Start](#quick-start) · [What it does](#what-the-swarm-can-do) · [Architecture](docs/architecture.md) · [API](docs/api.md) · [Security](docs/security.md)
 
-<img src="assets/screenshots/chat-turn-at-orb.png" alt="The StarlingAI dashboard during a research turn — strips of a Dyson sphere turn close round the orb's core, a ring of lit panels round the orb carries the turn's steps, the newest in front, and a status line under the orb saying what the swarm is doing; the question sits on the right, an earlier answer on the left" width="100%" />
-<sub><em>The swarm at work. A Dyson sphere is being built round the orb's core; while a turn runs, a ring of lit panels assembles round the orb and carries the turn's steps — the newest in front — and one line beneath says what it is doing right now.</em></sub>
+<img src="assets/screenshots/chat-turn-at-orb.png" alt="The StarlingAI dashboard during a research turn — a sphere of fine light rings holds the orb's glowing core and its cloud of particles, a track of light round the orb carries the turn's steps, the newest in front, and a status line under the orb saying what the swarm is doing; the question sits on the right, an earlier answer on the left" width="100%" />
+<sub><em>The swarm at work. A sphere of fine light rings holds the orb's breathing core; while a turn runs, a track of light assembles round the orb and carries the turn's steps — the newest in front — and one line beneath says what it is doing right now.</em></sub>
 
 </div>
 
@@ -173,7 +173,7 @@ pnpm sai dev web               # start web UI in dev mode
 ### It stays guarded
 
 <div align="center">
-<img src="assets/screenshots/guardrails-settings.png" alt="Runtime settings — prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
+<img src="assets/screenshots/guardrails-settings.png" alt="The Settings page — a searchable index of its sections on top, the appearance picker, and the guardrails: prompt-injection protection and output secret scanning toggles, and a Shell Sandbox switch that is locked on and cannot be disabled" width="90%" />
 <br/><sub><em>Guardrails in the dashboard: prompt-injection scanning, output secret redaction — and a shell sandbox that is locked on. Some switches you don't get to flip.</em></sub>
 </div>
 
@@ -186,11 +186,12 @@ pnpm sai dev web               # start web UI in dev mode
 ### It stays watchable
 
 <div align="center">
-<img src="assets/screenshots/swarm-dashboard.png" alt="The Swarm Health dashboard — live warden alerts, capability gaps, tool promotions, paused tasks, and circuit-breaker states" width="90%" />
+<img src="assets/screenshots/swarm-dashboard.png" alt="The Swarm Health dashboard on a quiet swarm — warden alerts, capability gaps, paused tasks, the tool promotion queue and self-developed tools, each saying there is nothing to report" width="90%" />
 <br/><sub><em>Swarm Health: the warden's live view — alerts, capability gaps, tool promotions, paused tasks, circuit breakers.</em></sub>
 </div>
 
-- **The turn at the orb** — the orb's core sits inside a Dyson sphere of panel strips, each turning on its own axis. While a turn runs, a ring of lit panels assembles round the whole orb and the turn's steps ride on it, and one status line under the orb says, in the swarm's own words, what it is doing now: its plan, a finished step, that it is still on it. The conversation keeps only questions and answers; each answer folds its steps into one line that opens the full record, and any step opens in the side panel.
+- **The turn at the orb** — the orb's core and its cloud of particles breathe inside a sphere of hairline rings: a globe cage, graduated scales and slowly tumbling gimbals, drawn in light. While a turn runs, a track of the same make assembles round the whole orb and the turn's steps ride on it, and one status line under the orb says, in the swarm's own words, what it is doing now: its plan, a finished step, that it is still on it. The conversation keeps only questions and answers; each answer folds its steps into one line that opens the full record, and any step opens in the side panel.
+- **A dashboard that answers** — `Ctrl+K` reaches any page or action in a few letters, and typing anywhere on the chat starts a message. Every page names itself, says so when its data could not be loaded, and asks before anything that cannot be undone. Settings has a section index, a search over its cards, and marks what is not saved yet. Chat labels follow the conversation's language (English or German).
 - **Live observability** — token streaming to the dashboard via AG-UI SSE, live shell previews, per-turn performance telemetry, and audit/debug Markdown exports on top of a JSONL + PostgreSQL audit trail.
 - **Distributed tracing** — OpenTelemetry spans cover tool calls, sub-agents, and federation hops, with W3C `traceparent` propagated across instances.
 - **Cost governance** — token usage aggregated with per-model pricing and budget thresholds on a `/cost` dashboard. (Per-task limits are post-run signals today; atomic mission-wide budgets are on the roadmap.)

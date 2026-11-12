@@ -11,42 +11,45 @@
       >
         <header class="ism__header">
           <div>
-            <div class="ism__eyebrow">Image settings</div>
-            <div id="ism-title" class="ism__title">{{ view === 'paint' ? 'Paint the region that may change' : request.title }}</div>
+            <div class="ism__eyebrow">{{ chatText.imageSettings(lang) }}</div>
+            <div id="ism-title" class="ism__title">{{ view === 'paint' ? chatText.paintTitle(lang) : request.title }}</div>
           </div>
           <span class="ism__timer" :class="{ 'ism__timer--soon': leftMs !== null && leftMs < 30_000 }">
-            {{ leftMs === null ? '' : `Auto in ${formatCountdown(leftMs)}` }}
+            {{ leftMs === null ? '' : chatText.autoIn(lang, formatCountdown(leftMs)) }}
           </span>
-          <button type="button" class="ism__close" aria-label="Close (Esc)" title="Close (Esc)" @click="close">✕</button>
+          <button type="button" class="ism__close" :aria-label="chatText.closeEsc(lang)" :title="chatText.closeEsc(lang)" @click="close">✕</button>
         </header>
 
         <!-- Painting replaces the form, so the picture gets the whole dialog. -->
         <div v-if="view === 'paint' && paintBase" class="ism__body ism__body--paint">
           <MaskPainter
+            ref="painterEl"
             :width="paintBase.width"
             :height="paintBase.height"
             :base-url="basePreview?.dataUrl ?? null"
             :base-error="basePreview?.error"
             :initial-mask-url="paintStartMask"
+            :language="lang"
             @apply="onMaskApplied"
             @cancel="view = 'form'"
           />
         </div>
 
-        <form v-else class="ism__body" @submit.prevent="submit">
+        <form v-else ref="formEl" class="ism__body" @submit.prevent="submit">
           <!-- Engine -->
           <fieldset class="ism__section">
-            <legend class="ism__legend">Engine</legend>
+            <legend class="ism__legend">{{ chatText.engineLegend(lang) }}</legend>
             <div class="ism__engines">
               <label
                 v-for="engine in payload.engines"
                 :key="engine.tier"
                 :class="['ism__engine', { 'ism__engine--on': form.tier === engine.tier, 'ism__engine--off': editing && !engine.canEdit }]"
-                :title="editing && !engine.canEdit ? `${engineLabel(engine)} cannot edit a picture` : undefined"
+                :title="editing && !engine.canEdit ? chatText.cannotEditPicture(lang, engineLabel(engine)) : undefined"
               >
                 <input
                   type="radio"
                   name="ism-engine"
+                  data-field="tier"
                   :value="engine.tier"
                   :checked="form.tier === engine.tier"
                   :disabled="editing && !engine.canEdit"
@@ -55,59 +58,61 @@
                 <span class="ism__engine-name">{{ engineLabel(engine) }}</span>
                 <!-- With these settings on that engine, not its usual time: 57 steps at 1344×768 is ~8 min. -->
                 <span v-if="etaLabel(engineEstimateSeconds(form, payload, engine.tier))" class="ism__muted">{{ etaLabel(engineEstimateSeconds(form, payload, engine.tier)) }}</span>
-                <span v-if="engine.fixedSize" class="ism__badge">{{ payload.bounds.size.fixed }}×{{ payload.bounds.size.fixed }} only</span>
-                <span v-if="engine.canEdit" class="ism__badge ism__badge--edit">can edit</span>
+                <span v-if="engine.fixedSize" class="ism__badge">{{ chatText.fixedSizeOnly(lang, payload.bounds.size.fixed) }}</span>
+                <span v-if="engine.canEdit" class="ism__badge ism__badge--edit">{{ chatText.canEdit(lang) }}</span>
               </label>
             </div>
-            <p v-if="errors.tier" class="ism__error">{{ errors.tier }}</p>
+            <p v-if="errors.tier" id="ism-error-tier" class="ism__error" data-error-for="tier">{{ errors.tier }}</p>
           </fieldset>
 
           <!-- Prompt -->
           <fieldset class="ism__section">
-            <legend class="ism__legend">Prompt</legend>
+            <legend class="ism__legend">{{ chatText.promptLegend(lang) }}</legend>
             <div class="ism__field-head">
-              <label for="ism-prompt" class="ism__label">What to draw</label>
+              <label for="ism-prompt" class="ism__label">{{ chatText.whatToDraw(lang) }}</label>
               <span class="ism__muted">{{ form.prompt.trim().length }}/{{ payload.bounds.promptMax }}</span>
-              <button v-if="form.prompt !== payload.agent.prompt" type="button" class="ism__link" @click="form.prompt = payload.agent.prompt">Reset to the agent's</button>
+              <button v-if="form.prompt !== payload.agent.prompt" type="button" class="ism__link" @click="form.prompt = payload.agent.prompt">{{ chatText.resetToAgents(lang) }}</button>
             </div>
-            <textarea id="ism-prompt" v-model="form.prompt" class="ism__textarea" rows="4" :maxlength="payload.bounds.promptMax + 200" />
-            <p v-if="errors.prompt" class="ism__error">{{ errors.prompt }}</p>
+            <textarea id="ism-prompt" v-model="form.prompt" class="ism__textarea" rows="4" :maxlength="payload.bounds.promptMax + 200" v-bind="fieldAria('prompt')" />
+            <p v-if="errors.prompt" id="ism-error-prompt" class="ism__error" data-error-for="prompt">{{ errors.prompt }}</p>
 
             <div class="ism__field-head">
-              <label for="ism-negative" class="ism__label">Avoid (negative prompt)</label>
+              <label for="ism-negative" class="ism__label">{{ chatText.negativePrompt(lang) }}</label>
               <span class="ism__muted">{{ form.negativePrompt.trim().length }}/{{ payload.bounds.negativeMax }}</span>
               <button
                 v-if="form.negativePrompt !== (payload.agent.negativePrompt ?? '')"
                 type="button"
                 class="ism__link"
                 @click="form.negativePrompt = payload.agent.negativePrompt ?? ''; form.touched.negativePrompt = true"
-              >Reset to the agent's</button>
+              >{{ chatText.resetToAgents(lang) }}</button>
             </div>
             <textarea
               id="ism-negative"
               v-model="form.negativePrompt"
               class="ism__textarea"
               rows="2"
-              placeholder="Nothing to avoid"
+              :placeholder="chatText.nothingToAvoid(lang)"
+              v-bind="fieldAria('negativePrompt')"
               @input="form.touched.negativePrompt = true"
             />
-            <p v-if="errors.negativePrompt" class="ism__error">{{ errors.negativePrompt }}</p>
+            <p v-if="errors.negativePrompt" id="ism-error-negativePrompt" class="ism__error" data-error-for="negativePrompt">{{ errors.negativePrompt }}</p>
             <p v-else-if="negativeNote" class="ism__warn">{{ negativeNote }}</p>
           </fieldset>
 
           <!-- Edit a picture -->
           <fieldset class="ism__section">
-            <legend class="ism__legend">Start from</legend>
-            <div class="ism__bases" role="radiogroup" aria-label="Picture to edit">
+            <legend class="ism__legend">{{ chatText.startFromLegend(lang) }}</legend>
+            <div class="ism__bases" role="radiogroup" :aria-label="chatText.pictureToEdit(lang)">
               <button
                 type="button"
                 role="radio"
                 :aria-checked="!form.baseCandidateId"
+                data-field="baseCandidateId"
                 :class="['ism__base', 'ism__base--none', { 'ism__base--on': !form.baseCandidateId }]"
                 @click="form = selectBase(form, payload, null)"
               >
                 <span class="ism__base-thumb ism__base-thumb--none" aria-hidden="true">＋</span>
-                <span class="ism__base-label">None — new picture</span>
+                <span class="ism__base-label">{{ chatText.newPicture(lang) }}</span>
               </button>
               <button
                 v-for="candidate in payload.baseCandidates"
@@ -116,37 +121,31 @@
                 role="radio"
                 :aria-checked="form.baseCandidateId === candidate.id"
                 :disabled="!anyEditor"
-                :title="anyEditor ? `${candidate.label} · ${candidate.width}×${candidate.height}` : 'No engine here can edit a picture'"
+                :title="anyEditor ? `${candidate.label} · ${candidate.width}×${candidate.height}` : chatText.noEditingEngine(lang)"
                 :class="['ism__base', { 'ism__base--on': form.baseCandidateId === candidate.id }]"
                 @click="form = selectBase(form, payload, candidate.id)"
               >
                 <img v-if="candidate.thumbDataUrl" :src="candidate.thumbDataUrl" :alt="candidate.label" class="ism__base-thumb" />
                 <span v-else class="ism__base-thumb ism__base-thumb--none" aria-hidden="true">?</span>
                 <span class="ism__base-label">{{ candidate.label }}</span>
-                <span class="ism__muted">{{ candidate.width ? `${candidate.width}×${candidate.height}` : 'size unknown' }} · {{ sourceLabel(candidate.source) }}</span>
-                <span v-if="!candidate.fitsBounds" class="ism__muted">too large to edit at its size — renders at {{ payload.agent.width }}×{{ payload.agent.height }}</span>
+                <span class="ism__muted">{{ candidate.width ? `${candidate.width}×${candidate.height}` : chatText.sizeUnknown(lang) }} · {{ chatText.baseSource(lang, candidate.source) }}</span>
+                <span v-if="!candidate.fitsBounds" class="ism__muted">{{ chatText.tooLargeRendersAt(lang, payload.agent.width, payload.agent.height) }}</span>
               </button>
             </div>
-            <p v-if="errors.baseCandidateId" class="ism__error">{{ errors.baseCandidateId }}</p>
-            <p v-if="baseMissing && !form.baseCandidateId" class="ism__warn" role="alert">
-              The agent's picture cannot be offered here, so rendering from this form makes a NEW picture.
-              To keep the edit, use the agent's settings.
-            </p>
+            <p v-if="errors.baseCandidateId" id="ism-error-baseCandidateId" class="ism__error" data-error-for="baseCandidateId">{{ errors.baseCandidateId }}</p>
+            <p v-if="baseMissing && !form.baseCandidateId" class="ism__warn" role="alert">{{ chatText.baseMissingWarning(lang) }}</p>
 
             <template v-if="selectedBase && selectedEngine?.editsByReference">
-              <p class="ism__muted">
-                {{ engineLabel(selectedEngine) }} edits by instruction: say in the prompt what should change, and the
-                rest of the picture is kept. It takes no strength and no mask.
-              </p>
+              <p class="ism__muted">{{ chatText.editsByInstruction(lang, engineLabel(selectedEngine)) }}</p>
               <p v-if="form.mask !== 'none'" class="ism__warn">
-                A mask is set, and this engine cannot use one.
-                <button type="button" class="ism__link" @click="form.mask = 'none'; form.maskDataUrl = undefined">Remove mask</button>
+                {{ chatText.maskNotUsable(lang) }}
+                <button type="button" class="ism__link" data-field="mask" @click="form.mask = 'none'; form.maskDataUrl = undefined">{{ chatText.removeMask(lang) }}</button>
               </p>
-              <p v-if="errors.mask" class="ism__error">{{ errors.mask }}</p>
+              <p v-if="errors.mask" id="ism-error-mask" class="ism__error" data-error-for="mask">{{ errors.mask }}</p>
             </template>
             <template v-else-if="selectedBase">
               <div class="ism__field-head">
-                <label for="ism-strength" class="ism__label">Strength</label>
+                <label for="ism-strength" class="ism__label">{{ chatText.strength(lang) }}</label>
                 <span class="ism__value">{{ form.strength.toFixed(2) }}</span>
                 <span class="ism__muted">{{ strengthBand(form.strength) }}</span>
               </div>
@@ -158,27 +157,28 @@
                 :min="payload.bounds.strength[0]"
                 :max="payload.bounds.strength[1]"
                 step="0.05"
+                v-bind="fieldAria('strength')"
               />
-              <p class="ism__muted ism__bands">0.2–0.35 changes tone and colour · 0.6–0.85 replaces a masked region</p>
-              <p v-if="errors.strength" class="ism__error">{{ errors.strength }}</p>
+              <p class="ism__muted ism__bands">{{ chatText.strengthBands(lang) }}</p>
+              <p v-if="errors.strength" id="ism-error-strength" class="ism__error" data-error-for="strength">{{ errors.strength }}</p>
 
               <div class="ism__mask">
-                <span class="ism__label">Mask</span>
+                <span class="ism__label">{{ chatText.mask(lang) }}</span>
                 <span class="ism__mask-state">{{ maskStateText }}</span>
-                <button v-if="selectedBase.fitsBounds" type="button" class="btn-ghost ism__small" @click="startPainting">
-                  {{ form.mask === 'none' ? 'Paint region…' : form.mask === 'agent' ? (payload.agentMask?.paintedEarlier ? 'Edit that region…' : 'Edit the agent’s mask…') : 'Repaint…' }}
+                <button v-if="selectedBase.fitsBounds" type="button" class="btn-ghost ism__small" data-field="mask" @click="startPainting">
+                  {{ paintButtonText }}
                 </button>
-                <button v-if="form.mask !== 'none'" type="button" class="ism__link" @click="form.mask = 'none'; form.maskDataUrl = undefined">Remove mask</button>
-                <span v-if="!selectedBase.fitsBounds" class="ism__muted">This picture is too large to paint a mask on.</span>
+                <button v-if="form.mask !== 'none'" type="button" class="ism__link" data-field="mask" @click="form.mask = 'none'; form.maskDataUrl = undefined">{{ chatText.removeMask(lang) }}</button>
+                <span v-if="!selectedBase.fitsBounds" class="ism__muted">{{ chatText.tooLargeToPaint(lang) }}</span>
               </div>
-              <p v-if="form.mask !== 'none' && form.strength < 0.6" class="ism__muted">A masked replacement usually needs a strength of 0.6–0.85.</p>
-              <p v-if="errors.mask" class="ism__error">{{ errors.mask }}</p>
+              <p v-if="form.mask !== 'none' && form.strength < 0.6" class="ism__muted">{{ chatText.maskedNeedsStrength(lang) }}</p>
+              <p v-if="errors.mask" id="ism-error-mask" class="ism__error" data-error-for="mask">{{ errors.mask }}</p>
 
               <template v-if="form.mask !== 'none'">
                 <div class="ism__field-head">
-                  <label for="ism-blur" class="ism__label">Feather</label>
+                  <label for="ism-blur" class="ism__label">{{ chatText.feather(lang) }}</label>
                   <span class="ism__value">{{ form.maskBlur }} px</span>
-                  <span class="ism__muted">softens the mask's edge</span>
+                  <span class="ism__muted">{{ chatText.featherHint(lang) }}</span>
                 </div>
                 <input
                   id="ism-blur"
@@ -188,16 +188,17 @@
                   :min="payload.bounds.maskBlur[0]"
                   :max="Math.min(payload.bounds.maskBlur[1], 128)"
                   step="1"
+                  v-bind="fieldAria('maskBlur')"
                   @input="form.touched.maskBlur = true"
                 />
-                <p v-if="errors.maskBlur" class="ism__error">{{ errors.maskBlur }}</p>
+                <p v-if="errors.maskBlur" id="ism-error-maskBlur" class="ism__error" data-error-for="maskBlur">{{ errors.maskBlur }}</p>
               </template>
             </template>
           </fieldset>
 
           <!-- Size -->
           <fieldset class="ism__section">
-            <legend class="ism__legend">Size</legend>
+            <legend class="ism__legend">{{ chatText.sizeLegend(lang) }}</legend>
             <div v-if="!lock.locked" class="ism__presets">
               <button
                 v-for="preset in presets"
@@ -208,70 +209,79 @@
               >{{ preset.label }} <span class="ism__muted">{{ preset.width }}×{{ preset.height }}</span></button>
             </div>
             <div class="ism__row">
-              <label class="ism__inline">W
-                <input v-model.number="form.width" type="number" class="ism__number" :min="payload.bounds.size.min" :max="payload.bounds.size.max" :step="payload.bounds.size.step" :disabled="lock.locked" />
+              <label class="ism__inline">{{ chatText.sizeAxis(lang, 'width') }}
+                <input id="ism-width" v-model.number="form.width" type="number" class="ism__number" :min="payload.bounds.size.min" :max="payload.bounds.size.max" :step="payload.bounds.size.step" :disabled="lock.locked" v-bind="fieldAria('width', 'size')" />
               </label>
-              <label class="ism__inline">H
-                <input v-model.number="form.height" type="number" class="ism__number" :min="payload.bounds.size.min" :max="payload.bounds.size.max" :step="payload.bounds.size.step" :disabled="lock.locked" />
+              <label class="ism__inline">{{ chatText.sizeAxis(lang, 'height') }}
+                <input id="ism-height" v-model.number="form.height" type="number" class="ism__number" :min="payload.bounds.size.min" :max="payload.bounds.size.max" :step="payload.bounds.size.step" :disabled="lock.locked" v-bind="fieldAria('height', 'size')" />
               </label>
               <span v-if="lock.reason === 'base'" class="ism__muted">{{ selectedBase?.fitsBounds === false
-                ? `The picture is too large to edit at its own size, so it renders at ${form.width}×${form.height}.`
-                : "An edit keeps the picture's own size." }}</span>
-              <span v-else-if="lock.reason === 'fixed'" class="ism__muted">This engine renders {{ payload.bounds.size.fixed }}×{{ payload.bounds.size.fixed }} only.</span>
-              <span v-else class="ism__muted">Multiples of {{ payload.bounds.size.step }}, {{ payload.bounds.size.min }}–{{ payload.bounds.size.max }}.</span>
+                ? chatText.sizeTooLargeRenders(lang, form.width, form.height)
+                : chatText.editKeepsSize(lang) }}</span>
+              <span v-else-if="lock.reason === 'fixed'" class="ism__muted">{{ chatText.engineFixedSize(lang, payload.bounds.size.fixed) }}</span>
+              <span v-else class="ism__muted">{{ chatText.sizeRule(lang, payload.bounds.size.step, payload.bounds.size.min, payload.bounds.size.max) }}</span>
             </div>
-            <p v-if="errors.width || errors.height" class="ism__error">{{ errors.width ?? errors.height }}</p>
+            <p v-if="errors.width || errors.height" id="ism-error-size" class="ism__error" :data-error-for="errors.width ? 'width' : 'height'">{{ sizeError }}</p>
           </fieldset>
 
           <!-- Quality -->
           <fieldset class="ism__section">
-            <legend class="ism__legend">Detail</legend>
+            <legend class="ism__legend">{{ chatText.detailLegend(lang) }}</legend>
             <div class="ism__field-head">
-              <label for="ism-steps" class="ism__label">Steps</label>
-              <input v-model.number="form.steps" type="number" class="ism__number" :min="payload.bounds.steps[0]" :max="payload.bounds.steps[1]" step="1" aria-label="Steps" @input="form.touched.steps = true" />
-              <span class="ism__muted">engine default {{ selectedEngine?.defaults.steps }}</span>
+              <label for="ism-steps" class="ism__label">{{ chatText.renderSteps(lang) }}</label>
+              <input v-model.number="form.steps" type="number" class="ism__number" :min="payload.bounds.steps[0]" :max="payload.bounds.steps[1]" step="1" :aria-label="chatText.renderSteps(lang)" @input="form.touched.steps = true" />
+              <span class="ism__muted">{{ chatText.engineDefault(lang, selectedEngine?.defaults.steps ?? '') }}</span>
             </div>
-            <input id="ism-steps" v-model.number="form.steps" type="range" class="ism__range" :min="payload.bounds.steps[0]" :max="payload.bounds.steps[1]" step="1" @input="form.touched.steps = true" />
-            <p v-if="errors.steps" class="ism__error">{{ errors.steps }}</p>
+            <input id="ism-steps" v-model.number="form.steps" type="range" class="ism__range" :min="payload.bounds.steps[0]" :max="payload.bounds.steps[1]" step="1" v-bind="fieldAria('steps')" @input="form.touched.steps = true" />
+            <p v-if="errors.steps" id="ism-error-steps" class="ism__error" data-error-for="steps">{{ errors.steps }}</p>
 
             <div class="ism__field-head">
-              <label for="ism-guidance" class="ism__label">Guidance</label>
-              <input v-model.number="form.guidanceScale" type="number" class="ism__number" :min="payload.bounds.guidance[0]" :max="payload.bounds.guidance[1]" step="0.1" aria-label="Guidance" @input="form.touched.guidanceScale = true" />
-              <span class="ism__muted">engine default {{ selectedEngine?.defaults.guidanceScale }} · higher follows the prompt more literally</span>
+              <label for="ism-guidance" class="ism__label">{{ chatText.guidance(lang) }}</label>
+              <input v-model.number="form.guidanceScale" type="number" class="ism__number" :min="payload.bounds.guidance[0]" :max="payload.bounds.guidance[1]" step="0.1" :aria-label="chatText.guidance(lang)" @input="form.touched.guidanceScale = true" />
+              <span class="ism__muted">{{ chatText.engineDefault(lang, selectedEngine?.defaults.guidanceScale ?? '') }} · {{ chatText.guidanceHint(lang) }}</span>
             </div>
-            <input id="ism-guidance" v-model.number="form.guidanceScale" type="range" class="ism__range" :min="payload.bounds.guidance[0]" :max="payload.bounds.guidance[1]" step="0.1" @input="form.touched.guidanceScale = true" />
-            <p v-if="errors.guidanceScale" class="ism__error">{{ errors.guidanceScale }}</p>
+            <input id="ism-guidance" v-model.number="form.guidanceScale" type="range" class="ism__range" :min="payload.bounds.guidance[0]" :max="payload.bounds.guidance[1]" step="0.1" v-bind="fieldAria('guidanceScale')" @input="form.touched.guidanceScale = true" />
+            <p v-if="errors.guidanceScale" id="ism-error-guidanceScale" class="ism__error" data-error-for="guidanceScale">{{ errors.guidanceScale }}</p>
 
             <div class="ism__row">
-              <span class="ism__label">Seed</span>
+              <span class="ism__label">{{ chatText.seedLabel(lang) }}</span>
               <label class="ism__inline">
                 <input type="checkbox" :checked="form.seed === null" @change="toggleRandomSeed" />
-                Random
+                {{ chatText.seedRandom(lang) }}
               </label>
               <input
                 v-if="form.seed !== null"
+                id="ism-seed"
                 v-model.number="form.seed"
                 type="number"
                 class="ism__number ism__number--wide"
                 :min="payload.bounds.seed[0]"
                 :max="payload.bounds.seed[1]"
                 step="1"
-                aria-label="Seed"
+                :aria-label="chatText.seedLabel(lang)"
+                v-bind="fieldAria('seed')"
               />
-              <button v-if="form.seed !== null" type="button" class="ism__link" title="A new random seed" @click="form.seed = randomSeed(payload.bounds.seed[1])">🎲 New</button>
-              <span class="ism__muted">the same seed and settings give the same picture</span>
+              <button v-if="form.seed !== null" type="button" class="ism__link" :title="chatText.newSeedTitle(lang)" @click="form.seed = randomSeed(payload.bounds.seed[1])">{{ chatText.newSeed(lang) }}</button>
+              <span class="ism__muted">{{ chatText.seedHint(lang) }}</span>
             </div>
-            <p v-if="errors.seed" class="ism__error">{{ errors.seed }}</p>
+            <p v-if="errors.seed" id="ism-error-seed" class="ism__error" data-error-for="seed">{{ errors.seed }}</p>
           </fieldset>
 
           <footer class="ism__footer">
+            <!-- The errors stand beside their fields, which may be scrolled far out of view: the
+                 footer, which never is, says that there are some. Re-made on every refused
+                 submit, so it is read out again. -->
+            <p v-if="attentionCount > 0" :key="refusals" class="ism__error ism__footer-error" role="alert">
+              {{ chatText.fieldsNeedAttention(lang, attentionCount) }}
+              <button type="button" class="ism__link" @click="revealFirstError">{{ chatText.showField(lang) }}</button>
+            </p>
             <p v-if="errors._form" class="ism__error ism__footer-error" role="alert">{{ errors._form }}</p>
             <p v-if="longWarning" class="ism__warn ism__footer-error">{{ longWarning }}</p>
             <p v-if="waitNote" class="ism__muted ism__footer-error">{{ waitNote }}</p>
-            <button type="button" class="ism__link ism__reset" @click="form = initialForm(payload); localErrors = []">Reset all</button>
-            <button type="button" class="btn-ghost ism__action" :disabled="busy" @click="useAgentSettings">Use the agent's settings</button>
-            <span v-if="etaLabel(estimateSeconds)" class="ism__muted ism__eta" title="How long these settings should take on this engine">{{ etaLabel(estimateSeconds) }}</span>
-            <button type="submit" class="btn-grad ism__action" :disabled="busy">{{ busy ? 'Sending…' : 'Render with these settings' }}</button>
+            <button type="button" class="ism__link ism__reset" @click="form = initialForm(payload); localErrors = []">{{ chatText.resetAll(lang) }}</button>
+            <button type="button" class="btn-ghost ism__action" :disabled="busy" @click="useAgentSettings">{{ chatText.useAgentSettings(lang) }}</button>
+            <span v-if="etaLabel(estimateSeconds)" class="ism__muted ism__eta" :title="chatText.estimateTitle(lang)">{{ etaLabel(estimateSeconds) }}</span>
+            <button type="submit" class="btn-grad ism__action" :disabled="busy">{{ busy ? chatText.sending(lang) : chatText.renderWithSettings(lang) }}</button>
           </footer>
         </form>
       </div>
@@ -306,6 +316,7 @@ import {
   strengthBand,
   validateForm,
   type BaseCandidate,
+  type ImageSettingsField,
   type ImageSettingsForm,
   type ImageSettingsPayload,
 } from "@/composables/imageSettings";
@@ -313,19 +324,31 @@ import { coverageLabel, type MaskCoverage } from "@/composables/maskPainter";
 import { formatCountdown, localExpiresAt, remainingMs, type UserInputFieldError, type UserInputRequest } from "@/composables/userInputs";
 import { useNow } from "@/composables/useNow";
 import { useEscapeToClose } from "@/composables/useEscapeToClose";
+import { useFocusTrap } from "@/composables/useFocusTrap";
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 import MaskPainter from "@/components/input/MaskPainter.vue";
 
 const props = defineProps<{
   request: UserInputRequest;
   payload: ImageSettingsPayload;
   alwaysAuto: boolean;
+  /**
+   * The language of the form's own labels: the conversation's, like the card that opens it. The
+   * lines that come from composables/imageSettings.ts (time estimates, warnings, a field's
+   * objection) and from the gateway are English either way.
+   */
+  language?: TurnLanguage;
 }>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 const emit = defineEmits<{ close: [] }>();
 
 const gateway = useGatewayStore();
 const now = useNow();
 const dialogEl = ref<HTMLElement | null>(null);
+const formEl = ref<HTMLFormElement | null>(null);
+const painterEl = ref<InstanceType<typeof MaskPainter> | null>(null);
 const form = ref<ImageSettingsForm>(initialForm(props.payload));
 const view = ref<"form" | "paint">("form");
 const busy = ref(false);
@@ -350,6 +373,57 @@ const waitNote = computed(() => engineWaitNote(engineWaitSeconds(props.payload, 
 const baseMissing = computed(() => editBaseMissing(props.payload));
 // This page's own checks first; what the server said about the last answer shows until the next.
 const errors = computed(() => ({ ...imageFieldErrors(props.request.errors), ...imageFieldErrors(localErrors.value) }));
+// Both, when they differ: the height's objection used to be dropped whenever the width had one.
+const sizeError = computed(() => {
+  const { width, height } = errors.value;
+  if (width && height && width !== height) return chatText.widthAndHeightErrors(lang.value, width, height);
+  return width ?? height ?? "";
+});
+
+// ── A refused submit ──────────────────────────────────────────────────────────────────────────
+// The button is in a footer that is always in view; the errors are beside their fields, which are
+// not. Pressing "Render" with one of them scrolled away looked like nothing had happened.
+/** How many fields carry an error, for the footer's line. */
+const attentionCount = computed(() => Object.keys(errors.value).filter((field) => field !== "_form").length);
+/** Counts refused submits: the footer's line is made anew for each, so it is announced each time. */
+const refusals = ref(0);
+
+/** Marks a field as the one its error line is about, for a screen reader. */
+function fieldAria(field: ImageSettingsField, errorId: string = field): Record<string, string> {
+  return errors.value[field] ? { "aria-invalid": "true", "aria-describedby": `ism-error-${errorId}` } : {};
+}
+
+/** What to put the keyboard on for a field's error: its input, or the control that changes it. */
+const FIELD_TARGETS: Partial<Record<ImageSettingsField, string[]>> = {
+  tier: ["[data-field='tier']:checked:not(:disabled)", "[data-field='tier']:not(:disabled)"],
+  prompt: ["#ism-prompt"],
+  negativePrompt: ["#ism-negative"],
+  baseCandidateId: ["[data-field='baseCandidateId']"],
+  strength: ["#ism-strength"],
+  mask: ["[data-field='mask']"],
+  maskBlur: ["#ism-blur"],
+  width: ["#ism-width:not(:disabled)", "[data-field='tier']:checked", "[data-field='baseCandidateId']"],
+  height: ["#ism-height:not(:disabled)", "[data-field='tier']:checked", "[data-field='baseCandidateId']"],
+  steps: ["#ism-steps"],
+  guidanceScale: ["#ism-guidance"],
+  seed: ["#ism-seed"],
+};
+
+/** The first error on the form, in the order the form reads: into view, with the keyboard on its field. */
+async function revealFirstError(): Promise<void> {
+  await nextTick();
+  const line = formEl.value?.querySelector<HTMLElement>("[data-error-for]");
+  if (!line) return;
+  const calm = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  // Centred: at the bottom edge it would sit under the sticky footer.
+  line.scrollIntoView({ block: "center", behavior: calm ? "auto" : "smooth" });
+  for (const selector of FIELD_TARGETS[line.dataset.errorFor as ImageSettingsField] ?? []) {
+    const target = formEl.value?.querySelector<HTMLElement>(selector);
+    if (!target) continue;
+    target.focus({ preventScroll: true });
+    return;
+  }
+}
 
 const paintBase = computed<BaseCandidate | undefined>(() => selectedBase.value);
 const basePreview = computed(() => (form.value.baseCandidateId ? previews.value[form.value.baseCandidateId] : undefined));
@@ -357,17 +431,16 @@ const paintStartMask = computed(() => form.value.mask === "painted"
   ? form.value.maskDataUrl
   : form.value.mask === "agent" ? props.payload.agentMask?.previewDataUrl : undefined);
 const maskStateText = computed(() => {
-  if (form.value.mask === "agent") return props.payload.agentMask?.paintedEarlier ? "The region you painted earlier" : "The agent's mask";
-  if (form.value.mask === "painted") return paintedCoverage.value ? `Your mask — ${coverageLabel(paintedCoverage.value)} may change` : "Your mask";
-  return "None — the whole picture may change";
+  if (form.value.mask === "agent") return props.payload.agentMask?.paintedEarlier ? chatText.maskPaintedEarlier(lang.value) : chatText.maskOfAgent(lang.value);
+  if (form.value.mask === "painted") return chatText.maskOfYours(lang.value, paintedCoverage.value ? coverageLabel(paintedCoverage.value) : undefined);
+  return chatText.maskNone(lang.value);
 });
-
-function sourceLabel(source: BaseCandidate["source"]): string {
-  if (source === "agent") return "the agent's pick";
-  if (source === "latest_image") return "latest";
-  if (source === "attachment") return "your upload";
-  return "earlier";
-}
+/** The button that opens the painter, named for what it starts from. */
+const paintButtonText = computed(() => {
+  if (form.value.mask === "none") return chatText.paintRegion(lang.value);
+  if (form.value.mask === "painted") return chatText.repaint(lang.value);
+  return props.payload.agentMask?.paintedEarlier ? chatText.editThatRegion(lang.value) : chatText.editAgentsMask(lang.value);
+});
 
 function toggleRandomSeed(event: Event): void {
   const random = (event.target as HTMLInputElement).checked;
@@ -397,7 +470,11 @@ function onMaskApplied(dataUrl: string, coverage: MaskCoverage): void {
 async function submit(): Promise<void> {
   const problems = validateForm(form.value, props.payload);
   localErrors.value = problems;
-  if (problems.length) return;
+  if (problems.length) {
+    refusals.value += 1;
+    void revealFirstError();
+    return;
+  }
   busy.value = true;
   try {
     const result = await gateway.respondUserInput(
@@ -405,7 +482,13 @@ async function submit(): Promise<void> {
       buildConfigureAnswer(form.value, props.payload, props.alwaysAuto),
       { tier: form.value.tier, expectedSeconds: estimateSeconds.value },
     );
-    if (result.ok) emit("close");
+    if (result.ok) {
+      emit("close");
+    } else {
+      // The server's objections land on the same fields as this page's own.
+      refusals.value += 1;
+      void revealFirstError();
+    }
   } finally {
     busy.value = false;
   }
@@ -421,7 +504,17 @@ async function useAgentSettings(): Promise<void> {
   }
 }
 
-function close(): void {
+/**
+ * Whether the painter may be left. It holds the strokes that were not applied and their undo
+ * history, and both go when the view changes — so with any of them it asks first (MaskPainter).
+ */
+async function mayLeavePainter(): Promise<boolean> {
+  if (view.value !== "paint" || !painterEl.value) return true;
+  return painterEl.value.confirmLeave();
+}
+
+async function close(): Promise<void> {
+  if (!(await mayLeavePainter())) return;
   // Closing is not an answer: the card stays, and the deadline decides if nothing else does.
   emit("close");
 }
@@ -429,13 +522,21 @@ function close(): void {
 // On the shared overlay stack, so one Escape steps back once: out of the painter, then out of
 // the form — and never also closes the side panel behind it.
 useEscapeToClose(() => true, () => {
-  if (view.value === "paint") view.value = "form";
-  else close();
+  if (view.value !== "paint") {
+    void close();
+    return;
+  }
+  void mayLeavePainter().then((leave) => {
+    if (leave) view.value = "form";
+  });
 });
 
 onMounted(() => {
   void nextTick(() => dialogEl.value?.focus());
 });
+
+// The form and the painter both: Tab goes round inside the dialog, whichever it shows.
+useFocusTrap(dialogEl);
 </script>
 
 <style scoped>

@@ -11,7 +11,7 @@
           'sdp-item--note': step.kind === 'note',
         }]"
       >
-        <p v-if="step.kind === 'note'" class="sdp-note">{{ stepTitle(step) }}</p>
+        <p v-if="step.kind === 'note'" class="sdp-note">{{ stepTitle(step, lang) }}</p>
 
         <template v-else>
           <button
@@ -20,39 +20,49 @@
             :aria-expanded="isOpen(step.id)"
             @click="toggle(step.id)"
           >
+            <span class="sdp-chevron" aria-hidden="true">{{ isOpen(step.id) ? "▾" : "▸" }}</span>
             <span class="sdp-index">{{ toolNumber(index) }}</span>
-            <span class="sdp-title">{{ stepTitle(step) }}</span>
+            <span class="sdp-title">{{ stepTitle(step, lang) }}</span>
             <span class="sdp-status">{{ statusLabel(step) }}</span>
           </button>
 
           <div v-if="isOpen(step.id)" class="sdp-body">
             <dl class="sdp-facts">
-              <template v-if="step.agent"><dt>Ran inside</dt><dd>{{ step.agent }}</dd></template>
-              <dt>Tool</dt><dd class="sdp-mono">{{ step.name }}</dd>
+              <template v-if="step.agent"><dt>{{ chatText.ranInside(lang) }}</dt><dd>{{ step.agent }}</dd></template>
+              <dt>{{ chatText.tool(lang) }}</dt><dd class="sdp-mono">{{ step.name }}</dd>
               <!-- Not while running: the panel has no ticking clock, so a running step's figure
                    would be frozen at the moment it was opened and read as the final time. -->
-              <template v-if="step.status !== 'running' && durationOf(step)"><dt>Took</dt><dd>{{ durationOf(step) }}</dd></template>
-              <template v-if="stepOutcome(step)"><dt>Outcome</dt><dd>{{ stepOutcome(step) }}</dd></template>
-              <template v-if="step.status === 'running' && step.progress"><dt>Now</dt><dd>{{ step.progress }}</dd></template>
+              <template v-if="step.status !== 'running' && durationOf(step)"><dt>{{ chatText.took(lang) }}</dt><dd>{{ durationOf(step) }}</dd></template>
+              <template v-if="stepOutcome(step, lang)"><dt>{{ chatText.outcome(lang) }}</dt><dd>{{ stepOutcome(step, lang) }}</dd></template>
+              <template v-if="step.status === 'running' && step.progress"><dt>{{ chatText.now(lang) }}</dt><dd>{{ step.progress }}</dd></template>
             </dl>
 
             <section v-if="hasEntries(step.args)" class="sdp-section">
-              <h4>Arguments</h4>
+              <h4>
+                {{ chatText.arguments(lang) }}
+                <button type="button" class="sdp-copy" @click="copy(`${step.id}:args`, printable(step.args))">{{ copyLabel(`${step.id}:args`) }}</button>
+              </h4>
               <pre>{{ printable(step.args) }}</pre>
             </section>
 
             <section v-if="step.result" class="sdp-section">
-              <h4>Result</h4>
-              <pre>{{ step.result }}</pre>
+              <h4>
+                {{ chatText.result(lang) }}
+                <button type="button" class="sdp-copy" @click="copy(`${step.id}:result`, readableResult(step.result))">{{ copyLabel(`${step.id}:result`) }}</button>
+              </h4>
+              <pre>{{ readableResult(step.result) }}</pre>
               <!-- The live stream carries the first 500 characters of a result; the full text is
                    kept on the server. Say so, rather than presenting a cut result as complete. -->
               <p v-if="step.result.length === LIVE_RESULT_LIMIT" class="sdp-hint">
-                First {{ LIVE_RESULT_LIMIT }} characters — the rest is in the session transcript.
+                {{ chatText.firstCharacters(lang, LIVE_RESULT_LIMIT) }}
               </p>
             </section>
 
             <section v-if="hasEntries(step.metadata)" class="sdp-section">
-              <h4>Details</h4>
+              <h4>
+                {{ chatText.details(lang) }}
+                <button type="button" class="sdp-copy" @click="copy(`${step.id}:details`, printable(step.metadata))">{{ copyLabel(`${step.id}:details`) }}</button>
+              </h4>
               <pre>{{ printable(step.metadata) }}</pre>
             </section>
           </div>
@@ -63,7 +73,10 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { writeClipboard } from "@/composables/clipboard";
+import { computed, nextTick, ref, watch } from "vue";
+import { chatText } from "@/composables/chatText";
+import type { TurnLanguage } from "@/composables/turnText";
 import {
   displayStatus,
   formatDuration,
@@ -79,7 +92,10 @@ const props = defineProps<{
   focusStepId?: string | null;
   /** Changes on every click, so re-clicking the same row re-opens and re-scrolls it. */
   focusRequest?: number;
+  /** The language of the answer these steps belong to: the panel reads like the list it was opened from. */
+  language?: TurnLanguage;
 }>();
+const lang = computed<TurnLanguage>(() => props.language ?? "en");
 
 /** What gateway/rpc.ts cuts a live tool result to before sending it. */
 const LIVE_RESULT_LIMIT = 500;
@@ -119,11 +135,40 @@ function durationOf(step: TurnStep): string {
 function statusLabel(step: TurnStep): string {
   // A render the user skipped is their choice, as the stream's row and the Outcome line say.
   const status = displayStatus(step);
-  if (status === "running") return "running…";
-  if (status === "skipped") return "skipped by you";
-  if (status === "failed") return "failed";
-  if (status === "stopped") return "no result";
-  return durationOf(step) || "done";
+  if (status === "running") return chatText.running(lang.value);
+  if (status === "skipped") return chatText.skippedByYou(lang.value);
+  if (status === "failed") return chatText.failed(lang.value);
+  if (status === "stopped") return chatText.noResult(lang.value);
+  // "Done" in words, not by the green of the figure alone.
+  const took = durationOf(step);
+  return took ? `${chatText.done(lang.value)} · ${took}` : chatText.done(lang.value);
+}
+
+/** A result that is JSON reads as JSON, indented; anything else as it came. */
+function readableResult(result: string): string {
+  const text = result.trim();
+  if (!(text.startsWith("{") || text.startsWith("["))) return result;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return result;
+  }
+}
+
+/** Copy a block, and say so on its button for a moment. */
+const copied = ref<{ key: string; ok: boolean } | null>(null);
+let copiedTimer: number | null = null;
+function copy(key: string, text: string): void {
+  const flash = (ok: boolean): void => {
+    copied.value = { key, ok };
+    if (copiedTimer !== null) window.clearTimeout(copiedTimer);
+    copiedTimer = window.setTimeout(() => { copied.value = null; copiedTimer = null; }, 1800);
+  };
+  writeClipboard(text).then(() => flash(true), () => flash(false));
+}
+function copyLabel(key: string): string {
+  if (copied.value?.key !== key) return chatText.copyBlock(lang.value);
+  return copied.value.ok ? chatText.copiedBlock(lang.value) : chatText.failedBlock(lang.value);
 }
 
 function hasEntries(value: Record<string, unknown> | undefined): boolean {
@@ -215,4 +260,33 @@ function printable(value: unknown): string {
 }
 .sdp-hint { margin: 0.25rem 0 0; font-size: 0.68rem; opacity: 0.6; font-style: italic; }
 .sdp-note { margin: 0.2rem 0.45rem 0.2rem 2.2rem; font-size: 0.76rem; font-style: italic; opacity: 0.7; }
+.sdp-chevron {
+  flex: none;
+  width: 0.8rem;
+  font-size: 0.7rem;
+  color: rgba(165, 243, 252, 0.6);
+}
+.sdp-section h4 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.sdp-copy {
+  font-family: var(--font-label);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--hairline);
+  color: rgba(165, 243, 252, 0.8);
+  cursor: pointer;
+}
+.sdp-copy:hover, .sdp-copy:focus-visible {
+  border-color: rgba(var(--logo-cyan), 0.5);
+  color: rgb(var(--logo-cyan));
+  outline: none;
+}
 </style>

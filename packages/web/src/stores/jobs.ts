@@ -70,7 +70,7 @@ export const useJobsStore = defineStore("jobs", () => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       jobs.value = await res.json() as JobDetail[];
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
     } finally {
       loading.value = false;
     }
@@ -91,7 +91,7 @@ export const useJobsStore = defineStore("jobs", () => {
       }
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }
@@ -110,7 +110,7 @@ export const useJobsStore = defineStore("jobs", () => {
       }
       await fetch();
     } catch (e) {
-      error.value = String(e);
+      error.value = e instanceof Error ? e.message : String(e);
       loading.value = false;
     }
   }
