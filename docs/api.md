@@ -231,6 +231,43 @@ If a scene exceeds `gateway.turnTimeoutMs`, the job fails and its scene session 
 
 These scene-job records are runtime execution instances created by `/api/scenes/:name/run`. They are distinct from the reusable workflow `jobs` stored under `workspace/jobs`, which are discovered inside chat with `search_workflows` and executed via `run_workflow`.
 
+### Scheduled tasks
+
+What the assistant was asked to run later, to repeat or to watch: a schedule made in a chat with the `schedule_task` tool. Each run is a turn of its own (a scene job, listed under `/api/scenes/jobs`), and what it finds is posted into the conversation the schedule was made in (see [Follow-ups](#follow-ups)).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/schedules` | the caller's scheduled tasks, newest first; an admin's listing has everyone's |
+| `DELETE` | `/api/schedules/:id` | remove one: it does not run again |
+
+```json
+{
+  "schedules": [{
+    "id": "sched_mhw2k1a9f3",
+    "label": "Release watch",
+    "task": "Check whether the full release is out. Known so far: the preview is live.",
+    "cron": "0 9 * * 1-5",
+    "timeZone": "Europe/Berlin",
+    "until": "the full release is out",
+    "maxRuns": 30,
+    "runs": 2,
+    "lastRunAt": "2026-11-13T08:00:41.000Z",
+    "lastOutcome": "nothing_new",
+    "nextRunAt": "2026-11-16T08:00:00.000Z",
+    "sessionId": "3f6c2a1e-8d47-4b59-a0c3-5e9d7f1b2a64",
+    "createdAt": "2026-11-12T14:20:05.000Z"
+  }]
+}
+```
+
+- A schedule has `cron` (repeating, on the clock of `timeZone`, UTC when there is none) or `at` (one run, an instant).
+- With `until` it is a watch: a run whose result does not say that this has happened is counted (`lastOutcome: "nothing_new"`) and posts nothing; the run that does is posted and ends the schedule, and so does run number `maxRuns`. Without `until` every run is posted (`"reported"`).
+- A failed run of a one-shot, or the third failed run in a row of a repeating schedule, is posted as a failure and ends the schedule.
+- `nextRunAt` is absent for a schedule that is disabled (`disabled` carries the reason) or whose single run is already out.
+- `userId` is present only in an admin's listing. Under multi-user auth a schedule that is not the caller's answers `DELETE` with 404, as a missing one does.
+
+`GET /api/triggers/cron` lists the cron jobs of configured job triggers. Scheduled tasks are not in it: each carries its owner's task text, and that listing is not scoped to an owner.
+
 ### Approvals
 
 | Method | Path | Notes |
@@ -548,7 +585,7 @@ Supported RPC methods:
 | `userInput.respond` | `{ inputId, answer }` |
 | `userInput.hold` | `{ inputId }` |
 | `userInput.preview` | `{ inputId, candidateId }` |
-| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort? }` |
+| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort?, timeZone? }` |
 | `chat.cancel` | `{ requestId }` |
 | `audit.subscribe` | none |
 
@@ -557,6 +594,8 @@ Supported RPC methods:
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
 `--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
+
+`timeZone` is the IANA zone of the sender's clock (`Intl.DateTimeFormat().resolvedOptions().timeZone`, e.g. `Europe/Berlin`). The gateway runs in UTC and knows no other: a time of day the user names ("remind me tomorrow at nine") is taken as wall-clock time in this zone, and a repeating schedule made in the turn runs on its clock. Without it such a time is taken as UTC and the answer says so. A name the runtime does not know is ignored.
 
 `chat.send` answers once the turn has started; the turn itself reports through the events below. The reply:
 
@@ -634,7 +673,7 @@ The rest lets a page reloaded mid-turn, or a second tab, pick the turn up:
 - `unreadSteering` is present only when it is not empty, and only for the session owner or an admin, since these are the person's own words. It lists steering messages that finished turns never read and whose final `status` found the connection that started them gone, each naming that turn as `requestId`. They are kept for at most an hour. The next `chat.send` of the session hands them back and retires them, and a reset, a delete or a rewind that removes something drops them. A turn still running then does not add the messages queued before it (see [Mid-turn steering](#mid-turn-steering)).
 - `serverNow` is the gateway clock (epoch ms) at the answer. The `expiresAt` deadlines of `openUserInputs` are server times, and the page needs the skew to count them down.
 
-For the owner or an admin, `session.get` also subscribes the connection to the session's `agent.user_input_needed`, `agent.user_input_resolved` and `agent.unread_steering` events. A turn's other events go only to the connection that started it.
+For the owner or an admin, `session.get` also subscribes the connection to the session's `agent.user_input_needed`, `agent.user_input_resolved`, `agent.unread_steering` and `session.follow_up` events. A turn's other events go only to the connection that started it.
 
 `session.end` remains accepted for backward compatibility and now archives the session instead of deleting it. Use `session.delete` to permanently remove stored session state.
 
@@ -655,6 +694,7 @@ During `chat.send`, the gateway emits streamed events:
 | `agent.user_input_needed` | a structured question from a tool (see [Structured user input](#structured-user-input)) |
 | `agent.user_input_resolved` | that question was answered, expired or settled |
 | `agent.unread_steering` | a finished turn's unread steering messages, pushed to the session's open pages |
+| `session.follow_up` | a scheduled task posted what it found into the session (see [Follow-ups](#follow-ups)); not tied to a turn |
 | `audit.event` | only after `audit.subscribe` |
 
 Final `status` payloads can include:
@@ -725,6 +765,32 @@ Messages the turn never read ride its final `status` as `unconsumedSteering`, an
 The push covers a stopped turn that is slow to notice its Stop and finishes unwinding after the next `chat.send` has started. Neither `session.get` nor that send's reply saw its leftovers then. It reaches the connections that loaded the session with `session.get` or started an interactive (not `--auto`) turn on it, and only those of the session owner or an admin (anyone's, for a session with no owner). Each message names, as `requestId`, the turn that ended without reading it. One message can arrive by more than one of these routes, so clients drop repeats by `id`.
 
 A reset, a delete or a rewind that removes something does not stop a running turn, and leaves what it has queued alone: the turn still folds those messages in, and its final `status` still lists the ones it did not read, for the connection that started it. When that status cannot be delivered, the session neither keeps nor pushes a message queued before the reset, delete or rewind, as the history it belongs to is gone. The rule is per message: one steered into the turn afterwards is kept and pushed like any other.
+
+### Follow-ups
+
+A scheduled task (see [Scheduled tasks](#scheduled-tasks)) runs in a session of its own. When a run has something to say, the gateway appends its answer to the conversation the schedule was made in, as an assistant message, and pushes it to the owner's connections that have loaded that session:
+
+```json
+{
+  "type": "session.follow_up",
+  "data": {
+    "sessionId": "3f6c2a1e-8d47-4b59-a0c3-5e9d7f1b2a64",
+    "message": {
+      "id": "3f6c2a1e-8d47-4b59-a0c3-5e9d7f1b2a64:14",
+      "role": "assistant",
+      "content": "## It is out\nThe weights are on the hub since this morning.",
+      "timestamp": "2026-11-26T08:01:12.000Z",
+      "requestId": "follow-up:6f0c1d2e-7a44-4c3b-9d0e-2b1f5a8c9e10",
+      "followUp": { "scheduleId": "sched_mhw2k1a9f3", "label": "Release watch", "jobId": "6f0c1d2e-7a44-4c3b-9d0e-2b1f5a8c9e10", "run": 9, "ended": "condition_met" }
+    }
+  }
+}
+```
+
+- `message` is the transcript entry as `session.get` returns it from then on. Its `followUp` mark says which schedule and which run wrote it; `ended` is set when the schedule ended with this run (`once`, `condition_met`, `max_runs` or `failed`), and `failed: true` when the run failed and the content says why.
+- The message is only ever written between turns. While a turn runs in the session the post waits for it to end, for at most half an hour.
+- Every post also raises a `notification.event` with `category: "follow_up"`, the session as `sessionId` and `targetPath: "/"`. It goes to the schedule's owner only. When the conversation is gone, was archived by hand or stayed busy, nothing is written and the notification points at `/jobs`, where the run's answer is kept.
+- Nothing is pushed to a client that is not connected: the message is in the session when it is opened next.
 
 ### Structured user input
 

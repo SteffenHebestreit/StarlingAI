@@ -268,7 +268,7 @@ describe("the request rate limit", () => {
 describe("schedule_task records its caller whole", () => {
   it("stamps the account id beside the name under multi-user auth, and the name alone with one operator", async () => {
     const tool = mods.tools.getTool("schedule_task")!;
-    const args = { cron: "0 8 * * 1-5", label: "Brief", task: "research X" };
+    const args = { kind: "repeat", cron: "0 8 * * 1-5", label: "Brief", task: "research X" };
     configure(true);
     await mods.context.runWithRequestContext({ identity: ALICE }, () =>
       tool.execute(args, { sessionId: "s", workspacePath: workspace, userId: "alice", identity: ALICE }));

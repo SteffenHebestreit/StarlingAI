@@ -37,6 +37,7 @@ let _nextId = 1;
  * @param label       Human-readable label.
  * @param action      User-defined action description (stored for reference).
  * @param onTick      Callback invoked each time the job fires.
+ * @param timeZone    The IANA zone the expression's clock is in (default UTC).
  * @returns The created job metadata.
  */
 export function createCronJob(
@@ -44,6 +45,7 @@ export function createCronJob(
   label: string,
   action: string,
   onTick: () => void | Promise<void>,
+  timeZone = "UTC",
 ): ScheduledJob {
   const id = `cron_${_nextId++}`;
 
@@ -79,7 +81,7 @@ export function createCronJob(
       }
     },
     start: true,
-    timeZone: "UTC",
+    timeZone,
   });
 
   jobMeta.cron = cron;

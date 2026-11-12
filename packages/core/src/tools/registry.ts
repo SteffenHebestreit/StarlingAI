@@ -25,6 +25,12 @@ export interface ToolHandler {
   timeoutMs?: number;
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
   /**
+   * Checked before the approval prompt: the reason this call cannot work, or nothing. A tool that
+   * needs approval on every call would otherwise ask the person to approve a call it then rejects
+   * for its arguments, and ask again for the corrected one.
+   */
+  refuse?: (args: Record<string, unknown>, context: ToolContext) => string | undefined | Promise<string | undefined>;
+  /**
    * E20: Free-form description used only for embedding-based rerank.
    * When unset the reranker falls back to `description`.  Use this to add
    * paraphrases, synonyms, and example tasks that help route
@@ -875,6 +881,11 @@ export async function executeTool(
       output: "",
       error: `Tool '${name}' declares requiresSandbox but has no sandboxed execution path — refused. A tool that runs in-process must not claim sandbox isolation; route its untrusted work through shell_exec/run_script, or register it at a non-sandbox tier.`,
     };
+  }
+
+  if (handler.refuse) {
+    const refusal = await handler.refuse(args, context);
+    if (refusal) return { success: false, output: "", error: refusal };
   }
 
   // Per-call approval:

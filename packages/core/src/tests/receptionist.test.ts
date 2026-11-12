@@ -16,6 +16,7 @@ import {
   ESCALATE_SENTINEL,
   buildMemoryCapsule,
   buildReceptionistMessages,
+  previousQuestion,
   languageIsUndetermined,
   classifyFrontDesk,
   runReceptionist,
@@ -295,3 +296,53 @@ describe("receptionist — memory capsule", () => {
     expect(buildMemoryCapsule(ws, 600)).toBe(`- ${value}`.slice(0, 160));
   });
 });
+
+// The desk saw the message alone: "ja bitte" after "shall I set up a daily check?" was small talk
+// to it, it answered "Gerne!", and what the user had just agreed to was never done.
+describe("receptionist — what a short message may be an answer to", () => {
+  it("finds the question the previous reply ends on", () => {
+    expect(previousQuestion("The draft is ready. Should I go ahead and send it?")).toBe("Should I go ahead and send it?");
+    expect(previousQuestion("Es gibt drei Wege. Welche der drei Varianten soll ich umsetzen: A, B oder C?")).toBe("Welche der drei Varianten soll ich umsetzen: A, B oder C?");
+    expect(previousQuestion("Soll ich das machen? Sonst lasse ich es so.")).toBe("Soll ich das machen?");
+    expect(previousQuestion("要我每天早上检查一次吗？")).toBe("要我每天早上检查一次吗？");
+  });
+
+  it("finds none in a reply that asks nothing, or asked long before its end", () => {
+    expect(previousQuestion("The capital of Australia is Canberra.")).toBeUndefined();
+    expect(previousQuestion(undefined)).toBeUndefined();
+    expect(previousQuestion(`Shall I? ${"A sentence of the report. ".repeat(30)}`)).toBeUndefined();
+  });
+
+  it("shows a long question's end only", () => {
+    const question = `Soll ich ${"wirklich ".repeat(60)}anfangen?`;
+    const shown = previousQuestion(question)!;
+    expect(shown.length).toBeLessThanOrEqual(241);
+    expect(shown.startsWith("…")).toBe(true);
+    expect(shown.endsWith("anfangen?")).toBe(true);
+  });
+
+  it("puts that question in front of the message, and leaves the message alone when there is none", () => {
+    const asked = buildReceptionistMessages("ja bitte", { previousReply: "Das geht. Soll ich dafür einen täglichen Check einrichten?" });
+    expect(asked[1]!.content).toBe('[The assistant had just asked: "Soll ich dafür einen täglichen Check einrichten?"]\n\nja bitte');
+    const plain = buildReceptionistMessages("danke dir", { previousReply: "Die Datei ist gespeichert unter reports/q3.pdf." });
+    expect(plain[1]!.content).toBe("danke dir");
+    expect(buildReceptionistMessages("hi")[1]!.content).toBe("hi");
+  });
+
+  it("says the same to the model whether or not a question is shown: the system text is one prefix", () => {
+    const withQuestion = buildReceptionistMessages("ja bitte", { previousReply: "Soll ich?" });
+    const without = buildReceptionistMessages("ja bitte");
+    expect(withQuestion[0]!.content).toBe(without[0]!.content);
+    expect(String(without[0]!.content)).toContain("a message that says yes to it, answers it or picks one of its options is the full assistant's to act on");
+  });
+
+  it("hands the previous reply from the turn to the model's messages", async () => {
+    let seen = "";
+    await runReceptionist("ok mach", {
+      previousReply: "Ich kann das jeden Morgen prüfen. Soll ich?",
+      complete: async (messages) => { seen = String(messages[1]!.content); return ESCALATE_SENTINEL; },
+    });
+    expect(seen).toBe('[The assistant had just asked: "Soll ich?"]\n\nok mach');
+  });
+});
+

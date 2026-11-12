@@ -36,6 +36,7 @@ import { PRODUCT } from "../product/index.js";
 import { midTurnUserMessages, startsTurn } from "./turn-boundary.js";
 import { attachmentEntryKey, extractArtifactsFromMetadata } from "./artifact-metadata.js";
 import { currentChatRequestId } from "../runtime/request-context.js";
+import { followUpMarkOf, type FollowUpMark } from "../runtime/follow-up-mark.js";
 import { isKnowledgeBaseWorkerReport, isPlanReportResult, isRetrievalEvidenceResult, isWorkflowRunResult } from "./turn-tool-contribution.js";
 import { knowledgeBaseWorkerReportMaxChars, retrievalEvidenceMaxChars, workflowRunResultMaxChars } from "./tool-result-format.js";
 
@@ -167,6 +168,9 @@ export interface SessionTranscriptMessage {
   requestId?: string;
   /** A progress message the turn posted while it worked (SessionProgressMessage), not its answer. */
   progress?: true;
+  /** What a scheduled task found, posted into the conversation it was made in
+   *  (runtime/follow-up.ts): no turn of this conversation wrote it. */
+  followUp?: FollowUpMark;
 }
 
 /**
@@ -955,6 +959,7 @@ export class AgentSession {
 
       const transcriptContent = getTranscriptDisplayContent(message);
       const attachments = getTranscriptAttachments(message.metadata);
+      const followUp = message.role === "assistant" ? followUpMarkOf(message.metadata) : undefined;
       raw.push({
         id: `${this.id}:${index}`,
         role: message.role,
@@ -963,6 +968,7 @@ export class AgentSession {
         ...(message.requestId ? { requestId: message.requestId } : {}),
         attachments,
         swarmState: message.role === "assistant" ? getTranscriptSwarmState(message.metadata) : undefined,
+        ...(followUp ? { followUp } : {}),
       });
       index += 1;
     }
@@ -2283,6 +2289,10 @@ ${buildOrchestrationExamples(config)}
 - Validate before you save: persist only what the user actually stated or what tool evidence confirmed as true. NEVER store an assumption, an inference, OR a stated "fact" you have not verified — a confident-sounding fact may be fabricated/hallucinated — as a durable truth; when unsure a detail is correct, verify it first or leave it unsaved rather than committing it to memory as fact.
 - Acknowledge the saved fact in one short clause of your reply; do not ask for permission to save it.
 - Do not persist secrets, credentials, or one-off task details this way.
+
+## Acting Later
+- You act only when a message arrives. Whatever is to be checked, watched, repeated or reminded of after this reply needs schedule_task, created in this turn; what it finds is posted into this conversation.
+- Never say you will follow up, keep watching, check again later or notify the user unless a schedule_task call succeeded in this turn. To offer it, end your reply with a direct question asking whether to set it up, and set it up when the user says yes.
 
 ## Security
 - Your tool calls are audited — use them responsibly

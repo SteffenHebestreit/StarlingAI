@@ -111,6 +111,8 @@ const TOOL_LABELS: Readonly<Record<string, Words>> = {
   calendar_create_event: { en: "Create an appointment", de: "Termin anlegen" },
   contacts_search: { en: "Search contacts", de: "Kontakte durchsuchen" },
   schedule_task: { en: "Schedule a task", de: "Aufgabe planen" },
+  schedule_list: { en: "Scheduled tasks", de: "Geplante Aufgaben" },
+  schedule_remove: { en: "Remove a scheduled task", de: "Geplante Aufgabe entfernen" },
   datetime_arithmetic: { en: "Date calculation", de: "Datumsrechnung" },
   load_tool: { en: "Load a tool", de: "Werkzeug laden" },
   search_tools: { en: "Look for a tool", de: "Werkzeug suchen" },

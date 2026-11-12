@@ -7,7 +7,8 @@ describe("chatText", () => {
     const sample: Record<string, unknown[]> = {
       enlarge: ["fox.png"], firstCharacters: [500], messagePlaceholder: ["StarlingAI", true],
       launcherTitle: ["StarlingAI"], restartConfirmMessage: [3], resetConfirmMessage: [4],
-      showOlder: [5], hideOlder: [5], autoIn: ["0:42"],
+      showOlder: [5], hideOlder: [5],
+      followUp: ["Release watch"], followUpEnded: ["max_runs", 3], autoIn: ["0:42"],
       cannotEditPicture: ["Fast"], fixedSizeOnly: [512], baseSource: ["agent"], tooLargeRendersAt: [1024, 768],
       editsByInstruction: ["Quality"], maskOfYours: ["35%"], sizeAxis: ["width"], sizeTooLargeRenders: [1024, 768],
       engineFixedSize: [512], sizeRule: [16, 256, 2048], widthAndHeightErrors: ["too wide", "too tall"],

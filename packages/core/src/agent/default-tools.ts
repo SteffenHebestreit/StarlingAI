@@ -74,6 +74,14 @@ export const ALWAYS_AVAILABLE_MAIN_TOOL_NAMES = [
   // "Schalte auf Claude um": a platform action of the conversation itself, which no specialist can
   // do. Tier 3 with approval on every call, and admin only (tools/model-switch.ts).
   "switch_model",
+  // The one way the assistant acts when nobody has written: a task that runs later, once or
+  // repeating, and posts what it finds into this conversation (tools/schedule.ts,
+  // runtime/follow-up.ts). No agent held these, so "I'll let you know when it is out" was a
+  // promise nothing could keep. Creating and removing are tier 3 with approval on every call; a
+  // scheduled run has nobody to ask and so cannot schedule more.
+  "schedule_task",
+  "schedule_list",
+  "schedule_remove",
 ] as const;
 
 export const DIRECT_MAIN_TOOL_NAMES = [
