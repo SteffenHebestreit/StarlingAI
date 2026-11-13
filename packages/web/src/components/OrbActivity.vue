@@ -18,7 +18,7 @@
         @click="emit('open', body.id)"
       >
         <span class="orb-sat__dot" aria-hidden="true" />
-        <span class="orb-sat__label">{{ body.short }}</span>
+        <span class="orb-sat__label">{{ body.text }}</span>
       </button>
     </div>
 
@@ -49,13 +49,15 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { activityRing, freeHalfWidth, labelFits, orbitPoint, placeLabels, orbPixels, type LiveActivity } from "@/composables/orbActivity";
+import { activityRing, freeHalfWidth, labelPlacement, orbitGeometry, orbitPoint, placeLabels, orbPixels, type LabelPlacement, type LiveActivity } from "@/composables/orbActivity";
 import type { StepDisplayStatus } from "@/composables/turnSteps";
 import { turnText, type TurnLanguage } from "@/composables/turnText";
 
 const props = defineProps<{
   activity: LiveActivity | null;
   language?: TurnLanguage;
+  /** The room the messages keep free at their outer edge for the page's round controls, in pixels. */
+  lane?: number;
 }>();
 
 const emit = defineEmits<{
@@ -84,13 +86,15 @@ function onResize(): void {
 /** Below this the messages take the whole width and would sit under the ring. */
 const narrow = computed(() => width.value < 1100);
 /** The band the messages leave free around the orb (Chat.vue lays them out at the outer edges). */
-const freeHalf = computed(() => freeHalfWidth(width.value, height.value));
+const freeHalf = computed(() => freeHalfWidth(width.value, height.value, 16, props.lane ?? 0));
 /** The step ring as the canvas draws it, and the page seen through the canvas's camera. */
 const view = computed(() => ({
   ring: activityRing(width.value, height.value, freeHalf.value),
   width: width.value,
   height: height.value,
   coreRadius: orbPixels(width.value, height.value) * 0.55,
+  /** The ring's half-width on the page. */
+  rx: orbitGeometry(width.value, height.value, freeHalf.value).rx,
 }));
 /** Under the orb and the front of the ring with its labels. */
 const statusStyle = computed(() => {
@@ -114,11 +118,20 @@ interface Body {
   nested: boolean;
   label: string;
   short: string;
+  subject?: string;
   duration: string;
   leaving: boolean;
 }
 const bodies = new Map<string, Body>();
-const drawn = ref<Array<Body & { style: Record<string, string | number>; front: boolean; labelled: boolean }>>([]);
+const drawn = ref<Array<Body & { style: Record<string, string | number>; front: boolean; labelled: boolean; text: string }>>([]);
+
+/**
+ * What a step's label says. The front one has room for the step and its subject; one beside it
+ * has little, and says the part that tells it apart — "wissen.example.org", not "Webseite lesen · …".
+ */
+function labelText(body: Body, front: boolean): string {
+  return front ? body.short : body.subject || body.short;
+}
 
 let frame = 0;
 let last = 0;
@@ -140,14 +153,14 @@ function step(time: number): void {
     // A new satellite is launched from the orb's core.
     const body = bodies.get(satellite.id) ?? {
       id: satellite.id, x: 0, y: 0, scale: 0.2, opacity: 0, depth: 1,
-      status: satellite.status, nested: satellite.nested, label: satellite.label, short: satellite.short, duration: satellite.duration, leaving: false,
+      status: satellite.status, nested: satellite.nested, label: satellite.label, short: satellite.short, subject: satellite.subject, duration: satellite.duration, leaving: false,
     };
     body.x += (target.x - body.x) * ease;
     body.y += (target.y - body.y) * ease;
     body.scale += (target.scale * (satellite.nested ? 0.75 : 1) - body.scale) * ease;
     body.opacity += (target.opacity - body.opacity) * ease;
     body.depth = target.depth;
-    Object.assign(body, { status: satellite.status, label: satellite.label, short: satellite.short, duration: satellite.duration, leaving: false });
+    Object.assign(body, { status: satellite.status, label: satellite.label, short: satellite.short, subject: satellite.subject, duration: satellite.duration, leaving: false });
     bodies.set(satellite.id, body);
   });
   // A step that left the ring, or every step once the turn is over, falls back into the orb.
@@ -161,24 +174,47 @@ function step(time: number): void {
     if (body.opacity < 0.02 || reducedMotion) bodies.delete(body.id);
   }
 
-  // Labels in front of the orb's centre line, where they keep out of the messages and off each
-  // other: the nearest one first.
+  // Labels on the near arc, where they can be read, keep out of the messages and off each other:
+  // the nearest one first (labelPlacement, placeLabels).
+  const placements = new Map<string, LabelPlacement>();
+  for (const body of bodies.values()) {
+    if (body.leaving) continue;
+    const placement = labelPlacement(body.x, body.depth, view.value.rx, freeHalf.value);
+    if (placement) placements.set(body.id, placement);
+  }
   const labelled = placeLabels([...bodies.values()]
-    .filter((body) => !body.leaving && body.depth > -0.2 && labelFits(body.x, freeHalf.value))
+    .filter((body) => placements.has(body.id))
     .sort((a, b) => b.depth - a.depth)
-    .map((body) => ({ id: body.id, x: body.x, y: body.y, scale: body.scale, text: body.short })));
-  drawn.value = [...bodies.values()].map((body) => ({
-    ...body,
-    front: body.id === newest,
-    labelled: labelled.has(body.id),
-    style: {
-      transform: `translate(-50%, -50%) translate3d(${body.x.toFixed(1)}px, ${body.y.toFixed(1)}px, 0) scale(${body.scale.toFixed(3)})`,
-      opacity: Math.max(0, Math.min(1, body.opacity)).toFixed(3),
-      // Far side out of focus: the ring reads as depth, not as a flat row.
-      filter: body.depth < 0 ? `blur(${(-body.depth * 1.1).toFixed(2)}px)` : "none",
-      zIndex: Math.round(10 + body.depth * 10),
-    },
-  }));
+    .map((body) => ({ id: body.id, x: body.x, y: body.y, scale: body.scale, text: labelText(body, body.id === newest), ...placements.get(body.id)! })));
+  drawn.value = [...bodies.values()].map((body) => {
+    const placement = placements.get(body.id);
+    const scale = Math.max(0.2, body.scale);
+    return {
+      ...body,
+      front: body.id === newest,
+      labelled: labelled.has(body.id),
+      // A point without a label shows the whole of it on hover, where it has the room.
+      text: labelled.has(body.id) ? labelText(body, body.id === newest) : body.short,
+      style: {
+        transform: `translate(-50%, -50%) translate3d(${body.x.toFixed(1)}px, ${body.y.toFixed(1)}px, 0) scale(${body.scale.toFixed(3)})`,
+        opacity: Math.max(0, Math.min(1, body.opacity)).toFixed(3),
+        // Far side out of focus: the ring reads as depth, not as a flat row.
+        filter: body.depth < 0 ? `blur(${(-body.depth * 1.1).toFixed(2)}px)` : "none",
+        zIndex: Math.round(10 + body.depth * 10),
+        // What undoes the point's own scale: a label is read at full size, however far round the
+        // ring its point is (at 0.9 of 11.5 px it was a strain already).
+        "--inv": (1 / scale).toFixed(3),
+        // Where the label hangs and how wide it may be; it grows from the edge it hangs by.
+        ...(placement
+          ? {
+            "--label-x": `${(-50 + 50 * placement.lean).toFixed(1)}%`,
+            "--label-origin": `${(50 - 50 * placement.lean).toFixed(1)}%`,
+            "--label-max": `${placement.maxWidth}px`,
+          }
+          : {}),
+      },
+    };
+  });
 
   if (bodies.size > 0 || props.activity) frame = requestAnimationFrame(step);
   else stop();
@@ -287,21 +323,25 @@ onBeforeUnmount(() => {
   50% { transform: scale(1.45); }
 }
 
-/* A step's label hangs under its point: always on the near side of the ring where it keeps out
-   of the messages, on hover or keyboard focus everywhere else. */
+/* A step's label hangs under its point, clear of the ring: on the ring's near arc always — centred
+   at the front, leaning outwards beside it (--label-x, --label-max from labelPlacement) — and on
+   hover or keyboard focus everywhere else. Its ground is nearly opaque: the ring's lines and glow
+   came through it and through the words. */
 .orb-sat__label {
   position: absolute;
   left: 50%;
-  top: calc(50% + 11px);
-  transform: translateX(-50%);
-  max-width: 210px;
+  /* 15 px on the page, whatever the point's own scale (--inv undoes it, as for the label's size). */
+  top: calc(50% + 15px * var(--inv, 1));
+  transform: translateX(var(--label-x, -50%)) scale(var(--inv, 1));
+  transform-origin: var(--label-origin, 50%) 0;
+  max-width: var(--label-max, 210px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 0.12rem 0.55rem;
   border-radius: 9999px;
   border: 1px solid rgba(var(--accent-purple), 0.22);
-  background: rgba(3, 7, 18, 0.62);
+  background: rgba(3, 7, 18, 0.9);
   color: rgb(209, 213, 219);
   font-size: 0.72rem;
   line-height: 1.35;
@@ -322,9 +362,19 @@ onBeforeUnmount(() => {
 .orb-sat--failed .orb-sat__label {
   border-color: rgba(248, 113, 113, 0.5);
 }
+/* Hovered or focused, a step comes forward wherever it is on the ring: sharp and opaque, its
+   label centred under it at reading size — on the far side both were small and out of focus. */
 .orb-sat:hover,
 .orb-sat:focus-visible {
   z-index: 40 !important;
+  opacity: 1 !important;
+  filter: none !important;
+}
+.orb-sat:not(.orb-sat--labelled):hover .orb-sat__label,
+.orb-sat:not(.orb-sat--labelled):focus-visible .orb-sat__label {
+  transform: translateX(-50%) scale(var(--inv, 1));
+  transform-origin: 50% 0;
+  max-width: 260px;
 }
 
 .orb-sat:focus-visible {

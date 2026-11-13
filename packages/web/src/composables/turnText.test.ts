@@ -49,6 +49,12 @@ describe("the step stream in German", () => {
     expect(stepTitle(step("delegate_to_agent", { args: { agentName: "content_writer" } }), "de")).toBe("An Content writer übergeben");
     expect(stepTitle(step("web_search", { args: { query: "Wetter Berlin" } }), "de")).toBe("Websuche");
     expect(stepTitle(step("record_plan", { args: { steps: [1, 2, 3] } }), "de")).toBe("3 Schritte geplant");
+    // Still open, it is being worked through — not planned and done with.
+    expect(stepTitle(step("record_plan", { status: "running", args: { steps: [1, 2, 3] } }), "de")).toBe("Plan läuft · 3 Schritte");
+    expect(stepTitle(step("record_plan", { status: "running", args: { steps: [1] } }), "de")).toBe("Plan läuft · 1 Schritt");
+    expect(stepTitle(step("record_plan", { status: "running" }), "de")).toBe("Plan läuft");
+    expect(stepTitle(step("execute_plan", { status: "running" }), "de")).toBe("Plan läuft");
+    expect(stepTitle(step("execute_plan"), "de")).toBe("Plan ausgeführt");
     expect(stepOutcome(step("execute_plan", { metadata: { done: 2, steps: 3, failed: 1 } }), "de")).toBe("2/3 erledigt · 1 fehlgeschlagen");
     expect(stepOutcome(step("web_search", { status: "stopped" }), "de")).toBe("kein Ergebnis gemeldet");
     expect(stepOutcome(step("delegate_to_agent", { metadata: { artifacts: [{ filename: "a" }, { filename: "b" }] } }), "de")).toBe("2 Dateien");
@@ -57,6 +63,8 @@ describe("the step stream in German", () => {
   it("keeps the English wording English", () => {
     expect(stepTitle(step("delegate_to_agent", { args: { agentName: "researcher" } }))).toBe("Delegated to Researcher");
     expect(stepTitle(step("record_plan", { args: { steps: [1] } }))).toBe("Planned 1 step");
+    expect(stepTitle(step("record_plan", { status: "running", args: { steps: [1, 2] } }))).toBe("Running the plan · 2 steps");
+    expect(stepTitle(step("execute_plan", { status: "running" }))).toBe("Running the plan");
     expect(stepOutcome(step("execute_plan", { metadata: { done: 3, steps: 3 } }))).toBe("3/3 done");
   });
 

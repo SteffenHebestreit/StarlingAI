@@ -137,6 +137,8 @@ const lineThinUniform         = { value: 1 };
 const lineDetailUniform       = { value: 1 };
 // The entity's breath, for every shader that shows its crest of light (shaders/breath.ts).
 const breathUniform           = { value: 0 };
+// How far the state lets the hologram's lines take the dust's colours (VisualState.lineTint).
+const lineTintUniform         = { value: 0 };
 
 // ─── Visual state ─────────────────────────────────────────────────────────────
 interface VisualState {
@@ -146,6 +148,8 @@ interface VisualState {
   neuralSphereColor: THREE.Color; neuralSphereOpacity: number; neuralSpherePulseAmount: number;
   pulsesFromCenter: boolean; neuralSphereScale: number; frozenAnimation: boolean;
   orbitSpeedFactor: number; coreIntensity: number;
+  /** How far the hologram's lines take the dust's colours, each by its own share (hudRings.ts). */
+  lineTint: number;
 }
 
 const STATE_DEFS: Record<string, {
@@ -157,6 +161,7 @@ const STATE_DEFS: Record<string, {
   neuralSphereColor: THREE.Color; neuralSphereOpacity: number; neuralSpherePulseAmount: number;
   pulsesFromCenter: boolean; neuralSphereScale: number; frozenAnimation: boolean;
   orbitSpeedFactor: number; coreIntensity: number;
+  lineTint?: number;
 }> = {
   default: {
     portalSpeedFactor: 0.3, pulseSpeedFactor: 0.6, pulseRateFactor: 0.15,
@@ -172,10 +177,13 @@ const STATE_DEFS: Record<string, {
     pulseColorOverride: new THREE.Color(0xffffff).multiplyScalar(1.1),
     portalColorNearOverride: new THREE.Color(0xffff33).multiplyScalar(1.2),
     portalColorFarOverride: new THREE.Color(0xffaa00).multiplyScalar(1.1),
-    neuralSphereColor: NS_ACTIVITY_COLOR.clone().multiplyScalar(1.1),
+    // Working is the one state whose core is white, and at full strength the core, the sphere
+    // and the step ring ran together into one blaze. It is held back, and about half of the lines
+    // take the dust's yellow instead (lineTint).
+    neuralSphereColor: NS_ACTIVITY_COLOR.clone(),
     neuralSphereOpacity: NS_ACTIVITY_OPACITY, neuralSpherePulseAmount: NS_ACTIVITY_PULSE * 0.8,
     pulsesFromCenter: false, neuralSphereScale: 1.0, frozenAnimation: false,
-    orbitSpeedFactor: 2.4, coreIntensity: 0.95,
+    orbitSpeedFactor: 2.4, coreIntensity: 0.72, lineTint: 1,
   },
   output: {
     portalSpeedFactor: 0.9, pulseSpeedFactor: 1.0, pulseRateFactor: 1.4,
@@ -265,6 +273,7 @@ function resolveVisuals(stateName: string): VisualState {
     frozenAnimation:         d.frozenAnimation,
     orbitSpeedFactor:        d.orbitSpeedFactor,
     coreIntensity:           d.coreIntensity,
+    lineTint:                d.lineTint ?? 0,
   };
 }
 
@@ -526,6 +535,7 @@ function animate() {
     cv.neuralSphereScale       = THREE.MathUtils.lerp(src.neuralSphereScale,       dst.neuralSphereScale,       t);
     cv.orbitSpeedFactor        = THREE.MathUtils.lerp(src.orbitSpeedFactor,        dst.orbitSpeedFactor,        t);
     cv.coreIntensity           = THREE.MathUtils.lerp(src.coreIntensity,           dst.coreIntensity,           t);
+    cv.lineTint                = THREE.MathUtils.lerp(src.lineTint,                dst.lineTint,                t);
     cv.pulseColor.lerpColors(src.pulseColor,             dst.pulseColor,        t);
     cv.portalColorNear.lerpColors(src.portalColorNear,   dst.portalColorNear,   t);
     cv.portalColorFar.lerpColors(src.portalColorFar,     dst.portalColorFar,    t);
@@ -574,6 +584,7 @@ function animate() {
   dustUniforms["uParticleOpacity"]!.value = cv.particleOpacity * (1 + 0.06 * breath);
   orbitalUniforms["uOpacity"]!.value       = cv.particleOpacity * (1 + 0.09 * breath);
   coreUniforms["uIntensity"]!.value        = cv.coreIntensity   * (1 + 0.13 * breath);
+  lineTintUniform.value                    = cv.lineTint;
 
   dustUniforms["uTime"]!.value            = time;
   dustUniforms["uOrbitPhase"]!.value      = dustOrbitPhase;
@@ -869,6 +880,11 @@ onMounted(() => {
           uWaveRadius: { value: Math.hypot(spec.radius, spec.offset) },
           uAssemble:  { value: 1 },
           uHot:       { value: spec.hot ?? 0 },
+          // The dust's own colours, as the dust has them now: a state change recolours both.
+          uTintNear:  dustUniforms["uPortalColorNear"]!,
+          uTintFar:   dustUniforms["uPortalColorFar"]!,
+          uTint:      lineTintUniform,
+          uTintShare: { value: spec.tint ?? 0 },
         },
         transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
       }),

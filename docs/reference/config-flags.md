@@ -21,7 +21,7 @@ Every public schema field, where it is declared, and how many production files r
 | `after` | packages/core/src/config/schema.ts:1581 | 331 |
 | `agents` | packages/core/src/config/schema.ts:1569 | 207 |
 | `alertmanager` | packages/core/src/config/schema.ts:1214 | 1 |
-| `all` | packages/core/src/config/schema.ts:1367 | 346 |
+| `all` | packages/core/src/config/schema.ts:1367 | 347 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1387 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1330 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -91,7 +91,7 @@ Every public schema field, where it is declared, and how many production files r
 | `command` | packages/core/src/config/schema.ts:751 | 66 |
 | `completes` | packages/core/src/config/schema.ts:967 | 16 |
 | `completionPer1m` | packages/core/src/config/schema.ts:590 | 1 |
-| `composer` | packages/core/src/config/schema.ts:1536 | 21 |
+| `composer` | packages/core/src/config/schema.ts:1536 | 22 |
 | `computerUse` | packages/core/src/config/schema.ts:2122 | 14 |
 | `concurrency` | packages/core/src/config/schemas/retrieval.ts:190 | 25 |
 | `concurrentSessions` | packages/core/src/config/schema.ts:312 | 1 |
@@ -115,7 +115,7 @@ Every public schema field, where it is declared, and how many production files r
 | `currency` | packages/core/src/config/schema.ts:596 | 13 |
 | `customInstructions` | packages/core/src/config/schema.ts:318 | 5 |
 | `dailyUsd` | packages/core/src/config/schema.ts:599 | 2 |
-| `default` | packages/core/src/config/schema.ts:1343 | 310 |
+| `default` | packages/core/src/config/schema.ts:1343 | 311 |
 | `defaultAlertmanager` | packages/core/src/config/schema.ts:1211 | 1 |
 | `defaultContainerized` | packages/core/src/config/schema.ts:1905 | 6 |
 | `defaultGithub` | packages/core/src/config/schema.ts:1233 | 1 |
@@ -302,7 +302,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxUploadBytes` | packages/core/src/config/schemas/multimodal.ts:294 | 5 |
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:890 | 5 |
-| `message` | packages/core/src/config/schema.ts:1589 | 382 |
+| `message` | packages/core/src/config/schema.ts:1589 | 383 |
 | `method` | packages/core/src/config/schema.ts:1102 | 95 |
 | `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:909 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1683 | 1 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:2137 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:75 | 71 |
+| `points` | packages/core/src/config/schemas/decisions.ts:75 | 72 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:355 | 42 |
 | `primary` | packages/core/src/config/schema.ts:117 | 74 |

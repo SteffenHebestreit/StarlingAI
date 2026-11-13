@@ -17,7 +17,7 @@
 
     <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
          chat keeps the question and the answer. -->
-    <OrbActivity :activity="orbActivity" :language="orbLanguage" @open="openLiveSteps" />
+    <OrbActivity :activity="orbActivity" :language="orbLanguage" :lane="podLane" @open="openLiveSteps" />
 
     <!-- Drag-drop overlay: visible while a file drag is hovering the chat surface -->
     <div
@@ -171,7 +171,7 @@
               <span>{{ gateway.isLoading ? chatText.newActivity(uiLanguage) : chatText.newMessages(uiLanguage) }}</span>
             </button>
           </Transition>
-          <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''">
+          <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''" :style="podLaneStyle">
             <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
               <button
                 @click="loadOlderMessages"
@@ -1202,6 +1202,7 @@ import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useFocusTrap } from "@/composables/useFocusTrap";
 import { confirmAction } from "@/composables/useConfirm";
 import { browserLanguage, chatText } from "@/composables/chatText";
+import { podLanes } from "@/composables/podLanes";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
@@ -1629,10 +1630,45 @@ const {
 } = useDraggableOrb("starlingai.hud.sessionOrb", { fx: 0.955, fy: 0.17 });
 
 const {
-  style: launcherOrbStyle,
+  x: launcherOrbX, style: launcherOrbStyle,
   down: launcherOrbDown, move: launcherOrbMove, up: launcherOrbUp,
   wasDragged: launcherOrbDragged,
 } = useDraggableOrb("starlingai.hud.launcherOrb", { fx: 0.95, fy: 0.92 });
+
+// ── Lanes for these buttons (composables/podLanes.ts) ─────────────────────────────────────
+// The messages stand at their column's outer edges, which is where the buttons are parked: a
+// long question ran under the one beside it. Each side keeps a lane free for the buttons at it,
+// as wide as the innermost of them. The composer's button counts while it is hidden too, or the
+// messages would jump sideways whenever the composer opens.
+const messagesColumn = ref({ left: 0, right: 0 });
+function measureMessagesColumn(): void {
+  const box = messagesEl.value?.getBoundingClientRect();
+  if (!box || (box.left === messagesColumn.value.left && box.right === messagesColumn.value.right)) return;
+  messagesColumn.value = { left: box.left, right: box.right };
+}
+let messagesColumnObserver: ResizeObserver | null = null;
+watch(messagesEl, (element) => {
+  messagesColumnObserver?.disconnect();
+  messagesColumnObserver = null;
+  if (!element) return;
+  measureMessagesColumn();
+  if (typeof ResizeObserver === "undefined") return;
+  messagesColumnObserver = new ResizeObserver(measureMessagesColumn);
+  messagesColumnObserver.observe(element);
+}, { immediate: true, flush: "post" });
+watch(hudWin, measureMessagesColumn, { flush: "post" });
+onUnmounted(() => messagesColumnObserver?.disconnect());
+const podLaneWidths = computed(() => podLanes([
+  { x: actionsOrbX.value, size: 40 },
+  { x: sessionOrbX.value, size: 40 },
+  { x: launcherOrbX.value, size: 55 },
+], messagesColumn.value));
+const podLaneStyle = computed(() => ({
+  "--pod-lane-l": `${podLaneWidths.value.left}px`,
+  "--pod-lane-r": `${podLaneWidths.value.right}px`,
+}));
+/** The wider of the two: what the orb's ring and its labels allow for (composables/orbActivity.ts). */
+const podLane = computed(() => Math.max(podLaneWidths.value.left, podLaneWidths.value.right));
 
 const sessionOpen = ref(false);
 const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
@@ -1907,7 +1943,7 @@ function onViewportResize(): void {
 onMounted(() => window.addEventListener("resize", onViewportResize, { passive: true }));
 onBeforeUnmount(() => window.removeEventListener("resize", onViewportResize));
 const orbRing = computed(() => ({
-  ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value)),
+  ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value, 16, podLane.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
 // Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
@@ -3987,11 +4023,17 @@ onUnmounted(() => {
   .chat-message-scroll :deep(.message-row--user) {
     width: 100%;
   }
-  .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; }
-  .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; }
-  .chat-message-scroll :deep(.message-bubble--ai),
+  /* Each side keeps a lane free at its outer edge for the round buttons parked there
+     (--pod-lane-l / -r, composables/podLanes.ts), and its bubbles give that room up at the outer
+     side: half of it comes off the row they measure by, the other half off their own width, so
+     their inner edge stays where the orb's zone begins. */
+  .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; padding-left: var(--pod-lane-l, 0px); }
+  .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; padding-right: var(--pod-lane-r, 0px); }
+  .chat-message-scroll :deep(.message-bubble--ai) {
+    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear) - var(--pod-lane-l, 0px) / 2)));
+  }
   .chat-message-scroll :deep(.message-bubble--user) {
-    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear))));
+    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear) - var(--pod-lane-r, 0px) / 2)));
   }
 }
 

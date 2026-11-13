@@ -179,11 +179,14 @@ export function stepTitle(step: TurnStep, lang: TurnLanguage = "en"): string {
     case "run_workflow": return turnText.ranWorkflow(lang);
     case "record_plan": {
       const steps = Array.isArray(args["steps"]) ? args["steps"].length : undefined;
+      // Still open: with the fold the plan is being worked through inside this call, and the
+      // report that says so (ranThePlan) only comes with its result.
+      if (step.status === "running") return steps ? turnText.runningPlan(lang, steps) : turnText.runningThePlan(lang);
       // Folded: the same call also ran the plan, so it reads like execute_plan's row.
       if (ranThePlan(step)) return steps ? turnText.plannedAndRan(lang, steps) : turnText.ranThePlan(lang);
       return steps ? turnText.planned(lang, steps) : turnText.plannedTheWork(lang);
     }
-    case "execute_plan": return turnText.ranThePlan(lang);
+    case "execute_plan": return step.status === "running" ? turnText.runningThePlan(lang) : turnText.ranThePlan(lang);
     case "search_agents": return turnText.lookedForSpecialist(lang);
     case "generate_image":
       return str(args["baseImage"])

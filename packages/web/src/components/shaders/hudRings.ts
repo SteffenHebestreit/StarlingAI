@@ -62,6 +62,11 @@ export interface HudRingSpec {
   minor?: boolean;
   /** How far the colour runs towards white-hot. */
   hot?: number;
+  /**
+   * The ring's share of the dust's colours when the orb's state lets its lines take them (the
+   * shader's uTint): absent or 0 keeps the core's colour, 1 is all the dust's.
+   */
+  tint?: number;
 }
 
 /** A frame the rings hang in: it turns about its pole, and the pole itself tumbles about an axis. */
@@ -200,7 +205,7 @@ function globe(frame: number, radius: number, parallels: readonly Parallel[], me
  */
 export function buildSphereRings(seed = 20261112): HudRingSpec[] {
   const rand = seeded(seed);
-  return [
+  return tinted([
     ...globe(OUTER_GLOBE, GLOBE_RADIUS, [
       { kind: "scale", degrees: 0, arc: 1 },
       { kind: "dash", degrees: 40, arc: 0.75 }, { kind: "hair", degrees: -40, arc: 0.7 },
@@ -218,7 +223,23 @@ export function buildSphereRings(seed = 20261112): HudRingSpec[] {
       { kind: "scale", radius: 1.15, minor: true }, { kind: "hair", radius: SPHERE_OUTER - 0.01 },
     ], rand),
     ...loose(2, rand),
-  ];
+  ], seed);
+}
+
+/**
+ * Which rings take the dust's colours while the orb works: about half of them, some wholly and
+ * some half-way, the rest staying in the core's colour. All of them in the core's white, the
+ * working orb was one blaze round a body of yellow dust; with some of its lines in that yellow it
+ * is one thing again. The shares come from a generator of their own, so the sphere is laid out as
+ * it was.
+ */
+function tinted(rings: HudRingSpec[], seed: number): HudRingSpec[] {
+  const rand = seeded((seed ^ 0x5bd1e995) >>> 0);
+  return rings.map((ring) => {
+    const draw = rand();
+    if (draw < 0.45) return ring;
+    return { ...ring, tint: draw < 0.7 ? 0.55 : 1 };
+  });
 }
 
 export const SPHERE_RINGS: readonly HudRingSpec[] = buildSphereRings();
@@ -229,8 +250,9 @@ export const SPHERE_RINGS: readonly HudRingSpec[] = buildSphereRings();
  */
 export const STEP_RINGS: readonly HudRingSpec[] = [
   { kind: "rail",  radius: 1,     width: 0.016, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.05,  flow: 0,     seed: 11.4, arc: 1, tiles: 120, strength: 1.7, hot: 0.5 },
-  { kind: "scale", radius: 1.05,  width: 0.026, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: -0.03, flow: 0.04,  seed: 12.7, arc: 1, tiles: 180, strength: 1.1, hot: 0.3 },
-  { kind: "dash",  radius: 0.955, width: 0.012, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.02,  flow: 0.025, seed: 13.9, arc: 1, tiles: 48,  strength: 1.5, hot: 0.4 },
+  // The rail the steps ride on stays in the core's colour; its scale and its blocks take the dust's.
+  { kind: "scale", radius: 1.05,  width: 0.026, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: -0.03, flow: 0.04,  seed: 12.7, arc: 1, tiles: 180, strength: 1.1, hot: 0.3, tint: 1 },
+  { kind: "dash",  radius: 0.955, width: 0.012, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.02,  flow: 0.025, seed: 13.9, arc: 1, tiles: 48,  strength: 1.5, hot: 0.4, tint: 0.55 },
 ];
 
 export const hudRingVertexShader = `
@@ -275,6 +297,10 @@ export const hudRingFragmentShader = `${BREATH_WAVE}
   uniform float uFlow;       // where what travels along the ring is, in turns
   uniform float uBreath;     // the entity's breath
   uniform float uWaveRadius; // how far from the orb's centre the ring is, in orb units
+  uniform vec3  uTintNear;   // the dust's colour on the side nearest the viewer (shaders/dustParticles.ts)
+  uniform vec3  uTintFar;    // and on the far side
+  uniform float uTint;       // how far the orb's state lets its lines take the dust's colours
+  uniform float uTintShare;  // this ring's own share of that
 
   varying vec2  vLocal;
   varying float vNear;
@@ -408,8 +434,13 @@ export const hudRingFragmentShader = `${BREATH_WAVE}
     float flatness = mix(0.3, 1.0, smoothstep(0.03, 0.3, vFacing));
     lum *= uStrength * uIntensity * pulse * flicker * depth * flatness * uThin * mix(1.0, uDetail, uMinor);
 
-    vec3 hot = mix(uCoreColor, vec3(1.0), 0.6);
-    vec3 col = (uCoreColor + hot * (0.15 + uHot)) * lum;
+    // A ring with a share of the dust's colours is graded like the dust, from its near colour to
+    // its far one round the sphere, and runs less towards white-hot: the colour is the point.
+    float tint = clamp(uTint * uTintShare, 0.0, 1.0);
+    vec3 dust  = mix(uTintFar, uTintNear, pow(vNear, 1.2));
+    vec3 base  = mix(uCoreColor, dust, tint);
+    vec3 hot   = mix(base, vec3(1.0), 0.6);
+    vec3 col   = (base + hot * (0.15 + uHot) * (1.0 - 0.75 * tint)) * lum;
     // Additive blending scales the colour by alpha. With the brightness as alpha and the colour
     // left as it is, a line counted its brightness twice and came out faint; alpha 1 made the
     // transparent canvas opaque along every ring, a black band over the page. So alpha stays the
