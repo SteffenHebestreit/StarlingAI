@@ -19,6 +19,29 @@ export function browserLanguage(): TurnLanguage {
   return turnLanguage(typeof navigator === "undefined" ? "en" : navigator.language);
 }
 
+/** The effort tiers as the session knows them (stores/gateway.ts EffortTier). */
+type EffortName = "low" | "medium" | "high" | "max";
+
+const EFFORT_NAMES: Record<TurnLanguage, Record<EffortName, string>> = {
+  en: { low: "Low", medium: "Medium", high: "High", max: "Max" },
+  de: { low: "Niedrig", medium: "Mittel", high: "Hoch", max: "Max" },
+};
+
+const EFFORT_TEXTS: Record<TurnLanguage, Record<EffortName, string>> = {
+  en: {
+    low: "fast & tight — shorter timeout, fewer iterations, no extended reasoning",
+    medium: "balanced default — today's behavior",
+    high: "thorough — long timeout, deeper delegation, full-length output, extended reasoning (quality gates kept)",
+    max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
+  },
+  de: {
+    low: "schnell & knapp — kürzeres Zeitlimit, weniger Durchläufe, kein erweitertes Nachdenken",
+    medium: "ausgewogener Standard",
+    high: "gründlich — langes Zeitlimit, tiefere Delegation, Ausgabe in voller Länge, erweitertes Nachdenken (Qualitätsprüfungen bleiben)",
+    max: "unbegrenzt — kein Zeitlimit, größtes Budget; lockert die Korrektheits- und QA-Prüfungen (kann Unbelegtes liefern)",
+  },
+};
+
 export const chatText = {
   // ── A message's own actions ───────────────────────────────────────────────────────────────
   copy: (l: TurnLanguage) => pick(l, "⧉ Copy", "⧉ Kopieren"),
@@ -316,6 +339,101 @@ export const chatText = {
   jobs: (l: TurnLanguage) => pick(l, "Jobs", "Jobs"),
   effortForSession: (l: TurnLanguage) => pick(l, "Effort for this session", "Aufwand für diese Sitzung"),
   relaxesGates: (l: TurnLanguage) => pick(l, "relaxes quality gates", "lockert die Qualitätsprüfungen"),
+
+  // ── The composer's setting chips, and the line under them ─────────────────────────────────
+  // The chips stand beside "Optionen" and "Lenken": in English they made the bar two languages.
+  effortName: (l: TurnLanguage, tier: EffortName) => pick(l, EFFORT_NAMES.en[tier], EFFORT_NAMES.de[tier]),
+  effortDescription: (l: TurnLanguage, tier: EffortName) => pick(l, EFFORT_TEXTS.en[tier], EFFORT_TEXTS.de[tier]),
+  effortLabel: (l: TurnLanguage, tier: EffortName) => pick(l, `Effort: ${EFFORT_NAMES.en[tier]}`, `Aufwand: ${EFFORT_NAMES.de[tier]}`),
+  effortTitle: (l: TurnLanguage, tier: EffortName) => pick(l,
+    `Effort: ${EFFORT_NAMES.en[tier]} — ${EFFORT_TEXTS.en[tier]}. Click to choose.`,
+    `Aufwand: ${EFFORT_NAMES.de[tier]} — ${EFFORT_TEXTS.de[tier]}. Klicken zum Auswählen.`),
+  imagesChip: (l: TurnLanguage, mode: "ask" | "auto") => pick(l, `Images: ${mode}`, `Bilder: ${mode === "ask" ? "fragen" : "auto"}`),
+  imagesTitle: (l: TurnLanguage, mode: "ask" | "auto") => mode === "auto"
+    ? pick(l,
+      "Images: auto — renders use the agent's settings without asking. Click to be asked first.",
+      "Bilder: auto — Bilder entstehen mit den Einstellungen des Agenten, ohne Rückfrage. Klicken, um vorher gefragt zu werden.")
+    : pick(l,
+      "Images: ask — before each render you can pick the engine, size, seed and mask. Click to always use the agent's settings.",
+      "Bilder: fragen — vor jedem Bild kannst du Engine, Größe, Seed und Maske wählen. Klicken, um immer die Einstellungen des Agenten zu nehmen."),
+  thinkingChip: (l: TurnLanguage, mode: boolean | undefined) => pick(l,
+    `Thinking: ${mode === undefined ? "auto" : mode ? "on" : "off"}`,
+    `Denken: ${mode === undefined ? "auto" : mode ? "an" : "aus"}`),
+  thinkingTitle: (l: TurnLanguage, mode: boolean | undefined) => mode === undefined
+    ? pick(l, "Thinking: auto — click to enable extended reasoning", "Denken: auto — klicken für erweitertes Nachdenken")
+    : mode
+      ? pick(l, "Thinking: ON — click to disable", "Denken: AN — klicken zum Ausschalten")
+      : pick(l, "Thinking: OFF — click to reset to auto", "Denken: AUS — klicken für auto"),
+  steerTitle: (l: TurnLanguage) => pick(l,
+    "Send this into the running turn — it is read at the turn's next step",
+    "In die laufende Aufgabe senden — wird bei ihrem nächsten Schritt gelesen"),
+  guardrailsLine: (l: TurnLanguage) => pick(l,
+    "Guardrails active · All messages audited · Overrides:",
+    "Guardrails aktiv · Alles wird protokolliert · Schalter:"),
+
+  // ── The note under the field ──────────────────────────────────────────────────────────────
+  notSent: (l: TurnLanguage, reason: string) => pick(l, `Not sent — ${reason}`, `Nicht gesendet — ${reason}`),
+  couldNotStop: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't stop the turn — ${reason}`,
+    `Die Aufgabe ließ sich nicht stoppen — ${reason}`),
+  couldNotRestart: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't restart there — ${reason}`,
+    `Der Neustart an dieser Stelle hat nicht geklappt — ${reason}`),
+  couldNotArchive: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't archive the session — ${reason}`,
+    `Die Sitzung ließ sich nicht archivieren — ${reason}`),
+  attachmentsCannotJoin: (l: TurnLanguage) => pick(l,
+    "Attachments can't join a running turn — send them once it finishes.",
+    "Anhänge können nicht in eine laufende Aufgabe — sende sie, sobald sie fertig ist."),
+  stillReadingAttachments: (l: TurnLanguage) => pick(l,
+    "Still reading your attachments — send this once they're done.",
+    "Deine Anhänge werden noch gelesen — sende das, sobald sie fertig sind."),
+  // Names the message's button by the label it has in this language (resend, above).
+  steerUndelivered: (l: TurnLanguage) => pick(l,
+    "Not delivered — use Resend on your message to try again.",
+    "Nicht zugestellt — über „Erneut senden“ an deiner Nachricht versuchst du es noch einmal."),
+  steerSentAsNext: (l: TurnLanguage) => pick(l,
+    "The turn had just finished — your message went out as the next one.",
+    "Die Aufgabe war gerade fertig — deine Nachricht ging als nächste raus."),
+  steerHeld: (l: TurnLanguage) => pick(l,
+    "The turn is finishing — your message goes out as soon as it does.",
+    "Die Aufgabe wird gerade fertig — deine Nachricht geht direkt danach raus."),
+  // Names the card's button by the label it has in this language (configure, above).
+  steerQueuedBehindCard: (l: TurnLanguage) => pick(l,
+    "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card.",
+    "Eingereiht — wird gelesen, sobald die Karte beantwortet und ihr Schritt fertig ist. Engine oder Prompt änderst du über „Anpassen“ auf der Karte."),
+  steerQueued: (l: TurnLanguage) => pick(l,
+    "Queued — folded into the running turn at its next step.",
+    "Eingereiht — fließt beim nächsten Schritt in die laufende Aufgabe ein."),
+  sendOrClearFirst: (l: TurnLanguage) => pick(l,
+    "Send or clear what you are writing first — asking again would replace it.",
+    "Sende oder lösche zuerst, was du gerade schreibst — die erneute Frage würde es ersetzen."),
+  printBlocked: (l: TurnLanguage) => pick(l,
+    "The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.",
+    "Der Browser hat die Druckansicht blockiert. Erlaube Pop-ups für diese Seite und exportiere dann erneut als PDF."),
+
+  // ── Attachments: the status line above the field ──────────────────────────────────────────
+  imageAttached: (l: TurnLanguage) => pick(l, "Image attached — click Send", "Bild angehängt — mit „Senden“ geht es raus"),
+  fileAttached: (l: TurnLanguage, filename: string) => pick(l,
+    `${filename} attached — click Send`,
+    `${filename} angehängt — mit „Senden“ geht es raus`),
+  uploadingDocuments: (l: TurnLanguage, count: number) => pick(l,
+    `Uploading document${count === 1 ? "" : "s"}…`,
+    count === 1 ? "Dokument wird hochgeladen…" : "Dokumente werden hochgeladen…"),
+  analysingImages: (l: TurnLanguage, count: number) => pick(l,
+    `Analysing image${count === 1 ? "" : "s"}…`,
+    count === 1 ? "Bild wird analysiert…" : "Bilder werden analysiert…"),
+
+  // ── A request the server refused without a word of its own (composables/httpErrors.ts) ────
+  uploadTooLarge: (l: TurnLanguage) => pick(l,
+    "Too large to upload (the server does not accept this much in one request).",
+    "Zu groß für den Upload (der Server nimmt so viel in einer Anfrage nicht an)."),
+  gatewayNoAnswer: (l: TurnLanguage, status: number) => pick(l,
+    `The gateway did not answer (HTTP ${status}); it may be restarting or still busy with the request.`,
+    `Das Gateway hat nicht geantwortet (HTTP ${status}); es startet vielleicht gerade neu oder ist noch mit der Anfrage beschäftigt.`),
+  serverSentPage: (l: TurnLanguage, status: number) => pick(l,
+    `The server answered with a web page instead of data (HTTP ${status}); the gateway address or the proxy in front of it is probably set up wrong.`,
+    `Der Server hat mit einer Webseite statt mit Daten geantwortet (HTTP ${status}); die Gateway-Adresse oder der Proxy davor ist vermutlich falsch eingerichtet.`),
 
   // ── Asking first ──────────────────────────────────────────────────────────────────────────
   restartConfirmTitle: (l: TurnLanguage) => pick(l, "Restart from this message?", "Ab dieser Nachricht neu starten?"),

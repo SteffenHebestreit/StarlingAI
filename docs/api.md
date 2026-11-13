@@ -490,6 +490,8 @@ These authenticated routes provide the backend bridge for the multimodal stack u
 | `GET` | `/api/multimodal/voices` | proxy to the configured TTS voice list |
 | `POST` | `/api/multimodal/tts` | JSON request, returns `audio/wav` |
 
+**Upload size.** The gateway accepts up to `multimodal.maxUploadBytes` (20 MB by default) on `/api/multimodal/*`, `/api/documents` and `/api/workspace/upload`, and `gateway.maxBodyBytes` (1 MB by default) everywhere else; a larger body gets `413` with `{ "error": "Request body too large" }`. The dashboard container's proxy (`docker/web/nginx.conf`) passes bodies of up to 64 MB on `/api/` and waits 300 s for an answer, so the gateway's limits are the ones that apply; raise `client_max_body_size` there together with `multimodal.maxUploadBytes` if that goes beyond 64 MB. The dashboard shows either refusal as "too large to upload".
+
 `GET /api/multimodal/config` returns the fully resolved `multimodal` section from the active runtime config.
 
 `PUT /api/multimodal/config` expects the full `multimodal` object and writes it back to the active writable config target. In local development that is typically `starlingai.json`; in Docker Compose it defaults to `/data/starlingai.runtime.json` layered on top of the read-only base config. The saved object includes:

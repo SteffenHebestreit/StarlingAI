@@ -559,7 +559,9 @@
       </div>
 
       <div v-if="showMultimodalStatus && (voiceStatusWorthShowing || (showWakeMode && wakeListening))" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
-        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide" role="status">
+        <!-- A sentence, set as one: in the capitals and wide spacing of a label, "report.pdf
+             attached" shouted its file name, and a long line read as a greyed-out input field. -->
+        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-xl px-3 py-1 text-xs" role="status">
           {{ voiceStatus }}
         </span>
         <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
@@ -983,13 +985,13 @@
               <summary
                 class="chat-dropdown__summary chat-dropdown__summary--effort"
                 :class="effortButtonClass"
-                :title="effortTitle"
-                :aria-label="`Effort: ${currentEffort}`"
+                :title="chatText.effortTitle(uiLanguage, currentEffort)"
+                :aria-label="chatText.effortLabel(uiLanguage, currentEffort)"
               >
                 <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
                 </svg>
-                <span class="capitalize">{{ currentEffort }}</span>
+                <span>{{ chatText.effortName(uiLanguage, currentEffort) }}</span>
                 <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
               </summary>
               <div class="chat-dropdown__menu chat-dropdown__menu--effort" role="radiogroup" :aria-label="chatText.effortForSession(uiLanguage)">
@@ -1005,11 +1007,11 @@
                   @click="chooseEffort(tier)"
                 >
                   <span class="effort-option__name">
-                    <span class="capitalize">{{ tier }}</span>
+                    <span>{{ chatText.effortName(uiLanguage, tier) }}</span>
                     <span v-if="tier === 'max'" class="effort-option__flag">{{ chatText.relaxesGates(uiLanguage) }}</span>
                     <span v-if="tier === currentEffort" class="effort-option__check" aria-hidden="true">✓</span>
                   </span>
-                  <span class="effort-option__text">{{ EFFORT_DESCRIPTIONS[tier] }}</span>
+                  <span class="effort-option__text">{{ chatText.effortDescription(uiLanguage, tier) }}</span>
                 </button>
               </div>
             </details>
@@ -1020,10 +1022,8 @@
               @click="toggleImageSettingsPrompt"
               class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="gateway.currentSessionImageSettingsPrompt === 'auto' ? 'opacity-60 hover:opacity-100' : 'opacity-80 hover:opacity-100'"
-              :title="gateway.currentSessionImageSettingsPrompt === 'auto'
-                ? 'Images: auto — renders use the agent\'s settings without asking. Click to be asked first.'
-                : 'Images: ask — before each render you can pick the engine, size, seed and mask. Click to always use the agent\'s settings.'"
-              :aria-label="`Image settings: ${gateway.currentSessionImageSettingsPrompt}`"
+              :title="chatText.imagesTitle(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
+              :aria-label="chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
               :aria-pressed="gateway.currentSessionImageSettingsPrompt === 'ask'"
             >
               <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1031,7 +1031,7 @@
                 <circle cx="8.5" cy="9.5" r="1.5" />
                 <path d="m21 16-5-5L5 20" />
               </svg>
-              <span>Images: {{ gateway.currentSessionImageSettingsPrompt }}</span>
+              <span>{{ chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt) }}</span>
             </button>
 
             <!-- Thinking: its state in words, like the Images button beside it. Glow alone carried
@@ -1045,43 +1045,46 @@
                 : thinkingMode === false
                   ? 'opacity-40 border-dashed'
                   : 'opacity-60 hover:opacity-100'"
-              :title="thinkingMode === undefined
-                ? 'Thinking: auto — click to enable extended reasoning'
-                : thinkingMode
-                  ? 'Thinking: ON — click to disable'
-                  : 'Thinking: OFF — click to reset to auto'"
-              :aria-label="thinkingMode === undefined ? 'Thinking auto' : thinkingMode ? 'Thinking on' : 'Thinking off'"
+              :title="chatText.thinkingTitle(uiLanguage, thinkingMode)"
+              :aria-label="chatText.thinkingChip(uiLanguage, thinkingMode)"
               :aria-pressed="thinkingMode === true"
             >
               <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
                 <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
               </svg>
-              <span>Thinking: {{ thinkingMode === undefined ? "auto" : thinkingMode ? "on" : "off" }}</span>
+              <span>{{ chatText.thinkingChip(uiLanguage, thinkingMode) }}</span>
             </button>
           </div>
 
-          <div class="chat-composer__primary-actions">
-            <!-- While a turn runs, Steer sends the composer into it — the same as Enter, for
-                 anyone not on a keyboard. Stop stays beside it. -->
+          <div class="chat-composer__primary-actions" :class="gateway.isLoading ? 'chat-composer__primary-actions--running' : ''">
+            <!-- While a turn runs: Stop, and Steer where Send stood — it sends the composer into
+                 the turn, the same as Enter, for anyone not on a keyboard. In Send's place, a
+                 second click on Send lands on Steer and never on Stop. Both are as wide as their
+                 word: two buttons of Send's width did not fit the row, Steer lay on the chips and
+                 Stop hung out of the bay. Stopping turns Stop's square into a spinner, at the
+                 same width. -->
+            <button
+              v-if="gateway.isLoading"
+              type="button"
+              :disabled="stoppingTurn"
+              :aria-busy="stoppingTurn"
+              :aria-label="stoppingTurn ? chatText.stopping(uiLanguage) : undefined"
+              @click="stopTurn"
+              class="chat-stop px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
+              :title="stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stopTitle(uiLanguage)"
+            >
+              <span class="chat-stop__glyph" :class="stoppingTurn ? 'chat-stop__glyph--busy' : ''" aria-hidden="true"></span>
+              <span>{{ chatText.stop(uiLanguage) }}</span>
+            </button>
             <button
               v-if="gateway.isLoading"
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
-              :title="sendBlockedReason || steerTitle"
+              :title="sendBlockedReason || chatText.steerTitle(uiLanguage)"
             >
               {{ chatText.steer(uiLanguage) }}
-            </button>
-            <button
-              v-if="gateway.isLoading"
-              type="button"
-              :disabled="stoppingTurn"
-              @click="stopTurn"
-              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
-              :title="chatText.stopTitle(uiLanguage)"
-            >
-              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
             <button
               v-else
@@ -1097,7 +1100,7 @@
       </div>
 
       <div class="text-xs text-gray-500 mt-1 px-1">
-        Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code> <code class="font-mono">--effort TIER</code>
+        {{ chatText.guardrailsLine(uiLanguage) }} <code class="font-mono whitespace-nowrap">--auto</code> <code class="font-mono whitespace-nowrap">--iter N</code> <code class="font-mono whitespace-nowrap">--agent NAME</code> <code class="font-mono whitespace-nowrap">--timeout N</code> <code class="font-mono whitespace-nowrap">--effort TIER</code>
       </div>
     </div>
     </div>
@@ -1305,7 +1308,6 @@ const offlineReason = computed(() => {
 /** Why nothing can be typed, for the field's placeholder — or "" while it can. */
 const composerBlockedReason = computed(() =>
   offlineReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
-const steerTitle = "Send this into the running turn — it is read at the turn's next step";
 /** Why Send (or Steer) is disabled, or "". */
 const sendBlockedReason = computed(() =>
   offlineReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
@@ -1385,8 +1387,9 @@ function formatApprovalCountdown(value: number): string {
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
 /** "… attached — click Send" stands only while something is attached. */
+let attachedNotice = "";
 function clearAttachedNotice(): void {
-  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && /attached — click Send$/.test(wakeStatus.value)) {
+  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && attachedNotice !== "" && wakeStatus.value === attachedNotice) {
     wakeStatus.value = "Voice idle";
   }
 }
@@ -1412,7 +1415,7 @@ async function stopTurn(): Promise<void> {
   try {
     await gateway.cancelTurn();
   } catch (err) {
-    showSteeringNote(`Couldn't stop the turn — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotStop(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   } finally {
     stoppingTurn.value = false;
   }
@@ -1464,14 +1467,7 @@ function cycleThinkingMode() {
 
 // ── Effort selector ──────────────────────────────────────────────────────────
 const EFFORT_TIERS: EffortTier[] = ["low", "medium", "high", "max"];
-const EFFORT_DESCRIPTIONS: Record<EffortTier, string> = {
-  low: "fast & tight — shorter timeout, fewer iterations, no extended reasoning",
-  medium: "balanced default — today's behavior",
-  high: "thorough — long timeout, deeper delegation, full-length output, extended reasoning (quality gates kept)",
-  max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
-};
 const currentEffort = computed<EffortTier>(() => gateway.currentSessionEffort);
-const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to choose.`);
 const effortButtonClass = computed(() => {
   switch (currentEffort.value) {
     case "max": return "multimodal-action-active thinking-toggle--on ring-1 ring-amber-400/60";
@@ -2456,11 +2452,12 @@ function queueAttachment(file: File): void {
   const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
   if (isImage) {
     pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
-    wakeStatus.value = `Image attached — click Send`;
+    attachedNotice = chatText.imageAttached(uiLanguage);
   } else {
     pendingDocumentContexts.value.push({ filename: file.name, file });
-    wakeStatus.value = `${file.name} attached — click Send`;
+    attachedNotice = chatText.fileAttached(uiLanguage, file.name);
   }
+  wakeStatus.value = attachedNotice;
   composerOpen.value = true;
 }
 
@@ -2733,7 +2730,7 @@ async function sendMessage() {
   if (gateway.isLoading) {
     if (hasImages || hasDocs) {
       // Text-only — attachments cannot join a running turn. Say so rather than ignore Enter.
-      showSteeringNote("Attachments can't join a running turn — send them once it finishes.", "error");
+      showSteeringNote(chatText.attachmentsCannotJoin(uiLanguage), "error");
       return;
     }
     inputText.value = "";
@@ -2744,22 +2741,22 @@ async function sendMessage() {
       return;
     }
     showSteeringNote(state === "undelivered"
-      ? "Not delivered — use Resend on your message to try again."
+      ? chatText.steerUndelivered(uiLanguage)
       : state === "sent"
-        ? "The turn had just finished — your message went out as the next one."
+        ? chatText.steerSentAsNext(uiLanguage)
         : state === "held"
-          ? "The turn is finishing — your message goes out as soon as it does."
+          ? chatText.steerHeld(uiLanguage)
           // Mid-turn messages are read between the turn's steps, and a step waiting on a card
           // does not finish until the card is answered.
           : gateway.hasOpenUserInput
-            ? "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card."
-            : "Queued — folded into the running turn at its next step.", state === "undelivered" ? "error" : "ok");
+            ? chatText.steerQueuedBehindCard(uiLanguage)
+            : chatText.steerQueued(uiLanguage), state === "undelivered" ? "error" : "ok");
     return;
   }
   // The previous message's attachments are still being read, and its turn has not started. Sent
   // now, this one would start first — and the analysed one would then replace it. It waits.
   if (analysing.value) {
-    showSteeringNote("Still reading your attachments — send this once they're done.", "error");
+    showSteeringNote(chatText.stillReadingAttachments(uiLanguage), "error");
     return;
   }
   const jobMatch = !hasImages && !hasDocs
@@ -2804,21 +2801,20 @@ async function sendMessage() {
     // into the engram document library. The prompt gets a hint + on-demand
     // retrieval (search_documents) instead of the whole file's text inlined.
     if (pendingDocs.length > 0) {
-      wakeStatus.value = `Uploading document${pendingDocs.length > 1 ? "s" : ""}…`;
+      wakeStatus.value = chatText.uploadingDocuments(uiLanguage, pendingDocs.length);
       const sid = gateway.currentSessionId ?? "shared";
       for (const d of pendingDocs) {
-        try {
-          const meta = await gateway.persistAttachment(d.file, sid);
-          attachments.push({
-            filename: meta.filename,
-            relativePath: meta.relativePath,
-            contentType: meta.contentType,
-            size: meta.size,
-            previewMode: "download",
-          });
-        } catch (err) {
-          wakeStatus.value = err instanceof Error ? err.message : String(err);
-        }
+        // A document that did not arrive stops the send: the message is about it. It used to go
+        // out without it, the reason passing through the status line and gone before the turn
+        // began.
+        const meta = await gateway.persistAttachment(d.file, sid).catch((err: unknown) => { throw namedFailure(d.filename, err); });
+        attachments.push({
+          filename: meta.filename,
+          relativePath: meta.relativePath,
+          contentType: meta.contentType,
+          size: meta.size,
+          previewMode: "download",
+        });
       }
     }
 
@@ -2828,12 +2824,12 @@ async function sendMessage() {
     // costs only that — the picture and its analysis still go out.
     let imageContext = "";
     if (pendingImages.length > 0) {
-      wakeStatus.value = `Analysing image${pendingImages.length > 1 ? "s" : ""}…`;
+      wakeStatus.value = chatText.analysingImages(uiLanguage, pendingImages.length);
       const sid = gateway.currentSessionId ?? "shared";
       const [dataUrls, stored, analyses] = await Promise.all([
         Promise.all(pendingImages.map(p => fileToDataUrl(p.file))),
         Promise.all(pendingImages.map(p => gateway.persistAttachment(p.file, sid).catch(() => null))),
-        Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file))),
+        Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file).catch((err: unknown) => { throw namedFailure(p.filename, err); }))),
       ]);
       for (let i = 0; i < pendingImages.length; i++) {
         const kept = stored[i];
@@ -2859,7 +2855,9 @@ async function sendMessage() {
     wakeStatus.value = "";
     await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
   } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
+    // Said once, as an error, under the field (giveBackUnsentText) — it stood in the status
+    // line above it as well, in a label's capitals.
+    wakeStatus.value = "";
     if (!pendingUserMessageId) {
       // Nothing reached the chat — no session could be made, or reading an attachment failed —
       // so the whole message goes back to the composer, attachments and all.
@@ -2881,7 +2879,12 @@ async function sendMessage() {
  */
 function giveBackUnsentText(text: string, error: unknown): void {
   if (text && !inputText.value.trim()) inputText.value = text;
-  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`, "error");
+  showSteeringNote(chatText.notSent(uiLanguage, error instanceof Error ? error.message : String(error)), "error");
+}
+
+/** Why an attachment failed, with the file it is about: there may be several. */
+function namedFailure(filename: string, error: unknown): Error {
+  return new Error(`${filename}: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 async function triggerScene(name: string) {
@@ -2989,7 +2992,7 @@ async function handleRewind(messageId: string) {
   } catch (err) {
     // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
     composerOpen.value = true;
-    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotRestart(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   }
 }
 
@@ -3002,7 +3005,7 @@ async function handleRetry(messageId: string) {
   if (!question?.content?.trim()) return;
   // Whatever is being drafted is not overwritten: the question goes out only from an empty input.
   if (inputText.value.trim()) {
-    showSteeringNote("Send or clear what you are writing first — asking again would replace it.", "error");
+    showSteeringNote(chatText.sendOrClearFirst(uiLanguage), "error");
     return;
   }
   inputText.value = question.content;
@@ -3020,7 +3023,7 @@ async function archiveCurrentSession() {
     await gateway.archiveSession(gateway.currentSessionId);
   } catch (err) {
     composerOpen.value = true;
-    showSteeringNote(`Couldn't archive the session — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotArchive(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   }
 }
 
@@ -3301,7 +3304,7 @@ async function exportPDF(): Promise<void> {
     const win = window.open("", "_blank");
     if (!win) {
       composerOpen.value = true;
-      showSteeringNote("The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.", "error");
+      showSteeringNote(chatText.printBlocked(uiLanguage), "error");
       return;
     }
     win.document.write(html);
@@ -4686,6 +4689,34 @@ onUnmounted(() => {
 /* Send/Stop fills the full column width. */
 .chat-composer__primary-actions > button { flex: 1 1 auto; }
 
+/* Stop: a square beside the word; a spinner in its place while the turn is being stopped. */
+.chat-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.chat-stop__glyph {
+  flex: none;
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 2px;
+  background: currentColor;
+}
+.chat-stop__glyph--busy {
+  width: 0.8rem;
+  height: 0.8rem;
+  margin: -0.06rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.32);
+  border-top-color: #fff;
+  animation: chatStopSpin 0.8s linear infinite;
+}
+@keyframes chatStopSpin {
+  to { transform: rotate(360deg); }
+}
+
 /* Thinking ON: the state reads through glow alone — cyan halo on the
    button, bloom on the brain glyph. */
 .thinking-toggle--on {
@@ -4733,7 +4764,10 @@ onUnmounted(() => {
 
 .chat-dropdown__menu {
   position: absolute;
-  right: 0;
+  /* From the chip's left edge, opening rightwards into the bay: the chips stand at the bay's left
+     edge, and a menu hung from a chip's right edge opened out of the bay — at 1100 px the Options
+     menu began 77 px left of the window, with Attach, audio and Record as its first items. */
+  left: 0;
   bottom: calc(100% + 0.65rem);
   width: min(24rem, calc(100vw - 2.5rem));
   max-height: min(70vh, 32rem);
@@ -4747,7 +4781,7 @@ onUnmounted(() => {
   padding: 0.9rem;
   display: grid;
   gap: 0.9rem;
-  transform-origin: bottom right;
+  transform-origin: bottom left;
   animation: hud-rise 300ms var(--ease-out) both;
 }
 
@@ -4988,20 +5022,23 @@ onUnmounted(() => {
     justify-content: space-between;
     gap: 0.9rem;
   }
-  .chat-composer__menus { flex-wrap: nowrap; }
+  /* The chips give way, the actions never: when the words get long (another language, a larger
+     font) the chips wrap onto a second line — they used to be held on one, and the actions were
+     pushed over them and out of the bay. */
+  .chat-composer__menus { flex: 1 1 auto; min-width: 0; }
   .chat-composer__primary-actions { flex: none; flex-wrap: nowrap; }
-  .chat-composer__primary-actions > button { min-width: 8.5rem; }
+  .chat-composer__primary-actions > button { flex: none; min-width: 8.5rem; }
+  /* Two actions while a turn runs, each as wide as its word. */
+  .chat-composer__primary-actions--running > button { min-width: 0; }
 }
 
-/* Below that the controls stack and each menu button sits at the bay's left edge: a menu hung
-   from its right edge opened leftwards, most of it off the screen, and Attach, audio and Record
-   are its first items. It hangs from the left edge there. */
+/* Below that the controls stack and the chips wrap, so a chip can stand anywhere in the row: the
+   menus hang from the ROW's left edge there, no wider than the row. From its own chip the Effort
+   menu ran 110 px out of a phone's right edge. */
 @media (max-width: 1023px) {
-  .chat-dropdown__menu {
-    left: 0;
-    right: auto;
-    transform-origin: bottom left;
-  }
+  .chat-composer__menus { position: relative; }
+  .chat-composer__menus > .chat-dropdown { position: static; }
+  .chat-composer__menus > .chat-dropdown > .chat-dropdown__menu { max-width: 100%; }
 }
 
 /* Motion on request only (the bay's 3D recede, the launcher's breathing, the fly-ins). */

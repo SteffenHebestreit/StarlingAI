@@ -1,4 +1,5 @@
 import { browserTimeZone } from "@/composables/browserTime";
+import { responseErrorMessage as parseErrorResponse } from "@/composables/httpErrors";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -1656,29 +1657,6 @@ export const useGatewayStore = defineStore("gateway", () => {
       ?? (pendingTurnRecovery.value?.requestId === requestId ? pendingTurnRecovery.value.finalStatus?.data : undefined);
     heldFinalStatuses.delete(requestId);
     return held;
-  }
-
-  async function parseErrorResponse(response: Response): Promise<string> {
-    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-    if (contentType.includes("application/json")) {
-      try {
-        const body = await response.json() as Record<string, unknown>;
-        return String(body["error"] ?? body["detail"] ?? response.statusText ?? `HTTP ${response.status}`);
-      } catch {
-        return response.statusText || `HTTP ${response.status}`;
-      }
-    }
-
-    try {
-      const text = (await response.text()).trim();
-      if (!text) return response.statusText || `HTTP ${response.status}`;
-      if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
-        return "Received HTML instead of JSON from the gateway. Check the web server API proxy and configured gateway URL.";
-      }
-      return text.slice(0, 240);
-    } catch {
-      return response.statusText || `HTTP ${response.status}`;
-    }
   }
 
   function parseContentDispositionFilename(headerValue: string | null): string | null {
