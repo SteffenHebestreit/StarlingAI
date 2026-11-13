@@ -505,8 +505,8 @@
             type="button"
             @click="previewModalUrl = img.previewUrl"
             class="shrink-0 rounded-l-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70"
-            title="Preview image"
-            :aria-label="`Preview ${img.filename}`"
+            :title="chatText.previewImage(uiLanguage)"
+            :aria-label="chatText.previewFile(uiLanguage, img.filename)"
           >
             <img :src="img.previewUrl" :alt="img.filename" class="h-9 w-9 object-cover rounded-l-xl" />
           </button>
@@ -517,8 +517,8 @@
             type="button"
             @click="removeImage(idx)"
             class="chip-remove text-purple-400 hover:text-red-300"
-            title="Remove"
-            :aria-label="`Remove ${img.filename}`"
+            :title="chatText.removeAttachment(uiLanguage)"
+            :aria-label="chatText.removeNamed(uiLanguage, img.filename)"
           >✕</button>
         </div>
       </div>
@@ -536,8 +536,8 @@
             type="button"
             @click="removeDocument(idx)"
             class="chip-remove text-cyan-400 hover:text-red-300"
-            title="Remove"
-            :aria-label="`Remove ${doc.filename}`"
+            :title="chatText.removeAttachment(uiLanguage)"
+            :aria-label="chatText.removeNamed(uiLanguage, doc.filename)"
           >✕</button>
         </div>
       </div>
@@ -550,8 +550,8 @@
           @click="removeFlag(flag.pattern)"
           type="button"
           :class="['flex items-center gap-1 px-2.5 py-1 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
-          title="Click to remove flag"
-          :aria-label="`Remove ${flag.label}`"
+          :title="chatText.removeFlagTitle(uiLanguage)"
+          :aria-label="chatText.removeNamed(uiLanguage, flag.label)"
         >
           {{ flag.label }}
           <span class="opacity-50 ml-0.5">✕</span>
@@ -565,21 +565,21 @@
           {{ voiceStatus }}
         </span>
         <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
-          Say {{ wakeKeywords.join(" / ") }}
+          {{ chatText.sayWakeWord(uiLanguage, wakeKeywords.join(" / ")) }}
         </span>
       </div>
 
       <div v-if="showWakeFeedbackCard" :class="['wake-feedback-card', `wake-feedback-card--${wakeFeedbackTone}`]">
         <div class="wake-feedback-card__header">
           <div>
-            <div class="wake-feedback-card__eyebrow">Wake Voice</div>
+            <div class="wake-feedback-card__eyebrow">{{ chatText.wakeEyebrow(uiLanguage) }}</div>
             <div class="wake-feedback-card__title">{{ wakeFeedbackTitle }}</div>
           </div>
           <div class="wake-feedback-card__steps">
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 1 ? 'wake-feedback-card__step--active' : '']">Listening</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 2 ? 'wake-feedback-card__step--active' : '']">Recording</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 3 ? 'wake-feedback-card__step--active' : '']">Transcribing</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 4 ? 'wake-feedback-card__step--active' : '']">Ready</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 1 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepListening(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 2 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepRecording(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 3 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepTranscribing(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 4 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepReady(uiLanguage) }}</span>
           </div>
         </div>
         <div class="wake-feedback-card__message">{{ wakeFeedbackMessage }}</div>
@@ -631,7 +631,7 @@
             aria-hidden="true"
           ><span /><span /><span /></span>
           <div class="voice-bar__text">
-            <div class="voice-bar__eyebrow">{{ voiceConversationMode ? 'Voice conversation' : 'Voice' }}</div>
+            <div class="voice-bar__eyebrow">{{ chatText.voiceEyebrow(uiLanguage, voiceConversationMode) }}</div>
             <div class="voice-bar__label" :class="voiceNotice ? 'voice-bar__label--notice' : ''">{{ voiceNotice || voiceBarLabel }}</div>
           </div>
           <div v-if="voiceBarListening" class="voice-bar__meter" aria-hidden="true">
@@ -648,7 +648,7 @@
               v-if="!voiceBarBusy && !voiceConversationMode && recordingState === 'idle'"
               type="button"
               class="voice-bar__close"
-              aria-label="Close the voice bar"
+              :aria-label="chatText.closeVoiceBar(uiLanguage)"
               @click="dismissVoiceBar()"
             >✕</button>
           </div>
@@ -664,9 +664,9 @@
             v-if="slashOpen && slashSuggestions.length > 0"
             class="slash-popup"
             role="listbox"
-            aria-label="Slash command suggestions"
+            :aria-label="chatText.slashSuggestions(uiLanguage)"
           >
-            <div class="slash-popup__hint">↑↓ navigate · Enter / Tab to insert · Esc to dismiss</div>
+            <div class="slash-popup__hint">{{ chatText.slashHint(uiLanguage) }}</div>
             <button
               v-for="(item, index) in slashSuggestions"
               :key="`${item.kind}:${item.name}`"
@@ -720,8 +720,8 @@
                       @click="fileInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Attach a document or image'"
-                      aria-label="Attach file"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.attachTitle(uiLanguage)"
+                      :aria-label="chatText.attachLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
@@ -735,8 +735,8 @@
                       @click="audioInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Upload an audio file for transcription'"
-                      aria-label="Upload audio"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.uploadAudioTitle(uiLanguage)"
+                      :aria-label="chatText.uploadAudioLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 16V4" />
@@ -751,8 +751,8 @@
                       :disabled="(multimodalBusy && recordingState !== 'recording') || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? 'Stop microphone recording' : multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Record voice from the microphone'"
-                      :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
+                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? chatText.stopMicRecording(uiLanguage) : multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.recordFromMic(uiLanguage)"
+                      :aria-label="recordingState === 'recording' ? chatText.stopRecordingLabel(uiLanguage) : chatText.recordVoiceLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
@@ -767,8 +767,8 @@
                       :disabled="recordingState === 'processing' || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="wakeListening ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? 'A voice conversation listens without a wake word' : (wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection')"
-                      :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
+                      :title="voiceConversationMode ? chatText.conversationNeedsNoWakeWord(uiLanguage) : (wakeListening ? chatText.disableWakeWord(uiLanguage) : chatText.enableWakeWord(uiLanguage))"
+                      :aria-label="wakeListening ? chatText.stopWakeMode(uiLanguage) : chatText.startWakeMode(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14.75 4.5c-2.9 0-5.25 2.35-5.25 5.25v4.5c0 2.07 1.68 3.75 3.75 3.75h.25" />
@@ -784,8 +784,8 @@
                       :disabled="recordingState !== 'idle' || wakeListening"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="voiceConversationMode ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? `Voice conversation: ${voiceConversationStatusLabel} — click to end` : 'Start a hands-free voice conversation: talk, pause, and it is sent; the answer is spoken, and talking over it interrupts'"
-                      :aria-label="voiceConversationMode ? 'Stop voice conversation' : 'Start voice conversation'"
+                      :title="voiceConversationMode ? chatText.conversationRunning(uiLanguage) : chatText.startConversationTitle(uiLanguage)"
+                      :aria-label="voiceConversationMode ? chatText.stopConversationLabel(uiLanguage) : chatText.startConversationLabel(uiLanguage)"
                       :aria-pressed="voiceConversationMode"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -800,8 +800,8 @@
                       @click="voice.speakLatest()"
                       :disabled="!latestAssistantText"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Read the latest answer aloud (a long one as a summary)"
-                      aria-label="Speak reply"
+                      :title="chatText.readLatestAloud(uiLanguage)"
+                      :aria-label="chatText.speakReplyLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M5 9v6" />
@@ -816,8 +816,8 @@
                       @click="voice.toggleSpeak()"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
                       :class="speakReplyEnabled ? 'multimodal-action-active' : ''"
-                      :title="speakReplyEnabled ? 'Speech is ON: tones and updates while a turn runs, the answer read aloud — click to turn off' : 'Speech is OFF — click for tones and updates while a turn runs, and the answer read aloud'"
-                      :aria-label="speakReplyEnabled ? 'Turn speech off' : 'Turn speech on'"
+                      :title="speakReplyEnabled ? chatText.speechOnTitle(uiLanguage) : chatText.speechOffTitle(uiLanguage)"
+                      :aria-label="speakReplyEnabled ? chatText.turnSpeechOff(uiLanguage) : chatText.turnSpeechOn(uiLanguage)"
                       :aria-pressed="speakReplyEnabled"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -829,9 +829,9 @@
                   </div>
                   <div v-if="showSpeechPlayback || showAudioUpload" class="chat-dropdown__voice-settings">
                     <label v-if="showAudioUpload" class="chat-dropdown__voice-setting">
-                      <span>Spoken language</span>
-                      <select v-model="sttLanguage" class="chat-dropdown__select" title="The language your recordings are transcribed in">
-                        <option value="auto">Detect</option>
+                      <span>{{ chatText.spokenLanguage(uiLanguage) }}</span>
+                      <select v-model="sttLanguage" class="chat-dropdown__select" :title="chatText.spokenLanguageTitle(uiLanguage)">
+                        <option value="auto">{{ chatText.detectLanguage(uiLanguage) }}</option>
                         <option value="de">Deutsch</option>
                         <option value="en">English</option>
                         <option value="pl">Polski</option>
@@ -839,7 +839,7 @@
                     </label>
                     <label v-if="showSpeechPlayback" class="chat-dropdown__voice-setting">
                       <span>{{ chatText.whileTurnRuns(uiLanguage) }}</span>
-                      <select v-model="speechUpdates" class="chat-dropdown__select" title="What you hear while the assistant works, with speech on">
+                      <select v-model="speechUpdates" class="chat-dropdown__select" :title="chatText.speechUpdatesTitle(uiLanguage)">
                         <option value="voice">{{ chatText.spokenUpdates(uiLanguage) }}</option>
                         <option value="tones">{{ chatText.tonesOnly(uiLanguage) }}</option>
                         <option value="off">{{ chatText.silentUntilAnswer(uiLanguage) }}</option>
@@ -2210,10 +2210,10 @@ const showMultimodalStatus = computed(() =>
   (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value)
 );
 const voiceStatus = computed(() => {
-  if (recordingState.value === "recording") return "Recording from microphone";
-  if (recordingState.value === "processing") return "Transcribing audio";
-  if (sttAvailable.value && !browserRecordingAvailable.value) return "Microphone recording is unavailable in this browser";
-  if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return "Wake-word detection is unavailable in this browser";
+  if (recordingState.value === "recording") return chatText.statusRecording(uiLanguage);
+  if (recordingState.value === "processing") return chatText.statusTranscribing(uiLanguage);
+  if (sttAvailable.value && !browserRecordingAvailable.value) return chatText.micUnavailable(uiLanguage);
+  if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return chatText.wakeUnavailable(uiLanguage);
   return wakeStatus.value;
 });
 const voiceStatusWorthShowing = computed(() => voiceStatus.value.trim() !== "" && voiceStatus.value !== "Voice idle");
@@ -2225,13 +2225,7 @@ const wakeFeedbackTone = computed(() => {
   if (wakeFeedbackState.value === "recording") return "recording";
   return "listening";
 });
-const wakeFeedbackTitle = computed(() => {
-  if (wakeFeedbackState.value === "error") return "Wake pipeline needs attention";
-  if (wakeFeedbackState.value === "success") return "Recording finished";
-  if (wakeFeedbackState.value === "processing") return "Transcribing your recording";
-  if (wakeFeedbackState.value === "recording") return "Recording in progress";
-  return "Wake listening active";
-});
+const wakeFeedbackTitle = computed(() => chatText.wakeTitle(uiLanguage, wakeFeedbackState.value));
 const wakeFeedbackStep = computed(() => {
   if (wakeFeedbackState.value === "success") return 4;
   if (wakeFeedbackState.value === "processing") return 3;
@@ -2326,7 +2320,7 @@ function scheduleWakeRestart(delayMs: number) {
     wakeRestartTimer = null;
     try {
       wakeRecognition?.start();
-      wakeStatus.value = "Wake listening";
+      wakeStatus.value = chatText.wakeListeningStatus(uiLanguage);
     } catch {
       scheduleWakeRestart(500);
     }
@@ -2351,14 +2345,14 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
 
     if (wakeStopPhrases.value.some((phrase) => lowered.includes(phrase.toLowerCase()))) {
       voice.finishRecording();
-      wakeStatus.value = "Stop phrase detected";
-      setWakeFeedback("processing", "Stop phrase detected. Finishing the recording and starting transcription.");
+      wakeStatus.value = chatText.stopPhraseDetected(uiLanguage);
+      setWakeFeedback("processing", chatText.stopPhraseFeedback(uiLanguage));
       return;
     }
 
     const matchedKeyword = wakeKeywords.value.find((phrase) => lowered.includes(phrase.toLowerCase()));
     if (matchedKeyword && recordingState.value === "idle") {
-      wakeStatus.value = `Wake phrase detected: ${matchedKeyword}`;
+      wakeStatus.value = chatText.wakePhraseDetected(uiLanguage, matchedKeyword);
       void startWakeRecording();
       return;
     }
@@ -2367,7 +2361,7 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
 
 function handleWakeError(event: SpeechRecognitionErrorEventLike) {
   const error = event.error ?? "unknown";
-  wakeStatus.value = `Wake recognition error: ${error}`;
+  wakeStatus.value = chatText.wakeRecognitionError(uiLanguage, error);
   setWakeFeedback("error", wakeStatus.value, 6000);
   if (wakeListening.value && !["not-allowed", "service-not-allowed"].includes(error)) {
     scheduleWakeRestart(1000);
@@ -2378,32 +2372,32 @@ async function toggleWakeListening() {
   if (wakeListening.value) {
     wakeListening.value = false;
     stopWakeRecognition();
-    wakeStatus.value = "Wake mode off";
+    wakeStatus.value = chatText.wakeModeOff(uiLanguage);
     setWakeFeedback("idle", "");
     return;
   }
 
   const recognition = createSpeechRecognition();
   if (!recognition) {
-    wakeStatus.value = "SpeechRecognition unavailable in this browser";
+    wakeStatus.value = chatText.speechRecognitionUnavailable(uiLanguage);
     setWakeFeedback("error", wakeStatus.value, 6000);
     return;
   }
 
   wakeRecognition = recognition;
   wakeListening.value = true;
-  wakeStatus.value = "Wake listening";
-  setWakeFeedback("listening", `Listening for ${wakeKeywords.value.join(" / ")}`);
+  wakeStatus.value = chatText.wakeListeningStatus(uiLanguage);
+  setWakeFeedback("listening", chatText.listeningFor(uiLanguage, wakeKeywords.value.join(" / ")));
   recognition.start();
 }
 
 function reportRecording(outcome: RecordingOutcome): void {
   if (outcome.kind === "transcribed") {
-    wakeStatus.value = `Transcript ready${outcome.language ? ` (${outcome.language})` : ""}`;
+    wakeStatus.value = chatText.transcriptReady(uiLanguage, outcome.language || undefined);
     setWakeFeedback("success", wakeStatus.value, 5000);
   } else if (outcome.kind === "empty") {
-    wakeStatus.value = "No speech was heard";
-    setWakeFeedback("error", "No speech was heard. Speak a little longer and try again.", 7000);
+    wakeStatus.value = chatText.noSpeechHeard(uiLanguage);
+    setWakeFeedback("error", chatText.noSpeechHint(uiLanguage), 7000);
   } else {
     wakeStatus.value = outcome.message;
     setWakeFeedback("error", outcome.message, 7000);
@@ -2413,8 +2407,8 @@ function reportRecording(outcome: RecordingOutcome): void {
 /** A wake phrase was heard: record what follows it, then listen for the phrase again. */
 async function startWakeRecording(): Promise<void> {
   stopWakeRecognition();
-  wakeStatus.value = "Wake-triggered recording";
-  setWakeFeedback("recording", "Wake word detected. Recording has started.");
+  wakeStatus.value = chatText.wakeTriggeredRecording(uiLanguage);
+  setWakeFeedback("recording", chatText.wakeRecordingStarted(uiLanguage));
   reportRecording(await voice.startRecording());
   if (wakeListening.value) {
     wakeRecognition = createSpeechRecognition();
@@ -2424,12 +2418,12 @@ async function startWakeRecording(): Promise<void> {
 
 async function toggleRecording() {
   if (recordingState.value === "recording") {
-    setWakeFeedback("processing", "Recording finished. Transcribing now...");
+    setWakeFeedback("processing", chatText.recordingFinishedTranscribing(uiLanguage));
     voice.finishRecording();
     return;
   }
   if (recordingState.value !== "idle") return;
-  wakeStatus.value = "Recording from microphone";
+  wakeStatus.value = chatText.statusRecording(uiLanguage);
   reportRecording(await voice.startRecording());
 }
 
@@ -2471,12 +2465,12 @@ async function onAudioSelected(event: Event) {
 
 async function transcribeDroppedAudio(file: File): Promise<void> {
   multimodalBusy.value = true;
-  wakeStatus.value = `Transcribing ${file.name}`;
+  wakeStatus.value = chatText.transcribingFile(uiLanguage, file.name);
   try {
     const outcome = await voice.transcribeFile(file);
     wakeStatus.value = outcome.kind === "transcribed"
-      ? `Audio added from ${file.name}`
-      : outcome.kind === "empty" ? "Audio transcription returned no text" : outcome.message;
+      ? chatText.audioAddedFrom(uiLanguage, file.name)
+      : outcome.kind === "empty" ? chatText.audioNoText(uiLanguage) : outcome.message;
   } finally {
     multimodalBusy.value = false;
   }
@@ -2547,7 +2541,6 @@ async function onChatDrop(event: DragEvent): Promise<void> {
 }
 
 /** The voice-conversation toggle's tooltip: what the conversation is doing. */
-const voiceConversationStatusLabel = computed(() => (voiceConversationMode.value ? voicePhase.value : "off"));
 
 const voiceBarBusy = computed(() => Boolean(speechActivity.value || preparingReply.value));
 const voiceBarListening = computed(() =>
@@ -2560,18 +2553,18 @@ watch(showVoiceBar, (showing) => { if (showing) composerOpen.value = true; });
 /** What the voice bar says is happening. */
 const voiceBarLabel = computed(() => {
   const speaking = speechActivity.value;
-  if (speaking?.priority === "reply") return speaking.label === "summary" ? "Speaking a summary of the answer" : "Speaking the answer";
-  if (speaking) return speaking.label ? `“${speaking.label}”` : "Speaking";
-  if (preparingReply.value) return "Preparing a spoken summary…";
+  if (speaking?.priority === "reply") return speaking.label === "summary" ? chatText.speakingSummary(uiLanguage) : chatText.speakingAnswer(uiLanguage);
+  if (speaking) return speaking.label ? `“${speaking.label}”` : chatText.speaking(uiLanguage);
+  if (preparingReply.value) return chatText.preparingSummary(uiLanguage);
   if (voiceConversationMode.value) {
-    if (voicePhase.value === "hearing") return "Hearing you…";
-    if (voicePhase.value === "transcribing") return "Transcribing…";
-    if (voicePhase.value === "thinking") return "Working on it…";
-    if (voicePhase.value === "listening") return "Listening — just talk";
+    if (voicePhase.value === "hearing") return chatText.hearingYou(uiLanguage);
+    if (voicePhase.value === "transcribing") return chatText.transcribingShort(uiLanguage);
+    if (voicePhase.value === "thinking") return chatText.workingOnIt(uiLanguage);
+    if (voicePhase.value === "listening") return chatText.listeningJustTalk(uiLanguage);
   }
-  if (recordingState.value === "recording") return "Recording — pause or press Done to finish";
-  if (recordingState.value === "processing") return "Transcribing…";
-  if (lastReply.value) return lastReply.value.summarized ? "Spoke a summary of the answer" : "Spoke the answer";
+  if (recordingState.value === "recording") return chatText.recordingPauseOrDone(uiLanguage);
+  if (recordingState.value === "processing") return chatText.transcribingShort(uiLanguage);
+  if (lastReply.value) return lastReply.value.summarized ? chatText.spokeSummary(uiLanguage) : chatText.spokeAnswer(uiLanguage);
   return "";
 });
 

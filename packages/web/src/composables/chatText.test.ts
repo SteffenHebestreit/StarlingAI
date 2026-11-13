@@ -18,6 +18,9 @@ describe("chatText", () => {
       notSent: ["too large"], couldNotStop: ["timeout"], couldNotRestart: ["timeout"], couldNotArchive: ["timeout"],
       fileAttached: ["report.pdf"], uploadingDocuments: [2], analysingImages: [1],
       gatewayNoAnswer: [504], serverSentPage: [404],
+      previewFile: ["fox.png"], removeNamed: ["fox.png"], voiceEyebrow: [true], sayWakeWord: ["Luna"],
+      listeningFor: ["Luna"], wakePhraseDetected: ["Luna"], wakeRecognitionError: ["network"], transcriptReady: ["de"],
+      transcribingFile: ["memo.wav"], audioAddedFrom: ["memo.wav"], wakeTitle: ["recording"],
     };
     for (const [key, label] of Object.entries(chatText)) {
       const args = sample[key] ?? [];
@@ -47,6 +50,18 @@ describe("chatText", () => {
     expect(chatText.imagesChip("de", "ask")).toBe("Bilder: fragen");
     expect(chatText.thinkingChip("de", undefined)).toBe("Denken: auto");
     expect(chatText.thinkingChip("en", false)).toBe("Thinking: off");
+  });
+
+  it("words the voice bar and the wake card in every state, in both languages", () => {
+    for (const lang of ["en", "de"] as const) {
+      const states = ["idle", "listening", "recording", "processing", "success", "error"] as const;
+      // "idle" and "listening" share the resting title; the other four are their own.
+      expect(new Set(states.map((state) => chatText.wakeTitle(lang, state))).size).toBe(5);
+      expect(chatText.voiceEyebrow(lang, true)).not.toBe(chatText.voiceEyebrow(lang, false));
+      expect(chatText.recordingPauseOrDone(lang)).toContain(chatText.voiceDone(lang));
+      expect(chatText.transcriptReady(lang)).not.toContain("(");
+      expect(chatText.transcriptReady(lang, "de")).toContain("(de)");
+    }
   });
 
   it("names the count the way each language does", () => {

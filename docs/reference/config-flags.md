@@ -65,7 +65,7 @@ Every public schema field, where it is declared, and how many production files r
 | `blendMode` | packages/core/src/config/schemas/retrieval.ts:40 | 4 |
 | `blockOn` | packages/core/src/config/schema.ts:1318 | 1 |
 | `botToken` | packages/core/src/config/schemas/channels.ts:10 | 10 |
-| `browser` | packages/core/src/config/schemas/decisions.ts:104 | 121 |
+| `browser` | packages/core/src/config/schemas/decisions.ts:104 | 120 |
 | `bucket` | packages/core/src/config/schema.ts:537 | 35 |
 | `budget` | packages/core/src/config/schema.ts:1805 | 108 |
 | `budgets` | packages/core/src/config/schema.ts:598 | 16 |
@@ -88,7 +88,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:463 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:465 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:119 | 4 |
-| `command` | packages/core/src/config/schema.ts:751 | 65 |
+| `command` | packages/core/src/config/schema.ts:751 | 66 |
 | `completes` | packages/core/src/config/schema.ts:967 | 16 |
 | `completionPer1m` | packages/core/src/config/schema.ts:590 | 1 |
 | `composer` | packages/core/src/config/schema.ts:1536 | 21 |

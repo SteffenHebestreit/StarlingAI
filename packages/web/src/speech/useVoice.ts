@@ -16,6 +16,7 @@ import { useStorage } from "@vueuse/core";
 import { onBeforeUnmount, ref, shallowRef, watch, type Ref } from "vue";
 import { useGatewayStore, type ChatMessage } from "@/stores/gateway";
 import { useMultimodalStore } from "@/stores/multimodal";
+import { browserLanguage, chatText } from "@/composables/chatText";
 import { playEarcon, unlockAudio, webAudioSink, type Earcon } from "./audioOutput";
 import { browserVoice } from "./browserVoice";
 import { PhraseBook, phrasesFor, spokenPhraseLanguage, type PhraseKind } from "./speechPhrases";
@@ -172,7 +173,7 @@ export function useVoice(options: UseVoiceOptions) {
     lastLanguage.value = language;
     lastReply.value = { messageId: message.id, fullText, spokenText, summarized, language };
     const outcome = await player.speak({ text: spokenText, language, priority: "reply", label: summarized ? "summary" : "answer" });
-    if (outcome === "failed") notice.value = "The answer could not be spoken — the speech service and the browser's voice both failed.";
+    if (outcome === "failed") notice.value = chatText.couldNotSpeak(browserLanguage());
   }
 
   /** Silences everything: the answer, a summary being made for it, and any line under way. */
@@ -401,7 +402,7 @@ export function useVoice(options: UseVoiceOptions) {
 
   /** Records until the user pauses, then transcribes into the composer; resolves with how it went. */
   async function startRecording(): Promise<RecordingOutcome> {
-    if (recording.value !== "idle" || conversation.value) return { kind: "error", message: "The microphone is in use" };
+    if (recording.value !== "idle" || conversation.value) return { kind: "error", message: chatText.micInUse(browserLanguage()) };
     unlockAudio();
     stopSpeaking();
     const capture = new VoiceCapture(
