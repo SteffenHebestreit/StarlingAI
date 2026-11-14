@@ -563,7 +563,7 @@ Every public schema field, where it is declared, and how many production files r
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |
 | `visionModel` | packages/core/src/config/schemas/multimodal.ts:21 | 12 |
-| `visionTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:29 | 1 |
+| `visionTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:29 | 2 |
 | `voices` | packages/core/src/config/schemas/multimodal.ts:49 | 13 |
 | `voiceSamplePath` | packages/core/src/config/schemas/multimodal.ts:58 | 5 |
 | `voiceSampleText` | packages/core/src/config/schemas/multimodal.ts:59 | 5 |

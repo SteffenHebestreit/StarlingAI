@@ -2120,6 +2120,90 @@ describe("gateway HTTP bridge", () => {
     }
   }, gatewayTestTimeoutMs);
 
+  it("gives an image analysis the vision model's time, not the file converter's", async () => {
+    // A 5 MB picture attached in the chat: the vision model answered after the file converter's
+    // timeout (60 s) and inside its own (120 s), and the route had waited the former.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-gateway-"));
+    const port = 18000 + Math.floor(Math.random() * 1000);
+    const upstreamPort = 19000 + Math.floor(Math.random() * 1000);
+    const configPath = join(tempDir, "starlingai.json");
+    let visionRequests = 0;
+
+    upstreamServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        visionRequests += 1;
+        req.resume();
+        req.on("end", () => {
+          // Slower than files.timeoutMs below, faster than files.visionTimeoutMs.
+          setTimeout(() => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ choices: [{ message: { content: "A teal wave over dark hills." } }] }));
+          }, 1600);
+        });
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstreamServer?.listen(upstreamPort, "127.0.0.1", (error?: Error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { port, jwtSecret: "v".repeat(32) },
+      multimodal: {
+        files: {
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          timeoutMs: 1000,
+          visionModel: "lmstudio/vision-test",
+          visionBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+          visionApiKey: "test-key",
+          visionTimeoutMs: 10_000,
+        },
+      },
+    }), "utf8");
+
+    process.env["SAI_CONFIG_PATH"] = configPath;
+    delete process.env["SAI_JWT_SECRET"];
+    process.env["SAI_MASTER_KEY"] = "m".repeat(32);
+    process.env["SAI_CRED_STORE"] = join(tempDir, PRODUCT.stateDirName, "credentials.enc");
+    process.env["SAI_AUDIT_LOG"] = join(tempDir, PRODUCT.stateDirName, "audit.jsonl");
+
+    vi.resetModules();
+
+    const [{ createGateway }, auth] = await Promise.all([
+      import("../gateway/index.js"),
+      import("../gateway/auth.js"),
+    ]);
+
+    const gateway = createGateway();
+    await gateway.start();
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await waitForHealth(`${baseUrl}/healthz`);
+      const token = await auth.createToken("admin", { role: "admin" });
+
+      const form = new FormData();
+      form.append("file", new File([new Uint8Array([137, 80, 78, 71])], "wave.png", { type: "image/png" }));
+      const response = await fetch(`${baseUrl}/api/multimodal/analyze-image`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+
+      expect(visionRequests).toBe(1);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ analysis: "A teal wave over dark hills.", filename: "wave.png" });
+    } finally {
+      await gateway.stop();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }, gatewayTestTimeoutMs);
+
   it("proxies multimodal file, STT, TTS, and voice listing routes", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-multimodal-"));
     const port = 23500 + Math.floor(Math.random() * 1000);
