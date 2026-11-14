@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:769 | 1 |
 | `admin` | packages/core/src/config/schema.ts:452 | 61 |
-| `after` | packages/core/src/config/schema.ts:1585 | 333 |
+| `after` | packages/core/src/config/schema.ts:1585 | 334 |
 | `agents` | packages/core/src/config/schema.ts:1573 | 208 |
 | `alertmanager` | packages/core/src/config/schema.ts:1218 | 1 |
 | `all` | packages/core/src/config/schema.ts:1371 | 349 |
@@ -179,7 +179,7 @@ Every public schema field, where it is declared, and how many production files r
 | `engramBaseUrl` | packages/core/src/config/schemas/retrieval.ts:92 | 2 |
 | `env` | packages/core/src/config/schema.ts:757 | 132 |
 | `errorMatches` | packages/core/src/config/schema.ts:1584 | 3 |
-| `evidence` | packages/core/src/config/schema.ts:1836 | 125 |
+| `evidence` | packages/core/src/config/schema.ts:1836 | 126 |
 | `evidenceAnchoringLengthScaled` | packages/core/src/config/schemas/orchestration.ts:312 | 1 |
 | `evidenceAnchoringOnGatheredEvidence` | packages/core/src/config/schemas/orchestration.ts:292 | 1 |
 | `excludeDelegationWaitFromTurnBudget` | packages/core/src/config/schemas/orchestration.ts:587 | 3 |
@@ -241,10 +241,10 @@ Every public schema field, where it is declared, and how many production files r
 | `keywords` | packages/core/src/config/schemas/multimodal.ts:275 | 31 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1152 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1150 | 1 |
-| `label` | packages/core/src/config/schema.ts:299 | 180 |
+| `label` | packages/core/src/config/schema.ts:299 | 181 |
 | `labeledAt` | packages/core/src/config/schema.ts:986 | 1 |
 | `labeledBy` | packages/core/src/config/schema.ts:985 | 1 |
-| `language` | packages/core/src/config/schemas/multimodal.ts:39 | 132 |
+| `language` | packages/core/src/config/schemas/multimodal.ts:39 | 133 |
 | `layaFirstMs` | packages/core/src/config/schemas/decisions.ts:71 | 3 |
 | `leanContextInjection` | packages/core/src/config/schema.ts:1964 | 3 |
 | `leanSynthesisPrompt` | packages/core/src/config/schemas/orchestration.ts:320 | 1 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1622 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:905 | 1 |
 | `mode` | packages/core/src/config/schema.ts:554 | 164 |
-| `model` | packages/core/src/config/schema.ts:1317 | 327 |
+| `model` | packages/core/src/config/schema.ts:1317 | 329 |
 | `modelModeration` | packages/core/src/config/schema.ts:1313 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1880 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1895 | 5 |
@@ -434,7 +434,7 @@ Every public schema field, where it is declared, and how many production files r
 | `role` | packages/core/src/config/schema.ts:1001 | 186 |
 | `roles` | packages/core/src/config/schema.ts:1538 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:477 | 1 |
-| `routing` | packages/core/src/config/schema.ts:277 | 125 |
+| `routing` | packages/core/src/config/schema.ts:277 | 126 |
 | `routingEnglish` | packages/core/src/config/schemas/orchestration.ts:914 | 6 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:895 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:852 | 2 |
@@ -506,7 +506,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:1003 | 23 |
 | `tags` | packages/core/src/config/schema.ts:650 | 82 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:78 | 5 |
-| `task` | packages/core/src/config/schema.ts:1382 | 191 |
+| `task` | packages/core/src/config/schema.ts:1382 | 192 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1978 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:526 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:735 | 1 |
@@ -527,7 +527,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 72 |
 | `toolPolicy` | packages/core/src/config/schema.ts:1549 | 1 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:695 | 2 |
-| `tools` | packages/core/src/config/schema.ts:1004 | 277 |
+| `tools` | packages/core/src/config/schema.ts:1004 | 278 |
 | `topK` | packages/core/src/config/schema.ts:175 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:164 | 7 |
 | `topP` | packages/core/src/config/schema.ts:174 | 4 |

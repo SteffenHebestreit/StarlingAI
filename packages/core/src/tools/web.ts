@@ -305,8 +305,13 @@ registerTool({
   async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const url = String(args["url"] ?? "");
     const maxLength = Math.min(32000, Math.max(500, Number(args["maxLength"] ?? 8000)));
-    const isSubAgent = !!ctx.currentAgentName;
-    const shareSuffix = isSubAgent
+    // Only a run under a coordinator has siblings reading what it shares: its session is
+    // "sub:sub:…" (agent/sub-agent.ts, the evidence checkpoint has the same gate). A run the main
+    // assistant delegated hands its answer back itself, and its pages are auto-shared; asked on
+    // every fetch, the researcher published its whole answer before writing it again (5 of 9 direct
+    // runs on the real web, 30 s each time).
+    const servesSiblings = Boolean(ctx.currentAgentName) && (ctx.sessionId ?? "").startsWith("sub:sub:");
+    const shareSuffix = servesSiblings
       ? "\n\n💡 If this content is useful for your task, call share_finding now to publish key facts for sibling agents before your iteration budget runs out."
       : "";
 
