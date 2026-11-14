@@ -4012,6 +4012,12 @@ onUnmounted(() => {
   100% { opacity: 0; transform: perspective(900px) translateZ(-220px) translateY(-44px) rotateX(-10deg); }
 }
 
+/* Each side keeps a lane free at its outer edge for the round buttons parked there
+   (--pod-lane-l / -r, composables/podLanes.ts), at every width: a question stands at the right
+   edge on a phone too, and ran under the buttons there. */
+.chat-message-scroll :deep(.message-row--ai) { padding-left: var(--pod-lane-l, 0px); }
+.chat-message-scroll :deep(.message-row--user) { padding-right: var(--pod-lane-r, 0px); }
+
 @media (min-width: 1100px) {
   /* The orb's zone, measured from the center: its body reaches
      about 14% of the viewport height (OrbCanvas.vue frames it by height),
@@ -4023,12 +4029,11 @@ onUnmounted(() => {
   .chat-message-scroll :deep(.message-row--user) {
     width: 100%;
   }
-  /* Each side keeps a lane free at its outer edge for the round buttons parked there
-     (--pod-lane-l / -r, composables/podLanes.ts), and its bubbles give that room up at the outer
-     side: half of it comes off the row they measure by, the other half off their own width, so
-     their inner edge stays where the orb's zone begins. */
-  .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; padding-left: var(--pod-lane-l, 0px); }
-  .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; padding-right: var(--pod-lane-r, 0px); }
+  /* Here the bubbles give the lanes' room (below) up at their outer side: half of it comes off
+     the row they measure by, the other half off their own width, so their inner edge stays where
+     the orb's zone begins. */
+  .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; }
+  .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; }
   .chat-message-scroll :deep(.message-bubble--ai) {
     max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear) - var(--pod-lane-l, 0px) / 2)));
   }
