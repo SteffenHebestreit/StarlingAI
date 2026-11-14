@@ -914,6 +914,26 @@ resolution by `score`. That was invisible before, because the reported score WAS
 one and the re-sort reproduced the order it had just received. With the pre-blend score it
 undoes the rerank ordering. The re-sort is gone; the resolution already arrives ranked.
 
+**Catalog searches run in English (2026-11-13, `orchestration.routingEnglish`).** The restatement
+rescue above fires after a search has come back empty, at the price of a classifier call (3.5 s at
+the median), and only for `search_agents`. An un-named delegation and the discovery capsule had
+no such second try: in session 5b77edf9 a coordinator's German weather lookup put researcher at
+0.716 against the 0.72 floor, and the same task in English scores 0.762. The translation tier
+(`tiers.translation`, else `narration`) renders a request in 0.55 s at the median, which makes
+the other order affordable: every request that is not in English is rendered FIRST, inside
+`resolveAgentRouting`, so every surface gets it, and the workflow and tool searches the same way
+(`agent/routing-english.ts`). Measured on the 138-request corpus against the live catalog and
+embedding model, twice at temperature 0: recall 89 → 108 (German 52 → 71 of 88, English 37 of 50
+unchanged), German requests admitted nobody 25 → 6, 20 cases fixed and 1 lost
+(`live-device-internal-webui-import`: its agent was fifth of five and is now sixth). Sampled at the
+model's default temperature the count moved by one between runs, hence temperature 0.
+The earlier measurement said that restating every non-English query "buys nothing extra" over
+restating the failed ones; that still holds for recall. What it buys is the same result without
+the failed pass, on every surface, in a sixth of the time. A search that was rendered skips the
+rescue: the restatement would say the same thing again.
+Language is read by the statistical detector (`text-language.ts`), not by word lists: an
+English request is searched as written and costs no call (0 of 50 in the corpus were rendered).
+
 **A second bidder scored by word fragments, and its bids rode in on the best one (2026-11-13).**
 The gateway starts two bidders. `swarm/bidding.ts` asks the router; `swarm/bidder-worker.ts`
 counted every fragment of the task of two letters or more that equalled or BEGAN a word of an

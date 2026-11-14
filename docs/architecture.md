@@ -490,6 +490,18 @@ Per-agent cost profiles (token usage estimates and latency percentiles from the 
 
 Routing accuracy is validated by the evaluation CI pipeline at a 75% gate across 18 benchmark cases, with regression comparison and a `--baseline` flag for tracking improvement over time.
 
+### Catalog searches run in English
+
+The catalogs — agents, workflows (scenes and jobs) and tools — are described in English, and a search scores the request against those descriptions. The embedding does not carry meaning across languages evenly: a German request lands a few hundredths under its English twin, and the router's 0.72 admission floor sits inside that gap. With `orchestration.routingEnglish` (on in the deployment shard `config/gateway/40-orchestration.jsonc`, off in the schema) the backend searches its catalogs in English only (`agent/routing-english.ts`):
+
+- **Requests.** A request that is not in English is rendered into English before it is searched with — in `resolveAgentRouting` (so for `search_agents`, `list_agents`, an un-named delegation, the bidders, the discovery capsule and `/api/agents/resolve`), in the workflow search, in `search_tools` and in a sub-agent's tool ranking. The language is read by the statistical detector (`agent/text-language.ts`); an English request is searched as written and costs no model call. The rendering comes from the `translation` model tier (`agents.defaults.model.tiers.translation`, else the `narration` tier, else the `routing` tier), at temperature 0, and is kept per request text. A turn asks for its request's rendering as the message arrives, so the discovery capsule finds it done.
+- **Catalog entries.** An agent, workflow or tool entry written in another language is rendered into English once, before it is embedded.
+- **Never in the way.** A search waits for the rendering only within its budget (5 s; the discovery capsule's own 2.5 s ends sooner). Without one in time, or when the model fails or answers with something that is not a translation, the search runs on the request as written. The resolution still reports the request as it was asked, and `agent_routing_evaluated` carries what the search ran on (`routedQuery`, `queryLanguage`). Each rendering is audited as `routing_query_translated` (lengths, time and outcome, never the text).
+- **Skills.** A learned skill is written by the model in whatever language its conversation ran in, so the skill search scores the request as written and in English and each skill keeps the better score; skills embedded from here on are indexed in English.
+- **Knowledge is not touched.** Documents, memory and shared facts are stored and searched in the language they were written in.
+
+On the routing corpus (`eval/routing/live-cases.jsonl`, 138 requests of which 88 are German): recall 89 → 108, German requests passed 52 → 71, German requests the router admitted nobody for 25 → 6, English unchanged at 37 of 50; one German case that had passed with its agent in fifth place lost it to sixth. A German request waits 0.65 s more at the median (0.87 s at p90) for its rendering; an English one nothing.
+
 ---
 
 ## Retrieval & Reranking

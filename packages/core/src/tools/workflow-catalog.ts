@@ -13,6 +13,7 @@ import { getConfig } from "../config/loader.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
+import { catalogEnglish, routingEnglish } from "../agent/routing-english.js";
 import { registerTool, toolCallIdentity, type SwarmTaskState, type ToolContext, type ToolResult } from "./registry.js";
 import { principalIdentity } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
@@ -285,7 +286,9 @@ async function computeSemanticWorkflowScores(
 
   try {
     const provider = getEmbeddingProvider();
-    const documents = entries.map(buildWorkflowSearchDocument);
+    // Indexed in English (agent/routing-english.ts): a scene or job its author described in
+    // another language is rendered before it is embedded, once per text.
+    const documents = await Promise.all(entries.map((entry) => catalogEnglish(buildWorkflowSearchDocument(entry))));
     const docCacheKeys = documents.map((doc) => `${model}\x00${doc}`);
     const queryCacheKey = `${model}\x00query:${query}`;
 
@@ -1507,11 +1510,13 @@ export async function searchWorkflowCandidates(
   const limit = Math.max(1, Math.min(8, Math.floor(opts?.limit ?? 5) || 5));
   const entries = buildWorkflowCatalogEntries().filter((entry) => workflowType === "any" || entry.workflowType === workflowType);
   if (entries.length === 0) return [];
-  const semanticScores = await computeSemanticWorkflowScores(q, entries);
+  // The workflow catalog is searched in English, by meaning and by words alike.
+  const searched = (await routingEnglish(q)).text;
+  const semanticScores = await computeSemanticWorkflowScores(searched, entries);
   const semanticAvailable = semanticScores.size > 0;
 
   const scored = entries.map((entry) => {
-    const keyword = scoreWorkflowKeywordMatch(q, entry);
+    const keyword = scoreWorkflowKeywordMatch(searched, entry);
     const semanticScore = semanticScores.get(entry.key) ?? 0;
     return {
       entry,
@@ -1594,11 +1599,13 @@ registerTool({
       };
     }
 
-    const semanticScores = await computeSemanticWorkflowScores(query, entries);
+    // The workflow catalog is searched in English, by meaning and by words alike.
+    const searched = (await routingEnglish(query)).text;
+    const semanticScores = await computeSemanticWorkflowScores(searched, entries);
     const semanticAvailable = semanticScores.size > 0;
     const candidates = entries
       .map((entry) => {
-        const keyword = scoreWorkflowKeywordMatch(query, entry);
+        const keyword = scoreWorkflowKeywordMatch(searched, entry);
         const semanticScore = semanticScores.get(entry.key) ?? 0;
         return {
           entry,

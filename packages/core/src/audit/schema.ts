@@ -220,6 +220,8 @@ export type CoreAuditEventType =
   | "delegation_bidding_filtered_capability_incapable"
   | "delegation_bidding_filtered_meta_factory"
   | "delegation_bidding_filtered_unqualified"
+  | "routing_query_translated"
+  | "routing_catalog_translated"
   | "delegation_explicit_redirected_research_incapable"
   | "delegation_research_candidate_selected"
   | "delegation_render_research_redirect_skipped"

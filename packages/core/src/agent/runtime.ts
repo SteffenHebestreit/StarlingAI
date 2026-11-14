@@ -271,6 +271,7 @@ import { applyTerminalResponseGuards, type TerminalGuardContext } from "./turn-f
 import { earlyReturnTeaches, finalizeSuccessfulTurn, recordTurnLearning } from "./turn-success-finalize.js";
 import { buildTurnQualityScorecard, createTurnQualitySignals, type ArtifactProbeStatus } from "./turn-scorecard.js";
 // Turn-setup spans lifted out of runTurnImpl (god-file seam).
+import { primeRoutingEnglish } from "./routing-english.js";
 import { lookupTrajectoryInjection, computeTurnEnforcementSignals, prefetchRoutedToDeliverableEmitter, startDiscoveryPrefetch, startProduceIntentRead, turnEvidenceRequirement, type ProduceIntentReadOutcome } from "./turn-setup.js";
 
 // D5 delegation-wait budget math (shared with the gateway hard-timeout layer; kept out of this
@@ -1937,6 +1938,10 @@ async function _runTurn(
   // Read before the fast lane, which skips such a turn: small talk directed to an agent was answered
   // by the front desk, and the agent never ran (review of 0b5089e, 2026-10-08).
   const directiveAgent = opts.directiveAgent?.trim() || undefined;
+  // The request in English, for every catalog search this turn makes with it
+  // (agent/routing-english.ts). Asked for here, beside the front desk, so the discovery capsule
+  // — which races the prompt's assembly — finds it done.
+  if (getConfig().orchestration?.discoveryPrefetch) primeRoutingEnglish(userMessage);
   const fastLaneOutput = await prepareReceptionistFastLane({
     eligible: detectedDynamicGuidance === null && !hasTurnAttachments && directiveAgent === undefined && getConfig().receptionist?.enabled === true,
     userMessage,

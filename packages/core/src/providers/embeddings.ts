@@ -595,7 +595,11 @@ async function _buildAgentIndexInner(
     const chunk = toEmbed.slice(offset, offset + chunkSize);
     const outcomes = await Promise.all(chunk.map(async ({ name, doc }) => {
       try {
-        const [vec] = await provider.embed([doc], embeddingModel);
+        // Indexed in English (agent/routing-english.ts): a description written in another
+        // language is rendered first; one in English, as nearly all are, is embedded as written.
+        // Imported on use: that module sits above this one.
+        const { catalogEnglish } = await import("../agent/routing-english.js");
+        const [vec] = await provider.embed([await catalogEnglish(doc)], embeddingModel);
         return { name, vec, err: null as unknown };
       } catch (err) {
         return { name, vec: undefined, err };

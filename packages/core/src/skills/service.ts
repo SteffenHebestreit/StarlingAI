@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { getConfig } from "../config/loader.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { isEmbeddingAvailable } from "../providers/embeddings.js";
+import { catalogEnglish, routingEnglish } from "../agent/routing-english.js";
 import { childLogger } from "../logger.js";
 import {
   listSkillSupportFiles,
@@ -41,6 +42,9 @@ const SEARCH_STOP_WORDS = new Set<string>([
   "kann", "kannst", "mir", "mit", "oder", "und", "von", "wie", "zu", "zum", "zur",
 ]);
 
+/** How long a skill search waits for its request in English before it scores the request as written only. */
+const SKILL_SEARCH_ENGLISH_BUDGET_MS = 1_500;
+
 /** Module-level doc-embedding cache: key = `${model}\x00${slug}\x00${version}`. */
 const _skillEmbeddingCache = new Map<string, Float32Array>();
 
@@ -55,7 +59,21 @@ export async function searchSkills(
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) return [];
 
+  // ALSO READ IN ENGLISH (agent/routing-english.ts). A skill is written by the model in whatever
+  // language the conversation ran in, so unlike the agent, workflow and tool catalogs this one is
+  // not English by construction: the request is scored as written AND in English, each skill
+  // keeping the better of the two, by meaning and by words. A request in a skill's own language
+  // matches it as before; a German request now also finds a skill written in English. Skills
+  // embedded from here on are indexed in English (computeSemanticSkillScores). The wait is short:
+  // this runs in a turn's and a specialist's setup.
+  const english = (await routingEnglish(query, SKILL_SEARCH_ENGLISH_BUDGET_MS)).text;
+  const inEnglish = normalizeSearchText(english) !== normalizedQuery ? english : null;
   const semanticScores = await computeSemanticSkillScores(workspacePath, query, skills);
+  if (inEnglish) {
+    for (const [slug, score] of await computeSemanticSkillScores(workspacePath, inEnglish, skills)) {
+      if (score > (semanticScores.get(slug) ?? 0)) semanticScores.set(slug, score);
+    }
+  }
   const semanticAvailable = semanticScores.size > 0;
 
   // Agent-scoped retrieval: a skill explicitly tagged for the running specialist
@@ -68,7 +86,9 @@ export async function searchSkills(
   const limit = Math.max(1, Math.min(10, opts.limit ?? 4));
   return skills
     .map((skill) => {
-      const keyword = scoreSkillKeywordMatch(workspacePath, query, skill);
+      const asWritten = scoreSkillKeywordMatch(workspacePath, query, skill);
+      const asEnglish = inEnglish ? scoreSkillKeywordMatch(workspacePath, inEnglish, skill) : asWritten;
+      const keyword = asEnglish.score > asWritten.score ? asEnglish : asWritten;
       const semanticScore = semanticScores.get(skill.frontmatter.slug) ?? 0;
       const base = combineScores(keyword.score, semanticScore, semanticAvailable);
       // Reliability boost: ±0.12 from rolling success rate once a skill has uses.
@@ -285,7 +305,8 @@ async function computeSemanticSkillScores(
     });
 
     if (uncached.length > 0) {
-      const docs = uncached.map((skill) => buildSkillSearchDocument(skill, workspacePath));
+      // Indexed in English: a skill recorded in another language is rendered before it is embedded.
+      const docs = await Promise.all(uncached.map((skill) => catalogEnglish(buildSkillSearchDocument(skill, workspacePath))));
       const vectors = await provider.embed(docs, model);
       for (let i = 0; i < uncached.length; i++) {
         const vector = vectors[i];

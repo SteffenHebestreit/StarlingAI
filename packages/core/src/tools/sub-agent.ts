@@ -120,6 +120,7 @@ import type { ChatProvider } from "../providers/lmstudio.js";
 import { effectiveOrchestration } from "../runtime/effort-context.js";
 import { normalizeDelegationTaskLanguage } from "../agent/delegation-language.js";
 import { attemptRestatementRescue } from "../agent/routing-restatement.js";
+import { routingEnglish } from "../agent/routing-english.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
 import { appendOutcome, extractTaskKeywords, type AgentCostProfile } from "../agent/outcomes.js";
@@ -2029,7 +2030,10 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
       // reads it after its own: a sibling that engaged the turn's outside source meanwhile has taken
       // the one redirect, and two routed builder slices sent to research leave the build unbuilt.
       if (candidateQueue.length === 0 && !request.routingQuery && !explicitAgentRequested) {
-        const shortened = shortenOverspecifiedRoutingQuery(request.task);
+        // Of the task as the router read it: in English (agent/routing-english.ts, answered from
+        // what Step 1 asked for). Shortened as written, a German task kept "Ermittle Wetter
+        // Deutschland Nachmittag (ca." and was then rendered from that.
+        const shortened = shortenOverspecifiedRoutingQuery((await routingEnglish(request.task)).text);
         if (shortened) {
           const engagedBeforeRoute = ctx.turnEvidence?.outsideEngaged;
           const shortRanked = await routeAgentCandidates(shortened, ctx, excludedFromRouting());
@@ -4179,8 +4183,10 @@ registerTool({
       // even though `researcher` or `mission_coordinator` would hit on the
       // first 4-5 distinctive terms.  When this happens, retry once with a
       // shortened query before declaring the routing a complete failure.
-      const shortened = countRoutingQueryContentTokens(raw) > 7
-        ? shortenOverspecifiedRoutingQuery(raw)
+      // Of the query as the router read it, in English (agent/routing-english.ts).
+      const rawInEnglish = (await routingEnglish(raw)).text;
+      const shortened = countRoutingQueryContentTokens(rawInEnglish) > 7
+        ? shortenOverspecifiedRoutingQuery(rawInEnglish)
         : null;
       if (shortened) {
         const retryResolutionRaw = await resolveAgentRouting(shortened, {
@@ -4246,7 +4252,9 @@ registerTool({
       // exactly the turns it exists to save.
       //
       // Nothing about the failure message below changes when this does not fire.
-      if (effectiveOrchestration().routingRestatementRescue !== false) {
+      // Not for a query the router already searched in English: the restatement would say the same
+      // thing a second time, a classifier call later.
+      if (effectiveOrchestration().routingRestatementRescue !== false && !resolution.routedQuery) {
         const rescue = await attemptRestatementRescue(raw, {
           resolve: (query) => resolveAgentRouting(query, {
             minConfidence,
