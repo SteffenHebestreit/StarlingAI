@@ -18,8 +18,8 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:765 | 1 |
 | `admin` | packages/core/src/config/schema.ts:448 | 61 |
-| `after` | packages/core/src/config/schema.ts:1581 | 331 |
-| `agents` | packages/core/src/config/schema.ts:1569 | 207 |
+| `after` | packages/core/src/config/schema.ts:1581 | 332 |
+| `agents` | packages/core/src/config/schema.ts:1569 | 208 |
 | `alertmanager` | packages/core/src/config/schema.ts:1214 | 1 |
 | `all` | packages/core/src/config/schema.ts:1367 | 347 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1387 | 31 |
@@ -144,7 +144,7 @@ Every public schema field, where it is declared, and how many production files r
 | `deliverableConsistencyQa` | packages/core/src/config/schemas/orchestration.ts:430 | 2 |
 | `deliverableConsistencyQaMaxRounds` | packages/core/src/config/schemas/orchestration.ts:433 | 1 |
 | `deny` | packages/core/src/config/schema.ts:1547 | 17 |
-| `description` | packages/core/src/config/schema.ts:644 | 199 |
+| `description` | packages/core/src/config/schema.ts:644 | 200 |
 | `detectWriteChurnOverwrite` | packages/core/src/config/schemas/orchestration.ts:461 | 2 |
 | `deviceGroups` | packages/core/src/config/schemas/multimodal.ts:130 | 1 |
 | `digest` | packages/core/src/config/schema.ts:2150 | 70 |
@@ -238,7 +238,7 @@ Every public schema field, where it is declared, and how many production files r
 | `isolation` | packages/core/src/config/schema.ts:2157 | 22 |
 | `issuer` | packages/core/src/config/schema.ts:462 | 11 |
 | `jwtSecret` | packages/core/src/config/schema.ts:356 | 6 |
-| `keywords` | packages/core/src/config/schemas/multimodal.ts:275 | 32 |
+| `keywords` | packages/core/src/config/schemas/multimodal.ts:275 | 31 |
 | `kubeconfigPath` | packages/core/src/config/schema.ts:1148 | 1 |
 | `kubectlBinary` | packages/core/src/config/schema.ts:1146 | 1 |
 | `label` | packages/core/src/config/schema.ts:295 | 180 |
@@ -254,7 +254,7 @@ Every public schema field, where it is declared, and how many production files r
 | `loginUrl` | packages/core/src/config/schema.ts:864 | 6 |
 | `loopAwareDelegation` | packages/core/src/config/schemas/orchestration.ts:567 | 8 |
 | `loopBrake` | packages/core/src/config/schema.ts:2072 | 6 |
-| `matches` | packages/core/src/config/schema.ts:588 | 123 |
+| `matches` | packages/core/src/config/schema.ts:588 | 122 |
 | `maxActiveTimeMs` | packages/core/src/config/schema.ts:1812 | 2 |
 | `maxBaseCandidates` | packages/core/src/config/schemas/multimodal.ts:268 | 1 |
 | `maxBodyBytes` | packages/core/src/config/schema.ts:367 | 3 |
@@ -434,7 +434,7 @@ Every public schema field, where it is declared, and how many production files r
 | `role` | packages/core/src/config/schema.ts:997 | 185 |
 | `roles` | packages/core/src/config/schema.ts:1534 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:473 | 1 |
-| `routing` | packages/core/src/config/schema.ts:277 | 122 |
+| `routing` | packages/core/src/config/schema.ts:277 | 123 |
 | `routingRestatementRescue` | packages/core/src/config/schemas/orchestration.ts:895 | 1 |
 | `routingTierPresetFallback` | packages/core/src/config/schemas/orchestration.ts:852 | 2 |
 | `routingTriage` | packages/core/src/config/schemas/orchestration.ts:803 | 1 |
@@ -466,7 +466,7 @@ Every public schema field, where it is declared, and how many production files r
 | `signalCliPath` | packages/core/src/config/schemas/channels.ts:73 | 4 |
 | `signingSecret` | packages/core/src/config/schemas/channels.ts:35 | 6 |
 | `silenceTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:277 | 3 |
-| `silent` | packages/core/src/config/schema.ts:1437 | 40 |
+| `silent` | packages/core/src/config/schema.ts:1437 | 41 |
 | `skillMatchThreshold` | packages/core/src/config/schema.ts:336 | 2 |
 | `sleepTimeConsolidation` | packages/core/src/config/schema.ts:1690 | 2 |
 | `smtpFrom` | packages/core/src/config/schemas/channels.ts:65 | 6 |
@@ -516,7 +516,7 @@ Every public schema field, where it is declared, and how many production files r
 | `tierLabels` | packages/core/src/config/schemas/multimodal.ts:253 | 1 |
 | `tiers` | packages/core/src/config/schema.ts:276 | 45 |
 | `timeoutMs` | packages/core/src/config/schema.ts:71 | 115 |
-| `token` | packages/core/src/config/schema.ts:1225 | 205 |
+| `token` | packages/core/src/config/schema.ts:1225 | 204 |
 | `tokenId` | packages/core/src/config/schema.ts:1124 | 1 |
 | `tokenSecret` | packages/core/src/config/schema.ts:1125 | 1 |
 | `toolCallPrefill` | packages/core/src/config/schema.ts:263 | 4 |

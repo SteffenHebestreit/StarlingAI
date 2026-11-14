@@ -1171,15 +1171,18 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
   // that re-issues the same canonical research reuses the earlier slice's evidence instead of
   // re-running it (audit d20a9a5e: the coordinator researched the same request twice = ~2x turn).
   //
-  // A delegation naming the agent the user directed the turn to (`--agent`) is served only that
-  // agent's own earlier result. Matched by signature alone, the runtime's own dispatch to the agent
-  // (the user's request as its task) was served what an ephemeral agent had answered for an
-  // undirected delegation of the same words: the named agent never ran, the turn stayed directed,
-  // and the next dispatch hit the reuse limit until the turn ended in a delegation failure
-  // (integration review, 2026-10-08). No other delegation is affected.
-  const reuseBoundToAgent = ctx.directiveAgent !== undefined && request.agentName?.trim() === ctx.directiveAgent
-    ? ctx.directiveAgent
-    : undefined;
+  // A delegation that names its agent is served only that agent's own earlier result. Matched by
+  // signature alone, the runtime's own dispatch to the agent the user directed the turn to
+  // (`--agent`, the user's request as its task) was served what an ephemeral agent had answered
+  // for an undirected delegation of the same words: the named agent never ran, the turn stayed
+  // directed, and the next dispatch hit the reuse limit until the turn ended in a delegation
+  // failure (integration review, 2026-10-08). The same held for any named agent: in session
+  // 5b77edf9 an undirected weather lookup had been run by mail_agent, the coordinator sent the same
+  // words to researcher by name, and three milliseconds later it held the mail agent's answer
+  // again, as researcher's. Naming another agent is how a caller says the first result was not the
+  // one it wanted. A delegation that names no agent still takes whatever ran the task, and the
+  // named agent's own earlier result is still served back, so a loop on one agent stays capped.
+  const reuseBoundToAgent = request.agentName?.trim() || undefined;
   const reusableTask = reusableTaskById?.signature === signature
     && (reuseBoundToAgent === undefined || reusableTaskById.status === "failed" || taskRanAgent(reusableTaskById, reuseBoundToAgent))
     ? reusableTaskById
@@ -1313,6 +1316,9 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
   const skippedCandidates = new Set<string>();
   const excludedFromRouting = (): string[] => [...attemptedAgents, ...skippedCandidates];
   let routingRounds = 0;
+  // The router's nearest agents when it ranked none at all, from this delegation's first routing
+  // round: named in the failure when nothing was tried (see the tail return).
+  let unroutedNearMisses: Array<{ name: string; score: number }> = [];
   // The research gate's turn trigger for a ROUTED pick: decided at this delegation's first routing
   // round and kept for the rest (see Step 1 below).
   let routedTurnTriggered: boolean | undefined;
@@ -1353,7 +1359,9 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
           dispatchMode: "autonomous_bidding",
           routingQuery: request.routingQuery ?? request.task,
           allowedAgents: ctx.allowedAgents ?? [],
-          excludeAgents: attemptedAgents,
+          // The caller is no candidate for its own delegation (routeAgentCandidates leaves it out
+          // too): its bid took the first place in the queue and was then passed over.
+          excludeAgents: uniqueNames([...attemptedAgents, ctx.currentAgentName ?? ""]),
           bidWindowMs: DEFAULT_AUTONOMOUS_BID_WINDOW_MS,
         },
       }
@@ -1885,6 +1893,7 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
       if (candidateQueue.length === 0) {
         const nearMisses: Array<{ name: string; score: number }> = [];
         const allRoutingCandidates = await routeAgentCandidates(request.routingQuery ?? request.task, ctx, excludedFromRouting(), nearMisses);
+        if (unroutedNearMisses.length === 0 && allRoutingCandidates.length === 0) unroutedNearMisses = [...nearMisses];
         await settleUserFile(allRoutingCandidates);
         // A SCENE'S OWN AGENT BEFORE NO AGENT. Inside a scene the agents a delegation may reach are
         // the few chosen for that work (ctx.allowedAgents), and the router's floor, set for the whole
@@ -2073,7 +2082,28 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
       // semantic + structural now.)
       if (candidateQueue.length === 0 && usesAutonomousBidding && isAutonomousBiddingStarted() && !biddingTried) {
         biddingTried = true;
-        const rawBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        const offeredBids = await collectTaskBids(taskId, DEFAULT_AUTONOMOUS_BID_WINDOW_MS);
+        // A BID STANDS ON ITS OWN SCORE, FOR AN AGENT THIS DELEGATION MAY STILL USE. The queue used
+        // to take every bid once the best one cleared skillMatchThreshold. In session 5b77edf9
+        // web_task_coordinator's undirected weather lookup drew its own bid at 0.77 and one for
+        // mail_agent at 0.17; the first was passed over as the caller, and the mail agent ran the
+        // lookup, found no mail about the weather and estimated one. Each bid now has to clear the
+        // threshold itself, and one for the caller or for an agent already tried or passed over
+        // is not a bid for this delegation.
+        const barredBidders = new Set([...excludedFromRouting(), ...(ctx.currentAgentName ? [ctx.currentAgentName] : [])]);
+        const rawBids = offeredBids.filter((bid) =>
+          !barredBidders.has(bid.agentName) && shouldPreferCatalogAgent(bid.score, bid.confidence, skillMatchThreshold));
+        if (rawBids.length < offeredBids.length) {
+          logAudit("delegation_bidding_filtered_unqualified", {
+            taskTitle: title,
+            droppedAgents: offeredBids.filter((bid) => !rawBids.includes(bid)).map((bid) => ({
+              agent: bid.agentName,
+              score: Number(bid.score.toFixed(3)),
+              reason: barredBidders.has(bid.agentName) ? "barred" : "under_threshold",
+            })),
+            skillMatchThreshold,
+          }, { sessionId: ctx.sessionId });
+        }
         let bids = rawBids.filter((bid) => agentCanFulfillArtifactTask(bid.agentName, request, ctx));
         if (bids.length === 0 && rawBids.length > 0) {
           logAudit("delegation_bidding_filtered_artifact_incapable", {
@@ -2126,16 +2156,15 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
         }
         bestAutoMatchScore = bids[0]?.score ?? bestAutoMatchScore;
         bestAutoMatchConfidence = bids[0]?.confidence as ("high" | "medium" | "low" | undefined) ?? bestAutoMatchConfidence;
-        if (shouldPreferCatalogAgent(bestAutoMatchScore, bestAutoMatchConfidence, skillMatchThreshold)) {
-          for (const bid of bids) {
-            routingCandidateMap.set(bid.agentName, {
-              confidence: bid.confidence,
-              matchedTerms: bid.matchedTerms,
-              score: bid.score,
-            });
-          }
-          candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
+        // Every bid left has cleared the threshold itself (above).
+        for (const bid of bids) {
+          routingCandidateMap.set(bid.agentName, {
+            confidence: bid.confidence,
+            matchedTerms: bid.matchedTerms,
+            score: bid.score,
+          });
         }
+        if (bids.length > 0) candidateQueue = uniqueNames(bids.map(bid => bid.agentName));
       }
 
       // NEVER UNTRIED WHEN ROUTING HAD A PICK. A pick under skillMatchThreshold leaves the task to an
@@ -3276,6 +3305,22 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
     && skippedCoordinatorCandidates.length > 0;
   const baseError = taskState.error ?? "No suitable agent completed the task.";
   let errorBody = baseError;
+  // NOBODY WAS TRIED, AND THE ROUTER HAD AGENTS JUST UNDER ITS FLOOR. search_agents says so when it
+  // finds none (surfaceRoutingNearMisses); an undirected delegation said only that no agent was
+  // suitable, and the caller had to guess a name. In session 5b77edf9 the router held researcher at
+  // 0.716 for a German weather lookup, 0.004 under its floor. Offered, not chosen: whether one of
+  // them covers the task is the caller's call.
+  const unroutedHint = taskState.attempts.length === 0
+    && cappedCandidates.length === 0
+    && skippedCoordinatorCandidates.length === 0
+    && unroutedNearMisses.length > 0
+    && effectiveOrchestration().surfaceRoutingNearMisses
+    ? `\n\nNo agent was tried. Closest matches, all below the ${SEMANTIC_AGENT_ROUTING_MIN_SCORE} semantic admission floor: `
+      + `${unroutedNearMisses.map((entry) => `${entry.name} (${entry.score.toFixed(3)})`).join(", ")}. `
+      + "If one of these plainly covers the task, delegate to it by name; a near miss is common when the task is "
+      + "worded in another language or at length."
+    : "";
+  if (unroutedHint) errorBody = `${baseError}${unroutedHint}`;
   if (allAttemptsTimedOut) {
     errorBody = `${baseError}\n\nTimeout cascade: every delegated attempt hit its per-agent turnTimeoutMs (${timeoutAttempts.length} attempt(s) on ${[...new Set(timeoutAttempts.map((a) => a.agentName))].join(", ")}). The model did not finish within the configured budget — this is a timeout, not a routing failure. Either raise turnTimeoutMs for these agents in starlingai.json, switch them to a faster model, or split the task into smaller pieces. Do NOT re-delegate the same work in this turn.`;
   } else if (allCandidatesCapped) {

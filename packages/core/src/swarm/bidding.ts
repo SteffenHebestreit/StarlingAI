@@ -20,6 +20,54 @@ export interface AutonomousTaskBid {
   ts: string;
 }
 
+/** One agent a bidder offers for an announced task. */
+export interface AnnouncedTaskCandidate {
+  name: string;
+  score: number;
+  confidence: "high" | "medium" | "low";
+  matchedTerms: string[];
+}
+
+/**
+ * The agents a bidder offers for an announced task: the router's ranking (resolveAgentRouting, the
+ * scorer every other routing decision uses), admitted candidates ahead of weak ones.
+ *
+ * Both bidders ask here. The long-running worker (bidder-worker.ts) had a scorer of its own that
+ * counted word fragments, and a German task's "ca", "am" and "nach" matched it to whichever agent's
+ * description began the most words with those letters (session 5b77edf9: a weather lookup, bid for
+ * mail_agent).
+ *
+ * NOT re-sorted by score. `resolution.results` already arrives in the router's rank order, which
+ * under the default blendMode carries the reranker's ordering while the reported score is the
+ * pre-blend embedding value. Sorting by that score again threw the rerank ordering away —
+ * invisibly, because before the reported score WAS the blended one and the re-sort happened to
+ * reproduce the order it had just received. Admitted candidates stay ahead of weak ones, which is
+ * the order that matters here.
+ */
+export async function routeAnnouncedTask(
+  query: string,
+  allowedAgents: readonly string[],
+  excludedAgents: ReadonlySet<string>,
+): Promise<AnnouncedTaskCandidate[]> {
+  const { resolveAgentRouting } = await import("../tools/sub-agent.js");
+  const resolution = await resolveAgentRouting(query, {
+    minConfidence: "low",
+    allowedAgents: allowedAgents.length > 0 ? [...allowedAgents] : undefined,
+    // Left out before the router cuts its ranking to the best few, not after: an announcement that
+    // bars its own caller otherwise spends a place on it.
+    ...(excludedAgents.size > 0 ? { excludeAgents: [...excludedAgents] } : {}),
+  });
+  return [...resolution.results, ...resolution.weakCandidates]
+    .filter((candidate) => !excludedAgents.has(candidate.name))
+    .slice(0, MAX_BIDS_PER_TASK)
+    .map((candidate) => ({
+      name: candidate.name,
+      score: candidate.score,
+      confidence: candidate.confidence,
+      matchedTerms: candidate.matchedTerms,
+    }));
+}
+
 let _unsubscribe: (() => void) | null = null;
 const _handledAnnouncementIds = new Map<string, number>(); // id → timestamp
 const _handledBidIds = new Map<string, number>();           // id → timestamp
@@ -128,21 +176,7 @@ async function emitAutonomousBids(event: SwarmEvent): Promise<void> {
     [spanLinkFromCarrier(event.trace)],
     async () => {
       try {
-        const { resolveAgentRouting } = await import("../tools/sub-agent.js");
-        const resolution = await resolveAgentRouting(query, {
-          minConfidence: "low",
-          allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
-        });
-
-        // NOT re-sorted by score. `resolution.results` already arrives in the router's rank
-        // order, which under the default blendMode carries the reranker's ordering while the
-        // reported score is the pre-blend embedding value. Sorting by that score again threw
-        // the rerank ordering away — invisibly, because before the reported score WAS the
-        // blended one and the re-sort happened to reproduce the order it had just received.
-        // Admitted candidates stay ahead of weak ones, which is the order that matters here.
-        const candidates = [...resolution.results, ...resolution.weakCandidates]
-          .filter(candidate => !excludedAgents.has(candidate.name))
-          .slice(0, MAX_BIDS_PER_TASK);
+        const candidates = await routeAnnouncedTask(query, allowedAgents, excludedAgents);
 
         for (const candidate of candidates) {
           emitSwarmEvent("task_bid", {

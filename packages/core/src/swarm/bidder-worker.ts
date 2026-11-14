@@ -10,8 +10,10 @@
  *   2. Maintains a local snapshot of the agent catalog (loaded from config,
  *      refreshed on config changes).
  *   3. Listens for `task_announced` events with `dispatchMode: "autonomous_bidding"`.
- *   4. Scores announced tasks against its local catalog and emits `task_bid`
- *      events back to the bus.
+ *   4. Routes announced tasks with the product's own router (swarm/bidding.ts
+ *      routeAnnouncedTask) and emits `task_bid` events back to the bus. In a
+ *      process whose in-process bidder is running it stays silent: that bidder
+ *      asks the same router, and the bids would be the same ones twice.
  *   5. Multiple bidder workers can run across different machines — bid
  *      deduplication at the collector level prevents double-claims.
  *
@@ -31,6 +33,7 @@
 import { randomUUID } from "node:crypto";
 import { childLogger } from "../logger.js";
 import { emitSwarmEvent, onSwarmEvent, isSwarmBusConnected, type SwarmEvent } from "./bus.js";
+import { isAutonomousBiddingStarted, routeAnnouncedTask } from "./bidding.js";
 import { announceAgentCapability } from "./capabilities.js";
 import type { SubAgentConfig } from "../config/schema.js";
 
@@ -39,47 +42,18 @@ const log = childLogger("swarm:bidder-worker");
 // ── Worker identity ──────────────────────────────────────────────────────────
 
 const WORKER_ID = randomUUID();
-const MAX_BIDS_PER_ANNOUNCEMENT = 3;
 
 // ── Agent catalog snapshot (refreshed periodically) ──────────────────────────
+// What this worker announces to the capability registry and reports in its status. It is not
+// what a task is scored against: that is the router's own catalog (routeAnnouncedTask).
 
 interface AgentIndexEntry {
   name: string;
   config: SubAgentConfig;
-  /** Pre-computed lowercase keyword set for fast matching. */
-  keywords: Set<string>;
 }
 
 let _agentIndex: AgentIndexEntry[] = [];
 let _catalogRefreshInterval: ReturnType<typeof setInterval> | null = null;
-
-/**
- * Build keyword set from agent metadata for fast task matching.
- */
-function buildKeywords(name: string, cfg: SubAgentConfig): Set<string> {
-  const words = new Set<string>();
-  // Agent name tokens
-  for (const token of name.split(/[_\-\s]+/)) {
-    if (token.length >= 2) words.add(token.toLowerCase());
-  }
-  // Description tokens
-  for (const token of (cfg.description ?? "").split(/\W+/)) {
-    if (token.length >= 3) words.add(token.toLowerCase());
-  }
-  // Domain
-  if (cfg.domain) words.add(cfg.domain.toLowerCase());
-  // Capabilities
-  for (const cap of cfg.capabilities ?? []) {
-    for (const token of cap.split(/\W+/)) {
-      if (token.length >= 3) words.add(token.toLowerCase());
-    }
-  }
-  // Tags
-  for (const tag of cfg.tags ?? []) {
-    words.add(tag.toLowerCase());
-  }
-  return words;
-}
 
 /**
  * Refresh the local agent index from config.
@@ -92,14 +66,14 @@ export function refreshAgentIndex(
   const entries: AgentIndexEntry[] = [];
 
   for (const [name, cfg] of Object.entries(subAgents)) {
-    entries.push({ name, config: cfg, keywords: buildKeywords(name, cfg) });
+    entries.push({ name, config: cfg });
   }
 
   // Merge promoted agents that aren't in the permanent config
   if (promotedAgents) {
     for (const [name, cfg] of Object.entries(promotedAgents)) {
       if (!subAgents[name]) {
-        entries.push({ name, config: cfg, keywords: buildKeywords(name, cfg) });
+        entries.push({ name, config: cfg });
       }
     }
   }
@@ -116,75 +90,6 @@ export function refreshAgentIndex(
     });
   }
   log.info({ agentCount: entries.length }, "Agent index refreshed");
-}
-
-// ── Scoring ──────────────────────────────────────────────────────────────────
-
-interface BidCandidate {
-  name: string;
-  score: number;
-  matchedTerms: string[];
-  confidence: "high" | "medium" | "low";
-}
-
-function confidenceLabel(score: number): "high" | "medium" | "low" {
-  if (score >= 0.72) return "high";
-  if (score >= 0.45) return "medium";
-  return "low";
-}
-
-/**
- * Score a task query against the local agent index.
- * Returns up to MAX_BIDS_PER_ANNOUNCEMENT top candidates.
- */
-function scoreTaskAgainstIndex(
-  query: string,
-  allowedAgents?: string[],
-  excludeAgents?: Set<string>,
-): BidCandidate[] {
-  const queryTokens = query.toLowerCase().split(/\W+/).filter(t => t.length >= 2);
-  if (queryTokens.length === 0) return [];
-
-  const querySet = new Set(queryTokens);
-  const candidates: BidCandidate[] = [];
-
-  for (const entry of _agentIndex) {
-    if (allowedAgents && allowedAgents.length > 0 && !allowedAgents.includes(entry.name)) continue;
-    if (excludeAgents?.has(entry.name)) continue;
-
-    const matchedTerms: string[] = [];
-    let matchScore = 0;
-
-    for (const token of querySet) {
-      if (entry.keywords.has(token)) {
-        matchedTerms.push(token);
-        matchScore += 1;
-      }
-      // Partial prefix match (e.g. "code" matches "coding")
-      for (const kw of entry.keywords) {
-        if (kw.startsWith(token) && kw !== token) {
-          matchedTerms.push(kw);
-          matchScore += 0.5;
-        }
-      }
-    }
-
-    if (matchScore === 0) continue;
-
-    // Normalize score: matched terms / total query terms, capped at 1
-    const normalizedScore = Math.min(1, matchScore / queryTokens.length);
-
-    candidates.push({
-      name: entry.name,
-      score: Number(normalizedScore.toFixed(4)),
-      matchedTerms: [...new Set(matchedTerms)],
-      confidence: confidenceLabel(normalizedScore),
-    });
-  }
-
-  return candidates
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_BIDS_PER_ANNOUNCEMENT);
 }
 
 // ── Event handling ───────────────────────────────────────────────────────────
@@ -205,11 +110,22 @@ function normalizeStringArray(value: unknown): string[] {
   return value.map(item => String(item).trim()).filter(Boolean);
 }
 
-function handleTaskAnnounced(event: SwarmEvent): void {
+/**
+ * Bid on an announced task with the router's ranking.
+ *
+ * This worker used to score the task itself: every word fragment of two letters or more, counted
+ * when it equalled or BEGAN a word of an agent's description. A German task's "ca", "am", "nach"
+ * and "com" began "categorizes", "anhang", "nachrichten" and "composes", and a weather lookup was
+ * bid for mail_agent at 0.17 (session 5b77edf9) — which then ran, behind the top bid's score. The
+ * router ranks by meaning and holds every candidate to its floor; it is asked instead.
+ */
+async function handleTaskAnnounced(event: SwarmEvent): Promise<void> {
   if (event.type !== "task_announced" || !event.taskId) return;
   if (event.data?.["dispatchMode"] !== "autonomous_bidding") return;
   if (_handledAnnouncements.has(event.id)) return;
   _handledAnnouncements.set(event.id, Date.now());
+  // This process's own bidder (swarm/bidding.ts) answers every announcement from the same router.
+  if (isAutonomousBiddingStarted()) return;
 
   const query = typeof event.data?.["routingQuery"] === "string"
     ? event.data["routingQuery"].trim()
@@ -219,11 +135,13 @@ function handleTaskAnnounced(event: SwarmEvent): void {
   const allowedAgents = normalizeStringArray(event.data?.["allowedAgents"]);
   const excludeAgents = new Set(normalizeStringArray(event.data?.["excludeAgents"]));
 
-  const candidates = scoreTaskAgainstIndex(
-    query,
-    allowedAgents.length > 0 ? allowedAgents : undefined,
-    excludeAgents,
-  );
+  let candidates: Awaited<ReturnType<typeof routeAnnouncedTask>>;
+  try {
+    candidates = await routeAnnouncedTask(query, allowedAgents, excludeAgents);
+  } catch (err) {
+    log.debug({ err, taskId: event.taskId }, "Failed to route an announced task");
+    return;
+  }
 
   for (const candidate of candidates) {
     emitSwarmEvent("task_bid", {
@@ -233,7 +151,7 @@ function handleTaskAnnounced(event: SwarmEvent): void {
       agentName: candidate.name,
       data: {
         dispatchMode: "autonomous_bidding",
-        score: candidate.score,
+        score: Number(candidate.score.toFixed(4)),
         confidence: candidate.confidence,
         matchedTerms: candidate.matchedTerms,
         bidderInstance: WORKER_ID,
@@ -252,7 +170,7 @@ function handleTaskAnnounced(event: SwarmEvent): void {
 
 function handleSwarmEvent(event: SwarmEvent): void {
   if (event.type === "task_announced") {
-    handleTaskAnnounced(event);
+    void handleTaskAnnounced(event);
     return;
   }
   // Clean up tracking for completed/requeued tasks

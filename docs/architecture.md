@@ -197,7 +197,7 @@ The current `v0.45.8` codebase implements the swarm vision through **Stage 13** 
 | **Container heartbeat protocol** | 2 | Implemented | 15s interval, 45s watchdog, SIGTERM→SIGKILL, OOM detection, partial result recovery |
 | **Emergent architect fallback** | 2 | Implemented | The built-in architect (or a configured catalog agent) designs ephemeral agents when no catalog match clears the skill threshold |
 | **Auto-promotion** | 2 | Implemented | Successful ephemeral agents promoted to `.starlingai/promoted_agents.json` |
-| **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; ranked offers collected before routing |
+| **Autonomous bidding** | 2 | Implemented | `task_announced` / `task_bid` events; every bidder ranks with the router (`resolveAgentRouting`), and a bid joins the queue only when its own score clears the skill threshold and its agent is not the caller or one already tried |
 | **Warden agent** | 3 | Implemented per process | Detects tool storms, repeated failures, escape attempts, rate-limit floods, SLO breaches, and infrastructure faults; cross-process observation and cancellation remain planned. |
 | **Swarm morphing** | 3 | Implemented per process | Per-agent and process-global concurrency semaphores with FIFO queuing and backpressure; provider-wide admission remains planned. |
 | **Collective memory** | 3 | Implemented; data-plane hardening planned | Redis shared facts and partial results with semantic lookup exist; provenance, conflict handling, and acknowledged agent-message delivery remain planned. |
