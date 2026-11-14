@@ -27,8 +27,9 @@ import { chooseConfiguredAgent } from "./research-fallback-routing.js";
 import { stripUntrustedDelegationContext } from "./delegation-response-collapse.js";
 
 function defaultResearchFallbackAgentsFor(agentName: string | undefined, guidance: DynamicTurnGuidance | null | undefined): string[] {
+  // A fresh fact goes to the researcher first, as in research-fallback-routing.ts.
   const preferredAgents = guidance?.freshnessSensitive && !guidance?.sourceSensitive
-    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
+    ? ["researcher", "web_task_coordinator", "mission_coordinator"]
     : ["mission_coordinator", "researcher"];
   return preferredAgents
     .filter((candidate) => candidate !== agentName)
