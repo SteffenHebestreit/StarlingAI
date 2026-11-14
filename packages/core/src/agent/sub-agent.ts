@@ -11,6 +11,7 @@
  *  - Audit entries tagged with the parent session ID so tracing works
  */
 
+import { correctWeekdays } from "./weekday-check.js";
 import { createBrowserDeciderForRun, type DrivenStep } from "../decisions/browser-step.js";
 import { decideWithReadout } from "../decisions/incumbent-readout.js";
 import { layaConfigured } from "../decisions/laya-client.js";
@@ -7103,6 +7104,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         // buildScaffold masked as it built them.
         if (!recovered.forcedOutcome && !truncationRecovered.forcedOutcome) {
           result = quarantineUnobservedFigures(result, "final_answer");
+        }
+
+        // A weekday named beside a date is checked against the calendar (agent/weekday-check.ts):
+        // a specialist's "Donnerstag, den 13. November" on a Friday reached the user word for word.
+        const weekdays = correctWeekdays(result, new Date(), currentRequestContext()?.userTimeZone);
+        if (weekdays.corrections.length > 0) {
+          result = weekdays.text;
+          logAudit(
+            "guardrail_flagged",
+            { type: "weekday_corrected", agentName: opts.agentName, corrections: weekdays.corrections.slice(0, 5) },
+            { sessionId: subSessionId, severity: "info" },
+          );
         }
 
         // Scan for secrets before returning to parent session

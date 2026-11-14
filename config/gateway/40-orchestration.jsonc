@@ -62,6 +62,18 @@
     // early, on iteration 0 — the cheapest stage to confirm is live).
     "discoveryPrefetch": true,
 
+    // Catalog searches in English only (agent/routing-english.ts). The agent, workflow and
+    // tool catalogs are described in English; a request in another language is rendered
+    // into English by the translation tier (agents.defaults.model.tiers.translation, else
+    // the narration tier, else the routing tier) before any of them is searched with it,
+    // and a catalog entry written in another language before it is embedded. Knowledge —
+    // documents, memory, shared facts — stays in its own language.
+    // On the routing corpus (138 requests, 88 of them German): recall 89 -> 108, German
+    // requests the router admitted nobody for 25 -> 6, none regressed; a German request
+    // waits 0.65 s more at the median, an English one nothing.
+    // Watch the audit stream for routing_query_translated.
+    "routingEnglish": true,
+
     // Honesty: stop the orchestrator dressing a from-memory answer up as freshly-
     // sourced ("based on current market data…", "as of today…") when it retrieved
     // nothing this turn. Sibling of the user-profile fabrication guard. Enabled here

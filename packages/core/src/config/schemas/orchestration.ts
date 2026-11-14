@@ -893,6 +893,25 @@ export const OrchestrationSchema = z.object({
    * unavailable, since the rescue is a few seconds spent before saying "no agent matched".
    */
   routingRestatementRescue: z.boolean().default(true),
+  /**
+   * Search the catalogs — agents, workflows, tools — in English only (agent/routing-english.ts).
+   *
+   * The catalogs are described in English and a search scores the request against those
+   * descriptions; the embedding puts a request in another language a few hundredths under its
+   * English twin, and the router's floor sits inside that gap. On the routing corpus (138
+   * requests, 88 of them German) the router admitted nobody for 25 German requests and for 3
+   * English ones. With this on, a request that is not in English is rendered into English by the
+   * translation tier before it is searched with, and a catalog entry written in another language
+   * is rendered before it is embedded. Knowledge (documents, memory, shared facts) is not touched.
+   *
+   * A search never waits on it past its budget: without a rendering in time it runs on the
+   * request as written.
+   *
+   * Default OFF here and ON in the deployment's orchestration shard: it puts a model call in
+   * front of a search, which a deployment has to have a fast tier for
+   * (agents.defaults.model.tiers.translation, else narration, else routing).
+   */
+  routingEnglish: z.boolean().default(false),
   /** When true, a turn whose ONLY orchestration was a single successful delegation that
    *  returned a complete, presentable deliverable surfaces that deliverable directly instead
    *  of running a SECOND full synthesis pass over it on the main assistant — which on the slow

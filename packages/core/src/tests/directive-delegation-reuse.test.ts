@@ -6,13 +6,17 @@ import type { SwarmState, ToolContext } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
 
 /**
- * A DELEGATION NAMING THE AGENT THE USER DIRECTED THE TURN TO IS SERVED ONLY THAT AGENT'S OWN RESULT.
+ * A DELEGATION THAT NAMES ITS AGENT IS SERVED ONLY THAT AGENT'S OWN RESULT.
  *
  * Signature reuse matched an earlier task by its words alone. On a turn directed to code_analyst
  * (`--agent`), an undirected delegation of the user's request had been answered by an ephemeral
  * agent, and the runtime's own dispatch to code_analyst (the same request as its task) was served
  * that answer: code_analyst never ran, the turn stayed directed, and the next dispatch hit the reuse
  * limit until the turn ended in a delegation failure (integration review, 2026-10-08).
+ *
+ * The same on a turn nobody directed (session 5b77edf9, 2026-11-13): an undirected weather lookup
+ * had been run by mail_agent, the coordinator sent the same words to researcher by name, and was
+ * handed the mail agent's answer as researcher's.
  */
 const statsFor = (args: SubAgentRunOptions): SubAgentRunResult["stats"] => ({
   agentName: args.agentName,
@@ -115,8 +119,9 @@ describe("signature reuse on a turn directed to an agent", () => {
     expect(exhausted.metadata).toMatchObject({ reused: true, reuseExhausted: true, agentName: "code_analyst" });
   }, 30_000);
 
-  it("still serves the earlier result to a delegation naming no agent, or on a turn no agent was named for", async () => {
-    // The controls: reuse by signature alone is unchanged everywhere else.
+  it("still serves the earlier result to a delegation naming no agent, and to one naming the agent that ran it", async () => {
+    // The controls: a caller that names nobody takes whatever ran the task, and one that names the
+    // agent that ran it gets that run back — so a loop on one agent stays capped.
     const run = await delegate();
     const directed: ToolContext = { sessionId: "s-undirected-call", workspacePath: "/workspace", swarmState: freshSwarmState(), directiveAgent: "code_analyst" };
     await run({ agentName: "researcher", task: TASK }, directed);
@@ -124,10 +129,34 @@ describe("signature reuse on a turn directed to an agent", () => {
 
     const plain: ToolContext = { sessionId: "s-plain-turn", workspacePath: "/workspace", swarmState: freshSwarmState() };
     await run({ agentName: "researcher", task: TASK }, plain);
-    const namedOnPlainTurn = await run({ agentName: "code_analyst", task: TASK }, plain);
+    const sameAgentAgain = await run({ agentName: "researcher", task: TASK }, plain);
+    const andAgain = await run({ agentName: "researcher", task: TASK }, plain);
 
     expect(ran()).toEqual(["researcher", "researcher"]);
     expect(undirectedCall.metadata).toMatchObject({ reused: true, agentName: "researcher" });
-    expect(namedOnPlainTurn.metadata).toMatchObject({ reused: true, agentName: "researcher" });
+    expect(sameAgentAgain.metadata).toMatchObject({ reused: true, agentName: "researcher" });
+    expect(andAgain.metadata).toMatchObject({ reused: true, reuseExhausted: true, agentName: "researcher" });
+  }, 30_000);
+
+  it("runs a named agent on any turn although another agent's result for the same task is at hand", async () => {
+    // Session 5b77edf9: nobody directed the turn. The first run answered the task from the wrong
+    // agent; the caller then named the right one, with the same words.
+    const run = await delegate();
+    const plain: ToolContext = { sessionId: "s-plain-named", workspacePath: "/workspace", swarmState: freshSwarmState() };
+
+    await run({ agentName: "researcher", task: TASK }, plain);
+    const named = await run({ agentName: "code_analyst", task: TASK }, plain);
+
+    expect(ran()).toEqual(["researcher", "code_analyst"]);
+    expect(named.success).toBe(true);
+    expect(named.metadata?.["reused"]).toBeUndefined();
+    expect(named.metadata).toMatchObject({ agentName: "code_analyst" });
+    expect(named.output).toContain("CODE_ANALYST-FINDING");
+    expect(named.output).not.toContain("RESEARCHER-FINDING");
+    // Each agent's run is a task of its own, and a caller that names nobody now takes the first.
+    expect(Object.values(plain.swarmState!.tasks).map((task) => task.selectedAgent)).toEqual(["researcher", "code_analyst"]);
+    const unnamed = await run({ task: TASK }, plain);
+    expect(unnamed.metadata).toMatchObject({ reused: true, agentName: "researcher" });
+    expect(ran()).toEqual(["researcher", "code_analyst"]);
   }, 30_000);
 });

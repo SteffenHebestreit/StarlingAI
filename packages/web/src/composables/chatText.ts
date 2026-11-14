@@ -19,6 +19,29 @@ export function browserLanguage(): TurnLanguage {
   return turnLanguage(typeof navigator === "undefined" ? "en" : navigator.language);
 }
 
+/** The effort tiers as the session knows them (stores/gateway.ts EffortTier). */
+type EffortName = "low" | "medium" | "high" | "max";
+
+const EFFORT_NAMES: Record<TurnLanguage, Record<EffortName, string>> = {
+  en: { low: "Low", medium: "Medium", high: "High", max: "Max" },
+  de: { low: "Niedrig", medium: "Mittel", high: "Hoch", max: "Max" },
+};
+
+const EFFORT_TEXTS: Record<TurnLanguage, Record<EffortName, string>> = {
+  en: {
+    low: "fast & tight — shorter timeout, fewer iterations, no extended reasoning",
+    medium: "balanced default — today's behavior",
+    high: "thorough — long timeout, deeper delegation, full-length output, extended reasoning (quality gates kept)",
+    max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
+  },
+  de: {
+    low: "schnell & knapp — kürzeres Zeitlimit, weniger Durchläufe, kein erweitertes Nachdenken",
+    medium: "ausgewogener Standard",
+    high: "gründlich — langes Zeitlimit, tiefere Delegation, Ausgabe in voller Länge, erweitertes Nachdenken (Qualitätsprüfungen bleiben)",
+    max: "unbegrenzt — kein Zeitlimit, größtes Budget; lockert die Korrektheits- und QA-Prüfungen (kann Unbelegtes liefern)",
+  },
+};
+
 export const chatText = {
   // ── A message's own actions ───────────────────────────────────────────────────────────────
   copy: (l: TurnLanguage) => pick(l, "⧉ Copy", "⧉ Kopieren"),
@@ -316,6 +339,235 @@ export const chatText = {
   jobs: (l: TurnLanguage) => pick(l, "Jobs", "Jobs"),
   effortForSession: (l: TurnLanguage) => pick(l, "Effort for this session", "Aufwand für diese Sitzung"),
   relaxesGates: (l: TurnLanguage) => pick(l, "relaxes quality gates", "lockert die Qualitätsprüfungen"),
+
+  // ── The composer's setting chips, and the line under them ─────────────────────────────────
+  // The chips stand beside "Optionen" and "Lenken": in English they made the bar two languages.
+  effortName: (l: TurnLanguage, tier: EffortName) => pick(l, EFFORT_NAMES.en[tier], EFFORT_NAMES.de[tier]),
+  effortDescription: (l: TurnLanguage, tier: EffortName) => pick(l, EFFORT_TEXTS.en[tier], EFFORT_TEXTS.de[tier]),
+  effortLabel: (l: TurnLanguage, tier: EffortName) => pick(l, `Effort: ${EFFORT_NAMES.en[tier]}`, `Aufwand: ${EFFORT_NAMES.de[tier]}`),
+  effortTitle: (l: TurnLanguage, tier: EffortName) => pick(l,
+    `Effort: ${EFFORT_NAMES.en[tier]} — ${EFFORT_TEXTS.en[tier]}. Click to choose.`,
+    `Aufwand: ${EFFORT_NAMES.de[tier]} — ${EFFORT_TEXTS.de[tier]}. Klicken zum Auswählen.`),
+  imagesChip: (l: TurnLanguage, mode: "ask" | "auto") => pick(l, `Images: ${mode}`, `Bilder: ${mode === "ask" ? "fragen" : "auto"}`),
+  imagesTitle: (l: TurnLanguage, mode: "ask" | "auto") => mode === "auto"
+    ? pick(l,
+      "Images: auto — renders use the agent's settings without asking. Click to be asked first.",
+      "Bilder: auto — Bilder entstehen mit den Einstellungen des Agenten, ohne Rückfrage. Klicken, um vorher gefragt zu werden.")
+    : pick(l,
+      "Images: ask — before each render you can pick the engine, size, seed and mask. Click to always use the agent's settings.",
+      "Bilder: fragen — vor jedem Bild kannst du Engine, Größe, Seed und Maske wählen. Klicken, um immer die Einstellungen des Agenten zu nehmen."),
+  thinkingChip: (l: TurnLanguage, mode: boolean | undefined) => pick(l,
+    `Thinking: ${mode === undefined ? "auto" : mode ? "on" : "off"}`,
+    `Denken: ${mode === undefined ? "auto" : mode ? "an" : "aus"}`),
+  thinkingTitle: (l: TurnLanguage, mode: boolean | undefined) => mode === undefined
+    ? pick(l, "Thinking: auto — click to enable extended reasoning", "Denken: auto — klicken für erweitertes Nachdenken")
+    : mode
+      ? pick(l, "Thinking: ON — click to disable", "Denken: AN — klicken zum Ausschalten")
+      : pick(l, "Thinking: OFF — click to reset to auto", "Denken: AUS — klicken für auto"),
+  steerTitle: (l: TurnLanguage) => pick(l,
+    "Send this into the running turn — it is read at the turn's next step",
+    "In die laufende Aufgabe senden — wird bei ihrem nächsten Schritt gelesen"),
+  guardrailsLine: (l: TurnLanguage) => pick(l,
+    "Guardrails active · All messages audited · Overrides:",
+    "Guardrails aktiv · Alles wird protokolliert · Schalter:"),
+
+  // ── The note under the field ──────────────────────────────────────────────────────────────
+  notSent: (l: TurnLanguage, reason: string) => pick(l, `Not sent — ${reason}`, `Nicht gesendet — ${reason}`),
+  couldNotStop: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't stop the turn — ${reason}`,
+    `Die Aufgabe ließ sich nicht stoppen — ${reason}`),
+  couldNotRestart: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't restart there — ${reason}`,
+    `Der Neustart an dieser Stelle hat nicht geklappt — ${reason}`),
+  couldNotArchive: (l: TurnLanguage, reason: string) => pick(l,
+    `Couldn't archive the session — ${reason}`,
+    `Die Sitzung ließ sich nicht archivieren — ${reason}`),
+  attachmentsCannotJoin: (l: TurnLanguage) => pick(l,
+    "Attachments can't join a running turn — send them once it finishes.",
+    "Anhänge können nicht in eine laufende Aufgabe — sende sie, sobald sie fertig ist."),
+  stillReadingAttachments: (l: TurnLanguage) => pick(l,
+    "Still reading your attachments — send this once they're done.",
+    "Deine Anhänge werden noch gelesen — sende das, sobald sie fertig sind."),
+  // Names the message's button by the label it has in this language (resend, above).
+  steerUndelivered: (l: TurnLanguage) => pick(l,
+    "Not delivered — use Resend on your message to try again.",
+    "Nicht zugestellt — über „Erneut senden“ an deiner Nachricht versuchst du es noch einmal."),
+  steerSentAsNext: (l: TurnLanguage) => pick(l,
+    "The turn had just finished — your message went out as the next one.",
+    "Die Aufgabe war gerade fertig — deine Nachricht ging als nächste raus."),
+  steerHeld: (l: TurnLanguage) => pick(l,
+    "The turn is finishing — your message goes out as soon as it does.",
+    "Die Aufgabe wird gerade fertig — deine Nachricht geht direkt danach raus."),
+  // Names the card's button by the label it has in this language (configure, above).
+  steerQueuedBehindCard: (l: TurnLanguage) => pick(l,
+    "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card.",
+    "Eingereiht — wird gelesen, sobald die Karte beantwortet und ihr Schritt fertig ist. Engine oder Prompt änderst du über „Anpassen“ auf der Karte."),
+  steerQueued: (l: TurnLanguage) => pick(l,
+    "Queued — folded into the running turn at its next step.",
+    "Eingereiht — fließt beim nächsten Schritt in die laufende Aufgabe ein."),
+  sendOrClearFirst: (l: TurnLanguage) => pick(l,
+    "Send or clear what you are writing first — asking again would replace it.",
+    "Sende oder lösche zuerst, was du gerade schreibst — die erneute Frage würde es ersetzen."),
+  printBlocked: (l: TurnLanguage) => pick(l,
+    "The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.",
+    "Der Browser hat die Druckansicht blockiert. Erlaube Pop-ups für diese Seite und exportiere dann erneut als PDF."),
+
+  // ── Attachments: the status line above the field ──────────────────────────────────────────
+  imageAttached: (l: TurnLanguage) => pick(l, "Image attached — click Send", "Bild angehängt — mit „Senden“ geht es raus"),
+  fileAttached: (l: TurnLanguage, filename: string) => pick(l,
+    `${filename} attached — click Send`,
+    `${filename} angehängt — mit „Senden“ geht es raus`),
+  uploadingDocuments: (l: TurnLanguage, count: number) => pick(l,
+    `Uploading document${count === 1 ? "" : "s"}…`,
+    count === 1 ? "Dokument wird hochgeladen…" : "Dokumente werden hochgeladen…"),
+  analysingImages: (l: TurnLanguage, count: number) => pick(l,
+    `Analysing image${count === 1 ? "" : "s"}…`,
+    count === 1 ? "Bild wird analysiert…" : "Bilder werden analysiert…"),
+
+  // ── What is attached, above the field ─────────────────────────────────────────────────────
+  previewImage: (l: TurnLanguage) => pick(l, "Preview image", "Bild ansehen"),
+  previewFile: (l: TurnLanguage, filename: string) => pick(l, `Preview ${filename}`, `${filename} ansehen`),
+  removeAttachment: (l: TurnLanguage) => pick(l, "Remove", "Entfernen"),
+  removeNamed: (l: TurnLanguage, name: string) => pick(l, `Remove ${name}`, `${name} entfernen`),
+  removeFlagTitle: (l: TurnLanguage) => pick(l, "Click to remove flag", "Klicken, um den Schalter zu entfernen"),
+  slashSuggestions: (l: TurnLanguage) => pick(l, "Slash command suggestions", "Vorschläge für Befehle"),
+  slashHint: (l: TurnLanguage) => pick(l,
+    "↑↓ navigate · Enter / Tab to insert · Esc to dismiss",
+    "↑↓ wählen · Enter / Tab fügt ein · Esc schließt"),
+
+  // ── The Options menu's buttons ────────────────────────────────────────────────────────────
+  attachTitle: (l: TurnLanguage) => pick(l, "Attach a document or image", "Dokument oder Bild anhängen"),
+  attachLabel: (l: TurnLanguage) => pick(l, "Attach file", "Datei anhängen"),
+  uploadAudioTitle: (l: TurnLanguage) => pick(l, "Upload an audio file for transcription", "Audiodatei zum Transkribieren hochladen"),
+  uploadAudioLabel: (l: TurnLanguage) => pick(l, "Upload audio", "Audio hochladen"),
+  stopMicRecording: (l: TurnLanguage) => pick(l, "Stop microphone recording", "Mikrofonaufnahme beenden"),
+  recordFromMic: (l: TurnLanguage) => pick(l, "Record voice from the microphone", "Sprache mit dem Mikrofon aufnehmen"),
+  stopRecordingLabel: (l: TurnLanguage) => pick(l, "Stop recording", "Aufnahme beenden"),
+  recordVoiceLabel: (l: TurnLanguage) => pick(l, "Record voice", "Sprache aufnehmen"),
+  conversationNeedsNoWakeWord: (l: TurnLanguage) => pick(l,
+    "A voice conversation listens without a wake word",
+    "Ein Sprachgespräch hört ohne Aktivierungswort zu"),
+  disableWakeWord: (l: TurnLanguage) => pick(l, "Disable wake-word detection", "Aktivierungswort ausschalten"),
+  enableWakeWord: (l: TurnLanguage) => pick(l, "Enable wake-word detection", "Aktivierungswort einschalten"),
+  stopWakeMode: (l: TurnLanguage) => pick(l, "Stop wake mode", "Sprachaktivierung beenden"),
+  startWakeMode: (l: TurnLanguage) => pick(l, "Start wake mode", "Sprachaktivierung starten"),
+  conversationRunning: (l: TurnLanguage) => pick(l,
+    "A voice conversation is running — click to end it",
+    "Ein Sprachgespräch läuft — klicken zum Beenden"),
+  startConversationTitle: (l: TurnLanguage) => pick(l,
+    "Start a hands-free voice conversation: talk, pause, and it is sent; the answer is spoken, and talking over it interrupts",
+    "Freihändiges Sprachgespräch starten: sprechen, pausieren, und es wird gesendet; die Antwort wird vorgelesen, und Dazwischenreden unterbricht sie"),
+  stopConversationLabel: (l: TurnLanguage) => pick(l, "Stop voice conversation", "Sprachgespräch beenden"),
+  startConversationLabel: (l: TurnLanguage) => pick(l, "Start voice conversation", "Sprachgespräch starten"),
+  readLatestAloud: (l: TurnLanguage) => pick(l,
+    "Read the latest answer aloud (a long one as a summary)",
+    "Die letzte Antwort vorlesen (eine lange als Zusammenfassung)"),
+  speakReplyLabel: (l: TurnLanguage) => pick(l, "Speak reply", "Antwort vorlesen"),
+  speechOnTitle: (l: TurnLanguage) => pick(l,
+    "Speech is ON: tones and updates while a turn runs, the answer read aloud — click to turn off",
+    "Sprachausgabe ist AN: Töne und Updates während einer Aufgabe, die Antwort wird vorgelesen — klicken zum Ausschalten"),
+  speechOffTitle: (l: TurnLanguage) => pick(l,
+    "Speech is OFF — click for tones and updates while a turn runs, and the answer read aloud",
+    "Sprachausgabe ist AUS — klicken für Töne und Updates während einer Aufgabe und das Vorlesen der Antwort"),
+  turnSpeechOff: (l: TurnLanguage) => pick(l, "Turn speech off", "Sprachausgabe ausschalten"),
+  turnSpeechOn: (l: TurnLanguage) => pick(l, "Turn speech on", "Sprachausgabe einschalten"),
+  spokenLanguage: (l: TurnLanguage) => pick(l, "Spoken language", "Gesprochene Sprache"),
+  spokenLanguageTitle: (l: TurnLanguage) => pick(l,
+    "The language your recordings are transcribed in",
+    "Die Sprache, in der deine Aufnahmen transkribiert werden"),
+  detectLanguage: (l: TurnLanguage) => pick(l, "Detect", "Erkennen"),
+  speechUpdatesTitle: (l: TurnLanguage) => pick(l,
+    "What you hear while the assistant works, with speech on",
+    "Was du hörst, während der Assistent arbeitet, wenn die Sprachausgabe an ist"),
+
+  // ── The voice bar ─────────────────────────────────────────────────────────────────────────
+  voiceEyebrow: (l: TurnLanguage, conversation: boolean) => conversation
+    ? pick(l, "Voice conversation", "Sprachgespräch")
+    : pick(l, "Voice", "Sprache"),
+  closeVoiceBar: (l: TurnLanguage) => pick(l, "Close the voice bar", "Sprachleiste schließen"),
+  speakingSummary: (l: TurnLanguage) => pick(l, "Speaking a summary of the answer", "Liest eine Zusammenfassung der Antwort vor"),
+  speakingAnswer: (l: TurnLanguage) => pick(l, "Speaking the answer", "Liest die Antwort vor"),
+  speaking: (l: TurnLanguage) => pick(l, "Speaking", "Spricht"),
+  preparingSummary: (l: TurnLanguage) => pick(l, "Preparing a spoken summary…", "Bereitet eine gesprochene Zusammenfassung vor…"),
+  hearingYou: (l: TurnLanguage) => pick(l, "Hearing you…", "Hört dich…"),
+  transcribingShort: (l: TurnLanguage) => pick(l, "Transcribing…", "Transkribiert…"),
+  workingOnIt: (l: TurnLanguage) => pick(l, "Working on it…", "Arbeitet daran…"),
+  listeningJustTalk: (l: TurnLanguage) => pick(l, "Listening — just talk", "Hört zu — sprich einfach"),
+  // Names the bar's button by the label it has in this language (voiceDone, above).
+  recordingPauseOrDone: (l: TurnLanguage) => pick(l,
+    "Recording — pause or press Done to finish",
+    "Aufnahme läuft — mach eine Pause oder drücke „Fertig“"),
+  spokeSummary: (l: TurnLanguage) => pick(l, "Spoke a summary of the answer", "Hat eine Zusammenfassung der Antwort vorgelesen"),
+  spokeAnswer: (l: TurnLanguage) => pick(l, "Spoke the answer", "Hat die Antwort vorgelesen"),
+  couldNotSpeak: (l: TurnLanguage) => pick(l,
+    "The answer could not be spoken — the speech service and the browser's voice both failed.",
+    "Die Antwort konnte nicht vorgelesen werden — der Sprachdienst und die Stimme des Browsers haben beide versagt."),
+  micInUse: (l: TurnLanguage) => pick(l, "The microphone is in use", "Das Mikrofon wird gerade verwendet"),
+
+  // ── Recording and the wake word: the status line and the card ────────────────────────────
+  statusRecording: (l: TurnLanguage) => pick(l, "Recording from microphone", "Aufnahme vom Mikrofon läuft"),
+  statusTranscribing: (l: TurnLanguage) => pick(l, "Transcribing audio", "Audio wird transkribiert"),
+  micUnavailable: (l: TurnLanguage) => pick(l,
+    "Microphone recording is unavailable in this browser",
+    "Mikrofonaufnahme ist in diesem Browser nicht verfügbar"),
+  wakeUnavailable: (l: TurnLanguage) => pick(l,
+    "Wake-word detection is unavailable in this browser",
+    "Die Erkennung des Aktivierungsworts ist in diesem Browser nicht verfügbar"),
+  speechRecognitionUnavailable: (l: TurnLanguage) => pick(l,
+    "SpeechRecognition unavailable in this browser",
+    "Spracherkennung ist in diesem Browser nicht verfügbar"),
+  sayWakeWord: (l: TurnLanguage, words: string) => pick(l, `Say ${words}`, `Sag ${words}`),
+  wakeListeningStatus: (l: TurnLanguage) => pick(l, "Wake listening", "Wartet auf das Aktivierungswort"),
+  listeningFor: (l: TurnLanguage, words: string) => pick(l, `Listening for ${words}`, `Wartet auf ${words}`),
+  wakeModeOff: (l: TurnLanguage) => pick(l, "Wake mode off", "Sprachaktivierung aus"),
+  wakePhraseDetected: (l: TurnLanguage, word: string) => pick(l, `Wake phrase detected: ${word}`, `Aktivierungswort erkannt: ${word}`),
+  wakeRecognitionError: (l: TurnLanguage, error: string) => pick(l,
+    `Wake recognition error: ${error}`,
+    `Fehler bei der Erkennung des Aktivierungsworts: ${error}`),
+  wakeTriggeredRecording: (l: TurnLanguage) => pick(l, "Wake-triggered recording", "Aufnahme nach Aktivierungswort"),
+  wakeRecordingStarted: (l: TurnLanguage) => pick(l,
+    "Wake word detected. Recording has started.",
+    "Aktivierungswort erkannt. Die Aufnahme läuft."),
+  stopPhraseDetected: (l: TurnLanguage) => pick(l, "Stop phrase detected", "Stoppwort erkannt"),
+  stopPhraseFeedback: (l: TurnLanguage) => pick(l,
+    "Stop phrase detected. Finishing the recording and starting transcription.",
+    "Stoppwort erkannt. Die Aufnahme wird beendet und transkribiert."),
+  recordingFinishedTranscribing: (l: TurnLanguage) => pick(l,
+    "Recording finished. Transcribing now...",
+    "Aufnahme beendet. Wird jetzt transkribiert…"),
+  transcriptReady: (l: TurnLanguage, language?: string) => pick(l,
+    `Transcript ready${language ? ` (${language})` : ""}`,
+    `Transkript fertig${language ? ` (${language})` : ""}`),
+  noSpeechHeard: (l: TurnLanguage) => pick(l, "No speech was heard", "Es war keine Sprache zu hören"),
+  noSpeechHint: (l: TurnLanguage) => pick(l,
+    "No speech was heard. Speak a little longer and try again.",
+    "Es war keine Sprache zu hören. Sprich etwas länger und versuche es noch einmal."),
+  transcribingFile: (l: TurnLanguage, filename: string) => pick(l, `Transcribing ${filename}`, `${filename} wird transkribiert`),
+  audioAddedFrom: (l: TurnLanguage, filename: string) => pick(l, `Audio added from ${filename}`, `Audio aus ${filename} eingefügt`),
+  audioNoText: (l: TurnLanguage) => pick(l, "Audio transcription returned no text", "Die Transkription hat keinen Text ergeben"),
+  wakeEyebrow: (l: TurnLanguage) => pick(l, "Wake Voice", "Aktivierungswort"),
+  wakeStepListening: (l: TurnLanguage) => pick(l, "Listening", "Hört zu"),
+  wakeStepRecording: (l: TurnLanguage) => pick(l, "Recording", "Aufnahme"),
+  wakeStepTranscribing: (l: TurnLanguage) => pick(l, "Transcribing", "Transkription"),
+  wakeStepReady: (l: TurnLanguage) => pick(l, "Ready", "Fertig"),
+  wakeTitle: (l: TurnLanguage, state: "idle" | "listening" | "recording" | "processing" | "success" | "error") => {
+    if (state === "error") return pick(l, "Wake pipeline needs attention", "Die Sprachaktivierung braucht Aufmerksamkeit");
+    if (state === "success") return pick(l, "Recording finished", "Aufnahme fertig");
+    if (state === "processing") return pick(l, "Transcribing your recording", "Deine Aufnahme wird transkribiert");
+    if (state === "recording") return pick(l, "Recording in progress", "Aufnahme läuft");
+    return pick(l, "Wake listening active", "Wartet auf das Aktivierungswort");
+  },
+
+  // ── A request the server refused without a word of its own (composables/httpErrors.ts) ────
+  uploadTooLarge: (l: TurnLanguage) => pick(l,
+    "Too large to upload (the server does not accept this much in one request).",
+    "Zu groß für den Upload (der Server nimmt so viel in einer Anfrage nicht an)."),
+  gatewayNoAnswer: (l: TurnLanguage, status: number) => pick(l,
+    `The gateway did not answer (HTTP ${status}); it may be restarting or still busy with the request.`,
+    `Das Gateway hat nicht geantwortet (HTTP ${status}); es startet vielleicht gerade neu oder ist noch mit der Anfrage beschäftigt.`),
+  serverSentPage: (l: TurnLanguage, status: number) => pick(l,
+    `The server answered with a web page instead of data (HTTP ${status}); the gateway address or the proxy in front of it is probably set up wrong.`,
+    `Der Server hat mit einer Webseite statt mit Daten geantwortet (HTTP ${status}); die Gateway-Adresse oder der Proxy davor ist vermutlich falsch eingerichtet.`),
 
   // ── Asking first ──────────────────────────────────────────────────────────────────────────
   restartConfirmTitle: (l: TurnLanguage) => pick(l, "Restart from this message?", "Ab dieser Nachricht neu starten?"),

@@ -2659,7 +2659,10 @@ export function createGateway() {
             temperature: 0.1,
           }),
         },
-        multimodalConfig.files.timeoutMs,
+        // The vision model's own time (120 s by default), as the analyze_image tool gives it
+        // (tools/multimodal.ts). This route waited files.timeoutMs, the file converter's 60 s:
+        // a 5 MB picture attached in the chat was cut off at a minute and the message not sent.
+        multimodalConfig.files.visionTimeoutMs ?? multimodalConfig.files.timeoutMs,
       );
 
       if (!res.ok) {

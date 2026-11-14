@@ -914,6 +914,48 @@ resolution by `score`. That was invisible before, because the reported score WAS
 one and the re-sort reproduced the order it had just received. With the pre-blend score it
 undoes the rerank ordering. The re-sort is gone; the resolution already arrives ranked.
 
+**Catalog searches run in English (2026-11-13, `orchestration.routingEnglish`).** The restatement
+rescue above fires after a search has come back empty, at the price of a classifier call (3.5 s at
+the median), and only for `search_agents`. An un-named delegation and the discovery capsule had
+no such second try: in session 5b77edf9 a coordinator's German weather lookup put researcher at
+0.716 against the 0.72 floor, and the same task in English scores 0.762. The translation tier
+(`tiers.translation`, else `narration`) renders a request in 0.55 s at the median, which makes
+the other order affordable: every request that is not in English is rendered FIRST, inside
+`resolveAgentRouting`, so every surface gets it, and the workflow and tool searches the same way
+(`agent/routing-english.ts`). Measured on the 138-request corpus against the live catalog and
+embedding model, twice at temperature 0: recall 89 → 108 (German 52 → 71 of 88, English 37 of 50
+unchanged), German requests admitted nobody 25 → 6, 20 cases fixed and 1 lost
+(`live-device-internal-webui-import`: its agent was fifth of five and is now sixth). Sampled at the
+model's default temperature the count moved by one between runs, hence temperature 0.
+The earlier measurement said that restating every non-English query "buys nothing extra" over
+restating the failed ones; that still holds for recall. What it buys is the same result without
+the failed pass, on every surface, in a sixth of the time. A search that was rendered skips the
+rescue: the restatement would say the same thing again.
+Language is read by the statistical detector (`text-language.ts`), not by word lists: an
+English request is searched as written and costs no call (0 of 50 in the corpus were rendered).
+
+**A second bidder scored by word fragments, and its bids rode in on the best one (2026-11-13).**
+The gateway starts two bidders. `swarm/bidding.ts` asks the router; `swarm/bidder-worker.ts`
+counted every fragment of the task of two letters or more that equalled or BEGAN a word of an
+agent's description. For a German task that is "ca", "am", "nach", "com": a weather lookup was
+bid for mail_agent at 0.17, for calendar_agent and for computer_use_agent. The delegation then
+queued EVERY bid once the best one cleared `skillMatchThreshold` — here the calling coordinator's
+own bid at 0.77, which was passed over as the caller — so mail_agent ran the lookup, found no
+mail about the weather and estimated one (session 5b77edf9). It takes an undirected delegation
+whose best match is its own caller and whose next match is under the router's floor
+(researcher 0.716): a coordinator handing on its own speciality in German. The nightly lab
+never saw it, because the lab runs no bidders (0 of 630 runs).
+Now: the worker bids the router's ranking, and stays silent where the process's own bidder
+runs; an announcement leaves its caller out; each bid has to clear the threshold itself
+(`delegation_bidding_filtered_unqualified`).
+
+**A re-delegation by name was served another agent's answer (2026-11-13).** Signature reuse
+matched an earlier task by its words alone, with one exception for the agent a turn is directed
+to. In the same session the coordinator then sent the same words to researcher by name and was
+handed mail_agent's answer three milliseconds later, as researcher's. A delegation that names
+its agent is now served only that agent's own earlier result; one that names nobody still
+takes whatever ran the task.
+
 **Nothing pinned which branch production takes.** Every test passed `blendMode` explicitly, so
 changing the schema default back to `"admission"` would have left the suite green while
 restoring the defect. Pinned.

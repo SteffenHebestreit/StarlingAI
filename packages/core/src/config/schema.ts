@@ -281,6 +281,10 @@ export const ModelConfigSchema = z.object({
      *  routing tier is often the task model itself, and under load it timed out on 10 of 13. Unset,
      *  those messages keep their fixed wording. */
     narration: z.string().max(200).optional(),
+    /** `translation`: the model that renders a request into English before the catalogs are
+     *  searched with it (orchestration.routingEnglish). Small and fast: a search waits on it.
+     *  Unset, the narration tier does it, and without one the routing tier. */
+    translation: z.string().max(200).optional(),
   }).optional(),
 });
 

@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { useGatewayStore } from "./gateway";
+import { responseErrorMessage as parseErrorResponse } from "@/composables/httpErrors";
 
 export interface MultimodalServiceConfig {
   baseUrl: string;
@@ -201,29 +202,6 @@ export const useMultimodalStore = defineStore("multimodal", () => {
 
   function baseUrl(): string {
     return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
-  }
-
-  async function parseErrorResponse(response: Response): Promise<string> {
-    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-    if (contentType.includes("application/json")) {
-      try {
-        const body = await response.json() as { error?: string; detail?: string };
-        return body.error ?? body.detail ?? response.statusText ?? `HTTP ${response.status}`;
-      } catch {
-        return response.statusText || `HTTP ${response.status}`;
-      }
-    }
-
-    try {
-      const text = (await response.text()).trim();
-      if (!text) return response.statusText || `HTTP ${response.status}`;
-      if (text.startsWith("<!DOCTYPE") || text.startsWith("<html")) {
-        return "Received HTML instead of JSON from the gateway. Check the web server API proxy and configured gateway URL.";
-      }
-      return text.slice(0, 240);
-    } catch {
-      return response.statusText || `HTTP ${response.status}`;
-    }
   }
 
   async function fetchStatus(): Promise<void> {

@@ -45,6 +45,8 @@ export interface Satellite {
   label: string;
   /** What the satellite carries on the ring: the step's title and the short form of its subject. */
   short: string;
+  /** The short form of its subject alone, when it has one: what a label with little room says. */
+  subject?: string;
   duration: string;
 }
 
@@ -127,6 +129,7 @@ export function liveActivity(messages: readonly ActivityMessage[], now: number, 
       nested: step.depth === 1,
       label: stepLabel(step, lang),
       short: stepShort(step, lang),
+      ...(stepSubject(step) ? { subject: shortSubject(stepSubject(step)!, 40) } : {}),
       duration: formatDuration(stepDurationMs(step, now)),
     })),
     elapsed: formatDuration(Math.max(0, now - startedAt)),
@@ -259,21 +262,60 @@ export function orbitGeometry(width: number, height: number, freeHalf = Infinity
 export const LABEL_HALF = 105;
 
 /**
- * Whether a satellite at `x` from the centre can show its label without reaching into the
- * messages. Out at the ring's sides on a small window it cannot; it stays a point, its label
- * shown on hover.
+ * A label shows on the near arc of the ring only: the newest step at the front and the one or
+ * two beside it. Further round the points are small and out of focus and so was their text —
+ * seven pixels tall at the ring's ends, with the ring's own lines through it.
  */
-export function labelFits(x: number, freeHalf: number): boolean {
-  return Math.abs(x) + LABEL_HALF <= freeHalf;
+export const LABEL_MIN_DEPTH = 0.45;
+/** A label narrower than this says too little to be worth showing. */
+const LABEL_MIN_WIDTH = 96;
+/** Air between a label and the messages. */
+const LABEL_MARGIN = 8;
+/** From this share of the ring's half-width outwards, a label hangs wholly on the outer side of its point. */
+const LEAN_FULL = 0.6;
+/** How far under its point a label hangs: clear of the ring's graduated scale and its glow. */
+export const LABEL_DROP = 15;
+/** A label's widest. The front one has the room for a step's title and its subject. */
+export const LABEL_WIDEST = 300;
+
+export interface LabelPlacement {
+  /** -1: all of the label left of its point; 0: centred under it; 1: all of it to the right. */
+  lean: number;
+  /** As wide as the band the messages leave free allows, in page pixels. */
+  maxWidth: number;
 }
 
-/** A label as drawn: centred under its point, its width from its text, all of it scaled with depth. */
+/**
+ * How a satellite at `x` from the centre, at `depth`, carries its label — or null when it stays a
+ * point (its label shows on hover). At the front the label hangs centred under its point; beside
+ * the front it leans outwards. The ring comes down towards its front, so a label centred under a
+ * point at the side lay half under the ring's arc, struck through by it; on the outer side the
+ * arc climbs away. Leaning out it comes nearer the messages, and is cut to what stays clear of them.
+ */
+export function labelPlacement(x: number, depth: number, rx: number, freeHalf: number): LabelPlacement | null {
+  if (depth < LABEL_MIN_DEPTH) return null;
+  const lean = Math.max(-1, Math.min(1, x / (rx * LEAN_FULL)));
+  // The share of the label's width on the outer side of its point.
+  const outer = (1 + Math.abs(lean)) / 2;
+  const maxWidth = Math.floor(Math.min(LABEL_WIDEST, (freeHalf - Math.abs(x) - LABEL_MARGIN) / outer));
+  return maxWidth >= LABEL_MIN_WIDTH ? { lean, maxWidth } : null;
+}
+
+/**
+ * A label as drawn: under its point, its width from its text. A placed label (labelPlacement) is
+ * drawn at full size, LABEL_DROP under its point, and hangs by its lean; one without a placement
+ * is centred and scaled with its point, drop and all.
+ */
 export interface LabelCandidate {
   id: string;
   x: number;
   y: number;
   scale: number;
   text: string;
+  /** Where it hangs (labelPlacement): centred when absent. */
+  lean?: number;
+  /** Its widest, in page pixels (labelPlacement). */
+  maxWidth?: number;
 }
 
 /**
@@ -285,9 +327,12 @@ export function placeLabels(candidates: readonly LabelCandidate[]): Set<string> 
   const placed: Array<{ left: number; right: number; top: number; bottom: number }> = [];
   const shown = new Set<string>();
   for (const label of candidates) {
-    const width = Math.min(2 * LABEL_HALF, label.text.length * 6.5 + 18) * label.scale;
-    const top = label.y + 11 * label.scale;
-    const box = { left: label.x - width / 2, right: label.x + width / 2, top, bottom: top + 20 * label.scale };
+    const natural = label.text.length * 6.5 + 18;
+    const size = label.maxWidth === undefined ? label.scale : 1;
+    const width = Math.min(label.maxWidth ?? 2 * LABEL_HALF, natural) * size;
+    const left = label.x - width * (1 - (label.lean ?? 0)) / 2;
+    const top = label.y + LABEL_DROP * size;
+    const box = { left, right: left + width, top, bottom: top + 20 * size };
     const covers = placed.some((other) => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top);
     if (covers) continue;
     placed.push(box);
@@ -299,13 +344,15 @@ export function placeLabels(candidates: readonly LabelCandidate[]): Set<string> 
 /**
  * Half the width the messages leave free around the centre, as the chat page lays them out
  * (pages/Chat.vue, from 1100 px): each bubble at its outer edge, ending at the orb's zone
- * (24vh + 1.5rem from the centre) but never narrower than 28rem nor wider than 52rem.
+ * (24vh + 1.5rem from the centre) but never narrower than 28rem nor wider than 52rem. `lane` is
+ * the room a side keeps free at its outer edge for the round controls parked there
+ * (composables/podLanes.ts): a bubble gives it up, down to its 28rem, and then comes nearer.
  */
-export function freeHalfWidth(width: number, height: number, rem = 16): number {
+export function freeHalfWidth(width: number, height: number, rem = 16, lane = 0): number {
   if (width < 1100) return 0;
   const inset = 1.25 * rem;
   const clear = 0.24 * height + 1.5 * rem;
   const row = width - 2 * inset;
-  const bubble = Math.min(52 * rem, Math.max(28 * rem, row / 2 - clear));
-  return width / 2 - inset - bubble;
+  const bubble = Math.min(52 * rem, Math.max(28 * rem, row / 2 - clear - lane));
+  return width / 2 - inset - lane - bubble;
 }

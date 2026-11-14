@@ -527,6 +527,27 @@ function _toolEmbeddingKey(h: ToolHandler): string {
   return `${h.name}::${h.description}::${h.embeddingDescription ?? ""}`;
 }
 
+/**
+ * A search text in the tool catalog's language, English (agent/routing-english.ts): the task or
+ * query a search runs on, or a tool's own entry before it is embedded. Imported on use — that
+ * module sits above this one.
+ */
+async function inCatalogLanguage(kind: "query" | "entry", text: string, budgetMs?: number): Promise<string> {
+  try {
+    const english = await import("../agent/routing-english.js");
+    return kind === "query" ? (await english.routingEnglish(text, budgetMs)).text : await english.catalogEnglish(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * How long a sub-agent's tool ranking waits for its task in English. The ranking only orders the
+ * tools the agent holds anyway, and it stands between a delegation and the agent's first model
+ * call: a long task takes the translation tier over two seconds, and is ranked as written then.
+ */
+const TOOL_RERANK_ENGLISH_BUDGET_MS = 1_500;
+
 function _toolEmbeddingText(h: ToolHandler): string {
   const paraphrase = h.embeddingDescription ?? "";
   return paraphrase
@@ -541,7 +562,7 @@ async function _getToolEmbedding(h: ToolHandler): Promise<Float32Array | null> {
   const inflight = _toolEmbeddingInflight.get(key);
   if (inflight) return inflight;
   const p = (async () => {
-    const vec = await computeQueryEmbedding(_toolEmbeddingText(h));
+    const vec = await computeQueryEmbedding(await inCatalogLanguage("entry", _toolEmbeddingText(h)));
     if (vec) _toolEmbeddingCache.set(key, vec);
     return vec;
   })();
@@ -575,7 +596,9 @@ export async function rerankToolsForTask(
   // original no-op-for-<=1 behaviour for callers that don't pass a threshold.
   if (!task || defs.length <= minTools || !isEmbeddingAvailable()) return defs;
 
-  const queryVec = await computeQueryEmbedding(task);
+  // The tools are described in English; a task in another language is ranked against them in
+  // English too.
+  const queryVec = await computeQueryEmbedding(await inCatalogLanguage("query", task, TOOL_RERANK_ENGLISH_BUDGET_MS));
   if (!queryVec) return defs;
 
   let embeddingMissing = false;
@@ -628,6 +651,8 @@ export async function searchToolsByEmbedding(
 ): Promise<{ name: string; description: string; score: number; mode: "embedding" | "keyword" | "empty" }[]> {
   const candidates = handlers ?? [..._registry.values()];
   if (candidates.length === 0 || !query.trim()) return [];
+  // Searched in the catalog's language, by meaning and by words alike.
+  query = await inCatalogLanguage("query", query);
 
   if (isEmbeddingAvailable()) {
     const queryVec = await computeQueryEmbedding(query);
@@ -721,7 +746,7 @@ export async function warmToolEmbeddings(
   }
   for (let start = 0; start < pending.length; start += TOOL_EMBEDDING_WARM_BATCH) {
     const batch = pending.slice(start, start + TOOL_EMBEDDING_WARM_BATCH);
-    const vectors = await computeTextEmbeddings(batch.map(_toolEmbeddingText));
+    const vectors = await computeTextEmbeddings(await Promise.all(batch.map((handler) => inCatalogLanguage("entry", _toolEmbeddingText(handler)))));
     let answered = 0;
     batch.forEach((handler, i) => {
       const vec = vectors[i];

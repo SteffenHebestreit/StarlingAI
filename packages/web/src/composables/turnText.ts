@@ -154,6 +154,12 @@ export const turnText = {
     ? `${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])} geplant und ausgeführt`
     : `Planned and ran ${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])}`,
   ranThePlan: (lang: TurnLanguage) => lang === "de" ? "Plan ausgeführt" : "Ran the plan",
+  // While it runs. A plan runs for minutes with its call still open: "4 Schritte geplant" stood
+  // beside a spinner for all of them, as the step the turn was on.
+  runningPlan: (lang: TurnLanguage, count: number) => lang === "de"
+    ? `Plan läuft · ${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])}`
+    : `Running the plan · ${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])}`,
+  runningThePlan: (lang: TurnLanguage) => lang === "de" ? "Plan läuft" : "Running the plan",
   planned: (lang: TurnLanguage, count: number) => lang === "de"
     ? `${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])} geplant`
     : `Planned ${plural(lang, count, ["step", "steps"], ["Schritt", "Schritte"])}`,

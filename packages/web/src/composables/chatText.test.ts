@@ -13,6 +13,14 @@ describe("chatText", () => {
       editsByInstruction: ["Quality"], maskOfYours: ["35%"], sizeAxis: ["width"], sizeTooLargeRenders: [1024, 768],
       engineFixedSize: [512], sizeRule: [16, 256, 2048], widthAndHeightErrors: ["too wide", "too tall"],
       engineDefault: [30], fieldsNeedAttention: [2], mayChange: ["35%"],
+      effortName: ["medium"], effortDescription: ["medium"], effortLabel: ["medium"], effortTitle: ["medium"],
+      imagesChip: ["ask"], imagesTitle: ["ask"], thinkingChip: [true], thinkingTitle: [true],
+      notSent: ["too large"], couldNotStop: ["timeout"], couldNotRestart: ["timeout"], couldNotArchive: ["timeout"],
+      fileAttached: ["report.pdf"], uploadingDocuments: [2], analysingImages: [1],
+      gatewayNoAnswer: [504], serverSentPage: [404],
+      previewFile: ["fox.png"], removeNamed: ["fox.png"], voiceEyebrow: [true], sayWakeWord: ["Luna"],
+      listeningFor: ["Luna"], wakePhraseDetected: ["Luna"], wakeRecognitionError: ["network"], transcriptReady: ["de"],
+      transcribingFile: ["memo.wav"], audioAddedFrom: ["memo.wav"], wakeTitle: ["recording"],
     };
     for (const [key, label] of Object.entries(chatText)) {
       const args = sample[key] ?? [];
@@ -22,6 +30,37 @@ describe("chatText", () => {
       expect(de.trim(), key).not.toBe("");
       // The words both languages share.
       if (!["details", "tabLive", "jobs", "engineLegend", "promptLegend", "seedLabel"].includes(key)) expect(de, key).not.toBe(en);
+    }
+  });
+
+  it("words the composer's chips in every state, in both languages", () => {
+    for (const lang of ["en", "de"] as const) {
+      const efforts = (["low", "medium", "high", "max"] as const).map((tier) => chatText.effortName(lang, tier));
+      expect(new Set(efforts).size).toBe(4);
+      for (const tier of ["low", "medium", "high", "max"] as const) {
+        expect(chatText.effortDescription(lang, tier)).not.toBe("");
+        expect(chatText.effortTitle(lang, tier)).toContain(chatText.effortName(lang, tier));
+        expect(chatText.effortTitle(lang, tier)).toContain(chatText.effortDescription(lang, tier));
+      }
+      expect(new Set([undefined, true, false].map((mode) => chatText.thinkingChip(lang, mode))).size).toBe(3);
+      expect(new Set([undefined, true, false].map((mode) => chatText.thinkingTitle(lang, mode))).size).toBe(3);
+      expect(chatText.imagesChip(lang, "ask")).not.toBe(chatText.imagesChip(lang, "auto"));
+      expect(chatText.imagesTitle(lang, "ask")).not.toBe(chatText.imagesTitle(lang, "auto"));
+    }
+    expect(chatText.imagesChip("de", "ask")).toBe("Bilder: fragen");
+    expect(chatText.thinkingChip("de", undefined)).toBe("Denken: auto");
+    expect(chatText.thinkingChip("en", false)).toBe("Thinking: off");
+  });
+
+  it("words the voice bar and the wake card in every state, in both languages", () => {
+    for (const lang of ["en", "de"] as const) {
+      const states = ["idle", "listening", "recording", "processing", "success", "error"] as const;
+      // "idle" and "listening" share the resting title; the other four are their own.
+      expect(new Set(states.map((state) => chatText.wakeTitle(lang, state))).size).toBe(5);
+      expect(chatText.voiceEyebrow(lang, true)).not.toBe(chatText.voiceEyebrow(lang, false));
+      expect(chatText.recordingPauseOrDone(lang)).toContain(chatText.voiceDone(lang));
+      expect(chatText.transcriptReady(lang)).not.toContain("(");
+      expect(chatText.transcriptReady(lang, "de")).toContain("(de)");
     }
   });
 
@@ -41,7 +80,21 @@ describe("chatText", () => {
   it("names the card's Configure button in the composer's hint by the label it has", () => {
     for (const lang of ["en", "de"] as const) {
       expect(chatText.cardPlaceholder(lang)).toContain(chatText.configure(lang).replace("…", ""));
+      expect(chatText.steerQueuedBehindCard(lang)).toContain(chatText.configure(lang).replace("…", ""));
     }
+  });
+
+  it("names the buttons its notes point at by the labels they have", () => {
+    for (const lang of ["en", "de"] as const) {
+      expect(chatText.steerUndelivered(lang)).toContain(chatText.resend(lang).replace("↻ ", ""));
+      expect(chatText.imageAttached(lang)).toContain(chatText.send(lang));
+      expect(chatText.fileAttached(lang, "report.pdf")).toContain(chatText.send(lang));
+      expect(chatText.fileAttached(lang, "report.pdf")).toContain("report.pdf");
+    }
+    expect(chatText.uploadingDocuments("en", 1)).toBe("Uploading document…");
+    expect(chatText.uploadingDocuments("en", 2)).toBe("Uploading documents…");
+    expect(chatText.analysingImages("de", 1)).toBe("Bild wird analysiert…");
+    expect(chatText.analysingImages("de", 3)).toBe("Bilder werden analysiert…");
   });
 
   it("words the image form's variable lines in both languages", () => {

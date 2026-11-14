@@ -10,6 +10,7 @@
 
 import { getConfig } from "../config/loader.js";
 import { buildAgentTokenIdf, isEmbeddingAvailable, routingTokenRarity, scoreAgentKeywordMatch, searchByEmbedding } from "../providers/embeddings.js";
+import { routingEnglish } from "../agent/routing-english.js";
 import type { SubAgentConfig } from "../config/schema.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { readPromotedAgents } from "../agent/promoted-agents.js";
@@ -71,6 +72,10 @@ export interface AgentRoutingCandidate {
 
 export interface AgentRoutingResolution {
   query: string;
+  /** What the search ran on, when the request was rendered into English for it (agent/routing-english.ts). */
+  routedQuery?: string;
+  /** The language the request was written in, when it was rendered (ISO 639-1, or "unknown"). */
+  queryLanguage?: string;
   minConfidence: "high" | "medium" | "low";
   mode: "keyword" | "hybrid" | "semantic_unavailable";
   results: AgentRoutingCandidate[];
@@ -148,6 +153,8 @@ export function logRoutingEvaluated(input: {
     // The query is the routing input; it is the user's text or a derived task, so it
     // rides through the same audit sanitizer as every other free-form field.
     query: input.query.slice(0, 500),
+    // What the search ran on, when the request was rendered into English for it.
+    ...(resolution.routedQuery ? { routedQuery: resolution.routedQuery.slice(0, 500), queryLanguage: resolution.queryLanguage } : {}),
     minConfidence: resolution.minConfidence,
     mode: resolution.mode,
     ...(resolution.semanticUnavailableReason ? { semanticUnavailableReason: resolution.semanticUnavailableReason } : {}),
@@ -466,9 +473,18 @@ export async function resolveAgentRouting(
     allowedAgents?: string[];
     excludeAgents?: string[];
     allowKeywordFallback?: boolean;
+    /** How long the search waits for the request in English (agent/routing-english.ts). */
+    englishBudgetMs?: number;
   },
 ): Promise<AgentRoutingResolution> {
-  const raw = query.trim();
+  const asked = query.trim();
+  // THE CATALOG IS SEARCHED IN ENGLISH. Every surface comes through here — search_agents,
+  // list_agents, an un-named delegation, the bidders, the discovery capsule, the resolve route —
+  // so this is the one place a request in another language is rendered before it is scored. `raw`
+  // below is what the search runs on; the resolution still reports the request as it was asked.
+  const english = await routingEnglish(asked, opts?.englishBudgetMs);
+  const raw = english.text;
+  const routedIn = english.translated ? { routedQuery: english.text, queryLanguage: english.language ?? "unknown" } : {};
   const minConfidence = opts?.minConfidence ?? "medium";
   // The qualification floor is computed AFTER we know whether semantic
   // search produced results (see further down), since the floor depends
@@ -531,7 +547,8 @@ export async function resolveAgentRouting(
 
   if (opts?.allowKeywordFallback === false && embeddingConfigured && !usedSemanticSearch) {
     return {
-      query: raw,
+      query: asked,
+      ...routedIn,
       minConfidence,
       mode: "semantic_unavailable",
       results: [],
@@ -707,7 +724,8 @@ export async function resolveAgentRouting(
   const allLowConfidence = resolvedResults.length > 0 && resolvedResults.every(r => r.confidence === "low");
 
   return {
-    query: raw,
+    query: asked,
+    ...routedIn,
     minConfidence,
     mode: usedSemanticSearch ? "hybrid" : "keyword",
     results: resolvedResults,

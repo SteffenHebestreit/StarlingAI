@@ -52,6 +52,25 @@ describe("the hologram sphere", () => {
     expect(nearCore.length).toBeLessThanOrEqual(2);
   });
 
+  it("gives some of its rings a share of the dust's colours, and leaves the rest the core's", () => {
+    const shares = SPHERE_RINGS.map((ring) => ring.tint ?? 0);
+    const tinted = shares.filter((share) => share > 0).length;
+    // Not all of them, or the sphere is one colour again; not a few, or the dust stays a stranger in it.
+    expect(tinted).toBeGreaterThanOrEqual(Math.ceil(SPHERE_RINGS.length * 0.35));
+    expect(tinted).toBeLessThanOrEqual(Math.floor(SPHERE_RINGS.length * 0.7));
+    expect(new Set(shares)).toEqual(new Set([0, 0.55, 1]));
+    // Among the bold lines and the quiet ones alike.
+    expect(SPHERE_RINGS.filter((ring) => !ring.minor).some((ring) => (ring.tint ?? 0) > 0)).toBe(true);
+    expect(SPHERE_RINGS.filter((ring) => !ring.minor).some((ring) => (ring.tint ?? 0) === 0)).toBe(true);
+  });
+
+  it("lays the sphere out as it was: the shares do not move a ring", () => {
+    // The first ring is the globe's equator, a whole graduated scale — whatever its share.
+    const { tint: _tint, ...equator } = SPHERE_RINGS[0]!;
+    expect(equator).toMatchObject({ kind: "scale", arc: 1, offset: 0, tiles: 65 });
+    expect(SPHERE_RINGS).toHaveLength(21);
+  });
+
   it("gives a scale a whole number of fives, so every fifth mark is a long one all the way round", () => {
     for (const ring of [...SPHERE_RINGS, ...STEP_RINGS]) {
       if (ring.kind === "scale") expect(ring.tiles % 5).toBe(0);
@@ -69,5 +88,10 @@ describe("the step ring", () => {
       expect(ring.normal).toEqual([0, 0, 1]);
       expect(ring.minor).toBeUndefined();
     }
+  });
+
+  it("keeps the rail the steps ride on in the core's colour, and grades its scale like the dust", () => {
+    expect(STEP_RINGS.find((ring) => ring.kind === "rail")?.tint).toBeUndefined();
+    expect(STEP_RINGS.find((ring) => ring.kind === "scale")?.tint).toBe(1);
   });
 });

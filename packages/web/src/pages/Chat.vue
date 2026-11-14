@@ -17,7 +17,7 @@
 
     <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
          chat keeps the question and the answer. -->
-    <OrbActivity :activity="orbActivity" :language="orbLanguage" @open="openLiveSteps" />
+    <OrbActivity :activity="orbActivity" :language="orbLanguage" :lane="podLane" @open="openLiveSteps" />
 
     <!-- Drag-drop overlay: visible while a file drag is hovering the chat surface -->
     <div
@@ -171,7 +171,7 @@
               <span>{{ gateway.isLoading ? chatText.newActivity(uiLanguage) : chatText.newMessages(uiLanguage) }}</span>
             </button>
           </Transition>
-          <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''">
+          <div ref="messagesEl" class="chat-message-scroll" :class="composerOpen ? 'chat-message-scroll--bay-open' : ''" :style="podLaneStyle">
             <div v-if="gateway.currentSessionHasOlderMessages" class="flex justify-center">
               <button
                 @click="loadOlderMessages"
@@ -505,8 +505,8 @@
             type="button"
             @click="previewModalUrl = img.previewUrl"
             class="shrink-0 rounded-l-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/70"
-            title="Preview image"
-            :aria-label="`Preview ${img.filename}`"
+            :title="chatText.previewImage(uiLanguage)"
+            :aria-label="chatText.previewFile(uiLanguage, img.filename)"
           >
             <img :src="img.previewUrl" :alt="img.filename" class="h-9 w-9 object-cover rounded-l-xl" />
           </button>
@@ -517,8 +517,8 @@
             type="button"
             @click="removeImage(idx)"
             class="chip-remove text-purple-400 hover:text-red-300"
-            title="Remove"
-            :aria-label="`Remove ${img.filename}`"
+            :title="chatText.removeAttachment(uiLanguage)"
+            :aria-label="chatText.removeNamed(uiLanguage, img.filename)"
           >✕</button>
         </div>
       </div>
@@ -536,8 +536,8 @@
             type="button"
             @click="removeDocument(idx)"
             class="chip-remove text-cyan-400 hover:text-red-300"
-            title="Remove"
-            :aria-label="`Remove ${doc.filename}`"
+            :title="chatText.removeAttachment(uiLanguage)"
+            :aria-label="chatText.removeNamed(uiLanguage, doc.filename)"
           >✕</button>
         </div>
       </div>
@@ -550,8 +550,8 @@
           @click="removeFlag(flag.pattern)"
           type="button"
           :class="['flex items-center gap-1 px-2.5 py-1 text-xs rounded-full border transition-colors', flagChipClass(flag.color)]"
-          title="Click to remove flag"
-          :aria-label="`Remove ${flag.label}`"
+          :title="chatText.removeFlagTitle(uiLanguage)"
+          :aria-label="chatText.removeNamed(uiLanguage, flag.label)"
         >
           {{ flag.label }}
           <span class="opacity-50 ml-0.5">✕</span>
@@ -559,25 +559,27 @@
       </div>
 
       <div v-if="showMultimodalStatus && (voiceStatusWorthShowing || (showWakeMode && wakeListening))" class="mb-3 flex flex-wrap items-center gap-2 text-xs text-gray-300">
-        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-full px-3 py-1 text-[11px] uppercase tracking-wide" role="status">
+        <!-- A sentence, set as one: in the capitals and wide spacing of a label, "report.pdf
+             attached" shouted its file name, and a long line read as a greyed-out input field. -->
+        <span v-if="voiceStatusWorthShowing" class="multimodal-status rounded-xl px-3 py-1 text-xs" role="status">
           {{ voiceStatus }}
         </span>
         <span v-if="showWakeMode && wakeListening" class="multimodal-status multimodal-status-live rounded-full px-3 py-1 text-[11px] uppercase tracking-wide">
-          Say {{ wakeKeywords.join(" / ") }}
+          {{ chatText.sayWakeWord(uiLanguage, wakeKeywords.join(" / ")) }}
         </span>
       </div>
 
       <div v-if="showWakeFeedbackCard" :class="['wake-feedback-card', `wake-feedback-card--${wakeFeedbackTone}`]">
         <div class="wake-feedback-card__header">
           <div>
-            <div class="wake-feedback-card__eyebrow">Wake Voice</div>
+            <div class="wake-feedback-card__eyebrow">{{ chatText.wakeEyebrow(uiLanguage) }}</div>
             <div class="wake-feedback-card__title">{{ wakeFeedbackTitle }}</div>
           </div>
           <div class="wake-feedback-card__steps">
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 1 ? 'wake-feedback-card__step--active' : '']">Listening</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 2 ? 'wake-feedback-card__step--active' : '']">Recording</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 3 ? 'wake-feedback-card__step--active' : '']">Transcribing</span>
-            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 4 ? 'wake-feedback-card__step--active' : '']">Ready</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 1 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepListening(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 2 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepRecording(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 3 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepTranscribing(uiLanguage) }}</span>
+            <span :class="['wake-feedback-card__step', wakeFeedbackStep >= 4 ? 'wake-feedback-card__step--active' : '']">{{ chatText.wakeStepReady(uiLanguage) }}</span>
           </div>
         </div>
         <div class="wake-feedback-card__message">{{ wakeFeedbackMessage }}</div>
@@ -629,7 +631,7 @@
             aria-hidden="true"
           ><span /><span /><span /></span>
           <div class="voice-bar__text">
-            <div class="voice-bar__eyebrow">{{ voiceConversationMode ? 'Voice conversation' : 'Voice' }}</div>
+            <div class="voice-bar__eyebrow">{{ chatText.voiceEyebrow(uiLanguage, voiceConversationMode) }}</div>
             <div class="voice-bar__label" :class="voiceNotice ? 'voice-bar__label--notice' : ''">{{ voiceNotice || voiceBarLabel }}</div>
           </div>
           <div v-if="voiceBarListening" class="voice-bar__meter" aria-hidden="true">
@@ -646,7 +648,7 @@
               v-if="!voiceBarBusy && !voiceConversationMode && recordingState === 'idle'"
               type="button"
               class="voice-bar__close"
-              aria-label="Close the voice bar"
+              :aria-label="chatText.closeVoiceBar(uiLanguage)"
               @click="dismissVoiceBar()"
             >✕</button>
           </div>
@@ -662,9 +664,9 @@
             v-if="slashOpen && slashSuggestions.length > 0"
             class="slash-popup"
             role="listbox"
-            aria-label="Slash command suggestions"
+            :aria-label="chatText.slashSuggestions(uiLanguage)"
           >
-            <div class="slash-popup__hint">↑↓ navigate · Enter / Tab to insert · Esc to dismiss</div>
+            <div class="slash-popup__hint">{{ chatText.slashHint(uiLanguage) }}</div>
             <button
               v-for="(item, index) in slashSuggestions"
               :key="`${item.kind}:${item.name}`"
@@ -718,8 +720,8 @@
                       @click="fileInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Attach a document or image'"
-                      aria-label="Attach file"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.attachTitle(uiLanguage)"
+                      :aria-label="chatText.attachLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
@@ -733,8 +735,8 @@
                       @click="audioInputEl?.click()"
                       :disabled="multimodalBusy"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Upload an audio file for transcription'"
-                      aria-label="Upload audio"
+                      :title="multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.uploadAudioTitle(uiLanguage)"
+                      :aria-label="chatText.uploadAudioLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 16V4" />
@@ -749,8 +751,8 @@
                       :disabled="(multimodalBusy && recordingState !== 'recording') || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="recordingState === 'recording' ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? 'Stop microphone recording' : multimodalBusy ? chatText.audioBusy(uiLanguage) : 'Record voice from the microphone'"
-                      :aria-label="recordingState === 'recording' ? 'Stop recording' : 'Record voice'"
+                      :title="voiceConversationMode ? chatText.recordInConversation(uiLanguage) : recordingState === 'recording' ? chatText.stopMicRecording(uiLanguage) : multimodalBusy ? chatText.audioBusy(uiLanguage) : chatText.recordFromMic(uiLanguage)"
+                      :aria-label="recordingState === 'recording' ? chatText.stopRecordingLabel(uiLanguage) : chatText.recordVoiceLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3Z" />
@@ -765,8 +767,8 @@
                       :disabled="recordingState === 'processing' || voiceConversationMode"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="wakeListening ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? 'A voice conversation listens without a wake word' : (wakeListening ? 'Disable wake-word detection' : 'Enable wake-word detection')"
-                      :aria-label="wakeListening ? 'Stop wake mode' : 'Start wake mode'"
+                      :title="voiceConversationMode ? chatText.conversationNeedsNoWakeWord(uiLanguage) : (wakeListening ? chatText.disableWakeWord(uiLanguage) : chatText.enableWakeWord(uiLanguage))"
+                      :aria-label="wakeListening ? chatText.stopWakeMode(uiLanguage) : chatText.startWakeMode(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M14.75 4.5c-2.9 0-5.25 2.35-5.25 5.25v4.5c0 2.07 1.68 3.75 3.75 3.75h.25" />
@@ -782,8 +784,8 @@
                       :disabled="recordingState !== 'idle' || wakeListening"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
                       :class="voiceConversationMode ? 'multimodal-action-active' : ''"
-                      :title="voiceConversationMode ? `Voice conversation: ${voiceConversationStatusLabel} — click to end` : 'Start a hands-free voice conversation: talk, pause, and it is sent; the answer is spoken, and talking over it interrupts'"
-                      :aria-label="voiceConversationMode ? 'Stop voice conversation' : 'Start voice conversation'"
+                      :title="voiceConversationMode ? chatText.conversationRunning(uiLanguage) : chatText.startConversationTitle(uiLanguage)"
+                      :aria-label="voiceConversationMode ? chatText.stopConversationLabel(uiLanguage) : chatText.startConversationLabel(uiLanguage)"
                       :aria-pressed="voiceConversationMode"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -798,8 +800,8 @@
                       @click="voice.speakLatest()"
                       :disabled="!latestAssistantText"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl disabled:opacity-40"
-                      title="Read the latest answer aloud (a long one as a summary)"
-                      aria-label="Speak reply"
+                      :title="chatText.readLatestAloud(uiLanguage)"
+                      :aria-label="chatText.speakReplyLabel(uiLanguage)"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                         <path d="M5 9v6" />
@@ -814,8 +816,8 @@
                       @click="voice.toggleSpeak()"
                       class="btn-brand-ghost multimodal-action multimodal-icon-button px-3 py-1.5 rounded-xl"
                       :class="speakReplyEnabled ? 'multimodal-action-active' : ''"
-                      :title="speakReplyEnabled ? 'Speech is ON: tones and updates while a turn runs, the answer read aloud — click to turn off' : 'Speech is OFF — click for tones and updates while a turn runs, and the answer read aloud'"
-                      :aria-label="speakReplyEnabled ? 'Turn speech off' : 'Turn speech on'"
+                      :title="speakReplyEnabled ? chatText.speechOnTitle(uiLanguage) : chatText.speechOffTitle(uiLanguage)"
+                      :aria-label="speakReplyEnabled ? chatText.turnSpeechOff(uiLanguage) : chatText.turnSpeechOn(uiLanguage)"
                       :aria-pressed="speakReplyEnabled"
                     >
                       <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -827,9 +829,9 @@
                   </div>
                   <div v-if="showSpeechPlayback || showAudioUpload" class="chat-dropdown__voice-settings">
                     <label v-if="showAudioUpload" class="chat-dropdown__voice-setting">
-                      <span>Spoken language</span>
-                      <select v-model="sttLanguage" class="chat-dropdown__select" title="The language your recordings are transcribed in">
-                        <option value="auto">Detect</option>
+                      <span>{{ chatText.spokenLanguage(uiLanguage) }}</span>
+                      <select v-model="sttLanguage" class="chat-dropdown__select" :title="chatText.spokenLanguageTitle(uiLanguage)">
+                        <option value="auto">{{ chatText.detectLanguage(uiLanguage) }}</option>
                         <option value="de">Deutsch</option>
                         <option value="en">English</option>
                         <option value="pl">Polski</option>
@@ -837,7 +839,7 @@
                     </label>
                     <label v-if="showSpeechPlayback" class="chat-dropdown__voice-setting">
                       <span>{{ chatText.whileTurnRuns(uiLanguage) }}</span>
-                      <select v-model="speechUpdates" class="chat-dropdown__select" title="What you hear while the assistant works, with speech on">
+                      <select v-model="speechUpdates" class="chat-dropdown__select" :title="chatText.speechUpdatesTitle(uiLanguage)">
                         <option value="voice">{{ chatText.spokenUpdates(uiLanguage) }}</option>
                         <option value="tones">{{ chatText.tonesOnly(uiLanguage) }}</option>
                         <option value="off">{{ chatText.silentUntilAnswer(uiLanguage) }}</option>
@@ -983,13 +985,13 @@
               <summary
                 class="chat-dropdown__summary chat-dropdown__summary--effort"
                 :class="effortButtonClass"
-                :title="effortTitle"
-                :aria-label="`Effort: ${currentEffort}`"
+                :title="chatText.effortTitle(uiLanguage, currentEffort)"
+                :aria-label="chatText.effortLabel(uiLanguage, currentEffort)"
               >
                 <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
                 </svg>
-                <span class="capitalize">{{ currentEffort }}</span>
+                <span>{{ chatText.effortName(uiLanguage, currentEffort) }}</span>
                 <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
               </summary>
               <div class="chat-dropdown__menu chat-dropdown__menu--effort" role="radiogroup" :aria-label="chatText.effortForSession(uiLanguage)">
@@ -1005,11 +1007,11 @@
                   @click="chooseEffort(tier)"
                 >
                   <span class="effort-option__name">
-                    <span class="capitalize">{{ tier }}</span>
+                    <span>{{ chatText.effortName(uiLanguage, tier) }}</span>
                     <span v-if="tier === 'max'" class="effort-option__flag">{{ chatText.relaxesGates(uiLanguage) }}</span>
                     <span v-if="tier === currentEffort" class="effort-option__check" aria-hidden="true">✓</span>
                   </span>
-                  <span class="effort-option__text">{{ EFFORT_DESCRIPTIONS[tier] }}</span>
+                  <span class="effort-option__text">{{ chatText.effortDescription(uiLanguage, tier) }}</span>
                 </button>
               </div>
             </details>
@@ -1020,10 +1022,8 @@
               @click="toggleImageSettingsPrompt"
               class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="gateway.currentSessionImageSettingsPrompt === 'auto' ? 'opacity-60 hover:opacity-100' : 'opacity-80 hover:opacity-100'"
-              :title="gateway.currentSessionImageSettingsPrompt === 'auto'
-                ? 'Images: auto — renders use the agent\'s settings without asking. Click to be asked first.'
-                : 'Images: ask — before each render you can pick the engine, size, seed and mask. Click to always use the agent\'s settings.'"
-              :aria-label="`Image settings: ${gateway.currentSessionImageSettingsPrompt}`"
+              :title="chatText.imagesTitle(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
+              :aria-label="chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
               :aria-pressed="gateway.currentSessionImageSettingsPrompt === 'ask'"
             >
               <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1031,7 +1031,7 @@
                 <circle cx="8.5" cy="9.5" r="1.5" />
                 <path d="m21 16-5-5L5 20" />
               </svg>
-              <span>Images: {{ gateway.currentSessionImageSettingsPrompt }}</span>
+              <span>{{ chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt) }}</span>
             </button>
 
             <!-- Thinking: its state in words, like the Images button beside it. Glow alone carried
@@ -1045,43 +1045,46 @@
                 : thinkingMode === false
                   ? 'opacity-40 border-dashed'
                   : 'opacity-60 hover:opacity-100'"
-              :title="thinkingMode === undefined
-                ? 'Thinking: auto — click to enable extended reasoning'
-                : thinkingMode
-                  ? 'Thinking: ON — click to disable'
-                  : 'Thinking: OFF — click to reset to auto'"
-              :aria-label="thinkingMode === undefined ? 'Thinking auto' : thinkingMode ? 'Thinking on' : 'Thinking off'"
+              :title="chatText.thinkingTitle(uiLanguage, thinkingMode)"
+              :aria-label="chatText.thinkingChip(uiLanguage, thinkingMode)"
               :aria-pressed="thinkingMode === true"
             >
               <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
                 <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
               </svg>
-              <span>Thinking: {{ thinkingMode === undefined ? "auto" : thinkingMode ? "on" : "off" }}</span>
+              <span>{{ chatText.thinkingChip(uiLanguage, thinkingMode) }}</span>
             </button>
           </div>
 
-          <div class="chat-composer__primary-actions">
-            <!-- While a turn runs, Steer sends the composer into it — the same as Enter, for
-                 anyone not on a keyboard. Stop stays beside it. -->
+          <div class="chat-composer__primary-actions" :class="gateway.isLoading ? 'chat-composer__primary-actions--running' : ''">
+            <!-- While a turn runs: Stop, and Steer where Send stood — it sends the composer into
+                 the turn, the same as Enter, for anyone not on a keyboard. In Send's place, a
+                 second click on Send lands on Steer and never on Stop. Both are as wide as their
+                 word: two buttons of Send's width did not fit the row, Steer lay on the chips and
+                 Stop hung out of the bay. Stopping turns Stop's square into a spinner, at the
+                 same width. -->
+            <button
+              v-if="gateway.isLoading"
+              type="button"
+              :disabled="stoppingTurn"
+              :aria-busy="stoppingTurn"
+              :aria-label="stoppingTurn ? chatText.stopping(uiLanguage) : undefined"
+              @click="stopTurn"
+              class="chat-stop px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
+              :title="stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stopTitle(uiLanguage)"
+            >
+              <span class="chat-stop__glyph" :class="stoppingTurn ? 'chat-stop__glyph--busy' : ''" aria-hidden="true"></span>
+              <span>{{ chatText.stop(uiLanguage) }}</span>
+            </button>
             <button
               v-if="gateway.isLoading"
               @click="sendMessage"
               :disabled="!composerHasContent || !gateway.connected"
               class="btn-brand-ghost px-4 py-3 rounded-2xl text-sm shrink-0 font-semibold"
-              :title="sendBlockedReason || steerTitle"
+              :title="sendBlockedReason || chatText.steerTitle(uiLanguage)"
             >
               {{ chatText.steer(uiLanguage) }}
-            </button>
-            <button
-              v-if="gateway.isLoading"
-              type="button"
-              :disabled="stoppingTurn"
-              @click="stopTurn"
-              class="px-5 py-3 rounded-2xl text-sm shrink-0 font-semibold transition-colors bg-red-600/80 hover:bg-red-500/90 border border-red-400/40 text-white disabled:opacity-60 disabled:cursor-progress"
-              :title="chatText.stopTitle(uiLanguage)"
-            >
-              {{ stoppingTurn ? chatText.stopping(uiLanguage) : chatText.stop(uiLanguage) }}
             </button>
             <button
               v-else
@@ -1097,7 +1100,7 @@
       </div>
 
       <div class="text-xs text-gray-500 mt-1 px-1">
-        Guardrails active · All messages audited · Overrides: <code class="font-mono">--auto</code> <code class="font-mono">--iter N</code> <code class="font-mono">--agent NAME</code> <code class="font-mono">--timeout N</code> <code class="font-mono">--effort TIER</code>
+        {{ chatText.guardrailsLine(uiLanguage) }} <code class="font-mono whitespace-nowrap">--auto</code> <code class="font-mono whitespace-nowrap">--iter N</code> <code class="font-mono whitespace-nowrap">--agent NAME</code> <code class="font-mono whitespace-nowrap">--timeout N</code> <code class="font-mono whitespace-nowrap">--effort TIER</code>
       </div>
     </div>
     </div>
@@ -1199,6 +1202,7 @@ import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useFocusTrap } from "@/composables/useFocusTrap";
 import { confirmAction } from "@/composables/useConfirm";
 import { browserLanguage, chatText } from "@/composables/chatText";
+import { podLanes } from "@/composables/podLanes";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
 import ComputerSessionPanel from "@/components/ComputerSessionPanel.vue";
@@ -1305,7 +1309,6 @@ const offlineReason = computed(() => {
 /** Why nothing can be typed, for the field's placeholder — or "" while it can. */
 const composerBlockedReason = computed(() =>
   offlineReason.value || (gateway.pendingInputRequest ? chatText.answerQuestionFirst(uiLanguage) : ""));
-const steerTitle = "Send this into the running turn — it is read at the turn's next step";
 /** Why Send (or Steer) is disabled, or "". */
 const sendBlockedReason = computed(() =>
   offlineReason.value || (composerHasContent.value ? "" : chatText.sendNeedsMessage(uiLanguage)));
@@ -1385,8 +1388,9 @@ function formatApprovalCountdown(value: number): string {
 
 /** Live estimate of context window usage based on last known prompt tokens + current input. */
 /** "… attached — click Send" stands only while something is attached. */
+let attachedNotice = "";
 function clearAttachedNotice(): void {
-  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && /attached — click Send$/.test(wakeStatus.value)) {
+  if (pendingImageContexts.value.length === 0 && pendingDocumentContexts.value.length === 0 && attachedNotice !== "" && wakeStatus.value === attachedNotice) {
     wakeStatus.value = "Voice idle";
   }
 }
@@ -1412,7 +1416,7 @@ async function stopTurn(): Promise<void> {
   try {
     await gateway.cancelTurn();
   } catch (err) {
-    showSteeringNote(`Couldn't stop the turn — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotStop(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   } finally {
     stoppingTurn.value = false;
   }
@@ -1464,14 +1468,7 @@ function cycleThinkingMode() {
 
 // ── Effort selector ──────────────────────────────────────────────────────────
 const EFFORT_TIERS: EffortTier[] = ["low", "medium", "high", "max"];
-const EFFORT_DESCRIPTIONS: Record<EffortTier, string> = {
-  low: "fast & tight — shorter timeout, fewer iterations, no extended reasoning",
-  medium: "balanced default — today's behavior",
-  high: "thorough — long timeout, deeper delegation, full-length output, extended reasoning (quality gates kept)",
-  max: "unbounded — no timeout, deepest budget; relaxes the correctness/QA gates (can ship ungrounded output)",
-};
 const currentEffort = computed<EffortTier>(() => gateway.currentSessionEffort);
-const effortTitle = computed(() => `Effort: ${currentEffort.value} — ${EFFORT_DESCRIPTIONS[currentEffort.value]}. Click to choose.`);
 const effortButtonClass = computed(() => {
   switch (currentEffort.value) {
     case "max": return "multimodal-action-active thinking-toggle--on ring-1 ring-amber-400/60";
@@ -1633,10 +1630,45 @@ const {
 } = useDraggableOrb("starlingai.hud.sessionOrb", { fx: 0.955, fy: 0.17 });
 
 const {
-  style: launcherOrbStyle,
+  x: launcherOrbX, style: launcherOrbStyle,
   down: launcherOrbDown, move: launcherOrbMove, up: launcherOrbUp,
   wasDragged: launcherOrbDragged,
 } = useDraggableOrb("starlingai.hud.launcherOrb", { fx: 0.95, fy: 0.92 });
+
+// ── Lanes for these buttons (composables/podLanes.ts) ─────────────────────────────────────
+// The messages stand at their column's outer edges, which is where the buttons are parked: a
+// long question ran under the one beside it. Each side keeps a lane free for the buttons at it,
+// as wide as the innermost of them. The composer's button counts while it is hidden too, or the
+// messages would jump sideways whenever the composer opens.
+const messagesColumn = ref({ left: 0, right: 0 });
+function measureMessagesColumn(): void {
+  const box = messagesEl.value?.getBoundingClientRect();
+  if (!box || (box.left === messagesColumn.value.left && box.right === messagesColumn.value.right)) return;
+  messagesColumn.value = { left: box.left, right: box.right };
+}
+let messagesColumnObserver: ResizeObserver | null = null;
+watch(messagesEl, (element) => {
+  messagesColumnObserver?.disconnect();
+  messagesColumnObserver = null;
+  if (!element) return;
+  measureMessagesColumn();
+  if (typeof ResizeObserver === "undefined") return;
+  messagesColumnObserver = new ResizeObserver(measureMessagesColumn);
+  messagesColumnObserver.observe(element);
+}, { immediate: true, flush: "post" });
+watch(hudWin, measureMessagesColumn, { flush: "post" });
+onUnmounted(() => messagesColumnObserver?.disconnect());
+const podLaneWidths = computed(() => podLanes([
+  { x: actionsOrbX.value, size: 40 },
+  { x: sessionOrbX.value, size: 40 },
+  { x: launcherOrbX.value, size: 55 },
+], messagesColumn.value));
+const podLaneStyle = computed(() => ({
+  "--pod-lane-l": `${podLaneWidths.value.left}px`,
+  "--pod-lane-r": `${podLaneWidths.value.right}px`,
+}));
+/** The wider of the two: what the orb's ring and its labels allow for (composables/orbActivity.ts). */
+const podLane = computed(() => Math.max(podLaneWidths.value.left, podLaneWidths.value.right));
 
 const sessionOpen = ref(false);
 const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
@@ -1911,7 +1943,7 @@ function onViewportResize(): void {
 onMounted(() => window.addEventListener("resize", onViewportResize, { passive: true }));
 onBeforeUnmount(() => window.removeEventListener("resize", onViewportResize));
 const orbRing = computed(() => ({
-  ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value)),
+  ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value, 16, podLane.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
 // Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
@@ -2214,10 +2246,10 @@ const showMultimodalStatus = computed(() =>
   (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value)
 );
 const voiceStatus = computed(() => {
-  if (recordingState.value === "recording") return "Recording from microphone";
-  if (recordingState.value === "processing") return "Transcribing audio";
-  if (sttAvailable.value && !browserRecordingAvailable.value) return "Microphone recording is unavailable in this browser";
-  if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return "Wake-word detection is unavailable in this browser";
+  if (recordingState.value === "recording") return chatText.statusRecording(uiLanguage);
+  if (recordingState.value === "processing") return chatText.statusTranscribing(uiLanguage);
+  if (sttAvailable.value && !browserRecordingAvailable.value) return chatText.micUnavailable(uiLanguage);
+  if (sttAvailable.value && wakeConfigured.value && !browserSpeechRecognitionAvailable.value) return chatText.wakeUnavailable(uiLanguage);
   return wakeStatus.value;
 });
 const voiceStatusWorthShowing = computed(() => voiceStatus.value.trim() !== "" && voiceStatus.value !== "Voice idle");
@@ -2229,13 +2261,7 @@ const wakeFeedbackTone = computed(() => {
   if (wakeFeedbackState.value === "recording") return "recording";
   return "listening";
 });
-const wakeFeedbackTitle = computed(() => {
-  if (wakeFeedbackState.value === "error") return "Wake pipeline needs attention";
-  if (wakeFeedbackState.value === "success") return "Recording finished";
-  if (wakeFeedbackState.value === "processing") return "Transcribing your recording";
-  if (wakeFeedbackState.value === "recording") return "Recording in progress";
-  return "Wake listening active";
-});
+const wakeFeedbackTitle = computed(() => chatText.wakeTitle(uiLanguage, wakeFeedbackState.value));
 const wakeFeedbackStep = computed(() => {
   if (wakeFeedbackState.value === "success") return 4;
   if (wakeFeedbackState.value === "processing") return 3;
@@ -2330,7 +2356,7 @@ function scheduleWakeRestart(delayMs: number) {
     wakeRestartTimer = null;
     try {
       wakeRecognition?.start();
-      wakeStatus.value = "Wake listening";
+      wakeStatus.value = chatText.wakeListeningStatus(uiLanguage);
     } catch {
       scheduleWakeRestart(500);
     }
@@ -2355,14 +2381,14 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
 
     if (wakeStopPhrases.value.some((phrase) => lowered.includes(phrase.toLowerCase()))) {
       voice.finishRecording();
-      wakeStatus.value = "Stop phrase detected";
-      setWakeFeedback("processing", "Stop phrase detected. Finishing the recording and starting transcription.");
+      wakeStatus.value = chatText.stopPhraseDetected(uiLanguage);
+      setWakeFeedback("processing", chatText.stopPhraseFeedback(uiLanguage));
       return;
     }
 
     const matchedKeyword = wakeKeywords.value.find((phrase) => lowered.includes(phrase.toLowerCase()));
     if (matchedKeyword && recordingState.value === "idle") {
-      wakeStatus.value = `Wake phrase detected: ${matchedKeyword}`;
+      wakeStatus.value = chatText.wakePhraseDetected(uiLanguage, matchedKeyword);
       void startWakeRecording();
       return;
     }
@@ -2371,7 +2397,7 @@ function handleWakeResult(event: SpeechRecognitionEventLike) {
 
 function handleWakeError(event: SpeechRecognitionErrorEventLike) {
   const error = event.error ?? "unknown";
-  wakeStatus.value = `Wake recognition error: ${error}`;
+  wakeStatus.value = chatText.wakeRecognitionError(uiLanguage, error);
   setWakeFeedback("error", wakeStatus.value, 6000);
   if (wakeListening.value && !["not-allowed", "service-not-allowed"].includes(error)) {
     scheduleWakeRestart(1000);
@@ -2382,32 +2408,32 @@ async function toggleWakeListening() {
   if (wakeListening.value) {
     wakeListening.value = false;
     stopWakeRecognition();
-    wakeStatus.value = "Wake mode off";
+    wakeStatus.value = chatText.wakeModeOff(uiLanguage);
     setWakeFeedback("idle", "");
     return;
   }
 
   const recognition = createSpeechRecognition();
   if (!recognition) {
-    wakeStatus.value = "SpeechRecognition unavailable in this browser";
+    wakeStatus.value = chatText.speechRecognitionUnavailable(uiLanguage);
     setWakeFeedback("error", wakeStatus.value, 6000);
     return;
   }
 
   wakeRecognition = recognition;
   wakeListening.value = true;
-  wakeStatus.value = "Wake listening";
-  setWakeFeedback("listening", `Listening for ${wakeKeywords.value.join(" / ")}`);
+  wakeStatus.value = chatText.wakeListeningStatus(uiLanguage);
+  setWakeFeedback("listening", chatText.listeningFor(uiLanguage, wakeKeywords.value.join(" / ")));
   recognition.start();
 }
 
 function reportRecording(outcome: RecordingOutcome): void {
   if (outcome.kind === "transcribed") {
-    wakeStatus.value = `Transcript ready${outcome.language ? ` (${outcome.language})` : ""}`;
+    wakeStatus.value = chatText.transcriptReady(uiLanguage, outcome.language || undefined);
     setWakeFeedback("success", wakeStatus.value, 5000);
   } else if (outcome.kind === "empty") {
-    wakeStatus.value = "No speech was heard";
-    setWakeFeedback("error", "No speech was heard. Speak a little longer and try again.", 7000);
+    wakeStatus.value = chatText.noSpeechHeard(uiLanguage);
+    setWakeFeedback("error", chatText.noSpeechHint(uiLanguage), 7000);
   } else {
     wakeStatus.value = outcome.message;
     setWakeFeedback("error", outcome.message, 7000);
@@ -2417,8 +2443,8 @@ function reportRecording(outcome: RecordingOutcome): void {
 /** A wake phrase was heard: record what follows it, then listen for the phrase again. */
 async function startWakeRecording(): Promise<void> {
   stopWakeRecognition();
-  wakeStatus.value = "Wake-triggered recording";
-  setWakeFeedback("recording", "Wake word detected. Recording has started.");
+  wakeStatus.value = chatText.wakeTriggeredRecording(uiLanguage);
+  setWakeFeedback("recording", chatText.wakeRecordingStarted(uiLanguage));
   reportRecording(await voice.startRecording());
   if (wakeListening.value) {
     wakeRecognition = createSpeechRecognition();
@@ -2428,12 +2454,12 @@ async function startWakeRecording(): Promise<void> {
 
 async function toggleRecording() {
   if (recordingState.value === "recording") {
-    setWakeFeedback("processing", "Recording finished. Transcribing now...");
+    setWakeFeedback("processing", chatText.recordingFinishedTranscribing(uiLanguage));
     voice.finishRecording();
     return;
   }
   if (recordingState.value !== "idle") return;
-  wakeStatus.value = "Recording from microphone";
+  wakeStatus.value = chatText.statusRecording(uiLanguage);
   reportRecording(await voice.startRecording());
 }
 
@@ -2456,11 +2482,12 @@ function queueAttachment(file: File): void {
   const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i.test(file.name);
   if (isImage) {
     pendingImageContexts.value.push({ filename: file.name, file, previewUrl: URL.createObjectURL(file) });
-    wakeStatus.value = `Image attached — click Send`;
+    attachedNotice = chatText.imageAttached(uiLanguage);
   } else {
     pendingDocumentContexts.value.push({ filename: file.name, file });
-    wakeStatus.value = `${file.name} attached — click Send`;
+    attachedNotice = chatText.fileAttached(uiLanguage, file.name);
   }
+  wakeStatus.value = attachedNotice;
   composerOpen.value = true;
 }
 
@@ -2474,12 +2501,12 @@ async function onAudioSelected(event: Event) {
 
 async function transcribeDroppedAudio(file: File): Promise<void> {
   multimodalBusy.value = true;
-  wakeStatus.value = `Transcribing ${file.name}`;
+  wakeStatus.value = chatText.transcribingFile(uiLanguage, file.name);
   try {
     const outcome = await voice.transcribeFile(file);
     wakeStatus.value = outcome.kind === "transcribed"
-      ? `Audio added from ${file.name}`
-      : outcome.kind === "empty" ? "Audio transcription returned no text" : outcome.message;
+      ? chatText.audioAddedFrom(uiLanguage, file.name)
+      : outcome.kind === "empty" ? chatText.audioNoText(uiLanguage) : outcome.message;
   } finally {
     multimodalBusy.value = false;
   }
@@ -2550,7 +2577,6 @@ async function onChatDrop(event: DragEvent): Promise<void> {
 }
 
 /** The voice-conversation toggle's tooltip: what the conversation is doing. */
-const voiceConversationStatusLabel = computed(() => (voiceConversationMode.value ? voicePhase.value : "off"));
 
 const voiceBarBusy = computed(() => Boolean(speechActivity.value || preparingReply.value));
 const voiceBarListening = computed(() =>
@@ -2563,18 +2589,18 @@ watch(showVoiceBar, (showing) => { if (showing) composerOpen.value = true; });
 /** What the voice bar says is happening. */
 const voiceBarLabel = computed(() => {
   const speaking = speechActivity.value;
-  if (speaking?.priority === "reply") return speaking.label === "summary" ? "Speaking a summary of the answer" : "Speaking the answer";
-  if (speaking) return speaking.label ? `“${speaking.label}”` : "Speaking";
-  if (preparingReply.value) return "Preparing a spoken summary…";
+  if (speaking?.priority === "reply") return speaking.label === "summary" ? chatText.speakingSummary(uiLanguage) : chatText.speakingAnswer(uiLanguage);
+  if (speaking) return speaking.label ? `“${speaking.label}”` : chatText.speaking(uiLanguage);
+  if (preparingReply.value) return chatText.preparingSummary(uiLanguage);
   if (voiceConversationMode.value) {
-    if (voicePhase.value === "hearing") return "Hearing you…";
-    if (voicePhase.value === "transcribing") return "Transcribing…";
-    if (voicePhase.value === "thinking") return "Working on it…";
-    if (voicePhase.value === "listening") return "Listening — just talk";
+    if (voicePhase.value === "hearing") return chatText.hearingYou(uiLanguage);
+    if (voicePhase.value === "transcribing") return chatText.transcribingShort(uiLanguage);
+    if (voicePhase.value === "thinking") return chatText.workingOnIt(uiLanguage);
+    if (voicePhase.value === "listening") return chatText.listeningJustTalk(uiLanguage);
   }
-  if (recordingState.value === "recording") return "Recording — pause or press Done to finish";
-  if (recordingState.value === "processing") return "Transcribing…";
-  if (lastReply.value) return lastReply.value.summarized ? "Spoke a summary of the answer" : "Spoke the answer";
+  if (recordingState.value === "recording") return chatText.recordingPauseOrDone(uiLanguage);
+  if (recordingState.value === "processing") return chatText.transcribingShort(uiLanguage);
+  if (lastReply.value) return lastReply.value.summarized ? chatText.spokeSummary(uiLanguage) : chatText.spokeAnswer(uiLanguage);
   return "";
 });
 
@@ -2733,7 +2759,7 @@ async function sendMessage() {
   if (gateway.isLoading) {
     if (hasImages || hasDocs) {
       // Text-only — attachments cannot join a running turn. Say so rather than ignore Enter.
-      showSteeringNote("Attachments can't join a running turn — send them once it finishes.", "error");
+      showSteeringNote(chatText.attachmentsCannotJoin(uiLanguage), "error");
       return;
     }
     inputText.value = "";
@@ -2744,22 +2770,22 @@ async function sendMessage() {
       return;
     }
     showSteeringNote(state === "undelivered"
-      ? "Not delivered — use Resend on your message to try again."
+      ? chatText.steerUndelivered(uiLanguage)
       : state === "sent"
-        ? "The turn had just finished — your message went out as the next one."
+        ? chatText.steerSentAsNext(uiLanguage)
         : state === "held"
-          ? "The turn is finishing — your message goes out as soon as it does."
+          ? chatText.steerHeld(uiLanguage)
           // Mid-turn messages are read between the turn's steps, and a step waiting on a card
           // does not finish until the card is answered.
           : gateway.hasOpenUserInput
-            ? "Queued — read once the card is answered and its step finishes. To change the engine or prompt, use Configure on the card."
-            : "Queued — folded into the running turn at its next step.", state === "undelivered" ? "error" : "ok");
+            ? chatText.steerQueuedBehindCard(uiLanguage)
+            : chatText.steerQueued(uiLanguage), state === "undelivered" ? "error" : "ok");
     return;
   }
   // The previous message's attachments are still being read, and its turn has not started. Sent
   // now, this one would start first — and the analysed one would then replace it. It waits.
   if (analysing.value) {
-    showSteeringNote("Still reading your attachments — send this once they're done.", "error");
+    showSteeringNote(chatText.stillReadingAttachments(uiLanguage), "error");
     return;
   }
   const jobMatch = !hasImages && !hasDocs
@@ -2804,21 +2830,20 @@ async function sendMessage() {
     // into the engram document library. The prompt gets a hint + on-demand
     // retrieval (search_documents) instead of the whole file's text inlined.
     if (pendingDocs.length > 0) {
-      wakeStatus.value = `Uploading document${pendingDocs.length > 1 ? "s" : ""}…`;
+      wakeStatus.value = chatText.uploadingDocuments(uiLanguage, pendingDocs.length);
       const sid = gateway.currentSessionId ?? "shared";
       for (const d of pendingDocs) {
-        try {
-          const meta = await gateway.persistAttachment(d.file, sid);
-          attachments.push({
-            filename: meta.filename,
-            relativePath: meta.relativePath,
-            contentType: meta.contentType,
-            size: meta.size,
-            previewMode: "download",
-          });
-        } catch (err) {
-          wakeStatus.value = err instanceof Error ? err.message : String(err);
-        }
+        // A document that did not arrive stops the send: the message is about it. It used to go
+        // out without it, the reason passing through the status line and gone before the turn
+        // began.
+        const meta = await gateway.persistAttachment(d.file, sid).catch((err: unknown) => { throw namedFailure(d.filename, err); });
+        attachments.push({
+          filename: meta.filename,
+          relativePath: meta.relativePath,
+          contentType: meta.contentType,
+          size: meta.size,
+          previewMode: "download",
+        });
       }
     }
 
@@ -2828,12 +2853,12 @@ async function sendMessage() {
     // costs only that — the picture and its analysis still go out.
     let imageContext = "";
     if (pendingImages.length > 0) {
-      wakeStatus.value = `Analysing image${pendingImages.length > 1 ? "s" : ""}…`;
+      wakeStatus.value = chatText.analysingImages(uiLanguage, pendingImages.length);
       const sid = gateway.currentSessionId ?? "shared";
       const [dataUrls, stored, analyses] = await Promise.all([
         Promise.all(pendingImages.map(p => fileToDataUrl(p.file))),
         Promise.all(pendingImages.map(p => gateway.persistAttachment(p.file, sid).catch(() => null))),
-        Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file))),
+        Promise.all(pendingImages.map(p => gateway.analyzeImageFile(p.file).catch((err: unknown) => { throw namedFailure(p.filename, err); }))),
       ]);
       for (let i = 0; i < pendingImages.length; i++) {
         const kept = stored[i];
@@ -2859,7 +2884,9 @@ async function sendMessage() {
     wakeStatus.value = "";
     await gateway.sendMessage(fullText, thinkingMode.value, displayContent, attachments, { userMessageId: pendingUserMessageId });
   } catch (error) {
-    wakeStatus.value = error instanceof Error ? error.message : String(error);
+    // Said once, as an error, under the field (giveBackUnsentText) — it stood in the status
+    // line above it as well, in a label's capitals.
+    wakeStatus.value = "";
     if (!pendingUserMessageId) {
       // Nothing reached the chat — no session could be made, or reading an attachment failed —
       // so the whole message goes back to the composer, attachments and all.
@@ -2881,7 +2908,12 @@ async function sendMessage() {
  */
 function giveBackUnsentText(text: string, error: unknown): void {
   if (text && !inputText.value.trim()) inputText.value = text;
-  showSteeringNote(`Not sent — ${error instanceof Error ? error.message : String(error)}`, "error");
+  showSteeringNote(chatText.notSent(uiLanguage, error instanceof Error ? error.message : String(error)), "error");
+}
+
+/** Why an attachment failed, with the file it is about: there may be several. */
+function namedFailure(filename: string, error: unknown): Error {
+  return new Error(`${filename}: ${error instanceof Error ? error.message : String(error)}`);
 }
 
 async function triggerScene(name: string) {
@@ -2989,7 +3021,7 @@ async function handleRewind(messageId: string) {
   } catch (err) {
     // Nothing was cut, here or on the server; say why rather than leave the click unanswered.
     composerOpen.value = true;
-    showSteeringNote(`Couldn't restart there — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotRestart(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   }
 }
 
@@ -3002,7 +3034,7 @@ async function handleRetry(messageId: string) {
   if (!question?.content?.trim()) return;
   // Whatever is being drafted is not overwritten: the question goes out only from an empty input.
   if (inputText.value.trim()) {
-    showSteeringNote("Send or clear what you are writing first — asking again would replace it.", "error");
+    showSteeringNote(chatText.sendOrClearFirst(uiLanguage), "error");
     return;
   }
   inputText.value = question.content;
@@ -3020,7 +3052,7 @@ async function archiveCurrentSession() {
     await gateway.archiveSession(gateway.currentSessionId);
   } catch (err) {
     composerOpen.value = true;
-    showSteeringNote(`Couldn't archive the session — ${err instanceof Error ? err.message : String(err)}`, "error");
+    showSteeringNote(chatText.couldNotArchive(uiLanguage, err instanceof Error ? err.message : String(err)), "error");
   }
 }
 
@@ -3301,7 +3333,7 @@ async function exportPDF(): Promise<void> {
     const win = window.open("", "_blank");
     if (!win) {
       composerOpen.value = true;
-      showSteeringNote("The browser blocked the print view. Allow pop-ups for this page, then export as PDF again.", "error");
+      showSteeringNote(chatText.printBlocked(uiLanguage), "error");
       return;
     }
     win.document.write(html);
@@ -3980,6 +4012,12 @@ onUnmounted(() => {
   100% { opacity: 0; transform: perspective(900px) translateZ(-220px) translateY(-44px) rotateX(-10deg); }
 }
 
+/* Each side keeps a lane free at its outer edge for the round buttons parked there
+   (--pod-lane-l / -r, composables/podLanes.ts), at every width: a question stands at the right
+   edge on a phone too, and ran under the buttons there. */
+.chat-message-scroll :deep(.message-row--ai) { padding-left: var(--pod-lane-l, 0px); }
+.chat-message-scroll :deep(.message-row--user) { padding-right: var(--pod-lane-r, 0px); }
+
 @media (min-width: 1100px) {
   /* The orb's zone, measured from the center: its body reaches
      about 14% of the viewport height (OrbCanvas.vue frames it by height),
@@ -3991,11 +4029,16 @@ onUnmounted(() => {
   .chat-message-scroll :deep(.message-row--user) {
     width: 100%;
   }
+  /* Here the bubbles give the lanes' room (below) up at their outer side: half of it comes off
+     the row they measure by, the other half off their own width, so their inner edge stays where
+     the orb's zone begins. */
   .chat-message-scroll :deep(.message-row--ai) { justify-content: flex-start; }
   .chat-message-scroll :deep(.message-row--user) { justify-content: flex-end; }
-  .chat-message-scroll :deep(.message-bubble--ai),
+  .chat-message-scroll :deep(.message-bubble--ai) {
+    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear) - var(--pod-lane-l, 0px) / 2)));
+  }
   .chat-message-scroll :deep(.message-bubble--user) {
-    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear))));
+    max-width: min(52rem, max(28rem, calc(50% - var(--orb-clear) - var(--pod-lane-r, 0px) / 2)));
   }
 }
 
@@ -4686,6 +4729,34 @@ onUnmounted(() => {
 /* Send/Stop fills the full column width. */
 .chat-composer__primary-actions > button { flex: 1 1 auto; }
 
+/* Stop: a square beside the word; a spinner in its place while the turn is being stopped. */
+.chat-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.chat-stop__glyph {
+  flex: none;
+  width: 0.68rem;
+  height: 0.68rem;
+  border-radius: 2px;
+  background: currentColor;
+}
+.chat-stop__glyph--busy {
+  width: 0.8rem;
+  height: 0.8rem;
+  margin: -0.06rem;
+  border-radius: 999px;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.32);
+  border-top-color: #fff;
+  animation: chatStopSpin 0.8s linear infinite;
+}
+@keyframes chatStopSpin {
+  to { transform: rotate(360deg); }
+}
+
 /* Thinking ON: the state reads through glow alone — cyan halo on the
    button, bloom on the brain glyph. */
 .thinking-toggle--on {
@@ -4733,7 +4804,10 @@ onUnmounted(() => {
 
 .chat-dropdown__menu {
   position: absolute;
-  right: 0;
+  /* From the chip's left edge, opening rightwards into the bay: the chips stand at the bay's left
+     edge, and a menu hung from a chip's right edge opened out of the bay — at 1100 px the Options
+     menu began 77 px left of the window, with Attach, audio and Record as its first items. */
+  left: 0;
   bottom: calc(100% + 0.65rem);
   width: min(24rem, calc(100vw - 2.5rem));
   max-height: min(70vh, 32rem);
@@ -4747,7 +4821,7 @@ onUnmounted(() => {
   padding: 0.9rem;
   display: grid;
   gap: 0.9rem;
-  transform-origin: bottom right;
+  transform-origin: bottom left;
   animation: hud-rise 300ms var(--ease-out) both;
 }
 
@@ -4988,20 +5062,23 @@ onUnmounted(() => {
     justify-content: space-between;
     gap: 0.9rem;
   }
-  .chat-composer__menus { flex-wrap: nowrap; }
+  /* The chips give way, the actions never: when the words get long (another language, a larger
+     font) the chips wrap onto a second line — they used to be held on one, and the actions were
+     pushed over them and out of the bay. */
+  .chat-composer__menus { flex: 1 1 auto; min-width: 0; }
   .chat-composer__primary-actions { flex: none; flex-wrap: nowrap; }
-  .chat-composer__primary-actions > button { min-width: 8.5rem; }
+  .chat-composer__primary-actions > button { flex: none; min-width: 8.5rem; }
+  /* Two actions while a turn runs, each as wide as its word. */
+  .chat-composer__primary-actions--running > button { min-width: 0; }
 }
 
-/* Below that the controls stack and each menu button sits at the bay's left edge: a menu hung
-   from its right edge opened leftwards, most of it off the screen, and Attach, audio and Record
-   are its first items. It hangs from the left edge there. */
+/* Below that the controls stack and the chips wrap, so a chip can stand anywhere in the row: the
+   menus hang from the ROW's left edge there, no wider than the row. From its own chip the Effort
+   menu ran 110 px out of a phone's right edge. */
 @media (max-width: 1023px) {
-  .chat-dropdown__menu {
-    left: 0;
-    right: auto;
-    transform-origin: bottom left;
-  }
+  .chat-composer__menus { position: relative; }
+  .chat-composer__menus > .chat-dropdown { position: static; }
+  .chat-composer__menus > .chat-dropdown > .chat-dropdown__menu { max-width: 100%; }
 }
 
 /* Motion on request only (the bay's 3D recede, the launcher's breathing, the fly-ins). */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LABEL_HALF, MAX_SATELLITES, ORB_SCREEN_SHARE, activityRing, freeHalfWidth, labelFits, liveActivity, placeLabels, projectOrbPoint, ringPosition, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
+import { LABEL_HALF, MAX_SATELLITES, ORB_SCREEN_SHARE, LABEL_DROP, LABEL_MIN_DEPTH, LABEL_WIDEST, activityRing, freeHalfWidth, labelPlacement, liveActivity, placeLabels, projectOrbPoint, ringPosition, orbitGeometry, orbitPoint, shortSubject, type ActivityMessage } from "./orbActivity";
 import type { TurnStep } from "./turnSteps";
 
 /**
@@ -199,6 +199,19 @@ describe("the ring between the messages", () => {
     expect(live?.satellites[0]?.label).toContain("https://www.tech-insider.org/qwen4-four-variants");
   });
 
+  it("names a plan that is still running as running, in the status line and on the ring", () => {
+    const plan = tool("plan", { name: "record_plan", status: "running", args: { steps: [{}, {}, {}, {}] } });
+    const read = tool("s1", { status: "done", args: { url: "https://example.org/a" } });
+    const live = liveActivity(turn({ steps: [plan, read] }), T0 + 77_000, "de");
+    // The plan is the only step still open: it was "4 Schritte geplant" beside a spinner.
+    expect(live?.current?.label).toBe("Plan läuft · 4 Schritte");
+    expect(live?.satellites[0]?.short).toBe("Plan läuft · 4 Schritte");
+    expect(liveActivity(turn({ steps: [plan, read] }), T0 + 77_000, "en")?.current?.label).toBe("Running the plan · 4 steps");
+    // A step with a subject carries it alone as well, for a label with little room; one without has none.
+    expect(live?.satellites[1]?.subject).toBe("example.org");
+    expect(live?.satellites[0]?.subject).toBeUndefined();
+  });
+
   it("measures the band the chat page leaves free around the orb", () => {
     // 2000 × 1500: bubbles of 52rem are wider than the room, so each ends at the orb's zone.
     expect(freeHalfWidth(2000, 1500)).toBeCloseTo(0.24 * 1500 + 24);
@@ -222,11 +235,56 @@ describe("the ring between the messages", () => {
     expect(tight.rx).toBeCloseTo(ORB_SCREEN_SHARE * 800 * 1.05);
   });
 
-  it("shows a label only where it stays out of the messages", () => {
-    const free = freeHalfWidth(1280, 800);
-    expect(labelFits(0, free)).toBe(true);
-    expect(labelFits(free - LABEL_HALF, free)).toBe(true);
-    expect(labelFits(-(free - LABEL_HALF + 1), free)).toBe(false);
+  it("gives the room up that the round controls' lane takes at the outer edge", () => {
+    // Roomy: the bubble gets narrower by the lane and still ends at the orb's zone.
+    expect(freeHalfWidth(2000, 1500, 16, 60)).toBeCloseTo(freeHalfWidth(2000, 1500));
+    // At its 28rem the bubble cannot give more, and comes nearer by the lane.
+    expect(freeHalfWidth(1100, 900, 16, 60)).toBeCloseTo(freeHalfWidth(1100, 900) - 60);
+    // At 52rem it was not using the room anyway: the lane only moves it in.
+    expect(freeHalfWidth(3440, 1440, 16, 60)).toBeCloseTo(freeHalfWidth(3440, 1440) - 60);
+  });
+});
+
+describe("labelPlacement", () => {
+  // The live window: 1788 × 1418, a ring 259 px to each side, 364 px free either side of the centre.
+  const free = freeHalfWidth(1788, 1418);
+  const rx = orbitGeometry(1788, 1418, free).rx;
+
+  it("hangs the front step's label centred under it, at full width", () => {
+    expect(labelPlacement(0, 1, rx, free)).toEqual({ lean: 0, maxWidth: LABEL_WIDEST });
+  });
+
+  it("leans a label beside the front outwards, away from the ring's descending arc", () => {
+    // One slot round from the front on a seven-slot ring: 51° — 0.78 of the half-width, depth 0.62.
+    const left = labelPlacement(-0.78 * rx, 0.62, rx, free)!;
+    const right = labelPlacement(0.78 * rx, 0.62, rx, free)!;
+    expect(left.lean).toBe(-1);
+    expect(right.lean).toBe(1);
+    // All of it on the outer side of its point, and none of it in the messages.
+    expect(0.78 * rx + right.maxWidth).toBeLessThanOrEqual(free);
+    expect(right.maxWidth).toBe(left.maxWidth);
+    expect(right.maxWidth).toBeGreaterThan(120);
+  });
+
+  it("leans gradually near the front, so the label does not jump as the ring sways", () => {
+    const slight = labelPlacement(0.1 * rx, 0.99, rx, free)!;
+    expect(slight.lean).toBeGreaterThan(0);
+    expect(slight.lean).toBeLessThan(0.25);
+  });
+
+  it("leaves a step further round the ring a point: small and out of focus, its label was unreadable", () => {
+    // Two slots round: at the ring's end, depth -0.22 — labelled before, 7 px tall.
+    expect(labelPlacement(-0.97 * rx, -0.22, rx, free)).toBeNull();
+    expect(labelPlacement(0.9 * rx, LABEL_MIN_DEPTH - 0.01, rx, free)).toBeNull();
+    expect(labelPlacement(0.9 * rx, LABEL_MIN_DEPTH, rx, free)).not.toBeNull();
+  });
+
+  it("leaves a step a point where the messages leave its label no room", () => {
+    // 1280 × 800: 172 px free, the ring 116 px wide — beside the front there are 74 px left.
+    const tightFree = freeHalfWidth(1280, 800);
+    const tightRx = orbitGeometry(1280, 800, tightFree).rx;
+    expect(labelPlacement(0.78 * tightRx, 0.62, tightRx, tightFree)).toBeNull();
+    expect(labelPlacement(0, 1, tightRx, tightFree)).toEqual({ lean: 0, maxWidth: LABEL_WIDEST });
   });
 });
 
@@ -257,6 +315,19 @@ describe("placeLabels", () => {
     expect(long.size).toBe(1);
     const far = placeLabels([{ id: "a", x: 0, y: 0, scale: 0.5, text: "Read a web page · techtarget.com" }, { id: "b", x: 150, y: 0, scale: 0.5, text: "Read a web page · techtarget.com" }]);
     expect(far.size).toBe(2);
+  });
+
+  it("measures a leaning label on the side it hangs", () => {
+    const text = "Read a web page · arxiv.org";
+    // Centred, the front label and the one beside it at 150 px overlap; leaning out, they do not.
+    const centred = placeLabels([{ id: "front", x: 0, y: 30, scale: 1, text }, { id: "side", x: 150, y: 30, scale: 1, text }]);
+    expect(centred.size).toBe(1);
+    const leaning = placeLabels([{ id: "front", x: 0, y: 30, scale: 1, text, lean: 0, maxWidth: 210 }, { id: "side", x: 150, y: 30, scale: 1, text, lean: 1, maxWidth: 150 }]);
+    expect(leaning.size).toBe(2);
+    // A label cut to its room is measured at that width, not at its text's.
+    const cut = placeLabels([{ id: "a", x: 0, y: 0, scale: 1, text, lean: 1, maxWidth: 100 }, { id: "b", x: 110, y: 0, scale: 1, text, lean: 1, maxWidth: 100 }]);
+    expect(cut.size).toBe(2);
+    expect(LABEL_DROP).toBeGreaterThan(11);
   });
 
   it("does not count labels on different rows as covering", () => {
