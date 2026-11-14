@@ -644,6 +644,16 @@ export function isOrchestrationCapableRun(toolNames: string[] | undefined): bool
   return toolNames?.some((toolName) => ORCHESTRATION_DISCOVERY_TOOL_NAMES.has(toolName)) ?? false;
 }
 
+/**
+ * What a run that can neither read the web, nor hand the task on, nor build an artifact does with
+ * a task that needs facts it would have to look up: a mailbox, calendar or desktop agent, a
+ * reviewer. It hands the task back with the run's own verdict (parseFinalAnswerTag), so the
+ * delegation fails with the sentence as its reason and the next agent gets the task.
+ */
+export const OUT_OF_REACH_GUIDANCE = "When the task needs current or external facts that have to be looked up, the task does not hand them to you, and none of your tools can reach them, do not answer from memory and do not estimate: "
+  + "reply with exactly <final_answer status=\"failure\">one sentence naming the facts the task needs</final_answer> and nothing else, so it can go to an agent that can look them up. "
+  + "This is only for missing facts. Work from what the task gives you or from general knowledge is yours, in whatever form it is asked for; and when a search of your own finds nothing, say what you looked for and that nothing was found.";
+
 export function buildSubAgentToolInventory(toolNames: string[] | undefined): string {
   const availableTools = toolNames ?? [];
   if (availableTools.length === 0) {
@@ -672,6 +682,25 @@ export function buildSubAgentToolInventory(toolNames: string[] | undefined): str
     guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, use search_agents to identify a research-capable specialist instead of guessing.");
   } else if (canDelegateToSpecialists) {
     guidance.push("When the task depends on current, external, or source-sensitive facts that you cannot verify with your own tools, delegate to a research-capable specialist instead of guessing.");
+  } else if (!holdsArtifactBuilderTool(availableTools)) {
+    // pass^k-relevant. The fourth case had no line: a run that can neither read the web nor hand
+    // the task on. In session 5b77edf9 mail_agent was handed a weather lookup, said it had no
+    // internet access, and then estimated the forecast "from typical November data"; the estimate
+    // carried figures, counted as a successful delegation and was shared as a finding.
+    // Measured on the live model with mail_agent's real prompt and stubbed mail tools (3 tasks
+    // of that kind x 3, 3 tasks of its own x 3): before, 0 of 9 were handed back and 6 of 9
+    // carried an invented figure; with the line 9 of 9 were handed back with none invented, and
+    // its own 9 (six with mail to report, three where the search found nothing) were answered as
+    // before. Four other agents that get the line (code_analyst, evidence_analyst,
+    // quality_supervisor, git_developer): 8 of 8 tasks of their own answered, 4 of 4 outside
+    // their reach handed back.
+    // NOT FOR A RUN THAT BUILDS ARTIFACTS. With the line, chart_designer and content_writer handed
+    // back a chart of "today's closing prices" and a paragraph on "this afternoon's weather" (6 of
+    // 6) — but content_writer also returned the tag for a product description it was asked to
+    // give "as plain text, no file" (3 of 3, and 1 of 2 under an earlier wording): offered a way
+    // to fail, it took it for a conflict with its own prompt. A builder is kept from tasks that
+    // need gathering by the routing gates (tools/sub-agent.ts, the turn trigger); it gets no line.
+    guidance.push(OUT_OF_REACH_GUIDANCE);
   }
   // pass^k-relevant. One line, in a run that holds web_table only: every holder, configured or
   // ephemeral, reads it once, a fork that drops the grant drops the line, and a run without the
