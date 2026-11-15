@@ -1128,8 +1128,9 @@ describe("an extension refuses a tool call before anyone is asked to approve it"
   });
 
   it("an extension whose authorizeToolCall is not a function loads with its role, and refuses every call", async () => {
-    // Failing the load dropped the extension's roles, and a role nobody declares signs in as
-    // operator: a typo in the hook raised the fork's lowest role to an operator.
+    // Failing the load dropped the extension's roles: its accounts signed in as operators then (a
+    // typo in the hook raised the fork's lowest role), and would be locked out now that a role
+    // nobody declares signs nobody in.
     const pat = testAccount("pat", "patient");
     const dir = deployment({ auth: { enabled: true, users: [pat.record] } });
     await registerProbe();

@@ -525,8 +525,9 @@ describe("authorizeAgentRun: an extension's hook", () => {
     expect(refused.output).toContain("gatekeeper extension could not authorize the run");
     expect(maintainerCalls()).toHaveLength(0);
 
-    // Failing the load dropped the extension's roles, and a role nobody declares signs in as
-    // operator: a typo in the hook raised the fork's lowest role. It loads, and refuses every run.
+    // Failing the load dropped the extension's roles: its accounts signed in as operators then (a
+    // typo in the hook raised the fork's lowest role), and would be locked out now that a role
+    // nobody declares signs nobody in. It loads, and refuses every run.
     unloadExtensions();
     expect(await loadExtension({
       name: "brokenhook",

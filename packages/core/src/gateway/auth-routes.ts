@@ -15,6 +15,11 @@
  * username, so a name deleted and created again, or claimed by another IdP subject, is not the
  * account an earlier token was minted for. An extension credential store's own user id already is
  * immutable and stays the token's `sub`.
+ *
+ * Under multi-user auth an account whose role neither core nor any loaded extension declares does
+ * not sign in (auth.ts declaredRole): 401 after the password check, audited as
+ * `auth_account_refused` and logged at error level. Under the identity provider the same holds for
+ * a `roleMapping.defaultRole` nobody declares (oidc.ts mapRole).
  */
 import type { Hono } from "hono";
 import { getConfig } from "../config/loader.js";
@@ -29,8 +34,10 @@ import {
   clearAuthFailures,
   createToken,
   recordAuthFailure,
+  signInRoleProblem,
   verifyPassword,
 } from "./auth.js";
+import { extensionAccountId } from "../runtime/accounts.js";
 import { buildLoginUrl, handleCallback, oidcPublicBase, OidcSignInRefused, OIDC_CALLBACK_PATH, stashLoginState, takeLoginState } from "./oidc.js";
 import { resolveOidcSignIn } from "./oidc-accounts.js";
 
@@ -159,6 +166,20 @@ export function registerAuthRoutes(app: Hono): void {
         return c.json({ error: "Invalid username or password" }, 401);
       }
       clearAuthFailures(ip);
+      // Under multi-user auth a role that neither core nor any loaded extension declares signs
+      // nobody in (auth.ts declaredRole): refused here, after the password, rather than minting a
+      // token that every route would refuse. With auth off the token's claims stand, as before.
+      const roleRefused = getConfig().auth?.enabled === true
+        ? signInRoleProblem(providerUser.role, { account: extensionAccountId(providerUser.id) })
+        : undefined;
+      if (roleRefused) {
+        logAudit("auth_account_refused", {
+          username: providerUser.username,
+          role: typeof providerUser.role === "string" ? providerUser.role : null,
+          reason: roleRefused,
+        }, { userId: providerUser.id, severity: "warn" });
+        return c.json({ error: roleRefused }, 401);
+      }
       // Merge the provider's free-form claims FIRST and strip reserved security
       // keys, so a malicious/compromised extension provider cannot override the
       // authoritative `role` (privilege escalation) or `sub` in the minted JWT.
@@ -215,6 +236,13 @@ export function registerAuthRoutes(app: Hono): void {
     if (refused) {
       logAudit("auth_account_refused", { username: user.username, reason: refused }, { userId: user.username, severity: "warn" });
       return c.json({ error: refused }, 403);
+    }
+    // A role that neither core nor any loaded extension declares (a typo, or the role of an
+    // extension that failed to load) signs nobody in: 401, after the password, as for the id above.
+    const roleRefused = signInRoleProblem(user.role, { account: user.id });
+    if (roleRefused) {
+      logAudit("auth_account_refused", { username: user.username, account: user.id, role: user.role, reason: roleRefused }, { userId: user.username, severity: "warn" });
+      return c.json({ error: roleRefused }, 401);
     }
     const token = await createToken(user.username, {
       role: user.role,

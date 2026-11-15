@@ -124,7 +124,7 @@ export function registerRoutePolicies(source: string, policies: RoutePolicy[]): 
 /**
  * Registers an extension manifest's policies. They arrive unchecked: a `.js` manifest, or one run
  * through tsx, is not typechecked. A mistake in one never takes the extension down (its roles would
- * go with it, and a role nobody declares signs in as operator), and never widens access:
+ * go with it, and an account holding one of them could not sign in), and never widens access:
  * - an entry whose `pattern` is a path but whose form is malformed (both forms, neither, a role list
  *   that is not a list of names, a `method` that is not a string) registers as refusing every caller
  *   on that path (`roles: []`), for its verb when it names a valid one;
@@ -159,9 +159,9 @@ export function registerManifestRoutePolicies(source: string, value: unknown): s
 
 /**
  * The registered policies that name a role nobody can hold: neither a built-in nor one of
- * `knownRoles` (the extension roles). A resolved caller always holds a known role (auth.ts maps an
- * unknown role claim to operator), so a deny policy refuses nobody by such a name and a roles policy
- * admits nobody by it: a typo, or a role of an extension that did not load.
+ * `knownRoles` (the extension roles). A resolved caller always holds a known role (auth.ts refuses a
+ * caller whose role nobody declares), so a deny policy refuses nobody by such a name and a roles
+ * policy admits nobody by it: a typo, or a role of an extension that did not load.
  */
 export function routePolicyUnknownRoles(knownRoles: readonly string[]): Array<{ source: string; method?: string; pattern: string; unknownRoles: string[] }> {
   const known = new Set([...BUILTIN_ROLE_CHAIN, ...knownRoles]);

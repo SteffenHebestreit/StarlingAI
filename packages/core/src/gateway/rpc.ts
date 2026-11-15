@@ -18,7 +18,7 @@ import {
   listSessions,
 } from "../agent/session.js";
 import type { AgentSession, SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
-import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import { callerIdentity, revalidateAuthenticatedUser, roleRank, singleOperatorRole, type AuthenticatedUser } from "./auth.js";
 import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
@@ -618,12 +618,13 @@ export class RpcConnection implements AccountConnection {
   /**
    * This connection's caller in the shape the HTTP access rules take (gateway/session-route-access.ts).
    * Under multi-user auth the caller as the store resolved it (its account or principal kind with
-   * its live role): a name alone would read as an instance credential (callerIdentity).
+   * its live role, which callerAccess keeps current and which always is a declared one): a name
+   * alone would read as an instance credential (callerIdentity). With auth off, the token's subject
+   * with its role claim, operator for none or one nobody declares, as before.
    */
   private routeCaller(): AuthenticatedUser | null {
-    return this.liveUser
-      ? { ...this.liveUser, role: normalizeRole(this.connRole) }
-      : this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
+    if (this.liveUser) return { ...this.liveUser };
+    return this.connUserId ? { username: this.connUserId, role: singleOperatorRole(this.connRole) } : null;
   }
 
   /**

@@ -2,15 +2,19 @@
  * Core-extension loader — discovers `src/extensions/<name>/index.{ts,js}`
  * directories at boot, validates their manifests, and registers everything
  * they declare (tools + tiers, audit events, roles, guardrail hooks, routes,
- * route and RPC policies, lifecycle hooks).
+ * route and RPC policies, lifecycle hooks). The standalone scene worker loads
+ * none of that; it declares only their roles (registerCoreExtensionRoles).
  *
  * Failure semantics mirror the plugin loader: a broken extension is logged +
  * audited (`extension_load_failed`) and skipped; the gateway keeps booting.
  * Extensions are repo code — a compile-time error surfaces in CI long before
  * this loader runs — so runtime failures here are config/IO problems. A
- * mistake in one of the parts that decide access does not skip the
- * extension: its roles would go with it, and a role nobody declares signs in
- * as operator. It is logged and fails closed instead:
+ * skipped extension's roles go with it: under multi-user auth an account
+ * holding one of them cannot sign in until the extension loads again or the
+ * account's role is changed (gateway/auth.ts declaredRole; it used to sign in
+ * as operator). So a mistake in one of the parts that decide access does not
+ * skip the extension, which would lock its accounts out over one entry. It is
+ * logged and fails closed instead:
  *   - a malformed route policy refuses every caller on its path;
  *   - a malformed RPC policy refuses its method, or every method, to every
  *     caller;
@@ -34,7 +38,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
 import { registerTool, registerToolCallAuthorizer, type ToolHandler } from "../tools/registry.js";
-import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
+import { ToolTier, isBuiltinTool, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
 import { registerManifestRoutePolicies, routePolicyUnknownRoles } from "../gateway/route-policies.js";
 import { registerManifestRpcPolicies } from "../gateway/rpc-policy.js";
@@ -43,6 +47,7 @@ import { registerLlmBoundaryTransformer } from "../providers/llm-boundary.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
+  _recordExtensionRoles,
   _recordLoadedExtension,
   listExtensionRoles,
   type CoreExtension,
@@ -180,9 +185,10 @@ function registerExtension(ext: CoreExtension, source: string): void {
   // name without warnings.
   registerExtensionGroup(ext.name);
 
-  // A malformed policy does not fail the load: the extension's roles would go with it, and a role
-  // nobody declares signs in as operator. It is logged, and refuses every caller on its path instead
-  // (route-policies.ts registerManifestRoutePolicies).
+  // A malformed policy does not fail the load: the extension's roles would go with it, and every
+  // account holding one of them would be locked out (a role nobody declares signs nobody in). It is
+  // logged, and refuses every caller on its path instead (route-policies.ts
+  // registerManifestRoutePolicies).
   for (const problem of registerManifestRoutePolicies(ext.name, ext.routePolicies)) {
     log.error({ extension: ext.name, problem }, "extension route policy is malformed");
   }
@@ -312,6 +318,41 @@ export async function loadCoreExtensions(): Promise<{ loaded: number; failed: nu
     log.error({ extension: source, ...(method ? { method } : {}), pattern, unknownRoles }, "route policy names a role no one holds");
   }
   return { loaded, failed, dir };
+}
+
+/**
+ * Declares the core extensions' roles and registers nothing else of them: no tools, hooks,
+ * policies, credential store, routes or boot. For a process that runs work for accounts without
+ * loading the extensions: the standalone scene worker (scene-worker-main.ts) runs each queued job
+ * with its owner's role as the auth layer holds it, and under multi-user auth a role that nobody
+ * declares signs nobody in (gateway/auth.ts declaredRole). Without the roles, every job and
+ * scheduled run of an account holding an extension's role failed there as one of an account that no
+ * longer signs in.
+ *
+ * An extension declares its roles here only when loadCoreExtensions would get as far as declaring
+ * them: its module imports, its manifest is valid, and no tool it would register shadows a built-in.
+ * Otherwise it is logged and its roles stay undeclared, as in a gateway where it failed to load.
+ */
+export async function registerCoreExtensionRoles(): Promise<{ registered: number; failed: number; dir: string }> {
+  const dir = resolveExtensionsDir();
+  let registered = 0;
+  let failed = 0;
+  for (const { name, entry } of discoverEntryFiles(dir)) {
+    if (_active.some((a) => a.ext.name === name)) continue;
+    try {
+      const mod = await _importer(entry);
+      validateManifest(name, mod.default);
+      // registerExtension skips a malformed tool, then throws on one that shadows a built-in.
+      const shadowing = (mod.default.tools ?? []).find((tool) => toolProblem(tool) === null && isBuiltinTool(tool.name));
+      if (shadowing) throw new Error(`extension "${name}" must not shadow built-in tool "${shadowing.name}"`);
+      _recordExtensionRoles(mod.default.roles ?? []);
+      registered++;
+    } catch (err) {
+      failed++;
+      log.error({ extension: name, entry, err }, "core extension failed to load — its roles are not declared in this process");
+    }
+  }
+  return { registered, failed, dir };
 }
 
 /**

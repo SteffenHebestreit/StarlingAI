@@ -42,7 +42,7 @@ pnpm sai token --user alice --role viewer --ttl 7d
 pnpm sai token --user deploy-bot --role admin --ttl 30d
 ```
 
-Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
+Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request. Under multi-user auth the role must be one that core or a loaded extension declares ([below](#roles-nobody-declares)): `--role` with any other name mints a token the gateway refuses.
 
 `sai token` (and the setup wizard's dashboard token) mints a **bootstrap token**, marked with the claim `bst: true`. Under multi-user auth a bootstrap token is an instance credential, never an account: `--user alice` is a bootstrap principal named alice, with storage of its own, not alice's account. Whoever holds the JWT secret can mint one, so a bootstrap token works whatever accounts exist; rotating the secret revokes every token. Account tokens come from signing in (`POST /api/auth/login`, or SSO) and carry the account id (claim `aid`). The gateway resolves them on every request, and on every message of an open dashboard socket, only while that account still holds that id and the token's username. A token with neither claim (minted before account ids, or by hand) works only while the deployment has no account at all, the window in which the first account is created. With auth off neither claim changes anything.
 
@@ -51,6 +51,38 @@ Tokens carry a `sub` claim holding the user id (the standard JWT subject — not
 Authentication failures are rate-limited to **10 attempts per 5-minute window per IP address** (`checkAuthRateLimit` in `packages/core/src/gateway/auth.ts`). A successful auth clears that IP's counter.
 
 The limit covers exactly three surfaces: `POST /api/auth/login` (HTTP 429), `/ws` connections (closed with code 4429), and `/ws/browser-vnc` upgrades (HTTP 429). Every other `/api/*` route rejects an invalid or missing bearer token with a plain 401 and is **not** rate-limited — put a reverse proxy in front of the gateway if you need blanket per-IP throttling.
+
+### Roles Nobody Declares
+
+Under multi-user auth an account or a token can only hold a role that core (`viewer`, `operator`, `admin`) or a loaded core extension declares. Role names compare case-sensitively. Any other role signs nobody in, whether it is a typo (`Admin` included) or the role of an extension that failed to load or is no longer installed:
+
+- **The account cannot sign in.** `POST /api/auth/login` answers `401` after the password check (`This account's role is not known to this gateway: …`), audited as `auth_account_refused` with the role. An extension auth provider's user is refused the same way, and so is a user of that store whose record has no role at all.
+- **Every token that carries such a role is refused** wherever a revoked token is: `401` (`Unauthorized (account no longer valid)`) on `/api`, close code 4401 on the dashboard socket (at the handshake, and at the next message of a socket that is already open), and `401` on the AG-UI stream, `/mcp`, `/a2a/v1`, `/a2a/agents/:name` and the browser preview.
+- **Its queued work does not run.** A job the account queued fails as one of an account that no longer signs in, and is not queued again. So does each run of its schedules, and a schedule ends after such runs as after any failed ones: one that runs once is removed at its first refused run, a repeating one after three refused runs in a row. A schedule that ends says so in a notification to its owner, and in its conversation while that is still there.
+- **Where the role comes from.** An account's role is read from its record (`auth.users[].role`, or the extension store's user) on every request, so a change to it takes effect at once. A bootstrap token, a token of the empty-store window and an identity-provider account carry theirs in the token. A token with no `role` claim at all counts as `operator`, as before.
+- **Identity provider.** An `auth.oidc.roleMapping.defaultRole` that nobody declares maps nobody: a person the identity provider grants none of the listed roles is refused (`sso_failed`).
+- **A standalone scene worker** (a split deployment) loads no extension, but declares the extensions' roles when it starts, as the gateway's loader would, and nothing else of them. An extension that does not load there declares no role there: the jobs of the accounts holding its roles fail in that worker, which logs `core extension failed to load — its roles are not declared in this process`. It reads the roles once, so restart it whenever the gateway's extensions change.
+- **The log.** The gateway logs each refusal at error level, once per account and role: `Sign-in refused: the role is declared by neither core nor any loaded extension. …`, with the role and the account id (for a bootstrap token its kind instead), and nothing else of the account.
+
+Before, such a role counted as `operator`. So when an extension failed to load, every account holding one of its roles signed in as an operator: a fork's patient role at rank 10, say, read the account roster and drove sessions.
+
+**What that rule left behind.** Some records keep the role they were saved with, and the check above does not reach them:
+
+- A chat session answers to the role it was opened with, and every later turn in it runs with that role, delegations included. A session that an account opened while the old rule made it an operator still answers as `operator` after the account signs in again with its declared role, even one that ranks lower.
+- A queued job or a schedule of an identity-provider account or of a bootstrap token runs with the role it was queued with, since the gateway holds no other role for them. One queued while the old rule made its owner an operator keeps running as `operator`, with no expiry, even when its owner can no longer sign in. (The jobs and schedules of builtin accounts and extension store users run with the role their record holds when they start.)
+- An identity-provider account's token carries the role it was granted at sign-in: one minted while the old rule mapped an undeclared `defaultRole` to `operator` works as `operator` until it expires (24 hours at most).
+
+So after upgrading from a build without this check, if an extension failed to load at some boot (look for `core extension failed to load` in the old boot logs) or an account's role was misspelt, archive the sessions those accounts opened meanwhile (an admin may archive any session) and review their schedules: an admin's `GET /api/schedules` lists everyone's, and `DELETE /api/schedules/:id` removes one.
+
+**Getting a locked-out account back in.** Load the extension again, or give the account a declared role:
+
+- Restore the extension. The boot log says why it did not load (`core extension failed to load — skipped`, audited as `extension_load_failed`). Once it loads, its accounts sign in with their roles again, and the tokens they already hold work again.
+- Change the role. For a builtin account, edit its `role` in `auth.users[]` where the roster lives: the runtime config (`/data/starlingai.runtime.json` in Docker, `workspace/runtime/runtime.overrides.json` otherwise) or the config shard that lists it. The gateway reloads the file. Keep the record and its `id`: an account deleted and created again gets a new id, and its stored data stays with the old one. For an extension auth provider's user, change the role in that provider's store. For an identity-provider account, change the role mapping or the `defaultRole`; the person then signs in again.
+- For a bootstrap token, mint a new one with a declared `--role`.
+
+Neither brings back what failed while the account was locked out: its failed jobs stay failed and its removed schedules stay removed. Queue those jobs again and make those schedules again.
+
+With auth off nothing changes: there is one operator, the token's own claims stand, and a role nobody declares counts as `operator`.
 
 ### Roles On The Surfaces Outside `/api`
 
@@ -320,6 +352,8 @@ A reverse proxy you put in front of the stack (for TLS, say) buffers in the same
 - [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
 - [ ] Keep every proxy's temp files off disk: the web container's `/var/cache/nginx` is a tmpfs ([above](#dashboard-proxy-no-request-data-on-disk)), and a TLS proxy in front needs the same
 - [ ] If nothing calls the deprecated `POST /a2a/agents/:name`, set `a2a.legacyAgentRoute: false`
+- [ ] After an upgrade, or whenever the core extensions change, check the boot log for `core extension failed to load` (a standalone scene worker's too): an account holding a role of an extension that did not load cannot sign in, and its queued jobs and schedules fail ([Roles Nobody Declares](#roles-nobody-declares))
+- [ ] When upgrading from a build that let a role nobody declares sign in as `operator`, archive the sessions and review the schedules of the accounts that held one ([Roles Nobody Declares](#roles-nobody-declares), "What that rule left behind")
 - [ ] With viewer accounts and a signed-in automation browser, keep `mcp.expose` off or leave the tools that use that browser out of `mcp.expose.exposeTools` ([Roles On The Surfaces Outside `/api`](#roles-on-the-surfaces-outside-api))
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals

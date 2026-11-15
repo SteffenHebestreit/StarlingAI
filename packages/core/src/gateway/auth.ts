@@ -187,17 +187,24 @@ export function extractBearerToken(authHeader: string | null | undefined): strin
  * Role identifier. Upstream ships "viewer" (read-only), "operator" (full
  * per-user access), and "admin" (operator + instance-wide administration, e.g.
  * editing the shared global personality). Core extensions register additional
- * roles (with ranks) via their manifest — see extension/index.ts. Unknown role
- * claims normalize to "operator" for pre-Wave-B token compatibility.
+ * roles (with ranks) via their manifest — see extension/index.ts. Under
+ * multi-user auth a role that neither core nor a loaded extension declares
+ * signs nobody in (declaredRole); a token with no role claim, minted before
+ * roles (Wave B), counts as operator (normalizeRole).
  */
 export type AuthRole = string;
 
 /** Built-in role ranks; extension roles carry their own rank in the registry. */
-const BUILTIN_ROLE_RANKS: Record<string, number> = { viewer: 10, operator: 50, admin: 90 };
+const BUILTIN_ROLE_RANKS: Readonly<Record<string, number>> = { viewer: 10, operator: 50, admin: 90 };
+
+/** The rank of a built-in role. Own keys only: "constructor" or "toString" is no built-in role. */
+function builtinRoleRank(role: string): number | undefined {
+  return Object.hasOwn(BUILTIN_ROLE_RANKS, role) ? BUILTIN_ROLE_RANKS[role] : undefined;
+}
 
 /** Rank for any known role name; unknown roles rank as -1 (never sufficient). */
 export function roleRank(role: string): number {
-  const builtin = BUILTIN_ROLE_RANKS[role];
+  const builtin = builtinRoleRank(role);
   if (builtin !== undefined) return builtin;
   return getExtensionRole(role)?.rank ?? -1;
 }
@@ -228,11 +235,93 @@ export function callerIdentity(user: AuthenticatedUser | null | undefined): Iden
   return principalIdentity(user.username, "bootstrap");
 }
 
-export function normalizeRole(value: unknown): AuthRole {
-  if (typeof value === "string" && (value in BUILTIN_ROLE_RANKS || getExtensionRole(value))) return value;
-  // Unknown / missing role claims default to operator — matches the legacy
-  // single-operator behavior so unupgraded tokens keep working until expiry.
-  return "operator";
+/**
+ * The role `value` names when core or a loaded extension declares it, else undefined: a typo, the
+ * role of an extension that failed to load or is no longer installed, or a value that is no role
+ * name at all. Such a role grants nothing. Under multi-user auth an account or a token that holds
+ * one signs in nowhere (resolveCaller, the sign-in routes); it used to sign in as operator, so an
+ * extension that failed to load turned every account holding one of its roles into an operator.
+ */
+export function declaredRole(value: unknown): AuthRole | undefined {
+  if (typeof value !== "string") return undefined;
+  return builtinRoleRank(value) !== undefined || getExtensionRole(value) ? value : undefined;
+}
+
+/**
+ * The role a token's `role` claim stands for: a declared role as it is, and operator for a token
+ * with no role claim at all, minted before roles (Wave B), as it always has. Undefined for a claim
+ * naming a role that nobody declares, which every caller of this refuses. A role read from a store
+ * (an account's record) has no such default: see {@link declaredRole}.
+ */
+export function normalizeRole(value: unknown): AuthRole | undefined {
+  return value === undefined ? "operator" : declaredRole(value);
+}
+
+/**
+ * The role a token's claim stands for with auth off: there is one operator and no user store, the
+ * token's own claims are authoritative, and a role nobody declares counts as operator, as it always
+ * has. Never under multi-user auth, which refuses such a role.
+ */
+export function singleOperatorRole(value: unknown): AuthRole {
+  return normalizeRole(value) ?? "operator";
+}
+
+/** Who held a refused role, as the error line names them: an account id or a principal's kind, never a name. */
+export interface RoleHolder {
+  account?: string;
+  principal?: PrincipalKind;
+  /** Where the role was read, when no account holds it (the identity provider's default role). */
+  source?: string;
+}
+
+/** What the sign-in routes answer an account whose role nobody declares, after its password. */
+export const UNDECLARED_ROLE_REFUSAL =
+  "This account's role is not known to this gateway: an admin changes the account's role, or restores the extension that declares it";
+
+const UNDECLARED_ROLE_LOG =
+  "Sign-in refused: the role is declared by neither core nor any loaded extension. An extension that declares it may have failed to load (see the extension loader's errors at boot) or is no longer installed; the account stays locked out until its role is changed or that extension loads again";
+
+/** The (holder, role) pairs already logged, so a socket that asks before every message logs once. */
+const _undeclaredRolesReported = new Set<string>();
+/** Bounds the set: the roles come from the stores and from signed tokens, but a gateway runs for months. */
+const MAX_UNDECLARED_ROLE_REPORTS = 1_000;
+
+function describeRole(role: unknown): string {
+  if (typeof role === "string") return role.length > 64 ? `${role.slice(0, 64)}…` : role;
+  return role === undefined ? "(none)" : `(${role === null ? "null" : typeof role})`;
+}
+
+/**
+ * Logs at error level that a role neither core nor any loaded extension declares kept a caller from
+ * signing in: once per process for each holder and role, as an open socket asks before every
+ * message and every pushed event. The line names the role and the account id (or the principal's
+ * kind), nothing else of the account, and no part of the token.
+ */
+export function reportUndeclaredRole(role: unknown, holder: RoleHolder = {}): void {
+  const shown = describeRole(role);
+  const key = [holder.account?.toLowerCase() ?? "", holder.principal ?? "", holder.source ?? "", shown].join("\u0000");
+  if (_undeclaredRolesReported.has(key)) return;
+  if (_undeclaredRolesReported.size >= MAX_UNDECLARED_ROLE_REPORTS) _undeclaredRolesReported.clear();
+  _undeclaredRolesReported.add(key);
+  log.error({ role: shown, ...holder }, UNDECLARED_ROLE_LOG);
+}
+
+/** Refuses a caller whose role nobody declares: logs it (reportUndeclaredRole) and resolves to no caller. */
+function refuseUndeclaredRole(role: unknown, holder: RoleHolder): null {
+  reportUndeclaredRole(role, holder);
+  return null;
+}
+
+/**
+ * Why an account that gave the right password still may not sign in because of its role, or
+ * undefined when core or a loaded extension declares that role. The refusal is logged
+ * (reportUndeclaredRole). For the sign-in routes under multi-user auth: a token minted anyway would
+ * be refused on its first use (resolveCaller).
+ */
+export function signInRoleProblem(role: unknown, holder: RoleHolder): string | undefined {
+  if (declaredRole(role) !== undefined) return undefined;
+  reportUndeclaredRole(role, holder);
+  return UNDECLARED_ROLE_REFUSAL;
 }
 
 /**
@@ -244,7 +333,8 @@ export function normalizeRole(value: unknown): AuthRole {
  *
  * Tokens minted before Wave B (no `role` claim) default to operator —
  * matches the legacy single-operator behavior so unupgraded tokens keep
- * working until they expire.
+ * working until they expire. Under multi-user auth a role claim naming a
+ * role that nobody declares resolves to null, as does a stored one.
  */
 export async function authenticatedUser(authHeader: string | null | undefined): Promise<AuthenticatedUser | null> {
   const token = extractBearerToken(authHeader);
@@ -262,11 +352,11 @@ export async function authenticatedUserFromToken(token: string): Promise<Authent
   const username = payload.sub;
 
   // With auth disabled (single-operator) there is no user store, so the token's own claims are
-  // authoritative — the bootstrap/god-token path, unchanged.
+  // authoritative — the bootstrap/god-token path, unchanged (a role nobody declares included).
   if (getConfig().auth?.enabled !== true) {
     return {
       username,
-      role: normalizeRole(payload["role"]),
+      role: singleOperatorRole(payload["role"]),
       displayName: typeof payload["displayName"] === "string" ? (payload["displayName"] as string) : undefined,
     };
   }
@@ -286,7 +376,8 @@ export const BOOTSTRAP_CLAIM = "bst";
 /**
  * Checks a caller resolved earlier against the store again, synchronously: an open WebSocket asks
  * before every message it handles and every event it pushes. Null when the account is gone, retired,
- * renamed, or holds another id now; otherwise the caller with its role as the store has it now.
+ * renamed, holds another id now, or holds a role that nobody declares now; otherwise the caller with
+ * its role as the store has it now.
  */
 export function revalidateAuthenticatedUser(user: AuthenticatedUser): AuthenticatedUser | null {
   if (getConfig().auth?.enabled !== true) return user;
@@ -301,9 +392,10 @@ export function revalidateAuthenticatedUser(user: AuthenticatedUser): Authentica
 /**
  * The role the store holds for an account now, for work done for it that carries no role of its own
  * (a queued job, a scheduled run). A builtin account's record holds one, and so does an extension
- * auth provider's user. Null when the account no longer signs in (gone, retired, renamed, or its id
- * held by another). Undefined when the store holds no role for it (an identity-provider account,
- * whose role the IdP grants at each sign-in), when the identity names no account, or with auth off.
+ * auth provider's user. Null when the account no longer signs in (gone, retired, renamed, its id
+ * held by another, or its role one that nobody declares). Undefined when the store holds no role
+ * for it (an identity-provider account, whose role the IdP grants at each sign-in), when the
+ * identity names no account, or with auth off.
  */
 export function storedAccountRole(identity: Pick<Identity, "userId" | "account">): AuthRole | null | undefined {
   const account = identity.account;
@@ -333,6 +425,13 @@ interface CallerClaims {
  * claimed name another subject had first, would otherwise be signed in as the one before. The id is
  * random and minted once, so a token can only reach the account it was minted for, and only while
  * that account still holds the username in the token's `sub`.
+ *
+ * The role must be one that core or a loaded extension declares (declaredRole), whichever store or
+ * claim it comes from; a caller holding any other resolves to null, as a deleted account does, and
+ * the refusal is logged (reportUndeclaredRole). Every surface that resolves a caller through here
+ * then refuses it the way it refuses a revoked token. A role nobody declares was mapped to operator,
+ * so when an extension failed to load, each account holding one of its roles signed in as an
+ * operator. Only a token with no role claim keeps its default, operator (normalizeRole).
  */
 function resolveCaller(username: string, claims: CallerClaims, opts: { recordBootstrapSub: boolean }): AuthenticatedUser | null {
   const displayName = typeof claims.displayName === "string" ? claims.displayName : undefined;
@@ -343,7 +442,11 @@ function resolveCaller(username: string, claims: CallerClaims, opts: { recordBoo
     // Bootstrap tokens are not supported under an extension store, as before.
     const record = provider.getUserById(username);
     if (!record) return null; // account removed/disabled in the extension store
-    return { username, role: normalizeRole(record.role), displayName: record.displayName, account: extensionAccountId(username) };
+    const account = extensionAccountId(username);
+    // The role the store holds, which has no default: a record without one names no role.
+    const role = declaredRole(record.role);
+    if (!role) return refuseUndeclaredRole(record.role, { account });
+    return { username, role, displayName: record.displayName, account };
   }
 
   // A token carries one of the two claims; one carrying both was not minted here.
@@ -357,15 +460,22 @@ function resolveCaller(username: string, claims: CallerClaims, opts: { recordBoo
     // host (`sai token`, the setup wizard), it is never an account, whatever its `sub` names. It is
     // not refused when an account has that username (the shipped identity-provider realm's own user
     // is "admin", the default bootstrap `sub`): the two are different kinds, and never one bucket.
-    // TTL-bound; revoke one early by rotating the JWT secret.
+    // TTL-bound; revoke one early by rotating the JWT secret. A role claim nobody declares refuses
+    // it before its subject is recorded.
+    const role = normalizeRole(claims.role);
+    if (!role) return refuseUndeclaredRole(claims.role, { principal: "bootstrap" });
     if (opts.recordBootstrapSub) recordAccountRegistryBootstrapSub(username);
-    return { username, role: normalizeRole(claims.role), displayName, principal: "bootstrap" };
+    return { username, role, displayName, principal: "bootstrap" };
   }
   // A token with neither claim was minted before account ids, or by hand. It resolves by its own
   // claims only while the deployment holds no account at all (the bootstrap window documented in
-  // config/gateway/30-auth.jsonc): without that the first account could never be created.
+  // config/gateway/30-auth.jsonc): without that the first account could never be created. An
+  // extension store's token is one of these once that extension no longer loads: its role claim
+  // must still be declared.
   if (accountStoreIsEmpty()) {
-    return { username, role: normalizeRole(claims.role), displayName };
+    const role = normalizeRole(claims.role);
+    if (!role) return refuseUndeclaredRole(claims.role, {});
+    return { username, role, displayName };
   }
   return null;
 }
@@ -394,12 +504,16 @@ function resolveAccountCaller(username: string, aid: string, roleClaim: unknown,
     // Builtin accounts, also under provider "oidc" (mixed mode): the record still holds the id and
     // the name. Role and display name are read from it now, not from the token.
     if (record.username !== username) return null;
-    return { username, role: normalizeRole(record.role), displayName: record.displayName, account: record.id };
+    const role = declaredRole(record.role);
+    if (!role) return refuseUndeclaredRole(record.role, { account: record.id });
+    return { username, role, displayName: record.displayName, account: record.id };
   }
   // Identity-provider accounts only while that provider is configured. The role is the one the IdP
   // granted at sign-in (the registry holds none), as before.
   if (entry && getConfig().auth.provider === "oidc" && entry.status === "active" && entry.username === username) {
-    return { username, role: normalizeRole(roleClaim), displayName, account: entry.id };
+    const role = normalizeRole(roleClaim);
+    if (!role) return refuseUndeclaredRole(roleClaim, { account: entry.id });
+    return { username, role, displayName, account: entry.id };
   }
   return null;
 }
@@ -431,6 +545,7 @@ export function resetAuthStateForTests(): void {
   _jwtSecret = null;
   failureCounts.clear();
   _sharedIdsReported.clear();
+  _undeclaredRolesReported.clear();
 }
 
 function resolveJwtSecretPath(): string {

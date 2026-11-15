@@ -95,7 +95,10 @@ export interface ExtensionToolDef {
  * Role contributed by an extension (e.g. a medical fork's doctor/mfa/patient).
  * Registration makes the role *known* — surfaced via /api/product so the web
  * shell can render badges, and available to gateway RBAC checks. Enforcement
- * semantics stay in the consuming code.
+ * semantics stay in the consuming code. Under multi-user auth only a known role
+ * signs in: while the extension does not load, an account holding one of its
+ * roles cannot sign in and every token carrying one is refused
+ * (gateway/auth.ts declaredRole).
  */
 export interface ExtensionRoleDef {
   /** Role id as carried in JWT `role` claims. */
@@ -328,6 +331,15 @@ export function _recordLoadedExtension(record: LoadedExtensionRecord, ext: CoreE
     }
     _authProvider = { extension: record.name, provider: ext.authProvider };
   }
+}
+
+/**
+ * @internal loader-only: declares an extension's roles without loading it, for a process that runs
+ * work for accounts but loads no extension (loader.ts registerCoreExtensionRoles). The extension is
+ * not listed as loaded, and nothing else of it is registered.
+ */
+export function _recordExtensionRoles(roles: readonly ExtensionRoleDef[]): void {
+  for (const role of roles) _roles.set(role.name, role);
 }
 
 /** The registered credential backend, if any extension declared one. */

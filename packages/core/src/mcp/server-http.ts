@@ -11,9 +11,10 @@
  *     tokens are accepted and inherit the read-only RBAC the rest of the
  *     gateway already enforces (Tier 2 calls still pause for approval).
  *     Under multi-user auth the token's account is resolved against the user
- *     store on every request (a removed account gets 401; the role is the
- *     account's live one), its calls run as that account in its own workspace
- *     root, and a session serves only the caller that opened it.
+ *     store on every request (a removed account, or one whose role nobody
+ *     declares, gets 401; the role is the account's live one), its calls run
+ *     as that account in its own workspace root, and a session serves only
+ *     the caller that opened it.
  *   - When false, any caller can hit `/mcp`.  Only acceptable when bound
  *     to a trusted local socket.
  *
@@ -29,7 +30,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 
 import { getConfig } from "../config/loader.js";
-import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, normalizeRole, type AuthRole } from "../gateway/auth.js";
+import { authenticatedUser, callerIdentity, verifyToken, extractBearerToken, singleOperatorRole, type AuthRole } from "../gateway/auth.js";
 import { sameAccountId, type Identity } from "../runtime/accounts.js";
 import { registerAccountBindingTeardown } from "../gateway/account-connections.js";
 import { ownsRecord } from "../runtime/user-scope.js";
@@ -113,8 +114,9 @@ export async function handleMcpHttpRequest(
       userId = user.username;
       identity = callerIdentity(user);
     } else {
+      // With auth off the token's own claims stand, a role nobody declares counting as operator.
       caller = (verified as { sub?: string }).sub ?? "authenticated";
-      role = normalizeRole((verified as { role?: unknown }).role);
+      role = singleOperatorRole((verified as { role?: unknown }).role);
     }
   }
 

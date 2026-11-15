@@ -228,13 +228,27 @@ Notes:
   in `refuse`. The hook runs in the processes that load extensions: the gateway
   and its embedded scene worker. A standalone scene worker
   (`scene-worker-main.ts`) loads none, so neither your tools nor your hook
-  exist there. A hook that is not a function refuses every call, and a tool
-  whose `refuse` is not a function is not registered. Both are logged at boot,
-  and the extension still loads, with its roles.
+  exist there. It declares your roles, though, and nothing else of your
+  extension, so a job of a builtin account holding one of them runs there with
+  that role; if your module does not import there or its manifest is refused,
+  your roles are not declared there either, and those jobs fail. To read the
+  roles it imports your module, so its top-level code runs there too (`boot`
+  does not): keep work out of it. A hook that is not a function refuses every
+  call, and a tool whose `refuse` is not a function is not registered. Both
+  are logged at boot, and the extension still loads, with its roles.
 - A tool's `effect` block (ADR-005) is honoured like a built-in's, so an
   irreversible external mutation falls under `guardrails.effectContracts`.
 - A failing extension is logged + audited and skipped; it cannot take the
-  gateway down.
+  gateway down. Its roles go with it: under multi-user auth an account that
+  holds one of them cannot sign in, every token carrying one is refused (401,
+  `/ws` closes with 4401), and its queued jobs and scheduled runs fail, until
+  the extension loads again or the account's role is changed. Those failed
+  jobs are not queued again, and a schedule ends after such runs as after any
+  failed ones (a one-shot at once, a repeating one after three). The gateway
+  logs each such account with the role and the account id. Before, such an
+  account signed in as `operator`. See
+  [security.md](security.md#roles-nobody-declares) for getting accounts back
+  in, and for what that old rule left behind in chats and schedules.
 - Every WebSocket RPC method has a default minimum role (reading: viewer;
   anything that changes something, `session.create` and `chat.send` included:
   operator), compared by rank, so an extension role at rank 50 passes operator

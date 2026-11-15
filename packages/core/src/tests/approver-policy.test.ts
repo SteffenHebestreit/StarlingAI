@@ -608,9 +608,10 @@ describe("declaring an approval policy", () => {
     ["with a malformed role", { requiresPerCallApproval: true, approval: { approverRoles: ["Not A Role"] } }],
     ["with a non-boolean distinctApprover", { requiresPerCallApproval: true, approval: { approverRoles: [APPROVER_ROLE], distinctApprover: "yes" } }],
   ])("the loader leaves out a tool that declares one %s, and loads the rest of its extension with its roles", async (_how, fields) => {
-    // Failing the load dropped the extension's roles, and a role nobody declares signs in as
-    // operator: a typo in one approval policy raised a fork's lowest role. Each case loads an
-    // extension of its own, which stays loaded.
+    // Failing the load dropped the extension's roles: its accounts signed in as operators then (a
+    // typo in one approval policy raised a fork's lowest role), and would be locked out now that a
+    // role nobody declares signs nobody in. Each case loads an extension of its own, which stays
+    // loaded.
     const n = ++badExtensions;
     const name = `approval-bad-${n}`;
     const dir = join(tempDir, `extensions-bad-${Math.random().toString(36).slice(2)}`);

@@ -1803,9 +1803,14 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
  */
 const EXTENSION_TIER_MAP = new Map<string, ToolTierDef>();
 
+/** True when `toolName` is a built-in tool's, tiered in TOOL_TIER_MAP: no extension may declare a tool of that name. */
+export function isBuiltinTool(toolName: string): boolean {
+  return Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName);
+}
+
 /** @internal extension-loader-only. Throws on built-in shadowing or blocked tiers. */
 export function registerExtensionToolTier(toolName: string, def: ToolTierDef, source: string): void {
-  if (Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName)) {
+  if (isBuiltinTool(toolName)) {
     throw new Error(`extension "${source}" must not shadow built-in tool "${toolName}"`);
   }
   if (def.tier >= ToolTier.FOUR_BLOCKED) {

@@ -340,8 +340,9 @@ describe("rpcPolicies from extensions", () => {
   });
 
   it("loads an extension whose rpcPolicies are malformed: its role stays, and a malformed entry refuses its method to every caller", async () => {
-    // Failing the load dropped the extension's roles, and a role nobody declares signs in as
-    // operator: a typo in one policy raised a fork's portal role to an operator, with every method.
+    // Failing the load dropped the extension's roles: its accounts signed in as operators then (a
+    // typo in one policy raised a fork's portal role, with every method), and would be locked out
+    // now that a role nobody declares signs nobody in.
     const dir = mkdtempSync(join(tmpdir(), "starlingai-rpc-policy-ext-"));
     dirs.push(dir);
     mkdirSync(join(dir, "portal"));

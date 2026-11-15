@@ -36,6 +36,8 @@ pnpm token
 pnpm sai token
 ```
 
+Under multi-user auth (`auth.enabled`) a signed token counts only while its account still signs in. A token of a deleted account is refused, and so is one whose role, read from the account's record or from the token, neither core nor a loaded extension declares: `401` on HTTP, close code 4401 on the WebSocket. Such an account cannot sign in either: `POST /api/auth/login` answers `401` after the password check. See [Security Model](security.md#roles-nobody-declares).
+
 Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`. `POST /api/jobs/:name/run` takes a job's `api` trigger `webhookKey` the same way, via `?key=` or `X-Job-Key`. A caller with neither a valid token nor a valid key gets `401` whether or not the scene or job exists, and the gateway decides that before it looks the name up, so the time of the answer does not depend on the name either. Only an authenticated caller is told that a name is unknown (`404`).
 
 ## Health And Status
@@ -598,7 +600,7 @@ Connect to:
 ws://localhost:8765/ws?token=<jwt>
 ```
 
-After auth, the server sends `hello-ok` with `{ connId, version, sessions, methods }`: `sessions` lists the sessions the connection may see, and `methods` the RPC methods it may call, as its role stands at the handshake (see the Role column below). A client offers only those controls; the gateway still checks every call when it arrives, so a role changed later shows in the answers. A refused socket is closed with a code instead: 4401 (no valid token), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in, and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
+After auth, the server sends `hello-ok` with `{ connId, version, sessions, methods }`: `sessions` lists the sessions the connection may see, and `methods` the RPC methods it may call, as its role stands at the handshake (see the Role column below). A client offers only those controls; the gateway still checks every call when it arrives, so a role changed later shows in the answers. A refused socket is closed with a code instead: 4401 (no valid token, or one whose account does not sign in, such as an account whose role neither core nor a loaded extension declares), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in (deleted, or its role changed to one nobody declares), and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
 
 Request shape:
 

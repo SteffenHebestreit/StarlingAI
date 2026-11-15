@@ -11,14 +11,14 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:499 | 21 |
 | `accessKeyId` | packages/core/src/config/schema.ts:559 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 175 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 177 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1885 | 1 |
 | `action` | packages/core/src/config/schema.ts:1615 | 104 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1916 | 3 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:791 | 1 |
 | `admin` | packages/core/src/config/schema.ts:469 | 67 |
-| `after` | packages/core/src/config/schema.ts:1618 | 345 |
+| `after` | packages/core/src/config/schema.ts:1618 | 346 |
 | `agents` | packages/core/src/config/schema.ts:1606 | 213 |
 | `alertmanager` | packages/core/src/config/schema.ts:1240 | 1 |
 | `all` | packages/core/src/config/schema.ts:1393 | 352 |
@@ -189,7 +189,7 @@ Every public schema field, where it is declared, and how many production files r
 | `exposeScenes` | packages/core/src/config/schema.ts:853 | 1 |
 | `exposeTools` | packages/core/src/config/schema.ts:849 | 1 |
 | `expression` | packages/core/src/config/schema.ts:1460 | 23 |
-| `extensions` | packages/core/src/config/schema.ts:2228 | 23 |
+| `extensions` | packages/core/src/config/schema.ts:2228 | 24 |
 | `failedResearchHonestyBackstop` | packages/core/src/config/schemas/orchestration.ts:154 | 1 |
 | `fallback` | packages/core/src/config/schema.ts:118 | 120 |
 | `finalResponseQaGate` | packages/core/src/config/schemas/effort.ts:49 | 3 |
@@ -435,8 +435,8 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:624 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:1023 | 212 |
-| `roles` | packages/core/src/config/schema.ts:1571 | 32 |
+| `role` | packages/core/src/config/schema.ts:1023 | 213 |
+| `roles` | packages/core/src/config/schema.ts:1571 | 33 |
 | `rolesClaim` | packages/core/src/config/schema.ts:494 | 1 |
 | `routedTimeoutMs` | packages/core/src/config/schema.ts:1436 | 1 |
 | `routing` | packages/core/src/config/schema.ts:277 | 126 |
@@ -447,7 +447,7 @@ Every public schema field, where it is declared, and how many production files r
 | `runTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:290 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:651 | 4 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1326 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1447 | 108 |
+| `scene` | packages/core/src/config/schema.ts:1447 | 109 |
 | `scopes` | packages/core/src/config/schema.ts:490 | 25 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
@@ -490,7 +490,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:478 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1496 | 112 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:276 | 3 |
-| `store` | packages/core/src/config/schema.ts:1824 | 193 |
+| `store` | packages/core/src/config/schema.ts:1824 | 194 |
 | `stub` | packages/core/src/config/schema.ts:1583 | 35 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:440 | 1 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:682 | 2 |
@@ -504,7 +504,7 @@ Every public schema field, where it is declared, and how many production files r
 | `submitSelector` | packages/core/src/config/schema.ts:894 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1737 | 1 |
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:212 | 1 |
-| `surface` | packages/core/src/config/schema.ts:997 | 101 |
+| `surface` | packages/core/src/config/schema.ts:997 | 102 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:876 | 2 |
 | `synthesis` | packages/core/src/config/schema.ts:278 | 64 |
 | `systemOne` | packages/core/src/config/schemas/decisions.ts:51 | 3 |

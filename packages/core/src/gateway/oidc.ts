@@ -18,7 +18,7 @@ import { getConfig } from "../config/loader.js";
 import { resolveSecretRef } from "../tools/infrastructure-shared.js";
 import { childLogger } from "../logger.js";
 import type { AuthRole, OidcConfig } from "../config/schema.js";
-import { normalizeRole } from "./auth.js";
+import { declaredRole, reportUndeclaredRole } from "./auth.js";
 
 const log = childLogger("gateway:oidc");
 
@@ -261,20 +261,32 @@ export function identityFromClaims(cfg: OidcConfig, claims: JWTPayload): OidcIde
   }
   const roles = extractRoles(claims, cfg.rolesClaim);
   const role = mapRole(cfg, roles);
+  if (!role && cfg.roleMapping.defaultRole) {
+    // mapRole logged the role. The person is not named: the refusal is the configuration's.
+    throw new Error("OIDC sign-in refused: no mapped role, and roleMapping.defaultRole is a role that neither core nor any loaded extension declares");
+  }
   if (!role) throw new Error(`OIDC user '${username}' has no mapped role (${roles.join(", ") || "no roles"}) and no defaultRole`);
   const displayName = pickClaim(claims, "name") ?? pickClaim(claims, "preferred_username");
   const email = pickClaim(claims, "email");
   return { username, role, displayName, email, issuer, subject };
 }
 
-/** admin → operator → viewer (most-privileged listed role wins); else defaultRole. */
+/**
+ * admin → operator → viewer (most-privileged listed role wins); else defaultRole. A defaultRole
+ * that neither core nor any loaded extension declares (a typo, or the role of an extension that
+ * failed to load) maps nobody: null, and logged. It mapped to operator, so every person the IdP
+ * granted none of the listed roles signed in as an operator.
+ */
 export function mapRole(cfg: OidcConfig, roles: string[]): AuthRole | null {
   const has = (list: string[]) => list.some((r) => roles.includes(r));
   const m = cfg.roleMapping;
   if (has(m.admin)) return "admin";
   if (has(m.operator)) return "operator";
   if (has(m.viewer)) return "viewer";
-  return m.defaultRole ? normalizeRole(m.defaultRole) : null;
+  if (!m.defaultRole) return null;
+  const role = declaredRole(m.defaultRole);
+  if (!role) reportUndeclaredRole(m.defaultRole, { source: "auth.oidc.roleMapping.defaultRole" });
+  return role ?? null;
 }
 
 /** Read a possibly dotted claim path (e.g. "realm_access.roles") as a string. */

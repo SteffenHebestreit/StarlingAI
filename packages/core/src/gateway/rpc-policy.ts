@@ -129,9 +129,9 @@ export function registerRpcPolicies(source: string, policies: readonly RpcPolicy
 /**
  * Registers an extension manifest's RPC policies. They arrive unchecked: a `.js` manifest, or one
  * run through tsx, is not typechecked. A mistake in one never takes the extension down (its roles
- * would go with it, and a role nobody declares signs in as operator), and never widens access. The
- * first matching policy decides, so a malformed entry registers in its place as one that refuses
- * every caller (`roles: []`):
+ * would go with it, and an account holding one of them could not sign in), and never widens
+ * access. The first matching policy decides, so a malformed entry registers in its place as one
+ * that refuses every caller (`roles: []`):
  * - for its `method`, when that is a method name, `prefix.*` or `*`;
  * - for every method (`*`) when it is not, when the entry is no object, and in place of an
  *   `rpcPolicies` that is not a list: there is no telling which methods it meant.
