@@ -175,6 +175,63 @@ describe("scene job worker", () => {
     }
   });
 
+  it("marks a queued scene's task, and each job step's, as its own workflow text for the input guardrail", async () => {
+    // The guardrail trusts that text, and only that: a client's chat into the same session is
+    // screened like any message (agent/turn-prepare.ts, tests/scene-input-trust.test.ts).
+    const tempDir = mkdtempSync(join(tmpdir(), "starlingai-scene-worker-trust-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "s".repeat(32), turnTimeoutMs: 30_000 },
+      workspacePath: tempDir,
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const turns: Array<{ userMessage: unknown; channel: unknown; trusted: unknown }> = [];
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        turns.push({
+          userMessage: opts["userMessage"],
+          channel: (opts["session"] as { channel?: string } | undefined)?.channel,
+          trusted: opts["_trustedWorkflowInput"],
+        });
+        return { response: "done", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const [{ createJob, getJob }, { runSceneJobWorkerTick }] = await Promise.all([
+        import("../agent/jobs.js"),
+        import("../agent/scene-worker.js"),
+      ]);
+
+      const scene = await createJob({ sceneName: "brief", userId: "scene:brief", task: "Write the brief.", turnTimeoutMs: 30_000 });
+      expect(await runSceneJobWorkerTick()).toBe(true);
+      await waitForJobStatus(getJob, scene.id, "completed");
+
+      const job = await createJob({
+        sceneName: "packet",
+        definitionType: "job",
+        userId: "job:packet",
+        turnTimeoutMs: 30_000,
+        steps: [
+          { sceneName: "brief", label: "Brief", task: "Write the brief." },
+          { sceneName: "review", label: "Review", task: "Review the brief." },
+        ],
+      });
+      expect(await runSceneJobWorkerTick()).toBe(true);
+      await waitForJobStatus(getJob, job.id, "completed");
+
+      expect(turns).toEqual([
+        { userMessage: "Write the brief.", channel: "scene", trusted: true },
+        { userMessage: "Write the brief.", channel: "scene", trusted: true },
+        { userMessage: "Review the brief.", channel: "scene", trusted: true },
+      ]);
+    } finally {
+      await flushAuditLogForTests();
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("queues jobs via the gateway and supports cancellation", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-scene-cancel-"));
     const port = 23000 + Math.floor(Math.random() * 1000);

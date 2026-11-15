@@ -1899,7 +1899,7 @@ async function _runTurn(
   if (budgetBlocked) return budgetBlocked;
 
   // ── Input guardrail ───────────────────────────────────────────────────────
-  const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents);
+  const inputBlocked = await prepareInputGuardrails(userMessage, session, guardrailEvents, opts._trustedWorkflowInput === true);
   if (inputBlocked) return inputBlocked;
 
   // ── Build message history + deterministic assistant-rename persistence ──────

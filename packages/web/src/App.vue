@@ -890,7 +890,8 @@ const paletteCommands = computed<PaletteCommand[]>(() => {
     else for (const item of entry.items) pages.push({ id: `go:${item.to}`, label: item.label, group: entry.label, hint: item.hint, to: item.to });
   }
   const actions: PaletteCommand[] = [];
-  if (gateway.connected) {
+  // Only for a connection that may open a session (hello-ok lists what it may call): not a viewer.
+  if (gateway.connected && gateway.mayCall("session.create")) {
     actions.push({
       id: "do:new-session", label: "New session", group: "Action", hint: "Start a fresh conversation in the chat", keywords: "chat conversation clear",
       run: () => { void router.push("/").then(() => gateway.createSession()); },

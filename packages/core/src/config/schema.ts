@@ -390,10 +390,11 @@ export const GatewaySchema = z.object({
   /** Who may waive human approval for a run they start. */
   overrides: z.object({
     /**
-     * The lowest role whose request to auto-approve a run's per-call approvals is honoured (the
-     * legacy A2A route's `autoApprove`), compared by rank; "disabled" honours no one. Below it the
-     * request is ignored and approval-gated calls fail closed. Applies under `auth.enabled`; with
-     * auth off only "disabled" changes anything. Default "operator", the behaviour before the key.
+     * The lowest role whose request to auto-approve a run's per-call approvals is honoured
+     * (chat.send's `--auto`, the legacy A2A route's `autoApprove`), compared by rank; "disabled"
+     * honours no one. Below it `--auto` is refused and starts no turn, and the legacy route ignores
+     * `autoApprove`, so approval-gated calls fail closed. Applies under `auth.enabled`; with auth off
+     * only "disabled" changes anything. Default "operator", the behaviour before the key.
      */
     autoApproveMinRole: z.enum(["viewer", "operator", "admin", "disabled"]).default("operator"),
   }).prefault({}),
@@ -412,9 +413,8 @@ export const GatewaySchema = z.object({
  * jobs, federation, and the swarm dashboard but cannot mutate persistent
  * state (no user management, no config edits, no cron-trigger creation).
  *
- * Wave C will extend the gate to WS chat (viewers will not be able to
- * initiate turns); for now viewers can chat like operators, they just
- * can't administer the deployment.
+ * The WebSocket RPC draws the same line per method (gateway/rpc-policy.ts):
+ * a viewer reads its own sessions there but starts no session and no turn.
  */
 /** Role names are open strings: upstream ships operator/viewer; core
  *  extensions register additional roles (the gateway validates against the

@@ -557,7 +557,7 @@ Connect to:
 ws://localhost:8765/ws?token=<jwt>
 ```
 
-After auth, the server sends `hello-ok`. A refused socket is closed with a code instead: 4401 (no valid token), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in, and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
+After auth, the server sends `hello-ok` with `{ connId, version, sessions, methods }`: `sessions` lists the sessions the connection may see, and `methods` the RPC methods it may call, as its role stands at the handshake (see the Role column below). A client offers only those controls; the gateway still checks every call when it arrives, so a role changed later shows in the answers. A refused socket is closed with a code instead: 4401 (no valid token), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in, and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
 
 Request shape:
 
@@ -571,33 +571,45 @@ Response shape:
 { "type": "rpc.response", "id": "req-1", "ok": true, "payload": { "sessionId": "..." } }
 ```
 
-Supported RPC methods:
+Supported RPC methods, with the lowest role that may call each under multi-user auth (`auth.enabled`):
 
-| Method | Params |
-| --- | --- |
-| `gateway.status` | `{ requestId? }` |
-| `session.create` | `{ channel, userId?, workspacePath? }` |
-| `session.end` | `{ sessionId? }` |
-| `session.get` | `{ sessionId?, limit?, beforeMessageId? }` |
-| `session.list` | none |
-| `session.archive` | `{ sessionId? }` |
-| `session.delete` | `{ sessionId? }` |
-| `session.reset` | `{ sessionId? }` |
-| `session.rewind` | `{ sessionId?, historyIndex }` |
-| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` |
-| `scenes.list` | none |
-| `approval.respond` | `{ approvalId, approved }` |
-| `input.respond` | `{ inputId, answer }` |
-| `userInput.respond` | `{ inputId, answer }` |
-| `userInput.hold` | `{ inputId }` |
-| `userInput.preview` | `{ inputId, candidateId }` |
-| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort?, timeZone? }` |
-| `chat.cancel` | `{ requestId }` |
-| `audit.subscribe` | none |
+| Method | Params | Role |
+| --- | --- | --- |
+| `gateway.status` | `{ requestId? }` | viewer |
+| `session.create` | `{ channel?, userId?, workspacePath? }` | operator |
+| `session.end` | `{ sessionId? }` | operator |
+| `session.get` | `{ sessionId?, limit?, beforeMessageId? }` | viewer |
+| `session.list` | none | viewer |
+| `session.archive` | `{ sessionId? }` | operator |
+| `session.delete` | `{ sessionId? }` | operator |
+| `session.reset` | `{ sessionId? }` | operator |
+| `session.rewind` | `{ sessionId?, historyIndex }` | operator |
+| `session.updateSettings` | `{ sessionId?, effort?, turnTimeoutSec?, imageSettingsPrompt? }` | operator |
+| `scenes.list` | none | viewer |
+| `jobs.list` | none | viewer |
+| `approval.respond` | `{ approvalId, approved }` | operator |
+| `input.respond` | `{ inputId, answer }` | operator |
+| `userInput.respond` | `{ inputId, answer }` | operator |
+| `userInput.hold` | `{ inputId }` | operator |
+| `userInput.preview` | `{ inputId, candidateId }` | operator |
+| `chat.send` | `{ sessionId, message, requestId?, enableThinking?, effort?, timeZone? }` | operator |
+| `chat.cancel` | `{ requestId }` | operator |
+| `audit.subscribe` / `audit.unsubscribe` | none | viewer |
+| `notifications.subscribe` / `notifications.unsubscribe` | none | viewer |
+| `computer.list_sessions` | none | viewer |
+| `computer.emergency_stop` | `{ computerSessionId, reason? }` | operator |
+| `computer.heartbeat` | `{ computerSessionId }` | operator |
+| `computer.request_screenshot` | `{ computerSessionId }` | operator |
 
-`gateway.status` with a `requestId` adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
+Roles compare by rank, as on the REST routes (viewer 10, operator 50, admin 90; an extension role ranks where its manifest puts it), against the role the account store holds at the time of the call. A refused call runs nothing of the method and answers the RPC error `Forbidden: <method> requires role <role>`; it is audited as `rbac_denied` (`surface: "rpc"`), at most once per connection, method and minute. So a viewer reads its own sessions, the catalogue and its event streams, and starts no session and no turn, as the REST gate already refuses it every mutating route. A core extension can change a method's role with `rpcPolicies` ([forking.md](forking.md)). A method the protocol does not have answers `Unknown method: <method>`. With auth off every method is open, as before.
+
+`gateway.status` answers `{ status, sessions, uptime }`. `sessions` counts the active sessions the caller may see, as `session.list` scopes them: every one for an admin or a connection without a user, otherwise its own and those without an owner (it used to count every account's). With a `requestId` it adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
+
+`session.create` takes `channel` (default `webchat`) as 1 to 64 characters of `A-Za-z0-9:_.-`; any other is refused with the RPC error `Invalid channel`. The channel `scene` is refused too (`Invalid channel: scene is reserved for scene and job runs`): the scene worker runs a scene's or job's own task text there, and the input guardrail only flags prompt injection in that text instead of blocking it. The trust is the task's alone: a `chat.send` into such a session (its owner may send one while the run lasts) is screened like any other message.
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
+
+`--auto` grants every approval of the turn without asking, so it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
 
 `--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
 
@@ -615,7 +627,7 @@ Supported RPC methods:
 }
 ```
 
-- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
+- `accepted` is `false` when nothing was started: a message that is empty once the flags are stripped, `--auto` below its role floor, an unknown `/run` scene, or a `/job` that is unknown or could not be queued. A `status` event says why. `/job <name>` answers `{ accepted: true, queued: true, requestId, jobId }`. `/jobs` and `/job help` answer in a `status` event and start no turn.
 - `unreadSteering` is present only when this start retired steering messages that earlier turns of the session never read (see [Mid-turn steering](#mid-turn-steering)), and only for the session owner or an admin. It has the same shape as in `session.get`. The web stops a turn with `chat.cancel` and only then sends the next message; a stopped turn that finished unwinding in between would otherwise have its leftovers dropped by this start without anyone seeing them.
 - A turn already running on the session is superseded, whichever connection started it: it is aborted and reports its own leftovers on its own final `status`. The new turn runs alone on the history.
 - A `requestId` that a running turn still uses is refused with the RPC error `requestId <id> is already in use by a running turn`, before anything is sent under it.

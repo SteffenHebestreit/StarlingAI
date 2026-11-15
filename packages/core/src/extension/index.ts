@@ -30,11 +30,12 @@ import { ToolTier } from "../guardrails/tool-tiers.js";
 import type { GuardrailResult } from "../guardrails/input.js";
 import type { Logger } from "pino";
 import type { RoutePolicy as RoutePolicyDef } from "../gateway/route-policies.js";
+import type { RpcPolicyDef } from "../gateway/rpc-policy.js";
 import type { LlmBoundaryTransformer } from "../providers/llm-boundary.js";
 
 export type { LlmBoundaryTransformer };
 
-export type { RoutePolicyDef };
+export type { RoutePolicyDef, RpcPolicyDef };
 
 // Re-exports so an extension only needs one import for the common cases.
 export { ToolTier };
@@ -194,6 +195,16 @@ export interface CoreExtension {
    * syntax and which policies decide.
    */
   routePolicies?: RoutePolicyDef[];
+  /**
+   * Who may call which WebSocket RPC method (/ws), over the gateway's per-method minimum roles.
+   * `{ method, roles }` replaces the default for the methods it matches (e.g. opens chat to a role
+   * of this extension below operator, with the methods its turns need: docs/forking.md);
+   * `{ method, denyRoles }` refuses the listed roles and leaves the rest to the default. `method`
+   * is exact, "prefix.*" or "*"; first match wins, in load order. A malformed policy is logged and
+   * refuses its method, or every method, to every caller; it does not fail the extension's load.
+   * See gateway/rpc-policy.ts.
+   */
+  rpcPolicies?: RpcPolicyDef[];
   /**
    * Mount gateway routes. Called once during gateway construction, AFTER all
    * core routes (extensions cannot shadow core endpoints). Convention:

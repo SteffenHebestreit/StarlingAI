@@ -218,6 +218,7 @@ import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
 import { useToast, errorText } from "@/composables/useToast";
+import { rpcErrorText } from "@/composables/rpcErrors";
 import { useProductStore } from "@/stores/product";
 
 // Product name comes from GET /api/product so a fork rebrands without editing this
@@ -443,7 +444,13 @@ async function continueSession(sessionId: string) {
 }
 
 async function archive(sessionId: string) {
-  await gateway.archiveSession(sessionId);
+  // A refusal (a viewer's role, say) said nothing: the button just did not work.
+  try {
+    await gateway.archiveSession(sessionId);
+  } catch (err) {
+    toast.error("Couldn't archive the session", rpcErrorText(errorText(err)));
+    return;
+  }
   await gateway.refreshSessions();
   if (selectedSessionId.value === sessionId) {
     selectedSessionId.value = null;
@@ -465,7 +472,7 @@ async function removeSession(sessionId: string) {
   try {
     await gateway.deleteSession(sessionId);
   } catch (err) {
-    toast.error("Couldn't delete the session", errorText(err));
+    toast.error("Couldn't delete the session", rpcErrorText(errorText(err)));
     return;
   }
   if (selectedSessionId.value === sessionId) {
@@ -488,7 +495,7 @@ async function clearArchivedSessions() {
     try {
       await gateway.deleteSession(s.id);
     } catch (err) {
-      toast.error("Couldn't delete all archived sessions", `${errorText(err)} — the remaining ones were left alone.`);
+      toast.error("Couldn't delete all archived sessions", `${rpcErrorText(errorText(err))} — the remaining ones were left alone.`);
       break;
     }
   }

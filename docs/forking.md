@@ -183,6 +183,11 @@ export default defineCoreExtension({
     { method: "POST", pattern: "/api/knowledge/refresh", roles: ["mfa", "doctor", "admin"] },
     { pattern: "/api/admin/*", roles: ["admin"] },
   ],
+  // The same for the WebSocket RPC (/ws): replace a method's default minimum
+  // role with a role list, or refuse roles and keep the default for the rest.
+  rpcPolicies: [
+    { method: "computer.*", denyRoles: ["doctor"] },  // no computer-use controls for this role
+  ],
   configSchema: z.object({ praxisTyp: z.string().default("hausarzt") }),
   async boot(ctx) { await initBillingGraphSchema(); },
   async shutdown() { /* ... */ },
@@ -197,6 +202,35 @@ Notes:
   validated by your `configSchema` at boot.
 - A failing extension is logged + audited and skipped; it cannot take the
   gateway down.
+- Every WebSocket RPC method has a default minimum role (reading: viewer;
+  anything that changes something, `session.create` and `chat.send` included:
+  operator), compared by rank, so an extension role at rank 50 passes operator
+  and one at rank 10 does not (table in [api.md](api.md#websocket-rpc)).
+  `rpcPolicies` changes that per method: `method` is a method name,
+  `"prefix.*"` or `"*"`, and the first matching policy wins, in load order.
+  `{ method, roles }` *replaces* the default, admitting exactly the listed roles
+  (a listed built-in role admits the higher built-ins); list `operator` too or
+  operators lose the method. `{ method, denyRoles }` refuses the listed roles
+  and leaves everyone else to the default. A mistake in a policy is logged at
+  boot and never widens access; the extension still loads, with its roles. The
+  entry registers in its place as one that refuses every caller: for its
+  `method`, or for every method when `method` is not a method name,
+  `"prefix.*"` or `"*"`, or `rpcPolicies` is not a list. An extension that
+  fails to load for another reason registers none of its RPC policies.
+- To let a role below operator chat (e.g. a portal user), open what a turn
+  needs along with `chat.send`: `session.create`, `chat.cancel` (Stop) and the
+  answers a turn waits for, `approval.respond`, `input.respond` and
+  `userInput.respond` / `userInput.hold` / `userInput.preview`. A turn's
+  approvals and questions go to the socket that started it, so without these
+  its turns cannot be stopped and every approval waits until it times out and
+  is denied. For the same reason `approval.respond` answers only the approvals
+  of turns started on the caller's own connection: limiting it to a sign-off
+  role does not route other users' approvals to that role. A role that may call
+  `chat.send` may also use its inline overrides (`--agent`, `--iter`,
+  `--timeout`, `--effort`, `/run`, `/job`); only `--auto` has a floor of its
+  own (`gateway.overrides.autoApproveMinRole`, rank-based like the default).
+  The web offers a connection only the controls it may use: `hello-ok` lists
+  the methods it may call.
 - This is **trusted, repo-compiled code** — for runtime-installed third-party
   tools use the [Plugin SDK](../packages/core/src/plugin/README.md) instead
   (fixed Tier 2, sandboxed, per-call approval).

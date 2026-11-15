@@ -102,6 +102,11 @@ export interface RunTurnOptions {
    *  without agent and skill discovery, and while some of them have not run, a delegation that
    *  returned keeps the turn going instead of ending it. Internal. */
   _workflowStepPipeline?: string[];
+  /** The message is the task text of a queued scene or job step, run by the scene worker
+   *  (agent/scene-worker.ts) on a session it opened: the input guardrail flags prompt injection in
+   *  it but does not block it (prepareInputGuardrails). Without it, a turn on such a session (a
+   *  client's chat into it) is screened like any message. Internal. */
+  _trustedWorkflowInput?: boolean;
   /** Override the per-turn timeout in ms (replaces config gateway.turnTimeoutMs). 0 disables the timeout. */
   turnTimeoutOverrideMs?: number;
   /** Per-message Qwen3.5 thinking toggle. true = on, false = off, undefined = model default. */

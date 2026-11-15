@@ -29,6 +29,9 @@ import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
 import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import { parseOverrideFlags } from "./override-flags.js";
+import { allowedRpcMethods, authorizeRpc } from "./rpc-policy.js";
+import { autoApproveMinRole, mayAutoApprove } from "./auto-approve-policy.js";
+import { TRUSTED_WORKFLOW_CHANNELS } from "../agent/turn-prepare.js";
 import type { EffortTier } from "../config/schema.js";
 import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
@@ -89,6 +92,16 @@ const liveChatTurnBySession = new Map<string, string>();
  * any string stored again and again (turn-ids review, INFO 3).
  */
 const CHAT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * A session.create channel is taken only in this shape: the web's "webchat", the e2e harness's
+ * "eval", AG-UI's "webchat:agui" and the like. It is stored on the session and named in its audit
+ * records and exports, and it was taken verbatim, any string of any length.
+ */
+const SESSION_CHANNEL_RE = /^[A-Za-z0-9:_.-]{1,64}$/;
+
+/** A refused RPC call is audited at most once per connection, method and this window. */
+const RBAC_DENIED_AUDIT_WINDOW_MS = 60_000;
 
 /**
  * Turns that ended here lately, by request id, so a Stop that arrives just after can say "that turn
@@ -415,6 +428,8 @@ export class RpcConnection implements AccountConnection {
   private policyCheckedRole: string | undefined;
   private revoked = false;
   private untrackAccount: (() => void) | null = null;
+  /** When a refusal of each kind was last audited (rbac_denied), so a looping client logs one a minute. */
+  private readonly deniedAuditedAt = new Map<string, number>();
 
   constructor(ws: WebSocket, connUserId?: string, connRole?: string, liveUser?: AuthenticatedUser) {
     this.connId = randomUUID();
@@ -429,6 +444,9 @@ export class RpcConnection implements AccountConnection {
       connId: this.connId,
       version: "0.1.0",
       sessions: this.visibleSessions(),
+      // The methods this connection may call, as its role stands now (gateway/rpc-policy.ts): the
+      // web offers only those controls. Every call is still checked when it arrives.
+      methods: allowedRpcMethods(this.connRole, getConfig().auth?.enabled === true),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
   }
@@ -599,6 +617,22 @@ export class RpcConnection implements AccountConnection {
     }
   }
 
+  /**
+   * Audit a refusal for this caller's role (rbac_denied), at most once per `key` and minute on this
+   * connection: a client that retries in a loop must not fill the audit log. `key` is a known method
+   * (or method and flag), so the map stays small whatever a client sends.
+   */
+  private auditRbacDenied(key: string, data: Record<string, unknown>): void {
+    const now = Date.now();
+    const last = this.deniedAuditedAt.get(key);
+    if (last !== undefined && now - last < RBAC_DENIED_AUDIT_WINDOW_MS) return;
+    this.deniedAuditedAt.set(key, now);
+    logAudit("rbac_denied", { surface: "rpc", ...data, role: this.connRole ?? null }, {
+      ...(this.connUserId ? { userId: this.connUserId } : {}),
+      severity: "warn",
+    });
+  }
+
   /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
     if (!this.connUserId || this.isSessionAdmin()) return listSessions({ includeArchived: true });
@@ -627,6 +661,20 @@ export class RpcConnection implements AccountConnection {
       return;
     }
 
+    // The method's minimum role (gateway/rpc-policy.ts), checked against the role the store holds
+    // now (callerAccess just read it). Nothing of the method runs on a refusal.
+    const authorization = authorizeRpc(method, this.connRole, getConfig().auth?.enabled === true);
+    if (!authorization.allowed) {
+      if (authorization.reason === "unknown_method") {
+        // Answered as dispatch's default always answered it; not a decision about the role.
+        this.sendResponse({ id, ok: false, error: String(new Error(authorization.error)) });
+        return;
+      }
+      this.auditRbacDenied(method, { method, required: authorization.required, ...(authorization.policy ? { policy: authorization.policy } : {}) });
+      this.sendResponse({ id, ok: false, error: authorization.error });
+      return;
+    }
+
     try {
       const payload = await this.dispatch(method, params ?? {});
       this.sendResponse({ id, ok: true, payload });
@@ -651,13 +699,27 @@ export class RpcConnection implements AccountConnection {
           && (this.abortControllers.has(requestId) || (live !== undefined && !live.signal.aborted && this.canAccessSession(live.sessionId)));
         return {
           status: "running",
-          sessions: listSessions().length,
+          // The active sessions this connection may see, as session.list scopes them: every one for
+          // an admin (or with no identity to scope by), otherwise its own and those without an
+          // owner. The instance-wide count told any caller how busy every other account was.
+          sessions: !this.connUserId || this.isSessionAdmin()
+            ? listSessions().length
+            : getAllSessions().filter((session) => this.ownsSession(session)).length,
           uptime: process.uptime(),
           ...(requestId ? { requestId, activeTurn } : {}),
         };
       }
 
       case "session.create": {
+        // A client names its own channel, but never one reserved for the scene worker's runs: a
+        // session opened on "scene" let any caller's chat past the input guardrail, which flagged and
+        // did not block prompt injection there. That trust now also needs the scene worker's own task
+        // (RunTurnOptions._trustedWorkflowInput), and the channel still marks the session as a scene
+        // run in audits, exports and the turn's heuristics.
+        const channel = String(params["channel"] ?? "webchat");
+        if (!SESSION_CHANNEL_RE.test(channel)) throw new Error("Invalid channel");
+        if (TRUSTED_WORKFLOW_CHANNELS.has(channel)) throw new Error(`Invalid channel: ${channel} is reserved for scene and job runs`);
+
         let workspacePath: string | undefined = undefined;
         // Attribute the session to the authenticated connection user (so the document-RAG user
         // scope + RBAC match the identity uploads use). The server-derived identity wins over any
@@ -685,7 +747,7 @@ export class RpcConnection implements AccountConnection {
         }
 
         const session = createSession({
-          channel: String(params["channel"] ?? "webchat"),
+          channel,
           ...(sessionIdentity ?? {}),
           ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
@@ -916,6 +978,23 @@ export class RpcConnection implements AccountConnection {
         // Parse inline override flags (--auto, --iter N, --agent NAME, --effort TIER) before scene handling
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
+
+        // --auto says yes to every approval of the turn, so it is only as safe as the role behind
+        // it (gateway.overrides.autoApproveMinRole). Below the floor the turn does not start: run
+        // without the flag it would stop at the approvals its sender asked to skip.
+        if (overrideFlags.autoApprove && !mayAutoApprove(this.connRole)) {
+          const floor = autoApproveMinRole();
+          this.auditRbacDenied("chat.send --auto", { method: "chat.send", flag: "--auto", required: floor });
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "blocked",
+              requestId,
+              response: floor === "disabled" ? "--auto is disabled on this gateway" : `--auto requires role ${floor}`,
+            },
+          });
+          return { accepted: false, requestId };
+        }
 
         // Resolve the effort tier for this turn: inline --effort flag (one-off) >
         // per-message `effort` param > persisted session setting > configured default.

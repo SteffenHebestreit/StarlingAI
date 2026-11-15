@@ -1,6 +1,9 @@
 import { browserTimeZone } from "@/composables/browserTime";
 import { GatewayHttpError } from "@/composables/httpErrors";
 import { defaultGatewayWsUrl, gatewayRestBaseUrl, normalizeGatewayWsUrl } from "@/composables/gatewayUrl";
+import { forbiddenReason } from "@/composables/rpcErrors";
+import { readAllowedRpcMethods, rpcMethodAllowed } from "@/composables/rpcAccess";
+import { browserLanguage, chatText } from "@/composables/chatText";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -686,6 +689,16 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   const connected = ref(false);
   const connecting = ref(false);
+  /** The RPC methods this connection may call (hello-ok), or null while the gateway listed none. */
+  const allowedMethods = ref<string[] | null>(null);
+  /**
+   * Whether this connection may call `method`: its role's methods, as the gateway listed them at the
+   * handshake. The page offers a control only when it may (a viewer reads its chats and sends
+   * nothing); the gateway still decides every call.
+   */
+  function mayCall(method: string): boolean {
+    return rpcMethodAllowed(allowedMethods.value, method);
+  }
   // True when the gateway reports the primary model endpoint is unreachable (a
   // local LM Studio/Ollama that isn't running yet) — the dashboard shows a banner
   // so a fresh install doesn't just fail every turn with an unexplained empty answer.
@@ -2334,10 +2347,15 @@ export const useGatewayStore = defineStore("gateway", () => {
       ?? syntheticSwarmState.value
       ?? streamingMessage?.swarmState
       ?? synthesizeSwarmStateFromToolCalls(streamingMessage?.toolCalls, errorText);
+    // The gateway refused the caller's role ("Forbidden: …"): said as an access message, not as a
+    // failure, and not flashed red.
+    const noAccess = forbiddenReason(errorText);
     const errorMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: `⚠️ ${errorText}`,
+      content: noAccess === null
+        ? `⚠️ ${errorText}`
+        : `🔒 ${chatText.noAccess(streamingMessage?.language ?? browserLanguage(), noAccess)}`,
       timestamp: new Date(),
       blocked: true,
       pageOnly: true,
@@ -2371,8 +2389,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearPendingTurnRecovery();
     }
 
-    // The user's Stop is not an error: no red flash for it.
-    if (!stopped) flashError(5000);
+    // The user's Stop is not an error: no red flash for it, nor for a refusal of the role.
+    if (!stopped && noAccess === null) flashError(5000);
   }
 
   /**
@@ -2888,7 +2906,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     imageSettingsPrompt?: ImageSettingsPrompt;
   }): Promise<void> {
     const sessionId = currentSessionId.value;
-    if (!sessionId) return;
+    // Not for a connection that may not change them (a viewer): the value set below would stay on
+    // screen though the gateway refused it.
+    if (!sessionId || !mayCall("session.updateSettings")) return;
     if (patch.effort !== undefined) currentSessionEffort.value = patch.effort ?? "medium";
     if (patch.turnTimeoutSec !== undefined) currentSessionTimeLimitSec.value = patch.turnTimeoutSec;
     if (patch.imageSettingsPrompt !== undefined) currentSessionImageSettingsPrompt.value = patch.imageSettingsPrompt;
@@ -3071,6 +3091,8 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "hello-ok") {
       clearConnectTimeout();
+      // Before `connected`, so what reacts to the connection already knows what it may call.
+      allowedMethods.value = readAllowedRpcMethods(msg["data"]);
       connected.value = true;
       reconnecting.value = false;
       connecting.value = false;
@@ -4643,6 +4665,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     wsUrl,
     connected,
     connecting,
+    allowedMethods,
+    mayCall,
     reconnecting,
     modelUnreachable,
     authFailed,

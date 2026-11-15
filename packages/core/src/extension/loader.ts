@@ -2,14 +2,18 @@
  * Core-extension loader — discovers `src/extensions/<name>/index.{ts,js}`
  * directories at boot, validates their manifests, and registers everything
  * they declare (tools + tiers, audit events, roles, guardrail hooks, routes,
- * lifecycle hooks).
+ * route and RPC policies, lifecycle hooks).
  *
  * Failure semantics mirror the plugin loader: a broken extension is logged +
  * audited (`extension_load_failed`) and skipped; the gateway keeps booting.
  * Extensions are repo code — a compile-time error surfaces in CI long before
  * this loader runs — so runtime failures here are config/IO problems. A
- * malformed route policy does not skip the extension (its roles would go
- * with it): it is logged and refuses every caller on its path instead.
+ * mistake in one of the parts that decide access does not skip the
+ * extension: its roles would go with it, and a role nobody declares signs in
+ * as operator. It is logged and fails closed instead:
+ *   - a malformed route policy refuses every caller on its path;
+ *   - a malformed RPC policy refuses its method, or every method, to every
+ *     caller.
  *
  * Discovery root resolution:
  *   1. `SAI_EXTENSIONS_DIR` env var (tests / unusual layouts)
@@ -29,6 +33,7 @@ import { registerTool, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
 import { registerManifestRoutePolicies, routePolicyUnknownRoles } from "../gateway/route-policies.js";
+import { registerManifestRpcPolicies } from "../gateway/rpc-policy.js";
 import { registerExtensionToolKeywords } from "../providers/embeddings.js";
 import { registerLlmBoundaryTransformer } from "../providers/llm-boundary.js";
 import {
@@ -198,6 +203,16 @@ function registerExtension(ext: CoreExtension, source: string): void {
     },
     ext,
   );
+
+  // Last, once nothing above can throw any more: a `roles` policy replaces a method's default
+  // minimum role, so one left behind by an extension that failed to load (a tool that shadows a
+  // built-in, a second authProvider) opened methods to roles nobody vetted. A route policy only
+  // adds a gate, so one left behind only restricts. A malformed RPC policy does not fail the load,
+  // as for route policies: it is logged, and refuses its method, or every method, to every caller
+  // (rpc-policy.ts registerManifestRpcPolicies).
+  for (const problem of registerManifestRpcPolicies(ext.name, ext.rpcPolicies)) {
+    log.error({ extension: ext.name, problem }, "extension rpc policy is malformed");
+  }
 }
 
 /**

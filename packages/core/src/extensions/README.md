@@ -24,6 +24,7 @@ What a manifest can declare:
 | `llmBoundary`    | LLM-boundary transformer for provider-bound messages / model responses |
 | `guardrails`     | `checkInput` / `checkOutput` hooks appended after built-ins      |
 | `routePolicies`  | Declarative RBAC: role-name lists per gateway route pattern      |
+| `rpcPolicies`    | Who may call which WebSocket RPC method: replace a method's default minimum role (`roles`) or refuse roles (`denyRoles`) |
 | `registerRoutes` | Gateway routes (mounted after core routes; prefix `/api/<name>/`)|
 | `configSchema`   | Zod schema validating the `extensions.<name>` config slice       |
 | `boot`/`shutdown`| Lifecycle hooks (db schema init, knowledge loads, teardown)      |

@@ -327,6 +327,9 @@ async function runSingleSceneJob(
   return runTurn({
     session,
     userMessage: job.payload.task ?? "",
+    // The scene's own task text: the input guardrail flags injection patterns in it, and does not
+    // block them (a scene's security instructions would trip it). Only these turns are trusted so.
+    _trustedWorkflowInput: true,
     ...buildTurnHooks(job, controller, counters),
     ...queuedWorkflowTurnOptions(
       [queuedWorkflowKey(job)],
@@ -414,6 +417,8 @@ async function runWorkflowJob(
     const output = await runTurn({
       session,
       userMessage: step.task,
+      // The step's task text, trusted as the single scene's above.
+      _trustedWorkflowInput: true,
       allowedAgents: step.allowedAgents,
       humanInLoopSteps: step.humanInLoopSteps,
       approvalCallback: buildApprovalCallback(job, controller, counters, step.approvalChannel, `step${index}`),
