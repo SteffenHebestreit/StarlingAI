@@ -15,7 +15,8 @@
  *   - a malformed RPC policy refuses its method, or every method, to every
  *     caller;
  *   - a tool whose `refuse` is not a function is not registered;
- *   - an `authorizeToolCall` that is not a function refuses every tool call.
+ *   - an `authorizeToolCall` or `authorizeAgentRun` that is not a function
+ *     refuses every tool call or agent run.
  *
  * Discovery root resolution:
  *   1. `SAI_EXTENSIONS_DIR` env var (tests / unusual layouts)
@@ -222,6 +223,13 @@ function registerExtension(ext: CoreExtension, source: string): void {
   };
   _active.push({ ext, ctx, booted: false });
 
+  // An authorizeAgentRun that is not a function refuses every agent run instead of failing the load
+  // (module comment): called, it would throw on every run, and a hook that throws refuses the run.
+  let recorded = ext;
+  if (typeof ext.authorizeAgentRun !== "function" && ext.authorizeAgentRun !== undefined) {
+    log.error({ extension: ext.name }, "extension authorizeAgentRun is not a function; it refuses every agent run until it is fixed");
+    recorded = { ...ext, authorizeAgentRun: ({ agentName }) => `Agent ${agentName} cannot run: the ${ext.name} extension's authorizeAgentRun is not a function` };
+  }
   _recordLoadedExtension(
     {
       name: ext.name,
@@ -233,7 +241,7 @@ function registerExtension(ext: CoreExtension, source: string): void {
       loadedAt: new Date().toISOString(),
       source,
     },
-    ext,
+    recorded,
   );
 
   // Last, once nothing above can throw any more: a `roles` policy replaces a method's default

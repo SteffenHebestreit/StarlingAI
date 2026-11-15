@@ -83,6 +83,7 @@ import { childLogger } from "../logger.js";
 import { createCheckpoint, pauseCheckpoint, completeCheckpoint } from "../swarm/checkpoints.js";
 import { withSpan, genAi } from "../observability/tracing.js";
 import { runSubAgentInContainer } from "./container-runner.js";
+import { agentRunRefusal, runCaller } from "./full-scope-agent-floor.js";
 import { userWordsBlockForRun, type TurnUserWords } from "./delegation-user-words.js";
 import { looksLikeContainerLevelFailure, looksLikeModelTemplateArtifact, looksLikeProviderErrorEcho, looksLikeHallucinatedTruncationClaim } from "./container-failure.js";
 import { WORKER_REGISTERED_TOOL_NAMES, missingContainerTools, formatMissingContainerToolsFailure } from "./container-tool-support.js";
@@ -2791,7 +2792,7 @@ export interface SubAgentExecutionStats {
   model: string;
   capabilities: string[];
   outcome?: SubAgentOutcome;
-  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config" | "missing_tools";
+  terminalState?: "completed" | "max_iterations" | "timeout" | "cancelled" | "error" | "missing_config" | "missing_tools" | "refused";
   containerColdStartMs?: number;
   containerBootstrapMs?: number;
   containerRuntimeMs?: number;
@@ -2948,6 +2949,8 @@ export async function runSubAgentWithStats(opts: SubAgentRunOptions): Promise<Su
           // Inherit the caller's identity and scope wholesale — a sweep's pre-resolved
           // userScopeSegment is lossy to re-derive, so listing fields by hand drops it.
           ...(currentRequestContext() ?? {}),
+          // A role the caller threads explicitly is the one this run's own delegations inherit.
+          ...(opts.userRole ? { callerRole: opts.userRole } : {}),
           agentName: opts.agentName,
           callSite: "sub_agent",
           // This run mints its own session id (attachRequestSessionId, below); inheriting
@@ -3007,6 +3010,43 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         capabilities: [],
         outcome: "failure",
         terminalState: "missing_config",
+      },
+    };
+  }
+
+  // An agent that maintains the deployment (workspaceAccess "full") works from the shared root and
+  // writes the config zones for every account. A caller whose role ranks below
+  // agents.fullScopeMinRole is refused here, the one point every delegation path reaches, before
+  // any model call and before anything is written; an extension's authorizeAgentRun hook is asked
+  // first (agent/full-scope-agent-floor.ts). The role is the one its caller threads, else the one
+  // the run inherited from the work that started it, else, for a run done for an account (a queued
+  // job, a scheduled run), the role that account holds now.
+  const caller = runCaller({ role: opts.userRole, identity: opts.identity });
+  const refusal = await agentRunRefusal({ agentName: opts.agentName, agentConfig: agentCfg, ...caller });
+  if (refusal) {
+    log.warn({ agentName: opts.agentName, role: refusal.role, deniedBy: refusal.deniedBy }, "Refusing a sub-agent run: the caller may not run this agent");
+    logAudit("agent_run_refused", {
+      agent: opts.agentName,
+      role: refusal.role ?? null,
+      deniedBy: refusal.deniedBy,
+      ...(agentCfg.workspaceAccess ? { workspaceAccess: agentCfg.workspaceAccess } : {}),
+    }, { sessionId: opts.parentSessionId, severity: "warn" });
+    return {
+      output: refusal.reason,
+      stats: {
+        agentName: opts.agentName,
+        sessionId: `sub:${opts.parentSessionId}:${opts.agentName}:refused`,
+        promptChars: 0,
+        userContentChars: opts.task.length + (opts.context?.length ?? 0),
+        toolCount: 0,
+        toolNames: [],
+        iterations: 0,
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        maxIterations: agentCfg.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+        model: "",
+        capabilities: agentCfg.capabilities ?? [],
+        outcome: "failure",
+        terminalState: "refused",
       },
     };
   }

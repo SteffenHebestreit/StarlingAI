@@ -1918,6 +1918,18 @@ export const ConfigSchema = z.object({
     }).prefault({}),
     mainAssistant: MainAssistantConfigSchema.prefault({}),
     ephemeralGeneration: EphemeralGenerationSchema.prefault({}),
+    /**
+     * The lowest role that may run an agent with workspaceAccess "full" (the agents that maintain
+     * the deployment: they work from the shared root, edit agents/, scenes/ and jobs/ for every
+     * account and can read every account's root). Under multi-user auth a run whose role ranks
+     * below it is refused, whichever path reached the agent (delegate_to_agent, --agent,
+     * run_workflow, A2A, MCP, a queued job's or a scheduled run's turn, which answers to the role
+     * its account holds when it runs), and routing does not offer it those agents. A run with no
+     * known role (a channel, a cron trigger, a federation peer, an identity-provider account's
+     * queued run that carries none) is not refused by it; an extension's authorizeAgentRun hook can
+     * refuse those. Default "operator": operators and admins keep these agents, viewers do not.
+     */
+    fullScopeMinRole: z.enum(["viewer", "operator", "admin"]).default("operator"),
     /** When true, ALL sub-agents default to containerized execution (Docker isolation).
      *  Individual agents can opt out by setting container.disabled: true in their config.
      *  Defaults to true to align with the "every agent runs in an isolated container"

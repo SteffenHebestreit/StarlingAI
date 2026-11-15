@@ -30,7 +30,10 @@ for user attachments). Two structural rules keep them apart:
   agent physically cannot read the platform's configs/docs or plant files outside its zone. Core
   platform agents (e.g. `swarm_maintainer`, `prompt_optimizer`) opt in to the whole workspace with
   `workspaceAccess: "full"` in their agent definition — full scope also lifts the `generated/` write
-  rooting so they can edit config shards directly.
+  rooting so they can edit config shards directly. Under multi-user auth a run whose role ranks below
+  `agents.fullScopeMinRole` (default `operator`) is refused them, a queued job or scheduled run
+  included (it answers to its account's role); a run with no known role (a channel, a cron trigger)
+  is not, unless an extension's `authorizeAgentRun` refuses it (docs/forking.md).
 - **The config-shard sweep skips working zones**: `.json`/`.jsonc` files under `generated/`, `uploads/`,
   and `tools/` are never merged into the live config.
 

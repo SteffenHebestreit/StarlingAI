@@ -63,7 +63,9 @@ export interface RequestContext {
    * session's role (a queued job's session holds its owner's live role), by AG-UI around its turn
    * and by the surfaces that run agents without a turn (A2A, MCP). Unset where nobody signed in
    * (a channel, a cron or webhook-key run, federation): the role-aware tools treat that as they
-   * did before.
+   * did before. Read by the role floor for agents that maintain the deployment
+   * (agent/full-scope-agent-floor.ts), which reads the role of a run done for an account that
+   * carries none from the account.
    */
   callerRole?: string;
   /**
@@ -166,6 +168,11 @@ export function currentUserId(): string | undefined {
 /** The identity that owns the active work, if any. */
 export function currentIdentity(): Identity | undefined {
   return storage.getStore()?.identity;
+}
+
+/** The authenticated role of the person the active work answers to, if any (RequestContext.callerRole). */
+export function currentCallerRole(): string | undefined {
+  return storage.getStore()?.callerRole;
 }
 
 /** Convenience: the workspace zone of the active tool execution, if any. */

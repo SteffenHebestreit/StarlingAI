@@ -361,6 +361,37 @@ tiers. Naming a file after a built-in is ignored with a warning rather than
 silently dropped, so a future upstream command with that name can't quietly
 take over. `sai help` lists whatever your fork provides.
 
+**Who may run the maintenance agents.** Agents with `workspaceAccess: "full"`
+(upstream: `swarm_maintainer`, `prompt_optimizer`) maintain the deployment: they
+work from the shared root, edit `agents/`, `scenes/` and `jobs/` for every
+account, and can read every account's root. Under multi-user auth a run whose
+role ranks below `agents.fullScopeMinRole` (default `operator`) is refused before
+it starts, whichever path reached the agent: `delegate_to_agent`, `--agent`,
+`run_workflow`, A2A, MCP, or the turn of a queued job (`/job`, the scene and job
+run routes) or of a scheduled run. Such a job or run answers to the role its
+account holds when it runs. `search_agents`/`list_agents` do not offer the agents
+to a role below the floor. The floor refuses no run whose role is unknown: a
+channel, a cron or channel trigger, a federation peer, or a queued run of an
+identity-provider account that carries no role (the IdP grants that role at
+sign-in, and no store keeps it). To refuse those, or any agent for any caller,
+add `authorizeAgentRun`:
+
+```ts
+export default defineCoreExtension({
+  // ...name, version, tools, roles as above...
+  // Asked before every sub-agent run, on every surface, ahead of the role floor.
+  authorizeAgentRun: ({ agentConfig, role }) =>
+    agentConfig.workspaceAccess === "full" && role === undefined
+      ? "Maintenance agents run only for a signed-in account"
+      : undefined,
+});
+```
+
+The first refusal of any extension wins, also over the floor; a hook that throws
+refuses the run, and one that is not a function refuses every run (logged at
+boot; the extension still loads, with its roles). Every refusal writes an
+`agent_run_refused` audit row.
+
 ### 4. Add your domain frontend as a web extension
 
 Copy `packages/web/src/extensions/_example/` to `extensions/<name>/`:

@@ -28,6 +28,7 @@
 import type { ToolCallAuthorizer, ToolContext, ToolEffect, ToolResult } from "../tools/registry.js";
 import { ToolTier } from "../guardrails/tool-tiers.js";
 import type { GuardrailResult } from "../guardrails/input.js";
+import type { Identity } from "../runtime/accounts.js";
 import type { Logger } from "pino";
 import type { RoutePolicy as RoutePolicyDef } from "../gateway/route-policies.js";
 import type { RpcPolicyDef } from "../gateway/rpc-policy.js";
@@ -132,6 +133,25 @@ export interface ExtensionAuthProvider {
   getUserById(id: string): ExtensionAuthUser | null;
 }
 
+/**
+ * One agent run about to start, as an {@link CoreExtension.authorizeAgentRun} hook sees it.
+ * `role` is the role the run answers to: the caller's when the surface that started the run knows
+ * it, else, for a run done for an account that carries none (a queued job, a scheduled run), the
+ * role the auth store holds for that account now. It is absent when no role is known (a channel, a
+ * cron or channel trigger, a federation peer, an identity-provider account's queued run, an account
+ * that no longer signs in). `identity` is the account or principal the run is done for, when there
+ * is one.
+ */
+export interface ExtensionAgentRun {
+  agentName: string;
+  agentConfig: { workspaceAccess?: string };
+  role?: string;
+  identity?: Identity;
+}
+
+/** The reason an agent run is refused, or nothing to let it through. */
+export type ExtensionAgentRunAuthorizer = (run: ExtensionAgentRun) => string | undefined | Promise<string | undefined>;
+
 /** Per-extension context handed to routes/boot/shutdown. */
 export interface CoreExtensionContext {
   /** Extension name (= directory name). */
@@ -188,6 +208,18 @@ export interface CoreExtension {
   roles?: ExtensionRoleDef[];
   /** Credential backend consumed by the core /api/auth routes. One per process. */
   authProvider?: ExtensionAuthProvider;
+  /**
+   * Decide whether an agent run may start. Asked for every sub-agent run, whichever surface started
+   * it (delegate_to_agent, --agent, run_workflow, A2A, MCP, a queued job's or a scheduled run's
+   * turn), before any model call and before the core role floor for agents with workspaceAccess
+   * "full" (`agents.fullScopeMinRole`). Return the
+   * reason to refuse the run (it fails with that text and nothing runs), or undefined to leave the
+   * decision to the core checks. Hooks of all extensions run in load order and the first refusal
+   * wins; a hook that throws refuses the run, and one that is not a function refuses every run
+   * (logged at boot, the extension still loads). Keep it fast and side-effect free: routing asks it
+   * too, for each agent, so search_agents and list_agents do not offer an agent it would refuse.
+   */
+  authorizeAgentRun?: ExtensionAgentRunAuthorizer;
   /**
    * Embedding-reranker routing keywords: tools whose names match `pattern`
    * gain `keywords` in their embedding text, improving semantic routing for
@@ -266,6 +298,7 @@ const _extensions = new Map<string, LoadedExtensionRecord>();
 const _roles = new Map<string, ExtensionRoleDef>();
 const _auditEvents = new Set<string>();
 const _guardrailHooks: Array<{ extension: string; hooks: ExtensionGuardrailHooks }> = [];
+const _agentRunAuthorizers: Array<{ extension: string; authorize: ExtensionAgentRunAuthorizer }> = [];
 let _authProvider: { extension: string; provider: ExtensionAuthProvider } | null = null;
 
 /** @internal loader-only */
@@ -274,6 +307,7 @@ export function _recordLoadedExtension(record: LoadedExtensionRecord, ext: CoreE
   for (const role of ext.roles ?? []) _roles.set(role.name, role);
   for (const event of record.auditEvents) _auditEvents.add(event);
   if (ext.guardrails) _guardrailHooks.push({ extension: record.name, hooks: ext.guardrails });
+  if (ext.authorizeAgentRun) _agentRunAuthorizers.push({ extension: record.name, authorize: ext.authorizeAgentRun });
   if (ext.authProvider) {
     if (_authProvider && _authProvider.extension !== record.name) {
       throw new Error(
@@ -313,11 +347,17 @@ export function getExtensionGuardrailHooks(): ReadonlyArray<{ extension: string;
   return _guardrailHooks;
 }
 
+/** Agent-run authorizers from all loaded extensions, in load order. */
+export function getExtensionAgentRunAuthorizers(): ReadonlyArray<{ extension: string; authorize: ExtensionAgentRunAuthorizer }> {
+  return _agentRunAuthorizers;
+}
+
 /** Test hook: clear all extension registries. */
 export function _resetExtensionsForTests(): void {
   _extensions.clear();
   _roles.clear();
   _auditEvents.clear();
   _guardrailHooks.length = 0;
+  _agentRunAuthorizers.length = 0;
   _authProvider = null;
 }

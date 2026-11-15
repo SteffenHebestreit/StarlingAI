@@ -67,6 +67,9 @@ export type CoreAuditEventType =
   | "credential_fill"
   | "session_reset"
   | "session_rewound"
+  /** A sub-agent run refused before it started: the role floor for full-scope agents or an
+   *  extension's authorizeAgentRun hook (agent/full-scope-agent-floor.ts). */
+  | "agent_run_refused"
   | "sub_agent_started"
   | "sub_agent_completed"
   | "sub_agent_soft_deadline"

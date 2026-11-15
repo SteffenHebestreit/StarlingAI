@@ -52,6 +52,7 @@ import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits, userInputBroker, type UserInput
 import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 import { typedUserWords } from "../agent/delegation-user-words.js";
 import { isKnownAgentName } from "../agent/directive-agent.js";
+import { catalogAgentRunRefusal } from "../agent/full-scope-agent-floor.js";
 import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
 
 /**
@@ -1122,6 +1123,38 @@ export class RpcConnection implements AccountConnection {
             },
           });
           return { accepted: false, requestId };
+        }
+
+        // --agent names an agent this caller may not run: one that maintains the deployment, for a
+        // role below agents.fullScopeMinRole, or one an extension hook refuses. The run would be
+        // refused with the same words (agent/full-scope-agent-floor.ts); the turn is refused before
+        // it starts instead. Asked for the connection's caller with its live role, and for the
+        // session's owner with the role the session holds, which is who the run answers to: an
+        // admin driving another account's session, or a role changed since the session opened,
+        // leaves them apart, and either refusing refuses.
+        if (overrideFlags.forceAgent) {
+          const session = getSessionRecord(sessionId);
+          const callers = [
+            { role: this.connRole, identity: this.connIdentity() },
+            ...(session && (session.userRole !== this.connRole || session.userId !== this.connUserId)
+              ? [{ role: session.userRole, identity: session.identity() }]
+              : []),
+          ];
+          for (const caller of callers) {
+            const refusal = await catalogAgentRunRefusal(overrideFlags.forceAgent, {
+              ...(caller.role ? { role: caller.role } : {}),
+              ...(caller.identity ? { identity: caller.identity } : {}),
+            });
+            if (!refusal) continue;
+            logAudit("agent_run_refused", {
+              agent: overrideFlags.forceAgent,
+              role: refusal.role ?? null,
+              deniedBy: refusal.deniedBy,
+              via: "directive",
+            }, { ...(sessionId ? { sessionId } : {}), ...(this.connUserId ? { userId: this.connUserId } : {}), severity: "warn" });
+            this.sendEvent({ type: "status", data: { status: "blocked", requestId, response: refusal.reason } });
+            return { accepted: false, requestId };
+          }
         }
 
         const runMatch = message.match(/^\/run\s+(\S+)(?:\s+(.*))?$/s);

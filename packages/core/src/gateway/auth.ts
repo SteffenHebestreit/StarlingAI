@@ -298,6 +298,24 @@ export function revalidateAuthenticatedUser(user: AuthenticatedUser): Authentica
   }, { recordBootstrapSub: false });
 }
 
+/**
+ * The role the store holds for an account now, for work done for it that carries no role of its own
+ * (a queued job, a scheduled run). A builtin account's record holds one, and so does an extension
+ * auth provider's user. Null when the account no longer signs in (gone, retired, renamed, or its id
+ * held by another). Undefined when the store holds no role for it (an identity-provider account,
+ * whose role the IdP grants at each sign-in), when the identity names no account, or with auth off.
+ */
+export function storedAccountRole(identity: Pick<Identity, "userId" | "account">): AuthRole | null | undefined {
+  const account = identity.account;
+  if (getConfig().auth?.enabled !== true || !identity.userId || !account) return undefined;
+  // The role claim only stands in: a store that holds the account's role answers with that one.
+  const live = revalidateAuthenticatedUser({ username: identity.userId, account, role: "viewer" });
+  if (!live?.account || !sameAccountId(live.account, account)) return null;
+  const roleIsStored = getExtensionAuthProvider() !== null
+    || getConfig().auth.users.some((user) => user.id !== undefined && sameAccountId(user.id, account));
+  return roleIsStored ? live.role : undefined;
+}
+
 interface CallerClaims {
   aid: unknown;
   bst: unknown;
