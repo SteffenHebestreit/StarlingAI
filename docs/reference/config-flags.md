@@ -88,7 +88,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:467 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:469 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:119 | 4 |
-| `command` | packages/core/src/config/schema.ts:755 | 67 |
+| `command` | packages/core/src/config/schema.ts:755 | 69 |
 | `completes` | packages/core/src/config/schema.ts:971 | 16 |
 | `completionPer1m` | packages/core/src/config/schema.ts:594 | 1 |
 | `composer` | packages/core/src/config/schema.ts:1540 | 20 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1622 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:905 | 1 |
 | `mode` | packages/core/src/config/schema.ts:554 | 164 |
-| `model` | packages/core/src/config/schema.ts:1317 | 330 |
+| `model` | packages/core/src/config/schema.ts:1317 | 331 |
 | `modelModeration` | packages/core/src/config/schema.ts:1313 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1880 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1895 | 5 |
@@ -322,7 +322,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateInputs` | packages/core/src/config/schema.ts:1319 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1320 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:604 | 2 |
-| `mounts` | packages/core/src/config/schema.ts:766 | 13 |
+| `mounts` | packages/core/src/config/schema.ts:766 | 14 |
 | `name` | packages/core/src/config/schema.ts:2153 | 463 |
 | `narration` | packages/core/src/config/schema.ts:283 | 15 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:116 | 8 |
@@ -332,7 +332,7 @@ Every public schema field, where it is declared, and how many production files r
 | `notes` | packages/core/src/config/schema.ts:873 | 71 |
 | `oneLiner` | packages/core/src/config/schema.ts:982 | 3 |
 | `openaiCompatible` | packages/core/src/config/schema.ts:107 | 2 |
-| `operator` | packages/core/src/config/schema.ts:453 | 139 |
+| `operator` | packages/core/src/config/schema.ts:453 | 140 |
 | `orchestratorMaxToolIterations` | packages/core/src/config/schemas/effort.ts:23 | 1 |
 | `orchestratorTurnSloMs` | packages/core/src/config/schema.ts:1932 | 2 |
 | `orgId` | packages/core/src/config/schema.ts:1208 | 1 |
@@ -539,7 +539,7 @@ Every public schema field, where it is declared, and how many production files r
 | `trustModelRouting` | packages/core/src/config/schema.ts:335 | 2 |
 | `trustProxyHeader` | packages/core/src/config/schema.ts:524 | 1 |
 | `turnTimeoutMs` | packages/core/src/config/schema.ts:369 | 23 |
-| `type` | packages/core/src/config/schema.ts:1047 | 566 |
+| `type` | packages/core/src/config/schema.ts:1047 | 567 |
 | `unbackedActionClaims` | packages/core/src/config/schemas/orchestration.ts:970 | 1 |
 | `ungroundedFactualAnswerGuard` | packages/core/src/config/schemas/orchestration.ts:166 | 2 |
 | `upfrontSourceSensitiveClassifier` | packages/core/src/config/schemas/orchestration.ts:199 | 4 |
