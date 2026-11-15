@@ -104,7 +104,7 @@ Every public schema field, where it is declared, and how many production files r
 | `configRemovals` | packages/core/src/config/schema.ts:1869 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:266 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1696 | 1 |
-| `container` | packages/core/src/config/schema.ts:775 | 89 |
+| `container` | packages/core/src/config/schema.ts:775 | 90 |
 | `contextWindow` | packages/core/src/config/schema.ts:128 | 14 |
 | `control` | packages/core/src/config/schema.ts:1844 | 70 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:956 | 4 |
@@ -322,7 +322,7 @@ Every public schema field, where it is declared, and how many production files r
 | `moderateInputs` | packages/core/src/config/schema.ts:1319 | 1 |
 | `moderateToolOutputs` | packages/core/src/config/schema.ts:1320 | 1 |
 | `monthlyUsd` | packages/core/src/config/schema.ts:604 | 2 |
-| `mounts` | packages/core/src/config/schema.ts:766 | 14 |
+| `mounts` | packages/core/src/config/schema.ts:766 | 15 |
 | `name` | packages/core/src/config/schema.ts:2153 | 465 |
 | `narration` | packages/core/src/config/schema.ts:283 | 15 |
 | `negativePrompt` | packages/core/src/config/schemas/multimodal.ts:116 | 8 |
@@ -506,7 +506,7 @@ Every public schema field, where it is declared, and how many production files r
 | `systemPrompt` | packages/core/src/config/schema.ts:1003 | 23 |
 | `tags` | packages/core/src/config/schema.ts:650 | 82 |
 | `targetAgreement` | packages/core/src/config/schemas/decisions.ts:78 | 5 |
-| `task` | packages/core/src/config/schema.ts:1382 | 192 |
+| `task` | packages/core/src/config/schema.ts:1382 | 193 |
 | `taskConditionalPrompt` | packages/core/src/config/schema.ts:1978 | 1 |
 | `taskGraphFailureDisposition` | packages/core/src/config/schemas/orchestration.ts:526 | 1 |
 | `taskTimeoutMs` | packages/core/src/config/schema.ts:735 | 1 |

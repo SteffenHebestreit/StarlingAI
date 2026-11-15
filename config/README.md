@@ -93,7 +93,7 @@ The config loader reads `.json` and `.jsonc` files recursively in **lexicographi
 
 After loading `config/`, the loader merges in `workspace/` (agent-mutable zone) on top, then applies `workspace/runtime/runtime.overrides.json` as the final overlay.
 
-Run `pnpm sai config build` to compile everything into the root `starlingai.json` artifact that Docker mounts.
+Run `pnpm sai config build` to compile everything into the root `starlingai.json` artifact that Docker mounts. That build is the file's only writer: a gateway or script that loads `config/` + `workspace/` reads the shards themselves and never writes `starlingai.json` back, so the file changes only when you rebuild.
 
 The repository root should stay limited to entrypoints, compose files, core docs, and compiled artifacts. Helper scripts belong under `scripts/` or `scripts/devtools/`, and generated reports belong under `artifacts/`.
 

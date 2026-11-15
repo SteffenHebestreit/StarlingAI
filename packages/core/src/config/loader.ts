@@ -18,6 +18,10 @@ type ConfigSource = {
   /** Optional second directory (workspace/) merged on top of basePath. */
   workspacePath: string | null;
   mutablePath: string;
+  /**
+   * Where `sai config build` writes the merged config: the config file name next to a config
+   * directory. Never read as a shard, and never written here: that build is its one writer.
+   */
   compiledPath: string;
 };
 
@@ -46,10 +50,9 @@ const activeDirectoryWatchers: FSWatcher[] = [];
 /**
  * Sub-agents a runtime client adds to the loaded config: the A2A client bridges each peer skill in
  * as one. They are not config — never saved, never in a preview (a save is judged on the config as
- * it loads from disk), never in the compiled artifact the bidder and sub-agent containers read. But
- * every fresh load rebuilt the loaded config without them, and every save reloads: a sub-agent
- * PATCH, now saved, dropped the peer's skills from delegation until the next card refresh, up to
- * 15 minutes later (r4 A-security #3). So each load lays them back over.
+ * it loads from disk). But every fresh load rebuilt the loaded config without them, and every save
+ * reloads: a sub-agent PATCH, now saved, dropped the peer's skills from delegation until the next
+ * card refresh, up to 15 minutes later (r4 A-security #3). So each load lays them back over.
  */
 const _runtimeSubAgents = new Map<string, SubAgentConfig>();
 
@@ -64,8 +67,8 @@ export function deleteRuntimeSubAgent(name: string): void {
 }
 
 /**
- * Whether the loaded sub-agent `name` is one a runtime client laid over the config: the one
- * withoutRuntimeSubAgents leaves out. Told apart as "loaded but not on disk", every check parsed
+ * Whether the loaded sub-agent `name` is one a runtime client laid over the config, not one read
+ * from disk. Told apart as "loaded but not on disk", every check parsed
  * the config on disk again, and named an agent deleted on disk but not yet reloaded a peer's
  * (review of r6 leftovers, 2).
  */
@@ -140,18 +143,31 @@ export function applyLabPromptOverlay(overlay: LabPromptOverlay): () => void {
   };
 }
 
-export function loadConfig(opts: { skipCompiledWrite?: boolean } = {}): Config {
+/**
+ * The config, loaded once and cached. Loading only reads: it writes no file.
+ *
+ * It used to write the loaded config, as validated (every schema default filled in, the env
+ * overrides laid over, secrets among them, the runtime overlay and the absolute workspace path),
+ * to the config file name next to a config directory. That is the very file `sai config build`
+ * writes from the same shards in another shape, and the one Docker mounts into the gateway. So a
+ * gateway or script run from the repository root replaced the build's output with this machine's
+ * values (SAI_JWT_SECRET and the provider keys in plain text), under the feet of a Docker gateway
+ * watching that mount, and left a checkout that tracks the file changed. Nothing read that copy:
+ * a sub-agent container gets its config in the task payload, the Docker gateway reads the build's
+ * output, and every script that had to keep the file intact passed skipCompiledWrite. The build is
+ * now the file's one writer, and a load leaves it byte for byte.
+ */
+export function loadConfig(
+  _opts: {
+    /** @deprecated Loading never writes the compiled file; the option is accepted and ignored. */
+    skipCompiledWrite?: boolean;
+  } = {},
+): Config {
   if (_config) return _config;
 
   _config = parseRawConfig(getEffectiveRawConfig());
   for (const [name, agent] of _runtimeSubAgents) (_config.subAgents as Record<string, SubAgentConfig>)[name] = agent;
   layLabOverlay(_config);
-  // The watch path skips this and writes only when a section actually changed (B21),
-  // avoiding a redundant 277KB serialize + read on no-op reloads. Cold boot and
-  // updateConfig keep writing so the compiled artifact + sub-agent containers stay current.
-  // The harness-lab process never writes it: its config carries a candidate's prompts, and the
-  // artifact is the deployment's.
-  if (!opts.skipCompiledWrite && !isHarnessLabProcess()) writeCompiledConfig(_config);
   return _config;
 }
 
@@ -202,15 +218,12 @@ export function watchConfig(onChange: (config: Config, changedSections: string[]
       const oldConfig = _config;
       _config = null;
       try {
-        const newConfig = loadConfig({ skipCompiledWrite: true });
+        const newConfig = loadConfig();
         const changed = diffConfigSections(oldConfig, newConfig);
         if (changed.length === 0) {
           logger.debug("Config changed but no meaningful differences detected — skipping notification");
           return;
         }
-        // A section actually changed — persist the compiled artifact (skipped above
-        // for the no-op case) so freshly-spawned sub-agent containers see the update.
-        writeCompiledConfig(newConfig);
         logger.info({ changedSections: changed }, "Config reloaded — notifying subscribers");
         onChange(newConfig, changed);
       } catch (err) {
@@ -515,29 +528,6 @@ function applyMutableOverlay(base: Record<string, unknown>, overlay: Record<stri
   }
 
   return merged;
-}
-
-function writeCompiledConfig(config: Config): void {
-  if (CONFIG_SOURCE.baseType !== "directory") return;
-
-  try {
-    mkdirSync(dirname(CONFIG_SOURCE.compiledPath), { recursive: true });
-    const serialized = `${JSON.stringify(withoutRuntimeSubAgents(config), null, 2)}\n`;
-    if (existsSync(CONFIG_SOURCE.compiledPath)) {
-      const existing = readFileSync(CONFIG_SOURCE.compiledPath, "utf-8");
-      if (existing === serialized) return;
-    }
-    writeFileSync(CONFIG_SOURCE.compiledPath, serialized, "utf-8");
-  } catch (err) {
-    logger.warn({ err, path: CONFIG_SOURCE.compiledPath }, "Failed to write compiled config artifact");
-  }
-}
-
-/** The loaded config without the sub-agents a runtime client laid over it (see setRuntimeSubAgent). */
-function withoutRuntimeSubAgents(config: Config): Config {
-  if (_runtimeSubAgents.size === 0) return config;
-  const subAgents = Object.fromEntries(Object.entries(config.subAgents).filter(([name, agent]) => _runtimeSubAgents.get(name) !== agent));
-  return { ...config, subAgents };
 }
 
 function buildOverlayConfig(base: Record<string, unknown>, updated: Record<string, unknown>): Record<string, unknown> {
@@ -994,7 +984,7 @@ function resolveMutableConfigPath(mutableBase: string, baseType: ConfigSourceTyp
 
 function resolveCompiledConfigPath(baseConfigPath: string, baseType: ConfigSourceType): string {
   if (baseType === "directory") {
-    // In two-zone layout, compiled artifact goes to repo root (parent of config/)
+    // In two-zone layout, `sai config build` writes its output to the repo root (parent of config/)
     return join(dirname(baseConfigPath), DEFAULT_CONFIG_FILE_NAME);
   }
   return baseConfigPath;
