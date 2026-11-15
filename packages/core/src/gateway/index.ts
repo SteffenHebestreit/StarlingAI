@@ -3,7 +3,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { cors } from "hono/cors";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname } from "node:path";
 import { z } from "zod";
@@ -49,8 +49,8 @@ import {
   saveJobDefinition,
   deleteJobDefinition,
   resolveJobSteps,
-  getApiWebhookKeys,
 } from "../credentials/jobs.js";
+import { webhookKeyAdmits } from "./webhook-keys.js";
 import { handleAguiStream } from "./agui.js";
 import { runSubAgent, type SubAgentRunOptions } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
@@ -152,9 +152,16 @@ function applyTemplate(template: string, params: Record<string, string>): string
   });
 }
 
-function resolveWebhookSecret(secret: string | undefined): string {
-  if (!secret) return "";
-  return secret.startsWith("$") ? (process.env[secret.slice(1)] ?? "") : secret;
+/**
+ * Whether a presented approval secret equals the pending request's, in constant time. Both sides
+ * are hashed first, so the comparison never depends on their lengths and never throws:
+ * timingSafeEqual on the raw values threw when a presented value had the expected number of
+ * characters but not of bytes (a character outside ASCII), and that 500 came only from a request
+ * that is pending. Webhook keys are matched by their digest as well (webhook-keys.ts).
+ */
+function secretMatches(expected: string, presented: string): boolean {
+  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
+  return timingSafeEqual(digest(expected), digest(presented));
 }
 
 function originFromUrl(url: string | undefined): string | null {
@@ -3341,19 +3348,19 @@ export function createGateway() {
 
   app.post("/api/scenes/:name/run", async (c) => {
     const sceneName = c.req.param("name");
-    const scene = getScene(sceneName);
-    if (!scene) return c.json({ error: `Scene not found: ${sceneName}` }, 404);
 
-    // Auth: Bearer token OR scene webhook key
+    // Auth: Bearer token OR this scene's webhook key, decided before the scene is looked up: a
+    // caller with neither gets the same 401 for a scene that exists and one that does not, in the
+    // same time (webhookKeyAdmits never looks the name up), so the names cannot be listed by
+    // trying them.
     const bearerToken = extractBearerToken(c.req.header("Authorization"));
     const keyParam = c.req.query("key") ?? c.req.header("X-Scene-Key") ?? "";
-    const resolvedKey = resolveWebhookSecret(scene.webhookKey);
 
-    const authed = (bearerToken && await verifyToken(bearerToken)) ||
-      (resolvedKey.length >= 16 && keyParam.length === resolvedKey.length &&
-        timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey)));
+    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookKeyAdmits("scene", sceneName, keyParam);
 
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
+    const scene = getScene(sceneName);
+    if (!scene) return c.json({ error: `Scene not found: ${sceneName}` }, 404);
 
     // Run identity: an authenticated operator's dropdown run executes under THEIR
     // username, so per-user RBAC-scoped resources (site credentials with
@@ -3449,17 +3456,15 @@ export function createGateway() {
 
   app.post("/api/jobs/:name/run", async (c) => {
     const jobName = c.req.param("name");
-    const definition = getJobDefinition(jobName);
-    if (!definition) return c.json({ error: `Job not found: ${jobName}` }, 404);
 
+    // As on the scene run route: the caller is checked before the job is looked up, so a caller
+    // with no token and no valid key gets the same 401, in the same time, for every name.
     const bearerToken = extractBearerToken(c.req.header("Authorization"));
     const keyParam = c.req.query("key") ?? c.req.header("X-Job-Key") ?? "";
-    const resolvedWebhookKeys = getApiWebhookKeys(definition).map((key) => resolveWebhookSecret(key));
-    const webhookAuthorized = resolvedWebhookKeys.some((resolvedKey) =>
-      resolvedKey.length >= 16 && keyParam.length === resolvedKey.length && timingSafeEqual(Buffer.from(keyParam), Buffer.from(resolvedKey))
-    );
-    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookAuthorized;
+    const authed = (bearerToken && await verifyToken(bearerToken)) || webhookKeyAdmits("job", jobName, keyParam);
     if (!authed) return c.json({ error: "Unauthorized" }, 401);
+    const definition = getJobDefinition(jobName);
+    if (!definition) return c.json({ error: `Job not found: ${jobName}` }, 404);
 
     // Run identity: authenticated operator → their username (per-user RBAC
     // resolves their credentials); webhook key → synthetic job identity.
@@ -3512,26 +3517,27 @@ export function createGateway() {
     return c.json(listPendingApprovals());
   });
 
-  // Constant-time approval-secret comparison, mirroring the webhook-key checks
-  // above. The length pre-check both provides the timing guard and keeps
-  // timingSafeEqual from throwing on unequal-length buffers.
+  // Constant-time approval-secret comparison (secretMatches).
   const approvalSecretMatches = (expected: string, provided: string): boolean =>
-    expected.length > 0 && expected.length === provided.length &&
-    timingSafeEqual(Buffer.from(expected), Buffer.from(provided));
+    expected.length > 0 && secretMatches(expected, provided);
+
+  // The per-approval secret is the only credential a callback link carries, so a wrong or missing
+  // one is answered as an unknown id is: the id alone tells nothing about whether a request is
+  // pending. The log keeps the distinction for the operator debugging a channel's secret.
+  const APPROVAL_NOT_FOUND = "Approval request not found or already resolved";
+  const logRefusedApprovalSecret = (approvalId: string) =>
+    log.warn({ approvalId }, "Approval callback refused: the secret does not match the pending request");
 
   app.get("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
     const approved = c.req.query("approved") === "true";
     const secret = c.req.query("secret") ?? "";
 
-    const pending = getPendingApproval(id);
-    if (!pending) {
-      return c.html("<html><body><h2>Approval request not found or already resolved.</h2></body></html>", 404);
-    }
-
     // Verify secret if one was set (slack/outbound_webhook channels always set one)
-    if (pending.secret && !approvalSecretMatches(pending.secret, secret)) {
-      return c.html("<html><body><h2>Invalid approval secret.</h2></body></html>", 403);
+    const pending = getPendingApproval(id);
+    if (!pending || (pending.secret && !approvalSecretMatches(pending.secret, secret))) {
+      if (pending) logRefusedApprovalSecret(id);
+      return c.html(`<html><body><h2>${APPROVAL_NOT_FOUND}.</h2></body></html>`, 404);
     }
 
     resolveApproval(id, approved);
@@ -3551,15 +3557,16 @@ export function createGateway() {
     const bodySecret = body["secret"] ? String(body["secret"]) : "";
     const bearer = extractBearerToken(c.req.header("Authorization")) ?? "";
 
-    const pending = getPendingApproval(id);
-    if (!pending) return c.json({ error: "Approval request not found or already resolved" }, 404);
-
     // Two ways to authorize: the channel secret (Slack/webhook callbacks), OR a
     // valid operator JWT (the dashboard — so detached scene/job runs can be
-    // approved from the UI without knowing the per-approval secret).
+    // approved from the UI without knowing the per-approval secret). A caller
+    // with neither gets the answer an unknown id gets, pending or not.
     const operatorAuthed = bearer && await verifyToken(bearer);
+    const pending = getPendingApproval(id);
+    if (!pending) return c.json({ error: APPROVAL_NOT_FOUND }, 404);
     if (!operatorAuthed && pending.secret && !approvalSecretMatches(pending.secret, bodySecret || bearer)) {
-      return c.json({ error: "Invalid approval secret" }, 403);
+      logRefusedApprovalSecret(id);
+      return c.json({ error: APPROVAL_NOT_FOUND }, 404);
     }
 
     resolveApproval(id, approved);

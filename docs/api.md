@@ -36,7 +36,7 @@ pnpm token
 pnpm sai token
 ```
 
-Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`.
+Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenticate with either a Bearer token or the scene webhook secret via `?key=` or `X-Scene-Key`. `POST /api/jobs/:name/run` takes a job's `api` trigger `webhookKey` the same way, via `?key=` or `X-Job-Key`. A caller with neither a valid token nor a valid key gets `401` whether or not the scene or job exists, and the gateway decides that before it looks the name up, so the time of the answer does not depend on the name either. Only an authenticated caller is told that a name is unknown (`404`).
 
 ## Health And Status
 
@@ -281,7 +281,9 @@ Accepted POST forms:
 { "approved": true, "secret": "..." }
 ```
 
-or `Authorization: Bearer <secret>` with `{ "approved": true }`.
+or `Authorization: Bearer <secret>` with `{ "approved": true }`, or a gateway token (the dashboard) with `{ "approved": true }`.
+
+A wrong or missing secret gets the answer an unknown or already resolved approval id gets: `404` with `Approval request not found or already resolved` (an HTML page on `GET`). The id alone does not tell whether a request is pending; the gateway log records a secret that did not match a pending request.
 
 ### Sessions And Exports
 
