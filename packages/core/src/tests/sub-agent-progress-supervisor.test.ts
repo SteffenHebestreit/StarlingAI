@@ -59,6 +59,7 @@ function writeTempConfig(agentName: string, maxIterations: number): { tempDir: s
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-progress-supervisor-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     subAgents: {
       [agentName]: {
         description: "Progress supervisor fixture",
@@ -228,6 +229,7 @@ describe("sub-agent progress supervisor — a busy stall at max effort", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-busy-stall-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       ...(opts.loopBrake === false ? { agents: { performance: { loopBrake: false } } } : {}),
       subAgents: {
         busy_agent: {

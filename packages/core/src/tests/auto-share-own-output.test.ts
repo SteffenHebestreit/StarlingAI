@@ -41,10 +41,10 @@ const UPLOADED_SOURCE = [
   "Seat minimums apply to team contracts only, and are listed in the appendix of this sheet.",
 ].join("\n");
 
-function writeTempConfig(config: unknown): { tempDir: string; configPath: string } {
+function writeTempConfig(config: Record<string, unknown>): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-auto-share-own-"));
   const configPath = join(tempDir, "starlingai.json");
-  writeFileSync(configPath, JSON.stringify(config), "utf8");
+  writeFileSync(configPath, JSON.stringify({ workspacePath: tempDir, ...config }), "utf8");
   return { tempDir, configPath };
 }
 
@@ -144,7 +144,7 @@ describe("auto-share must not launder a run's own output into shared facts", () 
         agentName: "paper_author",
         task: "Write a report on subscription pricing from the collected evidence.",
         parentSessionId: "parent-auto-share-own",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       const keys = sharedFindings.map((f) => f.key);
@@ -195,7 +195,7 @@ describe("auto-share must not launder a run's own output into shared facts", () 
         agentName: "paper_author",
         task: "Read the supplied price list and draft the comparison.",
         parentSessionId: "parent-auto-share-other",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(sharedFindings.some((f) => f.key.includes("read_file"))).toBe(true);

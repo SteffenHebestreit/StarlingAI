@@ -44,6 +44,7 @@ async function routeWith(blendMode: "ordering" | "admission") {
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-rerank-admission-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: AGENTS,
     retrieval: { reranker: { enabled: true, mode: "tei", baseUrl: "http://reranker:80", topK: 6, blendMode } },

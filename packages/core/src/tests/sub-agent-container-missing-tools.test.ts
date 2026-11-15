@@ -43,6 +43,7 @@ describe("gateway static refusal when the worker cannot run the agent's tools", 
     // defaultContainerized is forced OFF in the test harness env (vitest.config.ts) so mock-LLM
     // tests stay in-process; turn it back ON here so this agent actually takes the container path.
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaultContainerized: true,
         defaults: {

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SwarmState } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
@@ -49,7 +52,11 @@ const RESEARCH_BODY =
   "(e.g. ICS-43434 / SPH0645). Sources: infineon.com product brief + datasheet (alldatasheet, datasheet4u).";
 
 describe("delegation halts escalation once a substantive partial exists", () => {
+  // Each test's own workspace: a delegation reads the promoted agents from it.
+  let workspacePath = "";
+
   beforeEach(() => {
+    workspacePath = mkdtempSync(join(tmpdir(), "sai-partial-halts-"));
     runSubAgentMock.mockClear();
     runSubAgentWithStatsMock.mockReset();
     runSubAgentWithStatsMock.mockImplementation(defaultStatsImpl);
@@ -61,6 +68,7 @@ describe("delegation halts escalation once a substantive partial exists", () => 
     resetConfigForTests();
     const memory = await import("../swarm/memory.js");
     await memory.resetSharedMemoryForTests();
+    rmSync(workspacePath, { recursive: true, force: true });
   });
 
   it("returns a research agent's substantive partial instead of escalating to the coordinator fallback", async () => {
@@ -116,7 +124,7 @@ describe("delegation halts escalation once a substantive partial exists", () => 
 
     const result = await delegate!.execute(
       { agentName: "researcher", fallbackAgents: ["mission_coordinator"], task: "Research the IM73A135V01 mic for an ESP32 build" },
-      { sessionId: "session-partial-halt", workspacePath: "/workspace", swarmState: freshSwarmState() },
+      { sessionId: "session-partial-halt", workspacePath, swarmState: freshSwarmState() },
     );
 
     const calledAgents = runSubAgentWithStatsMock.mock.calls.map((call) => call[0].agentName);
@@ -153,7 +161,7 @@ describe("delegation halts escalation once a substantive partial exists", () => 
     const [{ getTool }] = await Promise.all([import("../tools/registry.js"), import("../tools/sub-agent.js")]);
     const result = await getTool("delegate_to_agent")!.execute(
       { agentName: "researcher", task: "Wie hoch ist der Gesamtbestand am Standort Südtal?" },
-      { sessionId: "session-partial-keys", workspacePath: "/workspace", swarmState: freshSwarmState() },
+      { sessionId: "session-partial-keys", workspacePath, swarmState: freshSwarmState() },
     );
     expect(result.metadata?.["partialFallback"]).toBe(true);
     expect(result.metadata?.["computedAggregateKeys"]).toEqual(["596"]);
@@ -209,7 +217,7 @@ describe("delegation halts escalation once a substantive partial exists", () => 
 
     const result = await delegate!.execute(
       { agentName: "researcher", fallbackAgents: ["retrieval_analyst"], task: "Find the figures" },
-      { sessionId: "session-stub-escalates", workspacePath: "/workspace", swarmState: freshSwarmState() },
+      { sessionId: "session-stub-escalates", workspacePath, swarmState: freshSwarmState() },
     );
 
     // A bare error stub (<200 chars) is not a substantive partial, so the chain
@@ -231,7 +239,7 @@ describe("delegation halts escalation once a substantive partial exists", () => 
       { agentName: "web_task_coordinator", task: "coordinate some sub-work" },
       {
         sessionId: "sub:root:mission_coordinator:1",
-        workspacePath: "/workspace",
+        workspacePath,
         swarmState: freshSwarmState(),
         currentAgentName: "mission_coordinator",
       },

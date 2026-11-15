@@ -66,6 +66,7 @@ async function loadRuntime(stableToolBlock: "off" | "freeze") {
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
       stableToolBlock,
@@ -87,7 +88,7 @@ async function loadRuntime(stableToolBlock: "off" | "freeze") {
     import("../agent/session.js"),
     import("../agent/runtime.js"),
   ]);
-  return { AgentSession, resetSessionsForTests, runTurn };
+  return { AgentSession, resetSessionsForTests, runTurn, workspacePath: tempDir };
 }
 
 function toolCallStream(callId: string, toolName: string, args: Record<string, unknown>) {
@@ -211,9 +212,9 @@ describe("resolveIterationTools — the discovery withhold survives freeze (revi
 
 describe("orchestration.stableToolBlock", () => {
   it('freeze: every iteration of a turn receives a byte-identical tool array, including the forced one', async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("freeze");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("freeze");
     resetSessionsForTests();
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     // Iteration 0 is the forced one (must orchestrate, nothing delegated yet): the model
     // answers it with a delegation, which releases the force for iteration 1.
@@ -233,9 +234,9 @@ describe("orchestration.stableToolBlock", () => {
   });
 
   it('off: the forced iteration is served a strictly smaller array (the behaviour freeze removes)', async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("off");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("off");
     resetSessionsForTests();
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     streamMock
       .mockImplementationOnce(() => toolCallStream("c1", "delegate_to_agent", {
@@ -255,9 +256,9 @@ describe("orchestration.stableToolBlock", () => {
   });
 
   it('freeze: a tool that cannot advance a forced turn is refused at the call site, not executed', async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("freeze");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("freeze");
     resetSessionsForTests();
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     // memory_store is on the wire under freeze (the array is not narrowed), so the model
     // can pick it to satisfy tool_choice:"required" — the loop that audit be828e39 recorded.

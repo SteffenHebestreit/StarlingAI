@@ -9,7 +9,9 @@ export default defineConfig({
     // tests stop appending to the repo's own .starlingai/audit.jsonl, deletes
     // ambient service URLs (model, Laya, Redis, Postgres, ...) and refuses
     // connections that leave this machine. SAI_TEST_LIVE=1 lifts the last two.
-    // Servers a test starts bind loopback only, live run or not.
+    // Servers a test starts bind loopback only, live run or not. And no test
+    // reads or writes the default workspace (/workspace, the schema default of
+    // workspacePath): it looks absent, as on CI, and a test that reaches it fails.
     setupFiles: ["src/tests/vitest.setup.ts"],
     testTimeout: 60000,
     hookTimeout: 30000,

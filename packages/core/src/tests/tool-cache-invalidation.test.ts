@@ -56,6 +56,7 @@ describe("workspace writes invalidate the tool read caches", () => {
     const dir = mkdtempSync(join(tmpdir(), "sai-cache-invalidation-"));
     const configPath = join(dir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: dir,
       subAgents: {
         fixer: {
           description: "Reads, edits, re-reads.",

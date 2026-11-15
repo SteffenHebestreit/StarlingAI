@@ -92,6 +92,7 @@ function writeTempConfig(agentName: string, stagedBuild = false): { tempDir: str
     );
   }
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     subAgents: {
       [agentName]: {
         description: "Mid-stream burn fixture",

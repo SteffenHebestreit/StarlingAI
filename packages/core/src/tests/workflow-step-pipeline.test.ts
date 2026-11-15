@@ -66,6 +66,7 @@ function writeTempConfig(): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-workflow-step-pipeline-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
     orchestration: { planDrivenContinuation: true },
     scenes: {
@@ -160,7 +161,7 @@ async function loadModules() {
       };
     },
   });
-  return { registry, runtime, session, pipeline, delegated };
+  return { registry, runtime, session, pipeline, delegated, workspacePath: written.tempDir };
 }
 
 const DISCOVERY = ["search_agents", "list_agents", "search_skills"];
@@ -250,13 +251,13 @@ describe("workflowStepPipeline", () => {
 
 describe("a scene or job step's turn runs the agents its task names, in the task's order", () => {
   it("scene: researcher, evidence_analyst and summarizer, each after the one before it returned", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     const directives = scriptDirectiveFollowingModel("researcher");
 
     const result = await registry.getTool("run_workflow")!.execute(
       // The filled-in topic names an agent: the order still comes from the author's task.
       { name: "sourced_brief", workflowType: "scene", params: { topic: "summarizer benchmarks" } },
-      { sessionId: "chat-pipeline-scene", workspacePath: "/workspace" },
+      { sessionId: "chat-pipeline-scene", workspacePath },
     );
 
     expect(result.success).toBe(true);
@@ -268,12 +269,12 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   });
 
   it("job: the step's turn does the same", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     scriptDirectiveFollowingModel("researcher");
 
     const result = await registry.getTool("run_workflow")!.execute(
       { name: "sourced_brief_packet", workflowType: "job" },
-      { sessionId: "chat-pipeline-job", workspacePath: "/workspace" },
+      { sessionId: "chat-pipeline-job", workspacePath },
     );
 
     expect(result.success).toBe(true);
@@ -281,12 +282,12 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   });
 
   it("an agent the turn passed over is not offered again: document_intake with nothing attached", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     const directives = scriptDirectiveFollowingModel("researcher", ["document_intake", "researcher", "summarizer"]);
 
     await registry.getTool("run_workflow")!.execute(
       { name: "intake_brief", workflowType: "scene" },
-      { sessionId: "chat-pipeline-intake", workspacePath: "/workspace" },
+      { sessionId: "chat-pipeline-intake", workspacePath },
     );
 
     expect(delegated).toEqual(["researcher", "summarizer"]);
@@ -299,7 +300,7 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   // only when no plan existed, so a one-step plan of researcher ended the turn as before (review of
   // 5564404b, 2026-10-09).
   it("a plan the step's turn recorded and finished does not end it before the agents named after the plan's", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     await import("../tools/plan-executor.js");
     await import("../tools/turn-plan-tool.js");
     const directives: string[] = [];
@@ -326,7 +327,7 @@ describe("a scene or job step's turn runs the agents its task names, in the task
 
     const result = await registry.getTool("run_workflow")!.execute(
       { name: "sourced_brief", workflowType: "scene" },
-      { sessionId: "chat-pipeline-plan", workspacePath: "/workspace" },
+      { sessionId: "chat-pipeline-plan", workspacePath },
     );
 
     expect(result.success).toBe(true);
@@ -338,12 +339,12 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   });
 
   it("control: a step whose task names no agent ends at its first delegation, as before", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     const directives = scriptDirectiveFollowingModel("researcher");
 
     const result = await registry.getTool("run_workflow")!.execute(
       { name: "open_brief", workflowType: "scene" },
-      { sessionId: "chat-pipeline-open", workspacePath: "/workspace" },
+      { sessionId: "chat-pipeline-open", workspacePath },
     );
 
     expect(result.success).toBe(true);
@@ -353,11 +354,11 @@ describe("a scene or job step's turn runs the agents its task names, in the task
   });
 
   it("control: a chat turn that names the same agents ends at its first delegation, as before", async () => {
-    const { runtime, session, delegated } = await loadModules();
+    const { runtime, session, delegated, workspacePath } = await loadModules();
     const directives = scriptDirectiveFollowingModel("researcher");
 
     await runtime.runTurn({
-      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      session: new session.AgentSession({ channel: "test", workspacePath, systemPrompt: "test" }),
       userMessage: "Use researcher for the sources, evidence_analyst to weigh them, and summarizer to write the brief.",
     });
 
@@ -375,10 +376,10 @@ describe("a scene or job step's turn whose task names its agents goes without ag
     { name: "sourced_brief_packet", workflowType: "job" },
   ] as const) {
     it(`${workflow.workflowType}: none of them is offered on any call`, async () => {
-      const { registry } = await loadModules();
+      const { registry, workspacePath } = await loadModules();
       scriptDirectiveFollowingModel("researcher");
 
-      await registry.getTool("run_workflow")!.execute({ ...workflow }, { sessionId: `chat-discovery-${workflow.workflowType}`, workspacePath: "/workspace" });
+      await registry.getTool("run_workflow")!.execute({ ...workflow }, { sessionId: `chat-discovery-${workflow.workflowType}`, workspacePath });
 
       const offered = offeredToolNames();
       expect(offered.length).toBeGreaterThan(0);
@@ -390,15 +391,15 @@ describe("a scene or job step's turn whose task names its agents goes without ag
   }
 
   it("control: a step whose task names no agent, and a chat turn, are offered them as before", async () => {
-    const { registry, runtime, session } = await loadModules();
+    const { registry, runtime, session, workspacePath } = await loadModules();
     scriptDirectiveFollowingModel("researcher");
-    await registry.getTool("run_workflow")!.execute({ name: "open_brief", workflowType: "scene" }, { sessionId: "chat-discovery-open", workspacePath: "/workspace" });
+    await registry.getTool("run_workflow")!.execute({ name: "open_brief", workflowType: "scene" }, { sessionId: "chat-discovery-open", workspacePath });
     expect(offeredToolNames()[0]).toEqual(expect.arrayContaining(DISCOVERY));
 
     streamMock.mockReset();
     scriptDirectiveFollowingModel("researcher");
     await runtime.runTurn({
-      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      session: new session.AgentSession({ channel: "test", workspacePath, systemPrompt: "test" }),
       userMessage: "Use researcher for the sources, evidence_analyst to weigh them, and summarizer to write the brief.",
     });
     expect(offeredToolNames()[0]).toEqual(expect.arrayContaining(DISCOVERY));
@@ -451,12 +452,12 @@ describe("a scene or job step's turn that does not delegate unprompted still run
     { name: "sourced_brief_packet", workflowType: "job" },
   ] as const) {
     it(`${workflow.workflowType}: the turn is told to start with the pipeline's first agent, and runs them in order`, async () => {
-      const { registry, delegated } = await loadModules();
+      const { registry, delegated, workspacePath } = await loadModules();
       scriptSearchingStepModel();
 
       const result = await registry.getTool("run_workflow")!.execute({ ...workflow }, {
         sessionId: `chat-start-${workflow.workflowType}`,
-        workspacePath: "/workspace",
+        workspacePath,
       });
 
       expect(result.success).toBe(true);
@@ -478,12 +479,12 @@ describe("a scene or job step's turn that does not delegate unprompted still run
   // directive that pointed at "the first one" of the list pointed the turn at that agent (review of
   // b0a5b7ce, 2026-10-11).
   it("a pipeline that opens with an agent the task calls for under a condition: the turn is not pointed at the head of the list", async () => {
-    const { registry } = await loadModules();
+    const { registry, workspacePath } = await loadModules();
     scriptDirectiveFollowingModel("researcher", ["document_intake", "researcher", "summarizer"]);
 
     await registry.getTool("run_workflow")!.execute(
       { name: "intake_brief", workflowType: "scene" },
-      { sessionId: "chat-start-conditional", workspacePath: "/workspace" },
+      { sessionId: "chat-start-conditional", workspacePath },
     );
 
     const start = messagesOfCall(0).map(contentOf).find((content) => content.startsWith(START)) ?? "";
@@ -494,12 +495,12 @@ describe("a scene or job step's turn that does not delegate unprompted still run
   });
 
   it("a turn that searched until the loop brake is given its start once more, and runs the pipeline", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     scriptSearchingStepModel({ ignoreStartFor: 3 });
 
     const result = await registry.getTool("run_workflow")!.execute(
       { name: "sourced_brief", workflowType: "scene" },
-      { sessionId: "chat-start-brake", workspacePath: "/workspace" },
+      { sessionId: "chat-start-brake", workspacePath },
     );
 
     expect(result.success).toBe(true);
@@ -510,12 +511,12 @@ describe("a scene or job step's turn that does not delegate unprompted still run
   });
 
   it("a turn that ran out of iterations searching is given its start once more, and runs the pipeline", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     scriptSearchingStepModel({ ignoreStartFor: 2 });
 
     const result = await registry.getTool("run_workflow")!.execute(
       { name: "sourced_brief", workflowType: "scene" },
-      { sessionId: "chat-start-ceiling", workspacePath: "/workspace", maxIterationsOverride: 2 },
+      { sessionId: "chat-start-ceiling", workspacePath, maxIterationsOverride: 2 },
     );
 
     expect(result.success).toBe(true);
@@ -523,12 +524,12 @@ describe("a scene or job step's turn that does not delegate unprompted still run
   });
 
   it("the start is given once: a turn that keeps searching ends at the next brake", async () => {
-    const { registry, delegated } = await loadModules();
+    const { registry, delegated, workspacePath } = await loadModules();
     scriptSearchingStepModel({ ignoreStartFor: 100 });
 
     await registry.getTool("run_workflow")!.execute(
       { name: "sourced_brief", workflowType: "scene" },
-      { sessionId: "chat-start-once", workspacePath: "/workspace" },
+      { sessionId: "chat-start-once", workspacePath },
     );
 
     expect(delegated).toEqual([]);
@@ -537,11 +538,11 @@ describe("a scene or job step's turn that does not delegate unprompted still run
   });
 
   it("control: a chat turn that searches until the loop brake ends there, as before", async () => {
-    const { runtime, session, delegated } = await loadModules();
+    const { runtime, session, delegated, workspacePath } = await loadModules();
     scriptSearchingStepModel({ ignoreStartFor: 100 });
 
     await runtime.runTurn({
-      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      session: new session.AgentSession({ channel: "test", workspacePath, systemPrompt: "test" }),
       userMessage: "Use researcher for the sources, evidence_analyst to weigh them, and summarizer to write the brief.",
     });
 
@@ -564,12 +565,12 @@ describe("a scene or job step's turn reads the request that started the workflow
     { name: "sourced_brief_packet", workflowType: "job" },
   ] as const) {
     it(`${workflow.workflowType}: the request is labelled as background to a workflow that is already running`, async () => {
-      const { registry } = await loadModules();
+      const { registry, workspacePath } = await loadModules();
       scriptDirectiveFollowingModel("researcher");
 
       await registry.getTool("run_workflow")!.execute({ ...workflow }, {
         sessionId: `chat-background-${workflow.workflowType}`,
-        workspacePath: "/workspace",
+        workspacePath,
         swarmState: { objective: OBJECTIVE, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), tasks: {} },
       });
 

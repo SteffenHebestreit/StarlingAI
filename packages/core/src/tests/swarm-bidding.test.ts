@@ -48,6 +48,7 @@ describe("swarm autonomous bidding", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -103,6 +104,7 @@ describe("swarm autonomous bidding", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -170,6 +172,7 @@ describe("swarm autonomous bidding", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },

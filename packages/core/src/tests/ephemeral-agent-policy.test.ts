@@ -405,6 +405,7 @@ describe("create_ephemeral_agent policy", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen3.5-4b" },
@@ -479,6 +480,7 @@ describe("create_ephemeral_agent policy", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen3.5-4b" },
@@ -551,6 +553,7 @@ describe("create_ephemeral_agent policy", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen3.5-4b" },
@@ -636,6 +639,7 @@ describe("create_ephemeral_agent policy", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen3.5-4b" },
@@ -746,6 +750,7 @@ describe("create_ephemeral_agent policy", () => {
     writeFileSync(
       join(tempDir, "starlingai.json"),
       JSON.stringify({
+        workspacePath: tempDir,
         server: { port: 0 },
         llm: { providers: [{ name: "mock", type: "openai", baseUrl: "http://localhost:1234/v1", apiKey: "k", models: ["m"] }] },
         agents: {

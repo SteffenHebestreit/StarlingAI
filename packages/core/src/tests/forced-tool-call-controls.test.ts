@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -105,9 +105,13 @@ function burnStream(chars = 4000) {
   })();
 }
 
+const tempDirs: string[] = [];
+
 async function loadRuntime() {
   const dir = mkdtempSync(join(tmpdir(), "sai-forced-controls-"));
+  tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
       // Both are required for forceToolChoice to be reachable at all.
@@ -121,7 +125,7 @@ async function loadRuntime() {
     import("../agent/session.js"),
     import("../agent/runtime.js"),
   ]);
-  return { AgentSession, runTurn };
+  return { AgentSession, runTurn, workspacePath: dir };
 }
 
 /** The options bag each provider.stream call received (its 4th argument). */
@@ -136,6 +140,7 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
     planState.recorded = false;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   /** One burned forced call, then a clean non-forced answer so the turn terminates. */
@@ -153,12 +158,12 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
 
   it("with a plan already recorded, sends controls {enableThinking:false, reasoningEffort:'none'} and maxTokens 4000 on the forced call only", async () => {
     planState.recorded = true;
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     burnThenAnswer();
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     await runTurn({ session, userMessage: "wie wird das wetter morgen?" });
@@ -188,12 +193,12 @@ describe("a forced tool call is issued thinking-off with a bounded output — un
 
   it("with no plan yet, leaves the planning call its thinking and sends the ceiling alone", async () => {
     planState.recorded = false;
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     burnThenAnswer();
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     await runTurn({ session, userMessage: "wie wird das wetter morgen?" });
@@ -232,6 +237,7 @@ describe("a build the turn must hand off asks for the prefilled tool call while 
     planState.recorded = false;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   /** A request the deliverable word lists recognise as a build. */
@@ -239,7 +245,9 @@ describe("a build the turn must hand off asks for the prefilled tool call while 
 
   async function forcedBuildCallOptions(): Promise<Record<string, unknown> | undefined> {
     const dir = mkdtempSync(join(tmpdir(), "sai-forced-build-"));
+    tempDirs.push(dir);
     writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+      workspacePath: dir,
       agents: { mainAssistant: { toolMode: "orchestration_only" } },
       orchestration: {
         forceToolChoiceWhenOrchestrationRequired: true,
@@ -267,7 +275,7 @@ describe("a build the turn must hand off asks for the prefilled tool call while 
         yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
       })();
     });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath: dir, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: BUILD_REQUEST, autoApprove: true });
     const forced = streamOptions()[0];
     expect(forced?.["toolChoice"], "the build turn's first call was not forced").toBe("required");

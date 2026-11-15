@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -55,10 +58,21 @@ const DELEGATED = "[browser_agent]: Artikel unter 50 €: NW-1201 34,90 €, NW-
 const ANSWER = "Die acht Artikel unter 50 € kosten zusammen 227,40 € (NW-1201, NW-1203, NW-2102, NW-3101, NW-3102, NW-3103, NW-3105 und NW-3106). Die Preise stammen aus der Produkttabelle der drei Katalogseiten; Versandkosten sind nicht eingerechnet, und das Sonderangebot NW-3106 zählt mit seinem aktuellen Preis.";
 const REVIEWER_FLAW = "FAIL: Die Summe der aufgeführten Preise beträgt 227,30 €, nicht 227,40 €.";
 
+/** Each turn's own workspace: a turn reads the workspace's memory, skills and files. */
+const workspaces: string[] = [];
+function tempWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), "sai-qa-repair-"));
+  workspaces.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 async function runRepairedTurn(rewrite: string, reviewer: "fails-then-passes" | "always-fails" = "fails-then-passes") {
   getConfig().orchestration.qaDeliveryLoop = true;
   getConfig().orchestration.relaySingleDeliverable = false;
-  const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+  const session = new AgentSession({ channel: "test", workspacePath: tempWorkspace(), systemPrompt: "You are a test agent." });
   let llmCalls = 0;
   streamMock.mockImplementation(() => {
     llmCalls += 1;

@@ -40,6 +40,7 @@ async function searchWith(surfaceRoutingNearMisses: boolean) {
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-near-miss-surface-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: AGENTS,
     retrieval: { reranker: { enabled: false } },
@@ -80,7 +81,7 @@ async function searchWith(surfaceRoutingNearMisses: boolean) {
   if (!searchAgents) throw new Error("search_agents tool is not registered");
   return searchAgents.execute(
     { query: "ich braeuchte jemanden im schwarm fuer uebersetzungen", minConfidence: "high" },
-    { sessionId: "near-miss-test", workspacePath: "/workspace" },
+    { sessionId: "near-miss-test", workspacePath: tempDir },
   );
 }
 

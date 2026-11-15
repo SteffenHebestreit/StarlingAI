@@ -41,6 +41,7 @@ describe("parallel_delegate artifact propagation", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-pd-artifacts-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coord: { description: "Coordinator", systemPrompt: "Coordinate the build mission.", tools: ["parallel_delegate"], maxIterations: 5 },
         builder: { description: "Builder", systemPrompt: "Build files into the workspace.", tools: ["write_file"], maxIterations: 4 },

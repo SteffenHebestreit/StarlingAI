@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock the chat provider so we can script the orchestrator's tool-call sequence.
 const streamMock = vi.hoisted(() => vi.fn());
@@ -77,7 +80,14 @@ function auditCalls(type: string) {
   );
 }
 
+// Each test's own workspace: a turn reads the workspace's memory and probes the files it names there.
+let workspacePath = "";
+beforeEach(() => {
+  workspacePath = mkdtempSync(join(tmpdir(), "sai-workflow-force-"));
+});
+
 afterEach(() => {
+  rmSync(workspacePath, { recursive: true, force: true });
   unregisterTool("search_workflows");
   unregisterTool("run_workflow");
   unregisterTool("parallel_delegate");
@@ -151,7 +161,7 @@ describe("workflow-run force-after-search", () => {
       return textStream("Die belegte Präsentation wurde erstellt.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "test" });
     const result = await runTurn({ session, userMessage });
 
     expect(result.blocked).toBe(false);
@@ -234,7 +244,7 @@ describe("workflow-run force-after-search", () => {
       return textStream("Die belegte Präsentation wurde erstellt.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "test" });
     const result = await runTurn({ session, userMessage });
 
     expect(result.blocked).toBe(false);
@@ -302,7 +312,7 @@ describe("workflow-run force-after-search", () => {
       return textStream("Ich habe direkt recherchiert, nachdem der Workflow blockiert war.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "test" });
     const result = await runTurn({ session, userMessage: "Erstelle eine Präsentation über Dresden mit Bildern und Quellen." });
 
     expect(result.blocked).toBe(false);
@@ -367,7 +377,7 @@ describe("the after-search check on a scene or job step", () => {
       return textStream("The brief is done.");
     });
 
-    const session = new AgentSession({ channel: "workflow", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "workflow", workspacePath, systemPrompt: "test" });
     await runTurn({
       session,
       userMessage: stepTask,
@@ -395,7 +405,7 @@ describe("the after-search check on a scene or job step", () => {
       return textStream("The brief: the facts the step's agents already shared.");
     });
 
-    const session = new AgentSession({ channel: "workflow", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "workflow", workspacePath, systemPrompt: "test" });
     await runTurn({
       session,
       userMessage: stepTask,
@@ -418,7 +428,7 @@ describe("the after-search check on a scene or job step", () => {
       return textStream("The brief: the facts the step's agents already shared.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "test" });
     await runTurn({ session, userMessage: stepTask });
 
     expect(auditCalls("tool_free_workflow_run_rejected")).toHaveLength(1);

@@ -62,7 +62,7 @@ function sessionParams(): Record<string, unknown> {
 
 describe("session ids in the shared memory graph", () => {
   async function load(authEnabled: boolean) {
-    writeFileSync(configPath, JSON.stringify({ auth: { enabled: authEnabled } }), "utf8");
+    writeFileSync(configPath, JSON.stringify({ workspacePath: tempDir, auth: { enabled: authEnabled } }), "utf8");
     // Sequential: these modules import each other, and parallel first imports can deadlock.
     const loader = await import("../config/loader.js");
     const context = await import("../runtime/request-context.js");

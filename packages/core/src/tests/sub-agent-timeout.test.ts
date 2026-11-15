@@ -38,6 +38,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         slow_agent: {
           description: "Timeout test agent",
@@ -78,7 +79,7 @@ describe("sub-agent turn timeouts", () => {
         agentName: "slow_agent",
         task: "Do a very slow thing.",
         parentSessionId: "parent-1",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
       const elapsedMs = Date.now() - startedAt;
 
@@ -99,6 +100,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coordinator_agent: {
           description: "Coordinator timeout test agent",
@@ -191,6 +193,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         writer_agent: {
           description: "Writer timeout artifact test agent",
@@ -272,6 +275,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         browser_agent: {
           description: "Browser approval loop test agent",
@@ -338,6 +342,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         reader_agent: {
           description: "Shared facts reader",
@@ -397,6 +402,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coordinator_agent: {
           description: "Coordinator that delegates in parallel",
@@ -484,6 +490,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaultContainerized: false,
       },
@@ -570,6 +577,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coordinator_agent: {
           description: "Coordinator that tries workflow discovery",
@@ -650,6 +658,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         researcher_shares: {
           description: "Researcher that publishes a finding before running out of budget",
@@ -720,6 +729,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         deep_coordinator: {
           description: "Coordinator running deep in the tree",
@@ -810,6 +820,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         research_agent: {
           description: "Timeout synthesis test agent",
@@ -906,6 +917,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         builder_agent: {
           description: "Deterministic completion test agent",
@@ -1004,6 +1016,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         research_agent: {
           description: "Sanitized output rescue test agent",
@@ -1081,6 +1094,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         researcher: {
           description: "Research specialist",
@@ -1172,6 +1186,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         writer_agent: {
           description: "Artifact-producing writer",
@@ -1254,6 +1269,7 @@ describe("sub-agent turn timeouts", () => {
     const turnTimeoutMs = 900_000; // 15 min gateway turn timeout
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       gateway: { turnTimeoutMs },
       subAgents: {
         coord_agent: {
@@ -1334,6 +1350,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         performance: {
           subAgentTurnSloMs: 60_000,
@@ -1421,6 +1438,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         long_builder: {
           description: "Long-running builder that must not be cut off",
@@ -1481,6 +1499,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         unlimited_agent: {
           description: "Unlimited iteration test agent",
@@ -1549,6 +1568,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         pentest_coordinator: {
           description: "Pentest coordinator",
@@ -1595,6 +1615,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         mission_coordinator: {
           description: "Mission coordinator",
@@ -1668,6 +1689,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         researcher: {
           description: "Research specialist",
@@ -1751,6 +1773,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         mission_coordinator: {
           description: "Mission coordinator",
@@ -1887,6 +1910,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         pentest_specialist: {
           description: "Pentest specialist",
@@ -1937,6 +1961,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         recon_agent: {
           description: "Recon agent",
@@ -2002,6 +2027,7 @@ describe("sub-agent turn timeouts", () => {
     }));
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaultContainerized: true,
         defaults: {
@@ -2070,6 +2096,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         computer_use_agent: {
           description: "Computer automation agent",
@@ -2152,6 +2179,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         dedup_agent: {
           description: "Dedup test agent",
@@ -2231,6 +2259,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coord_agent: {
           description: "Coordinator failure preservation test agent",
@@ -2345,6 +2374,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         shell_agent: {
           description: "Shell and SSH specialist",
@@ -2418,6 +2448,7 @@ describe("sub-agent turn timeouts", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         facts_agent: {
           description: "Boilerplate tool-result regression agent",
@@ -2504,6 +2535,7 @@ describe("sub-agent turn timeouts", () => {
       const tempDir = mkdtempSync(join(tmpdir(), prefix));
       const configPath = join(tempDir, "starlingai.json");
       writeFileSync(configPath, JSON.stringify({
+        workspacePath: tempDir,
         subAgents: {
           prime_coder: {
             description: "Runs a script in the sandbox",

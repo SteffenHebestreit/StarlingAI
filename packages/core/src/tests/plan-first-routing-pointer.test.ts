@@ -65,6 +65,7 @@ async function runRoutingTool(
   tempDir = mkdtempSync(join(tmpdir(), "starlingai-plan-pointer-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/embed" } } },
     subAgents: AGENTS,
     retrieval: { reranker: { enabled: false } },
@@ -114,7 +115,7 @@ async function runRoutingTool(
   if (!tool) throw new Error(`${toolName} is not registered`);
   const result = await tool.execute({ query }, {
     sessionId: session.id,
-    workspacePath: "/workspace",
+    workspacePath: tempDir,
     ...(planFirstPending === undefined ? {} : { planFirstPending }),
   });
   return { output: result.output, metadata: (result.metadata ?? {}) as Record<string, unknown> };

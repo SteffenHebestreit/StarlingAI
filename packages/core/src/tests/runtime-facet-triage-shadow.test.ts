@@ -79,6 +79,7 @@ async function loadRuntime(
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
       routingTriage,
@@ -102,7 +103,7 @@ async function loadRuntime(
     import("../agent/session.js"),
     import("../agent/runtime.js"),
   ]);
-  return { AgentSession, resetSessionsForTests, runTurn };
+  return { AgentSession, resetSessionsForTests, runTurn, workspacePath: tempDir };
 }
 
 /** The one `routing_triage_decided` row, or undefined. */
@@ -140,7 +141,7 @@ describe("routingTriage: shadow", () => {
     // routingTier:false is the deployed Claude-preset shape. The call-site fallback is what
     // makes the lane reachable there at all; without it this test finds zero calls, which is
     // precisely the production state the audit recorded for the judge and the receptionist.
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow", { routingTier: false });
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow", { routingTier: false });
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
@@ -151,7 +152,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -169,7 +170,7 @@ describe("routingTriage: shadow", () => {
   });
 
   it("logs the verdict and whether it agrees with the judge it would replace", async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow");
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
@@ -180,7 +181,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -203,7 +204,7 @@ describe("routingTriage: shadow", () => {
   });
 
   it("records a disagreement rather than hiding it", async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow");
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       // Triage says NOT source-sensitive; the judge says it is.
@@ -217,7 +218,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -229,7 +230,7 @@ describe("routingTriage: shadow", () => {
     // leaves the verdict at `false` — the same value as a genuine "not source-sensitive".
     // If eligibility alone decided comparability, a window of backend errors would show up
     // as the triage disagreeing, and the ">=95% agreement" gate would be measuring outages.
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow");
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       // Triage answers cleanly and says source-sensitive; the judge replies with no verdict
@@ -242,7 +243,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -262,7 +263,7 @@ describe("routingTriage: shadow", () => {
     // under any model preset. On a preset deployment every shadow row then read
     // judgeComparable:false — the agreement statistic the S4 gate is defined on had no
     // data at all, on exactly the deployment carrying the traffic.
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow", {
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow", {
       routingTier: false, presetFallback: true,
     });
     resetSessionsForTests();
@@ -275,7 +276,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -290,7 +291,7 @@ describe("routingTriage: shadow", () => {
   it("DISCRIMINANCE: with the fallback OFF and no tier, the judge stays unreachable", async () => {
     // Same configuration minus the flag. If this also reported a comparable judge, the
     // test above would be measuring the mock rather than the fallback.
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow", {
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow", {
       routingTier: false, presetFallback: false,
     });
     resetSessionsForTests();
@@ -303,7 +304,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -315,7 +316,7 @@ describe("routingTriage: shadow", () => {
   it("skips the classification entirely on a workflow step, which is already routed", async () => {
     // A scene step's agent set, task and deliverable were decided when the workflow was
     // authored. A four-step job would otherwise pay four extra routing-tier calls.
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow");
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
@@ -326,7 +327,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "scene", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "scene", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -335,7 +336,7 @@ describe("routingTriage: shadow", () => {
   });
 
   it("records a failed call as a failure, never as a neutral verdict", async () => {
-    const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime("shadow");
+    const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime("shadow");
     resetSessionsForTests();
     completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
       content: options?.responseFormat?.name === "routing_triage" ? "I'd say this is a research question." : "VERDICT: no",
@@ -346,7 +347,7 @@ describe("routingTriage: shadow", () => {
     streamMock.mockImplementation(() => textStream("Here is the answer."));
 
     await runTurn({
-      session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+      session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
       userMessage: QUESTION,
     });
 
@@ -361,7 +362,7 @@ describe("routingTriage: shadow", () => {
   it("changes nothing about the turn: same model calls, same tools, same answer", async () => {
     // The equivalence that makes shadow data trustworthy.
     async function runOnce(mode: "off" | "shadow") {
-      const { AgentSession, resetSessionsForTests, runTurn } = await loadRuntime(mode);
+      const { AgentSession, resetSessionsForTests, runTurn, workspacePath } = await loadRuntime(mode);
       resetSessionsForTests();
       completeMock.mockImplementation(async (_messages: unknown, _tools: unknown, _signal: unknown, options?: { responseFormat?: { name?: string } }) => ({
         content: options?.responseFormat?.name === "routing_triage" ? JSON.stringify(VERDICT) : "VERDICT: yes",
@@ -371,7 +372,7 @@ describe("routingTriage: shadow", () => {
       }));
       streamMock.mockImplementation(() => textStream("Here is the answer."));
       const result = await runTurn({
-        session: new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." }),
+        session: new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." }),
         userMessage: QUESTION,
       });
       const snapshot = {

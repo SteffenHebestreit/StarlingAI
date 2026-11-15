@@ -127,6 +127,7 @@ const WORKER_PIN = { enableThinking: false, reasoningEffort: "medium" } as const
 
 function writeTempConfig(tiers?: { routing?: string; synthesis?: string }, maxIterations = 1): void {
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: {
       defaultContainerized: false,
       defaults: { model: { ...(tiers ? { tiers } : {}) } },

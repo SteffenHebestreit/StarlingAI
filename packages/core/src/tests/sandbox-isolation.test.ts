@@ -22,7 +22,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "../tools/registry.js";
@@ -39,24 +39,46 @@ vi.mock("node:child_process", () => {
 const fakeOwners = new Map<string, number>();
 const fakeExisting = new Set<string>();
 const norm = (p: unknown) => String(p).replace(/\\/g, "/").replace(/\/+$/, "");
-/** A path of the compose layout (/workspace/...), which the gateway would see but this machine does not. */
-const isComposePath = (p: unknown) => norm(p) === "/workspace" || norm(p).startsWith("/workspace/");
+/** "/workspace" as the code under test resolves it: itself on Linux, the root of the current drive on
+ *  Windows (F:\workspace), a real directory there that every checkout on the drive shares. */
+const RESOLVED_COMPOSE_ROOT = norm(resolve("/workspace"));
+/** A path of the compose layout (/workspace/...), which the gateway would see but this machine does
+ *  not, as "/workspace/..." whether it came resolved or not; null for any other path. */
+function composePath(p: unknown): string | null {
+  const path = norm(p);
+  for (const root of ["/workspace", RESOLVED_COMPOSE_ROOT]) {
+    if (path === root || path.startsWith(`${root}/`)) return `/workspace${path.slice(root.length)}`;
+  }
+  return null;
+}
+const isComposePath = (p: unknown) => composePath(p) !== null;
+const missing = (path: unknown) => Object.assign(new Error(`ENOENT: ${String(path)}`), { code: "ENOENT" });
 
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
   const statSync = vi.fn((path: Parameters<typeof real.statSync>[0], options?: Parameters<typeof real.statSync>[1]) => {
-    const uid = fakeOwners.get(norm(path));
+    const uid = fakeOwners.get(composePath(path) ?? norm(path));
     if (uid !== undefined) return { uid, gid: uid } as ReturnType<typeof real.statSync>;
-    if (isComposePath(path)) throw Object.assign(new Error(`ENOENT: ${String(path)}`), { code: "ENOENT" });
+    if (isComposePath(path)) throw missing(path);
     return real.statSync(path, options);
   });
-  const existsSync = vi.fn((path: Parameters<typeof real.existsSync>[0]) =>
-    isComposePath(path) ? fakeExisting.has(norm(path)) : real.existsSync(path));
+  const existsSync = vi.fn((path: Parameters<typeof real.existsSync>[0]) => {
+    const compose = composePath(path);
+    return compose !== null ? fakeExisting.has(compose) : real.existsSync(path);
+  });
   // A compose-layout directory is never created on this machine (on Windows "/workspace" is the
-  // root of the current drive).
+  // root of the current drive), nor resolved: it is not there, as on a Linux runner.
   const mkdirSync = vi.fn((path: Parameters<typeof real.mkdirSync>[0], options?: Parameters<typeof real.mkdirSync>[1]) =>
     isComposePath(path) ? undefined : real.mkdirSync(path, options));
-  return { ...real, statSync, existsSync, mkdirSync, default: { ...real, statSync, existsSync, mkdirSync } };
+  const realpathSync = Object.assign(
+    vi.fn((path: Parameters<typeof real.realpathSync>[0], options?: Parameters<typeof real.realpathSync>[1]) => {
+      if (isComposePath(path)) throw missing(path);
+      return real.realpathSync(path, options);
+    }),
+    { native: real.realpathSync.native },
+  );
+  const spies = { statSync, existsSync, mkdirSync, realpathSync };
+  return { ...real, ...spies, default: { ...real, ...spies } };
 });
 
 const HOST_SOURCE = "/opt/deploy/repo";

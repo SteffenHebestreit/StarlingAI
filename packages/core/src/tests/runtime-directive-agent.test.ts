@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -298,9 +298,13 @@ const CODE_ANALYST = {
   maxIterations: 4,
 };
 
+const tempDirs: string[] = [];
+
 async function loadRuntime(extra: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sai-directive-"));
+  tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     ...extra,
   }), "utf8");
@@ -347,6 +351,7 @@ describe("a turn the user directed to one agent", () => {
     specialistRuns.ran.length = 0;
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   it("forces the delegation to that agent, then answers freely from its result", async () => {
