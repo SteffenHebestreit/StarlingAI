@@ -23,6 +23,7 @@ import { parseArgs } from "node:util";
 import { stampBuildRevision } from "./build-provenance.mjs";
 import { PRODUCT } from "./product.mjs";
 import { COMPANIONS_FILE, companionCompose, readCompanionStacks, servicesToKeepRunning } from "./companion-stacks.mjs";
+import { BASE_COMPOSE_FILE, OVERRIDE_COMPOSE_FILE, composeFileArgs } from "./compose-files.mjs";
 
 // The environment `sai` was started with, before loadDotEnv adds this stack's .env to it. A companion
 // stack's compose reads its own .env, and a variable of ours of the same name would override it.
@@ -220,8 +221,9 @@ async function cmdStart() {
   // Workspace mount source (WSL path translation)
   process.env.SAI_WORKSPACE_MOUNT_SOURCE = resolveWorkspaceMount();
 
-  // Compose file stack
-  const composeFiles = ["-f", "docker-compose.yml"];
+  // Compose file stack: overlays this run adds; composeFileArgs below puts docker-compose.yml in
+  // front and docker-compose.override.yml, when there is one, last.
+  const composeOverlays = [];
 
   // Document-RAG stack (engram + reranker) is behind the `rag` profile, OFF by
   // default so a plain start works on any machine (the reranker reserves an NVIDIA
@@ -261,7 +263,7 @@ async function cmdStart() {
     profileArgs.push("--profile", "comfyui");
   }
   const useGpu = (wantRag || wantLaya || wantComfy) && gpuAvailable();
-  if (useGpu) composeFiles.push("-f", "docker-compose.gpu.yml");
+  if (useGpu) composeOverlays.push("docker-compose.gpu.yml");
   if (wantRag) {
     profileArgs.push("--profile", "rag");
     ok(useGpu
@@ -281,6 +283,8 @@ async function cmdStart() {
     else warn("ComfyUI enabled without an NVIDIA GPU — it runs on the CPU, far too slow for real work");
   }
 
+  const composeFiles = composeFileArgs(composeOverlays);
+  noteComposeOverride(composeFiles);
   const dc = (...args) => ["docker", "compose", ...composeFiles, ...profileArgs, ...args];
 
   // Wipe volumes + host flat-file state if --fresh (a true clean slate, mirroring
@@ -474,16 +478,19 @@ async function cmdStop() {
     strict: false,
   });
 
-  const composeFiles = ["-f", "docker-compose.yml"];
+  const composeOverlays = [];
   const allProfiles = ["--profile", "pentest", "--profile", "computer-desktop", "--profile", "rag", "--profile", "laya", "--profile", "comfyui", "--profile", "harness-lab"];
   // The e2e test services (`pnpm e2e:env up`) run in this project on the stack's networks;
   // `down` has to remove them too, or it cannot remove those networks.
   if (existsSync("docker-compose.e2e.yml")) {
-    composeFiles.push("-f", "docker-compose.e2e.yml");
+    composeOverlays.push("docker-compose.e2e.yml");
     allProfiles.push("--profile", "e2e");
   }
+  // docker-compose.override.yml as well, when there is one: `sai start` started its services.
+  const composeFiles = composeFileArgs(composeOverlays);
 
   hdr(`Stopping ${PRODUCT.name}...`);
+  noteComposeOverride(composeFiles);
   ensureDockerDaemon();
   ensureInternalSecrets(); // compose `down` interpolates the same `${VAR:?}` tokens
   // First the companion stacks: one on the gateway's network keeps `down` from removing it. Their
@@ -527,6 +534,8 @@ async function cmdWipe() {
   }
   ensureDockerDaemon();
 
+  // No `-f` in these calls: without one, Compose reads docker-compose.yml and a
+  // docker-compose.override.yml next to it on its own.
   const dcExec = (label, service, shellCmd) => {
     try {
       execSync(`docker compose exec -T ${service} ${shellCmd}`, { stdio: ["ignore", "pipe", "pipe"] });
@@ -848,6 +857,8 @@ ${BOLD}Commands:${RESET}
                                        reachable from the gateway under their alias)
     --all                              Include all remaining optional services and
                                        the companion stacks
+                                     start and stop also load docker-compose.override.yml
+                                     when it exists, last, after docker-compose.yml
   stop  [--volumes]                  Stop services and companion stacks (--volumes wipes DB volumes incl. engram RAG, flat-file memory, uploaded files; companions keep their data)
   wipe  --yes                        Wipe runtime DATA in place (Redis, Postgres
                                      incl. pgvector, QuestDB, MemGraph, audit log)
@@ -1031,6 +1042,11 @@ function loadCompanionStacks() {
  */
 function runCompanion(stack, args, { override = true, keepRunning = [] } = {}) {
   return run([...companionCompose(stack, GATEWAY_NETWORK, { override, keepRunning }), ...args], undefined, { env: HOST_ENV, cwd: dirname(resolve(stack.compose)) });
+}
+
+/** Says so when the compose files include docker-compose.override.yml (scripts/compose-files.mjs). */
+function noteComposeOverride(composeFiles) {
+  if (composeFiles.includes(OVERRIDE_COMPOSE_FILE)) info(`${OVERRIDE_COMPOSE_FILE} found — loaded last, after ${BASE_COMPOSE_FILE}`);
 }
 
 /** The services of a companion stack to give a restart policy, read from its resolved compose config; none when it cannot be read. */

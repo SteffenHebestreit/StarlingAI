@@ -262,7 +262,12 @@ connect it via configuration:
 - **A2A peer**: expose a whole agent (agent-card discovery, `tasks/send`);
   register under `a2a.peers`.
 - **docker-compose overlay**: add `docker-compose.<name>.yml` next to the
-  base file; never edit the base compose files.
+  base file; never edit the base compose files. `docker-compose.override.yml`
+  is the one overlay `sai start`, `sai stop` and the one-click launchers load
+  on their own (last, so its settings win); pass any other with `-f`. An
+  overlay's `tmpfs` and `ports` entries are added to the base file's, not
+  swapped in: never list a tmpfs path again that the base already mounts
+  (the web service's `/var/cache/nginx`; resize it with `SAI_WEB_TMPFS_SIZE`).
 
 Zero code changes in either repo; the swarm discovers the capability from
 config.

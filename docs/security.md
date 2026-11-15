@@ -257,6 +257,24 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 
 ---
 
+## Dashboard Proxy: No Request Data on Disk
+
+The web container's nginx (`docker/web/nginx.conf`) sits between the browser and the gateway. With nginx's defaults it writes a request body over 8 KB (two memory pages; 16 KB on some 64-bit platforms), and the part of a proxied response the client is too slow to take, to temp files under `/var/cache/nginx`: uploads and answers carrying personal data would land on the container's disk, where a deleted temp file stays recoverable. The shipped setup keeps them in memory:
+
+- `docker-compose.yml` mounts `/var/cache/nginx`, where every nginx temp path of the image lives, as a tmpfs of `SAI_WEB_TMPFS_SIZE` (128 MB by default). It counts toward `SAI_WEB_MEM_LIMIT`, and `memswap_limit` equal to that limit keeps it out of swap.
+- `proxy_max_temp_file_size 0`: a proxied response is never written to a temp file. Once nginx's in-memory buffers are full it waits for the client, and the gateway waits with it.
+- Request bodies stay buffered (the default) on purpose. nginx then passes a chunked upload on with a `Content-Length`, which the gateway's size check reads; with `proxy_request_buffering off` a chunked body would reach the gateway without one and skip that check.
+
+**Sizing the tmpfs.** The tmpfs is one pool for all requests. While it is full, every request with a body over 8 KB gets a 500 (uploads, voice recordings, long JSON bodies), not only the one that filled it, until the requests holding it end; the container keeps running. It holds `SAI_WEB_TMPFS_SIZE` divided by the body size at once: two bodies at the 64 MB cap on `/api/`, six at the gateway's default 20 MB upload limit. Size it for the uploads you expect at once, at least the 64 MB cap and below `SAI_WEB_MEM_LIMIT` (raise that with it).
+
+nginx receives the whole body before the gateway, its login check included, sees the request, so anyone who can reach port 3001 can keep the pool full with a few slow uploads: `client_body_timeout` times only the pause between two reads, not the whole upload. With the temp files on disk the same uploads could fill the host's disk instead. Keep port 3001 on `127.0.0.1` (the default `SAI_BIND_HOST`). Where other machines must reach it, put a proxy in front that limits the uploads one client may run at once (for nginx, `limit_conn` keyed on `$binary_remote_addr` for `/api/`). The shipped `nginx.conf` sets no such limit: behind a proxy it sees only the proxy's address and would count all users as one.
+
+**Overrides.** Change the size with `SAI_WEB_TMPFS_SIZE`. A `docker-compose.override.yml` must not list `/var/cache/nginx` under the `web` service's `tmpfs` again: Compose appends an override's `tmpfs` entries to the base file's, and two mounts on one path are refused or lose `size` and `mode`. To replace the list, write `tmpfs: !override [...]`.
+
+A reverse proxy you put in front of the stack (for TLS, say) buffers in the same way: keep its temp files in memory too (for nginx, the settings above).
+
+---
+
 ## Security Checklist for Production
 
 - [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing or shorter than 32 chars — there is no shared default to replace, but verify the value was not copied between environments.
@@ -267,5 +285,6 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 - [ ] Mount `/data` as a named Docker volume with restricted host permissions
 - [ ] Do not expose ports 8765 or 5432 to the public internet — reverse proxy with TLS
 - [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
+- [ ] Keep every proxy's temp files off disk: the web container's `/var/cache/nginx` is a tmpfs ([above](#dashboard-proxy-no-request-data-on-disk)), and a TLS proxy in front needs the same
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals

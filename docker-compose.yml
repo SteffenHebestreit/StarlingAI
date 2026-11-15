@@ -285,8 +285,20 @@ services:
     restart: unless-stopped
     # nginx + static SPA; 256m is generous. Cap prevents a runaway proxy buffer
     # from competing with the gateway for host memory. Tune via SAI_WEB_MEM_LIMIT.
+    # The tmpfs below counts toward it; memswap_limit equal to it keeps both out of swap.
     mem_limit: ${SAI_WEB_MEM_LIMIT:-256m}
     memswap_limit: ${SAI_WEB_MEM_LIMIT:-256m}
+    # nginx's temp files in memory, never on disk: a request body over 8 KB (two memory pages)
+    # is buffered in /var/cache/nginx before it is passed to the gateway, and every temp path of
+    # the image is under it (docker/web/nginx.conf has the rest). It is one pool for all requests:
+    # while it is full, every request with a body over 8 KB gets a 500. It holds SAI_WEB_TMPFS_SIZE
+    # / body size bodies at once (two at the 64m cap of /api/, six at the gateway's default 20 MB
+    # upload limit), so size it for the uploads you expect at once, at least 64m and below
+    # SAI_WEB_MEM_LIMIT. Resize it with SAI_WEB_TMPFS_SIZE; a docker-compose.override.yml must not
+    # list /var/cache/nginx under tmpfs again. Compose appends an override's tmpfs entries, and two
+    # mounts on one path are refused or lose size and mode; `tmpfs: !override [...]` replaces the list.
+    tmpfs:
+      - /var/cache/nginx:size=${SAI_WEB_TMPFS_SIZE:-128m},mode=0755
     ports:
       - "${SAI_BIND_HOST:-127.0.0.1}:3001:3000"   # Host 3001 → container 3000
     networks:
