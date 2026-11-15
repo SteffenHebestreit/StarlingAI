@@ -21,7 +21,7 @@ Every public schema field, where it is declared, and how many production files r
 | `after` | packages/core/src/config/schema.ts:1585 | 335 |
 | `agents` | packages/core/src/config/schema.ts:1573 | 208 |
 | `alertmanager` | packages/core/src/config/schema.ts:1218 | 1 |
-| `all` | packages/core/src/config/schema.ts:1371 | 350 |
+| `all` | packages/core/src/config/schema.ts:1371 | 351 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1391 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1334 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -106,7 +106,7 @@ Every public schema field, where it is declared, and how many production files r
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1696 | 1 |
 | `container` | packages/core/src/config/schema.ts:775 | 89 |
 | `contextWindow` | packages/core/src/config/schema.ts:128 | 14 |
-| `control` | packages/core/src/config/schema.ts:1844 | 69 |
+| `control` | packages/core/src/config/schema.ts:1844 | 70 |
 | `coordinatorToolCaps` | packages/core/src/config/schemas/orchestration.ts:956 | 4 |
 | `corsAllowedOrigins` | packages/core/src/config/schema.ts:375 | 2 |
 | `cpus` | packages/core/src/config/schema.ts:895 | 11 |
@@ -214,7 +214,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:790 | 136 |
 | `http` | packages/core/src/config/schema.ts:835 | 100 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1392 | 20 |
-| `id` | packages/core/src/config/schema.ts:421 | 376 |
+| `id` | packages/core/src/config/schema.ts:421 | 377 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1439 | 2 |
 | `image` | packages/core/src/config/schema.ts:763 | 116 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -314,7 +314,7 @@ Every public schema field, where it is declared, and how many production files r
 | `minStepsToAuthor` | packages/core/src/config/schema.ts:1622 | 2 |
 | `minVramMb` | packages/core/src/config/schema.ts:905 | 1 |
 | `mode` | packages/core/src/config/schema.ts:554 | 164 |
-| `model` | packages/core/src/config/schema.ts:1317 | 329 |
+| `model` | packages/core/src/config/schema.ts:1317 | 330 |
 | `modelModeration` | packages/core/src/config/schema.ts:1313 | 4 |
 | `modelPresets` | packages/core/src/config/schema.ts:1880 | 1 |
 | `modelPresetScope` | packages/core/src/config/schema.ts:1895 | 5 |
@@ -364,7 +364,7 @@ Every public schema field, where it is declared, and how many production files r
 | `planFirst` | packages/core/src/config/schemas/orchestration.ts:21 | 1 |
 | `planRoundFold` | packages/core/src/config/schemas/orchestration.ts:65 | 10 |
 | `plugins` | packages/core/src/config/schema.ts:2141 | 15 |
-| `points` | packages/core/src/config/schemas/decisions.ts:75 | 72 |
+| `points` | packages/core/src/config/schemas/decisions.ts:75 | 73 |
 | `pollIntervalMs` | packages/core/src/config/schemas/channels.ts:66 | 4 |
 | `port` | packages/core/src/config/schema.ts:359 | 42 |
 | `primary` | packages/core/src/config/schema.ts:117 | 74 |
