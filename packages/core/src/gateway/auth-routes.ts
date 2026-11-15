@@ -73,14 +73,16 @@ export function registerAuthRoutes(app: Hono): void {
   // A sign-in that does not end in a token hands the login screen `sai_error`: the refusal's
   // code (OidcRefusalCode), or "sso_failed" for anything else. Only the code: the subject, the
   // account id and the reason stay in the log and the audit.
+  // The public base reads auth.oidc, which throws while it is absent, so it is resolved only after
+  // the provider and state checks: an unauthenticated request then gets the login route's 404 (or a
+  // 400 for a state no login stashed) rather than a 500 and a stack trace in the log.
   app.get(OIDC_CALLBACK_PATH, async (c) => {
     const auth = getConfig().auth;
-    const origin = new URL(c.req.url).origin;
-    const base = oidcPublicBase(origin);
     if (!auth.enabled || auth.provider !== "oidc") return c.json({ error: "OIDC login is not enabled" }, 404);
     const state = c.req.query("state");
     const codeVerifier = state ? takeLoginState(state) : null;
     if (!state || !codeVerifier) return c.json({ error: "Invalid or expired login state" }, 400);
+    const base = oidcPublicBase(new URL(c.req.url).origin);
     try {
       const query = new URL(c.req.url).searchParams.toString();
       const currentUrl = `${base}${OIDC_CALLBACK_PATH}?${query}`;

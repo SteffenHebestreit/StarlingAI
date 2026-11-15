@@ -118,11 +118,12 @@ export async function getOidcDiscovery(): Promise<oidc.Configuration> {
   return config;
 }
 
-/** Test-only: drop the cached discovery + service token. */
+/** Test-only: drop the cached discovery + service token, and any pending sign-ins. */
 export function _resetOidcForTests(): void {
   _discovery = null;
   _serviceToken = null;
   _jwks = null;
+  _loginStates.clear();
 }
 
 // ── Human SSO (authorization-code + PKCE) ───────────────────────────────────────
@@ -151,11 +152,35 @@ export function oidcRedirectUri(requestOrigin?: string): string {
 interface LoginStateEntry { codeVerifier: string; createdAt: number; }
 const _loginStates = new Map<string, LoginStateEntry>();
 const LOGIN_STATE_TTL_MS = 600_000; // 10 minutes
+/**
+ * The most sign-ins that can be pending at once. The login route is public and every call stashes
+ * an entry for the TTL, so without a cap anyone could grow the store without bound. Past the cap
+ * the oldest pending sign-in is dropped; its callback then gets the route's 400 and the person
+ * starts over.
+ */
+export const MAX_PENDING_LOGIN_STATES = 10_000;
 
 export function stashLoginState(state: string, codeVerifier: string): void {
-  const cutoff = Date.now() - LOGIN_STATE_TTL_MS;
-  for (const [k, v] of _loginStates) if (v.createdAt < cutoff) _loginStates.delete(k);
-  _loginStates.set(state, { codeVerifier, createdAt: Date.now() });
+  const now = Date.now();
+  // A Map iterates in insertion order, which is creation order (a re-stash is moved to the back
+  // below), so the expired entries sit at the front: the sweep stops at the first live one rather
+  // than walking the whole store on every login.
+  for (const [k, v] of _loginStates) {
+    if (now - v.createdAt <= LOGIN_STATE_TTL_MS) break;
+    _loginStates.delete(k);
+  }
+  _loginStates.delete(state);
+  while (_loginStates.size >= MAX_PENDING_LOGIN_STATES) {
+    const oldest = _loginStates.keys().next();
+    if (oldest.done) break;
+    _loginStates.delete(oldest.value);
+  }
+  _loginStates.set(state, { codeVerifier, createdAt: now });
+}
+
+/** Test-only: how many sign-ins are pending. */
+export function _pendingLoginStatesForTests(): number {
+  return _loginStates.size;
 }
 
 /** Consume the stored verifier for `state` (single-use). Null if missing/expired. */

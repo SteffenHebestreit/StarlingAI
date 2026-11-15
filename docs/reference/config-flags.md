@@ -18,7 +18,7 @@ Every public schema field, where it is declared, and how many production files r
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:769 | 1 |
 | `admin` | packages/core/src/config/schema.ts:452 | 61 |
-| `after` | packages/core/src/config/schema.ts:1585 | 335 |
+| `after` | packages/core/src/config/schema.ts:1585 | 336 |
 | `agents` | packages/core/src/config/schema.ts:1573 | 208 |
 | `alertmanager` | packages/core/src/config/schema.ts:1218 | 1 |
 | `all` | packages/core/src/config/schema.ts:1371 | 351 |
