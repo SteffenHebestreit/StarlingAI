@@ -42,6 +42,7 @@ import { runWithRequestContext } from "../runtime/request-context.js";
 import { userWorkspaceRoot } from "../tools/workspace-path.js";
 import type { Identity } from "../runtime/accounts.js";
 import { logAudit } from "../audit/logger.js";
+import { screenWorkflowParams, templateParamNames, workflowParamRefusalMessage } from "../guardrails/workflow-params.js";
 import { childLogger } from "../logger.js";
 import { PRODUCT } from "../product/index.js";
 
@@ -267,7 +268,7 @@ function sceneInputSchema(scene: SceneSummary): Record<string, unknown> {
   }
   properties["context"] = {
     type: "string",
-    description: "Optional supporting context appended to the scene's task template.",
+    description: "Optional supporting context appended to the scene's task template. It is screened for prompt injection and may be at most guardrails.maxInputLength characters long (32000 by default).",
   };
   return {
     type: "object",
@@ -413,11 +414,14 @@ async function runSceneCall(
   // guard matches the advertised required-param schema.  Unknown args are ignored so
   // an MCP client cannot smuggle template variables.
   const params: Record<string, string> = {};
+  // What the client supplied, apart from the declared defaults: untrusted input, screened below.
+  const supplied: Record<string, string> = {};
   const missingRequired: string[] = [];
   for (const [paramName, param] of Object.entries(scene.params ?? {})) {
     const provided = args[paramName];
     if (typeof provided === "string" && provided.length > 0) {
       params[paramName] = provided;
+      supplied[paramName] = provided;
     } else if (param.default !== undefined) {
       params[paramName] = param.default;
     } else {
@@ -427,8 +431,17 @@ async function runSceneCall(
   if (missingRequired.length > 0) {
     return errorResult(`Scene '${sceneName}' is missing required param(s): ${missingRequired.join(", ")}`);
   }
-  const renderedTask = renderTemplate(scene.task, params);
   const context = typeof args["context"] === "string" ? args["context"] : undefined;
+  // The scene's task is trusted, the client's values are not: the params its task reads are
+  // screened, and so is the context, which goes into the same message as the rendered task.
+  const screen = screenWorkflowParams(context !== undefined ? { ...supplied, context } : supplied, {
+    source: "mcp",
+    workflow: sceneName,
+    taskParams: new Set([...templateParamNames(scene.task), "context"]),
+    ...(ctx.userId ? { userId: ctx.userId } : {}),
+  });
+  if (!screen.ok) return errorResult(workflowParamRefusalMessage(sceneName, screen));
+  const renderedTask = renderTemplate(scene.task, params);
 
   // Scenes typically bootstrap into the assistant orchestrator, but for the
   // MCP entry path we delegate to the configured `bootstrapAgent` if any,

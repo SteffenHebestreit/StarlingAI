@@ -54,6 +54,7 @@ import { requesterApprovalCallback } from "../approval/routed.js";
 import { validTimeZone } from "../runtime/user-time.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
+import { jobTaskParams, screenWorkflowParams, templateParamNames, workflowParamRefusalMessage } from "../guardrails/workflow-params.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
 import { turnSteeringManager, unconsumedSteeringOf, type SteeringMessage } from "../agent/turn-steering.js";
 import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits, userInputBroker, type UserInputCaller } from "../agent/user-input-broker.js";
@@ -526,6 +527,26 @@ export class RpcConnection implements AccountConnection {
     const signedIn = this.callerAccess() === "ok";
     const identity = this.connIdentity();
     return { ...(identity ? { identity } : {}), ...(signedIn && this.connRole ? { role: this.connRole } : {}) };
+  }
+
+  /**
+   * Screens the parameters a `/job` or `/run` command carries, those the workflow's trusted task
+   * text reads (`taskParams`), before they are templated into it (guardrails/workflow-params.ts).
+   * On a refusal the turn is answered `blocked` with the reason and true is returned: nothing is
+   * queued or run.
+   */
+  private refusedWorkflowParams(requestId: string, sessionId: string, workflow: string, params: Record<string, string>, taskParams: ReadonlySet<string>): boolean {
+    const userId = this.connIdentity()?.userId;
+    const screen = screenWorkflowParams(params, {
+      source: "rpc",
+      workflow,
+      taskParams,
+      ...(sessionId ? { sessionId } : {}),
+      ...(userId ? { userId } : {}),
+    });
+    if (screen.ok) return false;
+    this.sendEvent({ type: "status", data: { status: "blocked", requestId, response: workflowParamRefusalMessage(workflow, screen) } });
+    return true;
   }
 
   /**
@@ -1108,6 +1129,7 @@ export class RpcConnection implements AccountConnection {
 
           try {
             const params = parseKeyValuePairs(jobMatch[2] ?? "");
+            if (this.refusedWorkflowParams(requestId, sessionId, jobName, params, jobTaskParams(job))) return { accepted: false, requestId };
             const steps = resolveJobSteps(job, params);
             const connIdentity = this.connIdentity();
             const queued = await createJob({
@@ -1200,6 +1222,7 @@ export class RpcConnection implements AccountConnection {
 
           // Parse inline key=value params and merge over scene-declared defaults
           const inlineParams = parseKeyValuePairs(runMatch[2] ?? "");
+          if (this.refusedWorkflowParams(requestId, sessionId, sceneName, inlineParams, templateParamNames(scene.task))) return { accepted: false, requestId };
           const mergedParams: Record<string, string> = {};
           for (const [key, def] of Object.entries(scene.params ?? {})) {
             if (def.default !== undefined) mergedParams[key] = def.default;

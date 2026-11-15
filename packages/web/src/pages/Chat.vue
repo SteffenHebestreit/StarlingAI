@@ -1438,6 +1438,7 @@ import { useEscapeToClose } from "@/composables/useEscapeToClose";
 import { useFocusTrap } from "@/composables/useFocusTrap";
 import { confirmAction } from "@/composables/useConfirm";
 import { browserLanguage, chatText } from "@/composables/chatText";
+import { parseJobCommand, submitJobCommand } from "@/composables/jobCommand";
 import { podLanes } from "@/composables/podLanes";
 import { followGrowth, LANDING_FOLLOW_MS } from "@/composables/scrollFollow";
 import SwarmStatusPanel from "@/components/SwarmStatusPanel.vue";
@@ -3286,13 +3287,13 @@ async function sendMessage() {
     showSteeringNote(chatText.stillReadingAttachments(uiLanguage), "error");
     return;
   }
-  const jobMatch = !hasImages && !hasDocs
-    ? trimmedText.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s)
-    : null;
-  if (jobMatch && jobMatch[1]?.toLowerCase() !== "help") {
+  const jobCommand = !hasImages && !hasDocs ? parseJobCommand(trimmedText) : null;
+  if (jobCommand) {
     inputText.value = "";
-    const params = parseInlineParams(jobMatch[2] ?? "");
-    await scenesStore.runJob(jobMatch[1]!, Object.keys(params).length > 0 ? params : undefined);
+    // Queued over REST, not as a turn: a job that was not queued (unknown, or a parameter the
+    // input guardrail refused) says why here and hands the command back (composables/jobCommand.ts).
+    const outcome = await submitJobCommand(trimmedText, jobCommand, scenesStore.runJob, () => scenesStore.runError);
+    if (!outcome.queued) giveBackUnsentText(outcome.text, new Error(outcome.reason));
     return;
   }
 
@@ -3593,14 +3594,6 @@ function isSceneRunning(name: string): boolean {
 
 function isJobRunning(name: string): boolean {
   return scenesStore.runningJobs.some((job) => job.definitionType === "job" && job.sceneName === name);
-}
-
-function parseInlineParams(raw: string): Record<string, string> {
-  const params: Record<string, string> = {};
-  for (const match of raw.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)) {
-    params[match[1]!] = (match[2] ?? "").replace(/^"|"$/g, "").replace(/\\"/g, '"');
-  }
-  return params;
 }
 
 function formatSceneName(name: string | undefined): string {

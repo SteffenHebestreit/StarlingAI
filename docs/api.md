@@ -177,6 +177,8 @@ Example response shape:
 | `GET` | `/api/scenes/jobs/:jobId` | poll a scene job |
 | `POST` | `/api/scenes/jobs/:jobId/cancel` | cancel a queued or running scene job |
 
+`POST /api/scenes/:name/run` (and `POST /api/jobs/:name/run`) take optional `{ "params": { "key": "value" } }`. Each value a scene's task reads (for a job, through a step's `params`) is screened as untrusted input before it is templated in: prompt-injection patterns, and at most `guardrails.maxInputLength` characters (32000 by default). A refused value answers `400` with `{ error, param }` and queues nothing. A key no task reads is not screened. The same screen runs on `/run` and `/job` in `chat.send`, where a refused parameter answers `accepted: false` with a `blocked` status that names it, and on an MCP `scene__<name>` call, where it covers the `context` as well and a refusal answers `isError` (see [security.md](security.md#layer-1--input-scanner)).
+
 `POST /api/scenes/:name/run` returns immediately:
 
 ```json

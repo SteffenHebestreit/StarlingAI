@@ -40,6 +40,9 @@ export type CoreAuditEventType =
   | "tool_output_framing_neutralized"
   | "guardrail_blocked"
   | "guardrail_flagged"
+  /** A caller-supplied scene/job parameter refused by the input scanner before the run was queued
+   *  (guardrails/workflow-params.ts). Carries the parameter's name and patterns, never its value. */
+  | "workflow_param_blocked"
   /** The Laya decision layer answered, or was asked alongside, one decision point (decisions/decide.ts). */
   | "decision_point"
   /** A decision point's incumbent read by its logits, beside or instead of its parsed call (decisions/incumbent-readout.ts). */

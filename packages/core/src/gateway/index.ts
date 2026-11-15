@@ -74,6 +74,7 @@ import { HubVoiceError, cancelTraining, cloneHubVoice, deleteHubVoice, designHub
 import { resolveProviderEndpointForModel, syncChatProviderRuntimeStatus } from "../providers/index.js";
 import { logAudit } from "../audit/logger.js";
 import { checkInput } from "../guardrails/input.js";
+import { jobTaskParams, screenWorkflowParams, templateParamNames, workflowParamRefusalMessage } from "../guardrails/workflow-params.js";
 import { getConcurrencySnapshot, getGlobalConcurrencySnapshot } from "../swarm/concurrency.js";
 import { isSwarmBusConnected } from "../swarm/bus.js";
 import { getAgentCapabilitySnapshot } from "../swarm/capabilities.js";
@@ -3439,6 +3440,17 @@ export function createGateway() {
       }
     } catch { /* body is optional */ }
 
+    // The caller's values are untrusted, though the scene's task they are templated into is not.
+    const sceneParamScreen = screenWorkflowParams(bodyParams, {
+      source: "rest",
+      workflow: sceneName,
+      taskParams: templateParamNames(scene.task),
+      userId: runIdentity.userId,
+    });
+    if (!sceneParamScreen.ok) {
+      return c.json({ error: workflowParamRefusalMessage(sceneName, sceneParamScreen), param: sceneParamScreen.param }, 400);
+    }
+
     // Merge scene defaults with request params
     const mergedParams: Record<string, string> = {};
     for (const [key, def] of Object.entries(scene.params ?? {})) {
@@ -3540,6 +3552,17 @@ export function createGateway() {
         );
       }
     } catch { /* body is optional */ }
+
+    // The caller's values are untrusted, though the scene tasks they are templated into are not.
+    const jobParamScreen = screenWorkflowParams(bodyParams, {
+      source: "rest",
+      workflow: jobName,
+      taskParams: jobTaskParams(definition),
+      userId: runIdentity.userId,
+    });
+    if (!jobParamScreen.ok) {
+      return c.json({ error: workflowParamRefusalMessage(jobName, jobParamScreen), param: jobParamScreen.param }, 400);
+    }
 
     let steps;
     try {
