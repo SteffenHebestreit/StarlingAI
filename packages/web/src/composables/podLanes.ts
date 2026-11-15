@@ -1,10 +1,12 @@
 /**
- * Lanes for the chat page's round controls.
+ * Lanes for the chat page's round controls, where they are parked.
  *
- * The session, actions and composer buttons float over the page where the user parks them, by
- * default down the right edge — which is where the messages stand (pages/Chat.vue lays each side
- * out at its outer edge). A long question ran under the button beside it, its words covered. The
- * messages now keep a lane free at a side for the buttons parked there: this says how wide.
+ * On a narrow window the session, actions and message controls float over the page where the user
+ * parks them, by default down the right edge — which is where the messages stand (pages/Chat.vue
+ * lays each side out at its outer edge). A long question ran under the button beside it, its
+ * words covered. The messages keep a lane free at a side for the buttons parked there: this says
+ * how wide. (On a wide window the controls stand on an orbit round the orb, clear of the messages,
+ * and no lane is kept: composables/orbControls.ts.)
  *
  * Pure: the buttons' places and the messages' column in, the two lanes out.
  */

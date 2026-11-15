@@ -215,13 +215,13 @@ describe("the ring between the messages", () => {
   it("measures the band the chat page leaves free around the orb", () => {
     // 2000 × 1500: bubbles of 52rem are wider than the room, so each ends at the orb's zone.
     expect(freeHalfWidth(2000, 1500)).toBeCloseTo(0.24 * 1500 + 24);
-    // 1440 × 900: the room left is 460 px, more than 28rem, less than 52rem.
-    expect(freeHalfWidth(1440, 900)).toBeCloseTo(0.24 * 900 + 24);
+    // 1600 × 900: the room left is 520 px, more than 28rem, less than 52rem.
+    expect(freeHalfWidth(1600, 900)).toBeCloseTo(0.24 * 900 + 24);
     // A narrow window: the bubbles keep 28rem and come closer to the centre.
-    expect(freeHalfWidth(1100, 900)).toBeCloseTo(1100 / 2 - 20 - 448);
+    expect(freeHalfWidth(1100, 900)).toBeCloseTo(1100 / 2 - 40 - 448);
     expect(freeHalfWidth(900, 900)).toBe(0);
     // An ultrawide window: the bubbles stop at 52rem, far out at the edges.
-    expect(freeHalfWidth(3440, 1440)).toBeCloseTo(3440 / 2 - 20 - 832);
+    expect(freeHalfWidth(3440, 1440)).toBeCloseTo(3440 / 2 - 40 - 832);
   });
 
   it("keeps the ring and its labels inside that band, but never inside the orb", () => {
@@ -280,11 +280,12 @@ describe("labelPlacement", () => {
   });
 
   it("leaves a step a point where the messages leave its label no room", () => {
-    // 1280 × 800: 172 px free, the ring 116 px wide — beside the front there are 74 px left.
+    // 1280 × 800: 152 px free, the ring 116 px wide — beside the front there are 54 px left.
     const tightFree = freeHalfWidth(1280, 800);
     const tightRx = orbitGeometry(1280, 800, tightFree).rx;
     expect(labelPlacement(0.78 * tightRx, 0.62, tightRx, tightFree)).toBeNull();
-    expect(labelPlacement(0, 1, tightRx, tightFree)).toEqual({ lean: 0, maxWidth: LABEL_WIDEST });
+    // The front one is centred, half of it to each side: 144 px of room a side, so 288 in all.
+    expect(labelPlacement(0, 1, tightRx, tightFree)).toEqual({ lean: 0, maxWidth: 288 });
   });
 });
 

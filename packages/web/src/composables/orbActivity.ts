@@ -161,7 +161,7 @@ const CAMERA_Z = 5;
 const ORB_SCALE = 0.42;
 const BASE_HALF_TAN = Math.tan(Math.PI / 6);
 /** How far the orb's body reaches, in the orb's own units: out to its orbits (the middle one runs at 1.85). */
-const ORB_REACH = 1.9;
+export const ORB_REACH = 1.9;
 /** The step ring is tipped this far from edge-on: seen from the front it is about 0.28 as tall as wide. */
 const RING_TILT = Math.asin(0.28);
 
@@ -350,7 +350,9 @@ export function placeLabels(candidates: readonly LabelCandidate[]): Set<string> 
  */
 export function freeHalfWidth(width: number, height: number, rem = 16, lane = 0): number {
   if (width < 1100) return 0;
-  const inset = 1.25 * rem;
+  // The page's own margin and the message column's, 1.25rem each. (This counted one of the two,
+  // and at a bubble's 28rem or 52rem the band came out 20 px wider than it is.)
+  const inset = 2.5 * rem;
   const clear = 0.24 * height + 1.5 * rem;
   const row = width - 2 * inset;
   const bubble = Math.min(52 * rem, Math.max(28 * rem, row / 2 - clear - lane));

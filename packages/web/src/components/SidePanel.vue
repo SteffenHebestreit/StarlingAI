@@ -232,7 +232,7 @@ const hasContent = computed(() =>
 .sp-scrim {
   position: fixed;
   inset: 0;
-  /* above the floating HUD pods (220) so the open panel dims them too */
+  /* above the chat page's round controls (220) so the open panel dims them too */
   z-index: 221;
   background: rgba(0, 0, 0, 0.52);
   backdrop-filter: blur(2px);
@@ -297,7 +297,7 @@ const hasContent = computed(() =>
 }
 
 /* When the panel is open, the handle moves to the panel's left edge and
-   rises with it (closed it stays at 201, under the HUD pods). */
+   rises with it (closed it stays at 201, under the page's round controls). */
 .sp-handle--open {
   right: min(22rem, calc(100vw - 1.75rem)); /* matches panel width */
   z-index: 223;
@@ -334,8 +334,8 @@ const hasContent = computed(() =>
   top: 0;
   right: 0;
   bottom: 0;
-  /* above the floating HUD pods (220), below the nav scrim/panel (225/230) —
-     the open drawer always covers the draggable toggles */
+  /* above the page's round controls (220), below the nav scrim/panel (225/230) —
+     the open drawer always covers them */
   z-index: 222;
   /* never wider than the screen less the handle: at 22rem flat it overflowed a small phone */
   width: min(22rem, calc(100vw - 1.75rem));

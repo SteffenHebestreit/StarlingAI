@@ -22,8 +22,10 @@ import {
 } from "./shaders/orbitalSystem";
 import { ambientVertexShader, ambientFragmentShader } from "./shaders/ambientSystem";
 import {
-  HUD_RING_KINDS, SPHERE_FRAMES, SPHERE_RINGS, STEP_RINGS, hudRingFragmentShader, hudRingVertexShader, type HudRingSpec,
+  CONTROL_ORBIT_RING, HUD_RING_KINDS, NODE_ORBIT_ARC, NODE_RINGS, SPHERE_FRAMES, SPHERE_RINGS, STEP_RINGS,
+  hudRingFragmentShader, hudRingVertexShader, type HudRingSpec,
 } from "./shaders/hudRings";
+import { ringPosition } from "@/composables/orbActivity";
 
 /**
  * The step ring (composables/orbActivity.ts activityRing): its radius in orb units, how far it is
@@ -31,9 +33,18 @@ import {
  * `active`.
  */
 interface StepRingProp { radius: number; tilt: number; active: boolean }
-const props = withDefaults(defineProps<{ aiState?: string; ring?: StepRingProp }>(), {
+/**
+ * The page's controls on their orbit round the orb (composables/orbControls.ts): where each one
+ * stands on it, its face's radius in orb units, whether it is there at all, and whether the
+ * pointer or the keyboard is on it. The page draws the glyph and takes the click; the canvas
+ * draws the gimbal round it and its stretch of the orbit.
+ */
+interface ControlNodeProp { id: string; angle: number; radius: number; shown: boolean; lit: boolean }
+interface ControlsProp { orbit: { radius: number; tilt: number }; nodes: ControlNodeProp[] }
+const props = withDefaults(defineProps<{ aiState?: string; ring?: StepRingProp; controls?: ControlsProp | null }>(), {
   aiState: "default",
   ring: () => ({ radius: 2.4, tilt: Math.asin(0.28), active: false }),
+  controls: null,
 });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -139,6 +150,9 @@ const lineDetailUniform       = { value: 1 };
 const breathUniform           = { value: 0 };
 // How far the state lets the hologram's lines take the dust's colours (VisualState.lineTint).
 const lineTintUniform         = { value: 0 };
+// How far from the orb's centre the breath's crest reaches a control while the page names no
+// orbit (the controls are leaving): the orbit's usual radius, in orb units.
+const CONTROL_ORBIT_FALLBACK  = 2.5;
 
 // ─── Visual state ─────────────────────────────────────────────────────────────
 interface VisualState {
@@ -316,6 +330,25 @@ let sphereRings:   HudRing[] = [];
 let stepRings:     HudRing[] = [];
 let stepRadius     = 2.4;
 let stepAssemble   = 0;
+/**
+ * The page's controls (props.controls). Like the step ring they live outside the breathing orb
+ * group, at the orb's fixed scale, so each stays exactly where the page puts its button. A node is
+ * a group at its station, scaled to its face, holding its gimbal; its stretch of the orbit hangs in
+ * the orbit's own plane. `presence` is how far it is there (it is built and taken down like the
+ * step ring), `emphasis` how far the pointer has woken it, `phase` its own clock, which runs
+ * faster while it is awake.
+ */
+interface ControlNode {
+  id: string; group: THREE.Group; rings: HudRing[]; arc: HudRing;
+  presence: number; emphasis: number; phase: number; seed: number; placed: boolean;
+}
+let controlGroup:  THREE.Group;
+let controlOrbit:  THREE.Group;
+let controlNodes:  ControlNode[] = [];
+let orbitLine:     HudRing | null = null;   // the orbit's own faint line, there while the controls are
+let orbitPresence  = 0;
+let makeRing:      ((spec: HudRingSpec, parent: THREE.Object3D, margin: number) => HudRing) | null = null;
+const nodeTarget   = new THREE.Vector3();
 const RING_AXIS    = new THREE.Vector3(0, 0, 1);
 const swayEuler    = new THREE.Euler();
 const swayTurn     = new THREE.Quaternion();
@@ -702,7 +735,98 @@ function animate() {
     mesh.visible = stepAssemble > 0;
   }
 
+  // ── The page's controls on their orbit: each gimbal turns in place, quicker while the pointer
+  // is on it; a control comes and goes like the step ring, its stretch of the orbit drawn out
+  // from one end ──
+  const controls = props.controls;
+  if (controls) {
+    controlOrbit.rotation.x = Math.PI / 2 + controls.orbit.tilt;
+    controlOrbit.scale.setScalar(controls.orbit.radius);
+    for (const want of controls.nodes) {
+      if (!controlNodes.some((node) => node.id === want.id)) controlNodes.push(buildControlNode(want.id));
+    }
+  }
+  if (orbitLine) {
+    const there = controls ? 1 : 0;
+    orbitPresence += (there - orbitPresence) * Math.min(1, delta * (there ? 1.6 : 4));
+    if (there === 0 && orbitPresence < 0.004) orbitPresence = 0;
+    orbitLine.mesh.visible = orbitPresence > 0;
+    orbitLine.mesh.rotation.z = orbitLine.spec.spin * hudPhase;
+    const uniforms = (orbitLine.mesh.material as THREE.ShaderMaterial).uniforms;
+    uniforms["uFlow"]!.value       = orbitLine.spec.flow * hudPhase;
+    uniforms["uAssemble"]!.value   = orbitPresence;
+    // It steps back while a turn runs: the step ring is the line to follow then.
+    uniforms["uStrength"]!.value   = orbitLine.spec.strength * orbitPresence * (1 - 0.6 * stepAssemble);
+    uniforms["uWaveRadius"]!.value = controls?.orbit.radius ?? CONTROL_ORBIT_FALLBACK;
+  }
+  for (const node of controlNodes) {
+    const want = controls?.nodes.find((candidate) => candidate.id === node.id);
+    const shown = want?.shown ? 1 : 0;
+    node.presence += (shown - node.presence) * Math.min(1, delta * (shown ? 2.4 : 5));
+    if (shown === 0 && node.presence < 0.004) node.presence = 0;
+    node.emphasis += ((want?.lit ? 1 : 0) - node.emphasis) * Math.min(1, delta * 7);
+    node.phase += dt * (cv.frozenAnimation ? 0.15 : 1) * (1 + 2.6 * node.emphasis);
+    if (want && controls) {
+      const [x, y, z] = ringPosition(want.angle, controls.orbit);
+      nodeTarget.set(x, y, z);
+      // A resize moves the stations and the node follows without a jump; when it first appears
+      // it is simply there, not flown in from the orb's centre.
+      const follow = node.placed ? Math.min(1, delta * 9) : 1;
+      node.group.position.lerp(nodeTarget, follow);
+      node.group.scale.setScalar(node.group.scale.x + (want.radius - node.group.scale.x) * follow);
+      node.arc.mesh.rotation.z = want.angle - Math.PI * node.arc.spec.arc;
+      node.placed = true;
+    }
+    const visible = node.presence > 0;
+    node.group.visible = visible;
+    node.arc.mesh.visible = visible;
+    if (!visible) continue;
+    const glow = node.presence * (0.8 + 0.9 * node.emphasis);
+    const reach = controls?.orbit.radius ?? CONTROL_ORBIT_FALLBACK;
+    node.group.rotation.z = node.seed + 0.09 * node.phase;
+    for (const { pivot, mesh, spec, lean } of node.rings) {
+      swayEuler.set(
+        spec.wobble * Math.sin(node.phase * 0.37 + spec.seed),
+        spec.wobble * Math.cos(node.phase * 0.29 + spec.seed),
+        0,
+      );
+      pivot.quaternion.copy(lean).multiply(swayTurn.setFromEuler(swayEuler));
+      mesh.rotation.z = spec.spin * node.phase;
+      const uniforms = (mesh.material as THREE.ShaderMaterial).uniforms;
+      uniforms["uFlow"]!.value       = spec.flow * node.phase;
+      uniforms["uAssemble"]!.value   = node.presence;
+      uniforms["uStrength"]!.value   = spec.strength * glow;
+      uniforms["uWaveRadius"]!.value = reach;
+    }
+    const arcUniforms = (node.arc.mesh.material as THREE.ShaderMaterial).uniforms;
+    arcUniforms["uFlow"]!.value       = node.arc.spec.flow * node.phase;
+    arcUniforms["uAssemble"]!.value   = node.presence;
+    arcUniforms["uStrength"]!.value   = node.arc.spec.strength * glow;
+    arcUniforms["uWaveRadius"]!.value = reach;
+  }
+
   renderer.render(scene, camera);
+}
+
+/**
+ * One control's lights: its gimbal — the same two rings for every control, each leaning and
+ * turning its own way — and its stretch of the orbit. Its place and size come with the first frame.
+ */
+function buildControlNode(id: string): ControlNode {
+  const index = controlNodes.length;
+  const mirror = index % 2 ? -1 : 1;
+  const group = new THREE.Group();
+  group.visible = false;
+  controlGroup.add(group);
+  const rings = NODE_RINGS.map((spec) => makeRing!({
+    ...spec,
+    seed: spec.seed + index * 7.1,
+    spin: spec.spin * mirror,
+    normal: [spec.normal[0] * mirror, spec.normal[1], spec.normal[2]],
+  }, group, 0.45));
+  const arc = makeRing!({ ...NODE_ORBIT_ARC, seed: NODE_ORBIT_ARC.seed + index * 3.3 }, controlOrbit, 0.05);
+  arc.mesh.visible = false;
+  return { id, group, rings, arc, presence: 0, emphasis: 0, phase: index * 11.7, seed: index * 2.1, placed: false };
 }
 
 function startAnimation() {
@@ -851,7 +975,7 @@ onMounted(() => {
   // intensity and phase drive them, so a state change recolours them with the core. `margin` is
   // the room the mesh leaves round a ring for its halo and end points, which are a few pixels
   // wide whatever the ring's size: more of the ring's own units on a small ring.
-  const makeRing = (spec: HudRingSpec, parent: THREE.Object3D, margin: number): HudRing => {
+  const buildRing = (spec: HudRingSpec, parent: THREE.Object3D, margin: number): HudRing => {
     const reach = spec.width + margin;
     const mesh = new THREE.Mesh(
       new THREE.RingGeometry(Math.max(0.01, spec.radius - reach), spec.radius + reach, 192, 1),
@@ -907,13 +1031,24 @@ onMounted(() => {
       tumbleAxis: new THREE.Vector3(...frame.tumbleAxis).normalize(), tumbleSpeed: frame.tumbleSpeed,
     };
   });
-  sphereRings = SPHERE_RINGS.map((spec) => makeRing(spec, sphereFrames[spec.frame]!.group, 0.14));
+  sphereRings = SPHERE_RINGS.map((spec) => buildRing(spec, sphereFrames[spec.frame]!.group, 0.14));
   stepRadius = props.ring.radius;
   stepGroup = new THREE.Group();
   stepGroup.scale.setScalar(ORB_SCALE * stepRadius);
-  stepRings = STEP_RINGS.map((spec) => makeRing(spec, stepGroup, 0.06));
+  stepRings = STEP_RINGS.map((spec) => buildRing(spec, stepGroup, 0.06));
   for (const { mesh } of stepRings) mesh.visible = false;
   scene.add(stepGroup);
+
+  // The page's controls: their nodes are built as the page names them (animate), in the orb's
+  // units and outside its breath, with their orbit's plane as a group of its own.
+  makeRing = buildRing;
+  controlGroup = new THREE.Group();
+  controlGroup.scale.setScalar(ORB_SCALE);
+  controlOrbit = new THREE.Group();
+  controlGroup.add(controlOrbit);
+  scene.add(controlGroup);
+  orbitLine = buildRing(CONTROL_ORBIT_RING, controlOrbit, 0.04);
+  orbitLine.mesh.visible = false;
 
   // The dust: the body's clouds, each hanging in one of the sphere's frames so it turns with the
   // cage that holds it. The clouds share every uniform but their own frame's matrix, which the
@@ -979,13 +1114,16 @@ onUnmounted(() => {
   (ambientPoints?.material as THREE.Material | undefined)?.dispose();
   coreGlowMesh?.geometry.dispose();
   (coreGlowMesh?.material as THREE.Material | undefined)?.dispose();
-  for (const { mesh } of [...sphereRings, ...stepRings]) {
+  for (const { mesh } of [...sphereRings, ...stepRings, ...controlNodes.flatMap((node) => [...node.rings, node.arc]), ...(orbitLine ? [orbitLine] : [])]) {
     mesh.geometry.dispose();
     (mesh.material as THREE.Material).dispose();
   }
   sphereRings = [];
   stepRings = [];
   sphereFrames = [];
+  controlNodes = [];
+  orbitLine = null;
+  makeRing = null;
   renderer?.dispose();
 });
 
