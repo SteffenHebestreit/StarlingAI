@@ -42,7 +42,7 @@ async function loadModules() {
   process.env["SAI_SESSION_STORE"] = join(FILE_DIR, "sessions.json");
   process.env["SAI_MASTER_KEY"] = "m".repeat(32);
   process.env["SAI_CRED_STORE"] = join(FILE_DIR, PRODUCT.stateDirName, "credentials.enc");
-  const [rpc, authModule, loader, sessions, registry, { registerUserRoutes }, { registerWorkspaceRoutes }, connections, audit] = await Promise.all([
+  const [rpc, authModule, loader, sessions, registry, { registerUserRoutes }, { registerWorkspaceRoutes }, connections, audit, policies] = await Promise.all([
     import("../gateway/rpc.js"),
     import("../gateway/auth.js"),
     import("../config/loader.js"),
@@ -52,8 +52,9 @@ async function loadModules() {
     import("../gateway/workspace-routes.js"),
     import("../gateway/account-connections.js"),
     import("../audit/logger.js"),
+    import("../gateway/route-policies.js"),
   ]);
-  return { rpc, authModule, loader, sessions, registry, registerUserRoutes, registerWorkspaceRoutes, connections, audit };
+  return { rpc, authModule, loader, sessions, registry, registerUserRoutes, registerWorkspaceRoutes, connections, audit, policies };
 }
 
 beforeAll(async () => {
@@ -73,6 +74,7 @@ afterEach(async () => {
   mods.registry.resetAccountRegistryForTests();
   mods.loader.resetConfigForTests();
   mods.authModule.resetAuthStateForTests();
+  mods.policies._resetRoutePoliciesForTests();
   delete process.env["SAI_AUDIT_LOG"];
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -175,6 +177,40 @@ describe("a dashboard socket checks its caller before every message", () => {
     expect(await ids()).not.toContain(bobs.id);
     expect((await tab.call("session.get", { sessionId: bobs.id })).ok).toBe(false);
     expect(tab.ws.closed).toBeUndefined();
+  });
+
+  it("closes with 4403 once a /ws route policy refuses the role the store holds now", async () => {
+    // The upgrade applies the policy to the role a socket opens with; a role changed afterwards is
+    // checked against it again, on the next message and the next pushed event.
+    configure({ enabled: true, users: [root.record, alice.record] });
+    mods.policies.registerRoutePolicies("test-extension", [{ pattern: "/ws", denyRoles: ["viewer"] }]);
+    const tab = await openSocket("alice", alice.claims);
+    expect((await tab.call("session.list")).ok).toBe(true);
+
+    setRole("alice", "viewer");
+    const refused = await tab.call("session.list");
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toBe("Forbidden for this role");
+    expect(tab.ws.closed).toEqual({ code: 4403, reason: "Forbidden for this role" });
+    expect(await tab.call("session.list")).toBeUndefined();
+
+    // A listening socket: the next push finds the new role refused.
+    setRole("alice", "operator");
+    const watcher = await openSocket("alice", alice.claims);
+    const own = mods.sessions.createSession({ channel: "webchat", userId: "alice", account: alice.id, workspacePath: workspace });
+    expect((await watcher.call("audit.subscribe")).ok).toBe(true);
+    setRole("alice", "viewer");
+    const before = watcher.sent.length;
+    mods.audit.logAudit("tool_call_requested", { tool: "probe" }, { sessionId: own.id, userId: "alice" });
+    expect(watcher.sent.slice(before).some((message) => message["type"] === "audit.event")).toBe(false);
+    expect(watcher.ws.closed?.code).toBe(4403);
+
+    // A role the policy does not name keeps the socket.
+    setRole("alice", "operator");
+    const kept = await openSocket("alice", alice.claims);
+    setRole("alice", "admin");
+    expect((await kept.call("session.list")).ok).toBe(true);
+    expect(kept.ws.closed).toBeUndefined();
   });
 
   it("closes a listening socket when its account is deleted, and pushes nothing to it after", async () => {

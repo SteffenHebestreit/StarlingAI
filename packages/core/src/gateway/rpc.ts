@@ -22,6 +22,7 @@ import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, t
 import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
+import { decideRoutePolicyChain, routePolicyChain } from "./route-policies.js";
 import { callerMayUseSession } from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
@@ -378,6 +379,11 @@ function formatJobHelpResponse(jobName?: string): string {
   ].join("\n");
 }
 
+/** How a socket closes when its account no longer signs in, as a refused handshake. */
+const SIGNED_OUT_CLOSE = { code: 4401, reason: "Unauthorized (account no longer valid)" } as const;
+/** How a socket closes when a route policy for `GET /ws` refuses the role its account holds now. */
+const ROLE_REFUSED_CLOSE = { code: 4403, reason: "Forbidden for this role" } as const;
+
 export class RpcConnection implements AccountConnection {
   readonly connId: string;
   private ws: WebSocket;
@@ -402,6 +408,11 @@ export class RpcConnection implements AccountConnection {
    * resolves closes the socket with 4401.
    */
   private liveUser: AuthenticatedUser | undefined;
+  /**
+   * The role the route policies for `GET /ws` last let through: the upgrade checked the role the
+   * socket opened with (gateway/raw-policy-gate.ts). A role the store holds now is checked again.
+   */
+  private policyCheckedRole: string | undefined;
   private revoked = false;
   private untrackAccount: (() => void) | null = null;
 
@@ -411,6 +422,7 @@ export class RpcConnection implements AccountConnection {
     this.connUserId = connUserId;
     this.connRole = connRole;
     this.liveUser = liveUser;
+    this.policyCheckedRole = liveUser?.role;
     // Deleting, retiring or renaming the account closes this socket at once (account-connections).
     if (liveUser?.account) this.untrackAccount = trackAccountConnection(liveUser.account, this);
     this.sendEvent({ type: "hello-ok", data: {
@@ -422,36 +434,52 @@ export class RpcConnection implements AccountConnection {
   }
 
   /**
-   * Whether the caller still signs in as it did at the handshake, its role taken as the store holds
-   * it now. Always true without multi-user auth (no live caller to check); false once revoked.
+   * Whether the caller may still use this socket: it still signs in as it did at the handshake (its
+   * role taken as the store holds it now), and a role changed since is one the route policies for
+   * `GET /ws` let through, as the upgrade checked for the role the socket opened with. Always "ok"
+   * without multi-user auth (no live caller to check); "signed-out" once revoked.
    */
-  private callerStillSignedIn(): boolean {
-    if (this.revoked) return false;
-    if (!this.liveUser) return true;
+  private callerAccess(): "ok" | "signed-out" | "role-refused" {
+    if (this.revoked) return "signed-out";
+    if (!this.liveUser) return "ok";
     const fresh = revalidateAuthenticatedUser(this.liveUser);
-    if (!fresh) return false;
+    if (!fresh) return "signed-out";
     this.liveUser = fresh;
     this.connRole = fresh.role;
-    return true;
+    if (fresh.role !== this.policyCheckedRole) {
+      if (decideRoutePolicyChain(routePolicyChain("GET", "/ws"), () => [fresh]).verdict === "forbidden") return "role-refused";
+      this.policyCheckedRole = fresh.role;
+    }
+    return "ok";
+  }
+
+  /** Close the socket for a caller that may no longer use it: 4401 signed out, 4403 role refused. */
+  private closeFor(access: "signed-out" | "role-refused"): void {
+    if (access === "role-refused") this.revoke("a route policy refuses the account's role on /ws", ROLE_REFUSED_CLOSE);
+    else this.revoke("account no longer signs in");
   }
 
   /** Whether a pushed event may go out: the caller is checked as for a message, and a caller that
-   *  no longer signs in closes the socket instead. */
+   *  may no longer use the socket closes it instead. */
   private pushAllowed(): boolean {
-    if (this.callerStillSignedIn()) return true;
-    this.revoke("account no longer signs in");
+    const access = this.callerAccess();
+    if (access === "ok") return true;
+    this.closeFor(access);
     return false;
   }
 
-  /** Close the socket because its caller no longer signs in (4401, as a refused handshake). */
-  revoke(reason: string): void {
+  /**
+   * Close the socket because its caller may no longer use it: by default 4401, as a refused
+   * handshake when the account no longer signs in; 4403 when a route policy refuses its new role.
+   */
+  revoke(reason: string, close: { code: number; reason: string } = SIGNED_OUT_CLOSE): void {
     if (this.revoked) return;
     this.revoked = true;
     this.untrackAccount?.();
     this.untrackAccount = null;
-    log.info({ connId: this.connId, reason }, "RPC connection revoked: its account no longer signs in");
+    log.info({ connId: this.connId, reason, code: close.code }, "RPC connection revoked: its caller may no longer use it");
     try {
-      this.ws.close(4401, "Unauthorized (account no longer valid)");
+      this.ws.close(close.code, close.reason);
     } catch (err) {
       log.warn({ err, connId: this.connId }, "Could not close a revoked RPC connection");
     }
@@ -591,10 +619,11 @@ export class RpcConnection implements AccountConnection {
     const { id, method, params } = req;
     log.debug({ connId: this.connId, method, id }, "RPC request");
 
-    if (!this.callerStillSignedIn()) {
+    const access = this.callerAccess();
+    if (access !== "ok") {
       // Answered first, so the caller's pending request fails with a reason; then closed.
-      this.sendResponse({ id, ok: false, error: "Unauthorized (account no longer valid)" });
-      this.revoke("account no longer signs in");
+      this.sendResponse({ id, ok: false, error: access === "role-refused" ? ROLE_REFUSED_CLOSE.reason : SIGNED_OUT_CLOSE.reason });
+      this.closeFor(access);
       return;
     }
 

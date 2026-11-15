@@ -22,6 +22,20 @@
       <code class="font-mono">.env</code>; this clears automatically once it responds.
     </div>
 
+    <!-- Access-denied banner: the gateway accepted the sign-in, but a route policy keeps this
+         account's role off the live dashboard socket (close code 4403). The token is kept, so
+         pages that work over REST still do; the socket is not retried. -->
+    <div
+      v-if="!bareLayout && gateway.accessDenied"
+      role="alert"
+      class="relative z-20 shrink-0 border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-center text-sm text-amber-100 backdrop-blur-lg"
+    >
+      This account has no access to the live dashboard.
+      <button type="button" class="ml-2 underline underline-offset-2 hover:text-white" @click="openAccountLogin">
+        Sign in with another account
+      </button>
+    </div>
+
     <!-- Header -->
     <header v-if="!bareLayout" ref="headerRef" class="app-header relative z-10 shrink-0 px-3 py-3 backdrop-blur-lg sm:px-5">
 
@@ -351,10 +365,11 @@
 
     <!-- Login modal: auto-shown when disconnected/auth-failed, or opened on
          demand (e.g. token mode → sign in as a created user / switch account).
+         When it shows and whether it closes: composables/loginModal.ts.
          A bare page signs in its own way, if at all. -->
     <LoginModal
-      v-if="!bareLayout && (showLogin || gateway.authFailed || (!gateway.connected && !gateway.connecting && !gateway.reconnecting))"
-      :dismissible="gateway.connected"
+      v-if="!bareLayout && loginModal.visible"
+      :dismissible="loginModal.dismissible"
       :sso-error="ssoError"
       @close="showLogin = false"
     />
@@ -506,6 +521,7 @@ import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type BrowserNotificationItem, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
 import { readSsoReturn } from "@/composables/ssoReturn";
+import { loginModalState } from "@/composables/loginModal";
 import ModelConnectModal from "@/components/ModelConnectModal.vue";
 import AppearanceSettings from "@/components/AppearanceSettings.vue";
 import OperatorRequestsDock from "@/components/OperatorRequestsDock.vue";
@@ -561,6 +577,14 @@ const signOut = auth.signOut;
 
 // Manual login-modal trigger (token mode → sign in as a created user / switch account).
 const showLogin = ref(false);
+const loginModal = computed(() => loginModalState({
+  requested: showLogin.value,
+  authFailed: gateway.authFailed,
+  connected: gateway.connected,
+  connecting: gateway.connecting,
+  reconnecting: gateway.reconnecting,
+  accessDenied: gateway.accessDenied,
+}));
 // Why the last SSO sign-in ended without a token: the gateway's code, which the login modal shows
 // a message for. Cleared once a sign-in connects.
 const ssoError = ref<string | null>(null);

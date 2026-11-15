@@ -557,7 +557,7 @@ Connect to:
 ws://localhost:8765/ws?token=<jwt>
 ```
 
-After auth, the server sends `hello-ok`.
+After auth, the server sends `hello-ok`. A refused socket is closed with a code instead: 4401 (no valid token), 4429 (too many failed sign-ins from this address) or 4403 (a route policy keeps this account's role off `/ws`; see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension)). Reconnecting does not help with any of them. An open socket closes the same way: with 4401 once its account no longer signs in, and with 4403 once its account's role changes to one a route policy keeps off `/ws`.
 
 Request shape:
 

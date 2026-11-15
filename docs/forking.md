@@ -201,6 +201,85 @@ Notes:
   tools use the [Plugin SDK](../packages/core/src/plugin/README.md) instead
   (fixed Tier 2, sandboxed, per-call approval).
 
+**Route policies.** Each entry sets exactly one of two forms:
+
+- `roles: [...]` lets only the listed roles through. A listed built-in role
+  also admits the higher built-ins (viewer < operator < admin); extension roles
+  never inherit. A caller without a token gets 401, any other role 403.
+- `denyRoles: [...]` refuses the listed roles with 403 and passes everyone
+  else on, callers without a token included. Use it to keep a low role off a
+  whole prefix without breaking what sits under it: public routes
+  (`/api/product`, `/api/auth/mode`, the OIDC callback), routes that take
+  `?token=` or a cookie (served sites, the live-app proxy), and routes that take
+  a scoped capability token. It checks every session token a request presents
+  (Authorization header, `?token=`, the served-site cookies), so moving the
+  token elsewhere does not get past it.
+
+Policies are consulted in registration order, and an extension's register
+before core's own:
+
+- The first matching `roles` policy decides; nothing after it is consulted.
+- A matching deny policy in front of it refuses the roles it names and passes
+  everyone else on to the next matching policy, then to the route's own auth. A
+  deny policy therefore only ever subtracts: whoever it does not name gets the
+  answer they would get without it, from core's own policies too. Core
+  registers these: the knowledge-base writes (`POST /api/knowledge-bases`,
+  `PATCH` and `DELETE /api/knowledge-bases/:id`, `POST
+  /api/knowledge-bases/:id/crawl` and `/cancel`) admit `operator` (and so
+  `admin`, but no extension role), and `POST /api/admin/account-migration`
+  admits `admin`.
+- `denyRoles: []` refuses nobody and drops every deny policy after it, never a
+  `roles` policy. It carves an exception out of a broader deny policy:
+
+```ts
+routePolicies: [
+  { pattern: "/api/product", denyRoles: [] },   // the exception comes first
+  { pattern: "/api/*", denyRoles: ["guest"] },
+  { pattern: "/ws", denyRoles: ["guest"] },
+  { pattern: "/mcp", denyRoles: ["guest"] },
+  { pattern: "/a2a/*", denyRoles: ["guest"] },
+],
+```
+
+A `roles` policy of yours decides every route it matches, core's policed ones
+included: `{ pattern: "/api/*", roles: [...] }` in front of core's policies
+takes their place, so list in it only roles that may do everything under the
+prefix.
+
+Policies reach every `/api/*` route and the surfaces the gateway answers before
+its router:
+
+| Surface | Refusal |
+|---|---|
+| `POST /api/chat/stream` (AG-UI) | 401/403 JSON |
+| `/mcp` | 401/403 JSON |
+| `POST /a2a/v1`, `POST /a2a/agents/:name` | 401/403 JSON-RPC (`-32003` for a refused role) |
+| `GET /.well-known/agent-card.json` | 401/403 JSON |
+| `/ws` (matched as `GET`) | the handshake completes, then close code 4403 (4401 without a token) |
+| `/ws/browser-vnc` and `/ws/browser-vnc/*` (matched as `GET`) | HTTP 403/401 before the upgrade |
+
+A browser sees only the close code of a socket, so `/ws` closes rather than
+failing the handshake; the dashboard then stops reconnecting and says the
+account has no access to the live dashboard, keeping its sign-in. An open `/ws`
+is checked again when its account's role changes: once the policy refuses the
+new role, the socket closes with 4403 at its next message or pushed event. The
+agent name in `/a2a/agents/:name` is matched percent-decoded, as the route reads
+it. On these surfaces a `roles` policy also takes the token as `?token=`; on
+`/api/*` it reads the Authorization header only, as it always has. `POST
+/api/federation/delegate/stream` is never policed (it authenticates a federation
+peer by HMAC, not a user), and other paths outside `/api/` (channel webhooks,
+`/healthz`) are not policed either. A refusal is audited as `rbac_denied` with
+`surface` `rest`, `raw` or `ws`.
+
+A mistake in a policy is logged at boot and never widens access. An entry with
+a path `pattern` but a malformed form (both forms, neither, a role list that is
+not a list of names) refuses every caller on that path until it is fixed; the
+extension still loads, with its roles, tools and hooks. An entry without a path
+pattern, or a `routePolicies` that is not a list, registers nothing. A policy
+that names a role which is neither built-in nor declared by a loaded extension
+is logged as well: no caller ever holds such a role, so a deny list refuses
+nobody by it.
+
 **CLI subcommands.** Drop a file at `extensions/<name>/cli/<command>.{mjs,js,ts}`
 and it becomes `sai <command>`, with everything after the command name passed
 through:

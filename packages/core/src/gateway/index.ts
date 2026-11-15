@@ -141,7 +141,8 @@ import { JobConfigSchema } from "../config/schema.js";
 import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { mountExtensionRoutes } from "../extension/loader.js";
-import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
+import { routePolicyChain, routePolicyForbiddenMessage } from "./route-policies.js";
+import { decideRoutePolicyChainForTokens, gateRawHttp, presentedTokens, upgradePolicyRefusal } from "./raw-policy-gate.js";
 import { formatListenAddress, gatewayListenHost } from "./listen-address.js";
 
 const log = childLogger("gateway");
@@ -183,15 +184,32 @@ export function createGateway() {
   const app = new Hono();
 
   // Route-policy RBAC gate (gateway/route-policies.ts): declarative per-route
-  // role lists, registered by core extensions. Runs before every /api handler;
-  // unpoliced routes fall through to their own auth checks.
+  // role lists, registered by core extensions and core. Runs before every /api
+  // handler; unpoliced routes, and callers the deciding policies pass on, fall
+  // through to the route's own auth checks. The surfaces the Node server answers
+  // before Hono are gated in createServer and the upgrade listener
+  // (raw-policy-gate.ts).
   app.use("/api/*", async (c, next) => {
-    const policy = findRoutePolicy(c.req.method, c.req.path);
-    if (!policy) return next();
-    const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    if (!policyAdmitsRole(policy, user.role)) {
-      return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
+    const chain = routePolicyChain(c.req.method, c.req.path);
+    if (chain.length === 0) return next();
+    // A roles policy reads the Authorization header, as it always has. A deny policy lets a caller
+    // without one through to the route's own auth, and several routes take a ?token= or a cookie
+    // instead, so it checks every session token the request presents.
+    const authorization = c.req.header("Authorization");
+    const headerTokens = presentedTokens({ authorization });
+    const everyToken = chain.some((policy) => policy.denyRoles)
+      ? presentedTokens({ authorization, query: c.req.query("token"), cookie: c.req.header("Cookie") })
+      : headerTokens;
+    const { verdict, policy, caller } = await decideRoutePolicyChainForTokens(chain, (candidate) => (candidate.denyRoles ? everyToken : headerTokens));
+    if (verdict === "unauthorized") return c.json({ error: "Unauthorized" }, 401);
+    if (verdict === "forbidden" && policy && caller) {
+      logAudit("rbac_denied", {
+        surface: "rest",
+        method: c.req.method.toUpperCase(),
+        path: c.req.path,
+        role: caller.role,
+      }, { userId: caller.username, severity: "warn" });
+      return c.json({ error: routePolicyForbiddenMessage(policy, caller.role) }, 403);
     }
     return next();
   });
@@ -3817,6 +3835,14 @@ export function createGateway() {
       return;
     }
 
+    // ── Route policies for the surfaces answered below, before Hono ─────────
+    // The /api/* policy gate is Hono middleware and never sees them; this
+    // applies the same policies (gateway/raw-policy-gate.ts). Unpoliced
+    // requests go on unchanged.
+    if (await gateRawHttp(req, res, pathname)) {
+      return;
+    }
+
     // ── Outbound MCP server (HTTP/SSE) ───────────────────────────────────────
     // Mounted at /mcp.  Handler enforces auth + transport dispatch; returns
     // true when the request belongs to MCP so we never hit Hono with it.
@@ -4151,16 +4177,53 @@ export function createGateway() {
     const url = new URL(req.url ?? "/", "http://localhost");
     const pathname = url.pathname;
 
+    // Node takes its own error listener off the socket before it emits "upgrade", and ws adds one
+    // only inside handleUpgrade. The checks below await (the caller's token, the stores), and a
+    // client that reset the connection meanwhile raised an "error" with no listener: an uncaught
+    // exception, which shuts the gateway down. This covers the socket until it is handed over.
+    const onSocketError = (err: Error) => {
+      log.debug({ err, path: pathname }, "WebSocket upgrade socket failed before its handshake");
+      socket.destroy();
+    };
+    socket.on("error", onSocketError);
+    const handOver = (server: WebSocketServer, done: (ws: WebSocket) => void): void => {
+      if (socket.destroyed) return; // reset while the checks ran
+      socket.off("error", onSocketError);
+      server.handleUpgrade(req, socket, head, done);
+    };
+
     if (pathname === "/ws") {
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      // A route policy for GET /ws (raw-policy-gate.ts). A browser sees only the close code of a
+      // socket, not the status of a refused handshake (that surfaces as 1006 and the dashboard
+      // retries forever), so the upgrade completes and the socket closes with 4401/4403.
+      const refusal = await upgradePolicyRefusal(req);
+      if (refusal) {
+        if (refusal.status === 401) recordAuthFailure(req.socket.remoteAddress ?? "unknown");
+        handOver(wss, (ws) => {
+          if (refusal.status === 403) ws.close(4403, "Forbidden for this role");
+          else ws.close(4401, "Unauthorized");
+        });
+        return;
+      }
+      handOver(wss, (ws) => wss.emit("connection", ws, req));
       return;
     }
 
-    if (pathname.startsWith("/ws/browser-vnc")) {
+    // Exactly the browser view's own paths: the proxy ignores the rest of the path, so a prefix match
+    // handed it /ws/browser-vncX past a policy for /ws/browser-vnc/*.
+    if (pathname === "/ws/browser-vnc" || pathname.startsWith("/ws/browser-vnc/")) {
       const ip = req.socket.remoteAddress ?? "unknown";
       const token = url.searchParams.get("token") ?? extractBearerToken(req.headers["authorization"]);
       const rl = checkAuthRateLimit(ip);
       if (!rl.allowed) { socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n"); socket.destroy(); return; }
+      // A route policy for GET /ws/browser-vnc/* (raw-policy-gate.ts), refused before the upgrade.
+      const refusal = await upgradePolicyRefusal(req);
+      if (refusal) {
+        if (refusal.status === 401) recordAuthFailure(ip);
+        socket.write(refusal.status === 403 ? "HTTP/1.1 403 Forbidden\r\n\r\n" : "HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       // The live browser is reached only through this check, and the token rides in the query
       // string, past the /api middleware that refuses a revoked account: under multi-user auth the
       // caller is resolved against the stores here, so a deleted account's token cannot watch it.
@@ -4174,7 +4237,7 @@ export function createGateway() {
         return;
       }
       clearAuthFailures(ip);
-      vncWss.handleUpgrade(req, socket, head, (ws) => vncWss.emit("connection", ws, req));
+      handOver(vncWss, (ws) => vncWss.emit("connection", ws, req));
       return;
     }
 

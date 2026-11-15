@@ -181,9 +181,17 @@ export interface CoreExtension {
   /** Guardrail pipeline hooks, appended after built-ins. */
   guardrails?: ExtensionGuardrailHooks;
   /**
-   * Declarative RBAC for gateway routes (core or extension ones): role-name
-   * lists per route pattern, enforced by the gateway's policy gate before
-   * handlers run. See gateway/route-policies.ts for pattern syntax.
+   * Declarative RBAC for gateway routes (core or extension ones), enforced
+   * before handlers run on every `/api/*` route, on the surfaces the Node
+   * server answers itself (`POST /api/chat/stream`, `/mcp`, `/a2a/*`,
+   * `/.well-known/agent-card.json`) and on the WebSocket upgrades `/ws` and
+   * `/ws/browser-vnc/*` (matched as `GET`). Each policy sets exactly one of
+   * `roles` (only these roles pass; no token → 401) or `denyRoles` (these
+   * roles get 403; everyone else, anonymous callers included, is passed on to
+   * the next matching policy, core's own included, then the route's own auth).
+   * A malformed policy is logged and refuses every caller on its path; it does
+   * not fail the extension's load. See gateway/route-policies.ts for pattern
+   * syntax and which policies decide.
    */
   routePolicies?: RoutePolicyDef[];
   /**

@@ -17,7 +17,7 @@ import { childLogger } from "../logger.js";
 import { runWithRequestContext } from "../runtime/request-context.js";
 import { ACCOUNT_MIGRATION_MAINTENANCE, type AccountMigrationBackends } from "../runtime/account-migration.js";
 import { authenticatedUser, callerIdentity } from "./auth.js";
-import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
+import { decideRoutePolicyChain, routePolicyChain, routePolicyForbiddenMessage } from "./route-policies.js";
 import { registerAccountMigrationRoutes } from "./account-migration-routes.js";
 import { gatewayListenHost } from "./listen-address.js";
 
@@ -30,11 +30,12 @@ export function createMaintenanceApp(backends?: () => Promise<AccountMigrationBa
   const app = new Hono();
   // The same gates as the full gateway's /api routes: the route policy, then the caller's identity.
   app.use("/api/*", async (c, next) => {
-    const policy = findRoutePolicy(c.req.method, c.req.path);
-    if (!policy) return next();
+    const chain = routePolicyChain(c.req.method, c.req.path);
+    if (chain.length === 0) return next();
     const user = await authenticatedUser(c.req.header("Authorization"));
-    if (!user) return c.json({ error: "Unauthorized" }, 401);
-    if (!policyAdmitsRole(policy, user.role)) return c.json({ error: `Requires role: ${policy.roles.join(" | ")}` }, 403);
+    const { verdict, policy } = decideRoutePolicyChain(chain, () => (user ? [user] : []));
+    if (verdict === "unauthorized") return c.json({ error: "Unauthorized" }, 401);
+    if (verdict === "forbidden" && policy && user) return c.json({ error: routePolicyForbiddenMessage(policy, user.role) }, 403);
     return next();
   });
   app.use("/api/*", async (c, next) => {

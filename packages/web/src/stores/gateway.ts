@@ -20,6 +20,7 @@ import {
 import { dropRunningTail, markRunningTail, mergeHydrated, sameList, sameMessage } from "../composables/hydration";
 import { namesTurns, nextOpenerIndex, recoveryVerdict, savedEnding, type RecoveryVerdict } from "../composables/turnRecovery";
 import { needsOlderTranscript, rewindHistoryIndex, transcriptHistoryIndex } from "../composables/rewind";
+import { socketCloseOutcome } from "../composables/socketClose";
 import {
   addUserInput, anchorStepFor, askUserExpiresAt, closesAskUser, dropTurnInputs, expiredInputIds, holdsStallRecovery,
   isExpiredAnswer, nextExpiryAt, openInputsFor, outcomeOfChoice, placeUserInputs, readFieldErrors, readUserInputList,
@@ -863,6 +864,9 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
+  // True when the gateway accepted the sign-in but a route policy keeps its role off the live
+  // dashboard (close code 4403). The token stays; reconnecting would only be refused again.
+  const accessDenied = ref(false);
   // True from a lost connection until it is back or given up on. Between two attempts neither
   // `connected` nor `connecting` is set, and the shell took that for "signed out": a login screen
   // covered the app for the whole wait of every reconnect.
@@ -1041,7 +1045,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function scheduleReconnect(delayMs?: number): void {
     if (reconnectTimer) return;
-    if (!token.value || authFailed.value) {
+    if (!token.value || authFailed.value || accessDenied.value) {
       reconnecting.value = false;
       return;
     }
@@ -1057,8 +1061,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (!token.value || authFailed.value) reconnecting.value = false;
-      if (!token.value || authFailed.value || connected.value || connecting.value) return;
+      if (!token.value || authFailed.value || accessDenied.value) reconnecting.value = false;
+      if (!token.value || authFailed.value || accessDenied.value || connected.value || connecting.value) return;
       consecutiveReconnects++;
       connect();
     }, backoff);
@@ -1206,7 +1210,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     lifecycleHooksInstalled = true;
 
     const resumeConnection = () => {
-      if (!token.value || authFailed.value) return;
+      if (!token.value || authFailed.value || accessDenied.value) return;
       if (connected.value || connecting.value) return;
       connect();
     };
@@ -2939,6 +2943,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     clearConnectTimeout();
     connecting.value = true;
     authFailed.value = false;
+    accessDenied.value = false;
 
     const normalizedWsUrl = normalizeGatewayWsUrl(wsUrl.value);
     wsUrl.value = normalizedWsUrl;
@@ -2965,8 +2970,10 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (ws !== socket) return;          // stale socket — already replaced
       ws = null;
 
-      // Auth failure (4401) or rate-limited (4429) — stop reconnecting
-      if (ev.code === 4401 || ev.code === 4429) {
+      // Auth failure (4401), rate-limited (4429) or this role may not use the dashboard (4403):
+      // stop reconnecting (composables/socketClose.ts).
+      const outcome = socketCloseOutcome(ev.code);
+      if (outcome !== "reconnect") {
         connected.value = false;
         connecting.value = false;
         notificationsSubscribed.value = false;
@@ -2975,6 +2982,11 @@ export const useGatewayStore = defineStore("gateway", () => {
         rejectPendingRpcs("Connection closed");
         clearReconnectTimer();
         reconnecting.value = false;
+        if (outcome === "access-denied") {
+          // The sign-in itself is valid: keep the token, so the account's other pages still work.
+          accessDenied.value = true;
+          return;
+        }
         authFailed.value = true;
         token.value = "";
         return;
@@ -3024,6 +3036,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   function disconnect() {
     clearReconnectTimer();
     reconnecting.value = false;
+    accessDenied.value = false;
     clearConnectTimeout();
     stopHeartbeat();
     rejectPendingRpcs("Disconnected");
@@ -4633,6 +4646,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     reconnecting,
     modelUnreachable,
     authFailed,
+    accessDenied,
     currentSessionId,
     sessions,
     activeSessions,

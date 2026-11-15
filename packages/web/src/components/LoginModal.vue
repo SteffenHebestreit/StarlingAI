@@ -237,6 +237,7 @@ const wsUrl = ref(gateway.wsUrl);
 const defaultWsUrl = defaultGatewayWsUrl();
 // A sign-in the gateway turned away is why this screen is up: say so, instead of an empty form.
 const REJECTED = "The gateway did not accept that sign-in. Check the token or sign in again.";
+const ACCESS_DENIED = "This account has no access to the live dashboard.";
 const errorMessage = ref<string | null>(gateway.authFailed ? REJECTED : null);
 const submitting = ref(false);
 watch(() => gateway.authFailed, (failed) => { if (failed) errorMessage.value = REJECTED; });
@@ -244,15 +245,17 @@ watch(() => gateway.authFailed, (failed) => { if (failed) errorMessage.value = R
 /**
  * A connect is only started by `gateway.connect()`; whether the gateway took the sign-in comes
  * later, over the socket. Wait for that answer, so "Connecting…" shows for as long as it is true
- * and a refusal is not met with silence. Resolves "open" (this screen closes), "rejected", or
+ * and a refusal is not met with silence. Resolves "open" (this screen closes), "rejected",
+ * "denied" (the sign-in is valid but the account's role may not use the live dashboard), or
  * "waiting" when the gateway has not answered in time.
  */
-function connectionSettled(timeoutMs = 10_000): Promise<"open" | "rejected" | "waiting"> {
+function connectionSettled(timeoutMs = 10_000): Promise<"open" | "rejected" | "denied" | "waiting"> {
   return new Promise((resolve) => {
     const started = Date.now();
     const check = (): void => {
       if (gateway.connected) resolve("open");
       else if (gateway.authFailed) resolve("rejected");
+      else if (gateway.accessDenied) resolve("denied");
       else if (unmounted || Date.now() - started > timeoutMs) resolve("waiting");
       else setTimeout(check, 120);
     };
@@ -305,6 +308,7 @@ async function submit(): Promise<void> {
     }
     const outcome = await connectionSettled();
     if (outcome === "rejected") errorMessage.value = REJECTED;
+    else if (outcome === "denied") errorMessage.value = ACCESS_DENIED;
     else if (outcome === "waiting" && !unmounted) {
       errorMessage.value = `No answer from the gateway at ${gatewayRestBaseUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
     }

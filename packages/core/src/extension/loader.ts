@@ -7,7 +7,9 @@
  * Failure semantics mirror the plugin loader: a broken extension is logged +
  * audited (`extension_load_failed`) and skipped; the gateway keeps booting.
  * Extensions are repo code — a compile-time error surfaces in CI long before
- * this loader runs — so runtime failures here are config/IO problems.
+ * this loader runs — so runtime failures here are config/IO problems. A
+ * malformed route policy does not skip the extension (its roles would go
+ * with it): it is logged and refuses every caller on its path instead.
  *
  * Discovery root resolution:
  *   1. `SAI_EXTENSIONS_DIR` env var (tests / unusual layouts)
@@ -26,13 +28,14 @@ import { getConfig } from "../config/loader.js";
 import { registerTool, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
-import { registerRoutePolicies } from "../gateway/route-policies.js";
+import { registerManifestRoutePolicies, routePolicyUnknownRoles } from "../gateway/route-policies.js";
 import { registerExtensionToolKeywords } from "../providers/embeddings.js";
 import { registerLlmBoundaryTransformer } from "../providers/llm-boundary.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
   _recordLoadedExtension,
+  listExtensionRoles,
   type CoreExtension,
   type CoreExtensionContext,
   type ExtensionRouteApp,
@@ -132,8 +135,11 @@ function registerExtension(ext: CoreExtension, source: string): void {
   // name without warnings.
   registerExtensionGroup(ext.name);
 
-  if (ext.routePolicies?.length) {
-    registerRoutePolicies(ext.name, ext.routePolicies);
+  // A malformed policy does not fail the load: the extension's roles would go with it, and a role
+  // nobody declares signs in as operator. It is logged, and refuses every caller on its path instead
+  // (route-policies.ts registerManifestRoutePolicies).
+  for (const problem of registerManifestRoutePolicies(ext.name, ext.routePolicies)) {
+    log.error({ extension: ext.name, problem }, "extension route policy is malformed");
   }
 
   if (ext.toolKeywords?.length) {
@@ -216,6 +222,12 @@ export async function loadCoreExtensions(): Promise<{ loaded: number; failed: nu
       log.error({ extension: name, entry, err }, "core extension failed to load — skipped");
       logAudit("extension_load_failed", { extension: name, source: entry, error: String(err) }, { severity: "error" });
     }
+  }
+  // Once every extension's roles are known: a policy naming a role nobody can hold refuses nobody by
+  // it (a deny list) or admits nobody by it (a roles list). A typo, or the role of an extension that
+  // did not load.
+  for (const { source, method, pattern, unknownRoles } of routePolicyUnknownRoles(listExtensionRoles().map((role) => role.name))) {
+    log.error({ extension: source, ...(method ? { method } : {}), pattern, unknownRoles }, "route policy names a role no one holds");
   }
   return { loaded, failed, dir };
 }
