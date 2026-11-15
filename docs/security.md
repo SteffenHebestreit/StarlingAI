@@ -277,8 +277,8 @@ A reverse proxy you put in front of the stack (for TLS, say) buffers in the same
 
 ## Security Checklist for Production
 
-- [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing or shorter than 32 chars — there is no shared default to replace, but verify the value was not copied between environments.
-- [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production
+- [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing, shorter than 32 chars, or still a template placeholder (such as the `your-256-bit-…` value older `.env.example` files shipped). Before it replaces a placeholder it looks for data already sealed with it (`credentials.enc` or any `*.salt` in the state directories under the repo root, `workspace/`, `packages/core/` (and its `workspace/`) and the home directory, plus `SAI_CRED_STORE`); when it finds some it keeps the placeholder, because a new key could not decrypt that data, and prints how to rotate. A key it replaces is appended to `.starlingai/replaced-master-keys.txt`, so the old value can be put back. Re-running setup while the stack is up: restart it (`pnpm sai start`) before storing any credential, because the running gateway keeps the old key until then. The gateway also warns at boot while a placeholder is in use. `.env.example` leaves the key empty. Verify the value was not copied between environments.
+- [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production (setup writes a random one to `.env`, and replaces a template placeholder such as the `your-256-bit-…` example older `.env.example` files carried)
 - [ ] Set `gateway.publicUrl` in `starlingai.json` — required for channel webhook verification
 - [ ] If the dashboard calls the gateway across origins, add the dashboard origin to `gateway.corsAllowedOrigins`
 - [ ] Use `dmPolicy: "pairing"` or `"allowlist"` on all channels — never leave channels `"open"` in production
