@@ -11,6 +11,7 @@ import {
   getJob,
   heartbeatJob,
   initSceneJobStore,
+  jobNotificationOwner,
   markJobCancelled,
   onJobQueued,
   recoverStaleSceneJobs,
@@ -651,6 +652,8 @@ function buildApprovalCallback(
       lastEventType: "approval_requested",
     });
 
+    // The account the job runs as, when it runs as one: the notice names its job, session and tool.
+    const owner = jobNotificationOwner(job);
     publishNotification({
       title: "Approval required",
       message: `${job.sceneName} is waiting for approval to run ${toolName}.`,
@@ -660,6 +663,7 @@ function buildApprovalCallback(
       jobId: job.id,
       targetPath: "/jobs",
       sticky: true,
+      ...(owner ? { owner } : {}),
     });
 
     // Stable key (job + step + tool + args) so a durable decision made before a

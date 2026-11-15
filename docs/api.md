@@ -44,7 +44,7 @@ Scene webhooks are the main exception: `POST /api/scenes/:name/run` can authenti
 | --- | --- | --- |
 | `GET` | `/healthz` | returns `{ "status": "ok" }` |
 | `GET` | `/readyz` | returns readiness, active-session count, deployment-mode dependencies, latest event-loop lag, and in-flight provider activity (producing / prefill / stalled); clustered modes return `503` when Redis or PostgreSQL is unavailable |
-| `GET` | `/api/status` | authenticated summary of uptime and active sessions |
+| `GET` | `/api/status` | authenticated summary of uptime and active sessions; under multi-user auth only the sessions the caller may see (its own and unowned ones, every one for an admin), as the socket's session list |
 | `GET` | `/api/runtime/status` | authenticated component health snapshot |
 | `GET` | `/api/health/subsystems` | authenticated deep self-checks (embeddings, vector store, graph, telemetry, event loop, provider activity, and a sandbox canary: a `docker run` through shell_exec must hand back what it printed on stdout and on stderr, else `degraded`, never 503; a verdict serves 5 minutes, carries `checkedAt` and `ageMs` (its age on the gateway's clock), and is not re-measured while a turn is running); 503 if any subsystem is unavailable |
 | `GET` | `/api/observability/recovery-nets` | authenticated firing counts per orchestration recovery net (which autopilots actually fire) |
@@ -330,8 +330,8 @@ With auth off, the single operator sees and drives every session, as before.
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/channels` | runtime status array for known channel types |
-| `GET` | `/api/channels/dead-letters` | `{ count, entries }` |
-| `GET` | `/api/channels/:type` | redacted effective config plus runtime status |
+| `GET` | `/api/channels/dead-letters` | `{ count, entries }`; under multi-user auth operator rank (`403` below it), and `entries` is empty unless the caller is an admin |
+| `GET` | `/api/channels/:type` | redacted effective config plus runtime status; under multi-user auth `operator.recentDeadLetters` is empty unless the caller is an admin |
 | `PUT` | `/api/channels/:type` | store override and reload runtime |
 | `DELETE` | `/api/channels/:type` | remove store override and reload |
 
@@ -867,7 +867,7 @@ Body:
 { "sessionId": "...", "message": "Summarise the quarterly report" }
 ```
 
-`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
+`sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`, and so does one only the durable session store holds (another gateway instance's), which the request leaves as it was. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
 
 Under multi-user auth a turn takes the operator rank, as a mutating `/api` call does: a caller whose role ranks below `operator` (a `viewer`, or an extension role below rank 50) gets `403` with `{ "error": "Operator role required for this action" }`, audited as `rbac_denied` with `surface: "agui"`. With auth off no role is checked.
 

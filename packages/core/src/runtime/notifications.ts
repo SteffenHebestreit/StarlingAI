@@ -21,8 +21,8 @@ export interface RuntimeNotification {
   sticky?: boolean;
   /**
    * Whose notification this is. One with an owner is forwarded to that owner's connections only
-   * (gateway/rpc.ts) and the field itself never leaves the gateway; one without goes to everybody
-   * signed in, as all of them did.
+   * (gateway/rpc.ts) and the field itself never leaves the gateway; under multi-user auth one
+   * without goes to operators and above (notificationForCaller).
    */
   owner?: Identity;
 }
@@ -104,17 +104,26 @@ export function subscribeToNotifications(
 }
 
 /**
- * A notification as it is sent to a connection, or nothing when it is somebody else's. One with
- * an owner goes to that owner alone under multi-user auth (with one operator there is nobody else);
- * who it belongs to is never part of what is sent.
+ * A notification as it is sent to a connection, or nothing when it is not the caller's to see.
+ * With one operator there is nobody else, and every notification goes out. Under multi-user auth:
+ *
+ * - One with an owner goes to that owner alone.
+ * - One without an owner goes only to a caller for whom `access.seesUnowned` is set, which the
+ *   gateway sets for operators and above. Such a notification is about a run that names no account
+ *   (a job a scene trigger or an instance credential queued) and carries its job and session ids and
+ *   its error text. Every signed-in viewer received it.
+ *
+ * Who a notification belongs to is never part of what is sent.
  */
 export function notificationForCaller(
   notification: RuntimeNotification,
   caller: Identity | undefined,
+  access: { seesUnowned: boolean },
 ): Omit<RuntimeNotification, "owner"> | undefined {
   const { owner, ...wire } = notification;
-  if (owner && multiUserAuthActive() && !ownsRecord(caller, owner)) return undefined;
-  return wire;
+  if (!multiUserAuthActive()) return wire;
+  if (owner) return ownsRecord(caller, owner) ? wire : undefined;
+  return access.seesUnowned ? wire : undefined;
 }
 
 export function listRecentNotifications(limit = 20): RuntimeNotification[] {

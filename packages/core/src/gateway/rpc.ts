@@ -17,7 +17,7 @@ import {
   resolveSession,
   listSessions,
 } from "../agent/session.js";
-import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
+import type { AgentSession, SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
 import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
 import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
@@ -28,6 +28,7 @@ import {
   callerMayUseComputerSession,
   callerMayUseSession,
   computerSessionsVisibleTo,
+  visibleSessionsFor,
 } from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
@@ -536,6 +537,16 @@ export class RpcConnection implements AccountConnection {
   }
 
   /**
+   * The same rule for a session already in hand. canAccessSession lets an id this process has no
+   * record of through, and resolveSession may then find its record in the durable store (another
+   * gateway instance's session, or one this process has not loaded): the owner is checked there,
+   * before the session is hydrated or woken up.
+   */
+  private mayUseResolvedSession(session: AgentSession): boolean {
+    return !this.connUserId || this.isSessionAdmin() || this.ownsSession(session);
+  }
+
+  /**
    * Whether this connection's caller owns a session, or the session has no owner. By identity under
    * multi-user auth (ownsRecord): the username matched, so an account created again under a deleted
    * one's name listed, opened and drove the old one's chats, and a session a channel sender or a
@@ -641,10 +652,9 @@ export class RpcConnection implements AccountConnection {
 
   /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
-    if (!this.connUserId || this.isSessionAdmin()) return listSessions({ includeArchived: true });
-    return getAllSessions({ includeArchived: true })
-      .filter((session) => this.ownsSession(session))
-      .map((session) => session.toSummary());
+    // No subject, nothing to enforce (auth off without a `sub`), as canAccessSession.
+    const caller = this.connUserId ? { identity: this.connIdentity(), role: this.connRole } : undefined;
+    return visibleSessionsFor(caller, { includeArchived: true }).map((session) => session.toSummary());
   }
 
   async handleMessage(raw: string): Promise<void> {
@@ -1202,7 +1212,18 @@ export class RpcConnection implements AccountConnection {
         // so "continue" must land on the same session instead of dead-ending. Explicit
         // ("manual") archives stay unresumable and fall through to the not-found path,
         // which now names WHICH benign cause applies (pruned / deleted / unknown here).
-        const session = getSession(sessionId) ?? await resolveSession(sessionId, { resumeArchived: true });
+        // The owner is checked again on a record the store hands back: canAccessSession above passed
+        // an id with no record in this process. Checked before the session is hydrated or un-parked,
+        // and refused with the same bare message, so the reply says nothing about the session.
+        let refused = false;
+        const session = getSession(sessionId) ?? await resolveSession(sessionId, {
+          resumeArchived: true,
+          admit: (found) => {
+            refused = !this.mayUseResolvedSession(found);
+            return !refused;
+          },
+        });
+        if (refused) throw new Error(`Session not found: ${sessionId}`);
         if (!session) throw new Error(`Session not found: ${sessionId} — ${describeMissingSession(sessionId)}`);
 
         // A turn already running on this session is superseded, whichever connection started it.
@@ -1731,8 +1752,11 @@ export class RpcConnection implements AccountConnection {
         this.notificationsUnsubscribe?.();
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
           if (!this.pushAllowed()) return;
-          // A notification with an owner (a scheduled follow-up's result) is that person's alone.
-          const wire = notificationForCaller(notification, this.connIdentity());
+          // A notification with an owner (a scheduled follow-up's result, an account's job) is that
+          // person's alone; one without goes to operators and above (notificationForCaller).
+          const wire = notificationForCaller(notification, this.connIdentity(), {
+            seesUnowned: this.connRole !== undefined && roleRank(this.connRole) >= roleRank("operator"),
+          });
           if (wire) this.sendEvent({ type: "notification.event", data: wire });
         });
         return { subscribed: true };

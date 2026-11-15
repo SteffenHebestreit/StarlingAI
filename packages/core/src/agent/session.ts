@@ -1618,12 +1618,19 @@ export function stopSessionPruner(): void {
  * the turn watchdog or the idle sweep is un-parked in place and returned, so a
  * follow-up message lands on the same history (including the partial work the timed-out
  * turn preserved). Explicitly ("manual") archived sessions still resolve to undefined.
+ *
+ * `admit` is asked about the session found, the one held here or the one the store hands back,
+ * before anything is done with it: false resolves to undefined with the session neither hydrated
+ * into this process nor un-parked. A caller checks the owner there, since an id this process has no
+ * record of tells it nothing about whose session the store holds under it.
  */
 export async function resolveSession(
   id: string,
-  opts?: { resumeArchived?: boolean },
+  opts?: { resumeArchived?: boolean; admit?: (session: AgentSession) => boolean },
 ): Promise<AgentSession | undefined> {
+  const admitted = (session: AgentSession): boolean => opts?.admit === undefined || opts.admit(session);
   const local = _sessions.get(id);
+  if (local && !admitted(local)) return undefined;
   if (local && !local.isArchived()) return local;
   if (local && opts?.resumeArchived) return local.reactivate() ? local : undefined;
 
@@ -1633,6 +1640,7 @@ export async function resolveSession(
   try {
     const record = JSON.parse(raw) as PersistedSessionRecord;
     const session = AgentSession.fromRecord(record);
+    if (!admitted(session)) return undefined;
     if (session.isArchived()) {
       if (!opts?.resumeArchived) return undefined;
       // Hydrate first so the un-park is persisted against the live store entry.

@@ -1,10 +1,11 @@
 import { getConfig } from "../config/loader.js";
-import { getSessionRecord } from "../agent/session.js";
+import { getAllSessions, getSessionRecord, type AgentSession } from "../agent/session.js";
 import { owningChatSessionId } from "../agent/session-ids.js";
 import type { ComputerSession } from "../agent/computer-session.js";
 import type { BrowserSession } from "../agent/browser-session.js";
+import type { Identity } from "../runtime/accounts.js";
 import { ownsRecord, recordHasOwner } from "../runtime/user-scope.js";
-import { callerIdentity, userHasRole, type AuthenticatedUser } from "./auth.js";
+import { callerIdentity, roleRank, userHasRole, type AuthenticatedUser } from "./auth.js";
 
 /**
  * Whether an HTTP caller may read or drive a session through a /api/sessions/:sessionId route.
@@ -163,4 +164,29 @@ export function callerMayUseBrowserSession(caller: AuthenticatedUser | null, ses
   if (getConfig().auth?.enabled !== true) return true;
   if (!session.parentSessionId) return userHasRole(caller, "admin");
   return callerMayUseSession(caller, owningChatSessionId(session.parentSessionId));
+}
+
+/** The chat a nested session id belongs to (agent/session-ids.ts, the one copy, which the computer-use
+ *  tools share), re-exported for the route modules that check access through this file. */
+export { owningChatSessionId };
+
+/**
+ * The sessions a caller may see listed: every one for an admin, otherwise the caller's own and those
+ * with no owner. One rule for the socket's session list and GET /api/status, which listed every
+ * session's id, channel and turn count to any caller that signed in.
+ *
+ * `caller` is undefined where there is no one to enforce anything for (auth off, or a socket whose
+ * token names no subject): every session, as before. ADMIN, not operator, is exempt, as for
+ * callerMayUseSession. A caller with no identity owns nothing, so it sees the unowned sessions only.
+ */
+export function visibleSessionsFor(
+  caller: { identity: Identity | undefined; role: string | undefined } | undefined,
+  opts?: { includeArchived?: boolean },
+): AgentSession[] {
+  const sessions = getAllSessions(opts);
+  if (!caller || (caller.role !== undefined && roleRank(caller.role) >= roleRank("admin"))) return sessions;
+  return sessions.filter((session) => {
+    const owner = session.identity();
+    return !recordHasOwner(owner) || ownsRecord(caller.identity, owner);
+  });
 }

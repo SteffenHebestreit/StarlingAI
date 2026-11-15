@@ -11,17 +11,17 @@ Every public schema field, where it is declared, and how many production files r
 | `a2a` | packages/core/src/config/schema.ts:499 | 21 |
 | `accessKeyId` | packages/core/src/config/schema.ts:559 | 2 |
 | `accessToken` | packages/core/src/config/schemas/channels.ts:51 | 9 |
-| `account` | packages/core/src/config/schemas/channels.ts:71 | 170 |
+| `account` | packages/core/src/config/schemas/channels.ts:71 | 173 |
 | `acquireTimeoutMs` | packages/core/src/config/schema.ts:1874 | 1 |
 | `action` | packages/core/src/config/schema.ts:1604 | 103 |
 | `activeModelPreset` | packages/core/src/config/schema.ts:1905 | 3 |
 | `adaptive` | packages/core/src/config/schemas/decisions.ts:76 | 14 |
 | `addHosts` | packages/core/src/config/schema.ts:791 | 1 |
-| `admin` | packages/core/src/config/schema.ts:469 | 64 |
-| `after` | packages/core/src/config/schema.ts:1607 | 343 |
+| `admin` | packages/core/src/config/schema.ts:469 | 66 |
+| `after` | packages/core/src/config/schema.ts:1607 | 344 |
 | `agents` | packages/core/src/config/schema.ts:1595 | 212 |
 | `alertmanager` | packages/core/src/config/schema.ts:1240 | 1 |
-| `all` | packages/core/src/config/schema.ts:1393 | 355 |
+| `all` | packages/core/src/config/schema.ts:1393 | 354 |
 | `allowedAgents` | packages/core/src/config/schema.ts:1413 | 31 |
 | `allowedPrivateHosts` | packages/core/src/config/schema.ts:1356 | 5 |
 | `allowedUserIds` | packages/core/src/config/schemas/channels.ts:11 | 5 |
@@ -101,7 +101,7 @@ Every public schema field, where it is declared, and how many production files r
 | `confidenceDemotion` | packages/core/src/config/schemas/retrieval.ts:133 | 1 |
 | `confidenceMinScoreGap` | packages/core/src/config/schemas/retrieval.ts:139 | 1 |
 | `confidenceMinTopRerank` | packages/core/src/config/schemas/retrieval.ts:147 | 1 |
-| `config` | packages/core/src/config/schema.ts:1311 | 343 |
+| `config` | packages/core/src/config/schema.ts:1311 | 344 |
 | `configRemovals` | packages/core/src/config/schema.ts:1891 | 3 |
 | `configureTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:266 | 1 |
 | `consolidationIntervalMs` | packages/core/src/config/schema.ts:1718 | 1 |
@@ -170,7 +170,7 @@ Every public schema field, where it is declared, and how many production files r
 | `embeddingApiKey` | packages/core/src/config/schema.ts:183 | 6 |
 | `embeddingBaseUrl` | packages/core/src/config/schema.ts:181 | 6 |
 | `embeddingModel` | packages/core/src/config/schema.ts:179 | 28 |
-| `enabled` | packages/core/src/config/schema.ts:339 | 156 |
+| `enabled` | packages/core/src/config/schema.ts:339 | 157 |
 | `enableThinking` | packages/core/src/config/schema.ts:201 | 27 |
 | `endpoint` | packages/core/src/config/schema.ts:556 | 90 |
 | `endpointUnits` | packages/core/src/config/schema.ts:1872 | 1 |
@@ -216,7 +216,7 @@ Every public schema field, where it is declared, and how many production files r
 | `host` | packages/core/src/config/schema.ts:366 | 139 |
 | `http` | packages/core/src/config/schema.ts:857 | 79 |
 | `humanInLoopSteps` | packages/core/src/config/schema.ts:1414 | 20 |
-| `id` | packages/core/src/config/schema.ts:438 | 380 |
+| `id` | packages/core/src/config/schema.ts:438 | 382 |
 | `ignoreCase` | packages/core/src/config/schema.ts:1461 | 2 |
 | `image` | packages/core/src/config/schema.ts:785 | 116 |
 | `imapHost` | packages/core/src/config/schemas/channels.ts:57 | 6 |
@@ -305,7 +305,7 @@ Every public schema field, where it is declared, and how many production files r
 | `maxUploadBytes` | packages/core/src/config/schemas/multimodal.ts:294 | 5 |
 | `mcpServer` | packages/core/src/config/schemas/multimodal.ts:16 | 3 |
 | `memoryMb` | packages/core/src/config/schema.ts:916 | 5 |
-| `message` | packages/core/src/config/schema.ts:1615 | 392 |
+| `message` | packages/core/src/config/schema.ts:1615 | 393 |
 | `method` | packages/core/src/config/schema.ts:1128 | 104 |
 | `midTurnSteering` | packages/core/src/config/schemas/orchestration.ts:928 | 3 |
 | `minConsolidatedFactChars` | packages/core/src/config/schema.ts:1709 | 1 |
@@ -446,7 +446,7 @@ Every public schema field, where it is declared, and how many production files r
 | `runTimeoutMs` | packages/core/src/config/schemas/multimodal.ts:290 | 1 |
 | `sampleRate` | packages/core/src/config/schema.ts:651 | 4 |
 | `sandboxShellExec` | packages/core/src/config/schema.ts:1326 | 2 |
-| `scene` | packages/core/src/config/schema.ts:1436 | 100 |
+| `scene` | packages/core/src/config/schema.ts:1436 | 102 |
 | `scopes` | packages/core/src/config/schema.ts:490 | 25 |
 | `searchTimeoutMs` | packages/core/src/config/schemas/retrieval.ts:97 | 2 |
 | `searxngBaseUrl` | packages/core/src/config/schemas/retrieval.ts:77 | 1 |
@@ -489,7 +489,7 @@ Every public schema field, where it is declared, and how many production files r
 | `stagedArtifactBuilds` | packages/core/src/config/schemas/orchestration.ts:478 | 1 |
 | `steps` | packages/core/src/config/schema.ts:1485 | 110 |
 | `stopPhrases` | packages/core/src/config/schemas/multimodal.ts:276 | 3 |
-| `store` | packages/core/src/config/schema.ts:1813 | 190 |
+| `store` | packages/core/src/config/schema.ts:1813 | 191 |
 | `stub` | packages/core/src/config/schema.ts:1572 | 35 |
 | `subAgentArithmeticCheck` | packages/core/src/config/schemas/orchestration.ts:440 | 1 |
 | `subAgentDisagreementVerify` | packages/core/src/config/schemas/orchestration.ts:682 | 2 |
@@ -531,7 +531,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 72 |
 | `toolPolicy` | packages/core/src/config/schema.ts:1571 | 1 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:695 | 2 |
-| `tools` | packages/core/src/config/schema.ts:1026 | 280 |
+| `tools` | packages/core/src/config/schema.ts:1026 | 281 |
 | `topK` | packages/core/src/config/schema.ts:175 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:164 | 7 |
 | `topP` | packages/core/src/config/schema.ts:174 | 4 |
@@ -562,7 +562,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:407 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:404 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 23 |
-| `viewer` | packages/core/src/config/schema.ts:471 | 44 |
+| `viewer` | packages/core/src/config/schema.ts:471 | 46 |
 | `virtualization` | packages/core/src/config/schema.ts:1192 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |

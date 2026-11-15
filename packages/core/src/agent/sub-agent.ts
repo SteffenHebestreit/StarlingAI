@@ -3352,10 +3352,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
   // checkpoint failure must never take down the work it is describing.
   let checkpointTaskId: string | null = null;
   try {
+    // Who the run executes as, the identity its tools act as: the dashboard shows the checkpoint to
+    // that account (gateway/checkpoint-routes.ts), also when the session it works in has no record.
+    const checkpointOwner = toolCallIdentity(opts);
     checkpointTaskId = createCheckpoint({
       agentName: opts.agentName,
       parentSessionId: opts.parentSessionId,
       task: opts.task,
+      ...(checkpointOwner ? { owner: checkpointOwner } : {}),
     }).taskId;
   } catch (err) {
     log.warn({ err, agentName: opts.agentName }, "createCheckpoint failed — continuing without one");

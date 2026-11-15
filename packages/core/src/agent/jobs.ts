@@ -273,6 +273,7 @@ export async function cancelJob(id: string): Promise<SceneJob | undefined> {
       jobId: job.id,
       targetPath: "/jobs",
       sticky: job.status === "cancelling",
+      ...jobNotificationOwnerField(job),
     });
   }
   return job;
@@ -318,6 +319,7 @@ export async function markJobCancelled(id: string, reason: string): Promise<void
       jobId: job.id,
       targetPath: "/jobs",
       sticky: true,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -341,6 +343,7 @@ export async function completeJob(
       jobId: job.id,
       targetPath: "/jobs",
       sticky: result.blocked,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -359,6 +362,7 @@ export async function failJob(id: string, error: string): Promise<void> {
       jobId: job.id,
       targetPath: "/jobs",
       sticky: true,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -1253,4 +1257,21 @@ export function sceneJobIdentity(job: Pick<SceneJob, "userId" | "account" | "pri
   if (job.account) return { userId: job.userId, account: job.account };
   if (job.principal) return { userId: job.userId, principal: job.principal };
   return { userId: job.userId };
+}
+
+/**
+ * Whose a job's notifications are (runtime/notifications.ts): the account it runs as, so they reach
+ * that account alone. They name the job, its session and its error text, and went to everyone signed
+ * in. A run that names no account (a scene trigger's, an instance credential's) has no owner, and its
+ * notifications go to operators and above.
+ */
+export function jobNotificationOwner(job: Pick<SceneJob, "userId" | "account">): Identity | undefined {
+  if (!job.account) return undefined;
+  return { ...(job.userId !== undefined ? { userId: job.userId } : {}), account: job.account };
+}
+
+/** The `owner` field of a job's notification: present only when the job runs as an account. */
+function jobNotificationOwnerField(job: Pick<SceneJob, "userId" | "account">): { owner?: Identity } {
+  const owner = jobNotificationOwner(job);
+  return owner ? { owner } : {};
 }

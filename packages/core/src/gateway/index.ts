@@ -24,7 +24,7 @@ import { registerLongRunningRoutes } from "./long-running-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
 import { discardUnreadBody } from "./unread-body.js";
-import { registerChannelRoutes } from "./channels-routes.js";
+import { deadLetterAccess, registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
 import { registerAuthRoutes } from "./auth-routes.js";
@@ -36,7 +36,6 @@ import { mountFederationRoutes } from "./federation-router.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { handleFederationDelegateStream } from "./federation-stream.js";
 import { RpcConnection, steerChatTurn } from "./rpc.js";
-import { getAllSessions } from "../agent/session.js";
 import { probeDockerReachability } from "../agent/container-runner.js";
 import {
   buildSessionAuditMarkdownDetached,
@@ -87,7 +86,7 @@ import { listCapabilityGaps } from "../agent/self-improve.js";
 import { getWardenAlerts } from "../agent/warden.js";
 import { ModelConfigSchema, RetrievalRerankerSchema, SkillLibrarySchema, ToolPipelineSchema, DocumentRagSchema, EffortSchema, EFFORT_TIERS, type Config } from "../config/schema.js";
 import { mergeOrchestrationConfigUpdate } from "./orchestration-config-merge.js";
-import { callerMayUseSession } from "./session-route-access.js";
+import { callerMayUseSession, visibleSessionsFor } from "./session-route-access.js";
 import { checkMultimodalConfigSave, mergeMultimodalConfigUpdate } from "./multimodal-config-merge.js";
 import {
   agentModelSecretDestinations,
@@ -1410,10 +1409,18 @@ export function createGateway() {
     if (!token || !await verifyToken(token)) {
       return c.json({ error: "Unauthorized" }, 401);
     }
+    // Under multi-user auth the sessions the caller may see, as the socket's session list: its own
+    // and unowned ones, every one for an admin. Every session's id, channel and turn count went to any
+    // caller that signed in. With auth off, every session, as before.
+    let viewer: Parameters<typeof visibleSessionsFor>[0];
+    if (getConfig().auth?.enabled === true) {
+      const caller = await authenticatedUser(c.req.header("Authorization"));
+      viewer = { identity: callerIdentity(caller), role: caller?.role };
+    }
     return c.json({
       version: "0.1.0",
       uptime: process.uptime(),
-      sessions: getAllSessions().map(s => ({
+      sessions: visibleSessionsFor(viewer).map(s => ({
         id: s.id,
         channel: s.channel,
         createdAt: s.createdAt,
@@ -3688,10 +3695,14 @@ export function createGateway() {
   app.get("/api/channels/dead-letters", async (c) => {
     const token = extractBearerToken(c.req.header("Authorization"));
     if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
+    // Under multi-user auth the count for operators and above, the entries for admins
+    // (deadLetterAccess); any caller that signed in read both. With auth off, both, as before.
+    const access = await deadLetterAccess(c.req.header("Authorization"));
+    if (access === "none") return c.json({ error: "Operator role required" }, 403);
     try {
       return c.json({
         count: getDeadLetterCount(),
-        entries: readDeadLetters({ limit: 50 }),
+        entries: access === "entries" ? readDeadLetters({ limit: 50 }) : [],
       });
     } catch {
       return c.json({ count: 0, entries: [] });
