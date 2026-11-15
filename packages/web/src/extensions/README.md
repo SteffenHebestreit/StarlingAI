@@ -25,6 +25,12 @@ export default defineWebExtension({
 - Keep pages and components inside your extension directory.
 - Branding (product name, tagline, accent) comes from `GET /api/product`
   (driven by the repo-root `product.json`), not from extensions.
+- **New UI builds** never interrupt a route with `meta: { layout: "bare" }` once
+  someone has used it: no notice, no reload. The build loads with the next
+  change of path, or sooner if the page calls `applyAppUpdate()` from
+  `@/composables/appUpdate` at an idle moment (its start screen, between
+  visitors; `appUpdatePending` says whether one is waiting). A page that stays
+  on one path should do that, or it keeps the old build until it is reloaded.
 
 **Upstream ships nothing here except this README, `registry.ts`, and the
 dormant `_example/`** — directories starting with `_` or `.` are skipped at
