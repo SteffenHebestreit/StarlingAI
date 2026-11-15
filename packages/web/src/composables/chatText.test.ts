@@ -6,7 +6,7 @@ describe("chatText", () => {
   it("has both wordings for every label, and they differ where the languages do", () => {
     const sample: Record<string, unknown[]> = {
       enlarge: ["fox.png"], firstCharacters: [500], messagePlaceholder: ["StarlingAI", true],
-      launcherTitle: ["StarlingAI"], restartConfirmMessage: [3], resetConfirmMessage: [4],
+      launcherTitle: ["StarlingAI", true], restartConfirmMessage: [3], resetConfirmMessage: [4],
       showOlder: [5], hideOlder: [5],
       followUp: ["Release watch"], followUpEnded: ["max_runs", 3], autoIn: ["0:42"],
       cannotEditPicture: ["Fast"], fixedSizeOnly: [512], baseSource: ["agent"], tooLargeRendersAt: [1024, 768],

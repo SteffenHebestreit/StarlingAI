@@ -695,7 +695,7 @@
 
 /* ── Stacking order ────────────────────────────────────────────────────────
    One scale for everything that floats. The chat page's own chrome (side panel
-   201–223, composer 215, pods and launcher 220) and the navigation panel
+   201–223, composer 215, its round controls 220) and the navigation panel
    (catcher 225, panel 230) were already up here, while the shell's menus, dialogs
    and toasts sat at 50–90: the chat's round buttons floated over the account
    menu, over a toast's Dismiss and over every dialog, and stayed clickable there.
@@ -729,8 +729,12 @@
   .nav-fwd-enter-from, .nav-fwd-leave-to,
   .nav-back-enter-from, .nav-back-leave-to,
   .toast-enter-from, .toast-leave-to,
-  .hud-btn:hover {
+  .hud-btn:hover, .hud-btn:active {
     transform: none !important;
+  }
+  .hud-btn::after, .hud-btn:hover::after {
+    transform: rotate(55deg);
+    transition: none;
   }
   .glass-card--interactive,
   .btn-grad,
@@ -802,39 +806,56 @@
 [data-theme="jarvis"] .rounded-md  { border-radius: 0.25rem; }
 [data-theme="jarvis"] .rounded     { border-radius: 0.2rem; }
 
-/* Round HUD chrome buttons (header burger, account, …): glassy disc with a
-   soft specular light and accent rim — quieter siblings of the 3D pods. */
+/* Round chrome buttons (the header's search, navigation and account; a dock's close): dials of
+   the same make as the chat page's controls round the orb (components/OrbNode.vue), flat and at
+   rest here — a glyph in a hairline bezel, with one arc of light on it that runs once round the
+   bezel under the pointer. They used to be glassy discs with a specular highlight, quieter
+   siblings of the balls those controls were. */
 .hud-btn {
+  position: relative;
   border-radius: 999px;
-  color: rgba(165, 243, 252, 0.8);
-  background:
-    radial-gradient(circle at 34% 30%, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 42%),
-    rgba(var(--app-bg), 0.6);
-  border: 1px solid rgba(var(--logo-cyan), 0.28);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 0 10px rgba(var(--accent-purple), 0.18);
-  transition: color 200ms var(--ease-out), border-color 200ms var(--ease-out),
+  color: rgba(var(--logo-cyan), 0.82);
+  background: rgba(var(--app-bg), 0.35);
+  border: 1px solid rgba(var(--logo-cyan), 0.22);
+  transition: color 200ms var(--ease-out), border-color 220ms var(--ease-out),
     box-shadow 220ms var(--ease-out), transform 220ms var(--ease-out);
+}
+/* The arc: a quarter of the bezel, brightest at its head; it rests at the upper right. (On
+   ::after: a dock's close button widens its hit area with ::before.) */
+.hud-btn::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    rgba(var(--logo-cyan), 0) 0deg,
+    rgba(var(--logo-cyan), 0) 262deg,
+    rgba(var(--logo-cyan), 0.95) 358deg,
+    rgba(var(--logo-cyan), 0) 360deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 1.7px), #000 calc(100% - 1px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 1.7px), #000 calc(100% - 1px));
+  transform: rotate(55deg);
+  transition: transform 700ms var(--ease-out);
 }
 .hud-btn:hover {
   color: rgb(var(--logo-cyan));
-  border-color: rgba(var(--logo-cyan), 0.55);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 0 18px rgba(var(--accent-purple), 0.4);
-  transform: translateY(-1px);
+  border-color: rgba(var(--logo-cyan), 0.5);
+  box-shadow: 0 0 14px rgba(var(--logo-cyan), 0.16), inset 0 0 10px rgba(var(--logo-cyan), 0.08);
 }
+.hud-btn:hover::after { transform: rotate(415deg); }
+.hud-btn:active { transform: scale(0.95); }
 .hud-btn:focus-visible {
   outline: 2px solid rgba(var(--logo-cyan), 0.75);
   outline-offset: 2px;
 }
+/* Open, or signed in: the whole bezel is lit. */
 .hud-btn--active {
   color: rgb(var(--logo-cyan));
-  border-color: rgba(var(--logo-cyan), 0.6);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 0 20px rgba(var(--accent-purple), 0.45);
+  border-color: rgba(var(--logo-cyan), 0.7);
+  box-shadow: 0 0 16px rgba(var(--logo-cyan), 0.2), inset 0 0 10px rgba(var(--logo-cyan), 0.1);
 }
 
 /* Header & nav as instrument console: mono uppercase nav chips, angular,

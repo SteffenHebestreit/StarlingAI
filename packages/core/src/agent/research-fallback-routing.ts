@@ -63,11 +63,13 @@ export function buildRequiredResearchFallbackRoute(
 ): RequiredResearchFallbackRoute | null {
   // De-layer single-domain research: a coordinator only earns its extra hop when
   // the task genuinely spans multiple areas (Anthropic/Cognition consensus).
-  // Otherwise route straight to the researcher specialist. Freshness single-shot
-  // lookups keep web_task_coordinator (its purpose-built lane).
+  // Otherwise route straight to the researcher specialist — a freshness single-shot lookup too:
+  // through web_task_coordinator it cost the coordinator's four model calls around one
+  // researcher run (46 s of 185 in a live weather turn, 2026-11-14). The coordinator stays the
+  // next choice for it, for a lookup of several live facts.
   const multiDomain = looksMultiDomainResearch(userMessage);
   const basePreference = guidance?.freshnessSensitive && !guidance?.sourceSensitive
-    ? ["web_task_coordinator", "researcher", "mission_coordinator"]
+    ? ["researcher", "web_task_coordinator", "mission_coordinator"]
     : (multiDomain ? ["mission_coordinator", "researcher"] : ["researcher", "mission_coordinator"]);
   // Inside a scoped scene/job step the session restricts which agents may run. Routing
   // to an agent outside that set hard-fails ("not permitted in this scene"), so respect

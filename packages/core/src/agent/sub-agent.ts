@@ -68,6 +68,15 @@ import {
   type MaskedDelegatedRun,
 } from "./delegated-run-record.js";
 import { scanOutput } from "../guardrails/output.js";
+import {
+  DIRECT_RUN_SHARE_NOTICE,
+  readRelayMarker,
+  relayableDelegationAnswer,
+  RELAY_OFFER,
+  RELAY_RESETTING_TOOLS,
+  RELAY_UNAVAILABLE_CORRECTION,
+  type RelayableDelegation,
+} from "./sub-agent-relay.js";
 import { neutralizeToolResultFraming } from "../guardrails/input.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -3796,12 +3805,21 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     const stablePrefix = effectiveOrchestration().stablePromptPrefix ?? true;
     // The setup lookups started above, awaited once.
     const [memoryGuidance, skillGuidance, orderedTools, peerMessages] = await setupLookups;
+    // A RUN THE MAIN ASSISTANT DELEGATED DIRECTLY HAS NOBODY TO SHARE WITH. Its answer goes back
+    // as the delegation's result, and what it fetches is auto-shared (autoShareUsefulFinding). An
+    // agent prompt written for coordinated work ("publish findings early … other agents can build
+    // on them") still had it publish its whole answer and then write it again: 36 of 82 direct
+    // researcher runs in the lab, 23 s per extra model call. Run-constant, so it rides with the task.
+    const directRunNotice = !opts.parentSessionId.startsWith("sub:") && (effectiveToolNames ?? []).includes("share_finding")
+      ? DIRECT_RUN_SHARE_NOTICE
+      : "";
     const taskDerivedContext = [
       flowGuidance,
       skillGuidance,
       memoryGuidance,
       discoveryFallbackNotice,
       degradedNudge,
+      directRunNotice,
     ].filter((entry) => entry.trim().length > 0);
     const legacyPromptSuffix = stablePrefix ? "" : taskDerivedContext.map((entry) => `\n\n${entry}`).join("");
     const runContextBlock = stablePrefix && taskDerivedContext.length > 0
@@ -4479,6 +4497,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     const failedArtifactPersistTools = new Set<string>();
     let artifactPersistFailureCount = 0;
     let workflowPassthroughOutput: string | null = null;
+    // The last delegation's answer while it can be passed on as it stands (agent/sub-agent-relay.ts):
+    // set by every delegate_to_agent call, cleared by a fan-out after it.
+    const canRelayDelegation = (effectiveToolNames ?? []).includes("delegate_to_agent");
+    let relayableDelegation: RelayableDelegation | null = null;
+    let relayCorrected = false;
     // Observability: per-tool byte totals for context-budget runaway detection
     const bytesByTool = new Map<string, number>();
     // E21: Source-diversity — detect when research plateaus on repeated domains
@@ -7054,6 +7077,47 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         let result = normalizeSubAgentOutput(response.content);
         if (tableComputeDraft !== null && /^\W*KEEP\W*$/i.test(result.trim())) result = tableComputeDraft;
 
+        // THE LAST DELEGATION'S ANSWER, PASSED ON AS IT STANDS (agent/sub-agent-relay.ts). A
+        // coordinator whose one specialist already answered the whole task replies with the
+        // marker instead of writing that answer out again; the runtime puts the answer in its
+        // place. When there is nothing to pass on (a fan-out, a failure or a partial came last) it
+        // is asked once to write the answer itself; a second marker leaves the run without an
+        // answer, which the empty-answer rescue below writes from the history.
+        const relayRead = canRelayDelegation ? readRelayMarker(result) : { kind: "none" as const, text: result };
+        if (relayRead.kind === "relay" && relayableDelegation) {
+          logAudit("sub_agent_delegation_relayed", {
+            agentName: opts.agentName,
+            runSessionId: subSessionId,
+            relayedAgent: relayableDelegation.agentName,
+            answerChars: relayableDelegation.answer.length,
+            iterations,
+          }, { sessionId: opts.parentSessionId, severity: "info" });
+          result = relayableDelegation.answer;
+        } else if (relayRead.kind === "relay") {
+          if (
+            !relayCorrected
+            && iterations + 1 < maxIterations
+            && !lrgOperatorStop
+            && !supervisorStop
+            && !opts.signal?.aborted
+            && !longRunningGenerationManager.isStopRequested(subSessionId)
+          ) {
+            relayCorrected = true;
+            history.push({ role: "assistant", content: result });
+            history.push({ role: "user", content: RELAY_UNAVAILABLE_CORRECTION });
+            logAudit("sub_agent_relay_refused", {
+              agentName: opts.agentName,
+              runSessionId: subSessionId,
+              iterations,
+            }, { sessionId: opts.parentSessionId, severity: "info" });
+            iterations++;
+            continue;
+          }
+          result = relayRead.text.length > 0 ? relayRead.text : NO_FINAL_RESPONSE;
+        } else if (relayRead.kind === "own") {
+          result = relayRead.text;
+        }
+
         // Recovery: if the agent used tools (gathered real content) but returned
         // an empty final response, force one synthesis pass so the fetched data
         // isn't lost.  This catches a common Qwen pattern where the model emits
@@ -8195,6 +8259,14 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
         if (tc.name === "run_workflow" && result.success) {
           workflowPassthroughOutput = result.output;
         }
+        if (canRelayDelegation) {
+          // Two delegations in one response are two answers: neither alone is the one to pass on.
+          if (tc.name === "delegate_to_agent") {
+            relayableDelegation = response.tool_calls.filter((call) => call.name === "delegate_to_agent").length === 1
+              ? relayableDelegationAnswer(result)
+              : null;
+          } else if (RELAY_RESETTING_TOOLS.has(tc.name)) relayableDelegation = null;
+        }
         if (
           response.tool_calls.length === 1
           && tc.name === "ssh_exec"
@@ -8563,7 +8635,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
 
         const executedAnswer: LLMMessage = {
           role: "tool",
-          content: resultContent,
+          // The pass-it-on offer (agent/sub-agent-relay.ts) rides on the result it is about.
+          content: canRelayDelegation && tc.name === "delegate_to_agent" && relayableDelegation
+            ? `${resultContent}\n\n${RELAY_OFFER}`
+            : resultContent,
           tool_call_id: tc.id,
         };
         toolResults.push(executedAnswer);
@@ -8716,7 +8791,18 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       // Phase A5: when substantial evidence has been gathered but share_finding hasn't
       // been called yet, inject a nudge so the agent publishes its findings before
       // running out of iterations or dropping evidence.
-      if (substantiveEvidenceCount >= 2 && !shareFindinCalledThisRun && toolResults.length > 0) {
+      //
+      // ONLY WHERE THE SHARE SERVES SOMEONE. A run the main assistant delegated directly hands its
+      // answer back as the delegation's result, and its fetched pages are already auto-shared
+      // (autoShareUsefulFinding); there the checkpoint made the researcher write its answer twice:
+      // a share_finding carrying the whole answer, then the same answer again (36 s of a 185 s
+      // weather turn, 2026-11-14). It stays for a run under a coordinator, whose siblings read
+      // shared facts while it works, and for a run whose budget is running out, which may not get
+      // to write its answer at all.
+      const sharesServeSiblings = opts.parentSessionId.startsWith("sub:");
+      const evidenceAtRisk = remaining <= 4
+        || (turnTimeoutMs !== undefined && timeRemainingMs !== undefined && timeRemainingMs <= turnTimeoutMs * 0.4);
+      if (substantiveEvidenceCount >= 2 && !shareFindinCalledThisRun && toolResults.length > 0 && (sharesServeSiblings || evidenceAtRisk)) {
         const lastTR = toolResults[toolResults.length - 1]!;
         lastTR.content += "\n\n[EVIDENCE CHECKPOINT] You have collected substantial evidence (" +
           substantiveEvidenceCount + " tool results \u2265 size threshold). " +

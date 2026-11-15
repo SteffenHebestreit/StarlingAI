@@ -255,6 +255,30 @@ export const STEP_RINGS: readonly HudRingSpec[] = [
   { kind: "dash",  radius: 0.955, width: 0.012, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.02,  flow: 0.025, seed: 13.9, arc: 1, tiles: 48,  strength: 1.5, hot: 0.4, tint: 0.55 },
 ];
 
+/**
+ * A control of the chat page, standing on its orbit round the orb (composables/orbControls.ts):
+ * the session, its actions, the message input. Each is a small instrument of the sphere's make: a
+ * gimbal of two rings round the glyph the page draws there, in the node's own units — 1 is the
+ * bezel round that glyph — turning slowly and quickening under the pointer.
+ */
+export const NODE_RINGS: readonly HudRingSpec[] = [
+  { kind: "hair",  radius: 1.22, width: 0,    offset: 0, normal: [0.58, 0.3, 0.76],   frame: 0, wobble: 0.22, spin: 0.42,  flow: 0.11, seed: 21.3, arc: 0.7,  tiles: 1,  strength: 1.5, weight: 1.2 },
+  { kind: "scale", radius: 1.5,  width: 0.19, offset: 0, normal: [-0.42, 0.56, 0.71], frame: 0, wobble: 0.18, spin: -0.27, flow: 0.07, seed: 22.9, arc: 0.42, tiles: 40, strength: 1.25, tint: 0.55 },
+];
+
+/**
+ * The controls' orbit itself, in its own units: a faint line of moving dashes all the way round
+ * the orb, so the three controls read as riding one ring and the eye can follow it behind the orb.
+ */
+export const CONTROL_ORBIT_RING: HudRingSpec = {
+  kind: "dash", radius: 1, width: 0.004, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.012, flow: 0.006, seed: 24.9, arc: 1, tiles: 84, strength: 0.5,
+};
+
+/** The stretch of the orbit a control stands on, in the orbit's own units: the control is at its middle. */
+export const NODE_ORBIT_ARC: HudRingSpec = {
+  kind: "hair", radius: 1, width: 0, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0, flow: 0.04, seed: 23.7, arc: 0.11, tiles: 0, strength: 1.15,
+};
+
 export const hudRingVertexShader = `
   uniform float uSphere;   // the radius of the sphere the ring lies on
   uniform float uOffset;   // how far the ring's plane sits from that sphere's centre

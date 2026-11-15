@@ -50,8 +50,14 @@
         </nav>
 
         <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:gap-4">
-          <!-- Connection status -->
-          <div class="flex items-center gap-2 text-xs shrink-0" role="status" :aria-label="connectionLabel" :title="connectionLabel">
+          <!-- Connection status: a readout, set like the header's other instrument labels. -->
+          <div
+            class="app-status flex items-center gap-2 shrink-0"
+            :class="gateway.connected ? '' : gateway.connecting || gateway.reconnecting ? 'app-status--wait' : 'app-status--down'"
+            role="status"
+            :aria-label="connectionLabel"
+            :title="connectionLabel"
+          >
             <div :class="[
               'w-1.5 h-1.5 rounded-full transition-colors',
               gateway.connected ? 'bg-emerald-400 dot-pulse'
@@ -59,7 +65,7 @@
               : 'bg-red-500'
             ]" />
             <!-- A lost connection is worth words on a phone too; "Connected" is not. -->
-            <span class="text-gray-400" :class="gateway.connected ? 'hidden sm:inline' : ''">{{ connectionLabel }}</span>
+            <span class="app-status__label" :class="gateway.connected ? 'hidden sm:inline' : ''">{{ connectionLabel }}</span>
           </div>
 
           <!-- The command palette's way in for whoever does not know the shortcut yet. -->
@@ -982,6 +988,20 @@ watch(() => gateway.isLoading, (running) => {
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.28);
 }
 
+/* The connection, read out like an instrument: the label's own small capitals, as the page name
+   beside the brand and the names of the chat's controls are set. */
+.app-status__label {
+  font-family: var(--font-label);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: rgba(165, 243, 252, 0.55);
+}
+.app-status--wait .app-status__label { color: rgb(252, 211, 77); }
+.app-status--down .app-status__label { color: rgb(252, 165, 165); }
+
 /* Where you are, beside the brand. */
 .app-crumb {
   display: flex;
@@ -1060,7 +1080,7 @@ watch(() => gateway.isLoading, (running) => {
   /* Where the header's lower edge usually is; the real top and height are set from the burger's
      place on screen (positionNavPanel), which moves with the banner and a wrapped header. */
   top: 4.4rem;
-  /* above the floating HUD pods (z 220) — the summoned menu always wins */
+  /* above the chat page's round controls (z 220) — the summoned menu always wins */
   z-index: 230;
   width: min(22rem, calc(100vw - 1.5rem));
   max-height: calc(100vh - 5.5rem);

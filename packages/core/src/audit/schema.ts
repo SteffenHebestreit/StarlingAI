@@ -148,6 +148,10 @@ export type CoreAuditEventType =
   // Progress verifier — oversight for max-effort silent-unbounded runs
   | "progress_verifier_intervened"
   | "sub_agent_table_compute_nudged"
+  // A coordinator passed its last delegation's answer on as it stands, or asked to with none to pass
+  // on (agent/sub-agent-relay.ts)
+  | "sub_agent_delegation_relayed"
+  | "sub_agent_relay_refused"
   // Max-effort turn oversight — orchestrator-level re-plan / never-empty floor
   | "turn_oversight_redirected"
   | "turn_oversight_floor"

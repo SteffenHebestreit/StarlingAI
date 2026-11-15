@@ -605,15 +605,18 @@ packages/
                                             analyze_image, browser_* (Playwright MCP)
   web/                      Vue 3 dashboard (Vite + Tailwind + Three.js)
     src/
-      components/           (18) MessageBubble.vue — chat message renderer
+      components/           (19) MessageBubble.vue — chat message renderer
                             TurnStepStream.vue · StepDetailPanel.vue — a turn's steps:
                               the folded list in an answer, one step in the side panel
                             LoginModal.vue — JWT login
                             OrbCanvas.vue — Three.js swarm visualizer: the core, its
                               breathing dust, a hologram sphere of rings round both,
-                              and the step ring, in 3D
+                              the step ring, and the orbit the chat's controls ride, in 3D
                             OrbActivity.vue — the running turn at the orb: its steps on
                               the orb's step ring, its newest words in a status line
+                            OrbNode.vue — a chat control's face (session, its actions,
+                              message input): on its orbit round the orb on a wide
+                              window, parked at the page's edge on a narrow one
                             SwarmStatusPanel.vue — live agent and bus status
                             BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
                               ShellSessionPanel.vue — live operator docks

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  HUD_RING_KINDS, SPHERE_FRAMES, SPHERE_INNER, SPHERE_OUTER, SPHERE_RINGS, STEP_RINGS, buildSphereRings,
-  type HudRingKind,
+  CONTROL_ORBIT_RING, HUD_RING_KINDS, NODE_ORBIT_ARC, NODE_RINGS, SPHERE_FRAMES, SPHERE_INNER, SPHERE_OUTER, SPHERE_RINGS, STEP_RINGS,
+  buildSphereRings, type HudRingKind,
 } from "./hudRings";
 
 /** The orb's own parts the sphere has to keep clear of (OrbCanvas.vue, orbitalSystem.ts), in orb units. */
@@ -72,7 +72,7 @@ describe("the hologram sphere", () => {
   });
 
   it("gives a scale a whole number of fives, so every fifth mark is a long one all the way round", () => {
-    for (const ring of [...SPHERE_RINGS, ...STEP_RINGS]) {
+    for (const ring of [...SPHERE_RINGS, ...STEP_RINGS, ...NODE_RINGS]) {
       if (ring.kind === "scale") expect(ring.tiles % 5).toBe(0);
     }
   });
@@ -93,5 +93,40 @@ describe("the step ring", () => {
   it("keeps the rail the steps ride on in the core's colour, and grades its scale like the dust", () => {
     expect(STEP_RINGS.find((ring) => ring.kind === "rail")?.tint).toBeUndefined();
     expect(STEP_RINGS.find((ring) => ring.kind === "scale")?.tint).toBe(1);
+  });
+});
+
+describe("the page's controls on their orbit", () => {
+  it("draws a control's gimbal round the bezel the page draws, never across its glyph", () => {
+    for (const ring of NODE_RINGS) {
+      // 1 is the bezel round the glyph: everything a ring draws stays outside it.
+      expect(ring.radius - INWARD[ring.kind] * ring.width).toBeGreaterThan(1);
+      // A great circle about the node's own centre, which it turns round.
+      expect(ring.offset).toBe(0);
+      // Leaning: neither flat to the viewer, where it would be a second bezel, nor edge-on, where it dims to a line.
+      const lean = Math.abs(ring.normal[2]) / Math.hypot(...ring.normal);
+      expect(lean).toBeGreaterThan(0.5);
+      expect(lean).toBeLessThan(0.9);
+      expect(ring.arc).toBeLessThan(1);
+      // A control keeps its whole gimbal on a small orb too.
+      expect(ring.minor).toBeUndefined();
+    }
+    // The two rings turn against each other, and lean different ways.
+    expect(Math.sign(NODE_RINGS[0]!.spin)).toBe(-Math.sign(NODE_RINGS[1]!.spin));
+    expect(Math.sign(NODE_RINGS[0]!.normal[0])).toBe(-Math.sign(NODE_RINGS[1]!.normal[0]));
+  });
+
+  it("draws the whole orbit faintly and lights each control's own stretch of it", () => {
+    for (const ring of [NODE_ORBIT_ARC, CONTROL_ORBIT_RING]) {
+      // In the orbit's own plane and units: the canvas scales it to the orbit's radius.
+      expect(ring.radius).toBe(1);
+      expect(ring.offset).toBe(0);
+      expect(ring.normal).toEqual([0, 0, 1]);
+    }
+    expect(CONTROL_ORBIT_RING.arc).toBe(1);
+    // A stretch short enough that the two back controls' stretches stay apart at their widest stance (38° either side).
+    expect(NODE_ORBIT_ARC.arc * 360).toBeLessThan(2 * 38);
+    // The orbit is a guide for the eye, not a fourth thing to look at.
+    expect(CONTROL_ORBIT_RING.strength).toBeLessThan(NODE_ORBIT_ARC.strength / 2);
   });
 });

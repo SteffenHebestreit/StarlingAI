@@ -12,7 +12,7 @@
       class="chat-orb-layer fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden"
       :class="orbBehindText ? 'chat-orb-layer--behind-text' : ''"
     >
-      <OrbCanvas :ai-state="orbAiState" :ring="orbRing" class="w-full h-full" />
+      <OrbCanvas :ai-state="orbAiState" :ring="orbRing" :controls="orbControls" class="w-full h-full" />
     </div>
 
     <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
@@ -32,96 +32,44 @@
       </div>
     </div>
 
-    <!-- Floating HUD pods: draggable toggles whose menus open around
-         wherever they currently sit. Teleported to <body> so no overlay or
-         stacking context can swallow their clicks. -->
+    <!-- The page's three round controls: the session, its actions, the message input
+         (components/OrbNode.vue). On a wide window they stand on an orbit round the orb
+         (composables/orbControls.ts) and their menus open away from it; on a narrow one, where
+         the messages lie over the orb, they are parked at the page's edge and can be dragged.
+         Teleported to <body> so no overlay or stacking context can swallow their clicks. They are
+         chat controls and only exist while connected, so they never float above the login modal. -->
     <Teleport to="body">
     <div v-if="(actionsOpen || sessionOpen) && gateway.connected" class="fixed inset-0 z-[210]" @click="actionsOpen = false; sessionOpen = false" />
 
-    <!-- Session-actions pod: its tools open as a labelled list beside it, on the side with room.
-         They used to fan out on a full circle as bare glyphs (MD, DBG, AUD, ARC, RST): near a
-         screen edge half of them left the screen, one landed on the header, and what a glyph
-         did was told by a hover tooltip only.
-         The pods are chat controls — they only exist while connected, so
-         they can never float above the login modal. -->
-    <div v-if="gateway.connected" class="hud-orb" :style="actionsOrbStyle">
-      <div class="radial-menu" :class="actionsOpen ? 'radial-menu--open' : ''">
-        <button
-          type="button"
-          class="radial-menu__toggle"
-          :aria-expanded="actionsOpen"
-          aria-haspopup="menu"
-          aria-label="Session actions"
-          title="Session actions (drag to move)"
-          @pointerdown="actionsOrbDown"
-          @pointermove="actionsOrbMove"
-          @pointerup="actionsOrbUp"
-          @click="onActionsToggleClick"
-        >
-          <span v-if="actionsOpen" aria-hidden="true">✕</span>
-          <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="h-[17px] w-[17px]" aria-hidden="true">
-            <path d="M4 7h10" /><circle cx="17" cy="7" r="2.2" />
-            <path d="M20 12h-10" /><circle cx="7" cy="12" r="2.2" />
-            <path d="M4 17h8" /><circle cx="15" cy="17" r="2.2" />
-          </svg>
-        </button>
-      </div>
-      <Transition name="hud-pop">
-        <div
-          v-if="actionsOpen"
-          ref="actionsMenuEl"
-          class="actions-pod"
-          :class="[actionsPodLeft ? 'session-pod--left' : 'session-pod--right', actionsPodUp ? 'actions-pod--up' : '']"
-          role="menu"
-          aria-label="Session actions"
-          @keydown="onActionsMenuKeydown"
-        >
-          <template v-for="(action, i) in sessionActions" :key="action.key">
-            <div v-if="action.danger" class="actions-pod__rule" role="separator" />
-            <button
-              type="button"
-              role="menuitem"
-              class="actions-pod__item"
-              :class="action.danger ? 'actions-pod__item--danger' : ''"
-              :style="{ '--delay': `${i * 26}ms` }"
-              :disabled="action.disabled"
-              :title="action.disabled ? action.disabledReason : undefined"
-              @click="action.run(); actionsOpen = false;"
-            >
-              <span class="actions-pod__glyph" aria-hidden="true">{{ action.glyph }}</span>
-              <span class="actions-pod__text">
-                <span class="actions-pod__label">{{ action.label }}</span>
-                <span class="actions-pod__hint">{{ action.disabled ? action.disabledReason : action.hint }}</span>
-              </span>
-            </button>
-          </template>
-        </div>
-      </Transition>
-    </div>
-
-    <!-- Session pod: indicator + picker behind its own toggle. -->
-    <div v-if="gateway.connected" class="hud-orb" :style="sessionOrbStyle">
-      <button
-        type="button"
-        class="radial-menu__toggle"
-        :class="gateway.currentSessionId ? '' : 'hud-orb__btn--idle'"
+    <!-- Session: whether there is one, and the picker behind it. -->
+    <div v-if="gateway.connected" class="orb-control" :class="controlsDocked ? 'orb-control--docked' : ''" :style="sessionControlStyle">
+      <OrbNode
+        side="left"
+        :docked="controlsDocked"
+        :open="sessionOpen"
+        :idle="!gateway.currentSessionId"
+        :label="controlLabelled.session ? chatText.nodeSession(uiLanguage) : ''"
         :aria-expanded="sessionOpen"
-        aria-label="Session"
-        title="Session (drag to move)"
+        :aria-label="chatText.nodeSession(uiLanguage)"
+        :title="controlTitle(chatText.nodeSession(uiLanguage))"
         @pointerdown="sessionOrbDown"
         @pointermove="sessionOrbMove"
         @pointerup="sessionOrbUp"
         @click="onSessionToggleClick"
+        @pointerenter="wakeControl('session')"
+        @pointerleave="restControl('session')"
+        @focus="wakeControl('session')"
+        @blur="restControl('session')"
       >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="h-[17px] w-[17px]" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 3l9 5-9 5-9-5 9-5z" />
           <path d="M3 13l9 5 9-5" />
         </svg>
-      </button>
-      <Transition name="hud-pop">
+      </OrbNode>
+      <Transition name="node-panel">
         <div v-if="sessionOpen" class="session-pod" :class="sessionPodLeft ? 'session-pod--left' : 'session-pod--right'">
           <div class="session-pod__row">
-            <span class="session-pod__label">Session</span>
+            <span class="session-pod__label">{{ chatText.nodeSession(uiLanguage) }}</span>
             <button
               v-if="gateway.currentSessionId"
               type="button"
@@ -149,6 +97,71 @@
         </div>
       </Transition>
     </div>
+
+    <!-- Session actions: its tools open as a labelled list beside it. They used to fan out on a
+         full circle as bare glyphs (MD, DBG, AUD, ARC, RST): near a screen edge half of them
+         left the screen, one landed on the header, and what a glyph did was told by a hover
+         tooltip only. -->
+    <div v-if="gateway.connected" class="orb-control" :class="controlsDocked ? 'orb-control--docked' : ''" :style="actionsControlStyle">
+      <OrbNode
+        side="right"
+        :docked="controlsDocked"
+        :open="actionsOpen"
+        :label="controlLabelled.actions ? chatText.nodeActions(uiLanguage) : ''"
+        :aria-expanded="actionsOpen"
+        aria-haspopup="menu"
+        :aria-label="chatText.nodeActionsLabel(uiLanguage)"
+        :title="controlTitle(chatText.nodeActionsLabel(uiLanguage))"
+        @pointerdown="actionsOrbDown"
+        @pointermove="actionsOrbMove"
+        @pointerup="actionsOrbUp"
+        @click="onActionsToggleClick"
+        @pointerenter="wakeControl('actions')"
+        @pointerleave="restControl('actions')"
+        @focus="wakeControl('actions')"
+        @blur="restControl('actions')"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <path d="M4 7h10" /><circle cx="17" cy="7" r="2.2" />
+          <path d="M20 12h-10" /><circle cx="7" cy="12" r="2.2" />
+          <path d="M4 17h8" /><circle cx="15" cy="17" r="2.2" />
+        </svg>
+      </OrbNode>
+      <Transition name="node-panel">
+        <div
+          v-if="actionsOpen"
+          ref="actionsMenuEl"
+          class="actions-pod"
+          :class="[actionsPodLeft ? 'session-pod--left' : 'session-pod--right', actionsPodUp ? 'actions-pod--up' : '']"
+          @keydown="onActionsMenuKeydown"
+        >
+          <!-- The list scrolls inside the panel: a panel that clipped its overflow would cut its own
+               leader line off. -->
+          <div class="actions-pod__list" role="menu" :aria-label="chatText.nodeActionsLabel(uiLanguage)">
+          <template v-for="(action, i) in sessionActions" :key="action.key">
+            <div v-if="action.danger" class="actions-pod__rule" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              class="actions-pod__item"
+              :class="action.danger ? 'actions-pod__item--danger' : ''"
+              :style="{ '--delay': `${i * 26}ms` }"
+              :disabled="action.disabled"
+              :title="action.disabled ? action.disabledReason : undefined"
+              @click="action.run(); actionsOpen = false;"
+            >
+              <span class="actions-pod__glyph" aria-hidden="true">{{ action.glyph }}</span>
+              <span class="actions-pod__text">
+                <span class="actions-pod__label">{{ action.label }}</span>
+                <span class="actions-pod__hint">{{ action.disabled ? action.disabledReason : action.hint }}</span>
+              </span>
+            </button>
+          </template>
+          </div>
+        </div>
+      </Transition>
+    </div>
+
     </Teleport>
 
     <!-- Workspace -->
@@ -482,7 +495,7 @@
     </Teleport>
 
     <!-- Input bay: a floating bottom panel (no layout impact at all);
-         recedes into depth while idle, summoned by the launcher. -->
+         recedes into depth while idle, summoned by the message input's control. -->
     <div class="chat-input-bay-wrap" :class="bayOpen ? 'chat-input-bay-wrap--open' : ''">
     <div
       ref="bayEl"
@@ -1105,27 +1118,38 @@
     </div>
     </div>
 
-    <!-- Composer launcher: the single round control left behind when the
-         input bay has flown out. Click it, or just start typing, to summon it. -->
+    <!-- The message input's control: what is left on the page when the input bay has flown out.
+         Click it, or just start typing, to summon the bay. On a wide window it stands at the front
+         of the controls' orbit, under the orb. -->
     <Teleport to="body">
     <Transition name="composer-launcher">
-      <button
+      <div
         v-if="!composerOpen && gateway.connected"
-        type="button"
-        class="chat-composer-launcher"
-        :style="launcherOrbStyle"
-        :title="chatText.launcherTitle(uiLanguage, product.name)"
-        :aria-label="chatText.launcherLabel(uiLanguage)"
-        @pointerdown="launcherOrbDown"
-        @pointermove="launcherOrbMove"
-        @pointerup="launcherOrbUp"
-        @click="onLauncherClick"
+        class="orb-control orb-control--message"
+        :class="controlsDocked ? 'orb-control--docked' : ''"
+        :style="messageControlStyle"
       >
-        <svg class="chat-composer-launcher__core" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M21 11.5a8.38 8.38 0 0 1-9 8.35 8.5 8.5 0 0 1-3.4-.7L3 21l1.85-5.6A8.38 8.38 0 0 1 12.5 3a8.5 8.5 0 0 1 8.5 8.5z" />
-          <path d="M8 10h8" /><path d="M8 13.5h5" />
-        </svg>
-      </button>
+        <OrbNode
+          side="below"
+          :docked="controlsDocked"
+          :label="controlLabelled.message ? chatText.nodeMessage(uiLanguage) : ''"
+          :title="chatText.launcherTitle(uiLanguage, product.name, !controlsDocked)"
+          :aria-label="chatText.launcherLabel(uiLanguage)"
+          @pointerdown="launcherOrbDown"
+          @pointermove="launcherOrbMove"
+          @pointerup="launcherOrbUp"
+          @click="onLauncherClick"
+          @pointerenter="wakeControl('message')"
+          @pointerleave="restControl('message')"
+          @focus="wakeControl('message')"
+          @blur="restControl('message')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 11.5a8.38 8.38 0 0 1-9 8.35 8.5 8.5 0 0 1-3.4-.7L3 21l1.85-5.6A8.38 8.38 0 0 1 12.5 3a8.5 8.5 0 0 1 8.5 8.5z" />
+            <path d="M8 10h8" /><path d="M8 13.5h5" />
+          </svg>
+        </OrbNode>
+      </div>
     </Transition>
     </Teleport>
   </div>
@@ -1188,7 +1212,9 @@ import { useVoice, type RecordingOutcome } from "@/speech/useVoice";
 import MessageBubble from "@/components/MessageBubble.vue";
 import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import OrbActivity from "@/components/OrbActivity.vue";
+import OrbNode from "@/components/OrbNode.vue";
 import { activityRing, freeHalfWidth, liveActivity } from "@/composables/orbActivity";
+import { controlLayout, stationBox, type ControlId } from "@/composables/orbControls";
 import { turnLanguage } from "@/composables/turnText";
 import { detectLanguage } from "@/speech/speechText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
@@ -1557,16 +1583,24 @@ function flagChipClass(color: "purple" | "sky" | "amber"): string {
 /** True while image analysis is in-flight before the backend call starts. */
 const analysing = ref(false);
 
-// ── Floating draggable HUD pods ─────────────────────────────────────────
-// Round toggles that can be dragged anywhere; a short pointer movement
-// still counts as a click on the inner toggle. Positions are stored as
-// viewport FRACTIONS so the pods realign on window resize.
+// ── The page's round controls: the session, its actions, the message input ──────────────────
+// On a window wide enough for the orb to have a zone of its own (the messages stand at its
+// sides) they stand on an orbit round the orb, in its own space (composables/orbControls.ts):
+// the canvas draws each one's gimbal there, the page its glyph. Below that the messages lie over
+// the orb, and the controls are parked at the page's edge, where they can be dragged anywhere; a
+// short pointer movement still counts as a click. Parked positions are stored as viewport
+// FRACTIONS so they realign on window resize.
 const hudWin = ref({ w: 1920, h: 1080 });
 function syncHudWin() { hudWin.value = { w: window.innerWidth, h: window.innerHeight }; }
 onMounted(() => { syncHudWin(); window.addEventListener("resize", syncHudWin); });
 onUnmounted(() => window.removeEventListener("resize", syncHudWin));
+/** From this width the messages stand beside the orb (the page's CSS and OrbActivity share it). */
+const controlsDocked = computed(() => hudWin.value.w >= 1100);
+/** A parked control's face in pixels: the session's and the actions', and the message input's larger one. */
+const PARKED_SIZE = 42;
+const PARKED_MESSAGE_SIZE = 54;
 
-function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: number }) {
+function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: number }, size: number) {
   const frac = ref({ ...defaultFrac });
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null") as { fx: number; fy: number } | null;
@@ -1579,13 +1613,15 @@ function useDraggableOrb(storageKey: string, defaultFrac: { fx: number; fy: numb
   let captureEl: HTMLElement | null = null;
   let capturePointer = 0;
 
-  const x = computed(() => Math.min(Math.max(frac.value.fx * hudWin.value.w, 8), hudWin.value.w - 52));
-  const y = computed(() => Math.min(Math.max(frac.value.fy * hudWin.value.h, 68), hudWin.value.h - 52));
+  const x = computed(() => Math.min(Math.max(frac.value.fx * hudWin.value.w, 8), hudWin.value.w - size - 10));
+  const y = computed(() => Math.min(Math.max(frac.value.fy * hudWin.value.h, 68), hudWin.value.h - size - 10));
   const style = computed(() => ({ left: `${x.value}px`, top: `${y.value}px` }));
 
   function down(event: PointerEvent) {
-    pointerActive = true;
     moved = false;
+    // On its orbit a control stays where it stands.
+    if (controlsDocked.value) return;
+    pointerActive = true;
     startX = event.clientX; startY = event.clientY;
     origX = x.value; origY = y.value;
     // Capture immediately for reliable fast drags. The handlers live on the
@@ -1621,19 +1657,44 @@ const {
   x: actionsOrbX, y: actionsOrbY, style: actionsOrbStyle,
   down: actionsOrbDown, move: actionsOrbMove, up: actionsOrbUp,
   wasDragged: actionsOrbDragged,
-} = useDraggableOrb("starlingai.hud.actionsOrb", { fx: 0.955, fy: 0.09 });
+} = useDraggableOrb("starlingai.hud.actionsOrb", { fx: 0.955, fy: 0.09 }, PARKED_SIZE);
 
 const {
   x: sessionOrbX, style: sessionOrbStyle,
   down: sessionOrbDown, move: sessionOrbMove, up: sessionOrbUp,
   wasDragged: sessionOrbDragged,
-} = useDraggableOrb("starlingai.hud.sessionOrb", { fx: 0.955, fy: 0.17 });
+} = useDraggableOrb("starlingai.hud.sessionOrb", { fx: 0.955, fy: 0.17 }, PARKED_SIZE);
 
 const {
   x: launcherOrbX, style: launcherOrbStyle,
   down: launcherOrbDown, move: launcherOrbMove, up: launcherOrbUp,
   wasDragged: launcherOrbDragged,
-} = useDraggableOrb("starlingai.hud.launcherOrb", { fx: 0.95, fy: 0.92 });
+} = useDraggableOrb("starlingai.hud.launcherOrb", { fx: 0.95, fy: 0.92 }, PARKED_MESSAGE_SIZE);
+
+// Where the controls stand on their orbit for this window, and each one's box on the page: its
+// station there, or the place it is parked at.
+const controlStations = computed(() => controlLayout(hudWin.value.w, hudWin.value.h, freeHalfWidth(hudWin.value.w, hudWin.value.h, 16, 0)));
+function controlStyle(id: ControlId, parked: { left: string; top: string }, parkedSize: number): Record<string, string> {
+  if (!controlsDocked.value) return { ...parked, width: `${parkedSize}px`, height: `${parkedSize}px`, "--node-size": `${parkedSize}px` };
+  const station = controlStations.value.stations.find((candidate) => candidate.id === id)!;
+  const box = stationBox(station, hudWin.value.w, hudWin.value.h);
+  return {
+    left: `${box.left}px`,
+    top: `${box.top}px`,
+    width: `${box.size}px`,
+    height: `${box.size}px`,
+    "--node-size": `${box.size}px`,
+    // What a menu hanging from the control's top has of the window's height below it.
+    "--panel-room": `${Math.max(160, hudWin.value.h - box.top - 12)}px`,
+  };
+}
+/** Which controls carry their name beside them: the ones with room for it (orbControls.ts). */
+const controlLabelled = computed(() => Object.fromEntries(
+  controlStations.value.stations.map((station) => [station.id, station.labelled]),
+) as Record<ControlId, boolean>);
+const sessionControlStyle = computed(() => controlStyle("session", sessionOrbStyle.value, PARKED_SIZE));
+const actionsControlStyle = computed(() => controlStyle("actions", actionsOrbStyle.value, PARKED_SIZE));
+const messageControlStyle = computed(() => controlStyle("message", launcherOrbStyle.value, PARKED_MESSAGE_SIZE));
 
 // ── Lanes for these buttons (composables/podLanes.ts) ─────────────────────────────────────
 // The messages stand at their column's outer edges, which is where the buttons are parked: a
@@ -1658,11 +1719,12 @@ watch(messagesEl, (element) => {
 }, { immediate: true, flush: "post" });
 watch(hudWin, measureMessagesColumn, { flush: "post" });
 onUnmounted(() => messagesColumnObserver?.disconnect());
-const podLaneWidths = computed(() => podLanes([
-  { x: actionsOrbX.value, size: 40 },
-  { x: sessionOrbX.value, size: 40 },
-  { x: launcherOrbX.value, size: 55 },
-], messagesColumn.value));
+// On their orbit the controls are in the orb's zone, which the messages keep clear of anyway.
+const podLaneWidths = computed(() => (controlsDocked.value ? { left: 0, right: 0 } : podLanes([
+  { x: actionsOrbX.value, size: PARKED_SIZE },
+  { x: sessionOrbX.value, size: PARKED_SIZE },
+  { x: launcherOrbX.value, size: PARKED_MESSAGE_SIZE },
+], messagesColumn.value)));
 const podLaneStyle = computed(() => ({
   "--pod-lane-l": `${podLaneWidths.value.left}px`,
   "--pod-lane-r": `${podLaneWidths.value.right}px`,
@@ -1671,12 +1733,23 @@ const podLaneStyle = computed(() => ({
 const podLane = computed(() => Math.max(podLaneWidths.value.left, podLaneWidths.value.right));
 
 const sessionOpen = ref(false);
-const sessionPodLeft = computed(() => sessionOrbX.value > hudWin.value.w / 2);
-// The actions list opens towards the middle of the screen, whichever corner the pod was dragged to.
-const actionsPodLeft = computed(() => actionsOrbX.value > hudWin.value.w / 2);
-const actionsPodUp = computed(() => actionsOrbY.value > hudWin.value.h / 2);
+// A menu opens away from the orb when its control stands on the orbit (the session's to the left,
+// the actions' to the right), and towards the middle of the screen from wherever a parked one was
+// dragged to.
+const sessionPodLeft = computed(() => (controlsDocked.value ? true : sessionOrbX.value > hudWin.value.w / 2));
+const actionsPodLeft = computed(() => (controlsDocked.value ? false : actionsOrbX.value > hudWin.value.w / 2));
+const actionsPodUp = computed(() => !controlsDocked.value && actionsOrbY.value > hudWin.value.h / 2);
 
-// Disconnecting unmounts the pods; make sure their menus don't reopen in a
+// Which control the pointer or the keyboard is on: the canvas quickens that one's gimbal.
+const wokenControl = ref<ControlId | null>(null);
+function wakeControl(id: ControlId): void { wokenControl.value = id; }
+function restControl(id: ControlId): void { if (wokenControl.value === id) wokenControl.value = null; }
+/** A parked control can be dragged, and says so; one on the orbit carries its name beside it. */
+function controlTitle(name: string): string {
+  return controlsDocked.value ? name : `${name} ${chatText.nodeDragHint(uiLanguage)}`;
+}
+
+// Disconnecting unmounts the controls; make sure their menus don't reopen in a
 // stale-open state when the connection returns.
 watch(() => gateway.connected, (connected) => {
   if (!connected) {
@@ -1695,8 +1768,7 @@ function onLauncherClick() {
   if (!launcherOrbDragged()) openComposer();
 }
 
-// Radial session-action menu: tools sit behind the toggle and fan out on a
-// circle around it when opened.
+// The session actions' menu: a list of its tools beside the control.
 const actionsOpen = ref(false);
 const actionsMenuEl = ref<HTMLElement | null>(null);
 useEscapeToClose(() => actionsOpen.value, () => { actionsOpen.value = false; });
@@ -1745,14 +1817,14 @@ const sessionActions = computed((): SessionAction[] => {
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
 
 // HUD input bay: the whole input area flies out of view while idle and is
-// summoned back via the corner launcher (or "/"). A drafted message, focus,
+// summoned back via the message input's control (or by typing). A drafted message, focus,
 // attachments, or a running turn keep it open.
 const composerOpen = ref(false);
 const composerFocused = ref(false);
 // While an ask_user question is pending, the QUESTION card IS the input surface (choices +
 // free-text + Send). The floating steering bay is disabled anyway, and being fixed/z-215 it
 // would float ON TOP of the QUESTION card and obscure its options — so fold it away until the
-// question is answered. The launcher stays hidden too (composerOpen is still true this turn).
+// question is answered. The bay's control stays hidden too (composerOpen is still true this turn).
 const bayOpen = computed(() => composerOpen.value && !gateway.pendingInputRequest);
 
 function openComposer(prefill?: string) {
@@ -1833,9 +1905,13 @@ watch(() => gateway.isLoading, (loading) => {
   if (loading) composerOpen.value = true;
   else if (!composerFocused.value) maybeCloseComposer();
 });
+// The page can be set up while a turn is already running (back from another page): the bay was
+// left folded then — Stop and Steer out of sight, and the bay's control standing where the turn's
+// status line stands.
+if (gateway.isLoading) composerOpen.value = true;
 
 // Typing anywhere on the page starts a message: the bay comes up with the key already in it. A
-// "/" therefore still starts a command. It used to be "/" alone, announced only in the launcher's
+// "/" therefore still starts a command. It used to be "/" alone, announced only in the control's
 // tooltip — every other key did nothing, on a page whose one purpose is to be typed into.
 function onGlobalComposerKey(event: KeyboardEvent) {
   if (composerOpen.value || event.defaultPrevented || event.isComposing) return;
@@ -1946,6 +2022,25 @@ const orbRing = computed(() => ({
   ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value, 16, podLane.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
+// The page's controls for the orb canvas, while they stand on their orbit: the canvas draws each
+// one's gimbal and its stretch of the orbit (the buttons themselves are the page's). The message
+// input's goes while its bay is open; one the pointer is on, or whose menu is open, is awake.
+const orbControls = computed(() => {
+  if (!controlsDocked.value || !gateway.connected) return null;
+  const { orbit, stations } = controlStations.value;
+  return {
+    orbit,
+    nodes: stations.map((station) => ({
+      id: station.id,
+      angle: station.angle,
+      radius: station.radius,
+      shown: station.id !== "message" || !composerOpen.value,
+      lit: wokenControl.value === station.id
+        || (station.id === "session" && sessionOpen.value)
+        || (station.id === "actions" && actionsOpen.value),
+    })),
+  };
+});
 // Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
 // list there, or a running turn's steps would be shown nowhere.
 const orbHasRoomForSteps = computed(() => viewportWidth.value >= 1100);
@@ -3527,9 +3622,9 @@ onUnmounted(() => {
   position: fixed;
   left: clamp(1rem, 4vw, 2rem);
   right: clamp(1rem, 4vw, 2rem);
-  /* above the composer when it is up, above the launcher when it is not */
+  /* above the composer when it is up, above its parked control when it is not */
   bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem), calc(var(--bay-h, 0px) + 2.5rem));
-  /* a question that waits for an answer beats the floating pods (220) */
+  /* a question that waits for an answer beats the page's round controls (220) */
   z-index: var(--z-popover);
   max-width: 48rem;
   margin: 0 auto;
@@ -4044,7 +4139,7 @@ onUnmounted(() => {
 
 /* ── Fly-out input bay ──────────────────────────────────────────────────
    While idle the whole input area folds away below the viewport with a 3D
-   tilt and its layout space collapses; the round launcher remains. */
+   tilt and its layout space collapses; its round control remains. */
 /* Floating bottom panel: fixed and centered, so showing/hiding can never
    shift the page layout. The bay itself only does depth + fade. */
 .chat-input-bay-wrap {
@@ -4079,90 +4174,84 @@ onUnmounted(() => {
   padding-bottom: calc(var(--bay-h, 12rem) + 1.75rem);
 }
 
-/* Miniature 3D orb like the radial toggles, one size up. */
-.chat-composer-launcher {
-  position: fixed;
-  z-index: 220;
-  touch-action: none;
-  width: 3.4rem;
-  height: 3.4rem;
-  border-radius: 999px;
-  display: grid;
-  place-items: center;
-  color: rgb(var(--logo-cyan));
-  background-color: rgb(4, 12, 18);
-  background-image:
-    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 32%),
-    radial-gradient(circle at 50% 42%, rgba(var(--logo-cyan), 0.4), rgba(var(--accent-purple), 0.24) 58%, rgba(2, 8, 14, 0.96) 100%);
-  border: 1px solid rgba(var(--logo-cyan), 0.4);
-  box-shadow:
-    inset -6px -9px 14px rgba(0, 0, 0, 0.6),
-    inset 4px 5px 10px rgba(255, 255, 255, 0.14),
-    0 8px 20px rgba(0, 0, 0, 0.5),
-    0 0 20px rgba(var(--accent-purple), 0.35);
-  cursor: grab;
-  transition: transform 220ms var(--ease-out), box-shadow 220ms var(--ease-out);
-}
-.chat-composer-launcher:active { cursor: grabbing; }
-.chat-composer-launcher:hover {
-  transform: scale(1.08);
-  box-shadow:
-    inset -6px -9px 14px rgba(0, 0, 0, 0.55),
-    inset 4px 5px 10px rgba(255, 255, 255, 0.18),
-    0 10px 24px rgba(0, 0, 0, 0.55),
-    0 0 30px rgba(var(--accent-purple), 0.55);
-}
-.chat-composer-launcher__core {
-  width: 1.25rem;
-  height: 1.25rem;
-  /* engraved into the orb surface and glowing: top-lip occlusion,
-     lower-lip light catch, cyan bloom */
-  filter:
-    drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.7))
-    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.3))
-    drop-shadow(0 0 5px rgba(var(--logo-cyan), 0.85));
-  animation: launcher-breathe 3.2s ease-in-out infinite;
-}
-@keyframes launcher-breathe {
-  0%, 100% { opacity: 0.7; transform: scale(1); }
-  50%      { opacity: 1;   transform: scale(1.12); }
-}
-.composer-launcher-enter-active,
-.composer-launcher-leave-active { transition: transform 360ms var(--ease-out), opacity 280ms var(--ease-out); }
-.composer-launcher-enter-from,
-.composer-launcher-leave-to { transform: translateY(140%) scale(0.6) rotate(-90deg); opacity: 0; }
-
-/* ── Floating draggable HUD pods ────────────────────────────────────────
-   Round toggles positioned anywhere by the user; menus open around the
-   toggle wherever it sits. */
-.hud-orb {
+/* ── The page's round controls ──────────────────────────────────────────
+   The session, its actions and the message input (components/OrbNode.vue draws each one's face).
+   On a wide window each stands at its station on the orbit round the orb, where the orb canvas
+   draws its gimbal (composables/orbControls.ts); on a narrow one it is parked at the page's
+   edge. This box is the control's place and size; its menu hangs from it. */
+.orb-control {
   position: fixed;
   /* above the closed side-panel handle (201) so clicks always land, but
      below the OPEN side panel (scrim/panel/handle at 221–223) */
   z-index: 220;
-  width: 2.5rem;
-  height: 2.5rem;
   touch-action: none;
 }
+/* On its orbit a control follows a resized window without a jump; a parked one follows the
+   pointer that drags it at once. */
+.orb-control--docked {
+  transition: left 420ms var(--ease-out), top 420ms var(--ease-out), width 320ms var(--ease-out), height 320ms var(--ease-out);
+}
+/* The message input's control goes into the bay it opens and comes back out of it: down and
+   away, towards the foot of the page. */
+.composer-launcher-enter-active,
+.composer-launcher-leave-active { transition: transform 360ms var(--ease-out), opacity 260ms var(--ease-out); }
+.composer-launcher-enter-from,
+.composer-launcher-leave-to { transform: perspective(700px) translateY(90%) translateZ(-120px) scale(0.6); opacity: 0; }
 
+/* ── The controls' menus ────────────────────────────────────────────────
+   A panel hangs beside its control, on the side away from the orb, at the end of a short leader
+   line, and swings out from that side like a door. */
 .session-pod {
   position: absolute;
   top: 50%;
-  transform: translateY(-50%);
+  /* centred on its control by `translate`, which leaves `transform` to the door's swing */
+  translate: 0 -50%;
+  --leader-y: 50%;
   width: min(18rem, calc(100vw - 5rem));
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   padding: 0.8rem;
   border-radius: 0.5rem;
-  border: 1px solid var(--hairline);
+  border: 1px solid rgba(var(--logo-cyan), 0.2);
   background: var(--surface-3);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
 }
-.session-pod--right { left: calc(100% + 0.75rem); }
-.session-pod--left  { right: calc(100% + 0.75rem); }
+.session-pod--right { left: calc(100% + 0.85rem); transform-origin: 0 var(--leader-y); }
+.session-pod--left  { right: calc(100% + 0.85rem); transform-origin: 100% var(--leader-y); }
+/* The leader line from the control to its panel. */
+.session-pod--right::before,
+.session-pod--left::before {
+  content: "";
+  position: absolute;
+  top: var(--leader-y);
+  width: 0.85rem;
+  height: 1px;
+  pointer-events: none;
+}
+.session-pod--right::before {
+  right: 100%;
+  background: linear-gradient(90deg, rgba(var(--logo-cyan), 0.15), rgba(var(--logo-cyan), 0.7));
+}
+.session-pod--left::before {
+  left: 100%;
+  background: linear-gradient(270deg, rgba(var(--logo-cyan), 0.15), rgba(var(--logo-cyan), 0.7));
+}
+/* The swing: hinged at the leader's end, the far edge comes forward out of the depth. */
+.node-panel-enter-active { transition: opacity 220ms var(--ease-out), transform 340ms var(--ease-out); }
+.node-panel-leave-active { transition: opacity 160ms ease, transform 200ms ease; }
+.session-pod--right.node-panel-enter-from,
+.session-pod--right.node-panel-leave-to {
+  opacity: 0;
+  transform: perspective(900px) rotateY(42deg) scale(0.96);
+}
+.session-pod--left.node-panel-enter-from,
+.session-pod--left.node-panel-leave-to {
+  opacity: 0;
+  transform: perspective(900px) rotateY(-42deg) scale(0.96);
+}
 .session-pod__row {
   display: flex;
   align-items: center;
@@ -4177,89 +4266,31 @@ onUnmounted(() => {
   color: rgba(165, 243, 252, 0.6);
 }
 
-/* ── Radial session-action menu ─────────────────────────────────────────
-   Tools sit stacked behind the toggle; opening fans them out along a
-   circle (depth + fade + size, staggered per item). */
-.radial-menu {
-  position: relative;
-  width: 2.5rem;
-  height: 2.5rem;
-}
-/* The draggable toggles are miniature 3D orbs: off-center specular light,
-   shaded body, dark lower limb, accent rim glow — tiny kin of the entity.
-   The glyphs sit engraved into the surface (see filter below). */
-.radial-menu__toggle {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  color: rgb(var(--logo-cyan));
-  /* opaque base so the orb never lets underlying content bleed through;
-     the translucent gradients above only tint it */
-  background-color: rgb(4, 12, 18);
-  background-image:
-    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 32%),
-    radial-gradient(circle at 50% 42%, rgba(var(--logo-cyan), 0.38), rgba(var(--accent-purple), 0.22) 58%, rgba(2, 8, 14, 0.96) 100%);
-  border: 1px solid rgba(var(--logo-cyan), 0.35);
-  box-shadow:
-    inset -5px -7px 12px rgba(0, 0, 0, 0.6),
-    inset 3px 4px 8px rgba(255, 255, 255, 0.14),
-    0 6px 16px rgba(0, 0, 0, 0.45),
-    0 0 16px rgba(var(--accent-purple), 0.3);
-  cursor: grab;
-  transition: transform 260ms var(--ease-out), box-shadow 220ms var(--ease-out);
-}
-/* Engraved glowing glyphs: occlusion shadow at the top lip, light catch on
-   the lower lip, cyan bloom around the stroke. */
-.radial-menu__toggle > svg,
-.radial-menu__toggle > span {
-  filter:
-    drop-shadow(0 -1px 1px rgba(0, 0, 0, 0.7))
-    drop-shadow(0 1px 0 rgba(255, 255, 255, 0.3))
-    drop-shadow(0 0 5px rgba(var(--logo-cyan), 0.85));
-}
-.radial-menu__toggle:active { cursor: grabbing; }
-.radial-menu--open .radial-menu__toggle { transform: rotate(90deg); }
-.radial-menu__toggle:hover {
-  transform: scale(1.08);
-  box-shadow:
-    inset -5px -7px 12px rgba(0, 0, 0, 0.55),
-    inset 3px 4px 8px rgba(255, 255, 255, 0.18),
-    0 8px 20px rgba(0, 0, 0, 0.5),
-    0 0 26px rgba(var(--accent-purple), 0.55);
-}
-.radial-menu--open .radial-menu__toggle:hover { transform: rotate(90deg) scale(1.08); }
-/* A pod with no session behind it: dimmed, its rim dashed. */
-.hud-orb__btn--idle {
-  border-style: dashed;
-  color: rgba(var(--logo-cyan), 0.55);
-  filter: saturate(0.6);
-}
-.radial-menu__toggle:focus-visible {
-  outline: 2px solid rgba(var(--logo-cyan), 0.8);
-  outline-offset: 3px;
-}
-
-/* The session actions: a list with names, opening beside the pod towards the middle of the
-   screen. Each row keeps its glyph as a badge and flies in a beat after the one above. */
+/* The session actions: a list with names beside its control. Each row keeps its glyph as a tag
+   and flies in a beat after the one above. */
 .actions-pod {
   position: absolute;
   top: 0;
+  /* the leader meets the control at its middle: half the control's own height down the list */
+  --leader-y: calc(var(--node-size, 2.6rem) / 2);
   width: min(17.5rem, calc(100vw - 5rem));
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.45rem;
   border-radius: 0.6rem;
-  border: 1px solid var(--hairline);
+  border: 1px solid rgba(var(--logo-cyan), 0.2);
   background: var(--surface-3);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
 }
-.actions-pod--up { top: auto; bottom: 0; }
+.actions-pod__list {
+  /* on a low window the list keeps to what is left of it under the control, and scrolls */
+  max-height: var(--panel-room, none);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem;
+}
+.actions-pod--up { top: auto; bottom: 0; --leader-y: calc(100% - var(--node-size, 2.6rem) / 2); }
 .actions-pod__item {
   display: flex;
   align-items: center;
@@ -4285,21 +4316,20 @@ onUnmounted(() => {
   outline: none;
 }
 .actions-pod__item:disabled { opacity: 0.45; cursor: not-allowed; }
+/* A row's glyph: a tag in a hairline frame, like the marks on the orb's instruments. */
 .actions-pod__glyph {
   flex: none;
   display: grid;
   place-items: center;
   width: 2rem;
-  height: 2rem;
-  border-radius: 999px;
+  height: 1.55rem;
+  border-radius: 0.25rem;
   font-family: var(--font-mono);
   font-size: 0.55rem;
   font-weight: 600;
   letter-spacing: 0.05em;
-  color: rgba(207, 250, 254, 0.92);
-  background: rgb(5, 19, 25);
-  border: 1px solid rgba(var(--accent-purple), 0.4);
-  box-shadow: 0 0 10px rgba(var(--accent-purple), 0.18);
+  color: rgba(var(--logo-cyan), 0.92);
+  border: 1px solid rgba(var(--logo-cyan), 0.28);
 }
 .actions-pod__text { display: grid; min-width: 0; }
 .actions-pod__label { font-size: 0.82rem; font-weight: 500; line-height: 1.25; }
@@ -4334,7 +4364,7 @@ onUnmounted(() => {
   gap: 0.6rem;
 }
 
-/* At the foot of the page, clear of the launcher: the entity owns its middle. */
+/* At the foot of the page, clear of the message input's control: the entity owns its middle. */
 .chat-starters {
   margin-top: auto;
   padding-bottom: 5.5rem;
@@ -4343,6 +4373,14 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.7rem;
   text-align: center;
+}
+/* Where that control stands on its orbit under the orb, and not in the page's corner, the
+   starters can stand lower: on a low window they would meet it. */
+@media (min-width: 1100px) {
+  .chat-starters { padding-bottom: 2rem; }
+}
+@media (min-width: 1100px) and (max-height: 600px) {
+  .chat-starters__lead { display: none; }
 }
 
 .chat-starters__lead {
@@ -5081,11 +5119,12 @@ onUnmounted(() => {
   .chat-composer__menus > .chat-dropdown > .chat-dropdown__menu { max-width: 100%; }
 }
 
-/* Motion on request only (the bay's 3D recede, the launcher's breathing, the fly-ins). */
+/* Motion on request only (the bay's 3D recede, the controls' moves and menus, the fly-ins). */
 @media (prefers-reduced-motion: reduce) {
   .chat-input-bay,
-  .chat-composer-launcher,
-  .radial-menu__toggle,
+  .orb-control,
+  .session-pod,
+  .actions-pod,
   .chat-orb-layer,
   .chat-scroll-resume,
   .chat-drop-overlay {

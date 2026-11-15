@@ -196,7 +196,7 @@ function longRunningSummary(r: PendingLongRunning): string {
   position: fixed;
   right: 1rem;
   bottom: 1rem;
-  /* above the chat's composer launcher, which shares this corner: a request waiting for an answer wins */
+  /* above the chat's message control, which is parked in this corner on a narrow window: a request waiting for an answer wins */
   z-index: var(--z-dock);
   font-size: 0.85rem;
   color: rgb(229, 231, 235);
