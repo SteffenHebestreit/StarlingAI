@@ -151,3 +151,73 @@ if (!LIVE && !socketPrototype[GUARDED]) {
   } as typeof socketPrototype.connect;
   socketPrototype[GUARDED] = true;
 }
+
+// 3. Inbound: the servers a test starts. The measures above keep a test from reaching out;
+//    nothing kept the network from reaching in. Every createGateway().start() bound 0.0.0.0
+//    (the listen address was hardcoded until gateway.host existed), so each gateway test put a
+//    gateway on the LAN for its duration, on a port from a narrow, guessable range, signed with
+//    a JWT secret written in this repository ("d".repeat(32) and the like). Node's listen()
+//    without a host binds every interface as well (`::`). A bind to every interface is moved to
+//    loopback, where every test connects anyway; a bind to any other non-loopback address (a LAN
+//    IP, a hostname other than localhost) throws, so a test cannot expose a server on purpose
+//    either. This holds under SAI_TEST_LIVE=1 too: a live run reaches out to real services, it
+//    never needs to be reached.
+//
+//    An ambient SAI_GATEWAY_HOST (a developer's shell, a sourced .env) would be laid over every
+//    test config by the loader, so it is deleted as well.
+delete process.env["SAI_GATEWAY_HOST"];
+
+const LISTEN_GUARDED = Symbol.for("starlingai.test.listenGuard");
+const EVERY_INTERFACE = new Set(["", "0.0.0.0", "::", "[::]", "::0"]);
+
+/** `host`, or a throw when it is neither every interface (rewritten by the caller) nor loopback. */
+function loopbackListenHost(host: string): string {
+  if (EVERY_INTERFACE.has(host)) return "127.0.0.1";
+  if (isLocalHost(host)) return host;
+  throw new Error(`listen ${host} — refused by the test listen guard (tests bind loopback only: 127.0.0.1, ::1 or localhost)`);
+}
+
+interface ListenOptions { host?: unknown; port?: unknown; fd?: unknown; handle?: unknown; _handle?: unknown }
+
+/** listen()'s arguments with a bind to every interface moved to 127.0.0.1; anything else as given.
+ *  The arguments are read the way net.Server#listen reads them (Node's lib/net.js), so whatever
+ *  the guard passes on as an IPC path or an inherited handle, Node does not bind TCP for either. */
+function loopbackListenArgs(args: unknown[]): unknown[] {
+  const [first] = args;
+  // listen() and listen(callback): no port, no host. (listen(undefined, host) is port 0 on host.)
+  if (args.length === 0 || typeof first === "function") return [0, "127.0.0.1", ...args];
+  if (first !== null && typeof first === "object") {
+    const given = first as ListenOptions;
+    // Node listens on `_handle || handle` in place of the object when either is set (an inherited
+    // server, socket or raw TCP handle), and on `fd` only when it is a valid descriptor: neither
+    // binds an interface. A null handle or an fd of -1 does not count.
+    const options = (given._handle || given.handle || given) as ListenOptions;
+    if (typeof options.fd === "number" && options.fd >= 0) return args;
+    // Anything else with a `port` key binds TCP, an undefined or null port meaning any free one,
+    // and Node decides that before it looks at `path`: { port, path } binds the port, not the
+    // path. Without a port it is an IPC path, a raw TCP handle, or a call Node rejects.
+    if (!("port" in options) || !(options.port == null || typeof options.port === "number" || typeof options.port === "string")) return args;
+    // Any falsy host (missing, null, "", 0) is Node's unspecified address: every interface.
+    if (!options.host) return [{ ...options, host: "127.0.0.1" }, ...args.slice(1)];
+    // Node's own lookup rejects a host that is not a string.
+    if (typeof options.host !== "string") return args;
+    const host = loopbackListenHost(options.host);
+    return host === options.host ? args : [{ ...options, host }, ...args.slice(1)];
+  }
+  // listen(path[, ...]): a Unix socket or a Windows named pipe. Node reads a string as a pipe name
+  // only when it is not a number >= 0 (its isPipeName): " 8080" and "0x1F90" are ports.
+  if (typeof first === "string" && !(Number(first) >= 0)) return args;
+  // listen(port[, host][, backlog][, callback]); `ws` and others pass an undefined host.
+  if (typeof args[1] === "string") return [first, loopbackListenHost(args[1]), ...args.slice(2)];
+  if (args.length > 1 && args[1] == null) return [first, "127.0.0.1", ...args.slice(2)];
+  return [first, "127.0.0.1", ...args.slice(1)];
+}
+
+const serverPrototype = net.Server.prototype as net.Server & { [LISTEN_GUARDED]?: true };
+if (!serverPrototype[LISTEN_GUARDED]) {
+  const originalListen = serverPrototype.listen;
+  serverPrototype.listen = function guardedListen(this: net.Server, ...args: unknown[]): net.Server {
+    return (originalListen as (...listenArgs: unknown[]) => net.Server).apply(this, loopbackListenArgs(args));
+  } as typeof serverPrototype.listen;
+  serverPrototype[LISTEN_GUARDED] = true;
+}

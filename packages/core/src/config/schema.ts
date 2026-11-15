@@ -351,12 +351,19 @@ export const EphemeralGenerationSchema = z.object({
 // moved to ./schemas/channels.ts; re-exported above.
 
 export const GatewaySchema = z.object({
-  // REST and the WebSocket share this one port. (`restPort` and `bindHost` used
-  // to live here; both were vestigial — nothing ever listened on a second port,
-  // and the listen address is hardcoded 0.0.0.0 inside the container while HOST
-  // exposure is set by SAI_BIND_HOST in docker-compose. A `bindHost: "loopback"`
-  // that does not bind loopback is worse than no knob at all.)
+  // REST and the WebSocket share this one port. (`restPort` used to live here;
+  // nothing ever listened on a second port.)
   port: z.number().int().min(1024).max(65535).default(8765),
+  // The address that port is bound to, by the gateway and by the maintenance boot. 127.0.0.1
+  // by default: a run outside Docker (`pnpm sai dev gateway`, the test suite) is reachable from
+  // this machine only. The gateway image sets SAI_GATEWAY_HOST=0.0.0.0, because inside the
+  // container Docker's port publish and the web container (http://gateway:8765) reach the
+  // gateway on the container's own interface; which HOST interface is published stays with
+  // SAI_BIND_HOST in docker-compose. Not "localhost": it resolves to ::1 first on Windows and
+  // many Linux hosts, and an IPv6-only bind refuses http://127.0.0.1. Binding 0.0.0.0 outside
+  // a container exposes the gateway to the network: only with auth.enabled. (The deleted
+  // `bindHost` enum never reached listen(); this does.)
+  host: z.string().trim().min(1).max(253).default("127.0.0.1"),
   jwtSecret: z.string().min(32).optional(), // loaded from env if not set
   sessionTtlMs: z.number().int().min(60000).default(3600000), // 1 hour
   // Hard ceiling for an interactive orchestrator turn. On expiry the turn is

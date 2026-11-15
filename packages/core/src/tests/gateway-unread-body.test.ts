@@ -52,12 +52,13 @@ async function bootGateway() {
   vi.resetModules();
   const { createGateway } = await import("../gateway/index.js");
   const gateway = createGateway();
-  // The gateway's own start(), with its listen redirected from 0.0.0.0:<configured port> to an
-  // ephemeral port on loopback, so the test neither exposes a port nor collides with one in use.
+  // The gateway's own start(), with its listen redirected from <gateway.host>:<configured port>
+  // (127.0.0.1 outside Docker, 0.0.0.0 in a container) to an ephemeral port on loopback, so the
+  // test neither exposes a port nor collides with one in use.
   const originalListen = Server.prototype.listen;
   let gatewayServer: Server | undefined;
   Server.prototype.listen = function redirectedListen(this: Server, ...args: unknown[]) {
-    const redirected = args[1] === "0.0.0.0";
+    const redirected = args[1] === "0.0.0.0" || args[1] === "127.0.0.1";
     if (redirected) {
       args[0] = 0;
       args[1] = "127.0.0.1";

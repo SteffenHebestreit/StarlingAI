@@ -19,6 +19,7 @@ import { ACCOUNT_MIGRATION_MAINTENANCE, type AccountMigrationBackends } from "..
 import { authenticatedUser, callerIdentity } from "./auth.js";
 import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
 import { registerAccountMigrationRoutes } from "./account-migration-routes.js";
+import { gatewayListenHost } from "./listen-address.js";
 
 const log = childLogger("gateway:maintenance");
 
@@ -108,11 +109,13 @@ export function createMaintenanceGateway(): { app: Hono; start(): Promise<void>;
   return {
     app,
     start: () => new Promise<void>((resolveStart, reject) => {
-      const port = getConfig().gateway.port;
+      const { gateway } = getConfig();
+      const port = gateway.port;
+      const host = gatewayListenHost(gateway);
       server.once("error", reject);
-      server.listen(port, "0.0.0.0", () => {
+      server.listen(port, host, () => {
         server.off("error", reject);
-        log.warn({ port }, `Maintenance boot (${ACCOUNT_MIGRATION_MAINTENANCE}): only the account migration is served`);
+        log.warn({ host, port }, `Maintenance boot (${ACCOUNT_MIGRATION_MAINTENANCE}): only the account migration is served`);
         resolveStart();
       });
     }),

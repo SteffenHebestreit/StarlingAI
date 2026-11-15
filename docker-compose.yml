@@ -36,6 +36,13 @@ services:
       - .env
     environment:
       - NODE_ENV=production
+      # The listen address and port INSIDE the container, pinned here because env_file above
+      # would otherwise hand the container a SAI_GATEWAY_HOST=127.0.0.1 or SAI_GATEWAY_PORT set
+      # in .env for a run outside Docker: loopback is unreachable for the port publish and the
+      # web container, and the publish, the healthcheck and nginx all expect 8765. Which HOST
+      # interface is published is SAI_BIND_HOST, on the ports line above.
+      - SAI_GATEWAY_HOST=0.0.0.0
+      - SAI_GATEWAY_PORT=8765
       - SAI_JWT_SECRET=${SAI_JWT_SECRET:?run pnpm sai start first — it generates .env; bare docker compose up is unsupported}
       - SAI_MASTER_KEY=${SAI_MASTER_KEY:?run pnpm sai start first — it generates .env; bare docker compose up is unsupported}
       # Primary model provider — any OpenAI-compatible server (LM Studio, Ollama, vLLM,

@@ -648,6 +648,14 @@ function mergeEnvOverrides(raw: Record<string, unknown>): Record<string, unknown
     const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
     raw["gateway"] = { ...gw, port: parseInt(env["SAI_GATEWAY_PORT"], 10) };
   }
+  // The listen address (gateway.host). Not SAI_BIND_HOST: docker-compose loads the whole .env
+  // into the gateway container, and SAI_BIND_HOST there names the HOST interface Docker
+  // publishes on (127.0.0.1 by default) — read here, it would bind the container's loopback,
+  // where neither the port publish nor the web container can reach it.
+  if (env["SAI_GATEWAY_HOST"]?.trim()) {
+    const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
+    raw["gateway"] = { ...gw, host: env["SAI_GATEWAY_HOST"].trim() };
+  }
   if (env["SAI_JWT_SECRET"]) {
     const gw = (raw["gateway"] as Record<string, unknown> | undefined) ?? {};
     raw["gateway"] = { ...(gw as object), jwtSecret: env["SAI_JWT_SECRET"] };

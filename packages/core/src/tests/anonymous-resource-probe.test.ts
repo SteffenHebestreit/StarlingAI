@@ -107,7 +107,8 @@ beforeAll(async () => {
   });
 
   const gateway = createGateway();
-  // The gateway listens on 0.0.0.0:<gateway.port>; the test binds loopback on a port the OS picks.
+  // The gateway listens on <gateway.host>:<gateway.port> (127.0.0.1 outside Docker, 0.0.0.0 in a
+  // container); the test binds loopback on a port the OS picks.
   let server: Server | undefined;
   const listen = Server.prototype.listen as (this: Server, port: number, host: string, onListening?: () => void) => Server;
   const listenSpy = vi.spyOn(Server.prototype, "listen").mockImplementation(function (this: Server, ...args: unknown[]) {

@@ -142,6 +142,7 @@ import { syncConfiguredJobTriggers } from "../runtime/job-triggers.js";
 
 import { mountExtensionRoutes } from "../extension/loader.js";
 import { findRoutePolicy, policyAdmitsRole } from "./route-policies.js";
+import { formatListenAddress, gatewayListenHost } from "./listen-address.js";
 
 const log = childLogger("gateway");
 
@@ -4205,6 +4206,7 @@ export function createGateway() {
       }
 
       const port = config.gateway.port;
+      const host = gatewayListenHost(config.gateway);
       return new Promise<void>((resolve, reject) => {
         const handleError = (error: Error) => {
           httpServer.off("error", handleError);
@@ -4212,9 +4214,9 @@ export function createGateway() {
         };
 
         httpServer.once("error", handleError);
-        httpServer.listen(port, "0.0.0.0", () => {
+        httpServer.listen(port, host, () => {
           httpServer.off("error", handleError);
-          log.info({ port }, `Gateway listening — ws://0.0.0.0:${port}/ws`);
+          log.info({ host, port }, `Gateway listening — ws://${formatListenAddress(host, port)}/ws`);
           resolve();
         });
       });
