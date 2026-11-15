@@ -23,6 +23,7 @@ import { registerMissionRoutes } from "./mission-routes.js";
 import { registerLongRunningRoutes } from "./long-running-routes.js";
 import { registerWorkspaceRoutes } from "./workspace-routes.js";
 import { buildContentDisposition } from "./content-disposition.js";
+import { discardUnreadBody } from "./unread-body.js";
 import { registerChannelRoutes } from "./channels-routes.js";
 import { registerModelPresetRoutes } from "./model-preset-routes.js";
 import { registerUserRoutes } from "./user-routes.js";
@@ -4012,12 +4013,16 @@ export function createGateway() {
     const forwardedHeaders: Record<string, string> = { ...(req.headers as Record<string, string>) };
     delete forwardedHeaders["x-gateway-peer-addr"];
     forwardedHeaders["x-gateway-peer-addr"] = req.socket.remoteAddress ?? "unknown";
+    const bodyless = method === "GET" || method === "HEAD";
     const honoReq = new Request(requestUrl, {
       method,
       headers: forwardedHeaders,
-      body: method === "GET" || method === "HEAD" ? undefined : Readable.toWeb(req),
-      duplex: method === "GET" || method === "HEAD" ? undefined : "half",
+      body: bodyless ? undefined : Readable.toWeb(req),
+      duplex: bodyless ? undefined : "half",
     } as RequestInit & { duplex?: "half" });
+    // A body the handler answered without reading is dropped after the reply, within bounds, so the
+    // keep-alive connection can carry the client's next request (./unread-body.ts).
+    if (!bodyless) res.once("finish", () => discardUnreadBody(req));
     void Promise.resolve(app.fetch(honoReq)).then((honoRes: Response) => {
       const responseHeaders: Record<string, string> = {};
       honoRes.headers.forEach((value, key) => {
