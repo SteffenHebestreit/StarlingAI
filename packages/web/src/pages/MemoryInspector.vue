@@ -373,7 +373,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 import fcose from "cytoscape-fcose";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { usePersonalityStore } from "@/stores/personality";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { noMatchLine, useListWindow } from "@/composables/listWindow";
@@ -603,7 +603,7 @@ const factsSharedSessionId = ref<string>("");
 const sharedFacts = ref<Array<{ key: string; value: string; auto: boolean }>>([]);
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 function authHeaders(): Record<string, string> {

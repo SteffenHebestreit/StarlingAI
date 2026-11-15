@@ -165,7 +165,7 @@
 
 <script setup lang="ts">
 import { ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { formatDateTime, isoTimestamp } from "@/composables/formatDate";
 import { noMatchLine, useListWindow } from "@/composables/listWindow";
 import { confirmAction } from "@/composables/useConfirm";
@@ -245,7 +245,7 @@ const modalEl = ref<HTMLElement | null>(null);
 useFocusTrap(modalEl);
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 function authHeaders(): Record<string, string> {

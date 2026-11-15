@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { useStorage } from "@vueuse/core";
 import { computed, ref, watch } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface SceneDetail {
   name: string;
@@ -88,9 +88,7 @@ export const useScenesStore = defineStore("scenes", () => {
   const pollTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function restUrl(path: string): string {
-    const wsUrl = gateway.wsUrl ?? "ws://localhost:8765/ws";
-    const base = wsUrl.replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
-    return `${base}${path}`;
+    return `${gatewayRestBaseUrl(gateway.wsUrl)}${path}`;
   }
 
   function authHeaders(): Record<string, string> {

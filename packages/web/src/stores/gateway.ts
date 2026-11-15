@@ -1,5 +1,6 @@
 import { browserTimeZone } from "@/composables/browserTime";
-import { responseErrorMessage as parseErrorResponse } from "@/composables/httpErrors";
+import { GatewayHttpError } from "@/composables/httpErrors";
+import { defaultGatewayWsUrl, gatewayRestBaseUrl, normalizeGatewayWsUrl } from "@/composables/gatewayUrl";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -27,6 +28,8 @@ import {
 } from "../composables/userInputs";
 
 export { sanitizeAssistantMessageContent } from "../composables/assistantContent";
+export { defaultGatewayWsUrl, gatewayRestBaseUrl } from "@/composables/gatewayUrl";
+export { GatewayHttpError } from "@/composables/httpErrors";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -278,46 +281,6 @@ const TURN_STALL_WARNING_MS = 20_000;
 const TURN_STALL_RECOVERY_MS = 45_000;
 const TURN_DELEGATED_STALL_WARNING_MS = 60_000;
 const TURN_DELEGATED_STALL_RECOVERY_MS = 120_000;
-const LEGACY_DIRECT_GATEWAY_WS_URL = "ws://localhost:8765/ws";
-
-export function defaultGatewayWsUrl(): string {
-  if (typeof window === "undefined") {
-    return LEGACY_DIRECT_GATEWAY_WS_URL;
-  }
-
-  const { protocol, host } = window.location;
-  if (!host || protocol === "file:") {
-    return LEGACY_DIRECT_GATEWAY_WS_URL;
-  }
-
-  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  return `${wsProtocol}//${host}/ws`;
-}
-
-function normalizeGatewayWsUrl(raw: string | null | undefined): string {
-  const trimmed = raw?.trim();
-  if (!trimmed || trimmed === LEGACY_DIRECT_GATEWAY_WS_URL) {
-    return defaultGatewayWsUrl();
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-    }
-    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-      return defaultGatewayWsUrl();
-    }
-    if (!parsed.pathname || parsed.pathname === "/") {
-      parsed.pathname = "/ws";
-    }
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
 export interface FileToMarkdownResult {
   success: boolean;
   markdown?: string;
@@ -1675,13 +1638,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     return plainMatch?.[1] ?? null;
   }
 
+  /** The REST base of the gateway the socket talks to ("https://host"), without a trailing slash. */
   function restBaseUrl(): string {
-    const parsed = new URL(normalizeGatewayWsUrl(wsUrl.value));
-    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
-    parsed.pathname = parsed.pathname.replace(/\/ws$/, "");
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
+    return gatewayRestBaseUrl(wsUrl.value);
   }
 
   async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -1691,10 +1650,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       ...init,
       headers,
     });
-    if (!response.ok) {
-      const message = await parseErrorResponse(response);
-      throw new Error(message);
-    }
+    if (!response.ok) throw await GatewayHttpError.fromResponse(response);
     return response;
   }
 
@@ -4765,6 +4721,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     downloadWorkspaceArtifact,
     buildWorkspacePreviewUrl,
     buildBrowserVncUrl,
+    restBaseUrl,
     authorizedFetch,
     downloadSessionDebugMarkdown,
     downloadSessionAuditMarkdown,

@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 import { responseErrorMessage as parseErrorResponse } from "@/composables/httpErrors";
 
 export interface MultimodalServiceConfig {
@@ -201,7 +201,7 @@ export const useMultimodalStore = defineStore("multimodal", () => {
   const errorField = ref("");
 
   function baseUrl(): string {
-    return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
+    return gatewayRestBaseUrl(gateway.wsUrl);
   }
 
   async function fetchStatus(): Promise<void> {

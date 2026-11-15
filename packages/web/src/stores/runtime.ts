@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface RuntimeComponentStatus {
   name: string;
@@ -40,7 +40,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const modelEndpointError = ref("");
 
   function baseUrl(): string {
-    return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
+    return gatewayRestBaseUrl(gateway.wsUrl);
   }
 
   async function fetch(): Promise<void> {

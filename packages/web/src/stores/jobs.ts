@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface JobStepInput {
   scene: string;
@@ -53,9 +53,7 @@ export const useJobsStore = defineStore("jobs", () => {
   const error = ref<string | null>(null);
 
   function restUrl(path: string): string {
-    const wsUrl = gateway.wsUrl ?? "ws://localhost:8765/ws";
-    const base = wsUrl.replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
-    return `${base}${path}`;
+    return `${gatewayRestBaseUrl(gateway.wsUrl)}${path}`;
   }
 
   function authHeaders(): Record<string, string> {

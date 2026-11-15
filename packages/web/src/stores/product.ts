@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 
 export interface ProductExtensionInfo {
   name: string;
@@ -48,7 +48,7 @@ export const useProductStore = defineStore("product", () => {
   const loaded = ref(false);
 
   function apiBase(): string {
-    return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+    return gatewayRestBaseUrl(gateway.wsUrl);
   }
 
   /** Fetch identity once at boot. Never throws and never clears a good value —

@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface AgentModelConfig {
   primary?: string;
@@ -57,7 +57,7 @@ export const useAgentsStore = defineStore("agents", () => {
 
   function restUrl(path: string): string {
     const gateway = useGatewayStore();
-    const base = (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    const base = gatewayRestBaseUrl(gateway.wsUrl);
     return `${base}${path}`;
   }
 

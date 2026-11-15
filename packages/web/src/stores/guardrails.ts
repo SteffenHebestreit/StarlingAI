@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface GuardrailState {
   promptInjectionBlock: boolean;
@@ -16,8 +16,7 @@ export const useGuardrailsStore = defineStore("guardrails", () => {
 
   function restUrl(path: string): string {
     const gateway = useGatewayStore();
-    // derive HTTP base URL from WS URL: ws://host:port → http://host:port
-    const base = (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    const base = gatewayRestBaseUrl(gateway.wsUrl);
     return `${base}${path}`;
   }
 

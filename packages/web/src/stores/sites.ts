@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface SiteSummary {
   hostname: string;
@@ -29,7 +29,7 @@ export const useSitesStore = defineStore("sites", () => {
 
   function restUrl(path: string): string {
     const gw = useGatewayStore();
-    const base = (gw.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+    const base = gatewayRestBaseUrl(gw.wsUrl);
     return `${base}${path}`;
   }
 

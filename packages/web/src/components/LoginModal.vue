@@ -151,7 +151,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue";
-import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
+import { defaultGatewayWsUrl, gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { ssoErrorMessage } from "@/composables/ssoReturn";
 import { useFocusTrap } from "@/composables/useFocusTrap";
@@ -195,7 +195,7 @@ const provider = ref<"builtin" | "oidc">("builtin");
 
 async function detectAuthMode(): Promise<void> {
   try {
-    const apiBase = apiBaseFromWsUrl(wsUrl.value);
+    const apiBase = gatewayRestBaseUrl(wsUrl.value);
     const res = await fetch(`${apiBase}/api/auth/mode`, { method: "GET" });
     if (!res.ok) return;
     const body = await res.json() as { authEnabled?: boolean; provider?: "builtin" | "oidc" };
@@ -208,7 +208,7 @@ async function detectAuthMode(): Promise<void> {
 
 /** Redirect the browser to the gateway's OIDC login (which redirects to the IdP). */
 function startSso(): void {
-  window.location.href = `${apiBaseFromWsUrl(wsUrl.value)}/api/auth/oidc/login`;
+  window.location.href = `${gatewayRestBaseUrl(wsUrl.value)}/api/auth/oidc/login`;
 }
 
 /** The cursor goes where the typing starts: the first field of the open tab that is still empty. */
@@ -272,16 +272,12 @@ function setMode(next: Mode): void {
   focusFirstField();
 }
 
-function apiBaseFromWsUrl(value: string): string {
-  return value.replace(/^ws/, "http").replace(/\/ws$/, "");
-}
-
 async function submit(): Promise<void> {
   errorMessage.value = null;
   submitting.value = true;
   try {
     if (mode.value === "password") {
-      const apiBase = apiBaseFromWsUrl(wsUrl.value);
+      const apiBase = gatewayRestBaseUrl(wsUrl.value);
       const res = await fetch(`${apiBase}/api/auth/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -310,13 +306,13 @@ async function submit(): Promise<void> {
     const outcome = await connectionSettled();
     if (outcome === "rejected") errorMessage.value = REJECTED;
     else if (outcome === "waiting" && !unmounted) {
-      errorMessage.value = `No answer from the gateway at ${apiBaseFromWsUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
+      errorMessage.value = `No answer from the gateway at ${gatewayRestBaseUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
     }
   } catch (err) {
     // A thrown fetch (or JSON parse) means we never reached the gateway — the most
     // common first-run cause. Without this the error was swallowed and the form
     // just silently stopped, giving the user no idea the gateway was unreachable.
-    errorMessage.value = `Can't reach the gateway at ${apiBaseFromWsUrl(wsUrl.value)}. Is it running? (${err instanceof Error ? err.message : String(err)})`;
+    errorMessage.value = `Can't reach the gateway at ${gatewayRestBaseUrl(wsUrl.value)}. Is it running? (${err instanceof Error ? err.message : String(err)})`;
   } finally {
     submitting.value = false;
   }

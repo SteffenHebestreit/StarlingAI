@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export type ConfigAssistantMode = "setup" | "enhancement" | "prompt";
 export type ConfigAssistantProposalStatus = "pending" | "applied" | "rejected";
@@ -98,7 +98,7 @@ export const useConfigAssistantStore = defineStore("configAssistant", () => {
   const activeProposalId = ref<string | null>(null);
 
   function restUrl(path: string): string {
-    return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "") + path;
+    return gatewayRestBaseUrl(gateway.wsUrl) + path;
   }
 
   function authHeaders(includeJson = false): Record<string, string> {

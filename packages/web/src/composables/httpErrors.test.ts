@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chatText } from "./chatText";
-import { responseErrorMessage } from "./httpErrors";
+import { GatewayHttpError, responseErrorMessage } from "./httpErrors";
 
 const NGINX_413 = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>";
 const page = (status: number, body = NGINX_413) => new Response(body, { status, headers: { "content-type": "text/html" } });
@@ -51,5 +51,41 @@ describe("responseErrorMessage", () => {
     expect(await responseErrorMessage(new Response("upstream said no", { status: 400 }), "en")).toBe("upstream said no");
     expect((await responseErrorMessage(new Response("x".repeat(900), { status: 400 }), "en")).length).toBe(240);
     expect(await responseErrorMessage(new Response("", { status: 418 }), "en")).toBe("HTTP 418");
+  });
+});
+
+describe("GatewayHttpError.fromResponse", () => {
+  it.each([
+    [401, () => json(401, { error: "Unauthorized" })],
+    [403, () => json(403, { detail: "operator role required" })],
+    [404, () => page(404, "<!DOCTYPE html><html><body>app</body></html>")],
+    [413, () => page(413)],
+    [500, () => new Response("boom", { status: 500 })],
+    [503, () => new Response("", { status: 503 })],
+  ])("carries the status %i and the message responseErrorMessage gives", async (status, response) => {
+    for (const lang of ["en", "de"] as const) {
+      const error = await GatewayHttpError.fromResponse(response(), lang);
+      expect(error).toBeInstanceOf(GatewayHttpError);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe("GatewayHttpError");
+      expect(error.status).toBe(status);
+      expect(error.message).toBe(await responseErrorMessage(response(), lang));
+    }
+  });
+
+  it("hands the parsed JSON body along, and nothing for an answer that is not JSON", async () => {
+    expect((await GatewayHttpError.fromResponse(json(409, { error: "exists", id: "kb-1" }), "en")).body).toEqual({ error: "exists", id: "kb-1" });
+    // The 413 message does not read the body; the body is still there.
+    expect((await GatewayHttpError.fromResponse(json(413, { error: "Request body too large", limit: 10 }), "en")).body).toEqual({ error: "Request body too large", limit: 10 });
+    expect((await GatewayHttpError.fromResponse(page(502, "<html></html>"), "en")).body).toBeUndefined();
+    expect((await GatewayHttpError.fromResponse(new Response("not json", { status: 500, headers: { "content-type": "application/json" } }), "en")).body).toBeUndefined();
+  });
+
+  it("still gives the message for an answer whose body was already read", async () => {
+    const response = new Response("gone", { status: 410 });
+    await response.text();
+    const error = await GatewayHttpError.fromResponse(response, "en");
+    expect(error.status).toBe(410);
+    expect(error.body).toBeUndefined();
   });
 });

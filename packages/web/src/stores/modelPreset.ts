@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import { useGatewayStore } from "./gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "./gateway";
 
 export interface ModelPresetDescriptor {
   name: string;
@@ -56,7 +56,7 @@ export const useModelPresetStore = defineStore("modelPreset", () => {
   const available = computed(() => presets.value.length > 0);
 
   function baseUrl(): string {
-    return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws/, "http").replace(/\/ws$/, "");
+    return gatewayRestBaseUrl(gateway.wsUrl);
   }
 
   function applyState(state: { active: string | null; activePrimary: string | null; defaultPrimary: string; presets: ModelPresetDescriptor[]; scope?: PresetScope; canChange?: boolean }): void {
