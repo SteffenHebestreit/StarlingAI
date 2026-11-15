@@ -22,6 +22,7 @@ export default defineWebExtension({
 - **Nav entries** render in the app shell after the core navigation; `roles`
   filters visibility against the signed-in user's role (display-only — the
   gateway enforces real access).
+- **Shell components** mount once, app-wide — see below.
 - Keep pages and components inside your extension directory.
 - Branding (product name, tagline, accent) comes from `GET /api/product`
   (driven by the repo-root `product.json`), not from extensions.
@@ -32,7 +33,61 @@ export default defineWebExtension({
   visitors; `appUpdatePending` says whether one is waiting). A page that stays
   on one path should do that, or it keeps the old build until it is reloaded.
 
-**Upstream ships nothing here except this README, `registry.ts`, and the
+## App-wide components: `shellComponents`
+
+A route's page is mounted only while that page is open. Something that has to
+run or show whatever page is open — a watcher that polls for alerts, a toast
+or banner region — goes in `shellComponents`:
+
+```ts
+import { defineAsyncComponent } from "vue";
+import { defineWebExtension } from "../registry";
+import AlertWatcher from "./shell/AlertWatcher.vue";
+
+export default defineWebExtension({
+  name: "helpdesk",
+  routes: [/* … */],
+  shellComponents: [
+    // In the main bundle: it loads with the app, or the app does not load.
+    AlertWatcher,
+    // Out of the main bundle, loaded when the shell first mounts it.
+    defineAsyncComponent({
+      loader: () => import("./shell/BannerRegion.vue"),
+      onError: (error, retry, fail, attempts) => (attempts <= 3 ? setTimeout(retry, attempts * 1000) : fail()),
+    }),
+  ],
+});
+```
+
+- The app shell (`App.vue`) mounts them on every page that has the shell and
+  keeps them mounted across navigation. They go with the shell: a page drawn
+  without the shell does not get them, and they are mounted afresh when the
+  shell comes back.
+- They are mounted **afresh whenever the signed-in user changes** — sign-in,
+  sign-out, switch of account — so nothing one user's session left in them is
+  there for the next user. They are also mounted while nobody is signed in:
+  show nothing from the gateway then (anything drawn above the sign-in dialog
+  would stay on top of it), and check that someone is before calling it.
+- They get **no props**. Read what you need from the stores (`useAuthStore`,
+  `useGatewayStore`, …).
+- They render at the **end of the shell, after the page, with no wrapper**.
+  Render nothing for a pure watcher; give anything visible `position: fixed`
+  or wrap it in `<Teleport to="body">`, as the shell's own toasts and dock do.
+- Several extensions can contribute; they mount in directory-name order, each
+  extension's list in its own order, one tick after the shell itself.
+- Each one sits behind its **own error boundary**: an error from its setup,
+  render, first mount, hooks, watchers or async loading is logged as
+  `[extensions] <name>: error in a shell component …` and reaches neither the
+  shell nor the other components. The failing component stays mounted (a
+  render that throws just draws nothing that time). Errors Vue never sees — a
+  timer callback, a promise nobody awaits — are the component's own to catch.
+- **Lazy loading can fail.** If the chunk of a `defineAsyncComponent` fails to
+  load — a network blip on the first visit — the component is simply missing,
+  with only the log line above to show for it; Vue does not try again by
+  itself. Import a component that must not go missing (an alert watcher)
+  statically, as above, and give a lazy one an `onError` that retries.
+
+**Upstream ships nothing here except this README, top-level `.ts` files, and the
 dormant `_example/`** — directories starting with `_` or `.` are skipped at
 discovery. Copy `_example/` to start your own. See
 `docs/fork-boilerplate-plan.md` for the full forking model.

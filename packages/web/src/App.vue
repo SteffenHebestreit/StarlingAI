@@ -486,6 +486,11 @@
     <!-- Global operator requests: approvals + live-browser handoff, reachable
          from any page (e.g. for scenes/jobs started from the dropdown). -->
     <OperatorRequestsDock v-if="!bareLayout && gateway.connected" />
+    <!-- Extensions' app-wide components (extensions/registry.ts shellComponents): watchers, toast or
+         banner regions, each behind an error boundary. Part of the shell, so they take every guard
+         the dock above takes except its connection one (ExtensionShellHost.test.ts checks this);
+         mounted afresh whenever the signed-in user changes. -->
+    <ExtensionShellHost v-if="!bareLayout" :components="extensionShell" :session="currentUser?.username ?? ''" />
   </div>
 </template>
 
@@ -495,7 +500,8 @@ import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useAuthStore } from "@/stores/auth";
 import { useProductStore } from "@/stores/product";
-import { extensionNavEntries } from "@/extensions/registry";
+import { extensionNavEntries, extensionShellComponents } from "@/extensions/registry";
+import ExtensionShellHost from "@/extensions/ExtensionShellHost";
 import { useModelPresetStore } from "@/stores/modelPreset";
 import { useNotificationStore, type BrowserNotificationItem, type NotificationLevel } from "@/stores/notifications";
 import LoginModal from "@/components/LoginModal.vue";
@@ -793,6 +799,10 @@ const extensionNav = computed<NavLeaf[]>(() => {
     .filter((entry) => !entry.roles?.length || entry.roles.includes(role))
     .map<NavLeaf>((entry) => ({ kind: "leaf", to: entry.path, label: entry.label }));
 });
+
+// Extension-contributed app-wide components, found the same way. The list is fixed at build time,
+// so it is read once; the template mounts them through ExtensionShellHost.
+const extensionShell = extensionShellComponents();
 
 const navEntries = computed<NavEntry[]>(() => {
   const core: NavEntry[] = !auth.isViewer

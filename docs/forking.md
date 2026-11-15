@@ -230,8 +230,11 @@ export default defineWebExtension({
 ```
 
 Routes merge behind all core routes; nav entries render after the core
-navigation. Branding (name/tagline/accent) comes from `GET /api/product`
-automatically.
+navigation. Components that every page needs (an alert watcher, a toast
+region) go in `shellComponents`: the app shell keeps them mounted whatever
+page is open, each behind its own error boundary — see
+[the web extensions README](../packages/web/src/extensions/README.md).
+Branding (name/tagline/accent) comes from `GET /api/product` automatically.
 
 ### 5. Add workspace content
 
