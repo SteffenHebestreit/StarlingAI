@@ -461,9 +461,10 @@ describe("AG-UI streaming", () => {
     try {
       const { handleAguiStream } = await import("../gateway/agui.js");
 
-      // alice creates her session (owned by alice) via the handler.
+      // alice creates her session (owned by alice) via the handler. She is an operator: the gateway
+      // refuses a viewer before this handler runs (raw-surface-role-defaults.test.ts).
       const resCreate = new FakeResponse();
-      await handleAguiStream(resCreate as never, { sessionId: "victim-sess", message: "hi" }, { userId: "alice", role: "viewer" });
+      await handleAguiStream(resCreate as never, { sessionId: "victim-sess", message: "hi" }, { userId: "alice", role: "operator" });
       expect(resCreate.statusCode).toBe(200);
       expect(ran).toHaveBeenCalledTimes(1);
 
@@ -487,7 +488,7 @@ describe("AG-UI streaming", () => {
 
       // The owner may access her own session.
       const resOwner = new FakeResponse();
-      await handleAguiStream(resOwner as never, { sessionId: "victim-sess", message: "mine" }, { userId: "alice", role: "viewer" });
+      await handleAguiStream(resOwner as never, { sessionId: "victim-sess", message: "mine" }, { userId: "alice", role: "operator" });
       expect(resOwner.statusCode).toBe(200);
       expect(ran).toHaveBeenCalledTimes(3);
     } finally {

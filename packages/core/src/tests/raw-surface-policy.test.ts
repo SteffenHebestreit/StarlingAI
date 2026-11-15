@@ -287,6 +287,11 @@ interface Surface {
   anonymous(answer: Answer): void;
   /** The gate's refusal with `status` (401/403). */
   refused(answer: Answer, status: 401 | 403): void;
+  /**
+   * The surface's own operator floor (raw-surface-role-defaults) refusing a viewer, with no policy at
+   * all. Absent where a viewer reaches the handler.
+   */
+  viewerFloor?(answer: Answer): void;
 }
 
 function jsonError(answer: Answer, status: number): void {
@@ -338,6 +343,8 @@ const SURFACES: Surface[] = [
     admitted: (answer) => expect(answer).toMatchObject({ status: 400, body: { error: { code: -32601 } } }),
     anonymous: (answer) => jsonRpcError(answer, 401, -32001),
     refused: (answer, status) => jsonRpcError(answer, status, status === 401 ? -32001 : -32003),
+    // The same status and code as the gate's refusal; the message tells the two apart.
+    viewerFloor: (answer) => expect(answer).toMatchObject({ status: 403, body: { jsonrpc: "2.0", error: { code: -32003, message: "Operator role required" }, id: null } }),
   },
   {
     name: "GET /.well-known/agent-card.json",
@@ -368,6 +375,8 @@ const SURFACES: Surface[] = [
     admitted: (answer) => expect(answer).toEqual({ status: 101, ws: 4404 }),
     anonymous: (answer) => expect(answer).toEqual({ status: 401 }),
     refused: (answer, status) => expect(answer).toEqual({ status }),
+    // The same 403 as the gate's refusal.
+    viewerFloor: (answer) => expect(answer).toEqual({ status: 403 }),
   },
 ];
 
@@ -381,16 +390,26 @@ async function deniedAuditEvents(): Promise<Array<{ type: string; userId?: strin
 describe("route policies on the surfaces answered before Hono", () => {
   it("leaves every surface as it was when no policy matches", async () => {
     for (const surface of SURFACES) {
-      surface.admitted(await surface.call(header(tokens.viewer)));
+      // A viewer reaches every handler but two: the legacy A2A agent route and the VNC bridge have an
+      // operator floor of their own (raw-surface-role-defaults), which refuses it with no policy.
+      const asViewer = await surface.call(header(tokens.viewer));
+      if (surface.viewerFloor) surface.viewerFloor(asViewer);
+      else surface.admitted(asViewer);
+      surface.admitted(await surface.call(header(tokens.operator)));
+      // The doctor ranks at operator: every floor lets it through, so a refusal of it below is the
+      // policy's alone.
+      surface.admitted(await surface.call(header(tokens.doctor)));
       surface.anonymous(await surface.call(anonymous));
     }
   });
 
   describe.each(SURFACES.map((surface) => [surface.name, surface] as const))("%s", (_name, surface) => {
     it("a deny policy refuses the listed role by header and by ?token=, and lets everyone else reach the handler", async () => {
-      policy({ pattern: surface.pattern, ...(surface.method ? { method: surface.method } : {}), denyRoles: ["viewer"] });
-      surface.refused(await surface.call(header(tokens.viewer)), 403);
-      surface.refused(await surface.call(query(tokens.viewer)), 403);
+      // Denied: the doctor, which the operator floors admit, so on the legacy A2A route and the VNC
+      // bridge too only the policy refuses it (a viewer the floor refuses anyway).
+      policy({ pattern: surface.pattern, ...(surface.method ? { method: surface.method } : {}), denyRoles: ["doctor"] });
+      surface.refused(await surface.call(header(tokens.doctor)), 403);
+      surface.refused(await surface.call(query(tokens.doctor)), 403);
       surface.admitted(await surface.call(header(tokens.operator)));
       // No token: the policy passes the caller on, and the handler's own auth answers.
       surface.anonymous(await surface.call(anonymous));
@@ -436,12 +455,18 @@ describe("route policies on the surfaces answered before Hono", () => {
 
   it("matches the legacy A2A agent name as its handler reads it, percent-decoded", async () => {
     // The handler decodes the name, so /a2a/agents/%78 runs agent "x": a policy for "x" covers it.
+    // The caller refused is an operator, whom the route's own operator floor lets through, and the
+    // message is the policy's: the floor answers a viewer with the same status and code.
     const call = (path: string, token: string) => http("POST", path, header(token), { body: JSON.stringify({ jsonrpc: "2.0", method: "nope", id: 1 }) });
-    for (const variant of [{ roles: ["admin"] }, { denyRoles: ["viewer"] }]) {
+    const variants: Array<[RoutePolicy, string]> = [
+      [{ pattern: "/a2a/agents/x", roles: ["admin"] }, "Requires role: admin"],
+      [{ pattern: "/a2a/agents/x", denyRoles: ["operator"] }, "Not permitted for role operator"],
+    ];
+    for (const [variant, message] of variants) {
       policies._resetRoutePoliciesForTests();
-      policy({ pattern: "/a2a/agents/x", ...variant } as RoutePolicy);
+      policy(variant);
       for (const path of ["/a2a/agents/x", "/a2a/agents/%78", "/a2a/agents/%78?via=encoded"]) {
-        jsonRpcError(await call(path, tokens.viewer), 403, -32003);
+        expect(await call(path, tokens.operator), path).toMatchObject({ status: 403, body: { jsonrpc: "2.0", error: { code: -32003, message }, id: null } });
       }
       // A caller the policy admits still reaches the handler under the encoded name.
       expect(await call("/a2a/agents/%78", tokens.admin)).toMatchObject({ status: 400, body: { error: { code: -32601 } } });
@@ -450,16 +475,18 @@ describe("route policies on the surfaces answered before Hono", () => {
 
   it("hands the browser view only /ws/browser-vnc and the paths under it", async () => {
     // The proxy ignores the rest of the path, so a path the policy pattern does not cover must not
-    // reach it: /ws/browser-vncX is dropped like any unknown upgrade.
-    for (const variant of [{ denyRoles: ["viewer"] }, { roles: ["admin"] }]) {
+    // reach it: /ws/browser-vncX is dropped like any unknown upgrade. The caller refused is an
+    // operator, whom the bridge's own operator floor lets through (it answers a viewer with the same
+    // 403): on /ws/browser-vnc itself only the policy refuses it.
+    for (const variant of [{ denyRoles: ["operator"] }, { roles: ["admin"] }]) {
       policies._resetRoutePoliciesForTests();
       policy({ pattern: "/ws/browser-vnc/*", ...variant } as RoutePolicy);
       for (const path of ["/ws/browser-vncX", "/ws/browser-vnc-live/1"]) {
-        expect(await socket(path, query(tokens.viewer))).toEqual({ status: 0 });
+        expect(await socket(path, query(tokens.operator))).toEqual({ status: 0 });
         expect(await socket(path, query(tokens.admin))).toEqual({ status: 0 });
       }
-      expect(await socket("/ws/browser-vnc", query(tokens.viewer))).toEqual({ status: 403 });
-      expect(await socket("/ws/browser-vnc/x", query(tokens.viewer))).toEqual({ status: 403 });
+      expect(await socket("/ws/browser-vnc", query(tokens.operator))).toEqual({ status: 403 });
+      expect(await socket("/ws/browser-vnc/x", query(tokens.operator))).toEqual({ status: 403 });
       expect(await socket("/ws/browser-vnc/x", query(tokens.admin))).toEqual({ status: 101, ws: 4404 });
     }
   });

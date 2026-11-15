@@ -144,8 +144,12 @@ import { mountExtensionRoutes } from "../extension/loader.js";
 import { routePolicyChain, routePolicyForbiddenMessage } from "./route-policies.js";
 import { decideRoutePolicyChainForTokens, gateRawHttp, presentedTokens, upgradePolicyRefusal } from "./raw-policy-gate.js";
 import { formatListenAddress, gatewayListenHost } from "./listen-address.js";
+import { autoApproveMinRole, mayAutoApprove } from "./auto-approve-policy.js";
 
 const log = childLogger("gateway");
+
+/** Warn-once guard for the deprecated POST /a2a/agents/:name route. */
+let warnedLegacyA2aRoute = false;
 
 function applyTemplate(template: string, params: Record<string, string>): string {
   return template.replace(/\{\{(\w+)(?:\|([^}]*))?\}\}/g, (match, key: string, defaultVal?: string) => {
@@ -3912,6 +3916,21 @@ export function createGateway() {
             res.end(JSON.stringify({ error: "Unauthorized" }));
             return;
           }
+          // A turn runs agents and their tools, which on /api takes the operator rank (the mutation
+          // gate above); this stream checked only that the caller was signed in, so a viewer ran
+          // full turns here. Ranked the same way, so an extension role at operator rank passes.
+          if (getConfig().auth?.enabled === true && aguiUser && !userHasRole(aguiUser, "operator")) {
+            logAudit("rbac_denied", {
+              surface: "agui",
+              username: aguiUser.username,
+              role: aguiUser.role,
+              method: "POST",
+              path: pathname,
+            }, { userId: aguiUser.username, severity: "warn" });
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Operator role required for this action" }));
+            return;
+          }
           await handleAguiStream(res, body, { userId: aguiUser?.username, role: aguiUser?.role, identity: callerIdentity(aguiUser) });
         } catch {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -3925,6 +3944,13 @@ export function createGateway() {
     // POST /a2a/agents/:name  — JSON-RPC 2.0 task delegation
     const a2aMatch = pathname.match(/^\/a2a\/agents\/([^/?]+)$/);
     if (req.method === "POST" && a2aMatch) {
+      // Deprecated in favour of /a2a/v1, and served whatever a2a.enabled says; a deployment that does
+      // not use it turns it off with a2a.legacyAgentRoute: false.
+      if (getConfig().a2a?.legacyAgentRoute === false) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32601, message: "Method not found" }, id: null }));
+        return;
+      }
       const token = req.headers["authorization"]
         ? extractBearerToken(req.headers["authorization"] as string)
         : null;
@@ -3944,6 +3970,25 @@ export function createGateway() {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized" }, id: null }));
         return;
+      }
+      // Running an agent takes the operator rank, as on /api (the mutation gate) and on tasks/send at
+      // /a2a/v1; a viewer ran any configured agent here. Ranked, so an extension role at operator
+      // rank passes.
+      if (a2aUser && !userHasRole(a2aUser, "operator")) {
+        logAudit("rbac_denied", {
+          surface: "a2a_legacy",
+          username: a2aUser.username,
+          role: a2aUser.role,
+          method: "POST",
+          path: pathname,
+        }, { userId: a2aUser.username, severity: "warn" });
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32003, message: "Operator role required" }, id: null }));
+        return;
+      }
+      if (!warnedLegacyA2aRoute) {
+        warnedLegacyA2aRoute = true;
+        log.warn("POST /a2a/agents/:name is deprecated: use JSON-RPC tasks/send at /a2a/v1, or set a2a.legacyAgentRoute to false if nothing calls it");
       }
       const a2aCaller = a2aUser?.username ?? (typeof verified.sub === "string" ? verified.sub : "authenticated");
 
@@ -3997,7 +4042,19 @@ export function createGateway() {
           const sessId = rpc.params?.["sessionId"]
             ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
-          const autoApprove = rpc.params?.["autoApprove"] === true;
+          // autoApprove grants every approval-gated call of the run, so it is honoured only from a
+          // role at gateway.overrides.autoApproveMinRole; below it the run asks as it would without
+          // it (no channel here, so a gated call fails closed).
+          let autoApprove = rpc.params?.["autoApprove"] === true;
+          if (autoApprove && !mayAutoApprove(a2aUser?.role)) {
+            autoApprove = false;
+            logAudit("a2a_auto_approve_refused", {
+              agent: agentName,
+              username: a2aCaller,
+              role: a2aUser?.role ?? null,
+              minRole: autoApproveMinRole(),
+            }, { userId: a2aCaller, severity: "warn" });
+          }
 
           const runOptions: SubAgentRunOptions = {
             agentName,
@@ -4227,8 +4284,10 @@ export function createGateway() {
       // The live browser is reached only through this check, and the token rides in the query
       // string, past the /api middleware that refuses a revoked account: under multi-user auth the
       // caller is resolved against the stores here, so a deleted account's token cannot watch it.
+      const multiUser = getConfig().auth?.enabled === true;
+      const vncUser = token && multiUser ? await authenticatedUserFromToken(token) : null;
       const vncCallerValid = token
-        ? (getConfig().auth?.enabled === true ? await authenticatedUserFromToken(token) !== null : await verifyToken(token) !== null)
+        ? (multiUser ? vncUser !== null : await verifyToken(token) !== null)
         : false;
       if (!vncCallerValid) {
         recordAuthFailure(ip);
@@ -4237,6 +4296,21 @@ export function createGateway() {
         return;
       }
       clearAuthFailures(ip);
+      // The bridge carries input both ways to the one shared automation browser, which may be signed
+      // in to sites: driving it takes the operator rank, as on /api (the mutation gate). Ranked, so
+      // an extension role at operator rank passes.
+      if (vncUser && !userHasRole(vncUser, "operator")) {
+        logAudit("rbac_denied", {
+          surface: "browser_vnc",
+          username: vncUser.username,
+          role: vncUser.role,
+          method: "GET",
+          path: pathname,
+        }, { userId: vncUser.username, severity: "warn" });
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        socket.destroy();
+        return;
+      }
       handOver(vncWss, (ws) => vncWss.emit("connection", ws, req));
       return;
     }

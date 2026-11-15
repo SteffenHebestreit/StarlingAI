@@ -387,6 +387,16 @@ export const GatewaySchema = z.object({
    *  container is NOT the mounted repo — the reason gateway-routed eval fixtures were
    *  invisible to agents. Deployments set this to the container mount (e.g. "/workspace"). */
   sessionWorkspaceRoot: z.string().optional(),
+  /** Who may waive human approval for a run they start. */
+  overrides: z.object({
+    /**
+     * The lowest role whose request to auto-approve a run's per-call approvals is honoured (the
+     * legacy A2A route's `autoApprove`), compared by rank; "disabled" honours no one. Below it the
+     * request is ignored and approval-gated calls fail closed. Applies under `auth.enabled`; with
+     * auth off only "disabled" changes anything. Default "operator", the behaviour before the key.
+     */
+    autoApproveMinRole: z.enum(["viewer", "operator", "admin", "disabled"]).default("operator"),
+  }).prefault({}),
 });
 
 /**
@@ -742,6 +752,11 @@ export const A2ASchema = z.object({
   taskTimeoutMs: z.number().int().min(5_000).max(3_600_000).default(600_000),
   /** Refresh interval in ms for re-fetching peer agent cards.  0 = once at startup. */
   refreshIntervalMs: z.number().int().min(0).max(86_400_000).default(900_000),
+  /**
+   * Serve the legacy in-process route `POST /a2a/agents/:name` (deprecated; use `/a2a/v1`).
+   * It is independent of `enabled`: true (default) keeps it as before, false answers 404.
+   */
+  legacyAgentRoute: z.boolean().default(true),
 });
 
 export type A2APeerConfig = z.infer<typeof A2APeerSchema>;

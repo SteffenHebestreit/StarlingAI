@@ -392,6 +392,8 @@ export type CoreAuditEventType =
   /** The public A2A agent card published the whole sub-agent roster (exposeAgents empty). */
   | "a2a_full_roster_exposed"
   | "a2a_task_completed"
+  /** The legacy A2A route ignored an `autoApprove` from a role below gateway.overrides.autoApproveMinRole. */
+  | "a2a_auto_approve_refused"
   | "a2a_peer_added"
   | "a2a_peer_removed"
   | "a2a_peer_unreachable";

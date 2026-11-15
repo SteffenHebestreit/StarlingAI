@@ -9,7 +9,7 @@ The StarlingAI gateway exposes four externally useful surfaces for interacting w
 - REST endpoints under `/api/*`
 - WebSocket RPC at `/ws`
 - AG-UI token streaming at `/api/chat/stream`
-- A2A JSON-RPC at `/a2a/agents/:name`
+- A2A JSON-RPC at `/a2a/v1` (and the deprecated legacy route `/a2a/agents/:name`)
 
 See also: [Security Model](security.md) · [Architecture & Design](architecture.md)
 
@@ -831,6 +831,8 @@ Body:
 
 `sessionId` is optional. An id no session has starts a new session under that id, owned by the caller, so a client may pre-generate one (a UUID, say). Under multi-user auth a session another account owns gets `404`. So does an id no session has unless it is 1 to 128 letters, digits, `_` or `-` (a UUID is fine). An id with a colon is read as naming another session: one in a namespace the system mints ids in for runs no chat started (`sub:`, `workflow:`, `a2a-in:`, `a2a-out:`, `a2a:`, `mcp:`, `fed:`, `eval:`, `eval-judge:`, `scene-eval:`, `selfimprove:`, `job:`), whose shared facts live under its id, and one ending in `:ephemeral`, whose sub-agent runs resolve to the session named before it. A `sessionId` that is not a string (or `null`) gets `400`.
 
+Under multi-user auth a turn takes the operator rank, as a mutating `/api` call does: a caller whose role ranks below `operator` (a `viewer`, or an extension role below rank 50) gets `403` with `{ "error": "Operator role required for this action" }`, audited as `rbac_denied` with `surface: "agui"`. With auth off no role is checked.
+
 It emits the same logical event types used by the WebSocket flow.
 
 In addition to the normal text and tool events, the stream can emit:
@@ -874,6 +876,8 @@ Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
+This is the legacy in-process route. It is deprecated in favour of `tasks/send` at `/a2a/v1` ([below](#public-a2a-surface)), and the gateway logs a warning the first time it serves it. It is served whatever `a2a.enabled` says. Set `a2a.legacyAgentRoute: false` to turn it off; every request then gets `404` with the JSON-RPC error `-32601` `Method not found`, before the token is looked at.
+
 The current method name is `tasks/send`.
 
 Request:
@@ -893,7 +897,9 @@ Request:
 
 `sessionId` names the session the run works in: the run reads and writes that session's shared facts, peer messages and checkpoints. Leave it out and the run gets a new session of its own. With auth off the id is used as given, so it can name a chat session. Under multi-user auth (`auth.enabled`) it names a session in the caller's own namespace instead, derived from the caller's account and the id: the same id from the same account reaches the same session on this route and on `tasks/send` at `/a2a/v1`, and it never joins an existing chat session, the caller's own included. The response does not carry the session id.
 
-Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`.
+Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`. Running an agent takes the operator rank, as a mutating `/api` call does: a role below `operator` gets `403` with the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a_legacy"`.
+
+`params.autoApprove: true` grants every approval-gated tool call of the run without asking anyone. It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
 
 Response:
 
@@ -914,6 +920,10 @@ Calling any other method returns `-32601` with `Method not found — use tasks/s
 
 `POST /a2a/v1` (JSON-RPC `tasks/send`, `tasks/get`) and its agent card at `GET /.well-known/agent-card.json` are served when `a2a.enabled` is set. The JSON-RPC endpoint takes the shared `a2a.inboundBearerToken` when one is configured, and otherwise a gateway token (or, with OIDC A2A on, a peer's token from the identity provider). Under multi-user auth a gateway token whose account has been removed gets `401`, as on `/api`, and a `tasks/send` task runs as the account the token names, with the workspace root and memory that account's chat runs have. A caller with the shared bearer or an OIDC peer's token is no account of this deployment, and its task runs in the shared workspace root. Under multi-user auth a `tasks/send` `sessionId` that is not a string gets the JSON-RPC error `-32602`.
 
+Under multi-user auth `tasks/send` with a gateway token takes the operator rank: an account whose role ranks below `operator` gets the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a"`. The shared bearer and an OIDC peer's token are machine callers the operator configured and have no role to check. `tasks/get` takes any caller and returns only that caller's own tasks, as before.
+
 ## MCP server
 
 `/mcp` serves the MCP streamable HTTP transport when `mcp.expose.enabled` and `mcp.expose.http.enabled` are set. With `mcp.expose.http.requireAuth` (the default) it takes a gateway token, in the `Authorization` header or a `?token=` query parameter. Under multi-user auth the token's account is looked up on every request, as on `/api`: a token whose account has been removed gets `401`, and a caller has the role its account has now, not the one the token was signed with. Calls run as that account, with the workspace root and memory its chat runs have. An `mcp-session-id` is served only to the account that opened the session; any other caller gets `404` with `Unknown MCP session`, the reply an unknown id gets. With `requireAuth` off every caller is anonymous, with the operator role, and its calls run in the shared workspace root.
+
+A caller below the operator rank, such as a `viewer`, may call Tier-0 tools only, and no agent or scene. Some Tier-0 tools read or move the shared automation browser, which may be signed in to sites; see [Security Model](security.md#roles-on-the-surfaces-outside-api) before serving `/mcp` to viewers.

@@ -52,6 +52,31 @@ Authentication failures are rate-limited to **10 attempts per 5-minute window pe
 
 The limit covers exactly three surfaces: `POST /api/auth/login` (HTTP 429), `/ws` connections (closed with code 4429), and `/ws/browser-vnc` upgrades (HTTP 429). Every other `/api/*` route rejects an invalid or missing bearer token with a plain 401 and is **not** rate-limited — put a reverse proxy in front of the gateway if you need blanket per-IP throttling.
 
+### Roles On The Surfaces Outside `/api`
+
+Under multi-user auth a mutating `/api/*` request (anything but `GET`, `HEAD` and `OPTIONS`) needs the `operator` rank or higher: the mutation gate refuses a lower role with 403 and audits `rbac_denied`. Four surfaces are served outside `/api`'s middleware and run agents or reach the live browser, and they apply the same rule, each audited as `rbac_denied` with its `surface`:
+
+| Surface | Refusal |
+|---|---|
+| AG-UI stream, `POST /api/chat/stream` | HTTP 403 (`agui`) |
+| Legacy A2A route, `POST /a2a/agents/:name` | HTTP 403, JSON-RPC `-32003` (`a2a_legacy`) |
+| `tasks/send` at `/a2a/v1` with a gateway token | JSON-RPC `-32003` (`a2a`) |
+| Browser preview, the `/ws/browser-vnc` upgrade | HTTP 403 (`browser_vnc`) |
+
+So a `viewer` can neither run a turn or an agent on these four surfaces nor take over the shared automation browser through its VNC bridge. Ranks compare as the mutation gate's do (viewer 10, operator 50, admin 90), so an extension role of rank 50 or more passes. An A2A caller with the shared `a2a.inboundBearerToken` or an OIDC peer's token is no account and has no role to check. `/mcp`, the public agent card and the dashboard socket `/ws` are outside this rule. With auth off no role is checked anywhere here.
+
+Two keys narrow the legacy A2A route further. `a2a.legacyAgentRoute: false` turns it off (404); it is served whatever `a2a.enabled` says, so a deployment that does not call it should set this. Its `autoApprove: true` grants every approval-gated call of the run, and is honoured only from a role at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled`). Below the floor it is ignored, audited as `a2a_auto_approve_refused`, and an approval-gated call of the run fails closed.
+
+Outside the VNC bridge a viewer can still reach that browser, which may be signed in to sites. When `/mcp` is served (`mcp.expose.enabled` and `mcp.expose.http.enabled`), it lets a viewer call every Tier-0 tool it exposes (all of them while `mcp.expose.exposeTools` is empty), though no agent, scene or Tier-1+ tool, and several Tier-0 tools use the shared browser:
+
+- `browser_navigate` sends it to a URL and returns the page it lands on.
+- `browser_snapshot`, `browser_screenshot` and `browser_wait_for` return the page it shows.
+- `browser_axe_audit` can do both.
+- `web_fetch` renders a page in it, with its sign-ins, when the direct request fails, is answered with an error status or returns almost no text, as a page behind a login does.
+- `web_search` moves it when it falls back to the browser.
+
+In a deployment that has viewer accounts and a browser signed in to anything, keep `mcp.expose` off, or set `mcp.expose.exposeTools` to a list without these tools. That list applies to every caller, operators included.
+
 ---
 
 ## Credential Store
@@ -141,7 +166,7 @@ Editing the shared **global** personality under auth requires the **`admin`** ro
 
 Creating, deleting or resetting the password of an account (`POST`/`DELETE`/`PATCH /api/auth/users`) requires **`admin`** as well. The default `pnpm sai token` is an admin bootstrap token, which is how the first account is created. Deleting an account stops its tokens and ends what it has running: its open sockets close, its chats are archived and a turn it is running stops, its queued and running jobs are cancelled, its schedules are disabled, and its MCP sessions and A2A tasks end. A tombstone in `<workspace>/.starlingai/accounts-retired.json` keeps the name from channel senders and new identity-provider subjects; when it cannot be written, nothing is deleted. The reply lists `aclReferences`, the `allowedUsers` entries in the gateway's config that still name the username or `account:<id>` (config is never edited). The storage stays under the old id until `pnpm sai migrate-account-ids --purge-retired <id>` removes it. An admin may create the name again: the new account gets a new id and starts empty, but a bare `allowedUsers` entry for the name grants it, so rewrite those entries first. A password reset keeps the account (tokens already issued stay valid until they expire). No account is created under `auth.provider: "oidc"`, where the identity provider owns the usernames, and the last admin account cannot be deleted.
 
-**Route policies.** A core extension can limit any `/api/*` route, and the surfaces the gateway answers before its router (`POST /api/chat/stream`, `/mcp`, `/a2a/v1`, `/a2a/agents/:name`, `/.well-known/agent-card.json` and the WebSocket upgrades `/ws` and `/ws/browser-vnc/*`), to listed roles (`roles`), or keep listed roles off them (`denyRoles`): see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension). Without a matching policy each of those surfaces keeps its own check, which is only that the token resolves to an account: any signed-in role, a viewer included, can open the dashboard socket, call tools over MCP and run agents over A2A. A deny policy only subtracts: a caller it does not name meets the next matching policy, core's own included, as if it were not there. A refused `/ws` closes with code 4403, and an open one closes with 4403 once its account's role changes to one the policy refuses. A refusal is audited as `rbac_denied`. A malformed policy refuses every caller on its path instead of being skipped, and a policy naming a role nobody holds is logged at boot.
+**Route policies.** A core extension can limit any `/api/*` route, and the surfaces the gateway answers before its router (`POST /api/chat/stream`, `/mcp`, `/a2a/v1`, `/a2a/agents/:name`, `/.well-known/agent-card.json` and the WebSocket upgrades `/ws` and `/ws/browser-vnc/*`), to listed roles (`roles`), or keep listed roles off them (`denyRoles`): see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension). Without a matching policy each of those surfaces keeps its own check: the token must resolve to an account, and the four that run agents or reach the live browser (the AG-UI stream, the legacy A2A route, `tasks/send` at `/a2a/v1` and the browser preview) also take operator rank ([Roles On The Surfaces Outside `/api`](#roles-on-the-surfaces-outside-api)). Any signed-in role, a viewer included, can open the dashboard socket and call tools over MCP. A deny policy only subtracts: a caller it does not name meets the next matching policy, core's own included, as if it were not there. A refused `/ws` closes with code 4403, and an open one closes with 4403 once its account's role changes to one the policy refuses. A refusal is audited as `rbac_denied`. A malformed policy refuses every caller on its path instead of being skipped, and a policy naming a role nobody holds is logged at boot.
 
 Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph; `/api/app/:id/*` (a running served app) takes any signed-in caller, not only the account that started the app; and a dashboard socket opened before its token expired stays open after. See `docs/memory-context-overview.md` §6 for the full account.
 
@@ -288,5 +313,7 @@ A reverse proxy you put in front of the stack (for TLS, say) buffers in the same
 - [ ] Do not expose ports 8765 or 5432 to the public internet — reverse proxy with TLS
 - [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
 - [ ] Keep every proxy's temp files off disk: the web container's `/var/cache/nginx` is a tmpfs ([above](#dashboard-proxy-no-request-data-on-disk)), and a TLS proxy in front needs the same
+- [ ] If nothing calls the deprecated `POST /a2a/agents/:name`, set `a2a.legacyAgentRoute: false`
+- [ ] With viewer accounts and a signed-in automation browser, keep `mcp.expose` off or leave the tools that use that browser out of `mcp.expose.exposeTools` ([Roles On The Surfaces Outside `/api`](#roles-on-the-surfaces-outside-api))
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals
