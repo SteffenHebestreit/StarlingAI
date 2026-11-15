@@ -1788,7 +1788,7 @@ interface FlagChip {
 const activeFlags = computed<FlagChip[]>(() => {
   const text = inputText.value;
   const chips: FlagChip[] = [];
-  if (/--auto\b/.test(text)) chips.push({ label: "--auto: skip approvals", pattern: /\s*--auto\b/g, color: "amber" });
+  if (/--auto\b/.test(text)) chips.push({ label: "--auto: auto-approve (scene steps still ask)", pattern: /\s*--auto\b/g, color: "amber" });
   const iterMatch = text.match(/--iter\s+(\d+)\b/);
   if (iterMatch) chips.push({ label: `--iter ${iterMatch[1]}`, pattern: /\s*--iter\s+\d+\b/, color: "sky" });
   const agentMatch = text.match(/--agent\s+(\S+)/);

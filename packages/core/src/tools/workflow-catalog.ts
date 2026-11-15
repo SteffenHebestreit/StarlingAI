@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { logAudit } from "../audit/logger.js";
-import { requestApprovalViaChannel } from "../approval/index.js";
+import { requestApprovalViaChannel, routeSceneStepsToChannel } from "../approval/index.js";
 import { archiveSession, createSession, type AgentSession, type SessionHistoryMessage } from "../agent/session.js";
 import { createFanOutExecutionRecords, readExecutionRecord, unbackedFiguresMasked } from "../agent/delegated-run-record.js";
 import { UNOBSERVED_FIGURE_MARKER } from "../agent/figure-provenance.js";
@@ -10,7 +10,7 @@ import { runSubAgentWithStats } from "../agent/sub-agent.js";
 import { runTurn, collectTurnArtifactAttachments, classifyPostOrchestrationDisposition } from "../agent/runtime.js";
 import type { TurnOutput } from "../agent/turn-types.js";
 import { getConfig } from "../config/loader.js";
-import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary } from "../credentials/jobs.js";
+import { getJobDefinition, listAllJobs, resolveJobSteps, type JobSummary, type ResolvedJobStep } from "../credentials/jobs.js";
 import { getScene, listAllScenes, type SceneSummary } from "../credentials/scenes.js";
 import { getEmbeddingProvider } from "../providers/index.js";
 import { catalogEnglish, routingEnglish } from "../agent/routing-english.js";
@@ -818,8 +818,11 @@ function resolveWorkflowApprovalCallback(
   scene: SceneSummary,
   ctx: ToolContext,
 ): ToolContext["approvalCallback"] {
+  // The caller answers the run's approvals, except the scene's humanInLoopSteps when the scene
+  // names an approval channel: those go to the channel, as on a REST or chat `/run` of the scene,
+  // and not to whoever asked for the workflow.
   if (ctx.approvalCallback) {
-    return ctx.approvalCallback;
+    return routeSceneStepsToChannel(scene, ctx.approvalCallback, { signal: ctx.signal });
   }
   if (!scene.approvalChannel) {
     return undefined;
@@ -831,7 +834,20 @@ function resolveWorkflowApprovalCallback(
     args,
     scene.name,
     scene.approvalTimeoutMs,
+    undefined,
+    ctx.signal,
   );
+}
+
+/** As resolveWorkflowApprovalCallback, for a job's step: the step's own scene names its steps and channel. */
+function resolveJobStepApprovalCallback(step: ResolvedJobStep, ctx: ToolContext): ToolContext["approvalCallback"] {
+  if (!ctx.approvalCallback) return undefined;
+  return routeSceneStepsToChannel({
+    name: step.sceneName,
+    approvalChannel: step.approvalChannel,
+    humanInLoopSteps: step.humanInLoopSteps,
+    approvalTimeoutMs: getScene(step.sceneName)?.approvalTimeoutMs,
+  }, ctx.approvalCallback, { signal: ctx.signal });
 }
 
 function looksLikeApprovalBlockedWorkflowOutput(output: string): boolean {
@@ -1258,6 +1274,7 @@ async function runJobInline(
       // (E2E 2026-10-08). The step's turn no longer has run_workflow, but a coordinator it delegates
       // to keeps one (mission_coordinator), and the recursion check reads this stack.
       const stepExecutionStack = [...workflowExecutionStack, buildWorkflowExecutionKey(step.sceneName, "scene")];
+      const stepApprovalCallback = resolveJobStepApprovalCallback(step, ctx);
 
       // Append the workflow context (which carries the ORIGINAL request, i.e. the topic)
       // to EVERY step, not just the first. Later steps otherwise never learn the subject:
@@ -1283,7 +1300,7 @@ async function runJobInline(
           workspacePath: ctx.workspacePath,
           allowedAgents,
           signal: ctx.signal,
-          approvalCallback: ctx.approvalCallback,
+          approvalCallback: stepApprovalCallback,
           onProgress: ctx.onSubAgentProgress,
           humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),
           onComputerAction: ctx.onComputerAction,
@@ -1349,7 +1366,7 @@ async function runJobInline(
         const result = await runTurn({
           session,
           userMessage: stepTask,
-          approvalCallback: ctx.approvalCallback,
+          approvalCallback: stepApprovalCallback,
           signal: ctx.signal,
           allowedAgents,
           humanInLoopSteps: mergeHumanInLoopSteps(ctx.humanInLoopSteps, step.humanInLoopSteps),

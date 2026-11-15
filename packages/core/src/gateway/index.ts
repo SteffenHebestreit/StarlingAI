@@ -56,6 +56,8 @@ import { runSubAgent, type SubAgentRunOptions } from "../agent/sub-agent.js";
 import { createJob, cancelJob, getJob as getExecutionJob, listJobs, deleteSceneJob } from "../agent/jobs.js";
 import { canSeeSceneJob, presentSceneJob, sceneJobViewer } from "./scene-job-access.js";
 import { resolveApproval, getPendingApproval, listPendingApprovals } from "../approval/store.js";
+import { autoApprovingCallback } from "../tools/registry.js";
+import { approvalConfirmationPage, approvalNoDecisionPage, approvalResultPage, readApprovalCallbackBody } from "./approval-pages.js";
 import { childLogger } from "../logger.js";
 import { handleSlackEvent } from "../channels/slack.js";
 import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.js";
@@ -3604,9 +3606,12 @@ export function createGateway() {
 
   // ── Approval callback endpoints ──────────────────────────────────────────
   // GET  /api/approval/:id?approved=true|false&secret=X
-  //        — one-click link handler (Slack / WhatsApp / email).  Returns HTML.
+  //        — the link in a Slack / WhatsApp / email message. Returns an HTML page
+  //          with Approve and Deny buttons; the GET itself changes nothing.
   // POST /api/approval/:id
-  //        — programmatic callback (n8n / outbound_webhook receivers).
+  //        — the page's buttons (form: approved=true|false&secret=X), and
+  //          programmatic callbacks (n8n / outbound_webhook receivers), JSON
+  //          whatever their Content-Type:
   //          Body: { approved: boolean, secret: string }
   //          OR   Authorization: Bearer <secret>  +  body: { approved: boolean }
 
@@ -3635,6 +3640,7 @@ export function createGateway() {
   // one is answered as an unknown id is: the id alone tells nothing about whether a request is
   // pending. The log keeps the distinction for the operator debugging a channel's secret.
   const APPROVAL_NOT_FOUND = "Approval request not found or already resolved";
+  const APPROVAL_NOT_FOUND_PAGE = `<html><body><h2>${APPROVAL_NOT_FOUND}.</h2></body></html>`;
   const logRefusedApprovalSecret = (approvalId: string) =>
     log.warn({ approvalId }, "Approval callback refused: the secret does not match the pending request");
 
@@ -3647,24 +3653,37 @@ export function createGateway() {
     const pending = getPendingApproval(id);
     if (!pending || (pending.secret && !approvalSecretMatches(pending.secret, secret))) {
       if (pending) logRefusedApprovalSecret(id);
-      return c.html(`<html><body><h2>${APPROVAL_NOT_FOUND}.</h2></body></html>`, 404);
+      return c.html(APPROVAL_NOT_FOUND_PAGE, 404);
     }
 
-    resolveApproval(id, approved);
-    const action = approved ? "✅ Approved" : "❌ Denied";
-    const safeName = pending.toolName.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-    return c.html(`<html><body style="font-family:sans-serif;padding:2rem"><h2>${action}</h2><p>Tool: <strong>${safeName}</strong></p><p>You can close this tab.</p></body></html>`);
+    // The GET only shows the request. Link previewers, mail scanners and chat unfurlers fetch a
+    // link with nobody behind it, and a GET that resolved the request approved or denied it by
+    // itself. The person decides with a button, which posts the secret back to this path.
+    c.header("Cache-Control", "no-store");
+    c.header("Referrer-Policy", "no-referrer");
+    c.header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    return c.html(approvalConfirmationPage({
+      approvalId: id,
+      toolName: pending.toolName,
+      sceneName: pending.sceneName,
+      secret,
+      suggested: approved,
+    }));
   });
 
   app.post("/api/approval/:approvalId", async (c) => {
     const id = c.req.param("approvalId");
-    let body: Record<string, unknown>;
-    try { body = await c.req.json<Record<string, unknown>>(); } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
-    }
+    // The confirmation page (GET above) posts a form, and gets a page back whatever the outcome;
+    // channel receivers and the dashboard send JSON and get JSON. Which one it is comes from the
+    // body, not from the Content-Type alone (readApprovalCallbackBody). A body that decides nothing
+    // gets 400 and the request stays pending.
+    const body = readApprovalCallbackBody(await c.req.text(), c.req.header("Content-Type"));
+    if (body.kind === "invalid-form") return c.html(approvalNoDecisionPage(), 400);
+    if (body.kind === "invalid-json") return c.json({ error: "Invalid JSON body" }, 400);
+    const fromForm = body.kind === "form";
+    const notFound = () => (fromForm ? c.html(APPROVAL_NOT_FOUND_PAGE, 404) : c.json({ error: APPROVAL_NOT_FOUND }, 404));
 
-    const approved = Boolean(body["approved"]);
-    const bodySecret = body["secret"] ? String(body["secret"]) : "";
+    const { approved, secret: bodySecret } = body;
     const bearer = extractBearerToken(c.req.header("Authorization")) ?? "";
 
     // Two ways to authorize: the channel secret (Slack/webhook callbacks), OR a
@@ -3673,13 +3692,17 @@ export function createGateway() {
     // with neither gets the answer an unknown id gets, pending or not.
     const operatorAuthed = bearer && await verifyToken(bearer);
     const pending = getPendingApproval(id);
-    if (!pending) return c.json({ error: APPROVAL_NOT_FOUND }, 404);
+    if (!pending) return notFound();
     if (!operatorAuthed && pending.secret && !approvalSecretMatches(pending.secret, bodySecret || bearer)) {
       logRefusedApprovalSecret(id);
-      return c.json({ error: APPROVAL_NOT_FOUND }, 404);
+      return notFound();
     }
 
     resolveApproval(id, approved);
+    if (fromForm) {
+      c.header("Cache-Control", "no-store");
+      return c.html(approvalResultPage(pending.toolName, approved));
+    }
     return c.json({ ok: true, approved });
   });
 
@@ -4132,10 +4155,10 @@ export function createGateway() {
           const sessId = rpc.params?.["sessionId"]
             ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
-          // autoApprove grants the run's approval-gated calls (a tool with an approval policy still
-          // goes to its approvers), so it is honoured only from a role at
-          // gateway.overrides.autoApproveMinRole; below it the run asks as it would without it (no
-          // channel here, so a gated call fails closed).
+          // autoApprove grants the run's approval-gated calls (never a humanInLoopSteps step, see
+          // below, and a tool with an approval policy still goes to its approvers), so it is
+          // honoured only from a role at gateway.overrides.autoApproveMinRole; below it the run asks
+          // as it would without it (no channel here, so a gated call fails closed).
           let autoApprove = rpc.params?.["autoApprove"] === true;
           if (autoApprove && !mayAutoApprove(a2aUser?.role)) {
             autoApprove = false;
@@ -4158,8 +4181,12 @@ export function createGateway() {
             workspacePath: a2aUser
               ? userWorkspaceRoot(getConfig().workspacePath, callerIdentity(a2aUser))
               : getConfig().workspacePath,
+            // autoApprove answers the run's approvals as --auto does, and like --auto it never
+            // answers a scene's humanInLoopSteps step, which the run reaches through run_workflow.
+            // There is nobody to ask here, so the step is refused, unless its scene sends it to an
+            // approvalChannel (tools/workflow-catalog.ts).
             approvalCallback: autoApprove
-              ? async () => true
+              ? autoApprovingCallback()
               : undefined,
             // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
             // request context the run's own memory reads take their account from; its role beside

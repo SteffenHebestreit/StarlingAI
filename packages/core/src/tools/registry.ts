@@ -161,6 +161,38 @@ export function toolCallIdentity(ctx: Pick<ToolContext, "userId" | "identity">):
 export function resourceGuardIdentity(ctx: Pick<ToolContext, "userId" | "identity">): Identity | undefined {
   return ctx.userId ? toolCallIdentity(ctx) : undefined;
 }
+
+/** What executeTool tells an approval callback about the call it asks for (its third argument). */
+export interface ApprovalRequest {
+  /** The call is a step the scene names in humanInLoopSteps. A person answers it, under --auto too. */
+  humanInLoopStep: boolean;
+}
+
+/** Asks whether a tool call may run. A callback that decides by the tool's name alone ignores `request`. */
+export type ApprovalCallback = (
+  toolName: string,
+  args: Record<string, unknown>,
+  request?: ApprovalRequest,
+) => Promise<boolean>;
+
+/**
+ * The approval callback of a run that approves its own tool calls: a chat turn with `--auto`, and
+ * the legacy A2A route's `autoApprove`. It answers every approval itself except a humanInLoopSteps
+ * step, which is enforced unconditionally. A step is a call executeTool marks as one, or one
+ * `humanInLoopSteps` names. It goes to `askPerson`, still marked, and with nobody to ask it is
+ * refused. Sub-agents and nested workflow turns inherit the callback, so the steps of the scenes
+ * they run are asked for too.
+ */
+export function autoApprovingCallback(askPerson?: ApprovalCallback, humanInLoopSteps?: readonly string[]): ApprovalCallback {
+  return async (toolName, args, request) => {
+    if (!request?.humanInLoopStep && !humanInLoopSteps?.includes(toolName)) return true;
+    if (!askPerson) {
+      throw new Error(`Tool '${toolName}' requires human approval (a humanInLoopSteps step, which auto-approval never answers) but no approval channel is available`);
+    }
+    return askPerson(toolName, args, { humanInLoopStep: true });
+  };
+}
+
 export interface ToolContext {
   sessionId: string;
   workspacePath: string;
@@ -202,7 +234,7 @@ export interface ToolContext {
    * the whole workspace (runtime internals, core agents).
    */
   workspaceScope?: "full" | "generated";
-  approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  approvalCallback?: ApprovalCallback;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   /**
    * Put a structured question to the person behind this turn (agent/user-input.ts) and wait for
@@ -297,7 +329,8 @@ export interface ToolContext {
    * Enforced unconditionally — cannot be bypassed by config or tier settings.
    */
   humanInLoopSteps?: string[];
-  /** When true, all tool approval prompts are automatically approved for this turn. */
+  /** The turn runs with `--auto`: its approvalCallback (autoApprovingCallback) answers every
+   *  approval itself except a humanInLoopSteps step, which it passes on to a person. */
   autoApprove?: boolean;
   /** The turn runs with nobody watching (RunTurnOptions.unattended, resolved). A workflow step's
    *  nested turn inherits it. */
@@ -1122,7 +1155,9 @@ export async function executeTool(
 
   // Per-call approval:
   //  1. Tier-level default (requiresPerCallApproval), OR
-  //  2. Scene-declared humanInLoopSteps — ENFORCED UNCONDITIONALLY, cannot be bypassed, OR
+  //  2. Scene-declared humanInLoopSteps — ENFORCED UNCONDITIONALLY, cannot be bypassed (the
+  //     callback is told, ApprovalRequest.humanInLoopStep, so a callback that approves by itself,
+  //     autoApprovingCallback, asks a person for it), OR
   //  3. SEC-106 effect policy (enforce mode): an irreversible/compensatable external
   //     mutation requires approval even when the TIER alone would not — tiers express
   //     privilege, not effect (a Tier-1 webhook can trigger a deployment). Shadow mode
@@ -1201,7 +1236,7 @@ export async function executeTool(
     if (context.approvalCallback) {
       let approved: boolean;
       try {
-        approved = await context.approvalCallback(name, args);
+        approved = await context.approvalCallback(name, args, { humanInLoopStep: sceneRequiresApproval });
       } catch (err) {
         // The approval callback may reject for two reasons:
         //   1. Timeout (no user response within the window) — message includes "timed out"

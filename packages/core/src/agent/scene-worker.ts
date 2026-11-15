@@ -21,7 +21,7 @@ import {
   type ClaimedSceneJob,
   type SceneJobProgress,
 } from "./jobs.js";
-import { requestApprovalViaChannel } from "../approval/index.js";
+import { sceneChannelApprovalCallback } from "../approval/index.js";
 import { buildApprovalIdempotencyKey } from "../approval/durable-store.js";
 import { logAudit } from "../audit/logger.js";
 import { childLogger } from "../logger.js";
@@ -635,8 +635,19 @@ function buildApprovalCallback(
    *  the same tool with the same args don't share a durable approval decision. */
   approvalScope?: string,
 ): ((toolName: string, args: Record<string, unknown>) => Promise<boolean>) | undefined {
-  const approvalChannel = approvalChannelOverride ?? job.payload.approvalChannel;
-  if (!approvalChannel || !job.payload.humanInLoopSteps?.length) return undefined;
+  // Stable key (job + step + tool + args) so a durable decision made before a
+  // restart is honoured when this step re-runs, instead of re-prompting the
+  // human — and two distinct gated steps never share one decision.
+  const viaChannel = sceneChannelApprovalCallback({
+    name: job.sceneName,
+    approvalChannel: approvalChannelOverride ?? job.payload.approvalChannel,
+    humanInLoopSteps: job.payload.humanInLoopSteps,
+    approvalTimeoutMs: job.payload.approvalTimeoutMs,
+  }, {
+    idempotencyKey: (toolName, args) => buildApprovalIdempotencyKey(job.id, toolName, args, approvalScope),
+    signal: controller.signal,
+  });
+  if (!viaChannel) return undefined;
 
   return async (toolName: string, args: Record<string, unknown>) => {
     counters.approvalsRequested += 1;
@@ -666,14 +677,7 @@ function buildApprovalCallback(
       ...(owner ? { owner } : {}),
     });
 
-    // Stable key (job + step + tool + args) so a durable decision made before a
-    // restart is honoured when this step re-runs, instead of re-prompting the
-    // human — and two distinct gated steps never share one decision.
-    const idempotencyKey = buildApprovalIdempotencyKey(job.id, toolName, args, approvalScope);
-    const approved = await raceAgainstAbort(
-      requestApprovalViaChannel(approvalChannel, toolName, args, job.sceneName, job.payload.approvalTimeoutMs, idempotencyKey),
-      controller.signal,
-    );
+    const approved = await viaChannel(toolName, args);
 
     await safeProgressUpdate(job.id, {
       stage: approved ? "running" : "approval",
@@ -689,18 +693,6 @@ function buildApprovalCallback(
 
     return approved;
   };
-}
-
-async function raceAgainstAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | false> {
-  if (signal.aborted) return false;
-
-  return new Promise<T | false>((resolve, reject) => {
-    const onAbort = () => resolve(false);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
 }
 
 function progressFromIntervention(

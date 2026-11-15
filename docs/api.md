@@ -273,18 +273,22 @@ What the assistant was asked to run later, to repeat or to watch: a schedule mad
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/approvals/pending` | the pending approvals the caller may decide (the dashboard's Operator requests) |
-| `GET` | `/api/approval/:approvalId` | one-click approve or deny HTML response |
-| `POST` | `/api/approval/:approvalId` | programmatic approval callback |
+| `GET` | `/api/approval/:approvalId` | the approval link: an HTML page with Approve and Deny buttons; the GET changes nothing |
+| `POST` | `/api/approval/:approvalId` | resolves the request: the page's buttons, and programmatic callbacks |
 
-Accepted POST forms:
+The `approveUrl` / `denyUrl` links a channel sends (`?approved=true|false&secret=...`) open the confirmation page and do not resolve the request on their own, because link previewers, mail scanners and chat unfurlers fetch links with nobody behind them. The page's buttons post `approved=true|false&secret=...` as `application/x-www-form-urlencoded` to the same path and get an HTML answer. A form post without exactly one `approved` of `true` or `false` decides nothing: it gets `400`, and the request stays pending.
+
+Accepted JSON POST forms (programmatic receivers, which should POST to `callbackUrl` rather than fetch the links):
 
 ```json
 { "approved": true, "secret": "..." }
 ```
 
-or `Authorization: Bearer <secret>` with `{ "approved": true }`, or a gateway token (the dashboard) with `{ "approved": true }`.
+or `Authorization: Bearer <secret>` with `{ "approved": true }`, or a gateway token (the dashboard) with `{ "approved": true }`. A body that is JSON is read as JSON whatever its `Content-Type` says, so `curl -d '{...}'`, which sends `application/x-www-form-urlencoded`, works. A JSON body that is not an object gets `400` (`Invalid JSON body`).
 
-A wrong or missing secret gets the answer an unknown or already resolved approval id gets: `404` with `Approval request not found or already resolved` (an HTML page on `GET`). The id alone does not tell whether a request is pending; the gateway log records a secret that did not match a pending request.
+A run that stops while it waits (Stop, a superseding message, the turn watchdog, a cancelled job) withdraws its channel request: the link and this callback then answer as for a request already resolved.
+
+A wrong or missing secret gets the answer an unknown or already resolved approval id gets: `404` with `Approval request not found or already resolved` (an HTML page on `GET` and on a form post). The id alone does not tell whether a request is pending; the gateway log records a secret that did not match a pending request.
 
 A pending approval has a `kind`:
 
@@ -646,7 +650,9 @@ The `computer.*` methods follow the rules of the `/api/computer-sessions` routes
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
-`--auto` grants the turn's approvals without asking, except a call to a tool with an approval policy, which still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). So it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
+`--auto` grants the turn's approvals without asking, except two: a scene's `humanInLoopSteps` step still goes to a person (next paragraph), and a call to a tool with an approval policy to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). So it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
+
+A `/run` of a scene that names an `approvalChannel` sends the scene's `humanInLoopSteps` to that channel, as a REST run of the scene does, and the socket gets a `status` event with `status: "guardrail"` and `message: "Approval requested via <channel>"` instead of an `agent.approval_needed` card. The turn's other approvals still come to the socket. `--auto` answers those other approvals, never a `humanInLoopSteps` step.
 
 `--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
 
@@ -950,7 +956,7 @@ Request:
 
 Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`. Running an agent takes the operator rank, as a mutating `/api` call does: a role below `operator` gets `403` with the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a_legacy"`.
 
-`params.autoApprove: true` grants the run's approval-gated tool calls without asking anyone, except a call to a tool with an approval policy, which still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
+`params.autoApprove: true` grants the run's approval-gated tool calls without asking anyone, except two: a scene's `humanInLoopSteps` step, which the run reaches through `run_workflow`, still goes to the scene's `approvalChannel` and is refused when the scene names none (there is nobody to ask here); and a call to a tool with an approval policy still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
 
 Response:
 

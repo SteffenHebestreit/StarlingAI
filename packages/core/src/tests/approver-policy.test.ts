@@ -234,7 +234,9 @@ describe("a tool whose approval policy names its approvers", () => {
     const result = await chatCall("alice", EXPORT_TOOL, { record: "r1" }, mods.routed.requesterApprovalCallback(card));
 
     expect(result.success).toBe(true);
-    expect(card).toHaveBeenCalledWith(EXPORT_TOOL, { record: "r1" });
+    // The card is asked as every approval callback is, with whether the call is a scene's
+    // humanInLoopSteps step (approval-bypass-fixes): it is not.
+    expect(card).toHaveBeenCalledWith(EXPORT_TOOL, { record: "r1" }, { humanInLoopStep: false });
     expect(mods.approvals.listPendingApprovals()).toEqual([]);
     expect(handled).toEqual([{
       tool: EXPORT_TOOL,

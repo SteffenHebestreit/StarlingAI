@@ -24,7 +24,7 @@ import { assembleTurnSystemMessages, buildDirectiveAgentPrompt, turnIsStillDisco
 import { markOrchestratorActivity, markOrchestratorIdle } from "./cache-warmer.js";
 import { intentShadowTurnEnded, intentShadowTurnStarted, type IntentShadowHandle } from "./intent-shadow.js";
 import { filterForcedOrchestrationTools } from "./forced-orchestration-tools.js";
-import { getToolsAsLLMDefs, executeTool, normalizeToolCall, type SwarmState, type ToolContext } from "../tools/registry.js";
+import { getToolsAsLLMDefs, executeTool, normalizeToolCall, autoApprovingCallback, type ApprovalCallback, type SwarmState, type ToolContext } from "../tools/registry.js";
 import { isToolAllowed } from "../guardrails/tool-tiers.js";
 import { loadTurnPlan, clearTurnPlanForSession, decidePlanContinuation, renderPlanContinuationDirective } from "./turn-plan.js";
 import { runQaDeliveryLoop, parseQaVerdict, resolveQaVerdictStatus, qaRequiresEvidence, buildQaImproveInstruction, buildQaVerdictInstruction, QA_VERDICT_SYSTEM_PROMPT, type QaVerdict, type QaVerdictStatus } from "./qa-delivery-loop.js";
@@ -2357,8 +2357,13 @@ async function _runTurn(
   // its own contextWindow, and passing the raw default made the trimmer budget
   // against a window the turn is not actually running on.
   session.setContextWindow(applyActiveModelPreset(getConfig().agents.defaults.model).contextWindow);
-  const resolvedApprovalCallback = opts.autoApprove
-    ? async (_toolName: string, _args: Record<string, unknown>) => true
+  // --auto answers the approvals of this turn's tools itself, except a humanInLoopSteps step, which
+  // is enforced unconditionally (tools/registry.ts): that one goes to the caller's callback, and
+  // with none it is refused. Sub-agents and nested workflow turns inherit this callback with their
+  // own steps added. executeTool marks a step as one (ApprovalRequest) and this callback passes it
+  // on marked, so an outer --auto callback does not answer it either.
+  const resolvedApprovalCallback: ApprovalCallback | undefined = opts.autoApprove
+    ? autoApprovingCallback(opts.approvalCallback, opts.humanInLoopSteps)
     : opts.approvalCallback;
 
   const carriedSwarmTasks = loadPreviousTurnSwarmTasks(session.getHistory());

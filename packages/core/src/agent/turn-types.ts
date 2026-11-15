@@ -14,7 +14,7 @@
  * from "./turn-types.js"`) so every external `import { TurnOutput } from
  * ".../runtime.js"` keeps working unchanged.
  */
-import type { SwarmState } from "../tools/registry.js";
+import type { ApprovalCallback, SwarmState } from "../tools/registry.js";
 import type { EffortTier } from "../config/schema.js";
 import type { AgentSession, SessionProgressMessage, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
@@ -64,7 +64,7 @@ export interface RunTurnOptions {
    *  gateway uses it to push its own hard-timeout out by the same amount, so the delegation-wait
    *  exclusion (orchestration.excludeDelegationWaitFromTurnBudget) holds at BOTH timeout layers. */
   onDelegationWaitMs?: (ms: number) => void;
-  approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  approvalCallback?: ApprovalCallback;
   inputCallback?: (question: string, choices?: string[], timeoutMs?: number) => Promise<string>;
   signal?: AbortSignal;
   /** Steering token of a turn the gateway armed before calling runTurn (turn-steering.ts), so
@@ -91,7 +91,8 @@ export interface RunTurnOptions {
   directiveAgent?: string;
   /** Tool names that must pause for human approval this turn (enforced unconditionally) */
   humanInLoopSteps?: string[];
-  /** Auto-approve all tool calls this turn — skips the approvalCallback gate entirely. */
+  /** Auto-approve this turn's tool calls (`--auto`), except a humanInLoopSteps step: that one still
+   *  goes to approvalCallback, and without one it is refused. */
   autoApprove?: boolean;
   /** The turn runs with nobody watching (`--auto`): the forced first call of
    *  orchestration.autonomousModeAntiRefusal, ask_user answering itself, routing's `autonomous`

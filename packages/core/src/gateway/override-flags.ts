@@ -16,7 +16,7 @@ export interface OverrideFlags {
 /**
  * Parse inline override flags from a message string.
  * Supported flags:
- *   --auto         — auto-approve all tool calls this turn
+ *   --auto         — auto-approve this turn's tool calls, except a scene's humanInLoopSteps (agent/runtime.ts)
  *   --iter N       — override sub-agent maxIterations (0 = unlimited, else 1–50)
  *   --agent NAME   — force delegation to a specific agent
  *   --timeout N    — override turn timeout in seconds (0 = unlimited, else 10–3600)

@@ -161,9 +161,10 @@ components:
       type: object
       description: |
         Field names match the handler exactly. `approved` is read as a boolean —
-        a body without it resolves the approval as DENIED, so always send it.
-        Authorize with EITHER the per-approval `secret` (Slack/webhook callbacks)
-        OR an operator bearer token (dashboard).
+        a JSON body without it resolves the approval as DENIED, so always send it.
+        Authorize with EITHER the per-approval `secret` (Slack/webhook callbacks;
+        in the body or as `Authorization: Bearer <secret>`) OR an operator bearer
+        token (dashboard).
       properties:
         approved: { type: boolean, description: 'true = approve, false = reject. Required — absent is treated as false.' }
         secret: { type: string, description: 'Per-approval secret. Omit when authenticating with an operator bearer token.' }
@@ -674,10 +675,13 @@ paths:
   /api/approvals/pending:
     get:
       tags: [Approval]
-      summary: List every unresolved approval (dashboard surface)
+      summary: List the unresolved approvals the caller may decide (dashboard surface)
       description: |
-        The only read-only view of approvals — `GET /api/approval/{approvalId}`
-        mutates. Requires an operator bearer token.
+        The pending approvals the caller may decide, with their arguments: a
+        routed approval (a tool call whose approval policy names its approver
+        roles) to a caller whose role the policy admits, and not to a requester
+        who needs a second person; a channel approval at operator rank, the rank
+        needed to answer one. A viewer gets an empty list.
       responses:
         '200':
           description: OK
@@ -687,30 +691,55 @@ paths:
   /api/approval/{approvalId}:
     get:
       tags: [Approval]
-      summary: One-click approve/deny link (NOT a read — this RESOLVES the approval)
+      summary: The approval link — shows a confirmation page, changes nothing
       description: |
-        **This endpoint mutates.** It is the human-facing link embedded in Slack /
-        WhatsApp / email notifications, and it returns an HTML page, not JSON.
-        Opening it resolves the approval and the decision is final.
-
-        `approved` is compared against the literal string `"true"`; **any other
-        value — including omitting the parameter — DENIES the request.** There is
-        no read-only way to inspect a single approval; use
-        `GET /api/approvals/pending` to list pending approvals instead.
+        The human-facing link embedded in Slack / WhatsApp / email notifications
+        (`approveUrl` / `denyUrl`). It returns an HTML page that shows the tool
+        (and scene) and has an Approve and a Deny button; **opening it decides
+        nothing**, because link previewers, mail scanners and chat unfurlers
+        fetch links with nobody behind them. The buttons POST the decision to the
+        same path. `approved` only chooses which button has the focus. The page
+        is served with `Cache-Control: no-store`, `Referrer-Policy: no-referrer`
+        and a Content-Security-Policy that allows no script.
       parameters:
         - { name: approvalId, in: path, required: true, schema: { type: string } }
-        - { name: approved, in: query, required: true, schema: { type: string, enum: ['true', 'false'] }, description: 'Literal "true" approves; anything else denies.' }
-        - { name: secret, in: query, required: false, schema: { type: string }, description: 'Required when the approval was created with a secret (always the case for Slack/webhook channels).' }
+        - { name: approved, in: query, required: false, schema: { type: string, enum: ['true', 'false'] }, description: 'Which button has the focus ("true": Approve). It decides nothing.' }
+        - { name: secret, in: query, required: false, schema: { type: string }, description: 'Required when the approval was created with a secret (always the case for Slack/webhook channels). The page posts it back.' }
       responses:
-        '200': { description: 'HTML confirmation page', content: { text/html: { schema: { type: string } } } }
-        '403': { description: 'HTML error page — invalid approval secret', content: { text/html: { schema: { type: string } } } }
-        '404': { description: 'HTML error page — not found or already resolved', content: { text/html: { schema: { type: string } } } }
+        '200': { description: 'HTML confirmation page with Approve and Deny buttons', content: { text/html: { schema: { type: string } } } }
+        '404': { description: 'HTML page — not found or already resolved; also the answer to a wrong or missing secret', content: { text/html: { schema: { type: string } } } }
     post:
       tags: [Approval]
-      summary: Submit an approval decision (one-click callback)
+      summary: Submit an approval decision (the confirmation page's buttons, or a programmatic callback)
+      description: |
+        Two bodies are accepted:
+
+        - The confirmation page's form, `application/x-www-form-urlencoded`
+          `approved=true|false&secret=…`. It is answered with an HTML page. A
+          form without exactly one `approved` of `true` or `false` decides
+          nothing: `400`, and the request stays pending.
+        - A JSON object (`ApprovalDecision`), answered with JSON. A body that is
+          JSON is read as JSON whatever its `Content-Type` says (`curl -d` sends
+          `application/x-www-form-urlencoded`).
+
+        Authorize with the per-approval secret (in the body, or as
+        `Authorization: Bearer <secret>`) or with an operator bearer token.
       parameters: [ { name: approvalId, in: path, required: true, schema: { type: string } } ]
-      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ApprovalDecision' } } } }
-      responses: { '200': { description: Recorded } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ApprovalDecision' } }
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                approved: { type: string, enum: ['true', 'false'] }
+                secret: { type: string }
+              required: [approved]
+      responses:
+        '200': { description: 'Recorded: `{ ok: true, approved }` for JSON, the result page for a form' }
+        '400': { description: 'A body that decides nothing: invalid JSON, or a form without one `approved` of true or false (HTML page). The request stays pending.' }
+        '404': { description: 'Not found or already resolved; also the answer to a wrong or missing secret (HTML page for a form)' }
 
   /channels/slack/events:
     post:

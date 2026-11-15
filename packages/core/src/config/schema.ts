@@ -1061,7 +1061,7 @@ export type SubAgentConfig = z.infer<typeof SubAgentConfigSchema>;
 //   sync_webhook    — POST and expect { approved: boolean } in the response body
 
 /**
- * Slack — posts a Block Kit message with one-click Approve / Deny links
+ * Slack — posts a Block Kit message with Approve / Deny links (each opens a confirmation page)
  * via a Slack Incoming Webhook (no Slack app or interactive components required).
  * gateway.publicUrl must be set so StarlingAI can construct the link URLs.
  */
@@ -1075,7 +1075,7 @@ export const SlackApprovalChannelSchema = z.object({
 
 /**
  * Outbound webhook — POSTs a JSON approval request to any URL.
- * The payload contains pre-formed `approveUrl` and `denyUrl` one-click links
+ * The payload contains pre-formed `approveUrl` and `denyUrl` links (to a confirmation page)
  * plus a `callbackUrl` for programmatic POST-back.
  * Perfect for n8n → WhatsApp / email / SMS / any custom channel.
  * gateway.publicUrl must be set.
@@ -1418,7 +1418,7 @@ export const SceneConfigSchema = z.object({
   expectArtifact: z.boolean().optional(),
   /** Optional catalog-routing triggers (see WorkflowCatalogTriggersSchema). */
   triggers: WorkflowCatalogTriggersSchema,
-  /** Name of an entry in `approvalChannels` — used when this scene is triggered via webhook */
+  /** Name of an entry in `approvalChannels` — asked for this scene's approvals when it runs through REST, a webhook or a job, and for its humanInLoopSteps when a chat `/run` or `run_workflow` starts it */
   approvalChannel: z.string().optional(),
   /** Override the approval channel timeout for this scene (ms). Min 60 s, max 24 h.
    *  Falls back to the channel's own timeoutMs when not set. */

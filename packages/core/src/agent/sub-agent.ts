@@ -2708,7 +2708,7 @@ export interface SubAgentRunOptions {
   kbAccessSessionId?: string;
   allowedAgents?: string[];
   signal?: AbortSignal;
-  approvalCallback?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>;
+  approvalCallback?: ToolContext["approvalCallback"];
   onProgress?: (event: SubAgentProgressEvent) => void;
   /** The turn's progress reporter (agent/turn-progress.ts), for the run's own delegations: a coordinator's specialists tell their finishes. */
   reportProgress?: ToolContext["reportProgress"];

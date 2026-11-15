@@ -39,7 +39,8 @@ import { allowedRpcMethods, authorizeRpc } from "./rpc-policy.js";
 import { autoApproveMinRole, mayAutoApprove } from "./auto-approve-policy.js";
 import { TRUSTED_WORKFLOW_CHANNELS } from "../agent/turn-prepare.js";
 import type { EffortTier } from "../config/schema.js";
-import { listAllScenes } from "../credentials/scenes.js";
+import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
+import { routeSceneStepsToChannel } from "../approval/index.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit, logAudit } from "../audit/logger.js";
@@ -1009,10 +1010,10 @@ export class RpcConnection implements AccountConnection {
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
 
-        // --auto says yes to the turn's approvals (a tool with an approval policy still goes to its
-        // approvers), so it is only as safe as the role behind it
-        // (gateway.overrides.autoApproveMinRole). Below the floor the turn does not start: run
-        // without the flag it would stop at the approvals its sender asked to skip.
+        // --auto says yes to the turn's approvals (never to a scene's humanInLoopSteps step, and a
+        // tool with an approval policy still goes to its approvers), so it is only as safe as the
+        // role behind it (gateway.overrides.autoApproveMinRole). Below the floor the turn does not
+        // start: run without the flag it would stop at the approvals its sender asked to skip.
         if (overrideFlags.autoApprove && !mayAutoApprove(this.connRole)) {
           const floor = autoApproveMinRole();
           this.auditRbacDenied("chat.send --auto", { method: "chat.send", flag: "--auto", required: floor });
@@ -1094,6 +1095,7 @@ export class RpcConnection implements AccountConnection {
         // Handle /run <sceneName> [key=value ...] — substitute scene task with params
         let sceneAllowedAgents: string[] | undefined;
         let humanInLoopSteps: string[] | undefined;
+        let runScene: SceneSummary | undefined;
 
         const jobMatch = message.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s);
         if (jobMatch) {
@@ -1207,6 +1209,7 @@ export class RpcConnection implements AccountConnection {
           message = applyParamTemplate(scene.task, mergedParams);
           sceneAllowedAgents = scene.allowedAgents;
           humanInLoopSteps = scene.humanInLoopSteps;
+          runScene = scene;
 
           this.sendEvent({ type: "status", data: { status: "accepted", requestId, info: `Running scene: ${sceneName}` } });
         } else {
@@ -1660,7 +1663,17 @@ export class RpcConnection implements AccountConnection {
           // The approval card of the person who sent this message: the one callback an approval
           // policy accepts, and only for that person (`sender`) in a chat of their own with a role
           // it admits (approval/routed.ts).
-          approvalCallback: requesterApprovalCallback(async (toolName, args) => {
+          // A /run of a scene that names an approval channel sends the scene's humanInLoopSteps to
+          // that channel, as a REST run of the scene does (agent/scene-worker.ts), instead of to
+          // this socket; the socket is told where they went. The channel's request is one the
+          // dashboard lists, so any operator can answer it there, as for a REST run (who may answer
+          // is not narrowed here). The turn's other approvals come to this socket. Stopping the
+          // turn withdraws the channel's request. No durable-decision key: a chat turn does not
+          // resume after a restart, and the requestId a key would be built from is the client's.
+          // Only the card carries the requester mark, so inside such a /run a tool with an approval
+          // policy is routed to its approvers (approval/routed.ts), never to the channel and not to
+          // this card.
+          approvalCallback: routeSceneStepsToChannel(runScene, requesterApprovalCallback(async (toolName, args) => {
             const approvalId = randomUUID();
             const approvalTimeoutMs = getConfig().gateway.approvalTimeoutMs;
             const expiresAt = new Date(Date.now() + approvalTimeoutMs).toISOString();
@@ -1682,6 +1695,11 @@ export class RpcConnection implements AccountConnection {
               }, approvalTimeoutMs);
               this.pendingApprovals.set(approvalId, { requestId, resolve, reject, timeout });
             });
+          }), {
+            signal: ac.signal,
+            onChannelRequest: (channelName) => {
+              this.sendEvent({ type: "status", data: { requestId, status: "guardrail", message: `Approval requested via ${channelName}` } });
+            },
           }),
           // A call that waits for someone else's approval (a tool whose approval policy does not
           // admit this caller): said here with no answer button, and cleared when it is decided.

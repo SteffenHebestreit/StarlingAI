@@ -74,7 +74,7 @@ One clarification that removes most confusion (see [primitives taxonomy](#a-note
 | **Tool pipeline** | Batch several tool calls in one turn (fewer round-trips, no escalation) | `toolPipeline.*`: `enabled`(true), `maxSteps`(8); grant `run_tool_pipeline` per agent |
 | **Knowledge Bases** | Crawl a docs site into a queryable corpus (`kb:<id>`) | `retrieval.knowledgeBases.*` safety rails; `create_knowledge_base` tool; **Knowledge page**. **HARD-depends on `retrieval.documentRag.enabled` (engram)** — no-ops when off |
 | **Integration adapter families** | Light up whole tool families for external systems | `infrastructure.*`, `monitoring.*` (Prometheus/Grafana), `sourceForge.github.*`, `pentest.*`, `mail`, `dataFeeds.*`, `sites.<host>` (browser-login creds). All empty by default → tools inert until a profile is added |
-| **Approval channels** | Deliver human approval requests when no dashboard is open | `approvalChannels.<name>` — types: `slack`, `outbound_webhook`, `sync_webhook` (needs `gateway.publicUrl` for one-click links) |
+| **Approval channels** | Deliver human approval requests when no dashboard is open | `approvalChannels.<name>` — types: `slack`, `outbound_webhook`, `sync_webhook` (needs `gateway.publicUrl` for the approval links, which open a confirmation page) |
 
 ### Networked / interop capabilities (default-OFF)
 

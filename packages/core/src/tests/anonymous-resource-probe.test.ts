@@ -273,7 +273,7 @@ describe("the run routes decide on the caller without looking the name up", () =
 describe("the approval callbacks, for a caller with no valid credential", () => {
   const pending = () => mods.approvals.createPendingApproval({ toolName: "send_mail", args: {}, timeoutMs: 60_000, secret: APPROVAL_SECRET }).id;
 
-  it("an approval that is pending and one that is not get the same answer over the one-click link", async () => {
+  it("an approval that is pending and one that is not get the same answer over the approval link", async () => {
     const id = pending();
     try {
       for (const query of ["?approved=true", "?approved=true&secret=wrong", `?approved=true&secret=${"x".repeat(APPROVAL_SECRET.length)}`, `?approved=true&secret=${outsideAscii(APPROVAL_SECRET)}`]) {
@@ -310,10 +310,19 @@ describe("the approval callbacks, for a caller with no valid credential", () => 
   });
 
   it("the secret and a signed-in operator still resolve an approval, and a signed-in operator gets 404 for an unknown one", async () => {
+    // The link opens a confirmation page (it decides nothing); its form resolves the request.
     const viaLink = pending();
     const link = await call("GET", `/api/approval/${viaLink}?approved=true&secret=${APPROVAL_SECRET}`);
     expect(link.status).toBe(200);
-    expect(link.body).toContain("Approved");
+    expect(link.body).toContain('name="approved" value="true"');
+    expect(mods.approvals.getPendingApproval(viaLink)).toBeDefined();
+    const confirmed = await fetch(`${baseUrl}/api/approval/${viaLink}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ approved: "true", secret: APPROVAL_SECRET }).toString(),
+    });
+    expect(confirmed.status).toBe(200);
+    expect(await confirmed.text()).toContain("Approved");
     expect(mods.approvals.getPendingApproval(viaLink)).toBeUndefined();
 
     const viaBody = pending();
