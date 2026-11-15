@@ -259,6 +259,21 @@ Messages that trigger the scanner are rejected with a `blocked` status event. Th
 
 Runs before any tool is executed. Enforces the tier table above. Per-call approval requests are routed to the configured approval channel (Slack or webhook) and block execution until approved or denied. Denied tool calls are logged.
 
+`executeTool` (`tools/registry.ts`) checks a call in this order, and the first check that says no ends it:
+
+1. Tier 4 (Blocked) and unregistered names are refused.
+2. Every core extension's `authorizeToolCall` hook, in load order. A refusal is audited as `tool_call_refused` (tool, role, extension; never the arguments). A hook that throws refuses the call.
+3. A tool that claims `requiresSandbox` without a sandboxed execution path is refused.
+4. The tool's own `refuse` (argument checks).
+5. The effect retry guard (an identical retry of a mutation whose outcome is unknown).
+6. The approval gate: tier `requiresPerCallApproval`, a scene's `humanInLoopSteps`, or the effect policy under `guardrails.effectContracts: "enforce"`.
+
+Steps 2 and 4 come before the approval gate, so nobody is asked to approve a call that would then be refused.
+
+**The caller's role.** `ToolContext.userRole` is the authenticated role of the person a call answers to. A chat turn takes it from its session, and every run the turn starts inherits it through the request context (`RequestContext.callerRole`): sub-agents, workflow steps and their nested turns, ephemeral agents. A2A `tasks/send`, the legacy A2A route and MCP agent and scene calls set it from the signed-in account. A job a person queued, and each run of a schedule a person made with `schedule_task`, records the role it was queued with; the scene worker runs it with the owner's role as the account holds it when the run starts, and fails a job whose owner no longer signs in before it runs. Every claimed job runs in a request context of its own, so nothing reaches it from the work that queued it or woke the worker. Channel messages, configured cron and webhook-key runs, federated peers, and jobs and schedules queued before roles were recorded carry no role. With auth off a surface takes the role from the token: a WebSocket chat and `/job` carry the `role` claim as given (none without one), AG-UI turns and the REST scene and job run routes carry `operator` without one, and A2A and MCP runs carry none. Role-aware tools treat a missing role as before: knowledge-base management and schedules apply no role rule, and under multi-user auth the model switch refuses (with auth off it always allows).
+
+A standalone scene worker (`scene-worker-main.ts`) reads its config and the account registry once, when it starts, and loads no extensions. In a split deployment it checks a job's owner against the accounts as they were then: a demotion or a deletion reaches queued jobs once the worker restarts, and a job queued by an account of an extension's auth provider fails there.
+
 ### Layer 3 — Tool Output Scanner
 
 Runs after a tool returns its result, before the result is passed back to the LLM. Scans for:

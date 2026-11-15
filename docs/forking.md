@@ -170,11 +170,17 @@ export default defineCoreExtension({
     description: "Look up ICD-10-GM diagnosis codes",
     tier: ToolTier.ZERO_READ_ONLY,        // trusted first-party code declares tiers
     parameters: { /* JSON schema */ },
+    // Optional: checked before any approval card, like a built-in tool's refuse.
+    refuse: (args) => (isIcdCode(args.code) ? undefined : "Give an ICD-10-GM code such as J06.9."),
     async execute(args, ctx) { /* ... */ },
   }],
   auditEvents: ["patient_data_accessed"],  // logged as "mfa.patient_data_accessed"
   roles: [{ name: "doctor", description: "Arzt — sign-off authority", rank: 80 }],
   guardrails: { checkOutput: (text) => ({ allowed: true, redacted: pseudonymize(text) }) },
+  // Veto ANY tool call (core or extension) for the role it answers to, before
+  // the tool's own refuse and before any approval card. Return a reason to refuse.
+  authorizeToolCall: ({ name, ctx }) =>
+    name === "create_knowledge_base" && ctx.userRole === "doctor" ? "Ask the practice admin to add a source." : undefined,
   registerRoutes(app, ctx) { app.get("/api/mfa/knowledge/status", handler); },
   // Declarative RBAC: role lists per route pattern, enforced by the gateway
   // gate before handlers run — also works for CORE routes, so forks tighten
@@ -200,6 +206,33 @@ Notes:
   your whole extension with `tools.disabledGroups: ["mfa"]`.
 - Extension config lives at `extensions.<name>` in the root config and is
   validated by your `configSchema` at boot.
+- `ctx.userRole` is the role of the person the call answers to. It is the same
+  in the orchestrator's tool calls and in every run they start (sub-agents,
+  workflow steps). A2A and MCP agent runs carry the signed-in caller's role.
+  A job a person queued, and each run of a schedule a person made with
+  `schedule_task`, runs with its owner's role as the account holds it when the
+  run starts, and fails if the account no longer signs in. It is unset where
+  nobody signed in (a channel message, a configured cron or webhook-key run, a
+  federated peer). With auth off it is what the surface read from the token: a
+  WebSocket chat and `/job` carry the `role` claim as given (none without one),
+  AG-UI turns and the REST scene and job run routes carry `operator` without
+  one, and A2A and MCP runs carry none. So an unset role does not always mean
+  that nobody signed in (a WebSocket chat while auth is off, a job or schedule
+  queued before roles were recorded): decide in your hook what it means for
+  your tools.
+- `authorizeToolCall` runs for every call that reaches the tool registry, in
+  extension load order; the first refusal wins, and a hook that throws refuses
+  the call. A refusal is audited as `tool_call_refused` with the tool, the role
+  and your extension's name, never the arguments. A check inside `execute()`
+  runs only after the person approved the call; put role checks in the hook or
+  in `refuse`. The hook runs in the processes that load extensions: the gateway
+  and its embedded scene worker. A standalone scene worker
+  (`scene-worker-main.ts`) loads none, so neither your tools nor your hook
+  exist there. A hook that is not a function refuses every call, and a tool
+  whose `refuse` is not a function is not registered. Both are logged at boot,
+  and the extension still loads, with its roles.
+- A tool's `effect` block (ADR-005) is honoured like a built-in's, so an
+  irreversible external mutation falls under `guardrails.effectContracts`.
 - A failing extension is logged + audited and skipped; it cannot take the
   gateway down.
 - Every WebSocket RPC method has a default minimum role (reading: viewer;

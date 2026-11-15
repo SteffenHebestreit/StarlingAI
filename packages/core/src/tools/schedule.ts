@@ -198,11 +198,17 @@ registerTool({
     const { assumedUtc, ...stored } = request;
 
     const id = `sched_${Date.now().toString(36)}${randomBytes(2).toString("hex")}`;
+    const owner = scheduleOwner(ctx);
+    // The role this call answers to: each run is checked against the role the owner holds when it
+    // starts, as a job a person queued is. Without it a viewer's schedule ran with no role, which
+    // the role-aware tools read as no gating.
+    const role = ctx.userRole ?? currentRequestContext()?.callerRole;
     addAndActivateScheduledTask({
       id,
       ...stored,
       // The owner whole: its account id (or principal kind) with its name, so each run is theirs.
-      ...scheduleOwner(ctx),
+      ...owner,
+      ...(owner.userId && role ? { requestedByRole: role } : {}),
       // Where its runs report to. A sub-agent's or workflow's session is not a conversation.
       ...(ctx.sessionId && !ctx.sessionId.includes(":") ? { sessionId: ctx.sessionId } : {}),
       createdAt: new Date().toISOString(),

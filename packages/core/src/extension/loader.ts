@@ -13,7 +13,9 @@
  * as operator. It is logged and fails closed instead:
  *   - a malformed route policy refuses every caller on its path;
  *   - a malformed RPC policy refuses its method, or every method, to every
- *     caller.
+ *     caller;
+ *   - a tool whose `refuse` is not a function is not registered;
+ *   - an `authorizeToolCall` that is not a function refuses every tool call.
  *
  * Discovery root resolution:
  *   1. `SAI_EXTENSIONS_DIR` env var (tests / unusual layouts)
@@ -29,7 +31,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
-import { registerTool, type ToolHandler } from "../tools/registry.js";
+import { registerTool, registerToolCallAuthorizer, type ToolHandler } from "../tools/registry.js";
 import { ToolTier, registerExtensionToolTier } from "../guardrails/tool-tiers.js";
 import { registerExtensionGroup } from "../tools/groups.js";
 import { registerManifestRoutePolicies, routePolicyUnknownRoles } from "../gateway/route-policies.js";
@@ -44,6 +46,7 @@ import {
   type CoreExtension,
   type CoreExtensionContext,
   type ExtensionRouteApp,
+  type ExtensionToolDef,
 } from "./index.js";
 
 const log = childLogger("extension-loader");
@@ -135,6 +138,16 @@ function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExt
   }
 }
 
+/**
+ * What keeps one of a manifest's tools from being registered, or null. A mistake in a part of the
+ * tool that decides whether a call may run fails closed (see the module comment): the tool is left
+ * out, so nothing calls it until the mistake is fixed, and the rest of the extension loads.
+ */
+function toolProblem(tool: ExtensionToolDef): string | null {
+  if (tool.refuse !== undefined && typeof tool.refuse !== "function") return "refuse is not a function";
+  return null;
+}
+
 function registerExtension(ext: CoreExtension, source: string): void {
   // Group first so config-driven disabling recognizes the extension's group
   // name without warnings.
@@ -157,6 +170,11 @@ function registerExtension(ext: CoreExtension, source: string): void {
 
   const toolNames: string[] = [];
   for (const tool of ext.tools ?? []) {
+    const problem = toolProblem(tool);
+    if (problem) {
+      log.error({ extension: ext.name, tool: tool.name, problem }, "extension tool is malformed; it is not registered until it is fixed");
+      continue;
+    }
     // Tier BEFORE registerTool — unknown names are BLOCKED and would throw.
     registerExtensionToolTier(
       tool.name,
@@ -173,6 +191,10 @@ function registerExtension(ext: CoreExtension, source: string): void {
       description: tool.description,
       parameters: tool.parameters,
       execute: tool.execute,
+      // Checked before the approval prompt, as for a built-in; dropped here, a tool could refuse
+      // only from execute, after the person had approved the call.
+      ...(tool.refuse ? { refuse: tool.refuse } : {}),
+      ...(tool.effect ? { effect: tool.effect } : {}),
       group: tool.group ?? ext.name,
       ...(tool.embeddingDescription ? { embeddingDescription: tool.embeddingDescription } : {}),
       ...(tool.costHint ? { costHint: tool.costHint } : {}),
@@ -181,6 +203,16 @@ function registerExtension(ext: CoreExtension, source: string): void {
     };
     registerTool(handler);
     toolNames.push(tool.name);
+  }
+
+  // After the tools, the last step that can throw: an extension that fails to load is skipped, and
+  // its veto must not stay behind to refuse every call. One that is not a function cannot say which
+  // calls it lets through, so it refuses every call instead of failing the load (module comment).
+  if (typeof ext.authorizeToolCall === "function") {
+    registerToolCallAuthorizer(ext.name, ext.authorizeToolCall);
+  } else if (ext.authorizeToolCall !== undefined) {
+    log.error({ extension: ext.name }, "extension authorizeToolCall is not a function; it refuses every tool call until it is fixed");
+    registerToolCallAuthorizer(ext.name, ({ name }) => `Tool '${name}' was refused: the ${ext.name} extension's authorizeToolCall is not a function.`);
   }
 
   const ctx: ActiveExtension["ctx"] = {

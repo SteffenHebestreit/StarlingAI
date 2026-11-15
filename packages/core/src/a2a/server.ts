@@ -323,11 +323,14 @@ async function handleTasksSend(params: A2ATasksSendParams, caller: string, user?
       // denied user-restricted resources while still reaching shared ones.
       userId: caller === "anonymous" ? undefined : caller,
       ...(runIdentity ? { identity: runIdentity } : {}),
+      // The signed-in account's role, for the run's role-aware tools, as its chat turns have it.
+      ...(user ? { userRole: user.role } : {}),
     };
     // The account on the request context too, which the run's own memory reads and per-user
-    // stores take their account from; with no account there, as before.
+    // stores take their account from, and its role, which the run's delegations inherit; with no
+    // account there, as before.
     const run = user
-      ? await runWithRequestContext({ identity: runIdentity }, () => runSubAgentWithStats(runOptions))
+      ? await runWithRequestContext({ identity: runIdentity, callerRole: user.role }, () => runSubAgentWithStats(runOptions))
       : await runSubAgentWithStats(runOptions);
 
     const finalTask: A2ATask = {

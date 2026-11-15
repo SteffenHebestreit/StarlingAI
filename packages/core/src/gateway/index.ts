@@ -3421,6 +3421,9 @@ export function createGateway() {
       sceneName,
       definitionType: "scene",
       ...runIdentity,
+      // A signed-in caller's role, which the worker resolves again when the run starts; a
+      // webhook-key run has none and runs with no role, as before.
+      ...(triggeredBy ? { requestedByRole: triggeredBy.role } : {}),
       task,
       allowedAgents: scene.allowedAgents,
       humanInLoopSteps: scene.humanInLoopSteps,
@@ -3516,6 +3519,8 @@ export function createGateway() {
       sceneName: jobName,
       definitionType: "job",
       ...runIdentity,
+      // As for a scene run: the signed-in caller's role, resolved again when the run starts.
+      ...(triggeredBy ? { requestedByRole: triggeredBy.role } : {}),
       steps,
       turnTimeoutMs,
     });
@@ -4071,11 +4076,12 @@ export function createGateway() {
               ? async () => true
               : undefined,
             // The caller's account on the run's tools (a 'user' memory stays theirs) and on the
-            // request context the run's own memory reads take their account from.
-            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser) } : {}),
+            // request context the run's own memory reads take their account from; its role beside
+            // it, for the run's role-aware tools and every delegation the run makes.
+            ...(a2aUser ? { userId: a2aUser.username, identity: callerIdentity(a2aUser), userRole: a2aUser.role } : {}),
           };
           const result = a2aUser
-            ? await runWithRequestContext({ identity: callerIdentity(a2aUser) }, () => runSubAgent(runOptions))
+            ? await runWithRequestContext({ identity: callerIdentity(a2aUser), callerRole: a2aUser.role }, () => runSubAgent(runOptions))
             : await runSubAgent(runOptions);
 
           res.writeHead(200, { "Content-Type": "application/json" });

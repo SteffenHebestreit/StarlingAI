@@ -93,9 +93,10 @@ function callWorkspaceRoot(ctx: ExposeContext): string {
 }
 
 /** Run `fn` with the caller's account on the request context, which a run's own memory reads and
- *  per-user stores take their account from; with none there when the call has no account. */
+ *  per-user stores take their account from, and its live role, which every delegation the run
+ *  makes inherits (RequestContext.callerRole); with neither there when the call has no account. */
 function asCaller<T>(ctx: ExposeContext, fn: () => Promise<T>): Promise<T> {
-  return ctx.userId ? runWithRequestContext({ identity: callerIdentityOf(ctx) }, fn) : fn();
+  return ctx.userId ? runWithRequestContext({ identity: callerIdentityOf(ctx), callerRole: ctx.role }, fn) : fn();
 }
 
 /** Operators may run mutating tools / sub-agents / scenes; viewers are read-only. Exported for testing. */
@@ -377,8 +378,9 @@ async function runAgentCall(
     context,
     parentSessionId,
     workspacePath: callWorkspaceRoot(ctx),
-    // The account on the run's tools too, so a 'user' memory and per-user resources are the caller's.
-    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx) } : {}),
+    // The account on the run's tools too, so a 'user' memory and per-user resources are the caller's,
+    // and its live role, as the native tool calls above have it.
+    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx), userRole: ctx.role } : {}),
   }));
 
   return {
@@ -450,7 +452,7 @@ async function runSceneCall(
     workspacePath: callWorkspaceRoot(ctx),
     allowedAgents: scene.allowedAgents,
     humanInLoopSteps: scene.humanInLoopSteps,
-    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx) } : {}),
+    ...(ctx.userId ? { userId: ctx.userId, identity: callerIdentityOf(ctx), userRole: ctx.role } : {}),
   }));
 
   return {

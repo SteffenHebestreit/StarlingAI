@@ -89,7 +89,7 @@ Every public schema field, where it is declared, and how many production files r
 | `clientId` | packages/core/src/config/schema.ts:484 | 6 |
 | `clientSecret` | packages/core/src/config/schema.ts:486 | 4 |
 | `cloudFallback` | packages/core/src/config/schema.ts:119 | 4 |
-| `command` | packages/core/src/config/schema.ts:777 | 69 |
+| `command` | packages/core/src/config/schema.ts:777 | 70 |
 | `completes` | packages/core/src/config/schema.ts:993 | 17 |
 | `completionPer1m` | packages/core/src/config/schema.ts:611 | 1 |
 | `composer` | packages/core/src/config/schema.ts:1562 | 21 |
@@ -434,7 +434,7 @@ Every public schema field, where it is declared, and how many production files r
 | `retrievalTopK` | packages/core/src/config/schemas/retrieval.ts:103 | 3 |
 | `reuseSessionEvidenceOnRefinement` | packages/core/src/config/schemas/orchestration.ts:624 | 1 |
 | `riskGatedQA` | packages/core/src/config/schemas/effort.ts:47 | 7 |
-| `role` | packages/core/src/config/schema.ts:1023 | 196 |
+| `role` | packages/core/src/config/schema.ts:1023 | 202 |
 | `roles` | packages/core/src/config/schema.ts:1560 | 23 |
 | `rolesClaim` | packages/core/src/config/schema.ts:494 | 1 |
 | `routing` | packages/core/src/config/schema.ts:277 | 126 |
@@ -502,7 +502,7 @@ Every public schema field, where it is declared, and how many production files r
 | `submitSelector` | packages/core/src/config/schema.ts:894 | 5 |
 | `supersedeStaleFacts` | packages/core/src/config/schema.ts:1726 | 1 |
 | `suppressUnvalidatedDraftStreaming` | packages/core/src/config/schemas/orchestration.ts:212 | 1 |
-| `surface` | packages/core/src/config/schema.ts:997 | 99 |
+| `surface` | packages/core/src/config/schema.ts:997 | 100 |
 | `surfaceRoutingNearMisses` | packages/core/src/config/schemas/orchestration.ts:876 | 2 |
 | `synthesis` | packages/core/src/config/schema.ts:278 | 64 |
 | `systemOne` | packages/core/src/config/schemas/decisions.ts:51 | 3 |
@@ -530,7 +530,7 @@ Every public schema field, where it is declared, and how many production files r
 | `toolName` | packages/core/src/config/schemas/multimodal.ts:17 | 72 |
 | `toolPolicy` | packages/core/src/config/schema.ts:1571 | 1 |
 | `toolRerankMinTools` | packages/core/src/config/schemas/orchestration.ts:695 | 2 |
-| `tools` | packages/core/src/config/schema.ts:1026 | 278 |
+| `tools` | packages/core/src/config/schema.ts:1026 | 279 |
 | `topK` | packages/core/src/config/schema.ts:175 | 7 |
 | `topLogprobs` | packages/core/src/config/schemas/decisions.ts:164 | 7 |
 | `topP` | packages/core/src/config/schema.ts:174 | 4 |
@@ -561,7 +561,7 @@ Every public schema field, where it is declared, and how many production files r
 | `verifyArtifactsMaxRepairAttempts` | packages/core/src/config/schemas/orchestration.ts:407 | 1 |
 | `verifyArtifactsRepair` | packages/core/src/config/schemas/orchestration.ts:404 | 1 |
 | `verifyToken` | packages/core/src/config/schemas/channels.ts:47 | 23 |
-| `viewer` | packages/core/src/config/schema.ts:471 | 40 |
+| `viewer` | packages/core/src/config/schema.ts:471 | 42 |
 | `virtualization` | packages/core/src/config/schema.ts:1192 | 1 |
 | `visionApiKey` | packages/core/src/config/schemas/multimodal.ts:25 | 7 |
 | `visionBaseUrl` | packages/core/src/config/schemas/multimodal.ts:23 | 8 |

@@ -2718,6 +2718,8 @@ async function runDelegationWithFallback(request: DelegationRequest, ctx: ToolCo
         workspacePath: ctx.workspacePath,
         userId: ctx.userId,
         identity: ctx.identity,
+        // The caller's role travels with its identity; unset, the run takes the context's.
+        ...(ctx.userRole ? { userRole: ctx.userRole } : {}),
         allowedAgents: ctx.allowedAgents,
         signal: ctx.signal,
         approvalCallback: ctx.approvalCallback,

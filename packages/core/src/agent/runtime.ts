@@ -1209,6 +1209,10 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
     const userMessageLanguage = currentRequestContext()?.userMessageLanguage
       ?? detectTurnUserLanguage(opts.userMessage, opts.session.getHistory());
+    // The role of the person the turn answers to: the session's own, else the enclosing work's (a
+    // workflow step's nested turn runs on a session of its own, which no sign-in created). Every
+    // delegation the turn makes inherits it from the context (RequestContext.callerRole).
+    const callerRole = opts.session.userRole ?? currentRequestContext()?.callerRole;
     intentShadow = intentShadowTurnStarted({
       sessionId: opts.session.id,
       turnId,
@@ -1239,6 +1243,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         agentName: "main",
         callSite: "main_turn",
         ...(userInput ? { userInput } : {}),
+        ...(callerRole ? { callerRole } : {}),
         turnId,
         // Not inherited: a nested turn writes to its own session, which no chat.send started.
         ...(opts.requestId ? { chatRequestId: opts.requestId } : {}),
@@ -2365,7 +2370,9 @@ async function _runTurn(
     workspacePath: session.getWorkspacePath(),
     userId: session.userId,
     identity: session.identity(),
-    userRole: session.userRole,
+    // The session's role, else the one the turn inherited (runTurn): a workflow step's nested turn
+    // runs on a session no sign-in created, and its tools answer to the person who started it.
+    userRole: session.userRole ?? currentRequestContext()?.callerRole,
     approvalCallback: resolvedApprovalCallback,
     // An unattended run (auto mode, no input channel) answers ask_user itself — "no user is here,
     // continue on your stated assumption". Before, the tool refused and the model looped on it.

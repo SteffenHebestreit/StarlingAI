@@ -1076,13 +1076,16 @@ export class RpcConnection implements AccountConnection {
           try {
             const params = parseKeyValuePairs(jobMatch[2] ?? "");
             const steps = resolveJobSteps(job, params);
+            const connIdentity = this.connIdentity();
             const queued = await createJob({
               sceneName: jobName,
               definitionType: "job",
               // As the signed-in user, like the REST route: their run, listed, read and cancelled as
               // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
               // connection with no user runs it as the job itself.
-              ...(this.connIdentity() ?? principalIdentity(`job:${jobName}`, "synthetic")),
+              ...(connIdentity ?? principalIdentity(`job:${jobName}`, "synthetic")),
+              // With their role, which the worker resolves again when the run starts.
+              ...(connIdentity && this.connRole ? { requestedByRole: this.connRole } : {}),
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });

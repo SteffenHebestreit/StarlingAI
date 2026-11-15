@@ -2697,6 +2697,10 @@ export interface SubAgentRunOptions {
    *  from one identity. The run's tools and its records derive storage from it; without it the
    *  name is paired with the ambient identity (runtime/user-scope.ts pairedIdentity). */
   identity?: Identity;
+  /** The authenticated role of the person the run answers to (ToolContext.userRole). Unset, the
+   *  run takes the one its caller's work carries (RequestContext.callerRole), so a path that
+   *  threads no role still hands it down; a surface with nobody signed in sets neither. */
+  userRole?: string;
   /** Owning conversation session for KB scope checks (ephemeral KB workers only) —
    * propagated onto the sub-agent's ToolContext so its KB access resolves against
    * the originating session rather than its rewritten per-run sub-session id. */
@@ -3925,6 +3929,10 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // place scope and root are chosen together, which is why the exemption lives here.
     const isFullScopeAgent = agentCfg.workspaceAccess === "full";
     const effectiveWorkspacePath = isFullScopeAgent ? getConfig().workspacePath : opts.workspacePath;
+    // The role of the person this run answers to, for role-aware tools (knowledge-base management,
+    // schedules, the model switch). Only the orchestrator's context had one, so a delegated call
+    // read "no role" and a gate that reads that as "no gating" let a viewer's delegation through.
+    const userRole = opts.userRole ?? currentRequestContext()?.callerRole;
 
     const toolContext: ToolContext = {
       sessionId: subSessionId,
@@ -3937,6 +3945,7 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
       workspaceScope: isFullScopeAgent ? "full" : "generated",
       userId: opts.userId,
       ...(opts.identity ? { identity: opts.identity } : {}),
+      ...(userRole ? { userRole } : {}),
       ...(opts.kbAccessSessionId ? { kbAccessSessionId: opts.kbAccessSessionId } : {}),
       currentAgentName: opts.agentName,
       allowedAgents: opts.allowedAgents,

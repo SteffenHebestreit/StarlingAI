@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SwarmState } from "../tools/registry.js";
 import type { InterventionNotice } from "./interventions.js";
-import { createSession, type AgentSession } from "./session.js";
+import { createSession, getSession, type AgentSession } from "./session.js";
 import { archiveSession } from "./session.js";
 import { runTurn, type TurnOutput, type TurnPerformanceMetrics } from "./runtime.js";
 import {
@@ -31,6 +31,8 @@ import { workflowStepPipeline } from "./workflow-step-pipeline.js";
 import { getScene } from "../credentials/scenes.js";
 import { isLegacyIdentity, multiUserAuthActive, principalIdentity } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
+import { runWithRequestContext } from "../runtime/request-context.js";
+import { revalidateAuthenticatedUser } from "../gateway/auth.js";
 
 const log = childLogger("agent:scene-worker");
 const POLL_INTERVAL_MS = 1_000;
@@ -127,7 +129,11 @@ async function pumpQueue(): Promise<boolean> {
 
 function startJob(job: ClaimedSceneJob): void {
   const controller = new AbortController();
-  const completion = processJob(job, controller).finally(() => {
+  // Each job runs in an empty request context. A createJob wakes the worker inside its caller's
+  // async context (onJobQueued), and the pump claims the oldest job, whoever queued it: without
+  // this, that context (a turn's role, its user-input channel, its turn id) reached the run of
+  // whichever job was claimed. Whom a job runs as is its session's to say.
+  const completion = runWithRequestContext({}, () => processJob(job, controller)).finally(() => {
     activeJobs.delete(job.id);
   });
   activeJobs.set(job.id, { controller, completion });
@@ -155,6 +161,29 @@ function legacyJobRefusal(owner: Identity | undefined): string | undefined {
 
 /** The error a job queued before account ids ends with under multi-user auth. */
 export const LEGACY_JOB_REFUSAL = "This job was queued before account ids: it names its owner by name alone, and no run derives storage from a name. Queue it again.";
+
+/** The error a job a person queued ends with when their account no longer signs in. */
+export const OWNER_SIGNED_OUT_JOB_REFUSAL = "The account that queued this job no longer signs in, so the job does not run. Queue it again from an account that does.";
+
+/**
+ * The role a claimed job runs with. A job a person queued (its payload carries the role they queued
+ * it with) runs with its owner's role as the auth layer holds it now, not as it was then: a job
+ * waits in the queue, and an account demoted or deleted meanwhile must not run with the role it
+ * lost. Null when the owner no longer signs in; undefined for a job nobody signed in to queue (a
+ * configured cron, webhook-key or channel run), which runs with no role, as before.
+ */
+function liveJobOwnerRole(job: ClaimedSceneJob, owner: Identity | undefined): string | null | undefined {
+  const requestedByRole = job.payload.requestedByRole;
+  if (!requestedByRole) return undefined;
+  if (owner?.userId === undefined) return null;
+  const live = revalidateAuthenticatedUser({
+    username: owner.userId,
+    role: requestedByRole,
+    ...(owner.account ? { account: owner.account } : {}),
+    ...(owner.principal ? { principal: owner.principal } : {}),
+  });
+  return live ? live.role : null;
+}
 
 /** Ends a claimed job that never started: failed, audited and logged, so it is not left running
  *  for the stale-job recovery to queue again. */
@@ -191,12 +220,25 @@ async function processJob(job: ClaimedSceneJob, controller: AbortController): Pr
     await failUnstartedJob(job, refusal);
     return;
   }
+  // The role the run's tools see (ToolContext.userRole), through the session as a chat turn's do.
+  const userRole = liveJobOwnerRole(job, owner);
+  if (userRole === null) {
+    await failUnstartedJob(job, OWNER_SIGNED_OUT_JOB_REFUSAL);
+    return;
+  }
+  // A job resumed after a restart (B31) finds the session its first attempt opened, restored from
+  // the session store with the role that attempt ran with, and createSession hands an open session
+  // back unchanged. One that holds another role is closed, so the run opens a new one with the role
+  // resolved now; a resumed workflow continues from the job's checkpoint, not from the session.
+  const previous = getSession(job.sessionId);
+  if (previous && previous.userRole !== userRole) archiveSession(job.sessionId);
   let session: AgentSession;
   try {
     session = createSession({
       sessionId: job.sessionId,
       channel: "scene",
       ...(owner ?? principalIdentity(`scene:${job.sceneName}`, "synthetic")),
+      ...(userRole ? { userRole } : {}),
     });
   } catch (err) {
     await failUnstartedJob(job, `The job's session could not be opened: ${err instanceof Error ? err.message : String(err)}`, err);

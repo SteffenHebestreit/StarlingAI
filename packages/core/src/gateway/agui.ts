@@ -346,7 +346,9 @@ export async function handleAguiStream(
     let textStarted = false;
     let streamedMeaningfulText = false;
 
-    const turnResult = await runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: runId }, () => runTurn({
+    // The caller's role rides the context too: runTurn takes the session's own first, and this one
+    // for a session that holds none (one this stream resumed rather than created).
+    const turnResult = await runWithRequestContext({ ...(currentRequestContext() ?? {}), turnId: runId, ...(caller?.role ? { callerRole: caller.role } : {}) }, () => runTurn({
       session,
       userMessage: message,
       userWords: message,

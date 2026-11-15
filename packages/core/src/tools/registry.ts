@@ -861,6 +861,56 @@ export function _resetUnknownEffectsForTests(): void {
   _unknownEffects.clear();
 }
 
+// ── Tool-call authorizers (CoreExtension.authorizeToolCall) ──────────────────
+/** A call an authorizer is asked about. `ctx.userRole` is the role the call answers to, resolved
+ *  as the call's own role or else the one its work carries (RequestContext.callerRole). */
+export interface ToolCallAuthorizationRequest {
+  name: string;
+  args: Record<string, unknown>;
+  ctx: ToolContext;
+}
+
+/** The reason a call is refused, or nothing to let it through. */
+export type ToolCallAuthorizer = (call: ToolCallAuthorizationRequest) => string | undefined | Promise<string | undefined>;
+
+const _toolCallAuthorizers: Array<{ source: string; authorize: ToolCallAuthorizer }> = [];
+
+/**
+ * Register a tool-call authorizer (the extension loader does, for each extension's
+ * authorizeToolCall, in load order). executeTool asks every one before the tool's own refusal and
+ * before any approval prompt, so a call that will be refused never shows an approval card.
+ */
+export function registerToolCallAuthorizer(source: string, authorize: ToolCallAuthorizer): void {
+  _toolCallAuthorizers.push({ source, authorize });
+}
+
+/** Test hook: forget every registered tool-call authorizer. */
+export function _resetToolCallAuthorizersForTests(): void {
+  _toolCallAuthorizers.length = 0;
+}
+
+/**
+ * The first refusal any authorizer gives, with the authorizer's source; undefined when all let the
+ * call through. An authorizer that throws refuses the call (fails closed): it exists to say no.
+ */
+async function toolCallAuthorizerRefusal(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+): Promise<{ source: string; error: string } | undefined> {
+  for (const { source, authorize } of _toolCallAuthorizers) {
+    let refusal: string | undefined;
+    try {
+      refusal = await authorize({ name, args, ctx });
+    } catch (err) {
+      registryLog.error({ err, tool: name, source }, "A tool-call authorizer threw; the call is refused");
+      refusal = `Tool '${name}' was refused: its authorization check failed.`;
+    }
+    if (typeof refusal === "string" && refusal.trim()) return { source, error: refusal };
+  }
+  return undefined;
+}
+
 /**
  * What the model reads after the user said no, behind the "denied by user" that interventions.ts,
  * sub-agent.ts and workflow-catalog.ts recognise a decline by. Without it, of 32 lab runs with a
@@ -891,6 +941,25 @@ export async function executeTool(
       : [];
     const hint = similar.length > 0 ? ` Similar available tools: ${similar.join(", ")}.` : "";
     return { success: false, output: "", error: `Tool '${name}' is not registered.${hint}` };
+  }
+
+  // The role this call answers to: its own context's, else the one its work carries (a context
+  // built without one, inside a turn or a run that has one).
+  const userRole = context.userRole ?? currentRequestContext()?.callerRole;
+
+  // Extension authorizers (CoreExtension.authorizeToolCall), before the tool's own refusal and the
+  // approval gate: a call that will be refused must not first ask the person to approve it.
+  if (_toolCallAuthorizers.length > 0) {
+    const refused = await toolCallAuthorizerRefusal(name, args, userRole === context.userRole ? context : { ...context, userRole });
+    if (refused) {
+      // The arguments stay out of the row: they are what the caller may not act on.
+      logAudit("tool_call_refused", {
+        tool: name,
+        ...(userRole ? { role: userRole } : {}),
+        source: refused.source,
+      }, { sessionId: context.sessionId, severity: "warn" });
+      return { success: false, output: "", error: refused.error };
+    }
   }
 
   // requiresSandbox is a REAL, fail-closed contract — not documentation.
@@ -1042,6 +1111,8 @@ export async function executeTool(
               // else the ToolContext's own. Never its name with the ambient account: a
               // `workflow:<x>` run inside alice's turn would read and write alice's storage.
               identity: toolCallIdentity(context),
+              // The role this call answers to, so a run the tool starts answers to it too.
+              ...(userRole ? { callerRole: userRole } : {}),
               workspaceScope: context.workspaceScope,
               // Always this call's own id (or none): an inherited one would pin a question raised
               // by a nested run's call to the call that started that run.

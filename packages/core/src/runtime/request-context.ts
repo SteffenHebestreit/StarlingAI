@@ -56,6 +56,17 @@ export interface RequestContext {
    */
   userInput?: UserInputChannel;
   /**
+   * The authenticated role of the person the work answers to (the JWT `role` claim, as the gateway
+   * resolved it). Like `userInput`, it rides the context so every in-process delegation path
+   * inherits it without per-call plumbing: a sub-agent's, a workflow step's and a nested turn's
+   * tools see the same ToolContext.userRole as the turn that started them. Set by runTurn from the
+   * session's role (a queued job's session holds its owner's live role), by AG-UI around its turn
+   * and by the surfaces that run agents without a turn (A2A, MCP). Unset where nobody signed in
+   * (a channel, a cron or webhook-key run, federation): the role-aware tools treat that as they
+   * did before.
+   */
+  callerRole?: string;
+  /**
    * The top-level turn this work belongs to, set by runTurn for every turn and inherited by
    * everything it runs; a gateway sets it around runTurn so its own clock and the runtime's name the
    * same turn. Human waits carry it, so a wait a stopped turn left open holds no clock of the next

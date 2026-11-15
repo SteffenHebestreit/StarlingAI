@@ -24,6 +24,8 @@ export type CoreAuditEventType =
   | "tool_call_requested"
   | "tool_call_approved"
   | "tool_call_blocked"
+  /** An extension's authorizeToolCall refused a call, before any approval prompt (tools/registry.ts). */
+  | "tool_call_refused"
   | "tool_call_completed"
   | "tool_call_failed"
   | "tool_call_recovered"

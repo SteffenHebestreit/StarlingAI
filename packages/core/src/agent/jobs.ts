@@ -87,6 +87,13 @@ export interface SceneJobPayload {
   turnTimeoutMs: number;
   /** The principal kind of the run's owner (SceneJob.principal): the table has no column for it. */
   principal?: PrincipalKind;
+  /**
+   * The role the signed-in person who queued the run held then (CreateSceneJobInput.requestedByRole).
+   * The worker does not run on it: it resolves the owner's role as the auth layer holds it when the
+   * run starts. Its presence marks a run a person queued (or a run of a schedule a person made); a
+   * configured cron, webhook-key or channel run has none and runs with no role, as before.
+   */
+  requestedByRole?: string;
   /** The scheduled task this run is one run of (runtime/scheduled-tasks.ts): the worker hands the
    *  run's end to runtime/follow-up.ts, which counts it and posts what it found. */
   scheduleId?: string;
@@ -120,6 +127,10 @@ export interface CreateSceneJobInput {
   turnTimeoutMs: number;
   /** Set by the scheduled-task runner: the schedule this run belongs to. */
   scheduleId?: string;
+  /** Set by a surface a person queued the run from (the /job command, the scene and job run
+   *  routes) and by the scheduled-task runner for a schedule a person made: the role they signed
+   *  in with. See SceneJobPayload.requestedByRole. */
+  requestedByRole?: string;
 }
 
 export interface ClaimedSceneJob extends SceneJob {
@@ -420,6 +431,7 @@ class InMemorySceneJobStore implements SceneJobStore {
         turnTimeoutMs: input.turnTimeoutMs,
         ...jobPrincipalStamp(input),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+        ...(input.requestedByRole ? { requestedByRole: input.requestedByRole } : {}),
       },
     };
     this.jobs.set(job.id, job);
@@ -671,6 +683,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       turnTimeoutMs: input.turnTimeoutMs,
       ...jobPrincipalStamp(input),
       ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+      ...(input.requestedByRole ? { requestedByRole: input.requestedByRole } : {}),
     };
 
     await this.pool.query(
@@ -1062,6 +1075,7 @@ function normalizePayload(value: unknown): SceneJobPayload {
     turnTimeoutMs: typeof payload.turnTimeoutMs === "number" && Number.isFinite(payload.turnTimeoutMs) ? payload.turnTimeoutMs : 900_000,
     ...(isPrincipalKind(payload.principal) ? { principal: payload.principal } : {}),
     ...(typeof payload.scheduleId === "string" && payload.scheduleId ? { scheduleId: payload.scheduleId } : {}),
+    ...(typeof payload.requestedByRole === "string" && payload.requestedByRole ? { requestedByRole: payload.requestedByRole } : {}),
     // B31 resumable-workflow checkpoint: MUST round-trip through the Postgres jsonb read
     // path or resume silently never happens (the field is written by saveWorkflowCheckpoint
     // but would otherwise be stripped here). Keep only entries with the TurnOutput shape

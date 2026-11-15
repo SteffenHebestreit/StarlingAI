@@ -25,7 +25,7 @@
  * default to the group named after the extension).
  */
 
-import type { ToolContext, ToolResult } from "../tools/registry.js";
+import type { ToolCallAuthorizer, ToolContext, ToolEffect, ToolResult } from "../tools/registry.js";
 import { ToolTier } from "../guardrails/tool-tiers.js";
 import type { GuardrailResult } from "../guardrails/input.js";
 import type { Logger } from "pino";
@@ -39,7 +39,7 @@ export type { RoutePolicyDef, RpcPolicyDef };
 
 // Re-exports so an extension only needs one import for the common cases.
 export { ToolTier };
-export type { ToolContext, ToolResult, GuardrailResult };
+export type { ToolCallAuthorizer, ToolContext, ToolEffect, ToolResult, GuardrailResult };
 
 /** Extension name: lowercase, short, used as namespace + default tool group. */
 export const EXTENSION_NAME_PATTERN = /^[a-z][a-z0-9-]{1,32}$/;
@@ -56,6 +56,14 @@ export interface ExtensionToolDef {
   description: string;
   parameters: Record<string, unknown>;
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
+  /**
+   * Checked before the approval prompt (ToolHandler.refuse): the reason this call cannot work, or
+   * nothing. A check inside `execute` runs only after the person approved the call. One that is
+   * not a function leaves the tool out (logged at boot); the rest of the extension loads.
+   */
+  refuse?: (args: Record<string, unknown>, ctx: ToolContext) => string | undefined | Promise<string | undefined>;
+  /** What the tool does outside the workspace (ToolHandler.effect, ADR-005). */
+  effect?: ToolEffect;
   /** Explicit tier (0–3). FOUR_BLOCKED is rejected — don't ship a tool to block it. */
   tier: ToolTier;
   /** Defaults to false. */
@@ -157,6 +165,19 @@ export interface CoreExtension {
   description?: string;
   /** Tools registered under their bare names with the declared tiers. */
   tools?: ExtensionToolDef[];
+  /**
+   * Veto any tool call, core or extension, before it runs: return the reason to refuse it, or
+   * nothing to let it through. Asked for every call that reaches the tool registry (a chat turn's,
+   * a sub-agent's, a workflow step's, an MCP client's), after the blocked-tier and registration
+   * checks and BEFORE the tool's own `refuse` and any approval prompt, so a refused call never
+   * shows an approval card. `ctx.userRole` is the role the call answers to, inherited through
+   * every delegation; it is unset where nobody signed in (a channel, a cron run). Hooks of all
+   * extensions run in load order and the first refusal wins; a hook that throws refuses the call,
+   * and one that is not a function refuses every call (logged at boot, the extension still loads).
+   * A refusal is audited as `tool_call_refused` with the tool, the role and the extension, never
+   * the arguments. Keep it fast and side-effect free.
+   */
+  authorizeToolCall?: ToolCallAuthorizer;
   /**
    * Audit event names this extension emits. Logged as `<name>.<event>`
    * (e.g. "mfa.patient_data_accessed") — the namespace keeps fork events
