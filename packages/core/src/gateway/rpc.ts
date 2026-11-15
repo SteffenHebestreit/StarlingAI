@@ -23,7 +23,12 @@ import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../ru
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
 import { decideRoutePolicyChain, routePolicyChain } from "./route-policies.js";
-import { callerMayUseSession } from "./session-route-access.js";
+import {
+  callerMayStopComputerSession,
+  callerMayUseComputerSession,
+  callerMayUseSession,
+  computerSessionsVisibleTo,
+} from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
 import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
@@ -37,7 +42,7 @@ import { listAllScenes } from "../credentials/scenes.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit, logAudit } from "../audit/logger.js";
-import { rootSessionOf } from "../agent/session-ids.js";
+import { owningChatSessionId } from "../agent/session-ids.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
@@ -173,12 +178,6 @@ export function steerChatTurn(sessionId: string, message: string, clientMessageI
     ...(queued.replacedBy ? { replacedBy: queued.replacedBy } : {}),
     error: "The turn this was typed into has ended.",
   };
-}
-
-/** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
- *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
-function owningChatSessionId(sessionId: string): string {
-  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
 }
 
 /**
@@ -566,12 +565,18 @@ export class RpcConnection implements AccountConnection {
    * (callerMayUseSession) and this connection's own session access, whichever is stricter.
    */
   private mayStopTurnIn(sessionId: string): boolean {
-    // Under multi-user auth the caller as the store resolved it (its account or principal kind with
-    // its live role): a name alone would read as an instance credential (callerIdentity).
-    const caller = this.liveUser
+    return this.canAccessSession(sessionId) && callerMayUseSession(this.routeCaller(), sessionId);
+  }
+
+  /**
+   * This connection's caller in the shape the HTTP access rules take (gateway/session-route-access.ts).
+   * Under multi-user auth the caller as the store resolved it (its account or principal kind with
+   * its live role): a name alone would read as an instance credential (callerIdentity).
+   */
+  private routeCaller(): AuthenticatedUser | null {
+    return this.liveUser
       ? { ...this.liveUser, role: normalizeRole(this.connRole) }
       : this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
-    return this.canAccessSession(sessionId) && callerMayUseSession(caller, sessionId);
   }
 
   /**
@@ -1739,18 +1744,35 @@ export class RpcConnection implements AccountConnection {
         return { unsubscribed: true };
 
       // ── Computer-use session RPC ───────────────────────────────────────
+      // A session is its lease owner's chat's (callerMayUseComputerSession): only its owner or an
+      // admin sees its frames and window text, or keeps it alive. Any operator may stop any session.
+      // Below operator rank handleMessage has already refused emergency_stop, heartbeat and
+      // request_screenshot (rpc-policy.ts); a role an extension's rpcPolicies opens them to may stop
+      // only a session of its own.
       case "computer.list_sessions":
-        return { sessions: computerSessionManager.listSessions() };
+        return { sessions: computerSessionsVisibleTo(this.routeCaller(), computerSessionManager.listSessions()) };
 
       case "computer.emergency_stop": {
+        const caller = this.routeCaller();
         const csId = String(params["computerSessionId"] ?? "");
-        const reason = String(params["reason"] ?? "rpc:manual_stop");
-        computerSessionManager.emergencyStop(csId, reason);
+        if (!callerMayStopComputerSession(caller, computerSessionManager.getSession(csId))) {
+          throw new Error("Operator role required for this action");
+        }
+        const identity = this.connIdentity();
+        computerSessionManager.emergencyStop(
+          csId,
+          { ...(identity ? { identity } : {}), ...(caller ? { role: caller.role } : {}), via: "rpc" },
+          String(params["reason"] ?? "rpc:manual_stop"),
+        );
         return { ok: true };
       }
 
       case "computer.heartbeat": {
         const csId = String(params["computerSessionId"] ?? "");
+        const session = computerSessionManager.getSession(csId);
+        if (!session || !callerMayUseComputerSession(this.routeCaller(), session)) {
+          return { ok: false, error: `Session not found: ${csId}` };
+        }
         computerSessionManager.heartbeat(csId);
         return { ok: true };
       }
@@ -1758,11 +1780,14 @@ export class RpcConnection implements AccountConnection {
       case "computer.request_screenshot": {
         const csId = String(params["computerSessionId"] ?? "");
         const session = computerSessionManager.getSession(csId);
-        if (!session || session.state !== "active") {
+        if (!session || session.state !== "active" || !callerMayUseComputerSession(this.routeCaller(), session)) {
           return { ok: false, error: `No active session: ${csId}` };
         }
         try {
           const snapshot = await captureComputerSessionSnapshot(csId);
+          // The lease can change hands while the frame is taken: send it only if it is still ours.
+          const still = computerSessionManager.getSession(csId);
+          if (!still || !callerMayUseComputerSession(this.routeCaller(), still)) return { ok: false, error: `No active session: ${csId}` };
           if (snapshot.dataUrl && typeof snapshot.width === "number" && typeof snapshot.height === "number") {
             this.sendEvent({
               type: "computer.screenshot",

@@ -1823,7 +1823,7 @@ const MAX_TRACKED_WRITERS_PER_CONVERSATION = 256;
 /**
  * The conversation a run belongs to, for the writer record: through `sub:` AND `workflow:`
  * nesting (tools/workflow-catalog.ts names a scene's session workflow:<parent>:<scene>:<uuid>),
- * the rule gateway/rpc.ts owningChatSessionId and latency-attribution.ts rootSessionId use.
+ * the rule agent/session-ids.ts owningChatSessionId and latency-attribution.ts rootSessionId use.
  * deriveRootSessionId stops at a workflow — right for the shared facts it scopes, wrong here: in
  * c297c5ea the deck was built inside the sourced_presentation scene and the researcher of
  * 1581bae5 ran under mission_coordinator, so their records sat in two maps and it saw no writer.
@@ -9613,15 +9613,11 @@ async function runSubAgentWithStatsInner(opts: SubAgentRunOptions, arithmeticHol
     // Transfer any computer sessions the sub-agent created back to the parent
     // so the orchestrator can reuse them if it falls back to direct tool calls.
     try {
-      const subPrefix = `sub:${opts.parentSessionId}`;
-      for (const session of computerSessionManager.listActiveSessions()) {
-        if (session.leaseOwner.startsWith(subPrefix)) {
-          computerSessionManager.attachSession(session.id, opts.parentSessionId, true);
-          log.info(
-            { sessionId: session.id, from: session.leaseOwner, to: opts.parentSessionId },
-            "Transferred computer session lease from sub-agent back to parent",
-          );
-        }
+      for (const { sessionId, from } of computerSessionManager.returnSubRunLeases(opts.parentSessionId)) {
+        log.info(
+          { sessionId, from, to: opts.parentSessionId },
+          "Transferred computer session lease from sub-agent back to parent",
+        );
       }
     } catch (err) {
       log.warn({ err }, "Failed to transfer computer session leases back to parent");

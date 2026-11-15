@@ -301,6 +301,30 @@ The debug Markdown export is intended for operator review, incident handling, an
 
 The audit-only Markdown export is the lighter-weight companion. It keeps the session metadata and matching audit events for the session plus related sub-agent and workflow sessions, but omits the transcript and raw-history sections.
 
+### Computer-Use And Browser Sessions
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/computer-sessions` | computer-use sessions, scoped to the caller (see below) |
+| `GET` | `/api/computer-sessions/active` | the same, only sessions that are initializing, active or paused |
+| `GET` | `/api/computer-sessions/config` | `{ enabled }`; an admin gets the whole `computerUse` config block (node hosts, the remote-access URL, credential variable names) |
+| `GET` | `/api/computer-sessions/:id` | one session; `404` when not accessible |
+| `POST` | `/api/computer-sessions/:id/heartbeat` | keeps a session alive and resumes a paused one; `404` when not accessible (`403` for a viewer, as for every REST `POST`) |
+| `POST` | `/api/computer-sessions/:id/emergency-stop` | `{ reason? }`; any operator, any session (`403` for a viewer, as for every REST `POST`) |
+| `GET` | `/api/browser-sessions/config` | `{ enabled, reachable }` |
+| `GET` | `/api/browser-sessions` | browser runs the caller may see (see below) |
+| `GET` | `/api/browser-sessions/active` | the same, without stopped runs |
+| `GET` | `/api/browser-sessions/:id` | one run; `404` when not accessible |
+| `POST` | `/api/browser-sessions/:id/resolve-assist` | "I solved it, continue" for a run waiting on a person; operator rank (`403` for a viewer), `404` when not accessible |
+
+Under multi-user auth a computer-use session belongs to the chat whose run holds its lease (`leaseOwner`, often a `sub:` run of that chat), and a browser run to the chat that delegated it (`parentSessionId`). The owner of that chat sees the session whole and drives it (a heartbeat, a fresh frame), and so does an admin, by the rule of `/api/sessions/:sessionId`; driving it also takes operator rank, as every call that changes something does, so a viewer only watches its own. An emergency stop revokes the lease and keeps the last frame, so a stopped session stays with the chat that held it (`revokedLeaseOwner`). A session no run holds (detached) and a browser run with no parent are an admin's alone. A session the caller may not use answers `404` as a missing one does.
+
+The computer-session listings show the caller's own sessions whole. An operator also sees everyone else's, as `{ id, adapter, nodeId?, state, createdAt, emergencyStopAt?, restricted: true }`: enough to stop a runaway session, without its last frame (`lastSnapshot`: screenshot, accessibility text, active window) or lease owner. A viewer sees only its own. The browser-session listings show only the runs the caller may use.
+
+Any operator may emergency-stop any computer session, over REST or the socket; it is a safety control. A viewer stops none, its own included: REST refuses its `POST`s, and over the socket `computer.emergency_stop` and `computer.heartbeat` need operator rank (see [WebSocket RPC](#websocket-rpc)). The audit event `computer_session_emergency_stop` records `{ sessionId, actor, role, via, reason }`: `actor` is the identity the token or socket resolved to (its `userId`, with `account` or `principal`), `via` is `rest`, `rpc` or `system` (the warden, a failed adapter start; these carry no actor), and `reason` is the client's free text, cut to 200 characters. Before, the event was `{ sessionId, operator }` with the client's reason as `operator`.
+
+With auth off, the single operator sees and drives every session, as before.
+
 ### Channels
 
 | Method | Path | Notes |
@@ -602,6 +626,8 @@ Supported RPC methods, with the lowest role that may call each under multi-user 
 | `computer.request_screenshot` | `{ computerSessionId }` | operator |
 
 Roles compare by rank, as on the REST routes (viewer 10, operator 50, admin 90; an extension role ranks where its manifest puts it), against the role the account store holds at the time of the call. A refused call runs nothing of the method and answers the RPC error `Forbidden: <method> requires role <role>`; it is audited as `rbac_denied` (`surface: "rpc"`), at most once per connection, method and minute. So a viewer reads its own sessions, the catalogue and its event streams, and starts no session and no turn, as the REST gate already refuses it every mutating route. A core extension can change a method's role with `rpcPolicies` ([forking.md](forking.md)). A method the protocol does not have answers `Unknown method: <method>`. With auth off every method is open, as before.
+
+The `computer.*` methods follow the rules of the `/api/computer-sessions` routes (see [Computer-Use And Browser Sessions](#computer-use-and-browser-sessions)), after the method roles above. `computer.list_sessions` answers `{ sessions }`, scoped as the REST listing is. `computer.request_screenshot`, `computer.heartbeat` and `computer.emergency_stop` change something, so they need operator rank like every such method: a viewer is refused all three with `Forbidden: <method> requires role operator`, for its own sessions too, and neither stops nor keeps alive a session over the socket. `computer.request_screenshot` pushes a `computer.screenshot` event with a fresh frame to the caller, and only for an active session the caller may use (its own, or any for an admin); any other id answers `{ ok: false, error: "No active session: <id>" }`. `computer.heartbeat` answers `{ ok: false, error: "Session not found: <id>" }` for a session the caller may not use or that does not exist. `computer.emergency_stop` stops any session, whoever's chat started it: an emergency stop is a safety control for whoever sees a runaway agent. A role below operator that an extension's `rpcPolicies` opens one of these methods to meets the same session rules, and stops only a session of its own (otherwise `Operator role required for this action`).
 
 `gateway.status` answers `{ status, sessions, uptime }`. `sessions` counts the active sessions the caller may see, as `session.list` scopes them: every one for an admin or a connection without a user, otherwise its own and those without an owner (it used to count every account's). With a `requestId` it adds `{ requestId, activeTurn }`: whether that turn is running in this process, for any session the connection may use, not only a turn this connection started.
 

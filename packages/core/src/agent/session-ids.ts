@@ -58,3 +58,9 @@ export function rootSessionOf(sessionId: string, prefixes: readonly string[] = [
     current = parent;
   }
 }
+
+/** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
+ *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
+export function owningChatSessionId(sessionId: string): string {
+  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
+}

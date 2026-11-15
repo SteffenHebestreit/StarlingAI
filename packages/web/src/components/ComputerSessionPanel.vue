@@ -200,10 +200,12 @@ async function copyClickCommand() {
           <span class="session-id">{{ session.id.slice(0, 12) }}</span>
           <span class="session-adapter">{{ session.adapter }}</span>
           <span class="session-state" :class="session.state">{{ session.state }}</span>
+          <!-- Listed so it can be stopped; its screen is its owner's to watch. -->
+          <span v-if="session.restricted" class="session-foreign">Session of another user</span>
         </div>
         <div class="session-actions">
           <button
-            v-if="session.state === 'active' && observing !== session.id"
+            v-if="session.state === 'active' && observing !== session.id && !session.restricted"
             class="btn-sm btn-observe"
             @click="observe(session.id)"
           >
@@ -406,6 +408,12 @@ async function copyClickCommand() {
   padding: 0.1rem 0.4rem;
   border-radius: 3px;
   text-transform: uppercase;
+}
+
+.session-foreign {
+  font-size: 0.75rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
 }
 
 .session-state.active { color: #4caf50; }

@@ -23,6 +23,9 @@ import {
   type ComputerSessionSnapshot,
 } from "../agent/computer-session.js";
 import type { ComputerUseConfig } from "../config/computer-use-schema.js";
+import { getSessionRecord } from "../agent/session.js";
+import { owningChatSessionId } from "../agent/session-ids.js";
+import { ownsRecord } from "../runtime/user-scope.js";
 import { analyzeScreenshot } from "../agent/computer-vision.js";
 import {
   captureComputerSessionSnapshot,
@@ -115,6 +118,22 @@ function isSameLeaseFamily(left: string | undefined, right: string | undefined):
   const leftRoot = getLeaseFamilyRoot(left);
   const rightRoot = getLeaseFamilyRoot(right);
   return leftRoot.length > 0 && leftRoot === rightRoot;
+}
+
+/**
+ * Whether the run `taker` acts for the same person as the run `holder`: both belong to one chat, or,
+ * under multi-user auth, their chats belong to the same account or principal (ownsRecord). With
+ * auth off there is one operator. computer_session_start takes an open session over only between
+ * such runs unless asked to: the lease decides whose agent drives the desktop and who sees its
+ * frames in the dashboard, and the reuse moved another account's session to the next run that
+ * asked for the same node within its auto-approve window.
+ */
+function leaseHoldersShareOwner(holder: string, taker: string): boolean {
+  const holderChat = owningChatSessionId(holder);
+  const takerChat = owningChatSessionId(taker);
+  if (holderChat === takerChat) return true;
+  if (getConfig().auth?.enabled !== true) return true;
+  return ownsRecord(getSessionRecord(takerChat)?.identity(), getSessionRecord(holderChat)?.identity());
 }
 
 function requireActiveSession(sessionId?: string, leaseOwner?: string): { sessionId: string } {
@@ -558,8 +577,8 @@ registerTool({
         const sameOwner = existingOwner === ctx.sessionId;
         const canAutoAttach = !existingOwner
           || sameOwner
-          || isSameLeaseFamily(existingOwner, ctx.sessionId)
-          || computerSessionManager.isLeaseAutoApproved(existing.id);
+          || ((isSameLeaseFamily(existingOwner, ctx.sessionId) || computerSessionManager.isLeaseAutoApproved(existing.id))
+            && leaseHoldersShareOwner(existingOwner, ctx.sessionId));
 
         if (!sameOwner) {
           if (!canAutoAttach) {
@@ -601,7 +620,7 @@ registerTool({
         const topology = await initializeComputerSessionAdapter(session);
         computerSessionManager.activateSession(session.id, topology);
       } catch (error) {
-        computerSessionManager.emergencyStop(session.id, "adapter_initialization_failed");
+        computerSessionManager.emergencyStop(session.id, { via: "system" }, "adapter_initialization_failed");
         throw error;
       }
 

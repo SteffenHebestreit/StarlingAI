@@ -12,6 +12,8 @@ import { EventEmitter } from "node:events";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { getConfig } from "../config/loader.js";
+import type { Identity } from "../runtime/accounts.js";
+import { parentSessionOf } from "./session-ids.js";
 
 const log = childLogger("agent:computer-session");
 
@@ -75,8 +77,38 @@ export interface ComputerSession {
   lastHeartbeatAt: number;
   recordingEnabled: boolean;
   emergencyStopAt?: number;
+  /**
+   * Who held the lease when an emergency stop revoked it. The stopped session keeps its last frame,
+   * and stays that run's chat's to see (gateway/session-route-access.ts) while no run holds it.
+   */
+  revokedLeaseOwner?: string;
   /** Rolling auto-approve window: timestamp when lease auto-approve expires. */
   leaseAutoApproveUntil?: number;
+}
+
+/**
+ * Who stopped a session or answered its handoff, as the gateway resolved them: the caller of the
+ * socket or the token (`via: "rpc"` / `"rest"`), or the gateway itself (`via: "system"`: the warden,
+ * a failed adapter start). Never text the client sent: an emergency stop used to record its `reason`
+ * as the operator, so any caller could write whose name the audit gave.
+ */
+export interface SessionControlActor {
+  identity?: Identity;
+  role?: string;
+  via: "rpc" | "rest" | "system";
+}
+
+/** How much of a stop's free-text reason the audit keeps. */
+const MAX_STOP_REASON_CHARS = 200;
+
+function boundedStopReason(reason: unknown): string | undefined {
+  if (reason === undefined || reason === null) return undefined;
+  const text = String(reason);
+  if (text.length <= MAX_STOP_REASON_CHARS) return text;
+  const cut = text.slice(0, MAX_STOP_REASON_CHARS);
+  // Do not leave half a surrogate pair at the end.
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
@@ -85,6 +117,7 @@ export interface ComputerSessionEvents {
   "session:started": (session: ComputerSession) => void;
   "session:stopped": (sessionId: ComputerSessionId, reason: string) => void;
   "session:heartbeat_lost": (sessionId: ComputerSessionId, staleMs: number) => void;
+  /** `operator` names who stopped it: the caller's user id, or "system". */
   "session:emergency_stop": (sessionId: ComputerSessionId, operator: string) => void;
   "session:lease_changed": (sessionId: ComputerSessionId, previousOwner: string, newOwner: string) => void;
   "session:state_changed": (sessionId: ComputerSessionId, from: ComputerSessionState, to: ComputerSessionState) => void;
@@ -189,6 +222,25 @@ class ComputerSessionManager extends EventEmitter {
     return session;
   }
 
+  /**
+   * Hand the live sessions whose lease a direct sub-run of `parentSessionId` holds back to that
+   * parent, when one of its sub-runs ends, so the orchestrator can go on with them. Returns what
+   * moved. The holder's parent must BE `parentSessionId` (parentSessionOf): a holder id that merely
+   * starts with `sub:<parentSessionId>` also matched every chat whose id begins with it, so a run of
+   * chat `a` took the session of chat `ab`'s computer agent, of another account, when it ended. The
+   * lease decides who sees a session's frames in the dashboard.
+   */
+  returnSubRunLeases(parentSessionId: string): Array<{ sessionId: ComputerSessionId; from: string }> {
+    const moved: Array<{ sessionId: ComputerSessionId; from: string }> = [];
+    for (const session of this.listActiveSessions()) {
+      const from = session.leaseOwner;
+      if (!from || parentSessionOf(from) !== parentSessionId) continue;
+      this.attachSession(session.id, parentSessionId, true);
+      moved.push({ sessionId: session.id, from });
+    }
+    return moved;
+  }
+
   /** Detach from session (release lease). */
   detachSession(sessionId: ComputerSessionId): void {
     const session = this._requireSession(sessionId);
@@ -217,24 +269,43 @@ class ComputerSessionManager extends EventEmitter {
     log.info({ sessionId, reason }, "Computer session stopped");
   }
 
-  /** Emergency stop — immediate, revoke lease, audit. */
-  emergencyStop(sessionId: ComputerSessionId, operator = "system"): void {
+  /**
+   * Emergency stop — immediate, revoke lease, audit. The audit names the actor the gateway resolved
+   * and keeps the free-text `reason` apart, cut to 200 characters. A string in place of the actor,
+   * the signature before, is a system stop with that string as its reason.
+   */
+  emergencyStop(
+    sessionId: ComputerSessionId,
+    actor: SessionControlActor | string = { via: "system" },
+    reason?: string,
+  ): void {
     const session = this._get(sessionId);
     if (!session || session.state === "stopped") return;
+
+    const by: SessionControlActor = typeof actor === "string" ? { via: "system" } : actor;
+    const why = boundedStopReason(typeof actor === "string" ? actor : reason);
+    const operator = by.identity?.userId ?? "system";
 
     const prev = session.state;
     session.state = "stopped";
     session.emergencyStopAt = Date.now();
+    if (session.leaseOwner) session.revokedLeaseOwner = session.leaseOwner;
     session.leaseOwner = "";
     session.leaseAutoApproveUntil = undefined;
     session.updatedAt = Date.now();
 
-    logAudit("computer_session_emergency_stop", { sessionId, operator });
+    logAudit("computer_session_emergency_stop", {
+      sessionId,
+      ...(by.identity ? { actor: by.identity } : {}),
+      ...(by.role ? { role: by.role } : {}),
+      via: by.via,
+      ...(why !== undefined ? { reason: why } : {}),
+    }, by.identity?.userId ? { userId: by.identity.userId } : undefined);
     this.emit("session:state_changed", sessionId, prev, "stopped");
     this.emit("session:emergency_stop", sessionId, operator);
     this.emit("session:stopped", sessionId, "emergency_stop");
 
-    log.warn({ sessionId, operator }, "Computer session EMERGENCY STOPPED");
+    log.warn({ sessionId, operator, via: by.via, reason: why }, "Computer session EMERGENCY STOPPED");
   }
 
   /** Update heartbeat timestamp.  Also revives paused sessions. */
