@@ -365,6 +365,9 @@ export async function handleAguiStream(
       userMessage: message,
       userWords: message,
       signal: abortController.signal,
+      // Who asks for this turn's tool calls: the caller of this request, who is not the session's
+      // owner when an admin drives another account's session (tools/registry.ts approveUnderPolicy).
+      sender: () => ({ ...(callerWho ? { identity: callerWho } : {}), ...(caller?.role ? { role: caller.role } : {}) }),
       // Keep the gateway's hard timeout in lockstep with the runtime's delegation-wait
       // exclusion. Without this the two clocks disagree and the shorter one wins.
       onDelegationWaitMs: extendGatewayDeadline,

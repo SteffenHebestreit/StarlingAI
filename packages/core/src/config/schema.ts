@@ -1425,6 +1425,17 @@ export const SceneConfigSchema = z.object({
   approvalTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
 });
 
+/**
+ * Per-call approvals of tools whose approval policy names who may grant them
+ * (guardrails/tool-tiers.ts ToolApprovalPolicy, approval/routed.ts).
+ */
+export const ApprovalsSchema = z.object({
+  /** How long a call routed to its approvers waits for one of them before it is denied (ms).
+   *  Min 60 s, max 24 h. Unset, gateway.approvalTimeoutMs applies, as for the requester's own card.
+   *  The wait holds the turn's clocks, so the turn's own timeout does not cut it short. */
+  routedTimeoutMs: z.number().int().min(60_000).max(86_400_000).optional(),
+});
+
 export const ScenesSchema = z.record(z.string(), SceneConfigSchema);
 export type SceneConfig = z.infer<typeof SceneConfigSchema>;
 
@@ -2143,6 +2154,7 @@ export const ConfigSchema = z.object({
   sites: SitesSchema.default({}),
   webhooks: WebhooksSchema.default({}),
   approvalChannels: ApprovalChannelsSchema.default({}),
+  approvals: ApprovalsSchema.prefault({}),
   infrastructure: InfrastructureSchema.prefault({}),
   monitoring: MonitoringSchema.prefault({}),
   sourceForge: SourceForgeSchema.prefault({}),

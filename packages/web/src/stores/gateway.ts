@@ -3278,6 +3278,30 @@ export const useGatewayStore = defineStore("gateway", () => {
       return;
     }
 
+    // A call that waits for someone else's approval (a tool whose approval policy names other
+    // roles): said in the turn's status and a notice, with no answer button; agent.approval_resolved
+    // closes the notice.
+    if (type === "agent.approval_pending") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (isLiveTurnEvent(data)) {
+        notePendingTurnActivity();
+        const approvalId = String(data["approvalId"]);
+        const toolName = String(data["toolName"]);
+        const roles = Array.isArray(data["approverRoles"]) ? (data["approverRoles"] as unknown[]).map(String) : [];
+        const status = turnText.waitingForApprover(liveLanguage(), toolName, roles);
+        updateStreamingStatus(status, { appendHistory: true });
+        notifications.pushLocalNotification({
+          id: `approval:${approvalId}`,
+          title: "Waiting for approval",
+          message: status,
+          level: "info",
+          category: "approval",
+          sticky: true,
+        });
+      }
+      return;
+    }
+
     if (type === "agent.approval_needed") {
       const data = msg["data"] as Record<string, unknown>;
       if (isLiveTurnEvent(data)) {

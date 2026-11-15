@@ -14,7 +14,8 @@
  *   - a malformed route policy refuses every caller on its path;
  *   - a malformed RPC policy refuses its method, or every method, to every
  *     caller;
- *   - a tool whose `refuse` is not a function is not registered;
+ *   - a tool whose `refuse` is not a function, or whose approval policy is
+ *     malformed, is not registered;
  *   - an `authorizeToolCall` or `authorizeAgentRun` that is not a function
  *     refuses every tool call or agent run.
  *
@@ -107,6 +108,29 @@ function discoverEntryFiles(dir: string): Array<{ name: string; entry: string }>
   return out;
 }
 
+/** Role names as the manifest's own `roles` must spell them. */
+const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_-]{1,32}$/;
+
+/**
+ * What is wrong with a tool's approval policy, or null when it has a well-formed one or none. A
+ * policy goes only on a tool that asks for approval on every call, and names at least one role. The
+ * roles need not be this extension's: built-in ones and another extension's count, and are matched
+ * when a call is decided, by which time every extension has loaded.
+ */
+function approvalPolicyProblem(tool: ExtensionToolDef): string | null {
+  const approval: unknown = tool.approval;
+  if (approval === undefined) return null;
+  if (typeof approval !== "object" || approval === null) return "approval must be an object";
+  const { approverRoles, distinctApprover } = approval as { approverRoles?: unknown; distinctApprover?: unknown };
+  if (tool.requiresPerCallApproval !== true) return "approval needs requiresPerCallApproval: true";
+  if (!Array.isArray(approverRoles) || approverRoles.length === 0) return "approval.approverRoles must list at least one role";
+  for (const role of approverRoles) {
+    if (typeof role !== "string" || !ROLE_NAME_PATTERN.test(role)) return `invalid approver role ${JSON.stringify(role)}`;
+  }
+  if (distinctApprover !== undefined && typeof distinctApprover !== "boolean") return "approval.distinctApprover must be a boolean";
+  return null;
+}
+
 function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExtension {
   if (typeof ext !== "object" || ext === null) throw new Error("default export is not an object");
   const e = ext as Partial<CoreExtension>;
@@ -132,7 +156,7 @@ function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExt
     }
   }
   for (const role of e.roles ?? []) {
-    if (typeof role.name !== "string" || !/^[a-z][a-z0-9_-]{1,32}$/.test(role.name)) {
+    if (typeof role.name !== "string" || !ROLE_NAME_PATTERN.test(role.name)) {
       throw new Error(`invalid role name ${JSON.stringify(role.name)}`);
     }
     if (typeof role.rank !== "number") throw new Error(`role ${role.name}: rank must be a number`);
@@ -146,7 +170,9 @@ function validateManifest(dirName: string, ext: unknown): asserts ext is CoreExt
  */
 function toolProblem(tool: ExtensionToolDef): string | null {
   if (tool.refuse !== undefined && typeof tool.refuse !== "function") return "refuse is not a function";
-  return null;
+  // Registered without its policy, the tool would ask whoever its callback reaches; with a policy no
+  // one can satisfy, every call would wait for an approver who never comes.
+  return approvalPolicyProblem(tool);
 }
 
 function registerExtension(ext: CoreExtension, source: string): void {
@@ -184,6 +210,7 @@ function registerExtension(ext: CoreExtension, source: string): void {
         description: tool.description,
         requiresPerCallApproval: tool.requiresPerCallApproval ?? false,
         requiresSandbox: tool.requiresSandbox ?? false,
+        ...(tool.approval ? { approval: tool.approval } : {}),
       },
       ext.name,
     );

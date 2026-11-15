@@ -1205,6 +1205,8 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
     // So is the turn id, which every turn has: the chat's request id, the one a gateway set around
     // this call, or the enclosing turn's for a nested one; a fresh one for a turn nobody named.
     const turnId = userInput?.turnId ?? currentRequestContext()?.turnId ?? randomUUID();
+    const onApprovalPending = opts.onApprovalPending ?? currentRequestContext()?.onApprovalPending;
+    const sender = opts.sender ?? currentRequestContext()?.sender;
     // The person's language, for fixed text only (status lines, backstop messages). Inherited by a
     // nested turn, whose "message" is a workflow step written by the swarm, not by the person.
     const userMessageLanguage = currentRequestContext()?.userMessageLanguage
@@ -1252,6 +1254,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<TurnOutput> {
         ...(opts.userWords !== undefined ? { userWords: opts.userWords } : {}),
         // Inherited: a turn nested in an eval turn is eval traffic too.
         ...(opts.session.channel === "eval" || currentRequestContext()?.evalTraffic ? { evalTraffic: true as const } : {}),
+        // Inherited too: a specialist's or a workflow step's call that waits for an approver is
+        // shown in the chat that asked (approval/routed.ts), and is asked for by the person who
+        // sent that chat's message (tools/registry.ts approveUnderPolicy).
+        ...(onApprovalPending ? { onApprovalPending } : {}),
+        ...(sender ? { sender } : {}),
       },
       () => runWithPhaseTimings(async () => {
         // Progress messages (agent/turn-progress.ts): only for a surface that shows them live, and

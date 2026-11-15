@@ -347,6 +347,47 @@ that names a role which is neither built-in nor declared by a loaded extension
 is logged as well: no caller ever holds such a role, so a deny list refuses
 nobody by it.
 
+**Who approves a call.** `requiresPerCallApproval` alone asks whoever the
+call's approval callback reaches, which in a chat is the person who asked. To
+make a sign-off mean something, name the roles that may grant it:
+
+```ts
+{
+  name: "record_release",
+  tier: ToolTier.THREE_PRIVILEGED,
+  requiresPerCallApproval: true,
+  approval: { approverRoles: ["reviewer"], distinctApprover: true },
+  async execute(args, ctx) {
+    // ctx.approval: { via: "requester" | "routed", approvalId?, approvedBy?, approverRole? }
+    await recordSignOff(args, ctx.approval?.approvedBy, ctx.approval?.approverRole);
+    /* ... */
+  },
+}
+```
+
+The requester is the person who sent the message, with the role they hold
+now. That is not always the chat's owner or the role the chat was created
+with. When `approverRoles` admits that role and the chat is the requester's
+own, they approve on their own card, as before. Every other call waits until
+a signed-in approver decides it under Operator requests:
+
+- a role the policy does not admit;
+- someone else's chat, which an admin may drive;
+- a call that needs a second person (`distinctApprover`);
+- an approval nobody would really be asked for (`--auto`, the legacy A2A
+  route's `autoApprove`, a scene's approval channel).
+
+The requester's chat says it is waiting for approval by the listed roles. The
+wait holds the turn's clocks. `approverRoles` may name built-in roles or any extension's roles. They
+are matched like `routePolicies`: an extension role is never admitted through
+rank. Record who approved from `ctx.approval`, not from the fact that the
+handler ran. See [Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies).
+
+A malformed policy is logged at boot, and that tool is not registered: no
+approver role, a name that is no role name, a `distinctApprover` that is not a
+boolean, or a policy on a tool without `requiresPerCallApproval: true`. The
+rest of the extension still loads, with its roles.
+
 **CLI subcommands.** Drop a file at `extensions/<name>/cli/<command>.{mjs,js,ts}`
 and it becomes `sai <command>`, with everything after the command name passed
 through:

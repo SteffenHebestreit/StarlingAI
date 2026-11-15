@@ -19,6 +19,8 @@ import type { EffortTier } from "../config/schema.js";
 import type { AgentSession, SessionProgressMessage, SessionTranscriptAttachment } from "./session.js";
 import type { InterventionNotice } from "./interventions.js";
 import type { UserInputChannel } from "./user-input.js";
+import type { ApprovalPendingListener } from "../approval/routed.js";
+import type { TurnSender } from "../runtime/request-context.js";
 import type { SubAgentProgressEvent } from "./sub-agent.js";
 import type { TurnPerformanceMetrics } from "./turn-metrics.js";
 import type { TurnQualityScorecard } from "./turn-scorecard.js";
@@ -75,6 +77,13 @@ export interface RunTurnOptions {
   /** The chat a structured user-input request from this turn reaches (agent/user-input-broker.ts).
    *  Unset: a nested turn inherits its caller's; a top-level one has nobody to ask. */
   userInput?: UserInputChannel;
+  /** Told when a tool call of this turn, or of a run it starts, waits for someone else's approval
+   *  (ToolContext.onApprovalPending). Unset: a nested turn inherits its caller's. */
+  onApprovalPending?: ApprovalPendingListener;
+  /** The signed-in person who sent this turn's message, read when asked (RequestContext.sender):
+   *  who asked for a tool call, and the role they hold now. Unset: a nested turn inherits its
+   *  caller's; a turn no person sent has none. */
+  sender?: () => TurnSender;
   /** Sub-agents this turn is allowed to delegate to (undefined = no restriction) */
   allowedAgents?: string[];
   /** The agent the user directed this turn to (`--agent NAME`; allowedAgents narrows to it too). The

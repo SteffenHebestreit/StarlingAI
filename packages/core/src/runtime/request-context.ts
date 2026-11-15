@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { UserInputChannel } from "../agent/user-input.js";
 import type { OutcomeRun } from "../agent/outcomes.js";
 import type { Identity } from "./accounts.js";
+import type { ApprovalPendingListener } from "../approval/routed.js";
 
 export interface RequestContext {
   /**
@@ -123,6 +124,28 @@ export interface RequestContext {
    * stores the live swarm reads (the outcome ledger and retrieval credit) like its turn does.
    */
   evalTraffic?: true;
+  /**
+   * Tells the person behind this turn that a tool call now waits for someone else's approval
+   * (ToolContext.onApprovalPending). Set by runTurn from RunTurnOptions and inherited by the runs
+   * it starts, so a specialist's routed approval reaches the chat that asked, at any depth.
+   */
+  onApprovalPending?: ApprovalPendingListener;
+  /**
+   * The signed-in person who sent the message this work answers, read when asked. Set by runTurn
+   * from RunTurnOptions.sender (the chat socket, AG-UI) and inherited by every run the turn starts.
+   * It is not always the session's owner, and its role is not always the session's: an admin may
+   * drive another account's chat, and a session keeps the role it was created with. An approval
+   * policy decides on it (tools/registry.ts). Unset where no signed-in person sent a message (a
+   * job, a channel, A2A, MCP).
+   */
+  sender?: () => TurnSender;
+}
+
+/** The signed-in person who sent a turn's message, as they are when asked (RequestContext.sender). */
+export interface TurnSender {
+  identity?: Identity;
+  /** The role they hold at that moment; unset when it is not known or they no longer sign in. */
+  role?: string;
 }
 
 /** Whether the active work is evaluation traffic (see RequestContext.evalTraffic). */

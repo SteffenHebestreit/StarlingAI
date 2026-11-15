@@ -80,6 +80,19 @@ function approvalSummary(a: PendingApproval): string {
   return host ? `${a.toolName} · ${host}` : a.toolName;
 }
 
+// A routed approval (a tool call whose approval policy names who may grant it) is someone else's
+// request: the approver needs to see who asked and with what, before they answer for it.
+function routedRequester(a: PendingApproval): string {
+  const who = a.requester ?? "Unknown requester";
+  return a.requesterRole ? `${who} (${a.requesterRole})` : who;
+}
+
+function routedArgs(a: PendingApproval): string {
+  if (!a.args || Object.keys(a.args).length === 0) return "";
+  const text = JSON.stringify(a.args, null, 2);
+  return text.length > 1200 ? `${text.slice(0, 1200)}…` : text;
+}
+
 function formatElapsed(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -112,10 +125,16 @@ function longRunningSummary(r: PendingLongRunning): string {
       <!-- Pending approvals -->
       <div v-if="requests.approvals.length" class="dock-section">
         <div class="dock-section-title">Approvals</div>
-        <div v-for="a in requests.approvals" :key="a.id" class="approval-card">
+        <div v-for="a in requests.approvals" :key="a.id" class="approval-card" :class="{ 'approval-card--routed': a.kind === 'routed' }">
           <div class="approval-info">
             <span class="approval-tool">{{ approvalSummary(a) }}</span>
             <span v-if="a.sceneName" class="approval-scene">{{ a.sceneName }}</span>
+            <template v-if="a.kind === 'routed'">
+              <span class="approval-scene">Requested by {{ routedRequester(a) }}</span>
+              <span v-if="a.distinctApprover" class="approval-scene">Needs a second person</span>
+              <pre v-if="routedArgs(a)" class="approval-args">{{ routedArgs(a) }}</pre>
+            </template>
+            <span v-if="requests.respondError(a.id)" class="approval-error" role="alert">{{ requests.respondError(a.id) }}</span>
           </div>
           <div class="approval-actions">
             <button type="button" class="btn-grad dock-btn" :disabled="requests.isResponding(a.id)" @click="requests.respond(a.id, true)">Approve</button>
@@ -306,6 +325,22 @@ function longRunningSummary(r: PendingLongRunning): string {
 .approval-info { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
 .approval-tool { font-family: var(--font-mono); font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .approval-scene { font-size: 0.7rem; color: rgb(156, 163, 175); }
+/* Someone else's request: who asked and with what sit under the tool, so the buttons go below. */
+.approval-card--routed { flex-direction: column; align-items: stretch; }
+.approval-card--routed .approval-actions { justify-content: flex-end; }
+.approval-args {
+  margin: 0.2rem 0 0;
+  max-height: 8rem;
+  overflow: auto;
+  padding: 0.3rem 0.4rem;
+  border-radius: var(--radius-xs);
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.approval-error { font-size: 0.72rem; color: rgb(248, 113, 113); }
 .approval-actions { display: flex; gap: 0.3rem; flex-shrink: 0; }
 
 /* The shared button classes give the look; this is the dock's size for them. */

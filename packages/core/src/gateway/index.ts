@@ -62,6 +62,7 @@ import { handleWhatsappEvent, handleWhatsappVerify } from "../channels/whatsapp.
 import { buildSpeechSummarySystemPrompt, buildSpeechSummaryUserPrompt } from "./speech-summary.js";
 import { warmTextLanguageDetector } from "../agent/text-language.js";
 import { getRuntimeStatusSnapshot } from "../runtime/status.js";
+import { decideRoutedApproval } from "../approval/routed.js";
 import { getModelEndpointHealthSnapshot, syncModelEndpointRuntimeStatus } from "../runtime/model-endpoints.js";
 import { getDeadLetterCount, readDeadLetters } from "../channels/dead-letter.js";
 import { checkImageGenerationHealth, imageGenerationServiceConfigured, imageRequestBoundsError, requestImageGeneration } from "../multimodal/image-generation.js";
@@ -168,6 +169,26 @@ function applyTemplate(template: string, params: Record<string, string>): string
 function secretMatches(expected: string, presented: string): boolean {
   const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
   return timingSafeEqual(digest(expected), digest(presented));
+}
+
+/**
+ * Whether POST /api/approval/:id is left to the route rather than the operator-rank gate: for a
+ * routed approval, whose policy names its approvers by role (a sibling role below operator can be
+ * one), and for an id that names no pending approval, which the route answers as not found without
+ * changing anything (an approver answering a request another approver has just decided). A channel
+ * approval stays behind the gate, as before.
+ */
+function approvalDecidedByRoute(path: string): boolean {
+  const match = /^\/api\/approval\/([^/]+)$/.exec(path);
+  if (!match) return false;
+  let id: string;
+  try {
+    id = decodeURIComponent(match[1]!);
+  } catch {
+    return false;
+  }
+  const pending = getPendingApproval(id);
+  return !pending || pending.kind === "routed";
 }
 
 function originFromUrl(url: string | undefined): string | null {
@@ -982,6 +1003,9 @@ export function createGateway() {
     const user = await authenticatedUser(c.req.header("Authorization"));
     // No user → fall through; the route's own auth check will return 401.
     if (!user) return next();
+    // A routed approval names its approvers by role, not by rank, so the route decides who may
+    // answer it (approval/routed.ts); see approvalDecidedByRoute.
+    if (method === "POST" && approvalDecidedByRoute(c.req.path)) return next();
     if (!userHasRole(user, "operator")) {
       logAudit("rbac_denied", {
         username: user.username,
@@ -3536,6 +3560,48 @@ export function createGateway() {
     return c.json({ ok: true, sceneName: jobName, definitionType: "job", jobId: queued.id, sessionId: queued.sessionId, status: queued.status });
   });
 
+  // ── Routed approvals (approval/routed.ts) ────────────────────────────────
+  // A call of a tool whose approval policy names its approvers waits as a "routed" approval. It has
+  // no secret, and only a signed-in caller the policy admits decides it, so these two take a routed
+  // id ahead of the callback endpoints below, which serve the approval channels; any other id falls
+  // through to them. The link carries no caller: it is answered as an unknown id is.
+  app.get("/api/approval/:approvalId", async (c, next) => {
+    if (getPendingApproval(c.req.param("approvalId"))?.kind !== "routed") return next();
+    return c.html("<html><body><h2>Approval request not found or already resolved.</h2></body></html>", 404);
+  });
+
+  // Decided with an approver's session only, and with a second person required not by the
+  // requester. No secret is accepted, and a caller with no valid session is answered as an unknown
+  // id is. Who decided is recorded with the decision.
+  app.post("/api/approval/:approvalId", async (c, next) => {
+    const id = c.req.param("approvalId");
+    if (getPendingApproval(id)?.kind !== "routed") return next();
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Approval request not found or already resolved" }, 404);
+    let body: Record<string, unknown>;
+    try { body = await c.req.json<Record<string, unknown>>(); } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const approved = Boolean(body["approved"]);
+    const identity = callerIdentity(user);
+    const decision = decideRoutedApproval(id, approved, { ...(identity ? { identity } : {}), role: user.role });
+    if (decision.outcome === "refused") {
+      logAudit("rbac_denied", {
+        username: user.username,
+        role: user.role,
+        method: "POST",
+        path: c.req.path,
+        reason: decision.reason === "requester" ? "distinct_approver_required" : "not_an_approver",
+      }, { userId: user.username, severity: "warn" });
+      return decision.reason === "requester"
+        ? c.json({ error: "A second person must approve this request" }, 403)
+        : c.json({ error: `Requires role: ${decision.approverRoles.join(" | ")}` }, 403);
+    }
+    // Another approver may have decided it while this caller was being resolved.
+    if (decision.outcome === "not_found") return c.json({ error: "Approval request not found or already resolved" }, 404);
+    return c.json({ ok: true, approved });
+  });
+
   // ── Approval callback endpoints ──────────────────────────────────────────
   // GET  /api/approval/:id?approved=true|false&secret=X
   //        — one-click link handler (Slack / WhatsApp / email).  Returns HTML.
@@ -3547,10 +3613,18 @@ export function createGateway() {
   // Dashboard surface: list every pending approval so an authenticated operator
   // can respond from the UI (not just via the Slack/webhook callback links).
   // Covers detached scene/job runs triggered from the dropdown.
+  // Each caller sees what they may decide: a routed approval (a tool call whose approval policy
+  // names who may grant it) if its policy admits their role and they are not a requester who needs a
+  // second person; a channel approval at operator rank. A viewer sees none.
   app.get("/api/approvals/pending", async (c) => {
-    const token = extractBearerToken(c.req.header("Authorization"));
-    if (!token || !await verifyToken(token)) return c.json({ error: "Unauthorized" }, 401);
-    return c.json(listPendingApprovals());
+    const user = await authenticatedUser(c.req.header("Authorization"));
+    if (!user) return c.json({ error: "Unauthorized" }, 401);
+    const identity = callerIdentity(user);
+    return c.json(listPendingApprovals({
+      ...(identity ? { identity } : {}),
+      role: user.role,
+      operatorRank: userHasRole(user, "operator"),
+    }));
   });
 
   // Constant-time approval-secret comparison (secretMatches).
@@ -4058,9 +4132,10 @@ export function createGateway() {
           const sessId = rpc.params?.["sessionId"]
             ? callerScopedSessionId(String(rpc.params["sessionId"]), callerIdentity(a2aUser) ?? { userId: a2aCaller })
             : `a2a:${multiUser ? randomUUID() : Date.now()}`;
-          // autoApprove grants every approval-gated call of the run, so it is honoured only from a
-          // role at gateway.overrides.autoApproveMinRole; below it the run asks as it would without
-          // it (no channel here, so a gated call fails closed).
+          // autoApprove grants the run's approval-gated calls (a tool with an approval policy still
+          // goes to its approvers), so it is honoured only from a role at
+          // gateway.overrides.autoApproveMinRole; below it the run asks as it would without it (no
+          // channel here, so a gated call fails closed).
           let autoApprove = rpc.params?.["autoApprove"] === true;
           if (autoApprove && !mayAutoApprove(a2aUser?.role)) {
             autoApprove = false;

@@ -104,6 +104,8 @@ export type CoreAuditEventType =
   | "ephemeral_model_override_rejected"
   | "approval_requested"
   | "approval_resolved"
+  | "approval_routed_requested"
+  | "approval_routed_resolved"
   | "warden_alert"
   | "architect_fallback_started"
   | "architect_fallback_completed"

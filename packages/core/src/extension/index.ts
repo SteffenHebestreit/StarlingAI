@@ -33,10 +33,13 @@ import type { Logger } from "pino";
 import type { RoutePolicy as RoutePolicyDef } from "../gateway/route-policies.js";
 import type { RpcPolicyDef } from "../gateway/rpc-policy.js";
 import type { LlmBoundaryTransformer } from "../providers/llm-boundary.js";
+import type { ToolApprovalPolicy } from "../guardrails/tool-tiers.js";
 
 export type { LlmBoundaryTransformer };
 
 export type { RoutePolicyDef, RpcPolicyDef };
+
+export type { ToolApprovalPolicy };
 
 // Re-exports so an extension only needs one import for the common cases.
 export { ToolTier };
@@ -69,6 +72,15 @@ export interface ExtensionToolDef {
   tier: ToolTier;
   /** Defaults to false. */
   requiresPerCallApproval?: boolean;
+  /**
+   * Who may grant the per-call approval (needs requiresPerCallApproval). Role names as carried in
+   * JWT `role` claims, built-in or extension ones; a call from a role it does not admit, or one
+   * whose approval nobody would really be asked for (--auto, a callback that answers by itself),
+   * waits for a signed-in approver in the operator requests instead. The tool reads who approved
+   * from `ctx.approval`. A malformed policy leaves the tool out (logged at boot); the rest of the
+   * extension loads. See guardrails/tool-tiers.ts ToolApprovalPolicy.
+   */
+  approval?: ToolApprovalPolicy;
   /** Defaults to false. */
   requiresSandbox?: boolean;
   /** Tool group for config-driven disabling. Defaults to the extension name. */

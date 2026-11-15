@@ -49,6 +49,7 @@ import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { notificationForCaller, subscribeToNotifications } from "../runtime/notifications.js";
+import { requesterApprovalCallback } from "../approval/routed.js";
 import { validTimeZone } from "../runtime/user-time.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
@@ -59,7 +60,7 @@ import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 import { typedUserWords } from "../agent/delegation-user-words.js";
 import { isKnownAgentName } from "../agent/directive-agent.js";
 import { catalogAgentRunRefusal } from "../agent/full-scope-agent-floor.js";
-import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
+import { currentRequestContext, runWithRequestContext, type TurnSender } from "../runtime/request-context.js";
 
 /**
  * How often the gateway turn watchdog re-checks a turn it has suspended for an operator
@@ -511,6 +512,19 @@ export class RpcConnection implements AccountConnection {
   private connIdentity(): Identity | undefined {
     if (this.liveUser) return callerIdentity(this.liveUser);
     return this.connUserId ? { userId: this.connUserId } : undefined;
+  }
+
+  /**
+   * The person sending this connection's messages, as the store resolves them at this moment
+   * (RunTurnOptions.sender): their identity, and their role unless they no longer sign in. Read
+   * when a tool asks, not when the message arrived: an approval policy decides on the role they
+   * hold when the call is made and when its card is answered, not the one the chat was created
+   * with, and an admin driving another account's chat is the one asking, not that account.
+   */
+  private currentSender(): TurnSender {
+    const signedIn = this.callerAccess() === "ok";
+    const identity = this.connIdentity();
+    return { ...(identity ? { identity } : {}), ...(signedIn && this.connRole ? { role: this.connRole } : {}) };
   }
 
   /**
@@ -995,8 +1009,9 @@ export class RpcConnection implements AccountConnection {
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
 
-        // --auto says yes to every approval of the turn, so it is only as safe as the role behind
-        // it (gateway.overrides.autoApproveMinRole). Below the floor the turn does not start: run
+        // --auto says yes to the turn's approvals (a tool with an approval policy still goes to its
+        // approvers), so it is only as safe as the role behind it
+        // (gateway.overrides.autoApproveMinRole). Below the floor the turn does not start: run
         // without the flag it would stop at the approvals its sender asked to skip.
         if (overrideFlags.autoApprove && !mayAutoApprove(this.connRole)) {
           const floor = autoApproveMinRole();
@@ -1507,6 +1522,8 @@ export class RpcConnection implements AccountConnection {
           // entries apart from another tab's with the same words.
           requestId,
           ...(interactiveTurn ? { userInput: { rootSessionId: session.id, turnId: requestId, mode: "interactive" as const } } : {}),
+          // Who asks for this turn's tool calls: this connection's caller, read when a tool asks.
+          sender: () => this.currentSender(),
           onChunk: (text) => {
             noteTurnActivity();
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
@@ -1640,7 +1657,10 @@ export class RpcConnection implements AccountConnection {
           onComputerSessionState: (sessionState: { computerSessionId: string; state: string }) => {
             this.sendEvent({ type: "computer.session_state", data: { requestId, ...sessionState } });
           },
-          approvalCallback: async (toolName, args) => {
+          // The approval card of the person who sent this message: the one callback an approval
+          // policy accepts, and only for that person (`sender`) in a chat of their own with a role
+          // it admits (approval/routed.ts).
+          approvalCallback: requesterApprovalCallback(async (toolName, args) => {
             const approvalId = randomUUID();
             const approvalTimeoutMs = getConfig().gateway.approvalTimeoutMs;
             const expiresAt = new Date(Date.now() + approvalTimeoutMs).toISOString();
@@ -1662,6 +1682,24 @@ export class RpcConnection implements AccountConnection {
               }, approvalTimeoutMs);
               this.pendingApprovals.set(approvalId, { requestId, resolve, reject, timeout });
             });
+          }),
+          // A call that waits for someone else's approval (a tool whose approval policy does not
+          // admit this caller): said here with no answer button, and cleared when it is decided.
+          onApprovalPending: (pending) => {
+            this.sendEvent({
+              type: "agent.approval_pending",
+              data: {
+                requestId,
+                approvalId: pending.approvalId,
+                toolName: pending.toolName,
+                approverRoles: pending.approverRoles,
+                distinctApprover: pending.distinctApprover,
+                expiresAt: pending.expiresAt,
+              },
+            });
+            return (outcome) => {
+              this.sendEvent({ type: "agent.approval_resolved", data: { requestId, approvalId: pending.approvalId, outcome } });
+            };
           },
           inputCallback: async (question, choices, requestedTimeoutMs) => {
             const inputId = randomUUID();
@@ -1753,9 +1791,11 @@ export class RpcConnection implements AccountConnection {
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
           if (!this.pushAllowed()) return;
           // A notification with an owner (a scheduled follow-up's result, an account's job) is that
-          // person's alone; one without goes to operators and above (notificationForCaller).
+          // person's alone. One for some roles only (a routed approval's approvers) goes to those roles;
+          // one with neither goes to operators and above (notificationForCaller).
           const wire = notificationForCaller(notification, this.connIdentity(), {
             seesUnowned: this.connRole !== undefined && roleRank(this.connRole) >= roleRank("operator"),
+            role: this.connRole,
           });
           if (wire) this.sendEvent({ type: "notification.event", data: wire });
         });

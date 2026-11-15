@@ -272,6 +272,7 @@ What the assistant was asked to run later, to repeat or to watch: a schedule mad
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| `GET` | `/api/approvals/pending` | the pending approvals the caller may decide (the dashboard's Operator requests) |
 | `GET` | `/api/approval/:approvalId` | one-click approve or deny HTML response |
 | `POST` | `/api/approval/:approvalId` | programmatic approval callback |
 
@@ -284,6 +285,16 @@ Accepted POST forms:
 or `Authorization: Bearer <secret>` with `{ "approved": true }`, or a gateway token (the dashboard) with `{ "approved": true }`.
 
 A wrong or missing secret gets the answer an unknown or already resolved approval id gets: `404` with `Approval request not found or already resolved` (an HTML page on `GET`). The id alone does not tell whether a request is pending; the gateway log records a secret that did not match a pending request.
+
+A pending approval has a `kind`:
+
+- **`channel`**: a scene or job run's approval, sent to its approval channel. It is decided with the channel's secret or by an operator's session. `GET /api/approvals/pending` lists it at operator rank.
+- **`routed`**: a call of a tool whose approval policy names who may grant it (see [Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It has no secret.
+  - It is listed only to callers whose role the policy admits, and with `distinctApprover` not to the requester. Its entry carries `requester`, `requesterRole`, `approverRoles`, `distinctApprover`, `expiresAt` and the call's `args`. `requester` is the person who sent the message, with the role they held then. That is not the chat's owner when an admin drives another account's chat.
+  - `POST` decides it only with such a caller's session and records who decided. Any other signed-in caller gets `403`, and the requester under `distinctApprover` gets `403 A second person must approve this request`.
+  - A secret, the one-click link and a request without a session get the answer an unknown id gets (`404`).
+
+A viewer's pending list is empty.
 
 ### Sessions And Exports
 
@@ -635,7 +646,7 @@ The `computer.*` methods follow the rules of the `/api/computer-sessions` routes
 
 `chat.send` also supports chat-triggered scenes via `/run <sceneName> key=value ...`, and inline override flags in the `message`: `--auto`, `--iter N`, `--agent NAME`, `--timeout N`, and `--effort low|medium|high|max` (a one-off effort tier for that message).
 
-`--auto` grants every approval of the turn without asking, so it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
+`--auto` grants the turn's approvals without asking, except a call to a tool with an approval policy, which still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). So it needs at least the role in `gateway.overrides.autoApproveMinRole` (`viewer`, `operator` (the default), `admin`, or `disabled` for nobody). Below it the turn does not start: the reply is `accepted: false`, with a `blocked` status whose `response` is `--auto requires role <role>` (or `--auto is disabled on this gateway`), audited as `rbac_denied`. With auth off only `disabled` refuses it.
 
 `--agent NAME` hands the turn to that agent: the turn delegates to it before it answers. A name that is neither a configured nor a promoted agent starts no turn; the reply is `accepted: false`, with a `blocked` status whose `response` names the agent. A deployment with no agents at all checks no name, as `delegate_to_agent` does.
 
@@ -733,6 +744,8 @@ During `chat.send`, the gateway emits streamed events:
 | `agent.tool_done` | tool name and truncated result |
 | `agent.swarm` | live swarm state snapshot |
 | `agent.approval_needed` | approval id, tool name, and args |
+| `agent.approval_pending` | a call waits for someone else's approval (a tool's approval policy routed it): `{ requestId, approvalId, toolName, approverRoles, distinctApprover, expiresAt }`; nothing to answer here |
+| `agent.approval_resolved` | an approval card or a routed approval is settled: `{ requestId, approvalId, outcome }`, `outcome` being `approved`, `denied` or `timeout`, or for a routed approval also `cancelled` (its turn stopped) |
 | `agent.input_needed` | an `ask_user` question: `{ requestId, inputId, question, choices, timeoutMs, expiresAt }`, answered with `input.respond` |
 | `agent.steering_consumed` | the turn read queued steering messages (see [Mid-turn steering](#mid-turn-steering)) |
 | `agent.user_input_needed` | a structured question from a tool (see [Structured user input](#structured-user-input)) |
@@ -937,7 +950,7 @@ Request:
 
 Under multi-user auth the task also runs as the account the token names, with the workspace root and memory that account's chat runs have. A signed token whose account has been removed gets `401`, as on `/api`. Running an agent takes the operator rank, as a mutating `/api` call does: a role below `operator` gets `403` with the JSON-RPC error `-32003` `Operator role required`, audited as `rbac_denied` with `surface: "a2a_legacy"`.
 
-`params.autoApprove: true` grants every approval-gated tool call of the run without asking anyone. It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
+`params.autoApprove: true` grants the run's approval-gated tool calls without asking anyone, except a call to a tool with an approval policy, which still goes to its approvers ([Tool Tiers](tool-tiers.md#who-may-approve-a-call-approval-policies)). It is honoured only from a caller whose role ranks at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled` for no one). From a lower role it is ignored and audited as `a2a_auto_approve_refused`: the run then has no approval channel, so an approval-gated call fails closed. With auth off the request is honoured unless the floor is `disabled`.
 
 Response:
 

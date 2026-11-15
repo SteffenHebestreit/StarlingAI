@@ -219,6 +219,10 @@ export const turnText = {
   // The live status line, under the rows.
   working: (lang: TurnLanguage) => lang === "de" ? "Ich bin dran …" : "Working on it…",
   runningTool: (lang: TurnLanguage, tool: string) => `${toolLabel(tool, lang)} …`,
+  // A call whose approval someone else gives (a tool with an approval policy): no answer button here.
+  waitingForApprover: (lang: TurnLanguage, tool: string, roles: readonly string[]) => lang === "de"
+    ? `${toolLabel(tool, lang)}: wartet auf die Freigabe durch ${roles.join(" oder ")} …`
+    : `${toolLabel(tool, lang)}: waiting for approval by ${roles.join(" or ")}…`,
   nextStep: (lang: TurnLanguage) => lang === "de" ? "Überlege den nächsten Schritt …" : "Working out the next step…",
   plan: (lang: TurnLanguage, counts: { running: number; pending: number; done: number; partial: number; failed: number }) => {
     const parts = lang === "de"

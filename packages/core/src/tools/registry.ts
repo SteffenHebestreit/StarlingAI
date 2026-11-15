@@ -1,19 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ToolTier, getToolTier, isToolAllowed } from "../guardrails/tool-tiers.js";
+import { ToolTier, getToolTier, isToolAllowed, type ToolApprovalPolicy } from "../guardrails/tool-tiers.js";
 import type { LLMToolDef } from "../providers/lmstudio.js";
 import type { TurnUserWords } from "../agent/delegation-user-words.js";
 import type { UserInputOutcome, UserInputRequest } from "../agent/user-input.js";
 import type { TurnProgressFacts } from "../agent/turn-progress.js";
 import { computeQueryEmbedding, computeTextEmbeddings, cosineSimilarity, isEmbeddingAvailable } from "../providers/embeddings.js";
 import { withSpan, genAi } from "../observability/tracing.js";
-import { runWithRequestContext, currentRequestContext } from "../runtime/request-context.js";
-import { pairedIdentity } from "../runtime/user-scope.js";
+import { runWithRequestContext, currentRequestContext, type TurnSender } from "../runtime/request-context.js";
+import { ownsRecord, pairedIdentity, recordHasOwner } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { childLogger } from "../logger.js";
 import { isToolDisabled, resolveToolGroup } from "./groups.js";
 import { getConfig } from "../config/loader.js";
 import { logAudit } from "../audit/logger.js";
 import { enforceAfterToolCall, enforceBeforeToolCall } from "./enforcement-hooks.js";
+import { policyAdmitsRole } from "../gateway/route-policies.js";
+import {
+  isRequesterApprovalCallback,
+  requestRoutedApproval,
+  type ApprovalPendingListener,
+} from "../approval/routed.js";
 
 const registryLog = childLogger("tool-registry");
 
@@ -296,6 +302,28 @@ export interface ToolContext {
   /** The turn runs with nobody watching (RunTurnOptions.unattended, resolved). A workflow step's
    *  nested turn inherits it. */
   unattended?: boolean;
+  /**
+   * Told when a call of a tool with an approval policy waits for an approver instead of the
+   * requester (approval/routed.ts), so the chat can say so; may return a function told how the wait
+   * ended. Unset, executeTool uses the one the request context carries (RunTurnOptions).
+   */
+  onApprovalPending?: ApprovalPendingListener;
+  /**
+   * How this call was approved, set by executeTool for the handler of a tool with an approval
+   * policy (guardrails/tool-tiers.ts ToolApprovalPolicy), so the tool can record who actually
+   * approved it: "requester" when the person who sent the message, whom the policy admits, approved
+   * on their own card (`approvedBy` and `approverRole` as they were when they answered, which need
+   * not be the session's owner or stored role), "routed" when an approver decided it (`approvalId`
+   * names the request). Such a handler receives a shallow copy of the call's context carrying it.
+   * Unset for every other call: a tool without a policy runs with its context exactly as before,
+   * and one called from inside such a handler with the handler's context gets a copy without it.
+   */
+  approval?: {
+    via: "requester" | "routed";
+    approvalId?: string;
+    approvedBy?: Identity;
+    approverRole?: string;
+  };
   /** Override sub-agent maxIterations for delegated tasks this turn. */
   maxIterationsOverride?: number;
   /** Override the per-turn timeout in ms for delegated tasks. 0 disables timeout inheritance. */
@@ -919,6 +947,116 @@ async function toolCallAuthorizerRefusal(
  */
 const USER_DECLINED = "It was not done. Do not ask for it again in this turn or look for another way to do it: tell the user it was not done.";
 
+function formatApprovalWait(timeoutMs: number): string {
+  if (timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000} min`;
+  return `${Math.round(timeoutMs / 1000)} s`;
+}
+
+/** Whether an approval policy admits a role; a role that is not known is admitted by none. */
+function policyAdmits(policy: ToolApprovalPolicy, role: string | undefined): role is string {
+  return role !== undefined && policyAdmitsRole({ roles: [...policy.approverRoles] }, role);
+}
+
+/**
+ * Who asks for a call, and as which role. In a turn a signed-in person sent (RequestContext.sender:
+ * the chat socket, AG-UI), that person as they are now, not the session's owner and stored role: a
+ * session keeps the role it was created with, and an admin may drive another account's chat.
+ * Otherwise the call's own (a job's owner, an A2A or MCP caller): the ToolContext's role, else the
+ * request context's.
+ */
+function callRequester(context: ToolContext): { sender?: TurnSender; identity?: Identity; role?: string } {
+  const sender = currentRequestContext()?.sender?.();
+  if (sender) return { sender, identity: sender.identity, role: sender.role };
+  return { identity: toolCallIdentity(context), role: context.userRole ?? currentRequestContext()?.callerRole };
+}
+
+/**
+ * Whether the person who sent the message drives a chat of their own (the identity the call acts
+ * as): an admin driving another account's chat is not asked on the card, and the call is routed
+ * with the admin as the one who asked. A chat that names no owner is anyone's who may drive it, as
+ * session access has it.
+ */
+function sendsInOwnChat(sender: TurnSender, context: ToolContext): boolean {
+  const owner = toolCallIdentity(context);
+  return !recordHasOwner(owner) || ownsRecord(sender.identity, owner);
+}
+
+/**
+ * Who approves a call to a tool with an approval policy (guardrails/tool-tiers.ts
+ * ToolApprovalPolicy). The requester's own approval card serves only the person who sent the
+ * message (callRequester), in a chat of their own, with a role the policy admits now, when no second
+ * person is required, and only through a callback that really asks them (approval/routed.ts
+ * requesterApprovalCallback): `--auto`, the legacy A2A route's autoApprove, a scene's approval
+ * channel or any callback that answers by itself never grants such a call. Every other call is
+ * routed to the approvers, with that person as the one who asked, and waits here for one of them.
+ *
+ * Returns `card` when the requester's card is to be asked (executeTool asks it next, as for any
+ * tool, and requesterCardApproval credits the answer), the approval once an approver granted the
+ * call, or the refusal.
+ */
+async function approveUnderPolicy(
+  name: string,
+  args: Record<string, unknown>,
+  context: ToolContext,
+  policy: ToolApprovalPolicy,
+): Promise<{ card: true } | { approval: NonNullable<ToolContext["approval"]> } | { refused: ToolResult }> {
+  const { sender, identity: requester, role: requesterRole } = callRequester(context);
+  if (sender && sendsInOwnChat(sender, context) && policyAdmits(policy, requesterRole) && !policy.distinctApprover
+    && context.autoApprove !== true && isRequesterApprovalCallback(context.approvalCallback)) {
+    return { card: true };
+  }
+
+  const config = getConfig();
+  const timeoutMs = config.approvals?.routedTimeoutMs ?? config.gateway.approvalTimeoutMs;
+  const onPending = context.onApprovalPending ?? currentRequestContext()?.onApprovalPending;
+  const routed = await requestRoutedApproval({
+    toolName: name,
+    args,
+    sessionId: context.sessionId,
+    ...(requester ? { requester } : {}),
+    ...(requesterRole ? { requesterRole } : {}),
+    approverRoles: policy.approverRoles,
+    distinctApprover: policy.distinctApprover === true,
+    timeoutMs,
+    ...(context.signal ? { signal: context.signal } : {}),
+    ...(onPending ? { onPending } : {}),
+  });
+  if (routed.approved && routed.decidedBy) {
+    return {
+      approval: {
+        via: "routed",
+        ...(routed.approvalId ? { approvalId: routed.approvalId } : {}),
+        ...(routed.decidedBy.identity ? { approvedBy: routed.decidedBy.identity } : {}),
+        approverRole: routed.decidedBy.role,
+      },
+    };
+  }
+  const approvers = policy.approverRoles.join(" or ");
+  if (routed.outcome === "timeout") {
+    return { refused: { success: false, output: "", error: `Tool '${name}' approval timed out (no ${approvers} responded within ${formatApprovalWait(timeoutMs)})` } };
+  }
+  if (routed.outcome === "cancelled") {
+    return { refused: { success: false, output: "", error: `Tool '${name}' approval was withdrawn: the run stopped before a ${approvers} decided` } };
+  }
+  return { refused: { success: false, output: "", error: `Tool '${name}' execution denied by user (a ${approvers} declined it). ${USER_DECLINED}` } };
+}
+
+/**
+ * How a call the requester approved on their own card was approved, read once they answered: the
+ * person who sent the message, as they are now. Refused when the policy no longer admits them (their
+ * role changed while the card was open), so a handler never credits a role its approver had lost.
+ */
+function requesterCardApproval(
+  name: string,
+  policy: ToolApprovalPolicy,
+): { approval: NonNullable<ToolContext["approval"]> } | { refused: ToolResult } {
+  const sender = currentRequestContext()?.sender?.();
+  if (!sender || !policyAdmits(policy, sender.role)) {
+    return { refused: { success: false, output: "", error: `Tool '${name}' was not run: the person who approved it no longer holds ${policy.approverRoles.join(" or ")}` } };
+  }
+  return { approval: { via: "requester", ...(sender.identity ? { approvedBy: sender.identity } : {}), approverRole: sender.role } };
+}
+
 export async function executeTool(
   name: string,
   args: Record<string, unknown>,
@@ -1037,7 +1175,29 @@ export async function executeTool(
   }
   const requiresApproval = tierRequiresApproval || (effectDemandsApproval && effectContractsMode === "enforce");
 
-  if (requiresApproval) {
+  // What the handler runs with: the call's own context, or for a tool with an approval policy a
+  // copy that says how this call was approved (ToolContext.approval). Such a call asks the approval
+  // callback below only when the policy leaves it to the requester's own card (`cardPolicy`, whose
+  // answer is credited after it); otherwise an approver has decided it already.
+  let handlerContext = context;
+  let asksApprovalCallback = requiresApproval;
+  let cardPolicy: ToolApprovalPolicy | undefined;
+  if (requiresApproval && def.approval) {
+    const gate = await approveUnderPolicy(name, args, context, def.approval);
+    if ("refused" in gate) return gate.refused;
+    if ("card" in gate) {
+      cardPolicy = def.approval;
+    } else {
+      handlerContext = { ...context, approval: gate.approval };
+      asksApprovalCallback = false;
+    }
+  } else if (context.approval) {
+    // A call made from inside such a handler, with its context: that call's approval is not this one's.
+    const { approval: _callersApproval, ...ownContext } = context;
+    handlerContext = ownContext;
+  }
+
+  if (asksApprovalCallback) {
     if (context.approvalCallback) {
       let approved: boolean;
       try {
@@ -1061,6 +1221,11 @@ export async function executeTool(
       // No approval channel available — block the call rather than silently skip the gate
       return { success: false, output: "", error: `Tool '${name}' requires human approval but no approval channel is available` };
     }
+  }
+  if (cardPolicy) {
+    const answered = requesterCardApproval(name, cardPolicy);
+    if ("refused" in answered) return answered.refused;
+    handlerContext = { ...context, approval: answered.approval };
   }
 
   // Span the tool call so traces show how a turn fanned out across tools.
@@ -1118,7 +1283,7 @@ export async function executeTool(
               // by a nested run's call to the call that started that run.
               toolCallId: meta?.toolCallId,
             },
-            () => handler.execute(args, context),
+            () => handler.execute(args, handlerContext),
           );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
