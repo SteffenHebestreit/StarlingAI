@@ -12,12 +12,19 @@
       class="chat-orb-layer fixed inset-0 pointer-events-none flex items-center justify-center overflow-hidden"
       :class="orbBehindText ? 'chat-orb-layer--behind-text' : ''"
     >
-      <OrbCanvas :ai-state="orbAiState" :ring="orbRing" :controls="orbControls" class="w-full h-full" />
+      <OrbCanvas :ai-state="orbAiState" :ring="orbRing" :controls="orbControls" :suggestions="orbSuggestions" class="w-full h-full" />
     </div>
 
     <!-- The running turn at the orb: its steps orbit it, its newest words stand under it. The
          chat keeps the question and the answer. -->
-    <OrbActivity :activity="orbActivity" :language="orbLanguage" :lane="podLane" @open="openLiveSteps" />
+    <OrbActivity
+      :activity="orbActivity"
+      :language="orbLanguage"
+      :lane="podLane"
+      :floor="orbStatusFloor"
+      :ceiling="orbStatusCeiling"
+      @open="openLiveSteps"
+    />
 
     <!-- Drag-drop overlay: visible while a file drag is hovering the chat surface -->
     <div
@@ -41,8 +48,9 @@
     <Teleport to="body">
     <div v-if="(actionsOpen || sessionOpen) && gateway.connected" class="fixed inset-0 z-[210]" @click="actionsOpen = false; sessionOpen = false" />
 
-    <!-- Session: whether there is one, and the picker behind it. -->
-    <div v-if="gateway.connected" class="orb-control" :class="controlsDocked ? 'orb-control--docked' : ''" :style="sessionControlStyle">
+    <!-- Session: whether there is one, the picker behind it, and a new one. Starting a session
+         stood at the head of the actions' list, among what can be done WITH a session. -->
+    <div v-if="gateway.connected" class="orb-control" :class="controlClass" :style="sessionControlStyle">
       <OrbNode
         side="left"
         :docked="controlsDocked"
@@ -74,39 +82,48 @@
               v-if="gateway.currentSessionId"
               type="button"
               @click="copySessionId"
-              :title="sessionIdCopied ? 'Copied!' : `Copy session id: ${gateway.currentSessionId}`"
+              :title="sessionIdCopied ? chatText.sessionIdCopied(uiLanguage) : chatText.copySessionId(uiLanguage, gateway.currentSessionId)"
               class="font-mono text-gray-300 inline-flex items-center gap-1 rounded px-1 hover:text-purple-300 hover:bg-purple-500/10 transition-colors cursor-pointer text-xs"
             >
               <code class="font-mono">{{ gateway.currentSessionId.substring(0, 8) }}…</code>
               <span class="text-[10px]" aria-hidden="true">{{ sessionIdCopied ? '✓' : '⧉' }}</span>
             </button>
-            <span v-else class="italic text-gray-500 text-xs">No active session</span>
+            <span v-else class="italic text-gray-500 text-xs">{{ chatText.noActiveSession(uiLanguage) }}</span>
           </div>
           <select
             v-if="activeSessions.length > 0"
             :value="gateway.currentSessionId ?? ''"
-            aria-label="Active session"
+            :aria-label="chatText.activeSession(uiLanguage)"
             class="w-full rounded-lg border border-purple-500/20 bg-gray-900/70 px-2 py-1 text-[11px] text-gray-300 truncate"
             @change="handleSessionSwitch"
           >
-            <option value="">Select active session</option>
+            <option value="">{{ chatText.selectActiveSession(uiLanguage) }}</option>
             <option v-for="session in activeSessions" :key="session.id" :value="session.id">
-              {{ session.id.substring(0, 8) }}… · {{ session.turns }} turns
+              {{ session.id.substring(0, 8) }}… · {{ chatText.sessionTurns(uiLanguage, session.turns) }}
             </option>
           </select>
+          <button type="button" class="actions-pod__item session-pod__new" @click="startNewSession">
+            <span class="actions-pod__glyph" aria-hidden="true">＋</span>
+            <span class="actions-pod__text">
+              <span class="actions-pod__label">{{ chatText.newSession(uiLanguage) }}</span>
+              <span class="actions-pod__hint">{{ chatText.newSessionHint(uiLanguage) }}</span>
+            </span>
+          </button>
         </div>
       </Transition>
     </div>
 
-    <!-- Session actions: its tools open as a labelled list beside it. They used to fan out on a
-         full circle as bare glyphs (MD, DBG, AUD, ARC, RST): near a screen edge half of them
-         left the screen, one landed on the header, and what a glyph did was told by a hover
-         tooltip only. -->
-    <div v-if="gateway.connected" class="orb-control" :class="controlsDocked ? 'orb-control--docked' : ''" :style="actionsControlStyle">
+    <!-- Session actions: what can be done with the session on the page, as a labelled list
+         beside the control. They used to fan out on a full circle as bare glyphs (MD, DBG, AUD,
+         ARC, RST): near a screen edge half of them left the screen, one landed on the header, and
+         what a glyph did was told by a hover tooltip only. With no session there is nothing to
+         act on: the control is drawn idle, and its panel says where a session starts. -->
+    <div v-if="gateway.connected" class="orb-control" :class="controlClass" :style="actionsControlStyle">
       <OrbNode
         side="right"
         :docked="controlsDocked"
         :open="actionsOpen"
+        :idle="sessionActions.length === 0"
         :label="controlLabelled.actions ? chatText.nodeActions(uiLanguage) : ''"
         :aria-expanded="actionsOpen"
         aria-haspopup="menu"
@@ -135,9 +152,12 @@
           :class="[actionsPodLeft ? 'session-pod--left' : 'session-pod--right', actionsPodUp ? 'actions-pod--up' : '']"
           @keydown="onActionsMenuKeydown"
         >
+          <p v-if="sessionActions.length === 0" class="actions-pod__empty">
+            {{ chatText.noSessionActions(uiLanguage, chatText.nodeSession(uiLanguage)) }}
+          </p>
           <!-- The list scrolls inside the panel: a panel that clipped its overflow would cut its own
                leader line off. -->
-          <div class="actions-pod__list" role="menu" :aria-label="chatText.nodeActionsLabel(uiLanguage)">
+          <div v-else class="actions-pod__list" role="menu" :aria-label="chatText.nodeActionsLabel(uiLanguage)">
           <template v-for="(action, i) in sessionActions" :key="action.key">
             <div v-if="action.danger" class="actions-pod__rule" role="separator" />
             <button
@@ -161,6 +181,35 @@
         </div>
       </Transition>
     </div>
+
+    <!-- The start suggestions of an empty chat, where the controls stand on their orbit: each a
+         point of light with its words, on the front of a second, wider orbit round the lower half
+         of the orb (composables/orbControls.ts starterLayout). The middle one stands in front,
+         the others further round and further away; the orb canvas draws the arc they stand on.
+         They fly out from the orb as they appear. On a narrow window they stay a row of pills at
+         the foot of the page. -->
+    <Transition name="orb-starters">
+      <div v-if="showStarters && controlsDocked" class="orb-starters" role="group" :aria-label="starters.lead">
+        <p
+          v-if="starterSpots.leadY !== null"
+          class="orb-starters__lead"
+          :style="{ top: `calc(50% + ${Math.round(starterSpots.leadY)}px)` }"
+        >{{ starters.lead }}</p>
+        <button
+          v-for="(starter, index) in starters.items"
+          :key="starter.label"
+          type="button"
+          class="orb-starter"
+          :class="`orb-starter--${starterSpots.stations[index]?.side ?? 'below'}`"
+          :style="starterStyle(index)"
+          @click="openComposer(starter.prompt)"
+        >
+          <span class="orb-starter__dot" aria-hidden="true" />
+          <span class="orb-starter__label">{{ starter.label }}</span>
+        </button>
+        <p class="orb-starters__hint" :style="{ top: `calc(50% + ${Math.round(starterSpots.hintY)}px)` }">{{ starters.typeHint }}</p>
+      </div>
+    </Transition>
 
     </Teleport>
 
@@ -234,8 +283,9 @@
               />
             </div>
 
-            <!-- Nothing here yet: a start for the user to finish. -->
-            <div v-if="showStarters" class="chat-starters">
+            <!-- Nothing here yet: a start for the user to finish. (On a wide window the
+                 suggestions stand round the orb instead: see the arc beside the controls.) -->
+            <div v-if="showStarters && !controlsDocked" class="chat-starters">
               <p class="chat-starters__lead">{{ starters.lead }}</p>
               <div class="chat-starters__list">
                 <button
@@ -669,8 +719,8 @@
         <p v-if="lastReply && replyTextOpen" class="voice-bar__body">{{ lastReply.spokenText }}</p>
       </div>
 
-      <div class="chat-composer" :class="compactComposer ? 'chat-composer--compact' : ''">
-        <div class="chat-composer__field">
+      <div ref="composerEl" class="chat-composer" :class="[compactComposer ? 'chat-composer--compact' : '', optionsDocked ? 'chat-composer--docked' : '']">
+        <div ref="composerFieldEl" class="chat-composer__field">
           <!-- Slash-command autocomplete popup. Shown when the textarea starts with '/'
                and the user is still typing the command name (no space yet). -->
           <div
@@ -717,12 +767,40 @@
           >{{ steeringNote }}</div>
         </div>
 
+        <!-- The options: a row of chips in the bay, or — on a window with the room — nodes on
+             the orbit's front, where the message input's own control stands while the bay is
+             folded away (composables/orbControls.ts optionStations). The same elements either
+             way: on the orbit each is placed from the bay's own box, whose centre line is the
+             viewport's and whose foot stands a fixed way over the window's. -->
         <div class="chat-composer__controls">
           <div class="chat-composer__menus">
-            <details v-if="showOptionsDropdown" ref="optionsDetailsEl" class="chat-dropdown" @toggle="onComposerMenuToggle">
-              <summary class="chat-dropdown__summary">
-                <span>{{ chatText.options(uiLanguage) }}</span>
-                <span class="chat-dropdown__chevron">▾</span>
+            <details
+              v-if="showOptionsDropdown"
+              ref="optionsDetailsEl"
+              class="chat-dropdown"
+              :class="optionClass('options')"
+              :style="optionStyle('options')"
+              data-option="options"
+              @toggle="onComposerMenuToggle"
+              @pointerenter="wakeControl('options')"
+              @pointerleave="restControl('options')"
+              @focusin="wakeControl('options')"
+              @focusout="restControl('options')"
+            >
+              <summary
+                class="chat-dropdown__summary"
+                :title="optionsDocked ? chatText.options(uiLanguage) : undefined"
+                :aria-label="optionsDocked ? chatText.options(uiLanguage) : undefined"
+              >
+                <OrbNode v-if="optionsDocked" as="span" side="below" docked :open="openMenus.options" :label="chatText.options(uiLanguage)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                    <path d="M12 5v14" /><path d="M5 12h14" />
+                  </svg>
+                </OrbNode>
+                <template v-else>
+                  <span>{{ chatText.options(uiLanguage) }}</span>
+                  <span class="chat-dropdown__chevron">▾</span>
+                </template>
               </summary>
               <div class="chat-dropdown__menu">
                 <div class="chat-dropdown__group">
@@ -897,10 +975,41 @@
               </div>
             </details>
 
-            <details v-if="showJobsDropdown" class="chat-dropdown" @toggle="onComposerMenuToggle">
-              <summary class="chat-dropdown__summary">
-                <span>{{ jobsDropdownLabel }}</span>
-                <span class="chat-dropdown__chevron">▾</span>
+            <details
+              v-if="showJobsDropdown"
+              class="chat-dropdown"
+              :class="optionClass('jobs')"
+              :style="optionStyle('jobs')"
+              data-option="jobs"
+              @toggle="onComposerMenuToggle"
+              @pointerenter="wakeControl('jobs')"
+              @pointerleave="restControl('jobs')"
+              @focusin="wakeControl('jobs')"
+              @focusout="restControl('jobs')"
+            >
+              <summary
+                class="chat-dropdown__summary"
+                :title="optionsDocked ? jobsDropdownLabel : undefined"
+                :aria-label="optionsDocked ? jobsDropdownLabel : undefined"
+              >
+                <OrbNode
+                  v-if="optionsDocked"
+                  as="span"
+                  side="below"
+                  docked
+                  :open="openMenus.jobs"
+                  :lit="scenesStore.runningJobs.length > 0"
+                  :label="optionName(chatText.jobs(uiLanguage), Boolean(jobsNodeState))"
+                  :state="jobsNodeState"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 6h9" /><path d="M4 12h6" /><path d="M4 18h9" /><path d="M15 9l5 3-5 3z" />
+                  </svg>
+                </OrbNode>
+                <template v-else>
+                  <span>{{ jobsDropdownLabel }}</span>
+                  <span class="chat-dropdown__chevron">▾</span>
+                </template>
               </summary>
               <div class="chat-dropdown__menu chat-dropdown__menu--jobs">
                 <div v-if="sceneJobs.length === 0 && scenesStore.runError" class="rounded-2xl border border-red-500/20 bg-red-950/15 px-3 py-3 text-xs text-red-200">
@@ -994,18 +1103,48 @@
             <!-- Effort: the four tiers as a list with what each one does. It used to be one button
                  that stepped through them — one click past "high" landed on "max", which relaxes
                  the quality gates, with no warning, and going back to "low" took three more. -->
-            <details ref="effortDetailsEl" class="chat-dropdown chat-dropdown--effort" @toggle="onComposerMenuToggle">
+            <details
+              ref="effortDetailsEl"
+              class="chat-dropdown chat-dropdown--effort"
+              :class="optionClass('effort')"
+              :style="optionStyle('effort')"
+              data-option="effort"
+              @toggle="onComposerMenuToggle"
+              @pointerenter="wakeControl('effort')"
+              @pointerleave="restControl('effort')"
+              @focusin="wakeControl('effort')"
+              @focusout="restControl('effort')"
+            >
               <summary
                 class="chat-dropdown__summary chat-dropdown__summary--effort"
-                :class="effortButtonClass"
+                :class="optionsDocked ? '' : effortButtonClass"
                 :title="chatText.effortTitle(uiLanguage, currentEffort)"
                 :aria-label="chatText.effortLabel(uiLanguage, currentEffort)"
               >
-                <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
-                </svg>
-                <span>{{ chatText.effortName(uiLanguage, currentEffort) }}</span>
-                <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
+                <!-- On the orbit the tier shows as on its chip: "high" lit, "low" drawn idle, "max" in amber. -->
+                <OrbNode
+                  v-if="optionsDocked"
+                  as="span"
+                  side="below"
+                  docked
+                  :open="openMenus.effort"
+                  :lit="currentEffort === 'high'"
+                  :idle="currentEffort === 'low'"
+                  :tone="currentEffort === 'max' ? 'caution' : ''"
+                  :label="optionName(chatText.optionEffort(uiLanguage), true)"
+                  :state="chatText.effortName(uiLanguage, currentEffort)"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+                  </svg>
+                </OrbNode>
+                <template v-else>
+                  <svg class="multimodal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+                  </svg>
+                  <span>{{ chatText.effortName(uiLanguage, currentEffort) }}</span>
+                  <span class="chat-dropdown__chevron" aria-hidden="true">▾</span>
+                </template>
               </summary>
               <div class="chat-dropdown__menu chat-dropdown__menu--effort" role="radiogroup" :aria-label="chatText.effortForSession(uiLanguage)">
                 <div class="chat-dropdown__label">{{ chatText.effortForSession(uiLanguage) }}</div>
@@ -1031,7 +1170,35 @@
 
             <!-- Whether a render in this chat stops for the user's settings first. The same
                  session setting as the card's "Always Auto in this chat". -->
+            <div
+              v-if="optionsDocked"
+              :class="optionClass('images')"
+              :style="optionStyle('images')"
+              @pointerenter="wakeControl('images')"
+              @pointerleave="restControl('images')"
+              @focusin="wakeControl('images')"
+              @focusout="restControl('images')"
+            >
+              <OrbNode
+                side="below"
+                docked
+                :lit="gateway.currentSessionImageSettingsPrompt === 'ask'"
+                :label="optionName(chatText.optionImages(uiLanguage), true)"
+                :state="chatText.optionImagesState(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
+                :title="chatText.imagesTitle(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
+                :aria-label="chatText.imagesChip(uiLanguage, gateway.currentSessionImageSettingsPrompt)"
+                :aria-pressed="gateway.currentSessionImageSettingsPrompt === 'ask'"
+                @click="toggleImageSettingsPrompt"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="4" width="18" height="16" rx="2" />
+                  <circle cx="8.5" cy="9.5" r="1.5" />
+                  <path d="m21 16-5-5L5 20" />
+                </svg>
+              </OrbNode>
+            </div>
             <button
+              v-else
               @click="toggleImageSettingsPrompt"
               class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
               :class="gateway.currentSessionImageSettingsPrompt === 'auto' ? 'opacity-60 hover:opacity-100' : 'opacity-80 hover:opacity-100'"
@@ -1049,7 +1216,35 @@
 
             <!-- Thinking: its state in words, like the Images button beside it. Glow alone carried
                  it before, and "auto" and "off" were two shades of dim. -->
+            <div
+              v-if="optionsDocked"
+              :class="optionClass('thinking')"
+              :style="optionStyle('thinking')"
+              @pointerenter="wakeControl('thinking')"
+              @pointerleave="restControl('thinking')"
+              @focusin="wakeControl('thinking')"
+              @focusout="restControl('thinking')"
+            >
+              <OrbNode
+                side="below"
+                docked
+                :lit="thinkingMode === true"
+                :idle="thinkingMode === false"
+                :label="optionName(chatText.optionThinking(uiLanguage), true)"
+                :state="chatText.optionThinkingState(uiLanguage, thinkingMode)"
+                :title="chatText.thinkingTitle(uiLanguage, thinkingMode)"
+                :aria-label="chatText.thinkingChip(uiLanguage, thinkingMode)"
+                :aria-pressed="thinkingMode === true"
+                @click="cycleThinkingMode"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.44-3.16Z" />
+                  <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.44-3.16Z" />
+                </svg>
+              </OrbNode>
+            </div>
             <button
+              v-else
               type="button"
               @click="cycleThinkingMode"
               class="btn-brand-ghost px-3 py-3 rounded-2xl shrink-0 transition-colors text-xs font-semibold inline-flex items-center gap-1.5"
@@ -1196,7 +1391,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onUnmounted, onBeforeUnmount, defineAsyncComponent } from "vue";
+import { ref, reactive, computed, nextTick, watch, onMounted, onUnmounted, onBeforeUnmount, defineAsyncComponent } from "vue";
 import { useRouter } from "vue-router";
 import { useStorage } from "@vueuse/core";
 import { sanitizeAssistantMessageContent, useGatewayStore } from "@/stores/gateway";
@@ -1214,7 +1409,10 @@ import StepDetailPanel from "@/components/StepDetailPanel.vue";
 import OrbActivity from "@/components/OrbActivity.vue";
 import OrbNode from "@/components/OrbNode.vue";
 import { activityRing, freeHalfWidth, liveActivity } from "@/composables/orbActivity";
-import { controlLayout, stationBox, type ControlId } from "@/composables/orbControls";
+import {
+  controlLayout, optionLabelLines, optionStations, optionsFit, optionsFloor, starterLayout, stationBox, stepLabelFloor,
+  type ControlId,
+} from "@/composables/orbControls";
 import { turnLanguage } from "@/composables/turnText";
 import { detectLanguage } from "@/speech/speechText";
 import UserInputCard from "@/components/input/UserInputCard.vue";
@@ -1459,8 +1657,15 @@ function closeComposerMenus(except?: Element | null): void {
   for (const menu of openComposerMenus()) if (menu !== except) menu.open = false;
 }
 const composerMenuOpen = ref(false);
-function onComposerMenuToggle(): void {
+/** What the input bay offers beside its field: three menus and two switches. */
+type OptionId = "options" | "jobs" | "effort" | "images" | "thinking";
+/** Which of the menus is open, by its option: on the orbit its node turns into the way out. */
+const openMenus = reactive({ options: false, jobs: false, effort: false });
+function onComposerMenuToggle(event?: Event): void {
   composerMenuOpen.value = openComposerMenus().length > 0;
+  const menu = event?.target instanceof HTMLDetailsElement ? event.target : null;
+  const option = menu?.dataset["option"];
+  if (menu && (option === "options" || option === "jobs" || option === "effort")) openMenus[option] = menu.open;
 }
 function onDocumentPointerDown(event: PointerEvent): void {
   if (!composerMenuOpen.value) return;
@@ -1692,6 +1897,16 @@ function controlStyle(id: ControlId, parked: { left: string; top: string }, park
 const controlLabelled = computed(() => Object.fromEntries(
   controlStations.value.stations.map((station) => [station.id, station.labelled]),
 ) as Record<ControlId, boolean>);
+/**
+ * The session's and the actions' controls: on the orbit or parked; and behind the page while one
+ * of the input bay's menus is open. Such a menu, hung from an option on the orbit, opens up past
+ * them, and they are teleported out of the page's own stacking order, above all of it — the
+ * session's name lay across the menu's first row.
+ */
+const controlClass = computed(() => [
+  controlsDocked.value ? "orb-control--docked" : "",
+  composerMenuOpen.value ? "orb-control--under" : "",
+]);
 const sessionControlStyle = computed(() => controlStyle("session", sessionOrbStyle.value, PARKED_SIZE));
 const actionsControlStyle = computed(() => controlStyle("actions", actionsOrbStyle.value, PARKED_SIZE));
 const messageControlStyle = computed(() => controlStyle("message", launcherOrbStyle.value, PARKED_MESSAGE_SIZE));
@@ -1740,10 +1955,10 @@ const sessionPodLeft = computed(() => (controlsDocked.value ? true : sessionOrbX
 const actionsPodLeft = computed(() => (controlsDocked.value ? false : actionsOrbX.value > hudWin.value.w / 2));
 const actionsPodUp = computed(() => !controlsDocked.value && actionsOrbY.value > hudWin.value.h / 2);
 
-// Which control the pointer or the keyboard is on: the canvas quickens that one's gimbal.
-const wokenControl = ref<ControlId | null>(null);
-function wakeControl(id: ControlId): void { wokenControl.value = id; }
-function restControl(id: ControlId): void { if (wokenControl.value === id) wokenControl.value = null; }
+// Which control or option the pointer or the keyboard is on: the canvas quickens that one's gimbal.
+const wokenControl = ref<ControlId | OptionId | null>(null);
+function wakeControl(id: ControlId | OptionId): void { wokenControl.value = id; }
+function restControl(id: ControlId | OptionId): void { if (wokenControl.value === id) wokenControl.value = null; }
 /** A parked control can be dragged, and says so; one on the orbit carries its name beside it. */
 function controlTitle(name: string): string {
   return controlsDocked.value ? name : `${name} ${chatText.nodeDragHint(uiLanguage)}`;
@@ -1794,25 +2009,27 @@ interface SessionAction {
   disabled?: boolean; disabledReason?: string; danger?: boolean; run: () => void;
 }
 
+/** What can be done with the session on the page; nothing where there is none. */
 const sessionActions = computed((): SessionAction[] => {
-  const actions: SessionAction[] = [
-    { key: "new", glyph: "＋", label: "New session", hint: "Start a fresh conversation", run: () => { void gateway.createSession(); } },
+  if (!gateway.currentSessionId) return [];
+  const l = uiLanguage;
+  const busy = exportingTranscript.value;
+  const noMessages = gateway.messages.length === 0;
+  const whyNot = busy ? chatText.exportRunning(l) : chatText.nothingToExport(l);
+  return [
+    { key: "md",    glyph: "MD",  label: chatText.markdownTitle(l), hint: chatText.actionMarkdownHint(l), disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportMarkdown(); } },
+    { key: "pdf",   glyph: "PDF", label: chatText.pdfTitle(l),      hint: chatText.actionPdfHint(l),      disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportPDF(); } },
+    { key: "debug", glyph: "DBG", label: chatText.actionDebug(l),   hint: chatText.actionDebugHint(l),    disabled: busy, disabledReason: whyNot, run: () => { void exportDebugMarkdown(); } },
+    { key: "audit", glyph: "AUD", label: chatText.actionAudit(l),   hint: chatText.actionAuditHint(l),    disabled: busy, disabledReason: whyNot, run: () => { void exportAuditMarkdown(); } },
+    { key: "arch",  glyph: "ARC", label: chatText.actionArchive(l), hint: chatText.actionArchiveHint(l),  run: () => { void archiveCurrentSession(); } },
+    { key: "reset", glyph: "RST", label: chatText.actionReset(l),   hint: chatText.actionResetHint(l), danger: true, run: () => { void resetSession(); } },
   ];
-  if (gateway.currentSessionId) {
-    const busy = exportingTranscript.value;
-    const noMessages = gateway.messages.length === 0;
-    const whyNot = busy ? "An export is still running" : "Nothing to export yet";
-    actions.push(
-      { key: "md",    glyph: "MD",  label: "Download as Markdown", hint: "The conversation as a .md file",      disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportMarkdown(); } },
-      { key: "pdf",   glyph: "PDF", label: "Export as PDF",        hint: "Opens the print view in a new tab",   disabled: noMessages || busy, disabledReason: whyNot, run: () => { void exportPDF(); } },
-      { key: "debug", glyph: "DBG", label: "Debug bundle",         hint: "Transcript and audit log in one file", disabled: busy, disabledReason: whyNot, run: () => { void exportDebugMarkdown(); } },
-      { key: "audit", glyph: "AUD", label: "Audit log",            hint: "What the swarm did in this session",  disabled: busy, disabledReason: whyNot, run: () => { void exportAuditMarkdown(); } },
-      { key: "arch",  glyph: "ARC", label: "Archive session",      hint: "Moves it to Sessions, out of the way", run: () => { void archiveCurrentSession(); } },
-      { key: "reset", glyph: "RST", label: "Reset session…",       hint: "Clears this conversation", danger: true, run: () => { void resetSession(); } },
-    );
-  }
-  return actions;
 });
+/** From the session's menu: a fresh conversation. */
+function startNewSession(): void {
+  sessionOpen.value = false;
+  void gateway.createSession();
+}
 
 const compactComposer = computed(() => gateway.isLoading || analysing.value);
 
@@ -1862,9 +2079,24 @@ function maybeCloseComposer() {
 // guessed constant, under which the pill and the banners ended up hidden behind the bay.
 const bayEl = ref<HTMLElement | null>(null);
 let bayObserver: ResizeObserver | null = null;
+/** The composer (the field with the options' row under it, or with Send beside it) and its field. */
+const composerEl = ref<HTMLElement | null>(null);
+const composerFieldEl = ref<HTMLElement | null>(null);
+/**
+ * The bay as it stands, and as it is without the row of its options: its height while they stand
+ * on the orbit. Taken as what is over and under the composer plus the field alone, so it reads
+ * the same whichever way the options stand now — measured as "the bay less its row", the two
+ * ways disagreed by a rule's worth of pixels, and the options went to and fro for ever.
+ */
+const bayHeight = ref(0);
+const bayHeightSlim = ref(0);
 function publishBayHeight(): void {
-  const height = bayOpen.value && bayEl.value ? bayEl.value.offsetHeight : 0;
-  document.documentElement.style.setProperty("--bay-h", `${height}px`);
+  const full = bayEl.value?.offsetHeight ?? 0;
+  document.documentElement.style.setProperty("--bay-h", `${bayOpen.value ? full : 0}px`);
+  bayHeight.value = full;
+  const composer = composerEl.value?.offsetHeight ?? 0;
+  const field = composerFieldEl.value?.offsetHeight ?? 0;
+  bayHeightSlim.value = Math.max(0, full - composer + field);
 }
 onMounted(() => {
   if (typeof ResizeObserver !== "undefined" && bayEl.value) {
@@ -2022,6 +2254,37 @@ const orbRing = computed(() => ({
   ...activityRing(viewportWidth.value, viewportHeight.value, freeHalfWidth(viewportWidth.value, viewportHeight.value, 16, podLane.value)),
   active: Boolean(orbActivity.value) && viewportWidth.value >= 1100,
 }));
+
+// ── The start suggestions on their arc ───────────────────────────────────────────────────────
+// Where each suggestion of an empty chat stands round the orb on a wide window, and the arc the
+// canvas draws under them (composables/orbControls.ts starterLayout).
+const starterSpots = computed(() => starterLayout(
+  starters.items.length, hudWin.value.w, hudWin.value.h,
+  controlStations.value.stations.find((station) => station.id === "message"),
+));
+function starterStyle(index: number): Record<string, string> {
+  const { stations } = starterSpots.value;
+  const station = stations[index];
+  if (!station) return {};
+  // 1 for the suggestion nearest the viewer, less for the ones further round: they are set a
+  // little smaller and fainter, as they are further away.
+  const depth = station.scale / Math.max(...stations.map((other) => other.scale));
+  return {
+    left: `calc(50% + ${station.x.toFixed(1)}px)`,
+    top: `calc(50% + ${station.y.toFixed(1)}px)`,
+    // It flies out from the orb's centre: the front one first, then the ones beside it.
+    "--from-x": `${Math.round(-station.x)}px`,
+    "--from-y": `${Math.round(-station.y)}px`,
+    "--delay": `${Math.round(60 + 70 * Math.abs(index - (stations.length - 1) / 2))}ms`,
+    "--depth": depth.toFixed(3),
+    "--label-max": `${station.maxWidth}px`,
+  };
+}
+const orbSuggestions = computed(() => {
+  if (!controlsDocked.value || !gateway.connected) return null;
+  const { orbit, span } = starterSpots.value;
+  return { radius: orbit.radius, tilt: orbit.tilt, span, shown: showStarters.value };
+});
 // The page's controls for the orb canvas, while they stand on their orbit: the canvas draws each
 // one's gimbal and its stretch of the orbit (the buttons themselves are the page's). The message
 // input's goes while its bay is open; one the pointer is on, or whose menu is open, is awake.
@@ -2030,15 +2293,28 @@ const orbControls = computed(() => {
   const { orbit, stations } = controlStations.value;
   return {
     orbit,
-    nodes: stations.map((station) => ({
-      id: station.id,
-      angle: station.angle,
-      radius: station.radius,
-      shown: station.id !== "message" || !composerOpen.value,
-      lit: wokenControl.value === station.id
-        || (station.id === "session" && sessionOpen.value)
-        || (station.id === "actions" && actionsOpen.value),
-    })),
+    nodes: [
+      ...stations.map((station) => ({
+        id: station.id as string,
+        angle: station.angle,
+        radius: station.radius,
+        shown: station.id !== "message" || !composerOpen.value,
+        lit: wokenControl.value === station.id
+          || (station.id === "session" && sessionOpen.value)
+          || (station.id === "actions" && actionsOpen.value),
+      })),
+      // The input's options, while they stand on the orbit and the bay is open.
+      ...(optionsDocked.value ? optionLayout.value.map((station, index) => {
+        const id = shownOptionIds.value[index]!;
+        return {
+          id: id as string,
+          angle: station.angle,
+          radius: station.radius,
+          shown: bayOpen.value,
+          lit: wokenControl.value === id || (id !== "images" && id !== "thinking" && openMenus[id]),
+        };
+      }) : []),
+    ],
   };
 });
 // Below 1100 px the ring has no room and the orb shows no steps: the live bubble keeps its own
@@ -2067,6 +2343,99 @@ const showOptionsDropdown = computed(() => (
   || configuredJobs.value.length > 0
 ));
 const hasSidePanels = computed(() => Boolean(gateway.visibleSwarmState) || shellStore.hasEntries || computerStore.loading || computerStore.sessions.length > 0 || gateway.isLoading);
+
+// ── The input's options on the orbit ─────────────────────────────────────────────────────────
+// What the bay offers beside its field stood in it as a row of chips. Where the window has the
+// room they stand on the controls' orbit while the bay is open, fanned out either side of its
+// front (composables/orbControls.ts optionStations); the bay keeps its field and Send. Where it
+// has not — a low window, a bay grown tall with attachments or the voice bar, the controls parked
+// at the page's edge — they stay in the bay as chips. The same elements either way.
+const shownOptionIds = computed<OptionId[]>(() => [
+  ...(showOptionsDropdown.value ? ["options" as const] : []),
+  ...(showJobsDropdown.value ? ["jobs" as const] : []),
+  "effort", "images", "thinking",
+]);
+const optionLayout = computed(() => optionStations(shownOptionIds.value.length, hudWin.value.w, hudWin.value.h, controlStations.value.orbit));
+/** Two lines under an option on a tall window (its name, what it is set to); one below that. */
+const optionLines = computed(() => optionLabelLines(hudWin.value.h));
+/** The bay's height without the options' row and with an idle field: what it is never under for long. */
+const BAY_SLIM_IDLE = 150;
+/**
+ * Whether the options stand on the orbit. Measured against the bay without their row, whichever
+ * way they stand now, and against an idle field at the least, so a turn starting (the field
+ * shrinks) does not move them. Coming back onto the orbit asks for a little more room than
+ * staying on it: a bay a pixel either side of the limit would otherwise send them to and fro.
+ */
+const optionsDocked = ref(false);
+function settleOptions(): void {
+  const { w, h } = hudWin.value;
+  const slack = optionsDocked.value ? 0 : 8;
+  optionsDocked.value = controlsDocked.value && optionsFit(optionLayout.value, optionLines.value, h, {
+    bayHeight: Math.max(bayHeightSlim.value, BAY_SLIM_IDLE) + slack,
+    // Under the front step's label, whether a turn runs now or not: one will.
+    over: stepLabelFloor(w, h, freeHalfWidth(w, h, 16, 0)),
+  });
+}
+// Watched from the moment the page is mounted: which options there are is decided by what is
+// declared further down this setup, and a watcher reads its sources the moment it is made.
+onMounted(() => {
+  publishBayHeight();
+  settleOptions();
+  watch([controlsDocked, optionLayout, optionLines, hudWin, bayHeightSlim], settleOptions);
+});
+// The bay is measured again once the options have moved in or out of it — on the next frame,
+// never within the same turn of the event loop.
+watch(optionsDocked, () => { requestAnimationFrame(publishBayHeight); }, { flush: "post" });
+
+function optionStation(id: OptionId) {
+  return optionLayout.value[shownOptionIds.value.indexOf(id)];
+}
+/** An option's classes on the orbit: which way its menu opens, and folded away with the bay. */
+function optionClass(id: OptionId): string[] {
+  const station = optionsDocked.value ? optionStation(id) : undefined;
+  if (!station) return [];
+  return ["orb-option", `orb-option--${station.side}`, bayOpen.value ? "" : "orb-option--away"];
+}
+/**
+ * An option's place on the orbit, from the bay's own box: the bay is centred on the viewport like
+ * the orb, and its foot stands 20 px over the window's (1 px of that its border).
+ */
+function optionStyle(id: OptionId): Record<string, string> | undefined {
+  const station = optionsDocked.value ? optionStation(id) : undefined;
+  if (!station) return undefined;
+  const { w, h } = hudWin.value;
+  const front = controlStations.value.stations.find((candidate) => candidate.id === "message")!;
+  const left = w / 2 + station.x - station.size / 2;
+  const top = h / 2 + station.y - station.size / 2;
+  return {
+    left: `calc(50% + ${Math.round(station.x - station.size / 2)}px)`,
+    bottom: `${Math.round(h / 2 - 21 - station.y - station.size / 2)}px`,
+    width: `${station.size}px`,
+    height: `${station.size}px`,
+    "--node-size": `${station.size}px`,
+    // Folded away, an option is where the message input's control stands: that control opens into them.
+    "--away-x": `${Math.round(front.x - station.x)}px`,
+    "--away-y": `${Math.round(front.y - station.y)}px`,
+    "--delay": `${station.index * 40}ms`,
+    // Its menu stands on the option's own foot and grows upwards and away from the middle: up to
+    // the header, out to the window's edge.
+    "--panel-room": `${Math.round(Math.max(200, top + station.size - 76))}px`,
+    "--panel-w": `${Math.round(Math.max(220, (station.side === "left" ? left : w - left - station.size) - 28))}px`,
+  };
+}
+/** An option's name over what it is set to — where there is one line only, the setting stands alone. */
+function optionName(name: string, hasState: boolean): string {
+  return optionLines.value === 2 || !hasState ? name : "";
+}
+/** How many jobs the Jobs option counts: the running ones, else the recent ones. */
+const jobsNodeState = computed(() => {
+  const running = scenesStore.runningJobs.length;
+  return running > 0 ? String(running) : sceneJobs.value.length > 0 ? String(sceneJobs.value.length) : "";
+});
+/** How far below the orb the options reach, for the turn's status line, which stands under them. */
+const orbStatusFloor = computed(() => (optionsDocked.value && bayOpen.value ? optionsFloor(optionLayout.value, optionLines.value) : 0));
+/** Where the open bay begins, in pixels below the viewport's centre: the status line ends above it. */
+const orbStatusCeiling = computed(() => (bayOpen.value && bayHeight.value > 0 ? hudWin.value.h / 2 - 20 - bayHeight.value : undefined));
 
 // ── Off-canvas side panel ───────────────────────────────────────────────
 const sidePanelOpen = ref(false);
@@ -4186,6 +4555,9 @@ onUnmounted(() => {
   z-index: 220;
   touch-action: none;
 }
+/* Behind the page (its <main> is a stacking context of its own, at 10) while one of the input
+   bay's menus is open: the menu covers what it opens over. */
+.orb-control--under { z-index: 9; }
 /* On its orbit a control follows a resized window without a jump; a parked one follows the
    pointer that drags it at once. */
 .orb-control--docked {
@@ -4342,6 +4714,23 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .actions-pod__rule { height: 1px; margin: 0.25rem 0.3rem; background: var(--hairline); }
+/* With no session there is nothing in the list: one line says where a session starts. */
+.actions-pod__empty {
+  margin: 0;
+  padding: 0.8rem 0.9rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: rgb(148, 163, 184);
+}
+/* In the session's menu: a new session, set off from the picker above it. */
+.session-pod__new {
+  width: 100%;
+  margin-top: 0.1rem;
+  padding-left: 0.3rem;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0 0 0.45rem 0.45rem;
+  padding-top: 0.6rem;
+}
 .actions-pod__item--danger .actions-pod__label { color: rgb(254, 202, 202); }
 .actions-pod__item--danger .actions-pod__glyph {
   border-color: rgba(248, 113, 113, 0.45);
@@ -4387,6 +4776,127 @@ onUnmounted(() => {
   margin: 0;
   color: rgb(186 230 253 / 0.8);
   font-size: 0.9rem;
+}
+
+/* ── The start suggestions on their arc ─────────────────────────────────
+   Each stands with its point on its station of the arc (left and top, set by the page); its words
+   hang under the point at the arc's front and stand on the outer side of it further round. */
+.orb-starters {
+  position: fixed;
+  inset: 0;
+  /* under the page's controls (220), over the conversation's column */
+  z-index: 219;
+  pointer-events: none;
+}
+.orb-starters-leave-active { transition: opacity 200ms ease; }
+.orb-starters-leave-to { opacity: 0; }
+
+.orb-starter {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.25rem 0;
+  border: 0;
+  background: none;
+  color: rgb(186 230 253);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+  animation: orb-starter-out 640ms var(--ease-out) var(--delay, 0ms) both;
+}
+/* The point is 10 px across, and its centre is the station. */
+.orb-starter--right { transform: translate(-5px, -50%); }
+.orb-starter--left {
+  flex-direction: row-reverse;
+  transform: translate(calc(-100% + 5px), -50%);
+}
+.orb-starter--below {
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0 0.25rem;
+  transform: translate(-50%, -5px);
+}
+@keyframes orb-starter-out {
+  from {
+    opacity: 0;
+    translate: var(--from-x, 0px) var(--from-y, 0px);
+    scale: 0.3;
+  }
+}
+
+.orb-starter__dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1.5px solid rgb(var(--logo-cyan));
+  box-shadow: 0 0 8px rgba(var(--logo-cyan), 0.6), inset 0 0 4px rgba(var(--logo-cyan), 0.5);
+  opacity: calc(0.25 + 0.75 * var(--depth, 1));
+  transition: background-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out), transform 180ms var(--ease-out);
+}
+.orb-starter__label {
+  max-width: var(--label-max, 16rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--logo-cyan), 0.26);
+  background: rgba(var(--app-bg), 0.78);
+  /* nearer is larger: 0.86rem at the front of the arc */
+  font-size: calc(0.86rem * var(--depth, 1));
+  line-height: 1.35;
+  opacity: calc(0.3 + 0.7 * var(--depth, 1));
+  transition: border-color 180ms var(--ease-out), color 180ms var(--ease-out), opacity 180ms var(--ease-out);
+}
+.orb-starter:hover .orb-starter__label,
+.orb-starter:focus-visible .orb-starter__label {
+  border-color: rgba(var(--logo-cyan), 0.7);
+  color: #fff;
+  opacity: 1;
+}
+.orb-starter:hover .orb-starter__dot,
+.orb-starter:focus-visible .orb-starter__dot {
+  background: rgb(var(--logo-cyan));
+  box-shadow: 0 0 14px rgba(var(--logo-cyan), 0.9);
+  opacity: 1;
+  transform: scale(1.25);
+}
+.orb-starter:focus-visible { outline: none; }
+.orb-starter:focus-visible .orb-starter__label {
+  outline: 2px solid rgba(var(--logo-cyan), 0.85);
+  outline-offset: 2px;
+}
+
+/* The line over the suggestions and the one under them, centred under the orb. */
+.orb-starters__lead,
+.orb-starters__hint {
+  position: absolute;
+  left: 50%;
+  margin: 0;
+  white-space: nowrap;
+  animation: orb-starters-fade 500ms ease 260ms both;
+}
+.orb-starters__lead {
+  transform: translate(-50%, -50%);
+  color: rgb(186 230 253 / 0.8);
+  font-size: 0.9rem;
+}
+.orb-starters__hint {
+  display: none;
+  transform: translateX(-50%);
+  font-family: var(--font-label);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(165, 243, 252, 0.45);
+}
+@media (hover: hover) and (pointer: fine) {
+  .orb-starters__hint { display: block; }
+}
+@keyframes orb-starters-fade {
+  from { opacity: 0; }
 }
 
 /* Only where there is a keyboard to type on. */
@@ -5123,6 +5633,11 @@ onUnmounted(() => {
 @media (prefers-reduced-motion: reduce) {
   .chat-input-bay,
   .orb-control,
+  .orb-starter,
+  .orb-starters__lead,
+  .orb-starters__hint,
+  .orb-option,
+  .orb-option > .chat-dropdown__menu,
   .session-pod,
   .actions-pod,
   .chat-orb-layer,
@@ -5209,6 +5724,106 @@ onUnmounted(() => {
   color: rgb(252, 211, 77);
 }
 .effort-option__text { font-size: 0.72rem; line-height: 1.4; color: rgb(148, 163, 184); }
+
+/* ── The input's options on the orbit ───────────────────────────────────
+   While they stand there (Chat.vue optionsDocked) the bay keeps its field and its Send button,
+   side by side; the options are placed from the bay's own box, whose centre line is the
+   viewport's and whose foot stands a fixed way over the window's, so each sits on its station of
+   the controls' orbit, where the orb canvas draws its gimbal. (After the chips' own rules, which
+   these replace.) */
+.chat-composer--docked {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+.chat-composer--docked .chat-composer__field { flex: 1 1 auto; min-width: 0; }
+.chat-composer--docked .chat-composer__controls,
+.chat-composer--docked .chat-composer__menus { display: contents; }
+.chat-composer--docked .chat-composer__primary-actions { flex: none; flex-wrap: nowrap; }
+
+.orb-option {
+  position: absolute;
+  z-index: 2;
+  /* Out from where the message input's control stands, each a beat after the one before; back
+     into it as the bay folds away. */
+  transition:
+    transform 440ms var(--ease-out) var(--delay, 0ms),
+    opacity 300ms var(--ease-out) var(--delay, 0ms),
+    left 420ms var(--ease-out), bottom 420ms var(--ease-out);
+}
+.orb-option--away {
+  opacity: 0;
+  transform: translate(var(--away-x, 0px), var(--away-y, 0px)) scale(0.4);
+  pointer-events: none;
+}
+/* An option's menu is above its neighbours on the orbit. */
+.orb-option[open] { z-index: 3; }
+
+/* A menu's summary is the node's face here, not a chip. */
+.orb-option > .chat-dropdown__summary {
+  position: absolute;
+  inset: 0;
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+}
+.orb-option > .chat-dropdown__summary:focus-visible {
+  outline: 2px solid rgba(var(--logo-cyan), 0.85);
+  outline-offset: 4px;
+}
+.orb-option > .chat-dropdown__summary:focus-visible :deep(.orb-node) { transform: scale(1.07); }
+
+/* A menu hangs beside its option, on the side away from the middle, at the end of a short leader
+   line; it stands on the option's foot and grows upwards, and swings out like a door. */
+.orb-option > .chat-dropdown__menu {
+  left: auto;
+  right: auto;
+  bottom: 0;
+  width: min(24rem, var(--panel-w, 24rem));
+  max-height: var(--panel-room, 32rem);
+  border-radius: 0.6rem;
+  border-color: rgba(var(--logo-cyan), 0.22);
+}
+.orb-option > .chat-dropdown__menu--jobs { width: min(30rem, var(--panel-w, 30rem)); }
+.orb-option > .chat-dropdown__menu--effort { width: min(26rem, var(--panel-w, 26rem)); }
+.orb-option--left > .chat-dropdown__menu {
+  right: calc(100% + 0.85rem);
+  transform-origin: 100% calc(100% - var(--node-size, 2.6rem) / 2);
+  animation: option-panel-left 340ms var(--ease-out) both;
+}
+.orb-option--right > .chat-dropdown__menu {
+  left: calc(100% + 0.85rem);
+  transform-origin: 0 calc(100% - var(--node-size, 2.6rem) / 2);
+  animation: option-panel-right 340ms var(--ease-out) both;
+}
+@keyframes option-panel-left {
+  from { opacity: 0; transform: perspective(900px) rotateY(-42deg) scale(0.96); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes option-panel-right {
+  from { opacity: 0; transform: perspective(900px) rotateY(42deg) scale(0.96); }
+  to   { opacity: 1; transform: none; }
+}
+.orb-option[open]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 0.85rem;
+  height: 1px;
+  pointer-events: none;
+}
+.orb-option--left[open]::after {
+  right: 100%;
+  background: linear-gradient(270deg, rgba(var(--logo-cyan), 0.15), rgba(var(--logo-cyan), 0.7));
+}
+.orb-option--right[open]::after {
+  left: 100%;
+  background: linear-gradient(90deg, rgba(var(--logo-cyan), 0.15), rgba(var(--logo-cyan), 0.7));
+}
 
 /* Small controls get a finger-sized target on touch screens; a mouse keeps the compact look. */
 @media (pointer: coarse) {

@@ -27,6 +27,7 @@
         v-if="activity"
         type="button"
         class="orb-status"
+        :class="statusCompact ? 'orb-status--compact' : ''"
         :style="statusStyle"
         :title="clickHint"
         @click="emit('open', activity.current?.stepId)"
@@ -58,6 +59,13 @@ const props = defineProps<{
   language?: TurnLanguage;
   /** The room the messages keep free at their outer edge for the page's round controls, in pixels. */
   lane?: number;
+  /**
+   * How far below the viewport's centre the page's own controls reach under the orb (the input's
+   * options on the orbit's front), in pixels: the status line stands under them.
+   */
+  floor?: number;
+  /** Where the open input bay begins, in pixels below the viewport's centre: the status line ends above it. */
+  ceiling?: number;
 }>();
 
 const emit = defineEmits<{
@@ -96,12 +104,21 @@ const view = computed(() => ({
   /** The ring's half-width on the page. */
   rx: orbitGeometry(width.value, height.value, freeHalf.value).rx,
 }));
-/** Under the orb and the front of the ring with its labels. */
-const statusStyle = computed(() => {
-  if (narrow.value) return {};
+/** Under the orb, the front of the ring with its labels, and whatever of the page's stands there. */
+const statusTop = computed(() => {
   const front = orbitPoint(0, 1, view.value).y;
-  return { top: `calc(50% + ${Math.round(Math.max(orbPixels(width.value, height.value) * 1.08, front + 52))}px)` };
+  return Math.round(Math.max(orbPixels(width.value, height.value) * 1.08, front + 52, (props.floor ?? 0) + STATUS_GAP));
 });
+const statusStyle = computed(() => (narrow.value ? {} : { top: `calc(50% + ${statusTop.value}px)` }));
+/** The status line's two rows, and the air it keeps to what stands over and under it, in pixels. */
+const STATUS_HEIGHT = 68;
+const STATUS_GAP = 10;
+/**
+ * Where its two rows would reach into the input bay, the status line keeps to its words: the
+ * step it names in its second row is the one at the front of the ring.
+ */
+const statusCompact = computed(() => !narrow.value && props.ceiling !== undefined
+  && statusTop.value + STATUS_HEIGHT + STATUS_GAP > props.ceiling);
 
 const reducedMotion = typeof window !== "undefined"
   && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
@@ -407,6 +424,12 @@ onBeforeUnmount(() => {
   pointer-events: auto;
   cursor: pointer;
 }
+/* Short of room over the input bay: the words alone, on one line. */
+.orb-status--compact {
+  padding: 0.4rem 1rem 0.45rem;
+}
+.orb-status--compact .orb-status__step { display: none; }
+.orb-status--compact .orb-status__headline { -webkit-line-clamp: 1; }
 /* On a narrow window the status sits under the header, clear of the round controls on the right. */
 .orb-activity--narrow .orb-status {
   top: 4.75rem;

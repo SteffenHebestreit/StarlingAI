@@ -615,8 +615,9 @@ packages/
                             OrbActivity.vue — the running turn at the orb: its steps on
                               the orb's step ring, its newest words in a status line
                             OrbNode.vue — a chat control's face (session, its actions,
-                              message input): on its orbit round the orb on a wide
-                              window, parked at the page's edge on a narrow one
+                              message input, the input's options): on its orbit round
+                              the orb on a wide window; parked at the page's edge, or
+                              a chip in the input bay, on a narrow one
                             SwarmStatusPanel.vue — live agent and bus status
                             BrowserSessionPanel.vue · ComputerSessionPanel.vue ·
                               ShellSessionPanel.vue — live operator docks

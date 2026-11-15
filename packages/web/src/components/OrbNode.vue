@@ -1,13 +1,19 @@
 <template>
-  <!-- One of the chat page's round controls (the session, its actions, the message input): a
-       glyph in a hairline bezel, with no body of its own. On a wide window it stands on an orbit
-       round the orb, where the orb canvas draws a gimbal round it (composables/orbControls.ts); on
-       a narrow one it is parked at the page's edge and this face is all of it. Listeners and
-       ARIA attributes given to the component land on the button. -->
-  <button
-    type="button"
+  <!-- One of the chat page's round controls (the session, its actions, the message input, and
+       the input's options): a glyph in a hairline bezel, with no body of its own. On a wide
+       window it stands on an orbit round the orb, where the orb canvas draws a gimbal round it
+       (composables/orbControls.ts); on a narrow one it is parked at the page's edge and this face
+       is all of it. Listeners and ARIA attributes given to the component land on its root: a
+       button, or a plain span where something else takes the click (a <summary>). -->
+  <component
+    :is="as"
+    :type="as === 'button' ? 'button' : undefined"
     class="orb-node"
-    :class="[`orb-node--${side}`, { 'orb-node--open': open, 'orb-node--idle': idle, 'orb-node--docked': docked }]"
+    :class="[
+      `orb-node--${side}`,
+      tone ? `orb-node--${tone}` : '',
+      { 'orb-node--open': open, 'orb-node--idle': idle, 'orb-node--docked': docked, 'orb-node--lit': lit },
+    ]"
   >
     <span class="orb-node__bezel" aria-hidden="true" />
     <span class="orb-node__spark" aria-hidden="true" />
@@ -15,8 +21,11 @@
       <span v-if="open" class="orb-node__close">✕</span>
       <slot v-else />
     </span>
-    <span v-if="label && docked" class="orb-node__label" aria-hidden="true">{{ label }}</span>
-  </button>
+    <span v-if="(label || state) && docked" class="orb-node__label" aria-hidden="true">
+      <span v-if="label" class="orb-node__name">{{ label }}</span>
+      <span v-if="state" class="orb-node__state">{{ state }}</span>
+    </span>
+  </component>
 </template>
 
 <script setup lang="ts">
@@ -31,7 +40,15 @@ withDefaults(defineProps<{
   idle?: boolean;
   /** The control's name in a word, shown beside it while docked. */
   label?: string;
-}>(), { side: "below", docked: false, open: false, idle: false, label: "" });
+  /** What it is set to, in a word, under or beside its name: an option's current setting. */
+  state?: string;
+  /** Switched on: the whole bezel is lit. */
+  lit?: boolean;
+  /** A setting to be careful with: it is drawn in amber. */
+  tone?: "caution" | "";
+  /** The root element: a span where the node stands inside something that takes the click itself. */
+  as?: "button" | "span";
+}>(), { side: "below", docked: false, open: false, idle: false, label: "", state: "", lit: false, tone: "", as: "button" });
 </script>
 
 <style scoped>
@@ -126,10 +143,19 @@ withDefaults(defineProps<{
 .orb-node:active { transform: scale(0.96); }
 .orb-node:hover .orb-node__bezel::before,
 .orb-node:focus-visible .orb-node__bezel::before,
-.orb-node--open .orb-node__bezel::before {
+.orb-node--open .orb-node__bezel::before,
+.orb-node--lit .orb-node__bezel::before {
   border-color: rgba(var(--logo-cyan), 0.7);
   box-shadow: 0 0 14px rgba(var(--logo-cyan), 0.22), inset 0 0 10px rgba(var(--logo-cyan), 0.12);
 }
+/* A setting to be careful with: amber, bezel and glyph and what it says. */
+.orb-node--caution { color: rgb(252, 211, 77); }
+.orb-node--caution .orb-node__bezel::before {
+  border-color: rgba(251, 191, 36, 0.7);
+  box-shadow: 0 0 14px rgba(251, 191, 36, 0.22), inset 0 0 10px rgba(251, 191, 36, 0.1);
+}
+.orb-node--caution .orb-node__glyph { filter: drop-shadow(0 0 4px rgba(251, 191, 36, 0.6)); }
+.orb-node--caution .orb-node__state { color: rgb(252, 211, 77); }
 .orb-node:focus-visible {
   outline: 2px solid rgba(var(--logo-cyan), 0.85);
   outline-offset: 4px;
@@ -188,6 +214,16 @@ withDefaults(defineProps<{
   gap: 0.25rem;
   padding-left: 0.2em;
 }
+/* An option's two lines: its name, and under it what it is set to, which is the one to read. */
+.orb-node__name,
+.orb-node__state { display: block; line-height: 1.05; }
+/* The setting is the line that gets read: a little larger than the name over it. */
+.orb-node__state {
+  font-size: 1.1em;
+  color: rgba(var(--logo-cyan), 0.95);
+}
+.orb-node--below .orb-node__name + .orb-node__state { margin-top: -0.02rem; }
+.orb-node--idle .orb-node__state { color: rgba(var(--logo-cyan), 0.6); }
 .orb-node--below .orb-node__label::before {
   width: 1px;
   height: 0.45rem;
@@ -197,8 +233,9 @@ withDefaults(defineProps<{
 .orb-node:focus-visible .orb-node__label {
   color: rgb(var(--logo-cyan));
 }
-/* Its menu opens where the name stands. */
-.orb-node--open .orb-node__label { opacity: 0; }
+/* A menu that opens to the side opens where the name stands. */
+.orb-node--left.orb-node--open .orb-node__label,
+.orb-node--right.orb-node--open .orb-node__label { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
   .orb-node,

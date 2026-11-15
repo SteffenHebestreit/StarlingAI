@@ -274,6 +274,15 @@ export const CONTROL_ORBIT_RING: HudRingSpec = {
   kind: "dash", radius: 1, width: 0.004, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0.012, flow: 0.006, seed: 24.9, arc: 1, tiles: 84, strength: 0.5,
 };
 
+/**
+ * The arc the start suggestions stand on (composables/orbControls.ts starterLayout): the front of
+ * a second, wider orbit in the controls' plane, in its own units. A plain line with two points of
+ * light running along it; how much of the circle it takes comes from the page.
+ */
+export const SUGGESTION_ARC: HudRingSpec = {
+  kind: "hair", radius: 1, width: 0, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0, flow: 0.03, seed: 26.3, arc: 0.48, tiles: 2, strength: 0.85,
+};
+
 /** The stretch of the orbit a control stands on, in the orbit's own units: the control is at its middle. */
 export const NODE_ORBIT_ARC: HudRingSpec = {
   kind: "hair", radius: 1, width: 0, offset: 0, normal: [0, 0, 1], frame: 0, wobble: 0, spin: 0, flow: 0.04, seed: 23.7, arc: 0.11, tiles: 0, strength: 1.15,

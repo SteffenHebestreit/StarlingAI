@@ -21,6 +21,8 @@ describe("chatText", () => {
       previewFile: ["fox.png"], removeNamed: ["fox.png"], voiceEyebrow: [true], sayWakeWord: ["Luna"],
       listeningFor: ["Luna"], wakePhraseDetected: ["Luna"], wakeRecognitionError: ["network"], transcriptReady: ["de"],
       transcribingFile: ["memo.wav"], audioAddedFrom: ["memo.wav"], wakeTitle: ["recording"],
+      sessionTurns: [3], copySessionId: ["abc123"], noSessionActions: ["Session"],
+      optionImagesState: ["ask"], optionThinkingState: [true],
     };
     for (const [key, label] of Object.entries(chatText)) {
       const args = sample[key] ?? [];

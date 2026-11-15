@@ -22,7 +22,7 @@ import {
 } from "./shaders/orbitalSystem";
 import { ambientVertexShader, ambientFragmentShader } from "./shaders/ambientSystem";
 import {
-  CONTROL_ORBIT_RING, HUD_RING_KINDS, NODE_ORBIT_ARC, NODE_RINGS, SPHERE_FRAMES, SPHERE_RINGS, STEP_RINGS,
+  CONTROL_ORBIT_RING, HUD_RING_KINDS, NODE_ORBIT_ARC, NODE_RINGS, SPHERE_FRAMES, SPHERE_RINGS, STEP_RINGS, SUGGESTION_ARC,
   hudRingFragmentShader, hudRingVertexShader, type HudRingSpec,
 } from "./shaders/hudRings";
 import { ringPosition } from "@/composables/orbActivity";
@@ -41,10 +41,18 @@ interface StepRingProp { radius: number; tilt: number; active: boolean }
  */
 interface ControlNodeProp { id: string; angle: number; radius: number; shown: boolean; lit: boolean }
 interface ControlsProp { orbit: { radius: number; tilt: number }; nodes: ControlNodeProp[] }
-const props = withDefaults(defineProps<{ aiState?: string; ring?: StepRingProp; controls?: ControlsProp | null }>(), {
+/**
+ * The arc the page's start suggestions stand on (composables/orbControls.ts starterLayout): the
+ * front of a wider orbit, `span` of its circle long and centred on its front, there while `shown`.
+ */
+interface SuggestionArcProp { radius: number; tilt: number; span: number; shown: boolean }
+const props = withDefaults(defineProps<{
+  aiState?: string; ring?: StepRingProp; controls?: ControlsProp | null; suggestions?: SuggestionArcProp | null;
+}>(), {
   aiState: "default",
   ring: () => ({ radius: 2.4, tilt: Math.asin(0.28), active: false }),
   controls: null,
+  suggestions: null,
 });
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -151,8 +159,10 @@ const breathUniform           = { value: 0 };
 // How far the state lets the hologram's lines take the dust's colours (VisualState.lineTint).
 const lineTintUniform         = { value: 0 };
 // How far from the orb's centre the breath's crest reaches a control while the page names no
-// orbit (the controls are leaving): the orbit's usual radius, in orb units.
+// orbit (the controls are leaving): the orbit's usual radius, in orb units. The same for the
+// start suggestions' arc.
 const CONTROL_ORBIT_FALLBACK  = 2.5;
+const SUGGESTION_ORBIT_FALLBACK = 4.4;
 
 // ─── Visual state ─────────────────────────────────────────────────────────────
 interface VisualState {
@@ -347,6 +357,9 @@ let controlOrbit:  THREE.Group;
 let controlNodes:  ControlNode[] = [];
 let orbitLine:     HudRing | null = null;   // the orbit's own faint line, there while the controls are
 let orbitPresence  = 0;
+let suggestionOrbit: THREE.Group;           // the plane of the start suggestions' wider orbit
+let suggestionArc: HudRing | null = null;
+let suggestionPresence = 0;
 let makeRing:      ((spec: HudRingSpec, parent: THREE.Object3D, margin: number) => HudRing) | null = null;
 const nodeTarget   = new THREE.Vector3();
 const RING_AXIS    = new THREE.Vector3(0, 0, 1);
@@ -805,6 +818,33 @@ function animate() {
     arcUniforms["uWaveRadius"]!.value = reach;
   }
 
+  // ── The start suggestions' arc: drawn out from the orbit's front to both sides as they appear,
+  // and drawn back in as they go ──
+  if (suggestionArc) {
+    const want = props.suggestions;
+    const there = want?.shown ? 1 : 0;
+    suggestionPresence += (there - suggestionPresence) * Math.min(1, delta * (there ? 1.8 : 4.5));
+    if (there === 0 && suggestionPresence < 0.004) suggestionPresence = 0;
+    const { mesh, spec } = suggestionArc;
+    mesh.visible = suggestionPresence > 0;
+    if (want) {
+      suggestionOrbit.rotation.x = Math.PI / 2 + want.tilt;
+      suggestionOrbit.scale.setScalar(want.radius);
+    }
+    if (mesh.visible) {
+      const span = want?.span ?? spec.arc;
+      const uniforms = (mesh.material as THREE.ShaderMaterial).uniforms;
+      // The arc is drawn from its own start: turned back by half of what is drawn, it stays
+      // centred on the orbit's front while it grows.
+      mesh.rotation.z = Math.PI / 2 - Math.PI * span * suggestionPresence;
+      uniforms["uArc"]!.value        = span;
+      uniforms["uFlow"]!.value       = spec.flow * hudPhase;
+      uniforms["uAssemble"]!.value   = suggestionPresence;
+      uniforms["uStrength"]!.value   = spec.strength * suggestionPresence;
+      uniforms["uWaveRadius"]!.value = want?.radius ?? SUGGESTION_ORBIT_FALLBACK;
+    }
+  }
+
   renderer.render(scene, camera);
 }
 
@@ -1049,6 +1089,10 @@ onMounted(() => {
   scene.add(controlGroup);
   orbitLine = buildRing(CONTROL_ORBIT_RING, controlOrbit, 0.04);
   orbitLine.mesh.visible = false;
+  suggestionOrbit = new THREE.Group();
+  controlGroup.add(suggestionOrbit);
+  suggestionArc = buildRing(SUGGESTION_ARC, suggestionOrbit, 0.03);
+  suggestionArc.mesh.visible = false;
 
   // The dust: the body's clouds, each hanging in one of the sphere's frames so it turns with the
   // cage that holds it. The clouds share every uniform but their own frame's matrix, which the
@@ -1114,7 +1158,8 @@ onUnmounted(() => {
   (ambientPoints?.material as THREE.Material | undefined)?.dispose();
   coreGlowMesh?.geometry.dispose();
   (coreGlowMesh?.material as THREE.Material | undefined)?.dispose();
-  for (const { mesh } of [...sphereRings, ...stepRings, ...controlNodes.flatMap((node) => [...node.rings, node.arc]), ...(orbitLine ? [orbitLine] : [])]) {
+  const pageRings = [...controlNodes.flatMap((node) => [...node.rings, node.arc]), ...(orbitLine ? [orbitLine] : []), ...(suggestionArc ? [suggestionArc] : [])];
+  for (const { mesh } of [...sphereRings, ...stepRings, ...pageRings]) {
     mesh.geometry.dispose();
     (mesh.material as THREE.Material).dispose();
   }
@@ -1123,6 +1168,7 @@ onUnmounted(() => {
   sphereFrames = [];
   controlNodes = [];
   orbitLine = null;
+  suggestionArc = null;
   makeRing = null;
   renderer?.dispose();
 });

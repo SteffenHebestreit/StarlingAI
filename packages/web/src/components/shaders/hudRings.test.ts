@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTROL_ORBIT_RING, HUD_RING_KINDS, NODE_ORBIT_ARC, NODE_RINGS, SPHERE_FRAMES, SPHERE_INNER, SPHERE_OUTER, SPHERE_RINGS, STEP_RINGS,
-  buildSphereRings, type HudRingKind,
+  SUGGESTION_ARC, buildSphereRings, type HudRingKind,
 } from "./hudRings";
 
 /** The orb's own parts the sphere has to keep clear of (OrbCanvas.vue, orbitalSystem.ts), in orb units. */
@@ -117,7 +117,7 @@ describe("the page's controls on their orbit", () => {
   });
 
   it("draws the whole orbit faintly and lights each control's own stretch of it", () => {
-    for (const ring of [NODE_ORBIT_ARC, CONTROL_ORBIT_RING]) {
+    for (const ring of [NODE_ORBIT_ARC, CONTROL_ORBIT_RING, SUGGESTION_ARC]) {
       // In the orbit's own plane and units: the canvas scales it to the orbit's radius.
       expect(ring.radius).toBe(1);
       expect(ring.offset).toBe(0);
@@ -128,5 +128,16 @@ describe("the page's controls on their orbit", () => {
     expect(NODE_ORBIT_ARC.arc * 360).toBeLessThan(2 * 38);
     // The orbit is a guide for the eye, not a fourth thing to look at.
     expect(CONTROL_ORBIT_RING.strength).toBeLessThan(NODE_ORBIT_ARC.strength / 2);
+  });
+
+  it("draws the start suggestions' arc as a plain line with light running along it, quieter than a control's stretch", () => {
+    expect(SUGGESTION_ARC.kind).toBe("hair");
+    // A partial arc: the page says how much of the circle (the fan of the suggestions).
+    expect(SUGGESTION_ARC.arc).toBeLessThan(1);
+    expect(SUGGESTION_ARC.tiles).toBeGreaterThanOrEqual(1);
+    expect(SUGGESTION_ARC.flow).toBeGreaterThan(0);
+    expect(SUGGESTION_ARC.spin).toBe(0);
+    expect(SUGGESTION_ARC.strength).toBeLessThan(NODE_ORBIT_ARC.strength);
+    expect(SUGGESTION_ARC.strength).toBeGreaterThan(CONTROL_ORBIT_RING.strength);
   });
 });
