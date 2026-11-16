@@ -47,6 +47,7 @@ import { registerLlmBoundaryTransformer } from "../providers/llm-boundary.js";
 import {
   EXTENSION_AUDIT_EVENT_PATTERN,
   EXTENSION_NAME_PATTERN,
+  _recordExtensionAuthProvider,
   _recordExtensionRoles,
   _recordLoadedExtension,
   listExtensionRoles,
@@ -321,22 +322,29 @@ export async function loadCoreExtensions(): Promise<{ loaded: number; failed: nu
 }
 
 /**
- * Declares the core extensions' roles and registers nothing else of them: no tools, hooks,
- * policies, credential store, routes or boot. For a process that runs work for accounts without
- * loading the extensions: the standalone scene worker (scene-worker-main.ts) runs each queued job
- * with its owner's role as the auth layer holds it, and under multi-user auth a role that nobody
- * declares signs nobody in (gateway/auth.ts declaredRole). Without the roles, every job and
- * scheduled run of an account holding an extension's role failed there as one of an account that no
- * longer signs in.
+ * Declares the core extensions' roles and registers their credential backend (authProvider), and
+ * nothing else of them: no tools, hooks, policies, routes or boot. For a process that runs work for
+ * accounts without loading the extensions: the standalone scene worker (scene-worker-main.ts) runs
+ * each queued job with its owner's role as the auth layer holds it, and under multi-user auth a role
+ * that nobody declares signs nobody in (gateway/auth.ts declaredRole). Without the roles, every job
+ * and scheduled run of an account holding an extension's role failed there as one of an account that
+ * no longer signs in. Without the credential backend, the worker looked the owners up in a store the
+ * gateway does not use: an extension store's accounts were not there, and every job and scheduled
+ * run of theirs failed the same way.
+ *
+ * The backend's boot hook does not run here: one that a standalone worker uses must answer
+ * getUserById without it. A lookup that throws fails that job (agent/scene-worker.ts).
  *
  * An extension declares its roles here only when loadCoreExtensions would get as far as declaring
- * them: its module imports, its manifest is valid, and no tool it would register shadows a built-in.
- * Otherwise it is logged and its roles stay undeclared, as in a gateway where it failed to load.
+ * them: its module imports, its manifest is valid, no tool it would register shadows a built-in, and
+ * no other extension registered a credential backend before it, when it declares one. Otherwise it is
+ * logged and its roles stay undeclared, as in a gateway where it failed to load.
  */
-export async function registerCoreExtensionRoles(): Promise<{ registered: number; failed: number; dir: string }> {
+export async function registerCoreExtensionRoles(): Promise<{ registered: number; failed: number; dir: string; authProvider?: string }> {
   const dir = resolveExtensionsDir();
   let registered = 0;
   let failed = 0;
+  let authProvider: string | undefined;
   for (const { name, entry } of discoverEntryFiles(dir)) {
     if (_active.some((a) => a.ext.name === name)) continue;
     try {
@@ -345,6 +353,11 @@ export async function registerCoreExtensionRoles(): Promise<{ registered: number
       // registerExtension skips a malformed tool, then throws on one that shadows a built-in.
       const shadowing = (mod.default.tools ?? []).find((tool) => toolProblem(tool) === null && isBuiltinTool(tool.name));
       if (shadowing) throw new Error(`extension "${name}" must not shadow built-in tool "${shadowing.name}"`);
+      // Before the roles: a second credential backend refuses the extension, roles and all.
+      if (mod.default.authProvider) {
+        _recordExtensionAuthProvider(name, mod.default.authProvider);
+        authProvider = name;
+      }
       _recordExtensionRoles(mod.default.roles ?? []);
       registered++;
     } catch (err) {
@@ -352,7 +365,7 @@ export async function registerCoreExtensionRoles(): Promise<{ registered: number
       log.error({ extension: name, entry, err }, "core extension failed to load — its roles are not declared in this process");
     }
   }
-  return { registered, failed, dir };
+  return { registered, failed, dir, ...(authProvider ? { authProvider } : {}) };
 }
 
 /**

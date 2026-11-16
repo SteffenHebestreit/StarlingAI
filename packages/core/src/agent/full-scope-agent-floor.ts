@@ -70,8 +70,9 @@ export function runCaller(explicit: AgentRunCaller = {}): AgentRunCaller {
  * The role a run answers to: the one its caller threads or its work carries, else, under multi-user
  * auth, for a run done for an account, the role the store holds for that account now. That is how a
  * queued job or a scheduled run answers to the person who started it: no role travels with either.
- * Null when that account no longer signs in; undefined when no role is known (no account, or one
- * whose role only its sign-in carries).
+ * Null when that account no longer signs in; undefined when no role is known (no account, or an
+ * identity-provider account whose registry entry records no granted role: gateway/auth.ts
+ * storedAccountRole).
  */
 async function runRole(caller: AgentRunCaller): Promise<string | null | undefined> {
   if (caller.role !== undefined) return caller.role;

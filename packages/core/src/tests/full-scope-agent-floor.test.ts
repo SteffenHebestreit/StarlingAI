@@ -736,6 +736,35 @@ describe("every path to a full-scope agent, with the floor at admin", () => {
     expect(turns.directed).toEqual([]);
     expect(refusals).toEqual([expect.objectContaining({ agent: "swarm_maintainer", role: "viewer", via: "directive" })]);
   });
+
+  it("--agent: an owner promoted since their session opened runs it there, by the role they hold now", async () => {
+    writeConfig({ floor: "admin" });
+    turns.held = true;
+    const { createSession } = await import("../agent/session.js");
+    // root opened this chat while still an operator; the session recorded that role.
+    const session = createSession({ channel: "webchat", userId: "root", account: users.root.id, userRole: "operator" });
+
+    const sent = await sendDirected("root", session.id);
+
+    expect(sent.map((status) => status["status"])).not.toContain("blocked");
+    expect(turns.directed).toEqual(["swarm_maintainer"]);
+    expect(refusals).toEqual([]);
+  });
+
+  it("--agent: an admin driving the session of an owner demoted since is refused for the owner's role now", async () => {
+    writeConfig({ floor: "admin" });
+    turns.held = true;
+    const { createSession } = await import("../agent/session.js");
+    // alice opened this chat as an admin and is an operator now; the session still records admin.
+    const session = createSession({ channel: "webchat", userId: "alice", account: users.alice.id, userRole: "admin" });
+
+    const refused = await sendDirected("root", session.id);
+
+    expect(refused.map((status) => status["status"])).toEqual(["blocked"]);
+    expect(refused[0]!["response"]).toBe("Agent swarm_maintainer maintains the deployment and needs role admin");
+    expect(turns.directed).toEqual([]);
+    expect(refusals).toEqual([expect.objectContaining({ agent: "swarm_maintainer", role: "operator", via: "directive" })]);
+  });
 });
 
 describe("every path, for a caller with no account (a bootstrap token): only the role the path carries can refuse it", () => {
@@ -983,6 +1012,84 @@ describe("a turn and the caller role it carries", () => {
     await directedTurn("root");
     expect(maintainerCalls().length).toBeGreaterThan(0);
     expect(wroteNote()).toBe(true);
+  }, 60_000);
+
+  /**
+   * A webchat turn of `owner`'s session, which recorded `recordedRole` when it opened, directed to
+   * swarm_maintainer; sent by `sender` with the role their connection holds, or by nobody.
+   */
+  async function turnInOldSession(owner: UserName, recordedRole: string, sender?: { user: UserName; role: string }): Promise<void> {
+    const { createSession } = await import("../agent/session.js");
+    const { runTurn } = await import("../agent/runtime.js");
+    const session = createSession({ channel: "webchat", userId: owner, account: users[owner].id, userRole: recordedRole });
+    await runTurn({
+      session,
+      userMessage: TASK,
+      directiveAgent: "swarm_maintainer",
+      allowedAgents: ["swarm_maintainer"],
+      ...(sender ? { sender: () => ({ identity: identityOf(sender.user), role: sender.role }) } : {}),
+    });
+  }
+
+  it("a turn its owner sends answers to the role they hold now, not to the one their session recorded", async () => {
+    writeConfig({ floor: "admin" });
+
+    // alice opened this chat as an admin and is an operator now.
+    await turnInOldSession("alice", "admin", { user: "alice", role: "operator" });
+    const turnCalls = model.calls.filter((call) => call.agentName === "main");
+    expect(turnCalls.length).toBeGreaterThan(0);
+    expect(turnCalls.every((call) => call.callerRole === "operator")).toBe(true);
+    expect(maintainerCalls()).toHaveLength(0);
+    expect(wroteNote()).toBe(false);
+    expect(refusals).toEqual([expect.objectContaining({ agent: "swarm_maintainer", role: "operator", deniedBy: "role_floor" })]);
+
+    // root opened this one as an operator and is an admin now.
+    await turnInOldSession("root", "operator", { user: "root", role: "admin" });
+    expect(maintainerCalls().length).toBeGreaterThan(0);
+    expect(wroteNote()).toBe(true);
+  }, 60_000);
+
+  it("a turn nobody sent, or another account sent, answers to the role the session's owner holds now", async () => {
+    writeConfig({ floor: "admin" });
+
+    // A step's turn on alice's chat (nobody sent it), and root driving that chat: both answer to
+    // alice, an operator now, though her session recorded admin.
+    await turnInOldSession("alice", "admin");
+    await turnInOldSession("alice", "admin", { user: "root", role: "admin" });
+    const turnCalls = model.calls.filter((call) => call.agentName === "main");
+    expect(turnCalls.length).toBeGreaterThan(0);
+    expect(turnCalls.every((call) => call.callerRole === "operator")).toBe(true);
+    expect(maintainerCalls()).toHaveLength(0);
+    expect(wroteNote()).toBe(false);
+    expect(refusals.length).toBe(2);
+    expect(refusals.every((refusal) => refusal["role"] === "operator")).toBe(true);
+  }, 60_000);
+
+  it("of an identity-provider account, whose role only its sign-in carries, a turn nobody sent keeps the session's role", async () => {
+    writeConfig({ floor: "admin", provider: "oidc" });
+    mkdirSync(join(workspace, PRODUCT.stateDirName), { recursive: true });
+    writeFileSync(registryFile, JSON.stringify({
+      version: 1,
+      bootstrapSubs: [],
+      accounts: [{
+        id: "oidc-0123456789abcdef", issuer: "https://idp.example", subject: "subject-1", username: "olga",
+        status: "active", firstSeenAt: "2026-01-01T00:00:00Z", lastSeenAt: "2026-01-01T00:00:00Z",
+      }],
+    }), "utf8");
+    try {
+      (await import("../runtime/account-registry.js")).resetAccountRegistryForTests();
+      const { createSession } = await import("../agent/session.js");
+      const { runTurn } = await import("../agent/runtime.js");
+      const session = createSession({ channel: "webchat", userId: "olga", account: "oidc-0123456789abcdef", userRole: "admin" });
+      await runTurn({ session, userMessage: TASK, directiveAgent: "swarm_maintainer", allowedAgents: ["swarm_maintainer"] });
+
+      const turnCalls = model.calls.filter((call) => call.agentName === "main");
+      expect(turnCalls.length).toBeGreaterThan(0);
+      expect(turnCalls.every((call) => call.callerRole === "admin")).toBe(true);
+      expect(maintainerCalls().length).toBeGreaterThan(0);
+    } finally {
+      await forgetAccountRegistry();
+    }
   }, 60_000);
 
   it("run_workflow's nested turn, on a workflow session no sign-in created, keeps the role of the turn that started it", async () => {

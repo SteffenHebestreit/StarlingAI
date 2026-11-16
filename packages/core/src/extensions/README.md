@@ -19,7 +19,7 @@ What a manifest can declare:
 | `tools`          | Tools with explicit tiers (0–3), grouped under the extension name for config-driven disabling |
 | `auditEvents`    | Audit events, namespaced `<name>.<event>`                        |
 | `roles`          | Auth roles + badge metadata, surfaced via `GET /api/product`. Under multi-user auth an account holding a role that no loaded extension declares cannot sign in (`docs/security.md`, "Roles Nobody Declares") |
-| `authProvider`   | Credential backend for the core `/api/auth` routes; one per process |
+| `authProvider`   | Credential backend for the core `/api/auth` routes; one per process. A standalone scene worker registers it too, without `boot`: `getUserById` must answer without it |
 | `toolKeywords`   | Embedding-reranker routing keywords for domain vocabulary (pattern → keywords) |
 | `llmBoundary`    | LLM-boundary transformer for provider-bound messages / model responses |
 | `guardrails`     | `checkInput` / `checkOutput` hooks appended after built-ins      |

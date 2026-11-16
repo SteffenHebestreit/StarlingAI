@@ -317,6 +317,33 @@ describe("mixed mode: builtin accounts beside the identity provider", () => {
   });
 });
 
+describe("the role an identity-provider sign-in grants", () => {
+  it("is recorded on the account at each sign-in, and is the role work done while nobody is signed in answers to", async () => {
+    configure({ enabled: true, provider: "oidc", oidc: { issuer: ISSUER, clientId: "sai" }, users: [] });
+    const { entry } = mods.oidcAccounts.resolveOidcSignIn({ issuer: ISSUER, subject: "subject-1", username: "carol", role: "admin" });
+    const carol = { userId: "carol", account: entry.id };
+    expect(mods.registry.accountRegistryEntryById(entry.id)?.grantedRole).toBe("admin");
+    expect(mods.authModule.storedAccountRole(carol)).toBe("admin");
+
+    // A later sign-in at which the IdP grants less: the record follows it.
+    mods.oidcAccounts.resolveOidcSignIn({ issuer: ISSUER, subject: "subject-1", username: "carol", role: "viewer" });
+    expect(mods.registry.accountRegistryEntryById(entry.id)?.grantedRole).toBe("viewer");
+    expect(mods.authModule.storedAccountRole(carol)).toBe("viewer");
+  });
+
+  it("knows no role for an entry written before the record, and refuses one nobody declares now", async () => {
+    configure({ enabled: true, provider: "oidc", oidc: { issuer: ISSUER, clientId: "sai" }, users: [] });
+    const { entry } = mods.oidcAccounts.resolveOidcSignIn({ issuer: ISSUER, subject: "subject-1", username: "carol", role: "operator" });
+    const carol = { userId: "carol", account: entry.id };
+
+    mods.registry.changeAccountRegistry((doc) => { delete doc.accounts.find((one) => one.id === entry.id)!.grantedRole; });
+    expect(mods.authModule.storedAccountRole(carol)).toBeUndefined();
+
+    mods.registry.changeAccountRegistry((doc) => { doc.accounts.find((one) => one.id === entry.id)!.grantedRole = "auditor"; });
+    expect(mods.authModule.storedAccountRole(carol)).toBeNull();
+  });
+});
+
 describe("a schedule of an ended account", () => {
   it("is not registered again at the next boot", async () => {
     configure({ enabled: true, users: [root.record, alice.record] });

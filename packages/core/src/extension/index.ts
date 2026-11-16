@@ -153,8 +153,8 @@ export interface ExtensionAuthProvider {
  * `role` is the role the run answers to: the caller's when the surface that started the run knows
  * it, else, for a run done for an account that carries none (a queued job, a scheduled run), the
  * role the auth store holds for that account now. It is absent when no role is known (a channel, a
- * cron or channel trigger, a federation peer, an identity-provider account's queued run, an account
- * that no longer signs in). `identity` is the account or principal the run is done for, when there
+ * cron or channel trigger, a federation peer, the queued run of an identity-provider account whose
+ * registry entry records no granted role, an account that no longer signs in). `identity` is the account or principal the run is done for, when there
  * is one.
  */
 export interface ExtensionAgentRun {
@@ -323,20 +323,27 @@ export function _recordLoadedExtension(record: LoadedExtensionRecord, ext: CoreE
   for (const event of record.auditEvents) _auditEvents.add(event);
   if (ext.guardrails) _guardrailHooks.push({ extension: record.name, hooks: ext.guardrails });
   if (ext.authorizeAgentRun) _agentRunAuthorizers.push({ extension: record.name, authorize: ext.authorizeAgentRun });
-  if (ext.authProvider) {
-    if (_authProvider && _authProvider.extension !== record.name) {
-      throw new Error(
-        `extension "${record.name}" declares an authProvider but "${_authProvider.extension}" already registered one — only one credential backend per process`,
-      );
-    }
-    _authProvider = { extension: record.name, provider: ext.authProvider };
+  if (ext.authProvider) _recordExtensionAuthProvider(record.name, ext.authProvider);
+}
+
+/**
+ * @internal loader-only: registers an extension's credential backend, the one store every account
+ * of this process resolves through (gateway/auth.ts resolveCaller). Throws when another extension
+ * registered one already: only one credential backend per process.
+ */
+export function _recordExtensionAuthProvider(extension: string, provider: ExtensionAuthProvider): void {
+  if (_authProvider && _authProvider.extension !== extension) {
+    throw new Error(
+      `extension "${extension}" declares an authProvider but "${_authProvider.extension}" already registered one — only one credential backend per process`,
+    );
   }
+  _authProvider = { extension, provider };
 }
 
 /**
  * @internal loader-only: declares an extension's roles without loading it, for a process that runs
  * work for accounts but loads no extension (loader.ts registerCoreExtensionRoles). The extension is
- * not listed as loaded, and nothing else of it is registered.
+ * not listed as loaded; its credential backend is registered beside, and nothing else of it.
  */
 export function _recordExtensionRoles(roles: readonly ExtensionRoleDef[]): void {
   for (const role of roles) _roles.set(role.name, role);
