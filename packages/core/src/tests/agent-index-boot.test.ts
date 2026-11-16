@@ -31,6 +31,7 @@ async function bootProviders(models: unknown[]) {
   const dir = mkdtempSync(join(tmpdir(), "sai-agent-index-boot-"));
   tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     providers: { lmstudio: { baseUrl: "http://127.0.0.1:9/v1", apiKey: "key" } },
     agents: {
       defaults: { model: { primary: "lmstudio/qwen", embeddingModel: "lmstudio/text-embedding-qwen3-embedding-0.6b" } },

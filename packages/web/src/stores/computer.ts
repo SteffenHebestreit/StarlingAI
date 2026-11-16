@@ -1,21 +1,19 @@
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useGatewayStore } from "./gateway";
+import {
+  canObserveComputerSession,
+  computerSessionToObserve,
+  normalizeComputerSession,
+  type ComputerSession,
+} from "../composables/computerSessions";
+
+export type { ComputerSession };
 
 // ── Live-preview polling ─────────────────────────────────────────────────────
 // Poll for a fresh screenshot every second while a session is being observed.
 // This keeps the panel live even when no agent turn is running.
 const LIVE_PREVIEW_INTERVAL_MS = 1_000;
-
-export interface ComputerSession {
-  id: string;
-  adapter: string;
-  state: string;
-  createdAt: number;
-  updatedAt?: number;
-  lastHeartbeat: number;
-  attachedScene?: string;
-}
 
 export interface ComputerMonitorInfo {
   id: number;
@@ -76,7 +74,7 @@ export const useComputerStore = defineStore("computer", () => {
     try {
       const res = await gateway.rpc("computer.list_sessions", {}) as { sessions?: ComputerSession[] };
       if (res?.sessions) {
-        sessions.value = res.sessions.map((session) => normalizeSession(session as unknown as Record<string, unknown>)).sort((left, right) => right.createdAt - left.createdAt);
+        sessions.value = res.sessions.map((session) => normalizeComputerSession(session as unknown as Record<string, unknown>)).sort((left, right) => right.createdAt - left.createdAt);
         ensureObservedSession();
       }
     } finally {
@@ -113,18 +111,6 @@ export const useComputerStore = defineStore("computer", () => {
     recentActions.value = [...(actionsBySession.value[observedSessionId.value] ?? [])];
   }
 
-  function normalizeSession(session: Record<string, unknown>): ComputerSession {
-    return {
-      id: String(session.id ?? ""),
-      adapter: String(session.adapter ?? "unknown"),
-      state: String(session.state ?? "active"),
-      createdAt: Number(session.createdAt ?? Date.now()),
-      updatedAt: Number(session.updatedAt ?? Date.now()),
-      lastHeartbeat: Number(session.lastHeartbeatAt ?? session.lastHeartbeat ?? session.updatedAt ?? Date.now()),
-      attachedScene: typeof session.attachedScene === "string" ? session.attachedScene : undefined,
-    };
-  }
-
   function upsertSession(partial: Partial<ComputerSession> & { id: string }) {
     const now = Date.now();
     const idx = sessions.value.findIndex((session) => session.id === partial.id);
@@ -150,8 +136,9 @@ export const useComputerStore = defineStore("computer", () => {
     }, ...sessions.value];
   }
 
+  // Another user's session is listed to be stopped, not watched: the gateway sends no frame of it.
   function ensureObservedSession(preferredSessionId?: string | null) {
-    if (observedSessionId.value && sessions.value.some((session) => session.id === observedSessionId.value)) {
+    if (observedSessionId.value && sessions.value.some((session) => session.id === observedSessionId.value && canObserveComputerSession(session))) {
       syncObservedPreview();
       return;
     }
@@ -162,11 +149,7 @@ export const useComputerStore = defineStore("computer", () => {
       return;
     }
 
-    const preferred = preferredSessionId
-      ? sessions.value.find((session) => session.id === preferredSessionId)
-      : undefined;
-    const fallback = preferred ?? activeSessions.value[0] ?? sessions.value[0];
-    observedSessionId.value = fallback?.id ?? null;
+    observedSessionId.value = computerSessionToObserve(sessions.value, preferredSessionId);
     syncObservedPreview();
   }
 
@@ -345,7 +328,7 @@ export const useComputerStore = defineStore("computer", () => {
       const csId = observedSessionId.value;
       if (!csId || !gateway.connected) return;
       const session = sessions.value.find((s) => s.id === csId);
-      if (!session || session.state !== "active") return;
+      if (!session || session.state !== "active" || !canObserveComputerSession(session)) return;
       // Skip poll if a fresh screenshot arrived in the last 600ms (agent is pushing them already)
       const cached = screenshotsBySession.value[csId];
       if (cached && Date.now() - cached.timestamp < 600) return;

@@ -108,14 +108,15 @@ const DuringActionSchema = z.object({
 }).strict();
 
 /** Identities the harness logs in as. Accounts are created by `pnpm e2e:setup`. */
-export const IdentitySchema = z.enum(["eval", "eval-viewer"]);
+export const IdentitySchema = z.enum(["eval", "eval-viewer", "eval-peer"]);
 
 const TurnStepSchema = z.object({
   kind: z.literal("turn"),
   id: z.string().optional(),
   /**
    * Run this turn as another identity, in that identity's own session. Lets one attempt store
-   * something as eval and check, right after, that eval-viewer cannot get at it.
+   * something as eval and check, right after, that another account (eval-peer, a second operator)
+   * cannot get at it. Not eval-viewer: the gateway opens no session and runs no turn for a viewer.
    */
   as: IdentitySchema.optional(),
   message: z.string().min(1),

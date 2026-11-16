@@ -192,7 +192,7 @@ pnpm sai dev web               # start web UI in dev mode
 - **Sandboxed by default** — sub-agents run containerized with `--cap-drop ALL`, a read-only root filesystem, bounded resources, and `network: none` unless the role requires approved access. Shell, script, test, and dynamic-tool execution get dedicated Docker sandboxes.
 - **Every tool call gated** — guardrail → tier → approval → audit → output-redaction, on every registered invocation. No exceptions, including for the swarm's own self-improvement. ([tool tiers](docs/tool-tiers.md))
 - **Credentials never enter the model** — agents inspect login metadata with `get_site_credentials`, but secrets are injected only through `site_fill_credentials` or `computer_type_credential`, under approval and audit.
-- **Human-in-the-loop** — approval gates via Slack, outbound webhook, or sync webhook with one-click HTTP callbacks before sensitive actions proceed.
+- **Human-in-the-loop** — approval gates via Slack, outbound webhook, or sync webhook before sensitive actions proceed; an approval link opens a confirmation page, so a link preview never decides.
 - **A warden on watch** — background monitoring detects tool storms, escape attempts, failure spikes, and SLO breaches in real time. (Its control state is process-local today; distributed observation and cancellation are planned before multi-worker scaling is treated as a hard guarantee.)
 
 ### It stays watchable

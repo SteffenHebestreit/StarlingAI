@@ -50,6 +50,8 @@ describe("delegate_to_agent approval propagation", () => {
     const delegate = getTool("delegate_to_agent");
     expect(delegate).toBeDefined();
 
+    const workspacePath = mkdtempSync(join(tmpdir(), "starlingai-delegate-approval-"));
+    tempDirs.push(workspacePath);
     const approvalCallback = vi.fn(async () => true);
     const result = await delegate!.execute(
       {
@@ -58,7 +60,7 @@ describe("delegate_to_agent approval propagation", () => {
       },
       {
         sessionId: "session-1",
-        workspacePath: "/workspace",
+        workspacePath,
         approvalCallback,
         humanInLoopSteps: ["site_fill_credentials", "mcp__playwright__browser_navigate"],
       },
@@ -69,7 +71,7 @@ describe("delegate_to_agent approval propagation", () => {
     expect(runSubAgentMock).toHaveBeenCalledWith(expect.objectContaining({
       agentName: "browser_agent",
       parentSessionId: "session-1",
-      workspacePath: "/workspace",
+      workspacePath,
       signal: undefined,
       approvalCallback,
       humanInLoopSteps: ["site_fill_credentials", "mcp__playwright__browser_navigate"],
@@ -81,6 +83,7 @@ describe("delegate_to_agent approval propagation", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -131,7 +134,7 @@ describe("delegate_to_agent approval propagation", () => {
       },
       {
         sessionId: "session-4",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       },
     );
 
@@ -140,7 +143,7 @@ describe("delegate_to_agent approval propagation", () => {
     expect(runSubAgentMock).toHaveBeenCalledWith(expect.objectContaining({
       agentName: "web_task_coordinator",
       parentSessionId: "session-4",
-      workspacePath: "/workspace",
+      workspacePath: tempDir,
     }));
   });
 });

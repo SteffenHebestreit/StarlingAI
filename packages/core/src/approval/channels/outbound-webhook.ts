@@ -6,9 +6,11 @@
  * messaging platform.
  *
  * The payload includes:
- *   - approveUrl / denyUrl  — one-click links the end-user can tap directly
+ *   - approveUrl / denyUrl  — links for the end-user: each opens a confirmation page with
+ *                             Approve and Deny buttons (opening a link decides nothing)
  *   - callbackUrl           — programmatic POST-back URL for the receiving system
- *   - callbackSecret        — must be sent back as X-Approval-Secret header
+ *   - callbackSecret        — sent back as `secret` in the JSON body, or as
+ *                             `Authorization: Bearer <secret>`
  *
  * gateway.publicUrl must be configured so these URLs can be constructed.
  */

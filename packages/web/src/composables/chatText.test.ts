@@ -15,7 +15,7 @@ describe("chatText", () => {
       engineDefault: [30], fieldsNeedAttention: [2], mayChange: ["35%"],
       effortName: ["medium"], effortDescription: ["medium"], effortLabel: ["medium"], effortTitle: ["medium"],
       imagesChip: ["ask"], imagesTitle: ["ask"], thinkingChip: [true], thinkingTitle: [true],
-      notSent: ["too large"], couldNotStop: ["timeout"], couldNotRestart: ["timeout"], couldNotArchive: ["timeout"],
+      notSent: ["too large"], noAccess: ["chat.send requires role operator"], couldNotStop: ["timeout"], couldNotRestart: ["timeout"], couldNotArchive: ["timeout"],
       fileAttached: ["report.pdf"], uploadingDocuments: [2], analysingImages: [1],
       gatewayNoAnswer: [504], serverSentPage: [404],
       previewFile: ["fox.png"], removeNamed: ["fox.png"], voiceEyebrow: [true], sayWakeWord: ["Luna"],

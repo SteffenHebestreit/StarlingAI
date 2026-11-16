@@ -6,6 +6,9 @@
  * own readout, and the judge's written verdict is never asked; with it off, nothing asks for
  * logprobs at all. No model is called.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type Msg = { role: string; content: string };
@@ -72,6 +75,9 @@ function spy(): Call[] {
   return calls;
 }
 
+/** Each turn's own workspace: a turn reads the workspace's memory, skills and files. */
+const workspaces: string[] = [];
+
 async function runJudgedTurn(readout: Record<string, "off" | "shadow" | "on">): Promise<Call[]> {
   const config = getConfig();
   config.agents.mainAssistant.toolMode = "orchestration_only";
@@ -80,7 +86,9 @@ async function runJudgedTurn(readout: Record<string, "off" | "shadow" | "on">): 
   config.decisions.baseUrl = "";
   config.decisions.readout = { ...config.decisions.readout, defaultMode: "off", points: readout };
   const calls = spy();
-  const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+  const workspacePath = mkdtempSync(join(tmpdir(), "sai-readout-wiring-"));
+  workspaces.push(workspacePath);
+  const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
   await runTurn({ session, userMessage: "How does a hash map find a key so quickly?" });
   return calls;
 }
@@ -88,6 +96,7 @@ async function runJudgedTurn(readout: Record<string, "off" | "shadow" | "on">): 
 const judgedBy = (calls: Call[], agentName: string) => calls.filter((call) => call.attribution["agentName"] === agentName && call.attribution["callSite"] === "routing_tier");
 
 afterEach(() => {
+  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
   resetConfigForTests();
   streamMock.mockReset();
   completeMock.mockReset();

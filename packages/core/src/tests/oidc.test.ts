@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { mapRole } from "../gateway/oidc.js";
 import { OidcConfigSchema } from "../config/schema.js";
+import { _recordLoadedExtension, _resetExtensionsForTests } from "../extension/index.js";
 
 function cfg(roleMapping: Record<string, unknown>) {
   return OidcConfigSchema.parse({
@@ -29,6 +30,24 @@ describe("oidc role mapping", () => {
     const c = cfg({ admin: [], operator: ["sai-op"], viewer: [] });
     expect(mapRole(c, ["sai-op"])).toBe("operator");
     expect(mapRole(c, ["anything"])).toBeNull();
+  });
+
+  it("maps nobody to a defaultRole that neither core nor any loaded extension declares", () => {
+    // A fork's lowest role as the default, with the fork's extension not loaded: the default mapped to
+    // operator, so everyone the IdP granted no listed role signed in as an operator.
+    const c = cfg({ operator: ["sai-op"], defaultRole: "patient" });
+    try {
+      expect(mapRole(c, ["unmapped"])).toBeNull();
+      expect(mapRole(c, ["sai-op"])).toBe("operator");
+      const patient = { name: "patient", description: "a patient", rank: 10 };
+      _recordLoadedExtension(
+        { name: "praxis", version: "1", toolNames: [], auditEvents: [], roles: [patient], loadedAt: "", source: "test" },
+        { name: "praxis", version: "1", roles: [patient] },
+      );
+      expect(mapRole(c, ["unmapped"])).toBe("patient");
+    } finally {
+      _resetExtensionsForTests();
+    }
   });
 });
 

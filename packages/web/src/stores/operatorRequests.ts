@@ -10,10 +10,20 @@ const POLL_INTERVAL_MS = 2_000;
 
 export interface PendingApproval {
   id: string;
+  /** "routed": a tool call whose approval policy names who may grant it; it waits for one of them.
+   *  "channel" (or absent, from an older gateway): a scene or job run's approval. */
+  kind?: "channel" | "routed";
   toolName: string;
   sceneName?: string;
   args?: Record<string, unknown>;
   createdAt: string;
+  /** Routed only: who asked, as which role, and the roles that may decide it. */
+  requester?: string;
+  requesterRole?: string;
+  approverRoles?: string[];
+  /** Routed only: the requester may not approve it themselves. */
+  distinctApprover?: boolean;
+  expiresAt?: string;
 }
 
 export interface PendingLongRunning {
@@ -38,6 +48,9 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
   const approvals = ref<PendingApproval[]>([]);
   const longRunning = ref<PendingLongRunning[]>([]);
   const respondingIds = ref<Set<string>>(new Set());
+  // Why the gateway refused an answer, by approval id (a second person must approve, a role it
+  // does not admit), shown on the card until the next answer to it.
+  const respondErrors = ref<Record<string, string>>({});
 
   const hasApprovals = computed(() => approvals.value.length > 0);
   const hasLongRunning = computed(() => longRunning.value.length > 0);
@@ -69,6 +82,9 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
 
   async function respond(id: string, approved: boolean) {
     respondingIds.value = new Set(respondingIds.value).add(id);
+    const clearedErrors = { ...respondErrors.value };
+    delete clearedErrors[id];
+    respondErrors.value = clearedErrors;
     try {
       await gateway.authorizedFetch(`/api/approval/${encodeURIComponent(id)}`, {
         method: "POST",
@@ -77,6 +93,9 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
       });
       // Drop it locally right away; the next poll reconciles.
       approvals.value = approvals.value.filter((a) => a.id !== id);
+    } catch (err) {
+      // Kept on the card: the request still waits, for someone else.
+      respondErrors.value = { ...respondErrors.value, [id]: err instanceof Error ? err.message : String(err) };
     } finally {
       const next = new Set(respondingIds.value);
       next.delete(id);
@@ -102,6 +121,10 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
 
   function isResponding(id: string): boolean {
     return respondingIds.value.has(id);
+  }
+
+  function respondError(id: string): string | undefined {
+    return respondErrors.value[id];
   }
 
   // ── Polling lifecycle ─────────────────────────────────────────────────────
@@ -148,5 +171,6 @@ export const useOperatorRequestsStore = defineStore("operatorRequests", () => {
     respond,
     respondLongRunning,
     isResponding,
+    respondError,
   };
 });

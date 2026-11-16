@@ -2278,7 +2278,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from "vue";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter, type RouteLocationNormalized } from "vue-router";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useGuardrailsStore } from "@/stores/guardrails";
 import { usePersonalityStore, type AssistantPersonalityProfile } from "@/stores/personality";
 import { useSitesStore, type SiteSummary } from "@/stores/sites";
@@ -2522,7 +2522,7 @@ const modelEndpointForm = reactive({
 });
 
 function settingsBaseUrl(): string {
-  return (gateway.wsUrl ?? "ws://localhost:8765/ws").replace(/^ws(s?)/, "http$1").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 async function parseSettingsError(response: Response): Promise<string> {

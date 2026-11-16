@@ -204,6 +204,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -238,7 +239,7 @@ describe("search_agents tool", () => {
 
       const result = await searchAgents!.execute(
         { query: "login form automation" },
-        { sessionId: "test-session", workspacePath: "/workspace" }
+        { sessionId: "test-session", workspacePath: tempDir }
       );
 
       expect(result.success).toBe(true);
@@ -252,7 +253,7 @@ describe("search_agents tool", () => {
 
       const gated = await searchAgents!.execute(
         { query: "login taxonomy regulatory", minConfidence: "high" },
-        { sessionId: "test-session", workspacePath: "/workspace" }
+        { sessionId: "test-session", workspacePath: tempDir }
       );
 
       expect(gated.success).toBe(true);
@@ -301,6 +302,7 @@ describe("search_agents tool", () => {
     };
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: {
@@ -339,7 +341,7 @@ describe("search_agents tool", () => {
 
       const result = await searchAgents!.execute(
         { query: "login form automation" },
-        { sessionId: "test-session", workspacePath: "/workspace" }
+        { sessionId: "test-session", workspacePath: tempDir }
       );
 
       expect(result.success).toBe(true);
@@ -370,6 +372,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -414,6 +417,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -458,6 +462,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -509,6 +514,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -555,6 +561,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -611,6 +618,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -663,6 +671,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -715,6 +724,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -767,6 +777,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -825,6 +836,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -862,7 +874,7 @@ describe("search_agents tool", () => {
 
       const result = await searchAgents!.execute(
         { query: "researcher weather climate data" },
-        { sessionId: "test-session", workspacePath: "/workspace" },
+        { sessionId: "test-session", workspacePath: tempDir },
       );
 
       expect(result.success).toBe(true);
@@ -902,6 +914,7 @@ describe("search_agents tool", () => {
     };
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -954,6 +967,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -1031,6 +1045,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -1075,6 +1090,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -1135,6 +1151,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -1186,6 +1203,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },
@@ -1251,6 +1269,7 @@ describe("search_agents tool", () => {
     const configPath = join(tempDir, "starlingai.json");
 
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },

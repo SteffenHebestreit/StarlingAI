@@ -101,7 +101,7 @@ Use:
 GET /api/channels/dead-letters
 ```
 
-That endpoint returns both the total `count` and the last 50 parsed `entries`.
+That endpoint returns both the total `count` and the last 50 parsed `entries`. Under multi-user auth (`auth.enabled`) it needs operator rank, and only an admin gets the `entries`: each holds a preview of the undelivered message. The same goes for the five most recent entries of one channel, which `GET /api/channels/:type` returns as `operator.recentDeadLetters`: the list is empty for anyone but an admin, while the channel's health summary still counts them.
 
 ## Delivery Retries
 

@@ -241,6 +241,8 @@ describe("gateway HTTP bridge", () => {
     }));
     writeFileSync(configPath, JSON.stringify({
       gateway: { port, jwtSecret: "t".repeat(32) },
+      // Its own: a signed-in request reads the account registry, <workspace>/.starlingai/accounts.json.
+      workspacePath: tempDir,
       auth: { enabled: true, users },
     }), "utf8");
 
@@ -295,6 +297,8 @@ describe("gateway HTTP bridge", () => {
 
     writeFileSync(configPath, JSON.stringify({
       gateway: { port, jwtSecret: "t".repeat(32) },
+      // Its own: a signed-in request reads the account registry, <workspace>/.starlingai/accounts.json.
+      workspacePath: tempDir,
       auth: { enabled: true, users },
     }), "utf8");
 
@@ -1202,6 +1206,8 @@ describe("gateway HTTP bridge", () => {
         port,
         jwtSecret: "f".repeat(32),
       },
+      // Its own: the channel status reads the dead-letter ledger, <workspace>/.starlingai/dead-letters.ndjson.
+      workspacePath: tempDir,
       channels: {
         telegram: {
           enabled: false,
@@ -2050,6 +2056,11 @@ describe("gateway HTTP bridge", () => {
         port,
         jwtSecret: "i".repeat(32),
       },
+      // Its own: routing weighs each agent by its record in <workspace>/.starlingai/agent_outcomes.ndjson
+      // and reads the promoted agents beside it. Under the default /workspace it read whatever every
+      // other run on the machine had left there, and a researcher with a record of successes came
+      // back as a weak candidate.
+      workspacePath: tempDir,
       agents: {
         defaults: {
           model: { primary: "lmstudio/qwen/qwen3.5-9b" },

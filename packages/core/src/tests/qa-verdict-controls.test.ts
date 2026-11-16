@@ -12,6 +12,9 @@
  * agentName/callSite is currentCallAttribution() at call time (lmstudio.ts / anthropic.ts), so
  * the spy records exactly that.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type Msg = { role: string; content: string };
@@ -99,9 +102,20 @@ function auditRows(type: string): Array<Record<string, unknown>> {
   return logAuditMock.mock.calls.filter(([t]) => t === type).map(([, data]) => data as Record<string, unknown>);
 }
 
+/** Each turn's own workspace: a turn reads the workspace's memory, skills and files. */
+const workspaces: string[] = [];
+function tempWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), "sai-qa-verdict-"));
+  workspaces.push(dir);
+  return dir;
+}
+afterEach(() => {
+  for (const dir of workspaces.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 async function runDeliverableTurn(opts: { plan: boolean; riskTier?: "low" | "high" }): Promise<void> {
   getConfig().orchestration.relaySingleDeliverable = false;
-  const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+  const session = new AgentSession({ channel: "test", workspacePath: tempWorkspace(), systemPrompt: "You are a test agent." });
   let llmCalls = 0;
   streamMock.mockImplementation(() => {
     llmCalls += 1;

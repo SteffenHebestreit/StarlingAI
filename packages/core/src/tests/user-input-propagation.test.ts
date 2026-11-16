@@ -53,6 +53,7 @@ describe("structured user input inside delegated runs", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-user-input-depth-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         painter: {
           description: "Paints pictures.",

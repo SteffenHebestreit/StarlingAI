@@ -17,10 +17,10 @@ vi.mock("../providers/lmstudio.js", async (importActual) => ({
   },
 }));
 
-function writeTempConfig(config: unknown): { tempDir: string; configPath: string } {
+function writeTempConfig(config: Record<string, unknown>): { tempDir: string; configPath: string } {
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-tool-caps-"));
   const configPath = join(tempDir, "starlingai.json");
-  writeFileSync(configPath, JSON.stringify(config), "utf8");
+  writeFileSync(configPath, JSON.stringify({ workspacePath: tempDir, ...config }), "utf8");
   return { tempDir, configPath };
 }
 
@@ -112,7 +112,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "research_agent",
         task: "Research the topic thoroughly.",
         parentSessionId: "parent-research-cap",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       const messages = completeMock.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
@@ -202,7 +202,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "builder_agent",
         task: "Erzeuge eine vollständige HTML-Lernwebsite und speichere sie mit write_file.",
         parentSessionId: "parent-idempotent-recall",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       // The agent must have survived the redundant read_file calls and reached write_file.
@@ -276,7 +276,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "mission_coordinator",
         task: "Build the full app by delegating to specialists.",
         parentSessionId: "parent-recursion-deadend",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
       // Broke after the 2nd consecutive failed-delegation iteration — did NOT churn to 10.
       expect(delegateTasks).toHaveLength(2);
@@ -356,7 +356,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "mission_coordinator",
         task: "Coordinate protocol research and publish a finding.",
         parentSessionId: "parent-empty-final-rescue",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(result.output).not.toBe("Sub-agent produced no final response.");
@@ -434,7 +434,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "mission_coordinator",
         task: "Coordinate a source-grounded protocol paper workflow.",
         parentSessionId: "parent-coordinator-cap",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(result.output).toContain("Workflow completed after coordinator handoffs.");
@@ -514,7 +514,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "mission_coordinator",
         task: "Erstelle ein kurzes Paper zu KI-Protokollen.",
         parentSessionId: "parent-workflow-passthrough",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(result.output).toBe(workflowOutput);
@@ -605,7 +605,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "mission_coordinator",
         task: "Erstelle ein kurzes Paper zu KI-Protokollen und publiziere den Abschlussfund.",
         parentSessionId: "parent-workflow-share-finding",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(result.output).toBe(workflowOutput);
@@ -681,7 +681,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "deck_agent",
         task: "Build the slide deck.",
         parentSessionId: "parent-cap-refund",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       // All 4 calls reached the tool: the 3 rejected-arg failures did NOT block the
@@ -742,7 +742,7 @@ describe("sub-agent research tool caps", () => {
         agentName: "flaky_agent",
         task: "Use the tool.",
         parentSessionId: "parent-failure-cap",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       // PER_TOOL_FAILURE_CAP (4) bounds it: distinct-arg failures reach the tool only
@@ -799,7 +799,7 @@ describe("per-agent model config", () => {
         agentName: "specialist_agent",
         task: "Do the specialist task.",
         parentSessionId: "parent-model-override",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
       });
 
       expect(result.stats.model).toBe("overridden-llm");

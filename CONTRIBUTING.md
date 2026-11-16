@@ -29,6 +29,8 @@ Always run tests through `pnpm test` (which runs `pnpm -r test`, executing each 
 cd packages/core && pnpm exec vitest run src/tests/<file>.test.ts
 ```
 
+A core test never uses the default workspace. `workspacePath` defaults to `/workspace`: a CI runner cannot create it, and on Windows it is `<drive>:\workspace`, which every checkout and every run on that drive share. So a test whose code reads or writes workspace state (agent outcomes, checkpoints, approvals, accounts, memory, skills, uploads) gives its config a temp `workspacePath` (`mkdtempSync(join(tmpdir(), "…"))`, removed in `afterEach`) and hands its tool contexts and sessions that directory too. The suite's setup (`src/tests/vitest.setup.ts`) enforces this: under it the default workspace looks absent, as on CI, and a test that reaches it fails with the calls and their callers listed.
+
 Tests that are environment-coupled or pending a behavior decision are marked `it.skip` with a `QUARANTINED (DEVPLAN …)` note explaining what to confirm before re-enabling. Don't silently delete them.
 
 ### Reliability eval (`pass^k`) before trusting a prompt/agent change

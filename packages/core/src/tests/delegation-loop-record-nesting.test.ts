@@ -36,6 +36,7 @@ describe("the turn's record of looped runs in a sub-agent", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-loop-record-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         mission_coordinator: { description: "Coordinates", systemPrompt: "Coordinate.", tools: ["grep_files"], maxIterations: 4 },
       },

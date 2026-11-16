@@ -39,6 +39,7 @@ describe("parallel_delegate cross-round reuse", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-parallel-reuse-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coord: { description: "Coordinator", systemPrompt: "Coordinate the research mission.", tools: ["parallel_delegate"], maxIterations: 5 },
         researcher: { description: "Researcher", systemPrompt: "Research from sources only.", tools: [], maxIterations: 1 },
@@ -118,6 +119,7 @@ describe("parallel_delegate cross-round reuse", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-reuse-limit-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         coord: { description: "Coordinator", systemPrompt: "Coordinate the research mission.", tools: ["parallel_delegate"], maxIterations: 6 },
         researcher: { description: "Researcher", systemPrompt: "Research from sources only.", tools: [], maxIterations: 1 },

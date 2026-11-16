@@ -115,7 +115,7 @@ describe("the gate in front of switch_model", () => {
   it("asks before it switches, naming the setup", async () => {
     const result = await executeTool("switch_model", { preset: "claude" }, ctx());
     expect(result.success).toBe(true);
-    expect(approve).toHaveBeenCalledWith("switch_model", { preset: "claude" });
+    expect(approve).toHaveBeenCalledWith("switch_model", { preset: "claude" }, { humanInLoopStep: false });
     expect(activePreset()).toBe("claude");
   });
 

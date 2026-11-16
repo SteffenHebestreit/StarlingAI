@@ -151,7 +151,7 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from "vue";
-import { defaultGatewayWsUrl, useGatewayStore } from "@/stores/gateway";
+import { defaultGatewayWsUrl, gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { ssoErrorMessage } from "@/composables/ssoReturn";
 import { useFocusTrap } from "@/composables/useFocusTrap";
@@ -195,7 +195,7 @@ const provider = ref<"builtin" | "oidc">("builtin");
 
 async function detectAuthMode(): Promise<void> {
   try {
-    const apiBase = apiBaseFromWsUrl(wsUrl.value);
+    const apiBase = gatewayRestBaseUrl(wsUrl.value);
     const res = await fetch(`${apiBase}/api/auth/mode`, { method: "GET" });
     if (!res.ok) return;
     const body = await res.json() as { authEnabled?: boolean; provider?: "builtin" | "oidc" };
@@ -208,7 +208,7 @@ async function detectAuthMode(): Promise<void> {
 
 /** Redirect the browser to the gateway's OIDC login (which redirects to the IdP). */
 function startSso(): void {
-  window.location.href = `${apiBaseFromWsUrl(wsUrl.value)}/api/auth/oidc/login`;
+  window.location.href = `${gatewayRestBaseUrl(wsUrl.value)}/api/auth/oidc/login`;
 }
 
 /** The cursor goes where the typing starts: the first field of the open tab that is still empty. */
@@ -237,6 +237,7 @@ const wsUrl = ref(gateway.wsUrl);
 const defaultWsUrl = defaultGatewayWsUrl();
 // A sign-in the gateway turned away is why this screen is up: say so, instead of an empty form.
 const REJECTED = "The gateway did not accept that sign-in. Check the token or sign in again.";
+const ACCESS_DENIED = "This account has no access to the live dashboard.";
 const errorMessage = ref<string | null>(gateway.authFailed ? REJECTED : null);
 const submitting = ref(false);
 watch(() => gateway.authFailed, (failed) => { if (failed) errorMessage.value = REJECTED; });
@@ -244,15 +245,17 @@ watch(() => gateway.authFailed, (failed) => { if (failed) errorMessage.value = R
 /**
  * A connect is only started by `gateway.connect()`; whether the gateway took the sign-in comes
  * later, over the socket. Wait for that answer, so "Connecting…" shows for as long as it is true
- * and a refusal is not met with silence. Resolves "open" (this screen closes), "rejected", or
+ * and a refusal is not met with silence. Resolves "open" (this screen closes), "rejected",
+ * "denied" (the sign-in is valid but the account's role may not use the live dashboard), or
  * "waiting" when the gateway has not answered in time.
  */
-function connectionSettled(timeoutMs = 10_000): Promise<"open" | "rejected" | "waiting"> {
+function connectionSettled(timeoutMs = 10_000): Promise<"open" | "rejected" | "denied" | "waiting"> {
   return new Promise((resolve) => {
     const started = Date.now();
     const check = (): void => {
       if (gateway.connected) resolve("open");
       else if (gateway.authFailed) resolve("rejected");
+      else if (gateway.accessDenied) resolve("denied");
       else if (unmounted || Date.now() - started > timeoutMs) resolve("waiting");
       else setTimeout(check, 120);
     };
@@ -272,16 +275,12 @@ function setMode(next: Mode): void {
   focusFirstField();
 }
 
-function apiBaseFromWsUrl(value: string): string {
-  return value.replace(/^ws/, "http").replace(/\/ws$/, "");
-}
-
 async function submit(): Promise<void> {
   errorMessage.value = null;
   submitting.value = true;
   try {
     if (mode.value === "password") {
-      const apiBase = apiBaseFromWsUrl(wsUrl.value);
+      const apiBase = gatewayRestBaseUrl(wsUrl.value);
       const res = await fetch(`${apiBase}/api/auth/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -309,14 +308,15 @@ async function submit(): Promise<void> {
     }
     const outcome = await connectionSettled();
     if (outcome === "rejected") errorMessage.value = REJECTED;
+    else if (outcome === "denied") errorMessage.value = ACCESS_DENIED;
     else if (outcome === "waiting" && !unmounted) {
-      errorMessage.value = `No answer from the gateway at ${apiBaseFromWsUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
+      errorMessage.value = `No answer from the gateway at ${gatewayRestBaseUrl(wsUrl.value)} yet. Still trying — check the URL if this stays.`;
     }
   } catch (err) {
     // A thrown fetch (or JSON parse) means we never reached the gateway — the most
     // common first-run cause. Without this the error was swallowed and the form
     // just silently stopped, giving the user no idea the gateway was unreachable.
-    errorMessage.value = `Can't reach the gateway at ${apiBaseFromWsUrl(wsUrl.value)}. Is it running? (${err instanceof Error ? err.message : String(err)})`;
+    errorMessage.value = `Can't reach the gateway at ${gatewayRestBaseUrl(wsUrl.value)}. Is it running? (${err instanceof Error ? err.message : String(err)})`;
   } finally {
     submitting.value = false;
   }

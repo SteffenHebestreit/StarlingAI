@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SwarmState } from "../tools/registry.js";
 import type { SubAgentRunOptions, SubAgentRunResult } from "../agent/sub-agent.js";
@@ -46,7 +49,11 @@ const RESEARCH_BODY =
   "An array of analog mics also needs matched bias and an analog front end before the ADC.";
 
 describe("operator-stop halts delegation escalation and preserves evidence", () => {
+  // Each test's own workspace: a delegation reads the promoted agents from it.
+  let workspacePath = "";
+
   beforeEach(() => {
+    workspacePath = mkdtempSync(join(tmpdir(), "sai-operator-stop-"));
     runSubAgentMock.mockClear();
     runSubAgentWithStatsMock.mockClear();
     vi.resetModules();
@@ -57,6 +64,7 @@ describe("operator-stop halts delegation escalation and preserves evidence", () 
     resetConfigForTests();
     const memory = await import("../swarm/memory.js");
     await memory.resetSharedMemoryForTests();
+    rmSync(workspacePath, { recursive: true, force: true });
   });
 
   it("short-circuits a NEW delegation when the operator already stopped the turn", async () => {
@@ -85,7 +93,7 @@ describe("operator-stop halts delegation escalation and preserves evidence", () 
     const delegate = getTool("delegate_to_agent");
     const result = await delegate!.execute(
       { agentName: "researcher", fallbackAgents: ["mission_coordinator"], task: "Research the IM73A135V01 mic" },
-      { sessionId: "session-stop-new", workspacePath: "/workspace", swarmState: freshSwarmState() },
+      { sessionId: "session-stop-new", workspacePath, swarmState: freshSwarmState() },
     );
 
     // No sub-agent should be spawned at all — the orchestrator is told to synthesize.
@@ -125,7 +133,7 @@ describe("operator-stop halts delegation escalation and preserves evidence", () 
     const result = await delegate!.execute(
       { agentName: "content_writer", task: "BUILD TASK — produce the deck from the verified findings" },
       // allowDelegationAfterOperatorStop = the terminal auto-build's exemption.
-      { sessionId: "session-stop-autobuild", workspacePath: "/workspace", swarmState: freshSwarmState(), allowDelegationAfterOperatorStop: true },
+      { sessionId: "session-stop-autobuild", workspacePath, swarmState: freshSwarmState(), allowDelegationAfterOperatorStop: true },
     );
 
     // The build sub-agent runs despite the stop, and the latch is cleared so its own
@@ -207,7 +215,7 @@ describe("operator-stop halts delegation escalation and preserves evidence", () 
     const delegate = getTool("delegate_to_agent");
     const result = await delegate!.execute(
       { agentName: "researcher", fallbackAgents: ["mission_coordinator"], task: "Research the IM73A135V01 mic" },
-      { sessionId: "session-stop-mid", workspacePath: "/workspace", swarmState: freshSwarmState() },
+      { sessionId: "session-stop-mid", workspacePath, swarmState: freshSwarmState() },
     );
 
     // Only the researcher ran; the coordinator fallback was never escalated to.

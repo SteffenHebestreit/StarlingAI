@@ -431,6 +431,36 @@ describe("AG-UI streaming", () => {
     }
   });
 
+  it("hands the turn its caller as the person who sent the message, not the session's owner", async () => {
+    // An approval policy decides on who asks (tools/registry.ts approveUnderPolicy, through
+    // RunTurnOptions.sender): an admin who drives another account's session asks as the admin.
+    const tempDir = mkdtempSync(join(tmpdir(), "guardedclaw-agui-sender-"));
+    const configPath = join(tempDir, "starlingai.json");
+    writeFileSync(configPath, JSON.stringify({
+      gateway: { jwtSecret: "a".repeat(32), turnTimeoutMs: 30_000 },
+    }), "utf8");
+    process.env["SAI_CONFIG_PATH"] = configPath;
+
+    const senders: unknown[] = [];
+    vi.doMock("../agent/runtime.js", () => ({
+      runTurn: vi.fn(async (opts: Record<string, unknown>) => {
+        senders.push((opts["sender"] as (() => unknown) | undefined)?.());
+        return { response: "ok", toolCallsExecuted: 0, guardrailEvents: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 }, blocked: false };
+      }),
+    }));
+
+    try {
+      const { handleAguiStream } = await import("../gateway/agui.js");
+      const alice = { userId: "alice", account: "acct-alice" };
+      const carol = { userId: "carol", account: "acct-carol" };
+      await handleAguiStream(new FakeResponse() as never, { sessionId: "sender-sess", message: "hi" }, { userId: "alice", role: "viewer", identity: alice });
+      await handleAguiStream(new FakeResponse() as never, { sessionId: "sender-sess", message: "export it" }, { userId: "carol", role: "admin", identity: carol });
+      expect(senders).toEqual([{ identity: alice, role: "viewer" }, { identity: carol, role: "admin" }]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to drive a turn on another user's existing session under active auth", async () => {
     // Regression: handleAguiStream resolved an existing session purely by id with no
     // ownership check, so any authenticated caller who knew a victim's sessionId could
@@ -461,9 +491,10 @@ describe("AG-UI streaming", () => {
     try {
       const { handleAguiStream } = await import("../gateway/agui.js");
 
-      // alice creates her session (owned by alice) via the handler.
+      // alice creates her session (owned by alice) via the handler. She is an operator: the gateway
+      // refuses a viewer before this handler runs (raw-surface-role-defaults.test.ts).
       const resCreate = new FakeResponse();
-      await handleAguiStream(resCreate as never, { sessionId: "victim-sess", message: "hi" }, { userId: "alice", role: "viewer" });
+      await handleAguiStream(resCreate as never, { sessionId: "victim-sess", message: "hi" }, { userId: "alice", role: "operator" });
       expect(resCreate.statusCode).toBe(200);
       expect(ran).toHaveBeenCalledTimes(1);
 
@@ -487,7 +518,7 @@ describe("AG-UI streaming", () => {
 
       // The owner may access her own session.
       const resOwner = new FakeResponse();
-      await handleAguiStream(resOwner as never, { sessionId: "victim-sess", message: "mine" }, { userId: "alice", role: "viewer" });
+      await handleAguiStream(resOwner as never, { sessionId: "victim-sess", message: "mine" }, { userId: "alice", role: "operator" });
       expect(resOwner.statusCode).toBe(200);
       expect(ran).toHaveBeenCalledTimes(3);
     } finally {

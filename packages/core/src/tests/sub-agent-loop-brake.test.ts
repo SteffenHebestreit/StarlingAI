@@ -80,6 +80,7 @@ function writeTempConfig(
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-loop-brake-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     ...extra,
     subAgents: {
       loop_agent: {

@@ -36,6 +36,7 @@ describe("best of two on a delegation", () => {
   const setup = async (bestOfTwoDeliverables: boolean) => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-bo2-delegation-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       orchestration: { bestOfTwoDeliverables },
       subAgents: { content_writer: { description: "Writes documents and reports.", systemPrompt: "Write.", tools: ["write_file"], maxIterations: 4 } },
     }), "utf8");

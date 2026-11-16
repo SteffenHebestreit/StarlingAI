@@ -94,6 +94,7 @@ describe("a delegated run that answered with essentially nothing", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-empty-answer-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         site_reader: {
           description: "Opens web pages in a browser and reports what they show.",

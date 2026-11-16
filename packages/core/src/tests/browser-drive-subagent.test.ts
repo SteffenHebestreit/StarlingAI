@@ -85,6 +85,7 @@ describe("laya-browser driving a sub-agent run", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-browser-drive-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         web_clicker: {
           description: "Clicks through websites",

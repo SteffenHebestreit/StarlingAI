@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -85,9 +85,13 @@ function burnStream(chars = 4000) {
   })();
 }
 
+const tempDirs: string[] = [];
+
 async function loadRuntime() {
   const dir = mkdtempSync(join(tmpdir(), "sai-forced-burn-"));
+  tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: {
       // Both are required for forceToolChoice to be reachable at all.
@@ -101,7 +105,7 @@ async function loadRuntime() {
     import("../agent/session.js"),
     import("../agent/runtime.js"),
   ]);
-  return { AgentSession, runTurn };
+  return { AgentSession, runTurn, workspacePath: dir };
 }
 
 describe("a forced tool call that burns its budget is not continued", () => {
@@ -112,6 +116,7 @@ describe("a forced tool call that burns its budget is not continued", () => {
     routingCompleteMock.mockClear();
     vi.resetModules();
     (await import("../config/loader.js")).resetConfigForTests();
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
   /**
@@ -125,7 +130,7 @@ describe("a forced tool call that burns its budget is not continued", () => {
     streamMock.mock.calls.filter((args) => Array.isArray(args[1]) && (args[1] as unknown[]).length === 0).length;
 
   it("does not continue a forced call that returned prose at the cap", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     let call = 0;
     streamMock.mockImplementation(() => {
       call += 1;
@@ -140,7 +145,7 @@ describe("a forced tool call that burns its budget is not continued", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     await runTurn({ session, userMessage: "wie wird das wetter morgen?" });
@@ -154,7 +159,7 @@ describe("a forced tool call that burns its budget is not continued", () => {
   it("still continues a genuinely truncated answer when the call was NOT forced", async () => {
     // Guards the over-broad version of this fix: an ordinary long answer cut by the completion
     // cap must still be stitched. Without forceToolChoice the continuation path is untouched.
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     let call = 0;
     streamMock.mockImplementation(() => {
       call += 1;
@@ -175,7 +180,7 @@ describe("a forced tool call that burns its budget is not continued", () => {
 
     const session = new AgentSession({
       channel: "test",
-      workspacePath: "/workspace",
+      workspacePath,
       systemPrompt: "You are a test agent.",
     });
     await runTurn({ session, userMessage: "write me a long essay about caching" });

@@ -1,6 +1,17 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { extensionRoutes } from "@/extensions/registry";
 
+declare module "vue-router" {
+  interface RouteMeta {
+    /**
+     * How the app shell frames the page. Absent: the dashboard shell (header, navigation, toasts,
+     * command palette, ...). "bare": the page alone, over the whole viewport — see
+     * layout/routeLayout.ts and src/extensions/README.md.
+     */
+    layout?: "bare";
+  }
+}
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [

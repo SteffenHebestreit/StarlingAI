@@ -26,6 +26,7 @@ import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
 import { emitSwarmEvent } from "./bus.js";
 import { getConfig } from "../config/loader.js";
+import type { Identity } from "../runtime/accounts.js";
 
 import { PRODUCT } from "../product/index.js";
 
@@ -54,6 +55,13 @@ export interface TaskCheckpoint {
   iterationsCompleted: number;
   /** Arbitrary key-value context for the agent to store mid-run data. */
   agentState: Record<string, unknown>;
+  /**
+   * Who the run executed as, when it ran as someone: its account, or a principal. Stamped when the
+   * checkpoint is opened. The dashboard routes (gateway/checkpoint-routes.ts) show the checkpoint to
+   * that owner, also where the session the run worked in has no record (an A2A or MCP run's) or no
+   * longer has one (a job's, pruned long before the checkpoint expires), and never send this field.
+   */
+  owner?: Identity;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -141,6 +149,8 @@ export function createCheckpoint(opts: {
   agentName: string;
   parentSessionId: string;
   task: string;
+  /** Who the run executes as (TaskCheckpoint.owner); none for a run that executes as nobody. */
+  owner?: Identity;
 }): TaskCheckpoint {
   const config = getConfig();
   const taskId = uuid();
@@ -159,6 +169,7 @@ export function createCheckpoint(opts: {
     elapsedMs: 0,
     iterationsCompleted: 0,
     agentState: {},
+    ...(opts.owner ? { owner: { ...opts.owner } } : {}),
   };
 
   _store.set(taskId, checkpoint);
@@ -289,6 +300,14 @@ export function completeCheckpoint(taskId: string): boolean {
   return true;
 }
 
+/**
+ * The checkpoint held under `taskId`, in this process or on disk, read without changing anything:
+ * the dashboard routes check whose it is before they resume or complete it.
+ */
+export function getCheckpoint(taskId: string): TaskCheckpoint | undefined {
+  return _store.get(taskId) ?? loadCheckpointFromDisk(getConfig().workspacePath, taskId);
+}
+
 /** Return all in-memory checkpoints (for the dashboard). */
 export function listCheckpoints(filter?: { status?: CheckpointStatus; agentName?: string }): TaskCheckpoint[] {
   try {
@@ -376,7 +395,16 @@ function persistCheckpoint(workspacePath: string, cp: TaskCheckpoint): void {
   }
 }
 
+/**
+ * The ids a checkpoint is stored under: letters, digits, `_` and `-` (createCheckpoint mints UUIDs).
+ * A task id comes from the dashboard's URL, which Hono hands over percent-decoded, so `..%2F..%2Fx`
+ * arrived as `../../x`: a resume or complete read `<checkpoints>/../../x.json`, and a complete then
+ * deleted that file.
+ */
+const CHECKPOINT_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
 function loadCheckpointFromDisk(workspacePath: string, taskId: string): TaskCheckpoint | undefined {
+  if (!CHECKPOINT_ID.test(taskId)) return undefined;
   try {
     const raw = readFileSync(checkpointPath(workspacePath, taskId), "utf-8");
     return JSON.parse(raw) as TaskCheckpoint;

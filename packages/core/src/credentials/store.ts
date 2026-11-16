@@ -78,6 +78,10 @@ let _cache: CredentialStore | null = null;
 // salt). We still serve reads as empty, but must NEVER overwrite the file (that would
 // destroy the recoverable ciphertext = every stored credential).
 let _loadFailed = false;
+// Bumped on every write, so whatever is derived from the store (the gateway's webhook-key index)
+// knows when to derive it again. setCredential/deleteCredential change the cached object before
+// saveStore runs, so the bump comes first: a write that then fails still changed what reads see.
+let _revision = 0;
 
 function loadStore(): CredentialStore {
   if (_cache) return _cache;
@@ -99,6 +103,7 @@ function loadStore(): CredentialStore {
 }
 
 function saveStore(store: CredentialStore): void {
+  _revision++;
   // Fail closed: if the file exists but never decrypted, a write here would wipe ALL
   // other credentials. Back up the ciphertext and refuse instead of destroying it.
   if (_loadFailed && existsSync(STORE_PATH)) {
@@ -146,6 +151,11 @@ export function deleteCredential(name: string): void {
 
 export function listCredentialNames(): string[] {
   return Object.keys(loadStore());
+}
+
+/** A number that changes whenever a credential is set or deleted. */
+export function credentialStoreRevision(): number {
+  return _revision;
 }
 
 function resolveStorePath(): string {

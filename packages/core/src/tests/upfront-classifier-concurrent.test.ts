@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -101,9 +101,13 @@ vi.mock("../guardrails/moderation.js", () => ({
 vi.mock("../guardrails/output.js", () => ({ scanOutput: vi.fn((text: string) => ({ safe: true, redacted: text })) }));
 vi.mock("../audit/logger.js", () => ({ logAudit: (...args: unknown[]) => logAuditMock(...args) }));
 
+const tempDirs: string[] = [];
+
 async function loadRuntime(config: { receptionistEnabled: boolean; decisions?: Record<string, unknown> }) {
   const dir = mkdtempSync(join(tmpdir(), "sai-upfront-concurrent-"));
+  tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     orchestration: { upfrontSourceSensitiveClassifier: true },
     receptionist: { enabled: config.receptionistEnabled },
@@ -115,7 +119,7 @@ async function loadRuntime(config: { receptionistEnabled: boolean; decisions?: R
     import("../agent/session.js"),
     import("../agent/runtime.js"),
   ]);
-  return { AgentSession, runTurn };
+  return { AgentSession, runTurn, workspacePath: dir };
 }
 
 /** Wait until the receptionist micro-call has been issued (its deferred reply exists). */
@@ -134,6 +138,7 @@ const upfrontAuditTypes = () => logAuditMock.mock.calls
 describe("up-front source-sensitivity classifier — issued after the fast lane, overlapping document RAG", () => {
   afterEach(async () => {
     delete process.env["SAI_CONFIG_PATH"];
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
     streamMock.mockReset();
     routingCompleteMock.mockClear();
     logAuditMock.mockClear();
@@ -149,8 +154,8 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
   });
 
   it("issues NO classifier request at all on a turn the front desk answers", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: true });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ receptionistEnabled: true });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     // "hi": no dynamic guidance, short + conversational — fast-lane eligible.
     const turn = runTurn({ session, userMessage: "hi" });
@@ -173,8 +178,8 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
   });
 
   it("issues it once the receptionist escalates, and consumes that verdict", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: true });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ receptionistEnabled: true });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     let classifierAbortedWhenOrchestratorStarted: boolean | undefined;
     streamMock.mockImplementation(() => {
       classifierAbortedWhenOrchestratorStarted = routingCalls.classifier[0]?.signal?.aborted;
@@ -214,8 +219,8 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
       for (const [verdict, answered] of [["VERDICT: no", true], ["", false]] as const) {
         logAuditMock.mockClear();
         routingCalls.classifierVerdict = verdict;
-        const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });
-        const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+        const { AgentSession, runTurn, workspacePath } = await loadRuntime({ receptionistEnabled: false });
+        const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
         await runTurn({ session, userMessage: "what changed in the deposit rules this year?" });
         expect(upfrontRows(), JSON.stringify(verdict)).toEqual([{ type: "upfront_source_sensitive_clear", answered }]);
       }
@@ -233,8 +238,8 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
       yield { type: "text_delta", content: "done" };
       yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
     })());
-    const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ receptionistEnabled: false });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
 
     const out = await runTurn({ session, userMessage: "Wer betreibt das Pfandsystem in Dänemark?" });
 
@@ -247,8 +252,8 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
 
   it("aborts the speculative request and logs no verdict when the turn turns out to be document-grounded", async () => {
     ragState.contextBlock = "the attached file says so";
-    const { AgentSession, runTurn } = await loadRuntime({ receptionistEnabled: false });
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ receptionistEnabled: false });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     streamMock.mockImplementation(() => (async function* () {
       yield { type: "text_delta", content: "done" };
       yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
@@ -275,11 +280,11 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
       answers: { source_sensitive: { choice: "yes", probabilities: { yes: 0.96, no: 0.04 } } },
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
     try {
-      const { AgentSession, runTurn } = await loadRuntime({
+      const { AgentSession, runTurn, workspacePath } = await loadRuntime({
         receptionistEnabled: false,
         decisions: { baseUrl: "http://laya:8080", points: { source_sensitive: { mode: "laya", threshold: 0.9 } } },
       });
-      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
       streamMock.mockImplementation(() => (async function* () {
         yield { type: "text_delta", content: "done" };
         yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
@@ -304,11 +309,11 @@ describe("up-front source-sensitivity classifier — issued after the fast lane,
       answers: { source_sensitive: { choice: "yes", probabilities: { yes: 0.96, no: 0.04 } } },
     }), { status: 200, headers: { "Content-Type": "application/json" } })));
     try {
-      const { AgentSession, runTurn } = await loadRuntime({
+      const { AgentSession, runTurn, workspacePath } = await loadRuntime({
         receptionistEnabled: false,
         decisions: { baseUrl: "http://laya:8080", layaFirstMs: 0, points: { source_sensitive: { mode: "laya", threshold: 0.9 } } },
       });
-      const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+      const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
       streamMock.mockImplementation(() => (async function* () {
         yield { type: "text_delta", content: "done" };
         yield { type: "done", finishReason: "stop", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };

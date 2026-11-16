@@ -53,6 +53,7 @@ describe("sub-agent progress events pair up", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-progress-pairing-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         researcher: {
           description: "Finds sources on the web.",
@@ -89,7 +90,7 @@ describe("sub-agent progress events pair up", () => {
         agentName: "researcher",
         task: "Find sources on the Strix Halo NPU.",
         parentSessionId: "parent-progress-pairing",
-        workspacePath: "/workspace",
+        workspacePath: tempDir,
         onProgress: (event) => {
           if (event.kind === "tool_start" || event.kind === "tool_done") {
             events.push({ kind: event.kind, toolCallId: event.toolCallId, metadata: event.metadata as Record<string, unknown> | undefined });

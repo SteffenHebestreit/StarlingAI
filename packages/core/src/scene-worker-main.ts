@@ -16,6 +16,7 @@ import { startEventLoopMonitor, stopEventLoopMonitor } from "./observability/eve
 import { startProviderActivityMonitor, stopProviderActivityMonitor } from "./observability/provider-activity-monitor.js";
 import { startRecoveryMetrics, stopRecoveryMetrics } from "./observability/recovery-metrics.js";
 import { loadConfig } from "./config/loader.js";
+import { registerCoreExtensionRoles } from "./extension/loader.js";
 import { stopAllCronJobs } from "./runtime/scheduler.js";
 import { relocateAccountWorkspaceState } from "./runtime/workspace-state-relocation.js";
 
@@ -66,6 +67,16 @@ export async function main() {
   // A standalone worker runs sandboxes too, and may start before the gateway: the same one-time move
   // of each account's workspace state out of its root, before any of them (src/index.ts).
   await relocateAccountWorkspaceState(config.workspacePath);
+
+  // The core extensions' roles, and nothing else of them, before anything here runs work for an
+  // account. This process loads no extension, but it runs each queued job with its owner's role as
+  // the auth layer holds it (agent/scene-worker.ts), and under multi-user auth a role nobody declares
+  // signs nobody in (gateway/auth.ts declaredRole): every job of an account holding an extension's
+  // role failed here as one of an account that no longer signs in.
+  const extensionRoles = await registerCoreExtensionRoles();
+  if (extensionRoles.registered > 0 || extensionRoles.failed > 0) {
+    log.info(extensionRoles, "Core extension roles registered");
+  }
 
   startEventLoopMonitor();
   startProviderActivityMonitor();

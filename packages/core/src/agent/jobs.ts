@@ -87,6 +87,13 @@ export interface SceneJobPayload {
   turnTimeoutMs: number;
   /** The principal kind of the run's owner (SceneJob.principal): the table has no column for it. */
   principal?: PrincipalKind;
+  /**
+   * The role the signed-in person who queued the run held then (CreateSceneJobInput.requestedByRole).
+   * The worker does not run on it: it resolves the owner's role as the auth layer holds it when the
+   * run starts. Its presence marks a run a person queued (or a run of a schedule a person made); a
+   * configured cron, webhook-key or channel run has none and runs with no role, as before.
+   */
+  requestedByRole?: string;
   /** The scheduled task this run is one run of (runtime/scheduled-tasks.ts): the worker hands the
    *  run's end to runtime/follow-up.ts, which counts it and posts what it found. */
   scheduleId?: string;
@@ -120,6 +127,10 @@ export interface CreateSceneJobInput {
   turnTimeoutMs: number;
   /** Set by the scheduled-task runner: the schedule this run belongs to. */
   scheduleId?: string;
+  /** Set by a surface a person queued the run from (the /job command, the scene and job run
+   *  routes) and by the scheduled-task runner for a schedule a person made: the role they signed
+   *  in with. See SceneJobPayload.requestedByRole. */
+  requestedByRole?: string;
 }
 
 export interface ClaimedSceneJob extends SceneJob {
@@ -262,6 +273,7 @@ export async function cancelJob(id: string): Promise<SceneJob | undefined> {
       jobId: job.id,
       targetPath: "/jobs",
       sticky: job.status === "cancelling",
+      ...jobNotificationOwnerField(job),
     });
   }
   return job;
@@ -307,6 +319,7 @@ export async function markJobCancelled(id: string, reason: string): Promise<void
       jobId: job.id,
       targetPath: "/jobs",
       sticky: true,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -330,6 +343,7 @@ export async function completeJob(
       jobId: job.id,
       targetPath: "/jobs",
       sticky: result.blocked,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -348,6 +362,7 @@ export async function failJob(id: string, error: string): Promise<void> {
       jobId: job.id,
       targetPath: "/jobs",
       sticky: true,
+      ...jobNotificationOwnerField(job),
     });
   }
 }
@@ -420,6 +435,7 @@ class InMemorySceneJobStore implements SceneJobStore {
         turnTimeoutMs: input.turnTimeoutMs,
         ...jobPrincipalStamp(input),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+        ...(input.requestedByRole ? { requestedByRole: input.requestedByRole } : {}),
       },
     };
     this.jobs.set(job.id, job);
@@ -671,6 +687,7 @@ class PostgresSceneJobStore implements SceneJobStore {
       turnTimeoutMs: input.turnTimeoutMs,
       ...jobPrincipalStamp(input),
       ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+      ...(input.requestedByRole ? { requestedByRole: input.requestedByRole } : {}),
     };
 
     await this.pool.query(
@@ -1062,6 +1079,7 @@ function normalizePayload(value: unknown): SceneJobPayload {
     turnTimeoutMs: typeof payload.turnTimeoutMs === "number" && Number.isFinite(payload.turnTimeoutMs) ? payload.turnTimeoutMs : 900_000,
     ...(isPrincipalKind(payload.principal) ? { principal: payload.principal } : {}),
     ...(typeof payload.scheduleId === "string" && payload.scheduleId ? { scheduleId: payload.scheduleId } : {}),
+    ...(typeof payload.requestedByRole === "string" && payload.requestedByRole ? { requestedByRole: payload.requestedByRole } : {}),
     // B31 resumable-workflow checkpoint: MUST round-trip through the Postgres jsonb read
     // path or resume silently never happens (the field is written by saveWorkflowCheckpoint
     // but would otherwise be stripped here). Keep only entries with the TurnOutput shape
@@ -1239,4 +1257,21 @@ export function sceneJobIdentity(job: Pick<SceneJob, "userId" | "account" | "pri
   if (job.account) return { userId: job.userId, account: job.account };
   if (job.principal) return { userId: job.userId, principal: job.principal };
   return { userId: job.userId };
+}
+
+/**
+ * Whose a job's notifications are (runtime/notifications.ts): the account it runs as, so they reach
+ * that account alone. They name the job, its session and its error text, and went to everyone signed
+ * in. A run that names no account (a scene trigger's, an instance credential's) has no owner, and its
+ * notifications go to operators and above.
+ */
+export function jobNotificationOwner(job: Pick<SceneJob, "userId" | "account">): Identity | undefined {
+  if (!job.account) return undefined;
+  return { ...(job.userId !== undefined ? { userId: job.userId } : {}), account: job.account };
+}
+
+/** The `owner` field of a job's notification: present only when the job runs as an account. */
+function jobNotificationOwnerField(job: Pick<SceneJob, "userId" | "account">): { owner?: Identity } {
+  const owner = jobNotificationOwner(job);
+  return owner ? { owner } : {};
 }

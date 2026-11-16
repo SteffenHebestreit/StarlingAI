@@ -81,6 +81,7 @@ describe("sub-agent setup before the first model call", () => {
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "sai-setup-lookups-"));
     writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+      workspacePath: dir,
       skillLibrary: { enabled: true },
       subAgents: {
         [AGENT]: {

@@ -268,7 +268,7 @@
 
 <script setup lang="ts">
 import { reactive, ref } from "vue";
-import { useGatewayStore } from "@/stores/gateway";
+import { gatewayRestBaseUrl, useGatewayStore } from "@/stores/gateway";
 import { useProductStore } from "@/stores/product";
 import { confirmAction } from "@/composables/useConfirm";
 import { useLoadWhenConnected } from "@/composables/useLoadWhenConnected";
@@ -332,7 +332,7 @@ const addForm = reactive({
 });
 
 function apiBase(): string {
-  return gateway.wsUrl.replace(/^ws/, "http").replace(/\/ws$/, "");
+  return gatewayRestBaseUrl(gateway.wsUrl);
 }
 
 function authHeaders(): Record<string, string> {

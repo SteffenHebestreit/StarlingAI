@@ -1,5 +1,9 @@
 import { browserTimeZone } from "@/composables/browserTime";
-import { responseErrorMessage as parseErrorResponse } from "@/composables/httpErrors";
+import { GatewayHttpError } from "@/composables/httpErrors";
+import { defaultGatewayWsUrl, gatewayRestBaseUrl, normalizeGatewayWsUrl } from "@/composables/gatewayUrl";
+import { forbiddenReason } from "@/composables/rpcErrors";
+import { readAllowedRpcMethods, rpcMethodAllowed } from "@/composables/rpcAccess";
+import { browserLanguage, chatText } from "@/composables/chatText";
 import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import { useStorage } from "@vueuse/core";
@@ -19,6 +23,7 @@ import {
 import { dropRunningTail, markRunningTail, mergeHydrated, sameList, sameMessage } from "../composables/hydration";
 import { namesTurns, nextOpenerIndex, recoveryVerdict, savedEnding, type RecoveryVerdict } from "../composables/turnRecovery";
 import { needsOlderTranscript, rewindHistoryIndex, transcriptHistoryIndex } from "../composables/rewind";
+import { socketCloseOutcome } from "../composables/socketClose";
 import {
   addUserInput, anchorStepFor, askUserExpiresAt, closesAskUser, dropTurnInputs, expiredInputIds, holdsStallRecovery,
   isExpiredAnswer, nextExpiryAt, openInputsFor, outcomeOfChoice, placeUserInputs, readFieldErrors, readUserInputList,
@@ -27,6 +32,8 @@ import {
 } from "../composables/userInputs";
 
 export { sanitizeAssistantMessageContent } from "../composables/assistantContent";
+export { defaultGatewayWsUrl, gatewayRestBaseUrl } from "@/composables/gatewayUrl";
+export { GatewayHttpError } from "@/composables/httpErrors";
 
 export interface TurnUsage {
   promptTokens: number;
@@ -278,46 +285,6 @@ const TURN_STALL_WARNING_MS = 20_000;
 const TURN_STALL_RECOVERY_MS = 45_000;
 const TURN_DELEGATED_STALL_WARNING_MS = 60_000;
 const TURN_DELEGATED_STALL_RECOVERY_MS = 120_000;
-const LEGACY_DIRECT_GATEWAY_WS_URL = "ws://localhost:8765/ws";
-
-export function defaultGatewayWsUrl(): string {
-  if (typeof window === "undefined") {
-    return LEGACY_DIRECT_GATEWAY_WS_URL;
-  }
-
-  const { protocol, host } = window.location;
-  if (!host || protocol === "file:") {
-    return LEGACY_DIRECT_GATEWAY_WS_URL;
-  }
-
-  const wsProtocol = protocol === "https:" ? "wss:" : "ws:";
-  return `${wsProtocol}//${host}/ws`;
-}
-
-function normalizeGatewayWsUrl(raw: string | null | undefined): string {
-  const trimmed = raw?.trim();
-  if (!trimmed || trimmed === LEGACY_DIRECT_GATEWAY_WS_URL) {
-    return defaultGatewayWsUrl();
-  }
-
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
-    }
-    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-      return defaultGatewayWsUrl();
-    }
-    if (!parsed.pathname || parsed.pathname === "/") {
-      parsed.pathname = "/ws";
-    }
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return trimmed;
-  }
-}
-
 export interface FileToMarkdownResult {
   success: boolean;
   markdown?: string;
@@ -722,6 +689,16 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   const connected = ref(false);
   const connecting = ref(false);
+  /** The RPC methods this connection may call (hello-ok), or null while the gateway listed none. */
+  const allowedMethods = ref<string[] | null>(null);
+  /**
+   * Whether this connection may call `method`: its role's methods, as the gateway listed them at the
+   * handshake. The page offers a control only when it may (a viewer reads its chats and sends
+   * nothing); the gateway still decides every call.
+   */
+  function mayCall(method: string): boolean {
+    return rpcMethodAllowed(allowedMethods.value, method);
+  }
   // True when the gateway reports the primary model endpoint is unreachable (a
   // local LM Studio/Ollama that isn't running yet) — the dashboard shows a banner
   // so a fresh install doesn't just fail every turn with an unexplained empty answer.
@@ -900,6 +877,9 @@ export const useGatewayStore = defineStore("gateway", () => {
   }
   const turnLikelyStalled = ref(false);
   const authFailed = ref(false);    // true when connection was rejected due to bad token
+  // True when the gateway accepted the sign-in but a route policy keeps its role off the live
+  // dashboard (close code 4403). The token stays; reconnecting would only be refused again.
+  const accessDenied = ref(false);
   // True from a lost connection until it is back or given up on. Between two attempts neither
   // `connected` nor `connecting` is set, and the shell took that for "signed out": a login screen
   // covered the app for the whole wait of every reconnect.
@@ -1078,7 +1058,7 @@ export const useGatewayStore = defineStore("gateway", () => {
 
   function scheduleReconnect(delayMs?: number): void {
     if (reconnectTimer) return;
-    if (!token.value || authFailed.value) {
+    if (!token.value || authFailed.value || accessDenied.value) {
       reconnecting.value = false;
       return;
     }
@@ -1094,8 +1074,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (!token.value || authFailed.value) reconnecting.value = false;
-      if (!token.value || authFailed.value || connected.value || connecting.value) return;
+      if (!token.value || authFailed.value || accessDenied.value) reconnecting.value = false;
+      if (!token.value || authFailed.value || accessDenied.value || connected.value || connecting.value) return;
       consecutiveReconnects++;
       connect();
     }, backoff);
@@ -1243,7 +1223,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     lifecycleHooksInstalled = true;
 
     const resumeConnection = () => {
-      if (!token.value || authFailed.value) return;
+      if (!token.value || authFailed.value || accessDenied.value) return;
       if (connected.value || connecting.value) return;
       connect();
     };
@@ -1675,13 +1655,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     return plainMatch?.[1] ?? null;
   }
 
+  /** The REST base of the gateway the socket talks to ("https://host"), without a trailing slash. */
   function restBaseUrl(): string {
-    const parsed = new URL(normalizeGatewayWsUrl(wsUrl.value));
-    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
-    parsed.pathname = parsed.pathname.replace(/\/ws$/, "");
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/$/, "");
+    return gatewayRestBaseUrl(wsUrl.value);
   }
 
   async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -1691,10 +1667,7 @@ export const useGatewayStore = defineStore("gateway", () => {
       ...init,
       headers,
     });
-    if (!response.ok) {
-      const message = await parseErrorResponse(response);
-      throw new Error(message);
-    }
+    if (!response.ok) throw await GatewayHttpError.fromResponse(response);
     return response;
   }
 
@@ -2374,10 +2347,15 @@ export const useGatewayStore = defineStore("gateway", () => {
       ?? syntheticSwarmState.value
       ?? streamingMessage?.swarmState
       ?? synthesizeSwarmStateFromToolCalls(streamingMessage?.toolCalls, errorText);
+    // The gateway refused the caller's role ("Forbidden: …"): said as an access message, not as a
+    // failure, and not flashed red.
+    const noAccess = forbiddenReason(errorText);
     const errorMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
-      content: `⚠️ ${errorText}`,
+      content: noAccess === null
+        ? `⚠️ ${errorText}`
+        : `🔒 ${chatText.noAccess(streamingMessage?.language ?? browserLanguage(), noAccess)}`,
       timestamp: new Date(),
       blocked: true,
       pageOnly: true,
@@ -2411,8 +2389,8 @@ export const useGatewayStore = defineStore("gateway", () => {
       clearPendingTurnRecovery();
     }
 
-    // The user's Stop is not an error: no red flash for it.
-    if (!stopped) flashError(5000);
+    // The user's Stop is not an error: no red flash for it, nor for a refusal of the role.
+    if (!stopped && noAccess === null) flashError(5000);
   }
 
   /**
@@ -2928,7 +2906,9 @@ export const useGatewayStore = defineStore("gateway", () => {
     imageSettingsPrompt?: ImageSettingsPrompt;
   }): Promise<void> {
     const sessionId = currentSessionId.value;
-    if (!sessionId) return;
+    // Not for a connection that may not change them (a viewer): the value set below would stay on
+    // screen though the gateway refused it.
+    if (!sessionId || !mayCall("session.updateSettings")) return;
     if (patch.effort !== undefined) currentSessionEffort.value = patch.effort ?? "medium";
     if (patch.turnTimeoutSec !== undefined) currentSessionTimeLimitSec.value = patch.turnTimeoutSec;
     if (patch.imageSettingsPrompt !== undefined) currentSessionImageSettingsPrompt.value = patch.imageSettingsPrompt;
@@ -2983,6 +2963,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     clearConnectTimeout();
     connecting.value = true;
     authFailed.value = false;
+    accessDenied.value = false;
 
     const normalizedWsUrl = normalizeGatewayWsUrl(wsUrl.value);
     wsUrl.value = normalizedWsUrl;
@@ -3009,8 +2990,10 @@ export const useGatewayStore = defineStore("gateway", () => {
       if (ws !== socket) return;          // stale socket — already replaced
       ws = null;
 
-      // Auth failure (4401) or rate-limited (4429) — stop reconnecting
-      if (ev.code === 4401 || ev.code === 4429) {
+      // Auth failure (4401), rate-limited (4429) or this role may not use the dashboard (4403):
+      // stop reconnecting (composables/socketClose.ts).
+      const outcome = socketCloseOutcome(ev.code);
+      if (outcome !== "reconnect") {
         connected.value = false;
         connecting.value = false;
         notificationsSubscribed.value = false;
@@ -3019,6 +3002,11 @@ export const useGatewayStore = defineStore("gateway", () => {
         rejectPendingRpcs("Connection closed");
         clearReconnectTimer();
         reconnecting.value = false;
+        if (outcome === "access-denied") {
+          // The sign-in itself is valid: keep the token, so the account's other pages still work.
+          accessDenied.value = true;
+          return;
+        }
         authFailed.value = true;
         token.value = "";
         return;
@@ -3068,6 +3056,7 @@ export const useGatewayStore = defineStore("gateway", () => {
   function disconnect() {
     clearReconnectTimer();
     reconnecting.value = false;
+    accessDenied.value = false;
     clearConnectTimeout();
     stopHeartbeat();
     rejectPendingRpcs("Disconnected");
@@ -3102,6 +3091,8 @@ export const useGatewayStore = defineStore("gateway", () => {
 
     if (type === "hello-ok") {
       clearConnectTimeout();
+      // Before `connected`, so what reacts to the connection already knows what it may call.
+      allowedMethods.value = readAllowedRpcMethods(msg["data"]);
       connected.value = true;
       reconnecting.value = false;
       connecting.value = false;
@@ -3283,6 +3274,30 @@ export const useGatewayStore = defineStore("gateway", () => {
           attachSwarmStateToMessage("streaming", swarmState);
           updateSwarmStatusFromState(swarmState, false);
         }
+      }
+      return;
+    }
+
+    // A call that waits for someone else's approval (a tool whose approval policy names other
+    // roles): said in the turn's status and a notice, with no answer button; agent.approval_resolved
+    // closes the notice.
+    if (type === "agent.approval_pending") {
+      const data = msg["data"] as Record<string, unknown>;
+      if (isLiveTurnEvent(data)) {
+        notePendingTurnActivity();
+        const approvalId = String(data["approvalId"]);
+        const toolName = String(data["toolName"]);
+        const roles = Array.isArray(data["approverRoles"]) ? (data["approverRoles"] as unknown[]).map(String) : [];
+        const status = turnText.waitingForApprover(liveLanguage(), toolName, roles);
+        updateStreamingStatus(status, { appendHistory: true });
+        notifications.pushLocalNotification({
+          id: `approval:${approvalId}`,
+          title: "Waiting for approval",
+          message: status,
+          level: "info",
+          category: "approval",
+          sticky: true,
+        });
       }
       return;
     }
@@ -4674,9 +4689,12 @@ export const useGatewayStore = defineStore("gateway", () => {
     wsUrl,
     connected,
     connecting,
+    allowedMethods,
+    mayCall,
     reconnecting,
     modelUnreachable,
     authFailed,
+    accessDenied,
     currentSessionId,
     sessions,
     activeSessions,
@@ -4765,6 +4783,7 @@ export const useGatewayStore = defineStore("gateway", () => {
     downloadWorkspaceArtifact,
     buildWorkspacePreviewUrl,
     buildBrowserVncUrl,
+    restBaseUrl,
     authorizedFetch,
     downloadSessionDebugMarkdown,
     downloadSessionAuditMarkdown,

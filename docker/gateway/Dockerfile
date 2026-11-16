@@ -81,6 +81,10 @@ FROM runtime-base AS runtime
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://127.0.0.1:8765/healthz || exit 1
 
+# Inside the container the gateway binds every interface: the port publish and the web
+# container reach it on the container's own address, not its loopback. gateway.host defaults to
+# 127.0.0.1 for runs outside Docker. The HOST interface is chosen by SAI_BIND_HOST in compose.
+ENV SAI_GATEWAY_HOST=0.0.0.0
 EXPOSE 8765
 
 # The commit this image is built from and whether the tree had uncommitted changes, passed in by

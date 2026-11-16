@@ -64,6 +64,7 @@ describe("a sibling's file in the sub-agent loop", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sibling-write-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         paper_writer: { description: "Writes the paper", systemPrompt: "Write.", tools: ["edit_file", "write_file"], maxIterations: 10 },
       },
@@ -122,6 +123,7 @@ describe("a sibling's file in the sub-agent loop", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sibling-export-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         paper_writer: { description: "Writes the paper", systemPrompt: "Write.", tools: ["export_workspace_artifact", "write_file"], maxIterations: 10 },
       },

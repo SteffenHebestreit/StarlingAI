@@ -4,10 +4,13 @@
  *
  * Runs inside a bare `node:22-alpine` container (no pnpm, no dependency
  * install) with the repo mounted, so the *only* host prerequisite is Docker.
- * It uses Node built-ins exclusively.
+ * It uses Node built-ins exclusively (its sibling modules master-key.mjs and
+ * product.mjs do too).
  *
  * What it does:
- *   1. Generates the core secrets (JWT, master key, Postgres password).
+ *   1. Generates the core secrets (JWT, master key, Postgres password); a
+ *      JWT secret or master key still set to a template placeholder is
+ *      replaced as well.
  *   2. Asks which model backend to use:
  *        A) a model you provide  — Anthropic API key, or any OpenAI-compatible
  *           endpoint (LM Studio, vLLM, llama.cpp, OpenAI, …)
@@ -30,6 +33,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { homedir } from "node:os";
+import { decideMasterKey, findSealedStores, isPlaceholderSecret, keepReplacedKey, stateRoots } from "./master-key.mjs";
+import { PRODUCT } from "./product.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
@@ -138,11 +144,41 @@ async function main() {
   try {
     // ── 1. secrets ──────────────────────────────────────────────────────────
     let changed = false;
-    if (!env.SAI_JWT_SECRET || env.SAI_JWT_SECRET.length < 32) {
-      env.SAI_JWT_SECRET = randomBytes(48).toString("base64url"); changed = true; ok("Generated SAI_JWT_SECRET");
+    // A template JWT secret is public: anyone could sign an admin token with it. It signs tokens and
+    // seals nothing, so replacing it only signs everyone out.
+    if (!env.SAI_JWT_SECRET || env.SAI_JWT_SECRET.length < 32 || isPlaceholderSecret(env.SAI_JWT_SECRET)) {
+      const placeholder = isPlaceholderSecret(env.SAI_JWT_SECRET);
+      env.SAI_JWT_SECRET = randomBytes(48).toString("base64url"); changed = true;
+      ok(placeholder
+        ? "Replaced the template SAI_JWT_SECRET placeholder with a generated secret (restart the stack to sign tokens with it)"
+        : "Generated SAI_JWT_SECRET");
     }
-    if (!env.SAI_MASTER_KEY || env.SAI_MASTER_KEY.length < 32) {
-      env.SAI_MASTER_KEY = randomBytes(48).toString("base64url"); changed = true; ok("Generated SAI_MASTER_KEY (credential encryption)");
+    // A template value (the placeholder .env.example used to ship) is public and seals nothing, so it
+    // is replaced like a missing key, unless data is already sealed with it (scripts/master-key.mjs).
+    const masterKey = decideMasterKey(env.SAI_MASTER_KEY, () => findSealedStores({
+      cwd: CWD,
+      roots: stateRoots({ cwd: CWD, home: homedir() }),
+      stateDirNames: [".starlingai", PRODUCT.stateDirName, ...(PRODUCT.legacyStateDirNames ?? [])],
+      credStore: env.SAI_CRED_STORE,
+    }));
+    if (masterKey.action === "generate") {
+      // Keep the value being replaced, so a wrong "nothing is sealed" decision can be undone.
+      const kept = env.SAI_MASTER_KEY ? keepReplacedKey({ dir: TOKEN_DIR, value: env.SAI_MASTER_KEY, reason: masterKey.reason }) : null;
+      env.SAI_MASTER_KEY = randomBytes(48).toString("base64url"); changed = true;
+      if (masterKey.reason === "placeholder") {
+        ok("Replaced the template SAI_MASTER_KEY placeholder with a generated key (credential encryption)");
+        // A gateway started before this run still holds the old key, and the credential store creates
+        // its salt on the first write: a credential stored now would be sealed with the old key and be
+        // unreadable after the next start.
+        warn("If the stack is running, restart it now (`pnpm sai start`) before storing any credential: "
+          + `the running gateway keeps the old key until it restarts. The old value is kept in ${kept}.`);
+      } else {
+        ok(`Generated SAI_MASTER_KEY (credential encryption)${kept ? `; the old value is kept in ${kept}` : ""}`);
+      }
+    } else if (masterKey.reason === "placeholder-sealed") {
+      warn(`SAI_MASTER_KEY is still a template placeholder, which is public, and data is already sealed with it: ${masterKey.sealedStores.join(", ")}. `
+        + "Kept it so that data stays readable. To rotate: stop the stack, move those files aside, empty SAI_MASTER_KEY in .env, "
+        + "re-run `pnpm sai setup`, then enter the stored credentials again.");
     }
     if (!env.POSTGRES_PASSWORD) {
       env.POSTGRES_PASSWORD = randomBytes(24).toString("base64url"); changed = true; ok("Generated POSTGRES_PASSWORD");

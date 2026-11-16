@@ -21,7 +21,7 @@ With `auth.provider: "oidc"`, the login screen shows **Sign in with SSO**:
 A sign-in that ends without a token comes back as `#sai_error=<code>`, and the login screen shows a
 message for the code: `migration_pending`, `account_retired`, `username_held`, `username_invalid`,
 `email_unverified`, `accounts_unreadable` (the refusals [below](#accounts-one-per-idp-subject)), or
-`sso_failed` for anything else (a failed token exchange, no mapped role). Only the code: the subject,
+`sso_failed` for anything else (a failed token exchange, no mapped role, a `defaultRole` nobody declares). Only the code: the subject,
 the account id and the reason stay in the gateway log (`OIDC sign-in refused`) and the audit.
 
 ### Configure via `.env`
@@ -43,6 +43,8 @@ SAI_OIDC_PUBLIC_URL=http://localhost:3001         # gateway public base; redirec
 ### Role mapping
 
 The IdP's roles (Keycloak: `realm_access.roles`) map to ours in `auth.oidc.roleMapping`. Most-privileged listed role wins; a user matching none falls back to `defaultRole`, or is **rejected** if that's unset (fail-closed).
+
+`defaultRole` may name a core extension's role. While no loaded extension declares it (the extension failed to load, or the name is a typo), it maps nobody: a user matching none is rejected (`sso_failed`) and the gateway logs the role. An account's session token carries the role it was granted at sign-in, and is refused while nobody declares that role ([Security Model](security.md#roles-nobody-declares)).
 
 ```jsonc
 "auth": {

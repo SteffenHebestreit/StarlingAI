@@ -333,8 +333,9 @@ async function writeStore(kbs: KnowledgeBaseRecord[]): Promise<void> {
   // torn write can never truncate the manifest — a damaged registry is
   // unreadable, which blocks every knowledge-base operation until it is repaired.
   const tmp = `${path}.${process.pid}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, "utf8");
   try {
+    // A write cut short (a full disk) leaves part of the registry in the temp file: it goes too.
+    await writeFile(tmp, `${JSON.stringify(body, null, 2)}\n`, "utf8");
     // Retried on Windows sharing errors (S4, 2026-10-05): a reader holding the file open made
     // the replace fail with EPERM, and the crawl write that hit it was lost.
     await retryTransientFs(() => rename(tmp, path));

@@ -122,6 +122,7 @@ async function runProbe(responses: unknown[], options: { agent: string; tools: s
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-relay-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     subAgents: {
       [options.agent]: { description: "Probe agent.", systemPrompt: "Do the task with your tools, then answer.", tools: options.tools, maxIterations: options.maxIterations ?? 10 },
       researcher: { description: "Finds current facts on the web.", systemPrompt: "Research.", tools: ["web_search", "web_fetch"], maxIterations: 6 },

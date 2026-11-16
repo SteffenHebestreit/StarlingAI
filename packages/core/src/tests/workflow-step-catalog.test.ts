@@ -73,6 +73,7 @@ function writeTempConfig(orchestration: Record<string, unknown> = {}): { tempDir
   const tempDir = mkdtempSync(join(tmpdir(), "starlingai-workflow-step-catalog-"));
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaults: { model: { primary: "lmstudio/qwen/qwen3.5-9b" } } },
     orchestration,
     scenes: {
@@ -165,7 +166,7 @@ async function loadModules(orchestration: Record<string, unknown> = {}) {
   };
   const searchExecute = watch("search_workflows");
   const runExecute = watch("run_workflow");
-  return { registry, runtime, session, logAudit: vi.mocked(audit.logAudit), delegateExecute, searchExecute, runExecute };
+  return { registry, runtime, session, logAudit: vi.mocked(audit.logAudit), delegateExecute, searchExecute, runExecute, workspacePath: written.tempDir };
 }
 
 /** The step's model: it looks the running workflow up, delegates, then tries to run the workflow. */
@@ -186,12 +187,12 @@ describe("a scene or job step's turn", () => {
     { name: "brief_packet", workflowType: "job" },
   ] as const) {
     it(`${workflow.workflowType}: neither searches for nor re-runs its workflow, and runs the scene's agents`, async () => {
-      const { registry, delegateExecute, searchExecute, runExecute } = await loadModules();
+      const { registry, delegateExecute, searchExecute, runExecute, workspacePath } = await loadModules();
       scriptStepModel();
 
       const result = await registry.getTool("run_workflow")!.execute(
         { ...workflow },
-        { sessionId: `chat-${workflow.workflowType}`, workspacePath: "/workspace" },
+        { sessionId: `chat-${workflow.workflowType}`, workspacePath },
       );
 
       expect(result.success).toBe(true);
@@ -216,7 +217,7 @@ describe("a scene or job step's turn", () => {
   // (tools/sub-agent.ts, agent/sub-agent.ts). With only the job on that stack, the step of
   // source_grounded_paper_packet ran its own scene nested inside itself (E2E 2026-10-08).
   it("job: an agent the step delegates to cannot run the step's own scene again", async () => {
-    const { registry, runExecute } = await loadModules();
+    const { registry, runExecute, workspacePath } = await loadModules();
     const nested: Array<{ success: boolean; error?: string }> = [];
     registry.registerTool({
       name: "delegate_to_agent",
@@ -232,7 +233,7 @@ describe("a scene or job step's turn", () => {
 
     await registry.getTool("run_workflow")!.execute(
       { name: "brief_packet", workflowType: "job" },
-      { sessionId: "chat-nested-scene", workspacePath: "/workspace" },
+      { sessionId: "chat-nested-scene", workspacePath },
     );
 
     expect(nested).toHaveLength(1);
@@ -243,11 +244,11 @@ describe("a scene or job step's turn", () => {
   });
 
   it("control: a chat turn is still offered both catalog tools", async () => {
-    const { runtime, session } = await loadModules();
+    const { runtime, session, workspacePath } = await loadModules();
     streamMock.mockImplementation(() => textStream("Hello."));
 
     await runtime.runTurn({
-      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      session: new session.AgentSession({ channel: "test", workspacePath, systemPrompt: "test" }),
       userMessage: "Write a verified research brief about the history of the city archive.",
     });
 
@@ -259,18 +260,18 @@ describe("a scene or job step's turn", () => {
   // The capsule the prefetch puts before the first call named workflows for the turn to "consider
   // run_workflow" on, and a step's task matches the workflow it is running.
   it("asks the discovery prefetch for no workflow, where a chat turn's asks as before", async () => {
-    const { registry, runtime, session } = await loadModules({ discoveryPrefetch: true });
+    const { registry, runtime, session, workspacePath } = await loadModules({ discoveryPrefetch: true });
     scriptStepModel();
     await registry.getTool("run_workflow")!.execute(
       { name: "verified_research_brief", workflowType: "scene" },
-      { sessionId: "chat-prefetch", workspacePath: "/workspace" },
+      { sessionId: "chat-prefetch", workspacePath },
     );
     expect(prefetchOptions).toEqual([{ withoutWorkflows: true }]);
 
     prefetchOptions.length = 0;
     streamMock.mockImplementation(() => textStream("Hello."));
     await runtime.runTurn({
-      session: new session.AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "test" }),
+      session: new session.AgentSession({ channel: "test", workspacePath, systemPrompt: "test" }),
       userMessage: "Write a verified research brief about the history of the city archive.",
     });
     expect(prefetchOptions).toEqual([{}]);
@@ -376,7 +377,7 @@ describe("a scene or job step whose turn gave up", () => {
     answers: Array<(agentName: string) => object>,
     ctxExtra: Record<string, unknown> = {},
   ) {
-    const { registry, logAudit } = await loadModules();
+    const { registry, logAudit, workspacePath } = await loadModules();
     let delegations = 0;
     registry.registerTool({
       name: "delegate_to_agent",
@@ -391,7 +392,7 @@ describe("a scene or job step whose turn gave up", () => {
       if (call === 2) return toolCallStream("d2", "delegate_to_agent", { agentName: "evidence_analyst", task: "Weigh the evidence." });
       return textStream("The brief could not be completed.");
     });
-    const result = await registry.getTool("run_workflow")!.execute(workflow, { sessionId: `chat-gave-up-${workflow.workflowType}`, workspacePath: "/workspace", ...ctxExtra });
+    const result = await registry.getTool("run_workflow")!.execute(workflow, { sessionId: `chat-gave-up-${workflow.workflowType}`, workspacePath, ...ctxExtra });
     const flagged = logAudit.mock.calls
       .map((c) => c[1] as Record<string, unknown>)
       .filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");
@@ -420,7 +421,7 @@ describe("a scene or job step whose turn gave up", () => {
   });
 
   it("job: with every tool call refused, is reported blocked", async () => {
-    const { registry, logAudit } = await loadModules();
+    const { registry, logAudit, workspacePath } = await loadModules();
     let call = 0;
     // run_workflow is not among the step turn's tools, so each call is refused before it runs.
     streamMock.mockImplementation(() => {
@@ -429,7 +430,7 @@ describe("a scene or job step whose turn gave up", () => {
       return textStream("The brief could not be completed.");
     });
 
-    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-refused", workspacePath: "/workspace" });
+    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-refused", workspacePath });
 
     expect(result.metadata?.["blocked"]).toBe(true);
     const flagged = logAudit.mock.calls.map((c) => c[1] as Record<string, unknown>).filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");
@@ -441,7 +442,7 @@ describe("a scene or job step whose turn gave up", () => {
   // repeated-tool-set brake ends it next. Both reported max_tool_iterations until each had a finish
   // reason of its own; the step is still one that gave up.
   it("job: ended by a loop brake with no specialist's result, is reported blocked", async () => {
-    const { registry, logAudit } = await loadModules();
+    const { registry, logAudit, workspacePath } = await loadModules();
     registry.registerTool({
       name: "search_tools",
       description: "search the tool catalog",
@@ -455,7 +456,7 @@ describe("a scene or job step whose turn gave up", () => {
       return textStream("The brief could not be completed.");
     });
 
-    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-streak", workspacePath: "/workspace" });
+    const result = await registry.getTool("run_workflow")!.execute({ name: "brief_packet", workflowType: "job" }, { sessionId: "chat-streak", workspacePath });
 
     expect(result.metadata?.["blocked"]).toBe(true);
     const flagged = logAudit.mock.calls.map((c) => c[1] as Record<string, unknown>).filter((data) => data?.["type"] === "workflow_step_ran_no_specialist");

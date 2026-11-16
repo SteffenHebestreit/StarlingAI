@@ -17,38 +17,52 @@ import {
   resolveSession,
   listSessions,
 } from "../agent/session.js";
-import type { SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
-import { callerIdentity, normalizeRole, revalidateAuthenticatedUser, roleRank, type AuthenticatedUser } from "./auth.js";
+import type { AgentSession, SessionTranscriptAttachment, SessionTranscriptMessage, SessionSummary } from "../agent/session.js";
+import { callerIdentity, revalidateAuthenticatedUser, roleRank, singleOperatorRole, type AuthenticatedUser } from "./auth.js";
 import { ownsRecord, principalIdentity, recordHasOwner, segmentFor } from "../runtime/user-scope.js";
 import type { Identity } from "../runtime/accounts.js";
 import { trackAccountConnection, type AccountConnection } from "./account-connections.js";
-import { callerMayUseSession } from "./session-route-access.js";
+import { decideRoutePolicyChain, routePolicyChain } from "./route-policies.js";
+import {
+  callerMayStopComputerSession,
+  callerMayUseComputerSession,
+  callerMayUseSession,
+  computerSessionsVisibleTo,
+  visibleSessionsFor,
+} from "./session-route-access.js";
 import type { AuditEvent } from "../audit/schema.js";
 import { runTurn, buildTimeoutDeliveryMessage } from "../agent/runtime.js";
 import { extendDeadlineForDelegationWait, resolveDelegationWaitCeilingMs } from "../agent/delegation-budget.js";
 import { resolveEffortProfile, resolveEffortTier } from "../runtime/effort-context.js";
 import { parseOverrideFlags } from "./override-flags.js";
+import { allowedRpcMethods, authorizeRpc } from "./rpc-policy.js";
+import { autoApproveMinRole, mayAutoApprove } from "./auto-approve-policy.js";
+import { TRUSTED_WORKFLOW_CHANNELS } from "../agent/turn-prepare.js";
 import type { EffortTier } from "../config/schema.js";
-import { listAllScenes } from "../credentials/scenes.js";
+import { listAllScenes, type SceneSummary } from "../credentials/scenes.js";
+import { routeSceneStepsToChannel } from "../approval/index.js";
 import { createJob } from "../agent/jobs.js";
 import { getJobDefinition, listAllJobs, resolveJobSteps } from "../credentials/jobs.js";
 import { subscribeToAudit, logAudit } from "../audit/logger.js";
-import { rootSessionOf } from "../agent/session-ids.js";
+import { owningChatSessionId } from "../agent/session-ids.js";
 import { childLogger } from "../logger.js";
 import { getConfig } from "../config/loader.js";
 import type { InterventionNotice } from "../agent/interventions.js";
 import { computerSessionManager } from "../agent/computer-session.js";
 import { notificationForCaller, subscribeToNotifications } from "../runtime/notifications.js";
+import { requesterApprovalCallback } from "../approval/routed.js";
 import { validTimeZone } from "../runtime/user-time.js";
 import { captureComputerSessionSnapshot } from "../agent/computer-adapters/runtime.js";
 import { resolveSessionWorkspaceOverride } from "./session-workspace.js";
+import { jobTaskParams, screenWorkflowParams, templateParamNames, workflowParamRefusalMessage } from "../guardrails/workflow-params.js";
 import { longRunningGenerationManager } from "../agent/long-running-generation.js";
 import { turnSteeringManager, unconsumedSteeringOf, type SteeringMessage } from "../agent/turn-steering.js";
 import { HUMAN_WAIT_RECHECK_MS, trackHumanWaits, userInputBroker, type UserInputCaller } from "../agent/user-input-broker.js";
 import { clampUserInputTimeoutMs } from "../agent/user-input.js";
 import { typedUserWords } from "../agent/delegation-user-words.js";
 import { isKnownAgentName } from "../agent/directive-agent.js";
-import { currentRequestContext, runWithRequestContext } from "../runtime/request-context.js";
+import { catalogAgentRunRefusal } from "../agent/full-scope-agent-floor.js";
+import { currentRequestContext, runWithRequestContext, type TurnSender } from "../runtime/request-context.js";
 
 /**
  * How often the gateway turn watchdog re-checks a turn it has suspended for an operator
@@ -88,6 +102,16 @@ const liveChatTurnBySession = new Map<string, string>();
  * any string stored again and again (turn-ids review, INFO 3).
  */
 const CHAT_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * A session.create channel is taken only in this shape: the web's "webchat", the e2e harness's
+ * "eval", AG-UI's "webchat:agui" and the like. It is stored on the session and named in its audit
+ * records and exports, and it was taken verbatim, any string of any length.
+ */
+const SESSION_CHANNEL_RE = /^[A-Za-z0-9:_.-]{1,64}$/;
+
+/** A refused RPC call is audited at most once per connection, method and this window. */
+const RBAC_DENIED_AUDIT_WINDOW_MS = 60_000;
 
 /**
  * Turns that ended here lately, by request id, so a Stop that arrives just after can say "that turn
@@ -158,12 +182,6 @@ export function steerChatTurn(sessionId: string, message: string, clientMessageI
     ...(queued.replacedBy ? { replacedBy: queued.replacedBy } : {}),
     error: "The turn this was typed into has ended.",
   };
-}
-
-/** The chat a nested session id belongs to: `sub:<parent>:<agent>:<ts>` and
- *  `workflow:<parent>:<name>:<uuid>` embed their parent, at any depth. */
-function owningChatSessionId(sessionId: string): string {
-  return rootSessionOf(sessionId, ["sub:", "workflow:"]);
 }
 
 /**
@@ -378,6 +396,11 @@ function formatJobHelpResponse(jobName?: string): string {
   ].join("\n");
 }
 
+/** How a socket closes when its account no longer signs in, as a refused handshake. */
+const SIGNED_OUT_CLOSE = { code: 4401, reason: "Unauthorized (account no longer valid)" } as const;
+/** How a socket closes when a route policy for `GET /ws` refuses the role its account holds now. */
+const ROLE_REFUSED_CLOSE = { code: 4403, reason: "Forbidden for this role" } as const;
+
 export class RpcConnection implements AccountConnection {
   readonly connId: string;
   private ws: WebSocket;
@@ -402,8 +425,15 @@ export class RpcConnection implements AccountConnection {
    * resolves closes the socket with 4401.
    */
   private liveUser: AuthenticatedUser | undefined;
+  /**
+   * The role the route policies for `GET /ws` last let through: the upgrade checked the role the
+   * socket opened with (gateway/raw-policy-gate.ts). A role the store holds now is checked again.
+   */
+  private policyCheckedRole: string | undefined;
   private revoked = false;
   private untrackAccount: (() => void) | null = null;
+  /** When a refusal of each kind was last audited (rbac_denied), so a looping client logs one a minute. */
+  private readonly deniedAuditedAt = new Map<string, number>();
 
   constructor(ws: WebSocket, connUserId?: string, connRole?: string, liveUser?: AuthenticatedUser) {
     this.connId = randomUUID();
@@ -411,47 +441,67 @@ export class RpcConnection implements AccountConnection {
     this.connUserId = connUserId;
     this.connRole = connRole;
     this.liveUser = liveUser;
+    this.policyCheckedRole = liveUser?.role;
     // Deleting, retiring or renaming the account closes this socket at once (account-connections).
     if (liveUser?.account) this.untrackAccount = trackAccountConnection(liveUser.account, this);
     this.sendEvent({ type: "hello-ok", data: {
       connId: this.connId,
       version: "0.1.0",
       sessions: this.visibleSessions(),
+      // The methods this connection may call, as its role stands now (gateway/rpc-policy.ts): the
+      // web offers only those controls. Every call is still checked when it arrives.
+      methods: allowedRpcMethods(this.connRole, getConfig().auth?.enabled === true),
     }});
     log.info({ connId: this.connId }, "RPC connection established");
   }
 
   /**
-   * Whether the caller still signs in as it did at the handshake, its role taken as the store holds
-   * it now. Always true without multi-user auth (no live caller to check); false once revoked.
+   * Whether the caller may still use this socket: it still signs in as it did at the handshake (its
+   * role taken as the store holds it now), and a role changed since is one the route policies for
+   * `GET /ws` let through, as the upgrade checked for the role the socket opened with. Always "ok"
+   * without multi-user auth (no live caller to check); "signed-out" once revoked.
    */
-  private callerStillSignedIn(): boolean {
-    if (this.revoked) return false;
-    if (!this.liveUser) return true;
+  private callerAccess(): "ok" | "signed-out" | "role-refused" {
+    if (this.revoked) return "signed-out";
+    if (!this.liveUser) return "ok";
     const fresh = revalidateAuthenticatedUser(this.liveUser);
-    if (!fresh) return false;
+    if (!fresh) return "signed-out";
     this.liveUser = fresh;
     this.connRole = fresh.role;
-    return true;
+    if (fresh.role !== this.policyCheckedRole) {
+      if (decideRoutePolicyChain(routePolicyChain("GET", "/ws"), () => [fresh]).verdict === "forbidden") return "role-refused";
+      this.policyCheckedRole = fresh.role;
+    }
+    return "ok";
+  }
+
+  /** Close the socket for a caller that may no longer use it: 4401 signed out, 4403 role refused. */
+  private closeFor(access: "signed-out" | "role-refused"): void {
+    if (access === "role-refused") this.revoke("a route policy refuses the account's role on /ws", ROLE_REFUSED_CLOSE);
+    else this.revoke("account no longer signs in");
   }
 
   /** Whether a pushed event may go out: the caller is checked as for a message, and a caller that
-   *  no longer signs in closes the socket instead. */
+   *  may no longer use the socket closes it instead. */
   private pushAllowed(): boolean {
-    if (this.callerStillSignedIn()) return true;
-    this.revoke("account no longer signs in");
+    const access = this.callerAccess();
+    if (access === "ok") return true;
+    this.closeFor(access);
     return false;
   }
 
-  /** Close the socket because its caller no longer signs in (4401, as a refused handshake). */
-  revoke(reason: string): void {
+  /**
+   * Close the socket because its caller may no longer use it: by default 4401, as a refused
+   * handshake when the account no longer signs in; 4403 when a route policy refuses its new role.
+   */
+  revoke(reason: string, close: { code: number; reason: string } = SIGNED_OUT_CLOSE): void {
     if (this.revoked) return;
     this.revoked = true;
     this.untrackAccount?.();
     this.untrackAccount = null;
-    log.info({ connId: this.connId, reason }, "RPC connection revoked: its account no longer signs in");
+    log.info({ connId: this.connId, reason, code: close.code }, "RPC connection revoked: its caller may no longer use it");
     try {
-      this.ws.close(4401, "Unauthorized (account no longer valid)");
+      this.ws.close(close.code, close.reason);
     } catch (err) {
       log.warn({ err, connId: this.connId }, "Could not close a revoked RPC connection");
     }
@@ -464,6 +514,39 @@ export class RpcConnection implements AccountConnection {
   private connIdentity(): Identity | undefined {
     if (this.liveUser) return callerIdentity(this.liveUser);
     return this.connUserId ? { userId: this.connUserId } : undefined;
+  }
+
+  /**
+   * The person sending this connection's messages, as the store resolves them at this moment
+   * (RunTurnOptions.sender): their identity, and their role unless they no longer sign in. Read
+   * when a tool asks, not when the message arrived: an approval policy decides on the role they
+   * hold when the call is made and when its card is answered, not the one the chat was created
+   * with, and an admin driving another account's chat is the one asking, not that account.
+   */
+  private currentSender(): TurnSender {
+    const signedIn = this.callerAccess() === "ok";
+    const identity = this.connIdentity();
+    return { ...(identity ? { identity } : {}), ...(signedIn && this.connRole ? { role: this.connRole } : {}) };
+  }
+
+  /**
+   * Screens the parameters a `/job` or `/run` command carries, those the workflow's trusted task
+   * text reads (`taskParams`), before they are templated into it (guardrails/workflow-params.ts).
+   * On a refusal the turn is answered `blocked` with the reason and true is returned: nothing is
+   * queued or run.
+   */
+  private refusedWorkflowParams(requestId: string, sessionId: string, workflow: string, params: Record<string, string>, taskParams: ReadonlySet<string>): boolean {
+    const userId = this.connIdentity()?.userId;
+    const screen = screenWorkflowParams(params, {
+      source: "rpc",
+      workflow,
+      taskParams,
+      ...(sessionId ? { sessionId } : {}),
+      ...(userId ? { userId } : {}),
+    });
+    if (screen.ok) return false;
+    this.sendEvent({ type: "status", data: { status: "blocked", requestId, response: workflowParamRefusalMessage(workflow, screen) } });
+    return true;
   }
 
   /**
@@ -487,6 +570,16 @@ export class RpcConnection implements AccountConnection {
     const rec = getSessionRecord(sid);
     if (!rec) return true;
     return this.ownsSession(rec);
+  }
+
+  /**
+   * The same rule for a session already in hand. canAccessSession lets an id this process has no
+   * record of through, and resolveSession may then find its record in the durable store (another
+   * gateway instance's session, or one this process has not loaded): the owner is checked there,
+   * before the session is hydrated or woken up.
+   */
+  private mayUseResolvedSession(session: AgentSession): boolean {
+    return !this.connUserId || this.isSessionAdmin() || this.ownsSession(session);
   }
 
   /**
@@ -519,12 +612,19 @@ export class RpcConnection implements AccountConnection {
    * (callerMayUseSession) and this connection's own session access, whichever is stricter.
    */
   private mayStopTurnIn(sessionId: string): boolean {
-    // Under multi-user auth the caller as the store resolved it (its account or principal kind with
-    // its live role): a name alone would read as an instance credential (callerIdentity).
-    const caller = this.liveUser
-      ? { ...this.liveUser, role: normalizeRole(this.connRole) }
-      : this.connUserId ? { username: this.connUserId, role: normalizeRole(this.connRole) } : null;
-    return this.canAccessSession(sessionId) && callerMayUseSession(caller, sessionId);
+    return this.canAccessSession(sessionId) && callerMayUseSession(this.routeCaller(), sessionId);
+  }
+
+  /**
+   * This connection's caller in the shape the HTTP access rules take (gateway/session-route-access.ts).
+   * Under multi-user auth the caller as the store resolved it (its account or principal kind with
+   * its live role, which callerAccess keeps current and which always is a declared one): a name
+   * alone would read as an instance credential (callerIdentity). With auth off, the token's subject
+   * with its role claim, operator for none or one nobody declares, as before.
+   */
+  private routeCaller(): AuthenticatedUser | null {
+    if (this.liveUser) return { ...this.liveUser };
+    return this.connUserId ? { username: this.connUserId, role: singleOperatorRole(this.connRole) } : null;
   }
 
   /**
@@ -571,12 +671,27 @@ export class RpcConnection implements AccountConnection {
     }
   }
 
+  /**
+   * Audit a refusal for this caller's role (rbac_denied), at most once per `key` and minute on this
+   * connection: a client that retries in a loop must not fill the audit log. `key` is a known method
+   * (or method and flag), so the map stays small whatever a client sends.
+   */
+  private auditRbacDenied(key: string, data: Record<string, unknown>): void {
+    const now = Date.now();
+    const last = this.deniedAuditedAt.get(key);
+    if (last !== undefined && now - last < RBAC_DENIED_AUDIT_WINDOW_MS) return;
+    this.deniedAuditedAt.set(key, now);
+    logAudit("rbac_denied", { surface: "rpc", ...data, role: this.connRole ?? null }, {
+      ...(this.connUserId ? { userId: this.connUserId } : {}),
+      severity: "warn",
+    });
+  }
+
   /** Session list scoped to what this connection may see (own + unowned; all for admins). */
   private visibleSessions(): SessionSummary[] {
-    if (!this.connUserId || this.isSessionAdmin()) return listSessions({ includeArchived: true });
-    return getAllSessions({ includeArchived: true })
-      .filter((session) => this.ownsSession(session))
-      .map((session) => session.toSummary());
+    // No subject, nothing to enforce (auth off without a `sub`), as canAccessSession.
+    const caller = this.connUserId ? { identity: this.connIdentity(), role: this.connRole } : undefined;
+    return visibleSessionsFor(caller, { includeArchived: true }).map((session) => session.toSummary());
   }
 
   async handleMessage(raw: string): Promise<void> {
@@ -591,10 +706,25 @@ export class RpcConnection implements AccountConnection {
     const { id, method, params } = req;
     log.debug({ connId: this.connId, method, id }, "RPC request");
 
-    if (!this.callerStillSignedIn()) {
+    const access = this.callerAccess();
+    if (access !== "ok") {
       // Answered first, so the caller's pending request fails with a reason; then closed.
-      this.sendResponse({ id, ok: false, error: "Unauthorized (account no longer valid)" });
-      this.revoke("account no longer signs in");
+      this.sendResponse({ id, ok: false, error: access === "role-refused" ? ROLE_REFUSED_CLOSE.reason : SIGNED_OUT_CLOSE.reason });
+      this.closeFor(access);
+      return;
+    }
+
+    // The method's minimum role (gateway/rpc-policy.ts), checked against the role the store holds
+    // now (callerAccess just read it). Nothing of the method runs on a refusal.
+    const authorization = authorizeRpc(method, this.connRole, getConfig().auth?.enabled === true);
+    if (!authorization.allowed) {
+      if (authorization.reason === "unknown_method") {
+        // Answered as dispatch's default always answered it; not a decision about the role.
+        this.sendResponse({ id, ok: false, error: String(new Error(authorization.error)) });
+        return;
+      }
+      this.auditRbacDenied(method, { method, required: authorization.required, ...(authorization.policy ? { policy: authorization.policy } : {}) });
+      this.sendResponse({ id, ok: false, error: authorization.error });
       return;
     }
 
@@ -622,13 +752,27 @@ export class RpcConnection implements AccountConnection {
           && (this.abortControllers.has(requestId) || (live !== undefined && !live.signal.aborted && this.canAccessSession(live.sessionId)));
         return {
           status: "running",
-          sessions: listSessions().length,
+          // The active sessions this connection may see, as session.list scopes them: every one for
+          // an admin (or with no identity to scope by), otherwise its own and those without an
+          // owner. The instance-wide count told any caller how busy every other account was.
+          sessions: !this.connUserId || this.isSessionAdmin()
+            ? listSessions().length
+            : getAllSessions().filter((session) => this.ownsSession(session)).length,
           uptime: process.uptime(),
           ...(requestId ? { requestId, activeTurn } : {}),
         };
       }
 
       case "session.create": {
+        // A client names its own channel, but never one reserved for the scene worker's runs: a
+        // session opened on "scene" let any caller's chat past the input guardrail, which flagged and
+        // did not block prompt injection there. That trust now also needs the scene worker's own task
+        // (RunTurnOptions._trustedWorkflowInput), and the channel still marks the session as a scene
+        // run in audits, exports and the turn's heuristics.
+        const channel = String(params["channel"] ?? "webchat");
+        if (!SESSION_CHANNEL_RE.test(channel)) throw new Error("Invalid channel");
+        if (TRUSTED_WORKFLOW_CHANNELS.has(channel)) throw new Error(`Invalid channel: ${channel} is reserved for scene and job runs`);
+
         let workspacePath: string | undefined = undefined;
         // Attribute the session to the authenticated connection user (so the document-RAG user
         // scope + RBAC match the identity uploads use). The server-derived identity wins over any
@@ -656,7 +800,7 @@ export class RpcConnection implements AccountConnection {
         }
 
         const session = createSession({
-          channel: String(params["channel"] ?? "webchat"),
+          channel,
           ...(sessionIdentity ?? {}),
           ...(this.connRole ? { userRole: this.connRole } : {}),
           workspacePath,
@@ -888,6 +1032,24 @@ export class RpcConnection implements AccountConnection {
         const { clean: cleanMessage, flags: overrideFlags } = parseOverrideFlags(message);
         message = cleanMessage;
 
+        // --auto says yes to the turn's approvals (never to a scene's humanInLoopSteps step, and a
+        // tool with an approval policy still goes to its approvers), so it is only as safe as the
+        // role behind it (gateway.overrides.autoApproveMinRole). Below the floor the turn does not
+        // start: run without the flag it would stop at the approvals its sender asked to skip.
+        if (overrideFlags.autoApprove && !mayAutoApprove(this.connRole)) {
+          const floor = autoApproveMinRole();
+          this.auditRbacDenied("chat.send --auto", { method: "chat.send", flag: "--auto", required: floor });
+          this.sendEvent({
+            type: "status",
+            data: {
+              status: "blocked",
+              requestId,
+              response: floor === "disabled" ? "--auto is disabled on this gateway" : `--auto requires role ${floor}`,
+            },
+          });
+          return { accepted: false, requestId };
+        }
+
         // Resolve the effort tier for this turn: inline --effort flag (one-off) >
         // per-message `effort` param > persisted session setting > configured default.
         const sessionSettings = getSessionRecord(sessionId)?.getSettings() ?? {};
@@ -955,6 +1117,7 @@ export class RpcConnection implements AccountConnection {
         // Handle /run <sceneName> [key=value ...] — substitute scene task with params
         let sceneAllowedAgents: string[] | undefined;
         let humanInLoopSteps: string[] | undefined;
+        let runScene: SceneSummary | undefined;
 
         const jobMatch = message.match(/^\/job\s+(\S+)(?:\s+(.*))?$/s);
         if (jobMatch) {
@@ -967,14 +1130,18 @@ export class RpcConnection implements AccountConnection {
 
           try {
             const params = parseKeyValuePairs(jobMatch[2] ?? "");
+            if (this.refusedWorkflowParams(requestId, sessionId, jobName, params, jobTaskParams(job))) return { accepted: false, requestId };
             const steps = resolveJobSteps(job, params);
+            const connIdentity = this.connIdentity();
             const queued = await createJob({
               sceneName: jobName,
               definitionType: "job",
               // As the signed-in user, like the REST route: their run, listed, read and cancelled as
               // theirs (gateway/scene-job-access.ts) and acting with their per-user resources. A
               // connection with no user runs it as the job itself.
-              ...(this.connIdentity() ?? principalIdentity(`job:${jobName}`, "synthetic")),
+              ...(connIdentity ?? principalIdentity(`job:${jobName}`, "synthetic")),
+              // With their role, which the worker resolves again when the run starts.
+              ...(connIdentity && this.connRole ? { requestedByRole: this.connRole } : {}),
               steps,
               turnTimeoutMs: effectiveTurnTimeoutMs,
             });
@@ -1013,6 +1180,38 @@ export class RpcConnection implements AccountConnection {
           return { accepted: false, requestId };
         }
 
+        // --agent names an agent this caller may not run: one that maintains the deployment, for a
+        // role below agents.fullScopeMinRole, or one an extension hook refuses. The run would be
+        // refused with the same words (agent/full-scope-agent-floor.ts); the turn is refused before
+        // it starts instead. Asked for the connection's caller with its live role, and for the
+        // session's owner with the role the session holds, which is who the run answers to: an
+        // admin driving another account's session, or a role changed since the session opened,
+        // leaves them apart, and either refusing refuses.
+        if (overrideFlags.forceAgent) {
+          const session = getSessionRecord(sessionId);
+          const callers = [
+            { role: this.connRole, identity: this.connIdentity() },
+            ...(session && (session.userRole !== this.connRole || session.userId !== this.connUserId)
+              ? [{ role: session.userRole, identity: session.identity() }]
+              : []),
+          ];
+          for (const caller of callers) {
+            const refusal = await catalogAgentRunRefusal(overrideFlags.forceAgent, {
+              ...(caller.role ? { role: caller.role } : {}),
+              ...(caller.identity ? { identity: caller.identity } : {}),
+            });
+            if (!refusal) continue;
+            logAudit("agent_run_refused", {
+              agent: overrideFlags.forceAgent,
+              role: refusal.role ?? null,
+              deniedBy: refusal.deniedBy,
+              via: "directive",
+            }, { ...(sessionId ? { sessionId } : {}), ...(this.connUserId ? { userId: this.connUserId } : {}), severity: "warn" });
+            this.sendEvent({ type: "status", data: { status: "blocked", requestId, response: refusal.reason } });
+            return { accepted: false, requestId };
+          }
+        }
+
         const runMatch = message.match(/^\/run\s+(\S+)(?:\s+(.*))?$/s);
         if (runMatch) {
           const sceneName = runMatch[1]!;
@@ -1024,6 +1223,7 @@ export class RpcConnection implements AccountConnection {
 
           // Parse inline key=value params and merge over scene-declared defaults
           const inlineParams = parseKeyValuePairs(runMatch[2] ?? "");
+          if (this.refusedWorkflowParams(requestId, sessionId, sceneName, inlineParams, templateParamNames(scene.task))) return { accepted: false, requestId };
           const mergedParams: Record<string, string> = {};
           for (const [key, def] of Object.entries(scene.params ?? {})) {
             if (def.default !== undefined) mergedParams[key] = def.default;
@@ -1033,6 +1233,7 @@ export class RpcConnection implements AccountConnection {
           message = applyParamTemplate(scene.task, mergedParams);
           sceneAllowedAgents = scene.allowedAgents;
           humanInLoopSteps = scene.humanInLoopSteps;
+          runScene = scene;
 
           this.sendEvent({ type: "status", data: { status: "accepted", requestId, info: `Running scene: ${sceneName}` } });
         } else {
@@ -1053,7 +1254,18 @@ export class RpcConnection implements AccountConnection {
         // so "continue" must land on the same session instead of dead-ending. Explicit
         // ("manual") archives stay unresumable and fall through to the not-found path,
         // which now names WHICH benign cause applies (pruned / deleted / unknown here).
-        const session = getSession(sessionId) ?? await resolveSession(sessionId, { resumeArchived: true });
+        // The owner is checked again on a record the store hands back: canAccessSession above passed
+        // an id with no record in this process. Checked before the session is hydrated or un-parked,
+        // and refused with the same bare message, so the reply says nothing about the session.
+        let refused = false;
+        const session = getSession(sessionId) ?? await resolveSession(sessionId, {
+          resumeArchived: true,
+          admit: (found) => {
+            refused = !this.mayUseResolvedSession(found);
+            return !refused;
+          },
+        });
+        if (refused) throw new Error(`Session not found: ${sessionId}`);
         if (!session) throw new Error(`Session not found: ${sessionId} — ${describeMissingSession(sessionId)}`);
 
         // A turn already running on this session is superseded, whichever connection started it.
@@ -1337,6 +1549,8 @@ export class RpcConnection implements AccountConnection {
           // entries apart from another tab's with the same words.
           requestId,
           ...(interactiveTurn ? { userInput: { rootSessionId: session.id, turnId: requestId, mode: "interactive" as const } } : {}),
+          // Who asks for this turn's tool calls: this connection's caller, read when a tool asks.
+          sender: () => this.currentSender(),
           onChunk: (text) => {
             noteTurnActivity();
             this.sendEvent({ type: "agent.chunk", data: { requestId, text } });
@@ -1470,7 +1684,20 @@ export class RpcConnection implements AccountConnection {
           onComputerSessionState: (sessionState: { computerSessionId: string; state: string }) => {
             this.sendEvent({ type: "computer.session_state", data: { requestId, ...sessionState } });
           },
-          approvalCallback: async (toolName, args) => {
+          // The approval card of the person who sent this message: the one callback an approval
+          // policy accepts, and only for that person (`sender`) in a chat of their own with a role
+          // it admits (approval/routed.ts).
+          // A /run of a scene that names an approval channel sends the scene's humanInLoopSteps to
+          // that channel, as a REST run of the scene does (agent/scene-worker.ts), instead of to
+          // this socket; the socket is told where they went. The channel's request is one the
+          // dashboard lists, so any operator can answer it there, as for a REST run (who may answer
+          // is not narrowed here). The turn's other approvals come to this socket. Stopping the
+          // turn withdraws the channel's request. No durable-decision key: a chat turn does not
+          // resume after a restart, and the requestId a key would be built from is the client's.
+          // Only the card carries the requester mark, so inside such a /run a tool with an approval
+          // policy is routed to its approvers (approval/routed.ts), never to the channel and not to
+          // this card.
+          approvalCallback: routeSceneStepsToChannel(runScene, requesterApprovalCallback(async (toolName, args) => {
             const approvalId = randomUUID();
             const approvalTimeoutMs = getConfig().gateway.approvalTimeoutMs;
             const expiresAt = new Date(Date.now() + approvalTimeoutMs).toISOString();
@@ -1492,6 +1719,29 @@ export class RpcConnection implements AccountConnection {
               }, approvalTimeoutMs);
               this.pendingApprovals.set(approvalId, { requestId, resolve, reject, timeout });
             });
+          }), {
+            signal: ac.signal,
+            onChannelRequest: (channelName) => {
+              this.sendEvent({ type: "status", data: { requestId, status: "guardrail", message: `Approval requested via ${channelName}` } });
+            },
+          }),
+          // A call that waits for someone else's approval (a tool whose approval policy does not
+          // admit this caller): said here with no answer button, and cleared when it is decided.
+          onApprovalPending: (pending) => {
+            this.sendEvent({
+              type: "agent.approval_pending",
+              data: {
+                requestId,
+                approvalId: pending.approvalId,
+                toolName: pending.toolName,
+                approverRoles: pending.approverRoles,
+                distinctApprover: pending.distinctApprover,
+                expiresAt: pending.expiresAt,
+              },
+            });
+            return (outcome) => {
+              this.sendEvent({ type: "agent.approval_resolved", data: { requestId, approvalId: pending.approvalId, outcome } });
+            };
           },
           inputCallback: async (question, choices, requestedTimeoutMs) => {
             const inputId = randomUUID();
@@ -1582,8 +1832,13 @@ export class RpcConnection implements AccountConnection {
         this.notificationsUnsubscribe?.();
         this.notificationsUnsubscribe = subscribeToNotifications((notification) => {
           if (!this.pushAllowed()) return;
-          // A notification with an owner (a scheduled follow-up's result) is that person's alone.
-          const wire = notificationForCaller(notification, this.connIdentity());
+          // A notification with an owner (a scheduled follow-up's result, an account's job) is that
+          // person's alone. One for some roles only (a routed approval's approvers) goes to those roles;
+          // one with neither goes to operators and above (notificationForCaller).
+          const wire = notificationForCaller(notification, this.connIdentity(), {
+            seesUnowned: this.connRole !== undefined && roleRank(this.connRole) >= roleRank("operator"),
+            role: this.connRole,
+          });
           if (wire) this.sendEvent({ type: "notification.event", data: wire });
         });
         return { subscribed: true };
@@ -1595,18 +1850,35 @@ export class RpcConnection implements AccountConnection {
         return { unsubscribed: true };
 
       // ── Computer-use session RPC ───────────────────────────────────────
+      // A session is its lease owner's chat's (callerMayUseComputerSession): only its owner or an
+      // admin sees its frames and window text, or keeps it alive. Any operator may stop any session.
+      // Below operator rank handleMessage has already refused emergency_stop, heartbeat and
+      // request_screenshot (rpc-policy.ts); a role an extension's rpcPolicies opens them to may stop
+      // only a session of its own.
       case "computer.list_sessions":
-        return { sessions: computerSessionManager.listSessions() };
+        return { sessions: computerSessionsVisibleTo(this.routeCaller(), computerSessionManager.listSessions()) };
 
       case "computer.emergency_stop": {
+        const caller = this.routeCaller();
         const csId = String(params["computerSessionId"] ?? "");
-        const reason = String(params["reason"] ?? "rpc:manual_stop");
-        computerSessionManager.emergencyStop(csId, reason);
+        if (!callerMayStopComputerSession(caller, computerSessionManager.getSession(csId))) {
+          throw new Error("Operator role required for this action");
+        }
+        const identity = this.connIdentity();
+        computerSessionManager.emergencyStop(
+          csId,
+          { ...(identity ? { identity } : {}), ...(caller ? { role: caller.role } : {}), via: "rpc" },
+          String(params["reason"] ?? "rpc:manual_stop"),
+        );
         return { ok: true };
       }
 
       case "computer.heartbeat": {
         const csId = String(params["computerSessionId"] ?? "");
+        const session = computerSessionManager.getSession(csId);
+        if (!session || !callerMayUseComputerSession(this.routeCaller(), session)) {
+          return { ok: false, error: `Session not found: ${csId}` };
+        }
         computerSessionManager.heartbeat(csId);
         return { ok: true };
       }
@@ -1614,11 +1886,14 @@ export class RpcConnection implements AccountConnection {
       case "computer.request_screenshot": {
         const csId = String(params["computerSessionId"] ?? "");
         const session = computerSessionManager.getSession(csId);
-        if (!session || session.state !== "active") {
+        if (!session || session.state !== "active" || !callerMayUseComputerSession(this.routeCaller(), session)) {
           return { ok: false, error: `No active session: ${csId}` };
         }
         try {
           const snapshot = await captureComputerSessionSnapshot(csId);
+          // The lease can change hands while the frame is taken: send it only if it is still ours.
+          const still = computerSessionManager.getSession(csId);
+          if (!still || !callerMayUseComputerSession(this.routeCaller(), still)) return { ok: false, error: `No active session: ${csId}` };
           if (snapshot.dataUrl && typeof snapshot.width === "number" && typeof snapshot.height === "number") {
             this.sendEvent({
               type: "computer.screenshot",

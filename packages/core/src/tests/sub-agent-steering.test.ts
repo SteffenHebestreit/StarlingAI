@@ -57,6 +57,7 @@ describe("mid-turn steering reaches a running specialist", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "starlingai-sub-agent-steering-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         listing_scout: {
           description: "Finds listings on job boards.",

@@ -42,7 +42,7 @@ pnpm sai token --user alice --role viewer --ttl 7d
 pnpm sai token --user deploy-bot --role admin --ttl 30d
 ```
 
-Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request.
+Tokens carry a `sub` claim holding the user id (the standard JWT subject — not a `user` claim), a `role` claim, and a standard `exp` expiry. The gateway validates `exp` on every request. Under multi-user auth the role must be one that core or a loaded extension declares ([below](#roles-nobody-declares)): `--role` with any other name mints a token the gateway refuses.
 
 `sai token` (and the setup wizard's dashboard token) mints a **bootstrap token**, marked with the claim `bst: true`. Under multi-user auth a bootstrap token is an instance credential, never an account: `--user alice` is a bootstrap principal named alice, with storage of its own, not alice's account. Whoever holds the JWT secret can mint one, so a bootstrap token works whatever accounts exist; rotating the secret revokes every token. Account tokens come from signing in (`POST /api/auth/login`, or SSO) and carry the account id (claim `aid`). The gateway resolves them on every request, and on every message of an open dashboard socket, only while that account still holds that id and the token's username. A token with neither claim (minted before account ids, or by hand) works only while the deployment has no account at all, the window in which the first account is created. With auth off neither claim changes anything.
 
@@ -51,6 +51,63 @@ Tokens carry a `sub` claim holding the user id (the standard JWT subject — not
 Authentication failures are rate-limited to **10 attempts per 5-minute window per IP address** (`checkAuthRateLimit` in `packages/core/src/gateway/auth.ts`). A successful auth clears that IP's counter.
 
 The limit covers exactly three surfaces: `POST /api/auth/login` (HTTP 429), `/ws` connections (closed with code 4429), and `/ws/browser-vnc` upgrades (HTTP 429). Every other `/api/*` route rejects an invalid or missing bearer token with a plain 401 and is **not** rate-limited — put a reverse proxy in front of the gateway if you need blanket per-IP throttling.
+
+### Roles Nobody Declares
+
+Under multi-user auth an account or a token can only hold a role that core (`viewer`, `operator`, `admin`) or a loaded core extension declares. Role names compare case-sensitively. Any other role signs nobody in, whether it is a typo (`Admin` included) or the role of an extension that failed to load or is no longer installed:
+
+- **The account cannot sign in.** `POST /api/auth/login` answers `401` after the password check (`This account's role is not known to this gateway: …`), audited as `auth_account_refused` with the role. An extension auth provider's user is refused the same way, and so is a user of that store whose record has no role at all.
+- **Every token that carries such a role is refused** wherever a revoked token is: `401` (`Unauthorized (account no longer valid)`) on `/api`, close code 4401 on the dashboard socket (at the handshake, and at the next message of a socket that is already open), and `401` on the AG-UI stream, `/mcp`, `/a2a/v1`, `/a2a/agents/:name` and the browser preview.
+- **Its queued work does not run.** A job the account queued fails as one of an account that no longer signs in, and is not queued again. So does each run of its schedules, and a schedule ends after such runs as after any failed ones: one that runs once is removed at its first refused run, a repeating one after three refused runs in a row. A schedule that ends says so in a notification to its owner, and in its conversation while that is still there.
+- **Where the role comes from.** An account's role is read from its record (`auth.users[].role`, or the extension store's user) on every request, so a change to it takes effect at once. A bootstrap token, a token of the empty-store window and an identity-provider account carry theirs in the token. A token with no `role` claim at all counts as `operator`, as before.
+- **Identity provider.** An `auth.oidc.roleMapping.defaultRole` that nobody declares maps nobody: a person the identity provider grants none of the listed roles is refused (`sso_failed`).
+- **A standalone scene worker** (a split deployment) loads no extension, but declares the extensions' roles when it starts, as the gateway's loader would, and nothing else of them. An extension that does not load there declares no role there: the jobs of the accounts holding its roles fail in that worker, which logs `core extension failed to load — its roles are not declared in this process`. It reads the roles once, so restart it whenever the gateway's extensions change.
+- **The log.** The gateway logs each refusal at error level, once per account and role: `Sign-in refused: the role is declared by neither core nor any loaded extension. …`, with the role and the account id (for a bootstrap token its kind instead), and nothing else of the account.
+
+Before, such a role counted as `operator`. So when an extension failed to load, every account holding one of its roles signed in as an operator: a fork's patient role at rank 10, say, read the account roster and drove sessions.
+
+**What that rule left behind.** Some records keep the role they were saved with, and the check above does not reach them:
+
+- A chat session answers to the role it was opened with, and every later turn in it runs with that role, delegations included. A session that an account opened while the old rule made it an operator still answers as `operator` after the account signs in again with its declared role, even one that ranks lower.
+- A queued job or a schedule of an identity-provider account or of a bootstrap token runs with the role it was queued with, since the gateway holds no other role for them. One queued while the old rule made its owner an operator keeps running as `operator`, with no expiry, even when its owner can no longer sign in. (The jobs and schedules of builtin accounts and extension store users run with the role their record holds when they start.)
+- An identity-provider account's token carries the role it was granted at sign-in: one minted while the old rule mapped an undeclared `defaultRole` to `operator` works as `operator` until it expires (24 hours at most).
+
+So after upgrading from a build without this check, if an extension failed to load at some boot (look for `core extension failed to load` in the old boot logs) or an account's role was misspelt, archive the sessions those accounts opened meanwhile (an admin may archive any session) and review their schedules: an admin's `GET /api/schedules` lists everyone's, and `DELETE /api/schedules/:id` removes one.
+
+**Getting a locked-out account back in.** Load the extension again, or give the account a declared role:
+
+- Restore the extension. The boot log says why it did not load (`core extension failed to load — skipped`, audited as `extension_load_failed`). Once it loads, its accounts sign in with their roles again, and the tokens they already hold work again.
+- Change the role. For a builtin account, edit its `role` in `auth.users[]` where the roster lives: the runtime config (`/data/starlingai.runtime.json` in Docker, `workspace/runtime/runtime.overrides.json` otherwise) or the config shard that lists it. The gateway reloads the file. Keep the record and its `id`: an account deleted and created again gets a new id, and its stored data stays with the old one. For an extension auth provider's user, change the role in that provider's store. For an identity-provider account, change the role mapping or the `defaultRole`; the person then signs in again.
+- For a bootstrap token, mint a new one with a declared `--role`.
+
+Neither brings back what failed while the account was locked out: its failed jobs stay failed and its removed schedules stay removed. Queue those jobs again and make those schedules again.
+
+With auth off nothing changes: there is one operator, the token's own claims stand, and a role nobody declares counts as `operator`.
+
+### Roles On The Surfaces Outside `/api`
+
+Under multi-user auth a mutating `/api/*` request (anything but `GET`, `HEAD` and `OPTIONS`) needs the `operator` rank or higher: the mutation gate refuses a lower role with 403 and audits `rbac_denied`. Four surfaces are served outside `/api`'s middleware and run agents or reach the live browser, and they apply the same rule, each audited as `rbac_denied` with its `surface`:
+
+| Surface | Refusal |
+|---|---|
+| AG-UI stream, `POST /api/chat/stream` | HTTP 403 (`agui`) |
+| Legacy A2A route, `POST /a2a/agents/:name` | HTTP 403, JSON-RPC `-32003` (`a2a_legacy`) |
+| `tasks/send` at `/a2a/v1` with a gateway token | JSON-RPC `-32003` (`a2a`) |
+| Browser preview, the `/ws/browser-vnc` upgrade | HTTP 403 (`browser_vnc`) |
+
+So a `viewer` can neither run a turn or an agent on these four surfaces nor take over the shared automation browser through its VNC bridge. Ranks compare as the mutation gate's do (viewer 10, operator 50, admin 90), so an extension role of rank 50 or more passes. An A2A caller with the shared `a2a.inboundBearerToken` or an OIDC peer's token is no account and has no role to check. `/mcp`, the public agent card and the dashboard socket `/ws` are outside this rule. With auth off no role is checked anywhere here.
+
+Two keys narrow the legacy A2A route further. `a2a.legacyAgentRoute: false` turns it off (404); it is served whatever `a2a.enabled` says, so a deployment that does not call it should set this. Its `autoApprove: true` grants the run's approval-gated calls, though never a scene's `humanInLoopSteps` step (Layer 2 below) and never a call to a tool with an approval policy, which still goes to its approvers. It is honoured only from a role at `gateway.overrides.autoApproveMinRole` or above (`viewer`, `operator` (the default), `admin`, or `disabled`). Below the floor it is ignored, audited as `a2a_auto_approve_refused`, and an approval-gated call of the run fails closed.
+
+Outside the VNC bridge a viewer can still reach that browser, which may be signed in to sites. When `/mcp` is served (`mcp.expose.enabled` and `mcp.expose.http.enabled`), it lets a viewer call every Tier-0 tool it exposes (all of them while `mcp.expose.exposeTools` is empty), though no agent, scene or Tier-1+ tool, and several Tier-0 tools use the shared browser:
+
+- `browser_navigate` sends it to a URL and returns the page it lands on.
+- `browser_snapshot`, `browser_screenshot` and `browser_wait_for` return the page it shows.
+- `browser_axe_audit` can do both.
+- `web_fetch` renders a page in it, with its sign-ins, when the direct request fails, is answered with an error status or returns almost no text, as a page behind a login does.
+- `web_search` moves it when it falls back to the browser.
+
+In a deployment that has viewer accounts and a browser signed in to anything, keep `mcp.expose` off, or set `mcp.expose.exposeTools` to a list without these tools. That list applies to every caller, operators included.
 
 ---
 
@@ -139,7 +196,11 @@ Shared per deployment: the config zones, and the agent outcome ledger, flow memo
 
 Editing the shared **global** personality under auth requires the **`admin`** role (rank 90 > operator 50 > viewer 10); a regular operator only edits their own override (`PUT`/`POST /api/personality?scope=global`).
 
+The dashboard socket (`/ws`) draws the line the REST gate draws: each RPC method has a minimum role, checked against the role the store holds at every call, so a viewer reads its own sessions there but opens no session, runs no turn and answers no approval (`Forbidden: …`, audited as `rbac_denied`). `--auto`, which grants a turn's approvals without asking, needs `gateway.overrides.autoApproveMinRole` (default operator). The input guardrail trusts only a scene's or job's own task text, which the scene worker runs on the `scene` channel: a client can neither open a session on that channel nor have its own message trusted in one (a chat into a running scene's session is screened like any other). See [api.md](api.md#websocket-rpc).
+
 Creating, deleting or resetting the password of an account (`POST`/`DELETE`/`PATCH /api/auth/users`) requires **`admin`** as well. The default `pnpm sai token` is an admin bootstrap token, which is how the first account is created. Deleting an account stops its tokens and ends what it has running: its open sockets close, its chats are archived and a turn it is running stops, its queued and running jobs are cancelled, its schedules are disabled, and its MCP sessions and A2A tasks end. A tombstone in `<workspace>/.starlingai/accounts-retired.json` keeps the name from channel senders and new identity-provider subjects; when it cannot be written, nothing is deleted. The reply lists `aclReferences`, the `allowedUsers` entries in the gateway's config that still name the username or `account:<id>` (config is never edited). The storage stays under the old id until `pnpm sai migrate-account-ids --purge-retired <id>` removes it. An admin may create the name again: the new account gets a new id and starts empty, but a bare `allowedUsers` entry for the name grants it, so rewrite those entries first. A password reset keeps the account (tokens already issued stay valid until they expire). No account is created under `auth.provider: "oidc"`, where the identity provider owns the usernames, and the last admin account cannot be deleted.
+
+**Route policies.** A core extension can limit any `/api/*` route, and the surfaces the gateway answers before its router (`POST /api/chat/stream`, `/mcp`, `/a2a/v1`, `/a2a/agents/:name`, `/.well-known/agent-card.json` and the WebSocket upgrades `/ws` and `/ws/browser-vnc/*`), to listed roles (`roles`), or keep listed roles off them (`denyRoles`): see [forking.md](forking.md#3-add-your-domain-backend-as-a-core-extension). Without a matching policy each of those surfaces keeps its own check: the token must resolve to an account, and the four that run agents or reach the live browser (the AG-UI stream, the legacy A2A route, `tasks/send` at `/a2a/v1` and the browser preview) also take operator rank ([Roles On The Surfaces Outside `/api`](#roles-on-the-surfaces-outside-api)). Any signed-in role, a viewer included, can open the dashboard socket and call tools over MCP. A deny policy only subtracts: a caller it does not name meets the next matching policy, core's own included, as if it were not there. A refused `/ws` closes with code 4403, and an open one closes with 4403 once its account's role changes to one the policy refuses. A refusal is audited as `rbac_denied`. A malformed policy refuses every caller on its path instead of being skipped, and a policy naming a role nobody holds is logged at boot.
 
 Remaining gaps (acceptable for trusted-operator deployments): the graph's non-L0 rerank signals and the `graph_*` tools still operate on a shared instance graph; `/api/app/:id/*` (a running served app) takes any signed-in caller, not only the account that started the app; and a dashboard socket opened before its token expired stays open after. See `docs/memory-context-overview.md` §6 for the full account.
 
@@ -180,13 +241,17 @@ Detects:
 
 Blocked messages return `status: "blocked"` to the client. The block event is recorded in the audit log with the matched pattern type (but not the full pattern content, to avoid logging the injection attempt verbatim).
 
+**Workflow parameters.** A scene's or job's task text is operator-authored, so the scene worker runs it on channel `scene` as trusted workflow input: the scanner notes injection patterns in it but does not block them (a scene's own security instructions would trip it). The parameters a caller passes into such a run are not operator-authored, so every entry point screens the values it templates into a task as untrusted input first: `/job` and `/run` in chat, `POST /api/scenes/:name/run` and `POST /api/jobs/:name/run`, an MCP `scene__<name>` call (its params and its `context`), and a channel trigger (what it captures or parses from the sender's message). Only what a task reads is screened: a value under a name no scene task reads reaches no model and is left alone. That covers the message a trigger matched and the sender's id unless a step passes them on, a body key no template names, and a step param its scene's task does not read. The check is the one an untrusted chat message gets, minus the repetition limit, and with the length limit `guardrails.maxInputLength`. A code banner or a markdown table rule trips the repetition limit, and a queued run still applies it to its whole task. A refused value starts nothing. `chat.send` answers `status: "blocked"`. REST answers `400`; the web chat sends its own `/job` that way, shows the reason under the composer and gives the command back. MCP answers `isError`, and a channel trigger replies with the reason unless it is `silent`. Each refusal is audited as `workflow_param_blocked` with the entry point, the workflow, the parameter's name and the matched patterns, never the value. Values the configuration declares are not screened: a scene param's `default`, a job step's `params`, a trigger's `params`, and cron-trigger parameters.
+
+The screen reads a value the way it reads a chat message, by what the text says, not by what the workflow is for. That includes a security workflow's free text. An incident description that a step's task reads is refused when it reads like a disclosure request or an instruction override, whether it comes from a Slack trigger, an alerting webhook on `POST /api/jobs/:name/run` or chat. `CI logs show the AWS secret key in plaintext` is refused (`extract_credentials`), as the same sentence would be in chat. Written as a finding, `AWS secret key found in plaintext in CI logs` passes.
+
 ### Layer 2 — Tool Tier Check
 
 Applied before any tool execution.
 
 - Tier 0 tools execute immediately.
 - Tier 1 tools execute with audit logging.
-- Per-call approval is driven by each tool's own `requiresPerCallApproval` flag, **not by its tier number** — `executeTool` gates on that flag (`packages/core/src/tools/registry.ts`), and a scene's `humanInLoopSteps` can additionally force approval for any tool. Most Tier 2/3 tools set the flag (`shell_exec`, the `ssh_*` and infrastructure tools, credential injection, …), but some execution-tier tools deliberately do not — internal orchestration (`delegate_to_agent`, `swarm_delegate`, `parallel_delegate`, `run_workflow`, …) stays inside the guarded runtime, where the sub-agent's own tool calls are gated individually. **Check `docs/reference/tool-tiers.md` for the per-tool `approval` column rather than assuming from the tier.**
+- Per-call approval is driven by each tool's own `requiresPerCallApproval` flag, **not by its tier number** — `executeTool` gates on that flag (`packages/core/src/tools/registry.ts`), and a scene's `humanInLoopSteps` can additionally force approval for any tool. `--auto`, and the legacy A2A route's `autoApprove`, answer the other approvals of their run but never a `humanInLoopSteps` step: that one still goes to the person, or to the scene's `approvalChannel` when the scene names one (a REST, webhook or job run, a chat `/run`, or `run_workflow`), and with nobody to ask it is refused. Any operator can answer a channel's request from the dashboard as well, the person who started the run included. Most Tier 2/3 tools set the flag (`shell_exec`, the `ssh_*` and infrastructure tools, credential injection, …), but some execution-tier tools deliberately do not — internal orchestration (`delegate_to_agent`, `swarm_delegate`, `parallel_delegate`, `run_workflow`, …) stays inside the guarded runtime, where the sub-agent's own tool calls are gated individually. **Check `docs/reference/tool-tiers.md` for the per-tool `approval` column rather than assuming from the tier.**
 - Tier 4 tools are rejected immediately with no approval path.
 - Unknown tools (not in any tier) are treated as Tier 4.
 
@@ -257,15 +322,38 @@ Secrets are redacted in audit entries using the same scanner as Layer 3/4 before
 
 ---
 
+## Dashboard Proxy: No Request Data on Disk
+
+The web container's nginx (`docker/web/nginx.conf`) sits between the browser and the gateway. With nginx's defaults it writes a request body over 8 KB (two memory pages; 16 KB on some 64-bit platforms), and the part of a proxied response the client is too slow to take, to temp files under `/var/cache/nginx`: uploads and answers carrying personal data would land on the container's disk, where a deleted temp file stays recoverable. The shipped setup keeps them in memory:
+
+- `docker-compose.yml` mounts `/var/cache/nginx`, where every nginx temp path of the image lives, as a tmpfs of `SAI_WEB_TMPFS_SIZE` (128 MB by default). It counts toward `SAI_WEB_MEM_LIMIT`, and `memswap_limit` equal to that limit keeps it out of swap.
+- `proxy_max_temp_file_size 0`: a proxied response is never written to a temp file. Once nginx's in-memory buffers are full it waits for the client, and the gateway waits with it.
+- Request bodies stay buffered (the default) on purpose. nginx then passes a chunked upload on with a `Content-Length`, which the gateway's size check reads; with `proxy_request_buffering off` a chunked body would reach the gateway without one and skip that check.
+
+**Sizing the tmpfs.** The tmpfs is one pool for all requests. While it is full, every request with a body over 8 KB gets a 500 (uploads, voice recordings, long JSON bodies), not only the one that filled it, until the requests holding it end; the container keeps running. It holds `SAI_WEB_TMPFS_SIZE` divided by the body size at once: two bodies at the 64 MB cap on `/api/`, six at the gateway's default 20 MB upload limit. Size it for the uploads you expect at once, at least the 64 MB cap and below `SAI_WEB_MEM_LIMIT` (raise that with it).
+
+nginx receives the whole body before the gateway, its login check included, sees the request, so anyone who can reach port 3001 can keep the pool full with a few slow uploads: `client_body_timeout` times only the pause between two reads, not the whole upload. With the temp files on disk the same uploads could fill the host's disk instead. Keep port 3001 on `127.0.0.1` (the default `SAI_BIND_HOST`). Where other machines must reach it, put a proxy in front that limits the uploads one client may run at once (for nginx, `limit_conn` keyed on `$binary_remote_addr` for `/api/`). The shipped `nginx.conf` sets no such limit: behind a proxy it sees only the proxy's address and would count all users as one.
+
+**Overrides.** Change the size with `SAI_WEB_TMPFS_SIZE`. A `docker-compose.override.yml` must not list `/var/cache/nginx` under the `web` service's `tmpfs` again: Compose appends an override's `tmpfs` entries to the base file's, and two mounts on one path are refused or lose `size` and `mode`. To replace the list, write `tmpfs: !override [...]`.
+
+A reverse proxy you put in front of the stack (for TLS, say) buffers in the same way: keep its temp files in memory too (for nginx, the settings above).
+
+---
+
 ## Security Checklist for Production
 
-- [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing or shorter than 32 chars — there is no shared default to replace, but verify the value was not copied between environments.
-- [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production
+- [ ] Confirm `SAI_MASTER_KEY` is set to a randomly generated ≥32-character string. `scripts/setup-wizard.mjs` generates one automatically when it is missing, shorter than 32 chars, or still a template placeholder (such as the `your-256-bit-…` value older `.env.example` files shipped). Before it replaces a placeholder it looks for data already sealed with it (`credentials.enc` or any `*.salt` in the state directories under the repo root, `workspace/`, `packages/core/` (and its `workspace/`) and the home directory, plus `SAI_CRED_STORE`); when it finds some it keeps the placeholder, because a new key could not decrypt that data, and prints how to rotate. A key it replaces is appended to `.starlingai/replaced-master-keys.txt`, so the old value can be put back. Re-running setup while the stack is up: restart it (`pnpm sai start`) before storing any credential, because the running gateway keeps the old key until then. The gateway also warns at boot while a placeholder is in use. `.env.example` leaves the key empty. Verify the value was not copied between environments.
+- [ ] Set `SAI_JWT_SECRET` explicitly — do not rely on the auto-generated file in production (setup writes a random one to `.env`, and replaces a template placeholder such as the `your-256-bit-…` example older `.env.example` files carried)
 - [ ] Set `gateway.publicUrl` in `starlingai.json` — required for channel webhook verification
 - [ ] If the dashboard calls the gateway across origins, add the dashboard origin to `gateway.corsAllowedOrigins`
 - [ ] Use `dmPolicy: "pairing"` or `"allowlist"` on all channels — never leave channels `"open"` in production
 - [ ] Mount `/data` as a named Docker volume with restricted host permissions
 - [ ] Do not expose ports 8765 or 5432 to the public internet — reverse proxy with TLS
 - [ ] Prefer publishing only the web entrypoint on port 3001 and let its Nginx proxy forward `/api` and `/ws` to the gateway
+- [ ] Keep every proxy's temp files off disk: the web container's `/var/cache/nginx` is a tmpfs ([above](#dashboard-proxy-no-request-data-on-disk)), and a TLS proxy in front needs the same
+- [ ] If nothing calls the deprecated `POST /a2a/agents/:name`, set `a2a.legacyAgentRoute: false`
+- [ ] After an upgrade, or whenever the core extensions change, check the boot log for `core extension failed to load` (a standalone scene worker's too): an account holding a role of an extension that did not load cannot sign in, and its queued jobs and schedules fail ([Roles Nobody Declares](#roles-nobody-declares))
+- [ ] When upgrading from a build that let a role nobody declares sign in as `operator`, archive the sessions and review the schedules of the accounts that held one ([Roles Nobody Declares](#roles-nobody-declares), "What that rule left behind")
+- [ ] With viewer accounts and a signed-in automation browser, keep `mcp.expose` off or leave the tools that use that browser out of `mcp.expose.exposeTools` ([Roles On The Surfaces Outside `/api`](#roles-on-the-surfaces-outside-api))
 - [ ] Review the audit log regularly; subscribe to the real-time stream for live monitoring
 - [ ] Keep scene webhook keys at 16+ characters and prefer env-backed secrets over literals

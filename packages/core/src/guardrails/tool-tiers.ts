@@ -11,10 +11,24 @@ export const enum ToolTier {
   ONE_WRITE = 1,
   /** Execution — require per-invocation approval, always sandboxed */
   TWO_EXECUTE = 2,
-  /** Privileged operations — require admin approval + audit entry */
+  /** Privileged operations — require per-call approval + audit entry. Who may grant it is not
+   *  checked unless the tool declares an approval policy (ToolApprovalPolicy). */
   THREE_PRIVILEGED = 3,
   /** BLOCKED — never executable under any circumstances */
   FOUR_BLOCKED = 4,
+}
+
+/**
+ * Who may grant a per-call approval (approval/routed.ts). Without one, the approval goes to
+ * whoever the call's approval callback reaches, which for a chat is the person who asked: they
+ * approve their own call. With one, only a caller whose role `approverRoles` admits may grant it
+ * (gateway/route-policies.ts policyAdmitsRole: a listed name, and among the built-in roles every
+ * higher one), and a call from anyone else is routed to them. `distinctApprover` asks for a second
+ * person: the requester never approves their own call, whatever their role.
+ */
+export interface ToolApprovalPolicy {
+  approverRoles: readonly string[];
+  distinctApprover?: boolean;
 }
 
 export interface ToolTierDef {
@@ -22,6 +36,8 @@ export interface ToolTierDef {
   description: string;
   requiresPerCallApproval: boolean;
   requiresSandbox: boolean;
+  /** Only with requiresPerCallApproval. Core tools declare none; see ToolApprovalPolicy. */
+  approval?: ToolApprovalPolicy;
 }
 
 // Central registry of all tool names → tier definition
@@ -1787,15 +1803,33 @@ const TOOL_TIER_MAP: Readonly<Record<string, ToolTierDef>> = Object.freeze({
  */
 const EXTENSION_TIER_MAP = new Map<string, ToolTierDef>();
 
+/** True when `toolName` is a built-in tool's, tiered in TOOL_TIER_MAP: no extension may declare a tool of that name. */
+export function isBuiltinTool(toolName: string): boolean {
+  return Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName);
+}
+
 /** @internal extension-loader-only. Throws on built-in shadowing or blocked tiers. */
 export function registerExtensionToolTier(toolName: string, def: ToolTierDef, source: string): void {
-  if (Object.prototype.hasOwnProperty.call(TOOL_TIER_MAP, toolName)) {
+  if (isBuiltinTool(toolName)) {
     throw new Error(`extension "${source}" must not shadow built-in tool "${toolName}"`);
   }
   if (def.tier >= ToolTier.FOUR_BLOCKED) {
     throw new Error(`extension "${source}" tool "${toolName}": registering at FOUR_BLOCKED is not allowed`);
   }
-  EXTENSION_TIER_MAP.set(toolName, Object.freeze({ ...def, description: `[ext:${source}] ${def.description}` }));
+  if (def.approval && (!def.requiresPerCallApproval || def.approval.approverRoles.length === 0)) {
+    throw new Error(`extension "${source}" tool "${toolName}": an approval policy needs requiresPerCallApproval and at least one approver role`);
+  }
+  const approval = def.approval
+    ? Object.freeze({
+      approverRoles: Object.freeze([...def.approval.approverRoles]),
+      ...(def.approval.distinctApprover ? { distinctApprover: true } : {}),
+    })
+    : undefined;
+  EXTENSION_TIER_MAP.set(toolName, Object.freeze({
+    ...def,
+    description: `[ext:${source}] ${def.description}`,
+    ...(approval ? { approval } : {}),
+  }));
 }
 
 /** Test hook: clear extension-declared tiers. */

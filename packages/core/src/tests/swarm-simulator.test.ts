@@ -87,6 +87,7 @@ function pinHybridConfig(extra: Record<string, unknown> = {}): void {
   tempConfigDirs.push(tempDir);
   const configPath = join(tempDir, "starlingai.json");
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { mainAssistant: { toolMode: "hybrid" } },
     ...extra,
   }), "utf8");
@@ -102,9 +103,12 @@ function textStream(text: string) {
 }
 
 function makeSession(): AgentSession {
+  // Its own workspace: a turn reads the workspace's memory and probes the files an answer names there.
+  const workspace = mkdtempSync(join(tmpdir(), "starlingai-swarm-sim-session-"));
+  tempConfigDirs.push(workspace);
   return new AgentSession({
     channel: "test",
-    workspacePath: "/workspace",
+    workspacePath: workspace,
     systemPrompt: "You are a test agent.",
   });
 }

@@ -2,8 +2,9 @@
  * Slack approval channel adapter.
  *
  * Posts a Block Kit message to a Slack Incoming Webhook URL.
- * The message contains formatted approval details and two one-click links
- * (Approve / Deny) that resolve the pending approval when the user visits them.
+ * The message contains formatted approval details and two links (Approve /
+ * Deny). Each opens a confirmation page (gateway/approval-pages.ts) whose
+ * buttons resolve the pending approval; visiting a link alone decides nothing.
  *
  * No Slack app or interactive components are required — just an Incoming Webhook.
  * gateway.publicUrl must be configured so the link URLs can be constructed.

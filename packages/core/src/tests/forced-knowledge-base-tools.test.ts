@@ -148,6 +148,7 @@ async function loadRuntime(orchestration: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sai-forced-kb-"));
   tempDirs.push(dir);
   writeFileSync(join(dir, "starlingai.json"), JSON.stringify({
+    workspacePath: dir,
     agents: { mainAssistant: { toolMode: "orchestration_only" } },
     retrieval: { knowledgeBases: { enabled: true } },
     orchestration: {
@@ -176,7 +177,7 @@ async function loadRuntime(orchestration: Record<string, unknown> = {}) {
     import("../tools/knowledge-bases.js"),
   ]);
   resetSessionsForTests();
-  return { AgentSession, runTurn };
+  return { AgentSession, runTurn, workspacePath: dir };
 }
 
 function toolCallStream(callId: string, toolName: string, args: Record<string, unknown>) {
@@ -242,11 +243,11 @@ describe("the forced-orchestration allowlist — knowledge-base reads", () => {
 
 describe("a source-sensitive turn under stableToolBlock freeze", () => {
   it("can call search_knowledge_base on the forced call, and the call runs instead of being refused", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const toolResults: Array<{ name: string; result: string }> = [];
     await runTurn({
       session,
@@ -307,11 +308,11 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
     const { looksLikeUnsourcedSpecificClaims } = await import("../agent/citation-honesty.js");
     expect(looksLikeUnsourcedSpecificClaims(GROUNDED_ANSWER)).toBe(true);
 
-    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime(GUARDS);
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(GROUNDED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(streamOptions()[0]?.["toolChoice"], "the first call was not the forced call").toBe("required");
@@ -328,11 +329,11 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
   }, 60_000);
 
   it("a search that found nothing leaves the turn forced", async () => {
-    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime(GUARDS);
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: [], retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(GROUNDED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(1);
@@ -354,12 +355,12 @@ describe("a knowledge-base read that brought content back grounds a source-sensi
         : null));
     }],
   ])("a search whose excerpts %s blocked leaves the turn forced", async (_screen, block) => {
-    const { AgentSession, runTurn } = await loadRuntime(GUARDS);
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime(GUARDS);
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     block();
     searchThenAnswer(GROUNDED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const toolResults: Array<{ name: string; result: string }> = [];
     await runTurn({
       session,
@@ -388,7 +389,7 @@ describe("the excerpts a search returned reach the model's next call", () => {
   ].join("\n");
 
   it("the call after the search reads a passage that sits past character 600 of the result", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     const [charge, grease] = KB_EXCERPTS;
     searchKnowledgeBaseMock.mockResolvedValue({
       chunks: [{ ...charge!, text: `${PAGE_CHROME}\n\n${charge!.text}` }, grease!],
@@ -397,7 +398,7 @@ describe("the excerpts a search returned reach the model's next call", () => {
     });
     searchThenAnswer("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const toolResults: Array<{ name: string; result: string }> = [];
     await runTurn({
       session,
@@ -416,7 +417,7 @@ describe("the excerpts a search returned reach the model's next call", () => {
   }, 60_000);
 
   it("a low-confidence search says so ahead of its excerpts, so the cut to the retrieval budget keeps the note", async () => {
-    await loadRuntime();
+    const { workspacePath } = await loadRuntime();
     const { getTool } = await import("../tools/registry.js");
     const { buildModelVisibleToolResult } = await import("../agent/tool-result-format.js");
     const { getConfig } = await import("../config/loader.js");
@@ -431,7 +432,7 @@ describe("the excerpts a search returned reach the model's next call", () => {
 
     const result = await getTool("search_knowledge_base")!.execute(
       { knowledge_base: KB_ID, query: "Wartung NW-AS 18" },
-      { sessionId: "kb-low-confidence", workspacePath: "/workspace" } as never,
+      { sessionId: "kb-low-confidence", workspacePath } as never,
     );
     expect(result.success).toBe(true);
     const visible = buildModelVisibleToolResult("search_knowledge_base", result.output, result.metadata);
@@ -468,7 +469,7 @@ describe("a knowledge-base worker's report reaches the model's next call", () =>
   ].join("\n");
 
   it("the call after the worker reads every finding of its report, the ones past character 600 included", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     runEphemeralWorkerMock.mockResolvedValue({
       success: true,
       output: REPORT,
@@ -483,7 +484,7 @@ describe("a knowledge-base worker's report reaches the model's next call", () =>
         : textStream("Laut Wissensdatenbank: 38 Minuten bis 80 %, Getriebefett alle 150 Betriebsstunden prüfen.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const toolResults: Array<{ name: string; result: string }> = [];
     await runTurn({
       session,
@@ -511,7 +512,7 @@ describe("a knowledge-base worker's report reaches the model's next call", () =>
   }, 60_000);
 
   it("a worker that could not run is no report: the call after it reads a generic tool result's 600 characters, its snippet 500", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     const { truncateForContext } = await import("../agent/tool-result-format.js");
     // The worker timed out while its searches kept hitting a provider's error page. Its partial
     // transcript repeats the page, and the tool hands that on behind its failure line.
@@ -535,7 +536,7 @@ describe("a knowledge-base worker's report reaches the model's next call", () =>
         : textStream("Die Wissensdatenbank war in diesem Durchlauf nicht erreichbar.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const toolResults: Array<{ name: string; result: string }> = [];
     await runTurn({
       session,
@@ -590,7 +591,7 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
       .find((message) => message.role === "tool" && message.tool_call_id === callId)?.content ?? undefined;
 
   it("a search that keeps failing the same way keeps the identical-output notice after the cut line", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 500;
     // The store's error, echoed whole, runs past the budget. A failed call is not served from the
     // identical-arguments cache, so the third one runs and gets the loop's notice. The listing in the
@@ -602,7 +603,7 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
       [["kb3", "search_knowledge_base", SEARCH_ARGS]],
     ], "Die Wissensdatenbank ist gerade nicht erreichbar.");
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(3);
@@ -613,7 +614,7 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
   }, 60_000);
 
   it("a repeated search served from the cache keeps the cached-result note after the cut line", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
     // Six long excerpts of a crawled site, as the default top-k returns them: past the budget.
     const chunks = Array.from({ length: 6 }, (_, i) => ({
@@ -627,7 +628,7 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
       [["kb2", "search_knowledge_base", SEARCH_ARGS]],
     ], "Die Auszüge nennen keine Ladezeit.");
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: KB_QUESTION });
 
     // The repeat was served from the cache, not searched again.
@@ -650,7 +651,7 @@ describe("the turn loop's own notes on a retrieval result survive its cut to the
 
 describe("a turn's retrieval results share the retrieval budget", () => {
   it("a second search over budget gets what the first left, at least a quarter of the budget", async () => {
-    const { AgentSession, runTurn } = await loadRuntime();
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime();
     (await import("../config/loader.js")).getConfig().retrieval.documentRag.maxContextChars = 6000;
     // Two searches for two parts of the question, each returning six long excerpts of a crawled site.
     const sixExcerpts = (topic: string) => Array.from({ length: 6 }, (_, i) => ({
@@ -669,7 +670,7 @@ describe("a turn's retrieval results share the retrieval budget", () => {
       return textStream("Die Auszüge nennen weder Ladezeit noch Prüfintervall.");
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(searchKnowledgeBaseMock).toHaveBeenCalledTimes(2);
@@ -771,11 +772,11 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   });
 
   it("a whole turn: the answer from the knowledge-base search ships with the page it cites", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true });
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(CITED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(output.response).toContain(PAGE_URL);
@@ -783,11 +784,11 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   }, 60_000);
 
   it("a whole turn: a made-up datasheet beside the page the search returned is stripped, and the page stays", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true });
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(MIXED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(output.response).toContain(PAGE_URL);
@@ -800,12 +801,12 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   it("a whole turn: a search whose excerpts the screen blocked returned no page to cite", async () => {
     // Not source-sensitive, so nothing forces the turn on: the answer after the blocked search is the
     // one that ships, and the page it cites is one the model never saw.
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true, upfrontSourceSensitiveClassifier: false });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true, upfrontSourceSensitiveClassifier: false });
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     checkToolOutputMock.mockImplementation((text) => (text.includes("38 Minuten") ? { allowed: false, reason: "suspicious payload" } : { allowed: true }));
     searchThenAnswer(CITED_ANSWER);
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(auditTypes()).toContain("tool_output_blocked");
@@ -814,7 +815,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   }, 60_000);
 
   it("a whole turn: the pages a knowledge-base worker cites are sources, and a URL the answer adds is not", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true });
     runEphemeralWorkerMock.mockResolvedValue({
       success: true,
       output: `38 Minuten von 0 % auf 80 %; Getriebefett alle 150 Betriebsstunden prüfen. Quelle: ${PAGE_URL}`,
@@ -829,7 +830,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
         : textStream(MIXED_ANSWER);
     });
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION });
 
     expect(runEphemeralWorkerMock).toHaveBeenCalledTimes(1);
@@ -842,7 +843,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   it("a turn cut off after the search: the synthesized answer keeps the page it cites too", async () => {
     // The iteration ceiling ends the turn right after the knowledge-base search, so the answer is
     // the terminal synthesis, and it reaches the citation guard through the backstop path.
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true });
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(CITED_ANSWER);
     completeMock.mockImplementation(async () => ({
@@ -852,7 +853,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
       finishReason: "stop",
     }));
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION, maxIterationsOverride: 1 });
 
     expect(streamMock).toHaveBeenCalledTimes(1);
@@ -862,7 +863,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
   }, 60_000);
 
   it("a turn cut off after the search: a made-up URL in the synthesized answer is stripped there too", async () => {
-    const { AgentSession, runTurn } = await loadRuntime({ citationHonestyGuard: true });
+    const { AgentSession, runTurn, workspacePath } = await loadRuntime({ citationHonestyGuard: true });
     searchKnowledgeBaseMock.mockResolvedValue({ chunks: KB_EXCERPTS, retrievalFailed: false, lowConfidence: false });
     searchThenAnswer(MIXED_ANSWER);
     completeMock.mockImplementation(async () => ({
@@ -872,7 +873,7 @@ describe("citations in an answer from this turn's knowledge-base read are its so
       finishReason: "stop",
     }));
 
-    const session = new AgentSession({ channel: "test", workspacePath: "/workspace", systemPrompt: "You are a test agent." });
+    const session = new AgentSession({ channel: "test", workspacePath, systemPrompt: "You are a test agent." });
     const output = await runTurn({ session, userMessage: KB_QUESTION, maxIterationsOverride: 1 });
 
     expect(streamMock).toHaveBeenCalledTimes(1);

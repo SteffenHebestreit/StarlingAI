@@ -108,6 +108,7 @@ describe("C5' at the delegation tools", () => {
   beforeEach(async () => {
     tempDir = mkdtempSync(join(tmpdir(), "sai-loop-consequences-"));
     writeFileSync(join(tempDir, "starlingai.json"), JSON.stringify({
+      workspacePath: tempDir,
       subAgents: {
         content_writer: { description: "Writes documents and decks.", systemPrompt: "Write.", tools: ["write_file", "edit_file"], maxIterations: 4 },
         researcher: { description: "Finds sources on the web.", systemPrompt: "Research.", tools: ["web_search"], maxIterations: 4 },

@@ -71,6 +71,9 @@ withDefaults(defineProps<{
 }
 .orb-node:not(.orb-node--docked) { cursor: grab; }
 .orb-node:not(.orb-node--docked):active { cursor: grabbing; }
+/* What this connection's role may not do (a viewer may not change the session's settings): drawn
+   faint and taking no click, as the chip it stands for below the input is. */
+.orb-node:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* The bezel: a faint full circle, and one arc of light going round it, brightest at its head. */
 .orb-node__bezel,

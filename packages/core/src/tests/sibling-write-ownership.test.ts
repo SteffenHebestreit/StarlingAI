@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   SiblingWriteGroup,
   checkSiblingWrite,
@@ -16,7 +19,10 @@ import {
  * sub-agent-sibling-write.test.ts.
  */
 
-const WS = "/workspace";
+/** Each test's own workspace root: the group checks a write against the root's real path. */
+let workspace = "";
+beforeEach(() => { workspace = mkdtempSync(join(tmpdir(), "sai-sibling-write-")); });
+afterEach(() => { rmSync(workspace, { recursive: true, force: true }); });
 
 /** Runs `bodies` as concurrently running siblings of one group; each body sees the others running. */
 async function siblings(
@@ -45,7 +51,7 @@ describe("the files a task names", () => {
 
 describe("write ownership among running siblings", () => {
   it("a file a sibling's task names is refused to the others, and the refusal names the owner", async () => {
-    const group = new SiblingWriteGroup("run_task_graph", WS);
+    const group = new SiblingWriteGroup("run_task_graph", workspace);
     const [paper, deck] = await siblings(group, [
       { id: "write_paper", task: "Write the paper to paper.md.", body: () => [checkSiblingWrite("deck.html"), checkSiblingWrite("paper.md")] },
       { id: "write_presentation", task: "Build the deck in deck.html.", body: () => [checkSiblingWrite("deck.html")] },
@@ -56,7 +62,7 @@ describe("write ownership among running siblings", () => {
   });
 
   it("compares files after the workspace resolver: generated/deck.html IS deck.html", async () => {
-    const group = new SiblingWriteGroup("run_task_graph", WS);
+    const group = new SiblingWriteGroup("run_task_graph", workspace);
     const [paper] = await siblings(group, [
       { id: "paper", task: "Write paper.md.", body: () => checkSiblingWrite("generated/deck.html") },
       { id: "deck", task: "Build deck.html.", body: () => null },
@@ -65,7 +71,7 @@ describe("write ownership among running siblings", () => {
   });
 
   it("two different files in one directory both go through", async () => {
-    const group = new SiblingWriteGroup("parallel_delegate", WS);
+    const group = new SiblingWriteGroup("parallel_delegate", workspace);
     const results = await siblings(group, [
       { id: "a", task: "Build site/a.html.", body: () => checkSiblingWrite("site/a.html") },
       { id: "b", task: "Build site/b.html.", body: () => checkSiblingWrite("site/b.html") },
@@ -87,7 +93,7 @@ describe("write ownership among running siblings", () => {
 
   it("a file no task names is the first running writer's", async () => {
     const [first, second] = await firstWriterThenSecond(
-      new SiblingWriteGroup("parallel_delegate", WS),
+      new SiblingWriteGroup("parallel_delegate", workspace),
       { id: "a", task: "Collect the data." },
       { id: "b", task: "Collect more data." },
       "data.json",
@@ -99,7 +105,7 @@ describe("write ownership among running siblings", () => {
   it("a file two running siblings both name goes to whichever writes it first", async () => {
     // A task that only refers to another's file (say, to cite it) must not take it over by naming it.
     const [builder, citer] = await firstWriterThenSecond(
-      new SiblingWriteGroup("run_task_graph", WS),
+      new SiblingWriteGroup("run_task_graph", workspace),
       { id: "deck", task: "Build deck.html." },
       { id: "notes", task: "Write notes.md about the slides in deck.html." },
       "deck.html",
@@ -109,7 +115,7 @@ describe("write ownership among running siblings", () => {
   });
 
   it("an owner that finished owns nothing: a dependent writes after it", async () => {
-    const group = new SiblingWriteGroup("run_task_graph", WS);
+    const group = new SiblingWriteGroup("run_task_graph", workspace);
     await runAsWriteSibling(group, "deck", "node 'deck'", "Build deck.html.", async () => checkSiblingWrite("deck.html"));
     const review = await runAsWriteSibling(group, "review", "node 'review'", "Fix the typos.", async () => checkSiblingWrite("deck.html"));
     expect(review).toBeNull();
@@ -120,13 +126,13 @@ describe("write ownership among running siblings", () => {
   });
 
   it("a sibling's nested delegation writes as that sibling, and a nested fan-out answers to both groups", async () => {
-    const outer = new SiblingWriteGroup("run_task_graph", WS);
+    const outer = new SiblingWriteGroup("run_task_graph", workspace);
     const [coordinator] = await siblings(outer, [
       {
         id: "paper",
         task: "Write paper.md.",
         body: async () => {
-          const inner = new SiblingWriteGroup("parallel_delegate", WS);
+          const inner = new SiblingWriteGroup("parallel_delegate", workspace);
           return siblings(inner, [
             { id: "draft", task: "Draft section one.", body: () => [checkSiblingWrite("paper.md"), checkSiblingWrite("deck.html")] },
             { id: "figures", task: "Draw figures.png.", body: () => null },
@@ -141,7 +147,7 @@ describe("write ownership among running siblings", () => {
   });
 
   it("a refusal claims nothing: once the named owner finished, the refused file is free again", async () => {
-    const group = new SiblingWriteGroup("parallel_delegate", WS);
+    const group = new SiblingWriteGroup("parallel_delegate", workspace);
     let aTried!: () => void;
     let aMayFinish!: () => void;
     const tried = new Promise<void>((resolve) => { aTried = resolve; });

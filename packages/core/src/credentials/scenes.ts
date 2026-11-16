@@ -56,7 +56,7 @@ export interface SceneSummary {
   allowedAgents?: string[];
   /** Tool names that must pause for human approval when called from this scene */
   humanInLoopSteps?: string[];
-  /** Name of an approvalChannels entry — used when this scene is triggered via webhook */
+  /** Name of an approvalChannels entry — asked for this scene's approvals on a REST, webhook or job run, and for its humanInLoopSteps when a chat `/run` or `run_workflow` starts it */
   approvalChannel?: string;
   /** Per-scene override for the approval channel timeout (ms). Falls back to channel config when absent. */
   approvalTimeoutMs?: number;

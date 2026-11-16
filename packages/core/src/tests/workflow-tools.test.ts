@@ -1133,6 +1133,7 @@ describe("workflow catalog tools", () => {
     try {
       const tool = getTool("run_workflow");
       expect(tool).toBeDefined();
+      const turn = new AbortController();
 
       const result = await tool!.execute(
         {
@@ -1143,6 +1144,7 @@ describe("workflow catalog tools", () => {
           sessionId: "workflow-scene",
           workspacePath: "/workspace",
           allowedAgents: ["browser_agent"],
+          signal: turn.signal,
         },
       );
 
@@ -1150,12 +1152,15 @@ describe("workflow catalog tools", () => {
       expect(runSubAgentWithStatsMock).toHaveBeenCalledTimes(1);
       expect(runTurnMock).not.toHaveBeenCalled();
       expect(requestApprovalViaChannelMock).toHaveBeenCalledTimes(1);
+      // The turn's signal goes with the request: a stopped turn withdraws it (approval/index.ts).
       expect(requestApprovalViaChannelMock).toHaveBeenCalledWith(
         "slack-approvals",
         "site_fill_credentials",
         { hostname: "app.example.com" },
         "credentialed_browser_approval",
         60_000,
+        undefined,
+        turn.signal,
       );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

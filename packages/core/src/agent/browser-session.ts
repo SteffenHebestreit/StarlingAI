@@ -22,6 +22,7 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 import { childLogger } from "../logger.js";
 import { logAudit } from "../audit/logger.js";
+import type { SessionControlActor } from "./computer-session.js";
 
 const log = childLogger("agent:browser-session");
 
@@ -159,18 +160,29 @@ class BrowserSessionManager extends EventEmitter {
     });
   }
 
-  /** Operator clicked "I solved it — continue". Resumes the waiting agent. */
-  resolveAssist(sessionId: BrowserSessionId, operator = "operator"): boolean {
+  /**
+   * Operator clicked "I solved it — continue". Resumes the waiting agent. `by` is who the
+   * gateway resolved: a name, or the caller whole, whose identity and role the audit then records.
+   */
+  resolveAssist(sessionId: BrowserSessionId, by: string | SessionControlActor = "operator"): boolean {
     const pending = this._pending.get(sessionId);
     const session = this._sessions.get(sessionId);
     if (!session) return false;
 
+    const actor = typeof by === "string" ? undefined : by;
+    const operator = typeof by === "string" ? by : by.identity?.userId ?? "operator";
     session.state = "active_resolved";
     session.assistResolvedAt = Date.now();
     session.updatedAt = session.assistResolvedAt;
     session.assistReason = undefined;
 
-    logAudit("browser_session_assist_resolved", { sessionId, operator });
+    logAudit("browser_session_assist_resolved", {
+      sessionId,
+      operator,
+      ...(actor?.identity ? { actor: actor.identity } : {}),
+      ...(actor?.role ? { role: actor.role } : {}),
+      ...(actor ? { via: actor.via } : {}),
+    });
     this.emit("session:assist_resolved", sessionId, operator);
     log.info({ sessionId, operator }, "Browser session assist resolved by human");
 

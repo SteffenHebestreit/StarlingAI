@@ -51,6 +51,7 @@ describe("a delegation reads the turn deadline as it stands now", () => {
     tempDirs.push(tempDir);
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       orchestration: { subAgentSynthesisReserveMs: 0 },
       subAgents: {
         web_coder: { description: "Builds pages", systemPrompt: "You build pages.", tools: ["write_file"], maxIterations: 5, turnTimeoutMs: 1_500_000 },
@@ -69,7 +70,7 @@ describe("a delegation reads the turn deadline as it stands now", () => {
         { agentName: "web_coder", task: "Build the page with the new hero image" },
         {
           sessionId: "session-live-deadline",
-          workspacePath: "/workspace",
+          workspacePath: tempDir,
           turnTimeoutOverrideMs: 1_800_000,
           _turnDeadlineMs: now + 60_000,
           _liveTurnDeadlineMs: () => now + 540_000,

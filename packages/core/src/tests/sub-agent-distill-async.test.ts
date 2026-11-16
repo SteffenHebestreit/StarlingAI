@@ -154,6 +154,7 @@ const SEARCH_RESULT = searchResultFor("IM73A135V01 datasheet");
 
 function writeTempConfig(turnTimeoutMs?: number): void {
   writeFileSync(configPath, JSON.stringify({
+    workspacePath: tempDir,
     agents: { defaultContainerized: false },
     subAgents: {
       [AGENT]: {

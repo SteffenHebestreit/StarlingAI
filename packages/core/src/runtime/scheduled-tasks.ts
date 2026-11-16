@@ -38,6 +38,11 @@ export interface ScheduledTaskRecord {
    *  runner skips it (scheduled-task-runner.ts). */
   account?: string;
   principal?: PrincipalKind;
+  /** With `userId`: the role its maker signed in with. Every run is queued with it
+   *  (CreateSceneJobInput.requestedByRole), so it runs with the owner's role as the account holds it
+   *  when the run starts, as a job a person queued does. A schedule made where nobody signed in, or
+   *  before schedules kept a role, has none and its runs carry none. */
+  requestedByRole?: string;
   createdAt: string;
   /** Set when the schedule must not run again (its owner's account was deleted or retired). It is
    *  kept, not removed: its owner's data stays until a purge, and an admin can still read and remove

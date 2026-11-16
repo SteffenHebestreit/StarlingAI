@@ -295,6 +295,7 @@ describe("delegate_to_agent hands the runner a parent-relative budget", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "sai-delegation-budget-"));
     const configPath = join(tempDir, "starlingai.json");
     writeFileSync(configPath, JSON.stringify({
+      workspacePath: tempDir,
       orchestration,
       subAgents: {
         budget_probe: {
@@ -334,7 +335,7 @@ describe("delegate_to_agent hands the runner a parent-relative budget", () => {
         { agentName: "budget_probe", task: "Build the app" },
         {
           sessionId: "session-delegation-budget",
-          workspacePath: "/workspace",
+          workspacePath: tempDir,
           // Exactly what gateway/rpc.ts + agent/runtime.ts put on the ToolContext: the STATIC turn
           // budget, and the absolute deadline armed at turn start.
           turnTimeoutOverrideMs: TURN_MS,
